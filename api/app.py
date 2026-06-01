@@ -1,0 +1,266 @@
+"""
+Solar Operator — FastAPI app.
+
+Endpoints:
+  POST /v1/sync                 — extension sends captured session here
+  GET  /v1/tenants/{id}/status  — what's the state of this tenant's pipeline
+  GET  /v1/tenants/{id}/bills   — every parsed bill for a tenant
+  POST /v1/tenants/{id}/pull    — manually trigger a pull-bills run
+  POST /v1/signup               — public signup → Stripe Checkout
+  POST /v1/stripe/webhook       — Stripe → activate tenant + email code
+  GET  /health                  — liveness probe (Railway)
+
+Admin (no auth in MVP — guard with a deploy-time env in prod):
+  POST /admin/tenants           — create a tenant
+  POST /admin/jobs/run          — run pending jobs (also runs on a scheduler)
+  GET  /admin/tenants           — list all
+"""
+from __future__ import annotations
+import os, secrets, json
+from datetime import datetime
+from typing import Any
+from fastapi import FastAPI, Request, HTTPException, Header, Depends
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
+from .db import init_db, SessionLocal
+from .models import Tenant, UtilityAccount, UtilitySession, Bill, Job, Array, now
+from .adapters import get_adapter
+from .worker import pull_bills_for_tenant, run_pending_jobs
+from .signup import router as signup_router
+from . import scheduler
+
+app = FastAPI(title="Solar Operator API", version="1.0.0")
+
+# CORS — allow the marketing site to call /v1/signup
+ALLOWED_ORIGINS = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "https://solaroperator.org,https://www.solaroperator.org,http://localhost:3000"
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS if o.strip()],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+
+app.include_router(signup_router)
+
+
+@app.on_event("startup")
+def _startup():
+    init_db()
+    scheduler.start()
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "solar-operator-api"}
+
+
+# ---- helpers ------------------------------------------------------------
+
+def tenant_from_bearer(authorization: str | None) -> Tenant:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing bearer token")
+    key = authorization.split(" ", 1)[1].strip()
+    with SessionLocal() as db:
+        t = db.execute(select(Tenant).where(Tenant.tenant_key == key)).scalar_one_or_none()
+        if not t or not t.active:
+            raise HTTPException(403, "Invalid or inactive tenant key")
+        return t
+
+
+# ---- ingest: receives extension POSTs ----------------------------------
+
+@app.post("/v1/sync")
+async def sync(request: Request, authorization: str | None = Header(default=None)):
+    """Chrome extension sends the captured session here. We persist a new
+    UtilitySession row and upsert UtilityAccount rows."""
+    tenant = tenant_from_bearer(authorization)
+    payload = await request.json()
+    adapter = get_adapter(payload.get("provider", "gmp"))
+    normalized = adapter.parse_extension_payload(payload)
+
+    with SessionLocal() as db:
+        # store the session
+        expires_at = None
+        if normalized["auth"].get("apiTokenExpires"):
+            try:
+                expires_at = datetime.fromisoformat(normalized["auth"]["apiTokenExpires"].replace("Z","+00:00")).replace(tzinfo=None)
+            except Exception:
+                pass
+        sess = UtilitySession(
+            tenant_id=tenant.id,
+            provider=normalized["provider"],
+            api_token=normalized["auth"].get("apiToken", ""),
+            refresh_token=normalized["auth"].get("refreshToken"),
+            expires_at=expires_at,
+            raw_payload={"user": normalized["user"]},
+        )
+        db.add(sess)
+
+        # upsert accounts
+        provider = normalized["provider"]
+        for a in normalized["accounts"]:
+            if not a.get("account_number"):
+                continue
+            row = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.tenant_id == tenant.id,
+                    UtilityAccount.provider == provider,
+                    UtilityAccount.account_number == a["account_number"],
+                )
+            ).scalar_one_or_none()
+            extra = a.get("extra") or {}
+            if a.get("current_bill_url"):
+                extra["currentBillUrlBinary"] = a["current_bill_url"]
+            if row is None:
+                row = UtilityAccount(
+                    tenant_id=tenant.id, provider=provider,
+                    account_number=a["account_number"],
+                    customer_number=a.get("customer_number"),
+                    nickname=a.get("nickname"),
+                    service_address=a.get("service_address"),
+                    extra=extra,
+                )
+                db.add(row)
+            else:
+                row.customer_number = a.get("customer_number") or row.customer_number
+                row.nickname = a.get("nickname") or row.nickname
+                row.service_address = a.get("service_address") or row.service_address
+                row.extra = {**(row.extra or {}), **extra}
+                row.last_seen = now()
+        db.commit()
+
+    return {
+        "ok": True,
+        "tenant": tenant.id,
+        "accounts": len(normalized["accounts"]),
+        "token_expires_at": normalized["auth"].get("apiTokenExpires"),
+    }
+
+
+# ---- tenant-facing ------------------------------------------------------
+
+@app.get("/v1/tenants/{tid}/status")
+def tenant_status(tid: str, authorization: str | None = Header(default=None)):
+    tenant = tenant_from_bearer(authorization)
+    if tenant.id != tid:
+        raise HTTPException(403, "tenant mismatch")
+    with SessionLocal() as db:
+        accounts = db.execute(select(UtilityAccount).where(UtilityAccount.tenant_id == tid)).scalars().all()
+        sess = db.execute(
+            select(UtilitySession).where(UtilitySession.tenant_id == tid).order_by(UtilitySession.captured_at.desc())
+        ).scalars().first()
+        bills_count = db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().all()
+        return {
+            "tenant": tid,
+            "name": tenant.name,
+            "plan": tenant.plan,
+            "accounts": [
+                {"id": a.id, "provider": a.provider, "account_number": a.account_number,
+                 "nickname": a.nickname, "enabled": a.enabled}
+                for a in accounts
+            ],
+            "session": {
+                "provider": sess.provider if sess else None,
+                "captured_at": sess.captured_at.isoformat() if sess else None,
+                "expires_at": sess.expires_at.isoformat() if sess and sess.expires_at else None,
+            } if sess else None,
+            "bills_count": len(bills_count),
+        }
+
+
+@app.get("/v1/tenants/{tid}/bills")
+def tenant_bills(tid: str, authorization: str | None = Header(default=None)):
+    tenant = tenant_from_bearer(authorization)
+    if tenant.id != tid:
+        raise HTTPException(403, "tenant mismatch")
+    with SessionLocal() as db:
+        bills = db.execute(
+            select(Bill).where(Bill.tenant_id == tid).order_by(Bill.period_end.desc().nullslast())
+        ).scalars().all()
+        return [
+            {
+                "id": b.id, "account_id": b.account_id,
+                "bill_date": b.bill_date.isoformat() if b.bill_date else None,
+                "period_start": b.period_start.isoformat() if b.period_start else None,
+                "period_end": b.period_end.isoformat() if b.period_end else None,
+                "billing_days": b.billing_days,
+                "kwh_generated": b.kwh_generated,
+                "parse_status": b.parse_status,
+                "pulled_at": b.pulled_at.isoformat(),
+            } for b in bills
+        ]
+
+
+@app.post("/v1/tenants/{tid}/pull")
+def tenant_pull(tid: str, authorization: str | None = Header(default=None)):
+    tenant = tenant_from_bearer(authorization)
+    if tenant.id != tid:
+        raise HTTPException(403, "tenant mismatch")
+    result = pull_bills_for_tenant(tid)
+    return result
+
+
+# ---- admin -------------------------------------------------------------
+
+@app.post("/admin/tenants")
+def admin_create_tenant(body: dict):
+    name = body.get("name")
+    email = body.get("contact_email", "")
+    if not name:
+        raise HTTPException(400, "name required")
+    tid = "ten_" + secrets.token_hex(6)
+    key = "sol_live_" + secrets.token_urlsafe(24)
+    with SessionLocal() as db:
+        t = Tenant(id=tid, name=name, contact_email=email, tenant_key=key, plan="trial")
+        db.add(t); db.commit()
+    return {"tenant_id": tid, "tenant_key": key, "name": name}
+
+
+@app.get("/admin/tenants")
+def admin_list_tenants():
+    with SessionLocal() as db:
+        ts = db.execute(select(Tenant).order_by(Tenant.created_at.desc())).scalars().all()
+        return [
+            {"id": t.id, "name": t.name, "email": t.contact_email,
+             "tenant_key": t.tenant_key, "plan": t.plan, "active": t.active,
+             "created_at": t.created_at.isoformat()}
+            for t in ts
+        ]
+
+
+@app.post("/admin/jobs/run")
+def admin_run_jobs():
+    return {"ran": run_pending_jobs()}
+
+
+# ---- root --------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    return """
+<!DOCTYPE html><html><head><title>Solar Operator API</title>
+<style>body{font-family:Georgia,serif;max-width:680px;margin:40px auto;padding:0 20px;color:#222}
+h1{color:#2e6b3a;border-bottom:2px solid #2e6b3a;padding-bottom:8px}
+code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
+.endpoint{background:#eef3ec;border-left:3px solid #2e6b3a;padding:8px 12px;margin:6px 0;font-family:ui-monospace,monospace;font-size:13px}
+</style></head><body>
+<h1>Solar Operator API</h1>
+<p>Backend for the Chrome extension. Receives captured utility sessions, pulls bills, drafts reports.</p>
+<h3>Ingest</h3>
+<div class="endpoint">POST /v1/sync — Chrome extension target</div>
+<h3>Tenant</h3>
+<div class="endpoint">GET  /v1/tenants/{id}/status</div>
+<div class="endpoint">GET  /v1/tenants/{id}/bills</div>
+<div class="endpoint">POST /v1/tenants/{id}/pull — force a pull-bills run</div>
+<h3>Admin</h3>
+<div class="endpoint">POST /admin/tenants    {"name":"...", "contact_email":"..."}</div>
+<div class="endpoint">GET  /admin/tenants</div>
+<div class="endpoint">POST /admin/jobs/run</div>
+<p style="margin-top:30px;color:#888;font-size:13px">Solar Operator v0.1.0 · single-utility (GMP) · multi-tenant ready</p>
+</body></html>
+"""

@@ -1,0 +1,145 @@
+"""
+Solar Operator — database models.
+
+Single SQLite file for now (data/solar.db). Schema is Postgres-compatible
+so when you outgrow SQLite, swap the URL and you're done. No ORM gymnastics:
+SQLAlchemy 2.0 Mapped style, declarative_base, foreign keys, indexes.
+
+Multi-tenant from day one. Every row that belongs to a customer carries
+tenant_id and queries are scoped through helpers in db.py.
+"""
+from __future__ import annotations
+from datetime import datetime
+from sqlalchemy import (
+    String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, UniqueConstraint, Index
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def now() -> datetime:
+    return datetime.utcnow()
+
+
+class Tenant(Base):
+    """A paying customer (a solar operator like Bruce)."""
+    __tablename__ = "tenants"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # ten_abc123
+    name: Mapped[str] = mapped_column(String(200))
+    contact_email: Mapped[str] = mapped_column(String(200))
+    tenant_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sol_live_...
+    plan: Mapped[str] = mapped_column(String(32), default="trial")  # trial, solo, manager, operator
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    sessions: Mapped[list["UtilitySession"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+
+
+class Array(Base):
+    """A solar array. A logical unit that maps to one OR MORE utility accounts
+    (e.g. Bruce's 'Starlake' = 3 GMP accounts summed)."""
+    __tablename__ = "arrays"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    region: Mapped[str | None] = mapped_column(String(40), nullable=True)  # north/south/central
+    first_connect_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    solar_adder_cents: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bill_offset_months: Mapped[int] = mapped_column(Integer, default=1)
+    # 1 = bill represents prior month (default for GMP)
+    # 0 = bill represents same month (Bruce's Starlake rule)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="arrays")
+    accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="array")
+
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_array_per_tenant"),)
+
+
+class UtilityAccount(Base):
+    """A specific account number at a utility provider."""
+    __tablename__ = "utility_accounts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(40))  # 'gmp', 'national_grid', ...
+    account_number: Mapped[str] = mapped_column(String(40))
+    customer_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    nickname: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    service_address: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # provider-specific raw blob
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=now)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="accounts")
+    array: Mapped[Array | None] = relationship(back_populates="accounts")
+    bills: Mapped[list["Bill"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "account_number", name="uq_account_per_tenant"),
+        Index("ix_account_provider_acct", "provider", "account_number"),
+    )
+
+
+class UtilitySession(Base):
+    """A captured auth session for a (tenant, provider). Latest row wins.
+    Stores the JWT (or whatever the provider uses) for downstream API calls."""
+    __tablename__ = "utility_sessions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    api_token: Mapped[str] = mapped_column(Text)
+    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="sessions")
+
+
+class Bill(Base):
+    """One pulled bill PDF + extracted metrics."""
+    __tablename__ = "bills"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("utility_accounts.id"), index=True)
+    bill_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    period_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    billing_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kwh_generated: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kwh_consumed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    document_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    pdf_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pulled_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    parse_status: Mapped[str] = mapped_column(String(20), default="parsed")  # parsed, failed, partial
+
+    account: Mapped[UtilityAccount] = relationship(back_populates="bills")
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "document_number", name="uq_bill_doc"),
+        Index("ix_bill_account_date", "account_id", "bill_date"),
+    )
+
+
+class Job(Base):
+    """Background jobs. Pull-bills, generate-report, refresh-session, etc."""
+    __tablename__ = "jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), index=True)
+    kind: Mapped[str] = mapped_column(String(40))  # pull_bills, generate_report
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    # queued, running, succeeded, failed
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)

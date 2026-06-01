@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Privacy Policy — Solar Operator Sync</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+         max-width: 720px; margin: 40px auto; padding: 0 24px;
+         color: #1a2a1f; line-height: 1.65; }
+  h1 { color: #2e6b3a; font-size: 28px; border-bottom: 2px solid #2e6b3a;
+       padding-bottom: 10px; }
+  h2 { color: #2e6b3a; font-size: 18px; margin-top: 32px; }
+  table { border-collapse: collapse; margin: 16px 0; width: 100%; font-size: 14px; }
+  th, td { padding: 8px 12px; text-align: left;
+           border-bottom: 1px solid #e4e8e2; vertical-align: top; }
+  th { background: #eef3ec; color: #1f4e2a; }
+  code { background: #f6f7f6; padding: 2px 6px; border-radius: 3px;
+         font-size: 0.9em; }
+  .meta { color: #888; font-size: 14px; font-style: italic; }
+  ul li { margin: 6px 0; }
+  a { color: #2e6b3a; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy — Solar Operator Sync</h1>
+<p class="meta">Last updated: June 1, 2026</p>
+
+<p>Solar Operator Sync ("we," "the extension") is a Chrome extension that
+helps community solar operators automate their utility-data reporting.
+This policy describes what we collect, why, and how we protect it.</p>
+
+<h2>What we collect</h2>
+<p>When you visit <code>greenmountainpower.com</code> while signed in, the
+extension reads the following from your browser's local storage for that
+site and sends it to the Solar Operator backend
+(<code>https://api.solaroperator.com</code>):</p>
+<ul>
+  <li>Your Green Mountain Power account identifier, username, email, and
+  full name (as shown on your GMP profile)</li>
+  <li>The temporary session token (JWT) your browser uses to authenticate
+  to Green Mountain Power</li>
+  <li>A list of utility accounts (meters) attached to your GMP login,
+  including account number, customer number, nickname, and the URL of the
+  current bill PDF</li>
+  <li>The "activation code" you paste into the extension's options page</li>
+</ul>
+
+<p>The extension does <strong>not</strong> collect:</p>
+<ul>
+  <li>Your Green Mountain Power password or any other password</li>
+  <li>Browsing history outside greenmountainpower.com</li>
+  <li>Any data from other websites, tabs, or apps</li>
+  <li>Payment information</li>
+</ul>
+
+<h2>How we use it</h2>
+<p>We use your captured session token to fetch your bill PDFs and billing
+history from GMP's API on a recurring schedule. The kWh production figures
+we extract are written into the reporting spreadsheet you provided to us
+during onboarding. That spreadsheet is then emailed to the address you
+specified.</p>
+
+<h2>How long we keep it</h2>
+<ul>
+  <li><strong>Session token:</strong> retained only while valid (GMP tokens
+  expire after approximately 21 days). Replaced on each fresh capture.</li>
+  <li><strong>Account metadata + billing data:</strong> retained while
+  your Solar Operator account is active, so historical reports remain
+  available.</li>
+  <li><strong>Activation code:</strong> retained until you disconnect or
+  close your account.</li>
+</ul>
+
+<h2>What we never do</h2>
+<ul>
+  <li>We never sell, rent, or share your data with third parties.</li>
+  <li>We never use your data for advertising, profiling, or any purpose
+  other than operating the reporting service.</li>
+  <li>We never read or transmit anything from websites other than
+  greenmountainpower.com.</li>
+</ul>
+
+<h2>Deletion</h2>
+<p>You can delete all your data at any time by emailing
+<a href="mailto:support@solaroperator.com">support@solaroperator.com</a>
+from the address associated with your account. We will purge your data
+within 24 hours and confirm by email.</p>
+<p>You may also click <strong>Disconnect</strong> in the extension's
+settings to remove the local copy immediately.</p>
+
+<h2>Security</h2>
+<ul>
+  <li>All data is transmitted over HTTPS.</li>
+  <li>Our backend stores your data in an encrypted database, accessible
+  only to your tenant account.</li>
+  <li>We follow standard industry practices for credential rotation and
+  vulnerability monitoring.</li>
+</ul>
+
+<h2>Permissions explained</h2>
+<table>
+  <thead>
+    <tr><th>Permission</th><th>Why</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>storage</code></td><td>To remember your activation code
+      and the latest captured session locally on your device.</td></tr>
+    <tr><td><code>alarms</code></td><td>To run a periodic check (every 12
+      hours) for whether your GMP token is close to expiring.</td></tr>
+    <tr><td><code>notifications</code></td><td>To display the expiry
+      reminder as a desktop notification when your token is within 3 days
+      of expiring.</td></tr>
+    <tr><td>Host: <code>greenmountainpower.com</code></td><td>So the
+      content script can read GMP's local storage after you sign in.</td></tr>
+    <tr><td>Host: <code>api.greenmountainpower.com</code></td><td>Reserved
+      for future use; the extension currently makes no calls here.</td></tr>
+    <tr><td>Host: <code>api.solaroperator.com</code></td><td>So we can
+      deliver captured data to your Solar Operator workspace.</td></tr>
+  </tbody>
+</table>
+
+<h2>Changes to this policy</h2>
+<p>If we change this policy, we will email registered Solar Operator
+customers and post the updated version at
+<a href="https://solaroperator.com/privacy">solaroperator.com/privacy</a>.</p>
+
+<h2>Contact</h2>
+<p>Email <a href="mailto:support@solaroperator.com">support@solaroperator.com</a>
+for any privacy questions or to exercise your data-deletion rights.</p>
+
+</body>
+</html>
