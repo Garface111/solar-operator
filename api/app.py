@@ -32,7 +32,9 @@ from . import scheduler
 
 app = FastAPI(title="Solar Operator API", version="1.0.0")
 
-# CORS — allow the marketing site to call /v1/signup
+# CORS — allow the marketing site to call /v1/signup, and any Chrome
+# extension to call /v1/sync (extensions identify with chrome-extension://
+# origins; we authenticate them per-request via tenant_key bearer token).
 ALLOWED_ORIGINS = os.getenv(
     "CORS_ALLOWED_ORIGINS",
     "https://solaroperator.org,https://www.solaroperator.org,http://localhost:3000"
@@ -40,6 +42,7 @@ ALLOWED_ORIGINS = os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in ALLOWED_ORIGINS if o.strip()],
+    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     allow_credentials=False,
