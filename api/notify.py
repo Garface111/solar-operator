@@ -151,11 +151,12 @@ Questions? Just reply.
 solaroperator.org
 """
 
-PLAN_LABELS = {"solo": "Solo", "manager": "Manager", "operator": "Operator"}
+PLAN_LABELS = {"standard": "Solar Operator", "comped": "Solar Operator (comped)",
+               "solo": "Solo", "manager": "Manager", "operator": "Operator"}
 
 
 def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
-    plan_label = PLAN_LABELS.get(plan, plan.title())
+    plan_label = PLAN_LABELS.get(plan, "Solar Operator")
     fmt = dict(
         name=name.split()[0] if name else "there",
         plan_label=plan_label,
@@ -167,6 +168,66 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
         subject="Welcome to Solar Operator — your activation code",
         html=WELCOME_HTML.format(**fmt),
         text=WELCOME_TEXT.format(**fmt),
+    )
+
+
+def send_payment_failed_email(to: str, name: str, amount_dollars: float,
+                              next_attempt_unix: int | None) -> bool:
+    """Warn the customer their card was declined. Stripe will retry; we just
+    want them to update the card before the retries run out."""
+    first = (name or "there").split()[0]
+    from datetime import datetime as _dt
+    when = ""
+    if next_attempt_unix:
+        try:
+            when = f" Our next retry runs around {_dt.utcfromtimestamp(next_attempt_unix):%B %d, %Y}."
+        except Exception:
+            pass
+    html = (f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
+            f"<h2 style='color:#a64a1f;'>Payment issue on your Solar Operator account</h2>"
+            f"<p>Hi {first},</p>"
+            f"<p>We tried to charge your card ${amount_dollars:.2f} for your Solar Operator subscription, but it was declined.{when}</p>"
+            f"<p>To keep your reports flowing, please update your card at "
+            f"<a href='https://solaroperator.org/account.html'>solaroperator.org/account</a> — "
+            f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
+            f"<p>If you don't update before our retries run out, your subscription will be canceled and reports will stop.</p>"
+            f"<p>Questions or need help? Just reply.</p>"
+            f"<p>— Solar Operator</p></body></html>")
+    text = (f"Hi {first},\n\nWe tried to charge your card ${amount_dollars:.2f} for "
+            f"Solar Operator, but it was declined.{when}\n\n"
+            f"Update your card at https://solaroperator.org/account.html — "
+            f"sign in, click Manage billing.\n\nQuestions? Just reply.\n\n— Solar Operator")
+    return _send_via_resend(
+        to=to,
+        subject="Your Solar Operator payment was declined",
+        html=html, text=text,
+    )
+
+
+def send_cancellation_email(to: str, name: str) -> bool:
+    first = (name or "there").split()[0]
+    html = (f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
+            f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is canceled</h2>"
+            f"<p>Hi {first},</p>"
+            f"<p>Your Solar Operator subscription has been canceled. "
+            f"You won't be charged again, and we'll stop sending monthly reports.</p>"
+            f"<p>Your historical data is still in our system. If you change your "
+            f"mind, sign up again any time at "
+            f"<a href='https://solaroperator.org/signup.html'>solaroperator.org/signup</a> — "
+            f"we'll restore your existing meters automatically.</p>"
+            f"<p>If this cancellation was a mistake, or you'd like to share why "
+            f"you're leaving, just reply. We read every email.</p>"
+            f"<p>Thank you for being a customer.</p>"
+            f"<p>— Solar Operator</p></body></html>")
+    text = (f"Hi {first},\n\nYour Solar Operator subscription is canceled. "
+            f"We'll stop sending reports and won't charge you again.\n\n"
+            f"If you change your mind, sign up at https://solaroperator.org/signup.html — "
+            f"we'll restore your meters automatically.\n\n"
+            f"Questions or feedback? Just reply.\n\n— Solar Operator")
+    return _send_via_resend(
+        to=to,
+        subject="Your Solar Operator subscription is canceled",
+        html=html, text=text,
     )
 
 

@@ -1,11 +1,14 @@
 """
 APScheduler — runs pull-bills on a cadence so new monthly bills land
-automatically. Also fires monthly default-template deliveries.
+automatically. Also fires per-tenant report deliveries based on
+each tenant's report_frequency.
 
 Schedule:
   - every 6 hours: enqueue pull_bills jobs for all active tenants
   - every 1 minute: drain the job queue
-  - 1st of every month at 09:00 UTC: deliver default-template workbooks
+  - every Monday at 09:00 UTC: deliver to weekly tenants
+  - 1st of every month at 09:00 UTC: deliver to monthly tenants
+  - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly tenants
 """
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,50 +28,52 @@ def enqueue_pull_for_all_tenants():
     return len(tenants)
 
 
-def deliver_monthly_default_reports():
-    """Generate + email the default workbook to every active tenant.
-    No template layer — every customer gets the same arrays×months format,
-    populated from their own bills."""
-    from datetime import datetime as _dt
-    # Lazy imports to avoid circulars at module load
-    from .writers import build_workbook
-    from .notify import send_workbook_email, send_internal_alert
+def _deliver_to_tenants_with_frequency(frequency: str) -> dict:
+    """Send the default workbook to every active tenant whose report_frequency
+    matches. Comped tenants (active=False but status=comped) get reports too."""
+    from .delivery import deliver_for_tenant
+    from .notify import send_internal_alert
 
     sent = []
     failed = []
     with SessionLocal() as db:
         tenants = db.execute(
-            select(Tenant).where(Tenant.active == True)
+            select(Tenant).where(Tenant.report_frequency == frequency)
         ).scalars().all()
+        candidates = [
+            t.id for t in tenants
+            if t.active or t.subscription_status in ("comped", "trialing")
+        ]
 
-    year = _dt.utcnow().year
-    for tenant in tenants:
+    for tid in candidates:
         try:
-            path = build_workbook(tenant.id, year=year)
-            ok = send_workbook_email(
-                to=tenant.contact_email,
-                subject=f"Your {year} Solar Operator monthly kWh report",
-                html=(f"<p>Hi {tenant.name.split()[0] if tenant.name else 'there'},</p>"
-                      f"<p>Your latest monthly kWh workbook is attached.</p>"
-                      f"<p>— Solar Operator</p>"),
-                text=f"Hi {tenant.name},\n\nYour latest monthly kWh workbook is attached.\n\n— Solar Operator",
-                workbook_path=str(path),
-                filename=f"{tenant.name.replace(' ', '_')}-{year}-monthly-kwh.xlsx",
-            )
-            (sent if ok else failed).append(tenant.id)
+            result = deliver_for_tenant(tid, triggered_by=f"sched-{frequency}")
+            (sent if result.get("ok") and result.get("email_sent") else failed).append(tid)
         except Exception as e:
-            failed.append(tenant.id)
+            failed.append(tid)
             send_internal_alert(
-                "Monthly default delivery failed",
-                f"Tenant: {tenant.id} ({tenant.name})\nError: {e}",
+                f"Scheduled delivery failed ({frequency})",
+                f"Tenant: {tid}\nError: {e}",
             )
 
     if failed:
         send_internal_alert(
-            "Monthly default delivery — partial failures",
+            f"Scheduled delivery — partial failures ({frequency})",
             f"Sent OK: {sent}\nFailed: {failed}",
         )
-    return {"sent": sent, "failed": failed}
+    return {"frequency": frequency, "sent": sent, "failed": failed}
+
+
+def deliver_weekly_reports():
+    return _deliver_to_tenants_with_frequency("weekly")
+
+
+def deliver_monthly_reports():
+    return _deliver_to_tenants_with_frequency("monthly")
+
+
+def deliver_quarterly_reports():
+    return _deliver_to_tenants_with_frequency("quarterly")
 
 
 def start():
@@ -82,10 +87,22 @@ def start():
     scheduler.add_job(
         run_pending_jobs, "interval", minutes=1, id="run_pending_jobs", replace_existing=True,
     )
-    # 1st of every month at 09:00 UTC — deliver default-template reports
+    # Weekly: Mondays at 09:00 UTC
     scheduler.add_job(
-        deliver_monthly_default_reports,
+        deliver_weekly_reports,
+        CronTrigger(day_of_week="mon", hour=9, minute=0),
+        id="deliver_weekly", replace_existing=True,
+    )
+    # Monthly: 1st of every month at 09:00 UTC
+    scheduler.add_job(
+        deliver_monthly_reports,
         CronTrigger(day=1, hour=9, minute=0),
-        id="deliver_monthly_default", replace_existing=True,
+        id="deliver_monthly", replace_existing=True,
+    )
+    # Quarterly: 1st of Jan/Apr/Jul/Oct at 09:00 UTC
+    scheduler.add_job(
+        deliver_quarterly_reports,
+        CronTrigger(month="1,4,7,10", day=1, hour=9, minute=0),
+        id="deliver_quarterly", replace_existing=True,
     )
     scheduler.start()

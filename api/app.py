@@ -28,6 +28,7 @@ from .models import Tenant, UtilityAccount, UtilitySession, Bill, Job, Array, no
 from .adapters import get_adapter
 from .worker import pull_bills_for_tenant, run_pending_jobs
 from .signup import router as signup_router
+from .account import router as account_router
 from . import scheduler
 
 app = FastAPI(title="Solar Operator API", version="1.0.0")
@@ -49,6 +50,7 @@ app.add_middleware(
 )
 
 app.include_router(signup_router)
+app.include_router(account_router)
 
 
 @app.on_event("startup")
@@ -297,50 +299,17 @@ def scheduler_status():
 @app.post("/admin/tenants/{tid}/deliver")
 def deliver_now(tid: str, year: int | None = None, to: str | None = None):
     """Force-run the workbook delivery for one tenant. Every tenant gets
-    the default arrays×months workbook — there's no per-customer template
-    layer; we keep onboarding minimal and let the data speak for itself.
-    Pass ?to=someone@example.com to override the recipient (admin testing)."""
-    with SessionLocal() as db:
-        t = db.get(Tenant, tid)
-        if not t:
-            raise HTTPException(404, "Tenant not found")
-        contact = to or t.contact_email
-        tenant_name = t.name
-
-    year = year or _dt.utcnow().year
+    the default arrays×months workbook. Pass ?to=someone@example.com to
+    override recipient (admin testing). Workbook is built in a tempdir
+    that is wiped after send — no persistent disk dependency."""
+    from .delivery import deliver_for_tenant
     try:
-        path = build_workbook(tid, year=year)
-    except Exception as e:
-        send_internal_alert(
-            "Workbook generation failed",
-            f"Tenant: {tid} ({tenant_name})\nYear: {year}\nError: {e}",
-        )
-        raise HTTPException(500, f"Workbook generation failed: {e}")
-
-    sent = send_workbook_email(
-        to=contact,
-        subject=f"Your {year} Solar Operator monthly kWh report",
-        html=(f"<p>Hi {tenant_name.split()[0] if tenant_name else 'there'},</p>"
-              f"<p>Your latest monthly kWh workbook is attached. "
-              f"It covers everything we have on file through "
-              f"{_dt.utcnow():%B %d, %Y}.</p>"
-              f"<p>Questions? Just reply.</p>"
-              f"<p>— Solar Operator</p>"),
-        text=(f"Hi {tenant_name},\n\n"
-              f"Your latest monthly kWh workbook is attached "
-              f"(through {_dt.utcnow():%B %d, %Y}).\n\n"
-              f"Questions? Just reply.\n\n— Solar Operator"),
-        workbook_path=str(path),
-        filename=f"{tenant_name.replace(' ', '_')}-{year}-monthly-kwh.xlsx",
-    )
-
-    return {
-        "ok": True,
-        "tenant": tid,
-        "workbook": str(path),
-        "email_sent": sent,
-        "recipient": contact,
-    }
+        result = deliver_for_tenant(tid, year=year, override_to=to, triggered_by="ops")
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    if not result.get("ok"):
+        raise HTTPException(500, f"Delivery failed: {result.get('error', 'see logs')}")
+    return result
 
 
 @app.post("/admin/test-email")

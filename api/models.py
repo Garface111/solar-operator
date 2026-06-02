@@ -29,11 +29,23 @@ class Tenant(Base):
     __tablename__ = "tenants"
     id: Mapped[str] = mapped_column(String(32), primary_key=True)  # ten_abc123
     name: Mapped[str] = mapped_column(String(200))
-    contact_email: Mapped[str] = mapped_column(String(200))
+    contact_email: Mapped[str] = mapped_column(String(200), index=True)
     tenant_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sol_live_...
-    plan: Mapped[str] = mapped_column(String(32), default="trial")  # trial, solo, manager, operator
+    plan: Mapped[str] = mapped_column(String(32), default="standard")  # standard | comped | legacy_*
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Stripe linkage (added June 2026 for lifecycle + billing portal)
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    subscription_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # active, past_due, canceled, comped, trialing
+
+    # Customer prefs (controlled via /account portal)
+    report_frequency: Mapped[str] = mapped_column(String(16), default="monthly")
+    # weekly | monthly | quarterly
+    last_pull_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
@@ -143,3 +155,30 @@ class Job(Base):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class LoginToken(Base):
+    """Magic-link auth: short-lived single-use tokens emailed to customers
+    so they can hit /account without a password."""
+    __tablename__ = "login_tokens"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    email: Mapped[str] = mapped_column(String(200))  # the address it was sent to
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class StripeEvent(Base):
+    """Webhook idempotency. Stripe retries failed deliveries; we de-dupe
+    on event.id so we never double-process a single event."""
+    __tablename__ = "stripe_events"
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="received")
+    # received | processed | ignored | error
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
