@@ -227,3 +227,49 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
 
     # Ignore other events for now (invoice.paid, customer.subscription.updated…)
     return {"ok": True, "event": event["type"], "handled": False}
+
+
+# ─── public: fetch activation code by Stripe session id ─────────────────
+
+@router.get("/v1/checkout/{session_id}")
+def checkout_lookup(session_id: str):
+    """Called by the post-payment welcome page to show the activation code
+    inline (no email dependency). Verifies the session was actually paid,
+    then returns the tenant_key. Self-heals if the webhook lagged or failed
+    by activating the tenant on first lookup.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe is not configured on this server")
+    if not session_id.startswith("cs_"):
+        raise HTTPException(400, "Invalid session id")
+
+    try:
+        sess = stripe.checkout.Session.retrieve(session_id)
+    except stripe.error.StripeError as e:
+        raise HTTPException(502, f"Stripe lookup failed: {e}")
+
+    if sess.get("payment_status") not in ("paid", "no_payment_required"):
+        raise HTTPException(402, "Payment not complete yet")
+
+    tenant_id = (sess.get("metadata") or {}).get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(404, "No tenant linked to this session")
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            raise HTTPException(404, "Tenant not found")
+        # Self-heal: webhook may not have fired yet (or signature mismatch).
+        # We've confirmed payment_status=paid via Stripe directly, so it's
+        # safe to activate here.
+        if not t.active:
+            t.active = True
+            db.commit()
+        return {
+            "tenant_id": t.id,
+            "tenant_key": t.tenant_key,
+            "plan": t.plan,
+            "name": t.name,
+            "email": t.contact_email,
+            "active": t.active,
+        }
