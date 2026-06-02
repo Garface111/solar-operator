@@ -353,3 +353,26 @@ def deliver_now(tid: str, year: int | None = None):
         "email_sent": sent,
         "recipient": contact,
     }
+
+
+@app.post("/admin/test-email")
+def test_email(to: str | None = None):
+    """Fire a 1-line test email + return the Resend error if it fails.
+    Use ?to=ford.genereaux@gmail.com to override recipient."""
+    import os as _os
+    from .notify import _send_via_resend, RESEND_API_KEY, FROM_ADDRESS, INTERNAL_ALERT_TO
+    target = to or INTERNAL_ALERT_TO
+    ok = _send_via_resend(
+        to=target,
+        subject="Solar Operator email pipeline test",
+        html="<p>If you can read this, Resend → your inbox works.</p>",
+        text="If you can read this, Resend → your inbox works.",
+    )
+    return {
+        "ok": ok,
+        "to": target,
+        "from": FROM_ADDRESS,
+        "has_api_key": bool(RESEND_API_KEY),
+        "api_key_prefix": RESEND_API_KEY[:7] if RESEND_API_KEY else None,
+        "last_error": getattr(_send_via_resend, "_last_error", None),
+    }

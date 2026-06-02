@@ -12,6 +12,7 @@ import os
 import logging
 import json
 import urllib.request
+import urllib.error
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,18 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
             if not ok:
                 logger.error("Resend HTTP %s: %s", resp.status, resp.read()[:300])
             return ok
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode()[:500]
+        except Exception:
+            err_body = "<unreadable>"
+        logger.error("Resend HTTP %s: %s", e.code, err_body)
+        # Stash on the function for endpoint introspection
+        _send_via_resend._last_error = f"HTTP {e.code}: {err_body}"
+        return False
     except Exception as e:
         logger.error("Resend send failed: %s", e)
+        _send_via_resend._last_error = f"{type(e).__name__}: {e}"
         return False
 
 
