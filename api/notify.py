@@ -54,6 +54,8 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "solar-operator/1.0 (+https://solaroperator.org)",
         },
     )
     try:
