@@ -24,21 +24,28 @@ EXTENSION_INSTALL_URL = os.getenv(
 )
 
 
-def _send_via_resend(to: str, subject: str, html: str, text: str | None = None) -> bool:
+def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
+                     attachments: list[dict] | None = None) -> bool:
     """Returns True on success, False otherwise. Never raises — caller can
-    decide whether to bubble up."""
+    decide whether to bubble up.
+
+    attachments: optional list of {filename, content_base64} dicts."""
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — logging email instead of sending.")
         logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or html[:500])
         return False
 
-    body = json.dumps({
+    payload = {
         "from": FROM_ADDRESS,
         "to": [to] if isinstance(to, str) else list(to),
         "subject": subject,
         "html": html,
         **({"text": text} if text else {}),
-    }).encode()
+    }
+    if attachments:
+        payload["attachments"] = attachments
+
+    body = json.dumps(payload).encode()
 
     req = urllib.request.Request(
         "https://api.resend.com/emails",
@@ -49,7 +56,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None) 
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             ok = 200 <= resp.status < 300
             if not ok:
                 logger.error("Resend HTTP %s: %s", resp.status, resp.read()[:300])
@@ -57,6 +64,21 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None) 
     except Exception as e:
         logger.error("Resend send failed: %s", e)
         return False
+
+
+def send_workbook_email(to: str, subject: str, html: str, text: str,
+                        workbook_path: str, filename: str | None = None) -> bool:
+    """Send a workbook as a base64-encoded attachment via Resend."""
+    import base64, pathlib as _p
+    p = _p.Path(workbook_path)
+    if not p.exists():
+        logger.error("Workbook missing: %s", workbook_path)
+        return False
+    encoded = base64.b64encode(p.read_bytes()).decode()
+    return _send_via_resend(
+        to=to, subject=subject, html=html, text=text,
+        attachments=[{"filename": filename or p.name, "content": encoded}],
+    )
 
 
 # ─── customer-facing ─────────────────────────────────────────────────────

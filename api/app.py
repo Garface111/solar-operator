@@ -267,3 +267,89 @@ code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
 <p style="margin-top:30px;color:#888;font-size:13px">Solar Operator v0.1.0 · single-utility (GMP) · multi-tenant ready</p>
 </body></html>
 """
+
+
+# ─── Delivery endpoints (default-template workbook → email) ────────────
+
+from .models import TenantTemplate
+from .writers import build_workbook
+from .notify import send_workbook_email, send_internal_alert
+from datetime import datetime as _dt
+
+
+@app.get("/admin/scheduler")
+def scheduler_status():
+    """Inspect APScheduler — confirm cron is alive on Railway."""
+    sched = scheduler.scheduler  # the BackgroundScheduler instance in scheduler.py
+    jobs = []
+    for j in sched.get_jobs():
+        jobs.append({
+            "id": j.id,
+            "next_run_time": j.next_run_time.isoformat() if j.next_run_time else None,
+            "trigger": str(j.trigger),
+        })
+    return {
+        "running": sched.running,
+        "jobs": jobs,
+        "now": _dt.utcnow().isoformat() + "Z",
+    }
+
+
+@app.post("/admin/tenants/{tid}/deliver")
+def deliver_now(tid: str, year: int | None = None):
+    """Force-run the default-writer delivery loop for one tenant.
+    Useful for testing without waiting for the monthly cron."""
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        if not t:
+            raise HTTPException(404, "Tenant not found")
+        tpl = db.execute(
+            select(TenantTemplate).where(TenantTemplate.tenant_id == tid)
+        ).scalar_one_or_none()
+        choice = tpl.choice if tpl else "default"
+        contact = t.contact_email
+        tenant_name = t.name
+
+    if choice != "default":
+        # Custom (uploaded) template path — not auto-deliverable yet.
+        # Ford wires a per-tenant writer at customers/{tid}/writer.py for these.
+        return {
+            "ok": False,
+            "reason": "tenant chose 'upload' — needs manual writer wired",
+            "tenant": tid,
+        }
+
+    year = year or _dt.utcnow().year
+    try:
+        path = build_workbook(tid, year=year)
+    except Exception as e:
+        send_internal_alert(
+            "Default workbook generation failed",
+            f"Tenant: {tid} ({tenant_name})\nYear: {year}\nError: {e}",
+        )
+        raise HTTPException(500, f"Workbook generation failed: {e}")
+
+    sent = send_workbook_email(
+        to=contact,
+        subject=f"Your {year} Solar Operator monthly kWh report",
+        html=(f"<p>Hi {tenant_name.split()[0] if tenant_name else 'there'},</p>"
+              f"<p>Your latest monthly kWh workbook is attached. "
+              f"It covers everything we have on file through "
+              f"{_dt.utcnow():%B %d, %Y}.</p>"
+              f"<p>Questions? Just reply.</p>"
+              f"<p>— Solar Operator</p>"),
+        text=(f"Hi {tenant_name},\n\n"
+              f"Your latest monthly kWh workbook is attached "
+              f"(through {_dt.utcnow():%B %d, %Y}).\n\n"
+              f"Questions? Just reply.\n\n— Solar Operator"),
+        workbook_path=str(path),
+        filename=f"{tenant_name.replace(' ', '_')}-{year}-monthly-kwh.xlsx",
+    )
+
+    return {
+        "ok": True,
+        "tenant": tid,
+        "workbook": str(path),
+        "email_sent": sent,
+        "recipient": contact,
+    }
