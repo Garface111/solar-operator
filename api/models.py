@@ -143,3 +143,26 @@ class Job(Base):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class TenantTemplate(Base):
+    """How a tenant wants their monthly report formatted.
+
+    Two modes:
+      - choice='upload'   → file_path points to a saved .xlsx/.xlsm the
+                            customer uploaded. Sheet-mapping is manual
+                            until Ford wires their writer.py.
+      - choice='default'  → backend generates a generic arrays×months
+                            workbook (no human touch needed). MVP layout.
+    """
+    __tablename__ = "tenant_templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"),
+                                           unique=True, index=True)
+    choice: Mapped[str] = mapped_column(String(20))  # 'upload' | 'default'
+    file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    original_filename: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mapping_status: Mapped[str] = mapped_column(String(20), default="pending")
+    # pending (uploaded, awaiting human map) | mapped (writer wired) | default (uses generic)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)

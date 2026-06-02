@@ -2,7 +2,7 @@
 // Receives captured tokens from content.js, persists locally, and POSTs to
 // the Solar Operator API. Also schedules periodic refresh-check alarms.
 
-const PROD_ENDPOINT = "https://api.solaroperator.com/v1/sync";
+const PROD_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
 const STORAGE_KEYS = {
   ENDPOINT: "api_endpoint",
   TENANT_KEY: "tenant_key",

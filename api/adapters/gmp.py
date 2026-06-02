@@ -3,12 +3,21 @@ Provider adapter for Green Mountain Power.
 
 Two responsibilities:
   1. Given a captured payload from the Chrome extension, normalize it.
-  2. Given a stored session (JWT + account meta), pull the latest bill PDF
-     and extract kWh + billing days.
+  2. Given a stored session (JWT + account meta), pull bill data and
+     extract kWh + billing days.
 
-The bill-fetch flow is the one we reverse-engineered with Ford:
-  GET <currentBillUrl>              -> HTML form (with AntiForgery token)
-  POST https://document.utilitec.net/Webview <form fields>  -> PDF bytes
+Two bill-fetch strategies, in preference order:
+
+  A) JSON API (gold standard, preferred):
+     GET https://api.greenmountainpower.com/api/v2/accounts/{acct}/bills
+       Authorization: Bearer <JWT>
+     → JSON with full history; KWH GENERATE line item per bill segment.
+     No regex, no PDF parsing — just numbers.
+
+  B) PDF redirector (fallback if JSON fails):
+     GET <currentBillUrl>              -> HTML form (with AntiForgery token)
+     POST https://document.utilitec.net/Webview <form fields>  -> PDF bytes
+     Parse with pdfplumber + regex.
 """
 from __future__ import annotations
 import re, html as htmllib, urllib.parse, pathlib
@@ -17,6 +26,7 @@ from typing import Any
 import httpx, pdfplumber
 
 PROVIDER = "gmp"
+GMP_API_BASE = "https://api.greenmountainpower.com"
 
 
 def parse_extension_payload(payload: dict) -> dict:
@@ -111,4 +121,90 @@ def extract_bill_metrics(pdf_path: pathlib.Path) -> dict[str, Any]:
         "bill_date":     bill_date,
         "raw_text":      text,
         "parse_status":  status,
+    }
+
+
+# ─── JSON API (preferred path) ──────────────────────────────────────────
+
+def fetch_bills_json(account_number: str, jwt: str, timeout: int = 30) -> list[dict]:
+    """GET full bill history for one account.
+
+    Raises httpx.HTTPError on transport failures and ValueError if GMP
+    returns a non-200 (typically expired JWT)."""
+    headers = {
+        "Authorization": f"Bearer {jwt}",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://greenmountainpower.com",
+        "Referer": "https://greenmountainpower.com/",
+        "GMP-Source": "web",
+        "User-Agent": "Mozilla/5.0 (Solar Operator)",
+    }
+    url = f"{GMP_API_BASE}/api/v2/accounts/{account_number}/bills"
+    with httpx.Client(timeout=timeout, headers=headers) as c:
+        r = c.get(url)
+    if r.status_code != 200:
+        raise ValueError(f"GMP JSON API returned HTTP {r.status_code}")
+    return r.json()
+
+
+def _extract_kwh_generated(bill: dict) -> float | None:
+    """Largest non-zero KWH GENERATE line item across all segments.
+
+    Each bill has a placeholder 0.0 GENERATE row plus the real total; some
+    have duplicates (generation + solar incentive credit) with identical
+    values — max collapses safely."""
+    best = 0.0
+    for seg in bill.get("billSegments", []):
+        for li in seg.get("segmentLineItems", []):
+            if (li.get("unitOfMeasure") == "KWH"
+                    and li.get("unitCode") == "GENERATE"):
+                v = float(li.get("unitCount") or 0)
+                if v > best:
+                    best = v
+    return best if best > 0 else None
+
+
+def _segment_dates(bill: dict) -> tuple[datetime | None, datetime | None]:
+    """First segment's (startDate, endDate) as datetimes, or (None, None)."""
+    for seg in bill.get("billSegments", []):
+        sc = (seg.get("segmentCalcs") or [{}])[0]
+        sd, ed = sc.get("startDate"), sc.get("endDate")
+        try:
+            sd_dt = datetime.fromisoformat(sd) if sd else None
+        except Exception:
+            sd_dt = None
+        try:
+            ed_dt = datetime.fromisoformat(ed) if ed else None
+        except Exception:
+            ed_dt = None
+        if sd_dt or ed_dt:
+            return sd_dt, ed_dt
+    return None, None
+
+
+def bill_json_to_metrics(bill: dict) -> dict[str, Any]:
+    """Convert a single bill JSON entry into the same metrics dict shape as
+    extract_bill_metrics() so worker.py can persist either uniformly."""
+    kwh = _extract_kwh_generated(bill)
+
+    bd_str = bill.get("billDate")
+    try:
+        bill_date = datetime.fromisoformat(bd_str) if bd_str else None
+    except Exception:
+        bill_date = None
+
+    period_start, period_end = _segment_dates(bill)
+    days = (period_end - period_start).days if (period_start and period_end) else None
+
+    status = "parsed" if (kwh is not None and days is not None) else "partial"
+    return {
+        "kwh_generated": int(round(kwh)) if kwh is not None else None,
+        "period_start":  period_start,
+        "period_end":    period_end,
+        "billing_days":  days,
+        "bill_date":     bill_date,
+        "raw_text":      "",  # not applicable for JSON path
+        "parse_status":  status,
+        "source":        "json",
+        "document_number": bill.get("billNumber") or bill.get("invoiceNumber"),
     }

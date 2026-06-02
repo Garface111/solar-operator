@@ -47,7 +47,7 @@ extension/
 
 Two settings live in `chrome.storage.local`:
 
-- `api_endpoint` — defaults to `https://api.solar-operator.com/v1/sync`
+- `api_endpoint` — defaults to `https://web-production-49c83.up.railway.app/v1/sync`
 - `tenant_key`   — issued per customer from the Solar Operator admin dashboard
 
 Without a tenant key the extension is capture-only (no network requests

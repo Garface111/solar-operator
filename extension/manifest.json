@@ -2,15 +2,19 @@
   "manifest_version": 3,
   "name": "Solar Operator Sync",
   "short_name": "Solar Operator",
-  "version": "1.0.0",
-  "description": "Solar Operator updates your community solar reporting spreadsheet every month with fresh Green Mountain Power data — automatically.",
+  "version": "1.0.1",
+  "description": "Solar Operator updates your community solar reporting spreadsheet every month with fresh Green Mountain Power data \u2014 automatically.",
   "author": "Solar Operator",
   "homepage_url": "https://solaroperator.com",
-  "permissions": ["storage", "alarms", "notifications"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications"
+  ],
   "host_permissions": [
     "https://*.greenmountainpower.com/*",
     "https://api.greenmountainpower.com/*",
-    "https://api.solaroperator.com/*"
+    "https://web-production-49c83.up.railway.app/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -21,7 +25,9 @@
         "https://greenmountainpower.com/*",
         "https://*.greenmountainpower.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
