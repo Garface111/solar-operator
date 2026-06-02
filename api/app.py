@@ -277,6 +277,31 @@ from .notify import send_workbook_email, send_internal_alert
 from datetime import datetime as _dt
 
 
+@app.get("/admin/templates")
+def list_templates():
+    """Cross-tenant template view — shows who uploaded what, who chose default,
+    and where files live. Useful for confirming data isolation."""
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Tenant, TenantTemplate)
+            .join(TenantTemplate, TenantTemplate.tenant_id == Tenant.id, isouter=True)
+        ).all()
+    return [
+        {
+            "tenant_id": t.id,
+            "name": t.name,
+            "email": t.contact_email,
+            "active": t.active,
+            "has_template": tpl is not None,
+            "choice": tpl.choice if tpl else None,
+            "mapping_status": tpl.mapping_status if tpl else None,
+            "file_path": tpl.file_path if tpl else None,
+            "original_filename": tpl.original_filename if tpl else None,
+        }
+        for t, tpl in rows
+    ]
+
+
 @app.get("/admin/scheduler")
 def scheduler_status():
     """Inspect APScheduler — confirm cron is alive on Railway."""
