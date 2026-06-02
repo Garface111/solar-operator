@@ -27,54 +27,43 @@ EXTENSION_INSTALL_URL = os.getenv(
 
 def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      attachments: list[dict] | None = None) -> bool:
-    """Returns True on success, False otherwise. Never raises — caller can
-    decide whether to bubble up.
-
-    attachments: optional list of {filename, content_base64} dicts."""
+    """Returns True on success, False otherwise. Uses the official Resend
+    SDK so we play nice with their Cloudflare bot rules."""
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — logging email instead of sending.")
         logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or html[:500])
         return False
 
-    payload = {
+    try:
+        import resend
+        resend.api_key = RESEND_API_KEY
+    except ImportError as e:
+        logger.error("resend SDK not installed: %s", e)
+        _send_via_resend._last_error = f"ImportError: {e}"
+        return False
+
+    params: dict = {
         "from": FROM_ADDRESS,
         "to": [to] if isinstance(to, str) else list(to),
         "subject": subject,
         "html": html,
-        **({"text": text} if text else {}),
     }
+    if text:
+        params["text"] = text
     if attachments:
-        payload["attachments"] = attachments
+        params["attachments"] = attachments
 
-    body = json.dumps(payload).encode()
-
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "solar-operator/1.0 (+https://solaroperator.org)",
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            ok = 200 <= resp.status < 300
-            if not ok:
-                logger.error("Resend HTTP %s: %s", resp.status, resp.read()[:300])
-            return ok
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = e.read().decode()[:500]
-        except Exception:
-            err_body = "<unreadable>"
-        logger.error("Resend HTTP %s: %s", e.code, err_body)
-        # Stash on the function for endpoint introspection
-        _send_via_resend._last_error = f"HTTP {e.code}: {err_body}"
+        result = resend.Emails.send(params)
+        # result is a dict like {"id": "xxx"}
+        if result and result.get("id"):
+            _send_via_resend._last_error = None
+            return True
+        logger.error("Resend returned unexpected response: %s", result)
+        _send_via_resend._last_error = f"Unexpected response: {result}"
         return False
     except Exception as e:
-        logger.error("Resend send failed: %s", e)
+        logger.error("Resend send failed: %s: %s", type(e).__name__, e)
         _send_via_resend._last_error = f"{type(e).__name__}: {e}"
         return False
 
