@@ -269,37 +269,11 @@ code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
 """
 
 
-# ─── Delivery endpoints (default-template workbook → email) ────────────
+# ─── Delivery endpoints (default workbook → email) ────────────────────
 
-from .models import TenantTemplate
 from .writers import build_workbook
 from .notify import send_workbook_email, send_internal_alert
 from datetime import datetime as _dt
-
-
-@app.get("/admin/templates")
-def list_templates():
-    """Cross-tenant template view — shows who uploaded what, who chose default,
-    and where files live. Useful for confirming data isolation."""
-    with SessionLocal() as db:
-        rows = db.execute(
-            select(Tenant, TenantTemplate)
-            .join(TenantTemplate, TenantTemplate.tenant_id == Tenant.id, isouter=True)
-        ).all()
-    return [
-        {
-            "tenant_id": t.id,
-            "name": t.name,
-            "email": t.contact_email,
-            "active": t.active,
-            "has_template": tpl is not None,
-            "choice": tpl.choice if tpl else None,
-            "mapping_status": tpl.mapping_status if tpl else None,
-            "file_path": tpl.file_path if tpl else None,
-            "original_filename": tpl.original_filename if tpl else None,
-        }
-        for t, tpl in rows
-    ]
 
 
 @app.get("/admin/scheduler")
@@ -322,34 +296,22 @@ def scheduler_status():
 
 @app.post("/admin/tenants/{tid}/deliver")
 def deliver_now(tid: str, year: int | None = None):
-    """Force-run the default-writer delivery loop for one tenant.
-    Useful for testing without waiting for the monthly cron."""
+    """Force-run the workbook delivery for one tenant. Every tenant gets
+    the default arrays×months workbook — there's no per-customer template
+    layer; we keep onboarding minimal and let the data speak for itself."""
     with SessionLocal() as db:
         t = db.get(Tenant, tid)
         if not t:
             raise HTTPException(404, "Tenant not found")
-        tpl = db.execute(
-            select(TenantTemplate).where(TenantTemplate.tenant_id == tid)
-        ).scalar_one_or_none()
-        choice = tpl.choice if tpl else "default"
         contact = t.contact_email
         tenant_name = t.name
-
-    if choice != "default":
-        # Custom (uploaded) template path — not auto-deliverable yet.
-        # Ford wires a per-tenant writer at customers/{tid}/writer.py for these.
-        return {
-            "ok": False,
-            "reason": "tenant chose 'upload' — needs manual writer wired",
-            "tenant": tid,
-        }
 
     year = year or _dt.utcnow().year
     try:
         path = build_workbook(tid, year=year)
     except Exception as e:
         send_internal_alert(
-            "Default workbook generation failed",
+            "Workbook generation failed",
             f"Tenant: {tid} ({tenant_name})\nYear: {year}\nError: {e}",
         )
         raise HTTPException(500, f"Workbook generation failed: {e}")

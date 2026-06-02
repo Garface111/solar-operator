@@ -17,12 +17,12 @@ import re
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import Tenant, TenantTemplate, now
+from .models import Tenant, now
 from .notify import send_welcome_email, send_internal_alert
 
 
@@ -273,117 +273,3 @@ def checkout_lookup(session_id: str):
             "email": t.contact_email,
             "active": t.active,
         }
-
-
-# ─── public: template upload / choice ───────────────────────────────────
-
-import pathlib as _pathlib
-from .db import DATA_DIR as _DATA_DIR
-
-TEMPLATES_DIR = _DATA_DIR / "templates"
-TEMPLATES_DIR.mkdir(exist_ok=True, parents=True)
-
-MAX_TEMPLATE_BYTES = 10 * 1024 * 1024  # 10 MB
-ALLOWED_EXTENSIONS = (".xlsx", ".xlsm", ".xls", ".csv", ".pdf")
-
-
-def _auth_tenant(authorization: str | None) -> Tenant:
-    """Validate `Authorization: Bearer sol_live_...` → Tenant or 401."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    with SessionLocal() as db:
-        t = db.execute(
-            select(Tenant).where(Tenant.tenant_key == token)
-        ).scalar_one_or_none()
-        if not t:
-            raise HTTPException(401, "Invalid token")
-        if not t.active:
-            raise HTTPException(403, "Tenant is not active")
-        # detach so caller can read without binding to closed session
-        db.expunge(t)
-        return t
-
-
-@router.post("/v1/tenants/template")
-async def submit_template(
-    choice: str = Form(...),
-    file: UploadFile | None = File(None),
-    authorization: str | None = Header(default=None),
-):
-    """Customer's onboarding choice for their report format.
-
-    choice='upload'  → multipart with `file` (their spreadsheet template)
-    choice='default' → no file; backend will generate generic arrays×months
-    """
-    if choice not in ("upload", "default"):
-        raise HTTPException(400, "choice must be 'upload' or 'default'")
-
-    tenant = _auth_tenant(authorization)
-
-    saved_path: str | None = None
-    original_filename: str | None = None
-    if choice == "upload":
-        if file is None:
-            raise HTTPException(400, "file is required when choice='upload'")
-        ext = _pathlib.Path(file.filename or "").suffix.lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(400,
-                f"Unsupported file type {ext}. Accepted: {', '.join(ALLOWED_EXTENSIONS)}")
-        data = await file.read()
-        if not data:
-            raise HTTPException(400, "Empty file")
-        if len(data) > MAX_TEMPLATE_BYTES:
-            raise HTTPException(413, f"File too large (max {MAX_TEMPLATE_BYTES // (1024*1024)} MB)")
-        tdir = TEMPLATES_DIR / tenant.id
-        tdir.mkdir(parents=True, exist_ok=True)
-        out = tdir / f"template{ext}"
-        out.write_bytes(data)
-        saved_path = str(out)
-        original_filename = file.filename
-
-    mapping_status = "pending" if choice == "upload" else "default"
-
-    with SessionLocal() as db:
-        existing = db.execute(
-            select(TenantTemplate).where(TenantTemplate.tenant_id == tenant.id)
-        ).scalar_one_or_none()
-        if existing:
-            existing.choice = choice
-            existing.file_path = saved_path
-            existing.original_filename = original_filename
-            existing.mapping_status = mapping_status
-            existing.updated_at = now()
-        else:
-            db.add(TenantTemplate(
-                tenant_id=tenant.id,
-                choice=choice,
-                file_path=saved_path,
-                original_filename=original_filename,
-                mapping_status=mapping_status,
-            ))
-        db.commit()
-
-    # Internal alert so we know what to do next
-    if choice == "upload":
-        send_internal_alert(
-            "📎 Template uploaded — manual mapping needed",
-            f"Tenant: {tenant.id}\n"
-            f"Customer: {tenant.name} ({tenant.contact_email})\n"
-            f"Plan: {tenant.plan}\n"
-            f"File: {original_filename}\n"
-            f"Saved at: {saved_path}\n\n"
-            f"Action: open the file, design their writer.py under "
-            f"customers/{tenant.id}/, and flip mapping_status to 'mapped'."
-        )
-    else:
-        send_internal_alert(
-            "🌞 New signup chose default template",
-            f"Tenant: {tenant.id}\n"
-            f"Customer: {tenant.name} ({tenant.contact_email})\n"
-            f"Plan: {tenant.plan}\n\n"
-            f"No template upload — they'll receive the generic "
-            f"arrays×months workbook. No human action required."
-        )
-
-    return {"ok": True, "choice": choice, "mapping_status": mapping_status}

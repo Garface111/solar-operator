@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
 from .db import SessionLocal
-from .models import Tenant, TenantTemplate, Job, now
+from .models import Tenant, Job, now
 
 scheduler = BackgroundScheduler(timezone="UTC")
 
@@ -26,9 +26,9 @@ def enqueue_pull_for_all_tenants():
 
 
 def deliver_monthly_default_reports():
-    """Generate + email the default workbook to every tenant with
-    mapping_status='default'. Custom-template tenants are skipped here —
-    they get their per-tenant writer.py + cron entry."""
+    """Generate + email the default workbook to every active tenant.
+    No template layer — every customer gets the same arrays×months format,
+    populated from their own bills."""
     from datetime import datetime as _dt
     # Lazy imports to avoid circulars at module load
     from .writers import build_workbook
@@ -37,15 +37,12 @@ def deliver_monthly_default_reports():
     sent = []
     failed = []
     with SessionLocal() as db:
-        rows = db.execute(
-            select(Tenant, TenantTemplate)
-            .join(TenantTemplate, TenantTemplate.tenant_id == Tenant.id)
-            .where(Tenant.active == True,
-                   TenantTemplate.mapping_status == "default")
-        ).all()
+        tenants = db.execute(
+            select(Tenant).where(Tenant.active == True)
+        ).scalars().all()
 
     year = _dt.utcnow().year
-    for tenant, _tpl in rows:
+    for tenant in tenants:
         try:
             path = build_workbook(tenant.id, year=year)
             ok = send_workbook_email(
