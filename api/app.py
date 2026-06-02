@@ -295,15 +295,16 @@ def scheduler_status():
 
 
 @app.post("/admin/tenants/{tid}/deliver")
-def deliver_now(tid: str, year: int | None = None):
+def deliver_now(tid: str, year: int | None = None, to: str | None = None):
     """Force-run the workbook delivery for one tenant. Every tenant gets
     the default arrays×months workbook — there's no per-customer template
-    layer; we keep onboarding minimal and let the data speak for itself."""
+    layer; we keep onboarding minimal and let the data speak for itself.
+    Pass ?to=someone@example.com to override the recipient (admin testing)."""
     with SessionLocal() as db:
         t = db.get(Tenant, tid)
         if not t:
             raise HTTPException(404, "Tenant not found")
-        contact = t.contact_email
+        contact = to or t.contact_email
         tenant_name = t.name
 
     year = year or _dt.utcnow().year
