@@ -114,12 +114,6 @@ You're 5 minutes from automatic monthly reporting.</p>
       log in, check "Stay signed in". Close the tab. You're done.</li>
 </ol>
 
-<p style="margin-top:24px;background:#fff4d6;padding:14px 18px;border-radius:6px;font-size:14px;">
-<strong>One more thing:</strong> reply to this email with your current reporting
-spreadsheet attached so we can match your exact format. Your first updated
-workbook lands within 1 business day after that.
-</p>
-
 <p style="margin-top:24px;color:#667;font-size:14px;">
 Questions? Just reply — we read every email and respond same business day.
 </p>
@@ -150,10 +144,6 @@ Setup (3 steps):
      code above, hit Save.
   3. Visit greenmountainpower.com, log in, check "Stay signed in." Close
      the tab. That's it.
-
-One more thing: reply to this email with your current reporting spreadsheet
-attached so we can match your exact format. Your first updated workbook
-lands within 1 business day after that.
 
 Questions? Just reply.
 
