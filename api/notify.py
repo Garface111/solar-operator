@@ -17,7 +17,7 @@ import urllib.error
 logger = logging.getLogger(__name__)
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-FROM_ADDRESS = os.getenv("MAIL_FROM", "Solar Operator <hello@solaroperator.org>")
+FROM_ADDRESS = os.getenv("MAIL_FROM", "Solar Operator <admin@solaroperator.org>")
 INTERNAL_ALERT_TO = os.getenv("INTERNAL_ALERT_TO", "ford.genereaux@dysonswarmtechnologies.com")
 EXTENSION_INSTALL_URL = os.getenv(
     "EXTENSION_INSTALL_URL",
