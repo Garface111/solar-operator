@@ -9,6 +9,7 @@ import {
   getToken,
   pingExtension,
   markExtensionInstalled,
+  fetchStatus,
 } from "../lib/onboarding";
 
 // Placeholder until the MV3 extension is published to the Chrome Web Store.
@@ -26,7 +27,40 @@ export default function Extension() {
   const [advancing, setAdvancing] = useState(false);
   const [pollFailures, setPollFailures] = useState(0);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [activationCode, setActivationCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const tokenRef = useRef<string | null>(getToken());
+
+  // Fetch the activation code (tenant_key) the moment the tenant is active.
+  // The user needs to paste this into the extension's options page so its
+  // posts to /v1/sync are authenticated against their tenant.
+  useEffect(() => {
+    const token = tokenRef.current;
+    if (!token) return;
+    let cancelled = false;
+    async function loadCode() {
+      try {
+        const status = await fetchStatus(token!);
+        if (!cancelled && status.activation_code) {
+          setActivationCode(status.activation_code);
+        }
+      } catch {
+        /* non-fatal — ping polling will surface bigger issues */
+      }
+    }
+    void loadCode();
+  }, []);
+
+  async function handleCopy() {
+    if (!activationCode) return;
+    try {
+      await navigator.clipboard.writeText(activationCode);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Couldn't copy automatically — please select and copy manually.");
+    }
+  }
 
   // Poll extension-ping every 3s; auto-advance to /clients when installed.
   useEffect(() => {
@@ -128,6 +162,33 @@ export default function Extension() {
               — this link is a placeholder for now.
             </p>
           )}
+        </div>
+
+        {/* Activation code — paste into the extension's options page */}
+        <div className="mt-6 rounded-xl border border-zinc-200 bg-white px-4 py-4">
+          <div className="text-sm font-medium text-zinc-900">
+            Step 2 — paste your activation code into the extension
+          </div>
+          <p className="mt-1 text-xs text-zinc-500">
+            Once the extension is installed, click its icon in your Chrome
+            toolbar → <strong>Options</strong>, paste this code into{" "}
+            <strong>Activation code</strong>, and click Save. This links the
+            extension to your account so we can find your bills.
+          </p>
+          <div className="mt-3 flex items-stretch gap-2">
+            <code className="flex-1 select-all rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-sm text-zinc-800 break-all">
+              {activationCode ?? "Loading…"}
+            </code>
+            <button
+              type="button"
+              onClick={handleCopy}
+              disabled={!activationCode}
+              className="inline-flex items-center justify-center rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors duration-150 hover:bg-zinc-50 active:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+              aria-label="Copy activation code"
+            >
+              {copied ? "Copied ✓" : "Copy"}
+            </button>
+          </div>
         </div>
 
         <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-4">
