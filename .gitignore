@@ -6,3 +6,5 @@ __pycache__/
 venv/
 bills/
 captures/
+web/onboarding/node_modules
+web/onboarding/dist
