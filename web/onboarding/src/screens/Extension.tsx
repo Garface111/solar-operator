@@ -38,17 +38,30 @@ export default function Extension() {
     const token = tokenRef.current;
     if (!token) return;
     let cancelled = false;
+    let retries = 0;
+    const MAX_RETRIES = 20; // ~60s of retries at 3s intervals
     async function loadCode() {
+      if (cancelled) return;
       try {
         const status = await fetchStatus(token!);
-        if (!cancelled && status.activation_code) {
+        if (cancelled) return;
+        if (status.activation_code) {
           setActivationCode(status.activation_code);
+          return; // got it — stop retrying
         }
       } catch {
-        /* non-fatal — ping polling will surface bigger issues */
+        /* non-fatal — fall through to retry */
+      }
+      // No code yet (webhook hasn't fired or tenant not active) — try again
+      retries += 1;
+      if (retries < MAX_RETRIES && !cancelled) {
+        window.setTimeout(loadCode, 3000);
       }
     }
     void loadCode();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function handleCopy() {
