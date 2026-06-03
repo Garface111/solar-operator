@@ -236,22 +236,24 @@ def build_workbook(tenant_id: str, year: Optional[int] = None,
                 row += 1
             row += 1  # gap row between quarter blocks
 
-        # Footnote
+        # Footnote — verbatim text from Bruce's GMCS.xlsx
         foot_row = row + (31 - row) if row <= 31 else row
         fc = sh.cell(foot_row, 1,
-                     " † NEPOOL-GIS will award 1 REC per whole MWh of generation. "
-                     "Fractional MWh accumulate to the next whole MWh.")
+                     " † NEPOOL-GIS will award 1 REC for every MWH reported.  "
+                     "Additionally, NEPOOL-GIS will keep track of the decimal "
+                     "MWHs and award an additional REC when the total exceeds 1 MWH.")
         fc.font = FOOTNOTE_FONT
         fc.alignment = Alignment(horizontal="left", vertical="center")
         sh.merge_cells(start_row=foot_row, start_column=1,
                        end_row=foot_row, end_column=4)
 
-        # Column widths — match the source workbook (13.0 across the board,
-        # gives the table room to breathe and aligns headers nicely).
-        sh.column_dimensions["A"].width = 13.0
-        sh.column_dimensions["B"].width = 13.0
-        sh.column_dimensions["C"].width = 13.0
-        sh.column_dimensions["D"].width = 13.0
+        # Column widths — generous breathing room. Source uses 13.0;
+        # bumping to 16.0 for label/data columns and 12.0 for the narrow
+        # RECs column to make the table easier to read at a glance.
+        sh.column_dimensions["A"].width = 16.0
+        sh.column_dimensions["B"].width = 20.0
+        sh.column_dimensions["C"].width = 20.0
+        sh.column_dimensions["D"].width = 12.0
 
     wb.save(out_path)
     return out_path
