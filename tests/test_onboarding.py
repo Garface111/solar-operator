@@ -186,7 +186,9 @@ def test_complete_sends_magic_link_and_finishes(client, mocks):
     assert mocks["welcome"][0]["to"] == email
     assert len(mocks["magic_link"]) == 1
     assert mocks["magic_link"][0]["to"] == email
-    assert "account.html?token=" in mocks["magic_link"][0]["text"]
+    # Magic link now lands on the dashboard SPA (/app/), which exchanges the
+    # one-time login token for a session via /v1/auth/verify.
+    assert "/app/?token=" in mocks["magic_link"][0]["text"]
 
 
 # ─── (e) Screen 4 reconciles Stripe quantity to the real array count ──────

@@ -443,26 +443,28 @@ class SPAStaticFiles(StaticFiles):
             raise
 
 
-_ONBOARDING_DIST = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "onboarding_dist")
-)
-# Note: lives inside api/ because Railway's Railpack builder only ships
-# directories it recognizes — web/ at the repo root was being dropped. The
-# build script (build_onboarding.sh) copies web/onboarding/dist/ → api/onboarding_dist/
-# before commit.
+# Each SPA's build is copied into api/ before commit because Railway's Railpack
+# builder only ships directories it recognizes — web/ at the repo root was being
+# dropped. build_onboarding.sh and build_app.sh do the copy.
+#   /onboarding ← api/onboarding_dist  (web/onboarding/dist)
+#   /app        ← api/app_dist         (web/app/dist — customer dashboard)
+_SPA_MOUNTS = [
+    ("/onboarding", "onboarding_dist", "build_onboarding.sh", "web/onboarding"),
+    ("/app", "app_dist", "build_app.sh", "web/app"),
+]
 
-if os.path.isdir(_ONBOARDING_DIST):
-    app.mount(
-        "/onboarding",
-        SPAStaticFiles(directory=_ONBOARDING_DIST, html=True),
-        name="onboarding",
-    )
-    log.info("Mounted onboarding SPA from %s", _ONBOARDING_DIST)
-else:
-    # Local dev without a frontend build — don't crash startup, just warn.
-    # Build it with: cd web/onboarding && npm ci && npm run build
-    log.warning(
-        "Onboarding SPA not mounted: %s does not exist. "
-        "Run `cd web/onboarding && npm ci && npm run build` to enable /onboarding.",
-        _ONBOARDING_DIST,
-    )
+for _prefix, _dirname, _build_script, _src in _SPA_MOUNTS:
+    _dist = os.path.normpath(os.path.join(os.path.dirname(__file__), _dirname))
+    if os.path.isdir(_dist):
+        app.mount(
+            _prefix,
+            SPAStaticFiles(directory=_dist, html=True),
+            name=_prefix.lstrip("/"),
+        )
+        log.info("Mounted SPA %s from %s", _prefix, _dist)
+    else:
+        # Local dev without a frontend build — don't crash startup, just warn.
+        log.warning(
+            "SPA %s not mounted: %s does not exist. Run `./%s` to enable it.",
+            _prefix, _dist, _build_script,
+        )
