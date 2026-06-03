@@ -3,7 +3,9 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { getToken, fetchStatus, type OnboardingStatus } from "../lib/onboarding";
 
-const DASHBOARD_URL = "https://solaroperator.org/app";
+// Relative so it resolves against whatever host serves the SPA. /app/ uses the
+// same magic-link auth as the email link, so this CTA just prompts sign-in.
+const DASHBOARD_URL = "/app/";
 
 export default function Done() {
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -74,7 +76,7 @@ export default function Done() {
             href={DASHBOARD_URL}
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
           >
-            Open your inbox →
+            Go to your account dashboard →
           </a>
         </div>
       </Card>

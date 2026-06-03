@@ -81,6 +81,7 @@ export interface ClientPayload {
   name: string;
   contact_email?: string;
   gmp_email?: string;
+  gmp_username?: string;
   gmp_autopopulate: boolean;
   arrays: ArrayPayload[];
 }

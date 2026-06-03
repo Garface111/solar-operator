@@ -134,6 +134,8 @@ def main():
              "ALTER TABLE tenants ADD COLUMN onboarding_stage VARCHAR(20) DEFAULT 'pending_payment'"),
             ("clients", "gmp_email",
              "ALTER TABLE clients ADD COLUMN gmp_email VARCHAR(200)"),
+            ("clients", "gmp_username",
+             "ALTER TABLE clients ADD COLUMN gmp_username VARCHAR(120)"),
             ("clients", "gmp_autopopulate",
              "ALTER TABLE clients ADD COLUMN gmp_autopopulate BOOLEAN DEFAULT FALSE"),
             ("clients", "gmp_last_sync_at",
@@ -158,6 +160,7 @@ def main():
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_tenants_onboarding_token ON tenants (onboarding_token)",
             "CREATE INDEX IF NOT EXISTS ix_clients_gmp_email ON clients (gmp_email)",
+            "CREATE INDEX IF NOT EXISTS ix_clients_gmp_username ON clients (gmp_username)",
             "CREATE INDEX IF NOT EXISTS ix_clients_tenant_gmp_email ON clients (tenant_id, gmp_email)",
         ]:
             conn.execute(text(idx_sql))

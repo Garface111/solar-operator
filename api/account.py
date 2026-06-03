@@ -124,6 +124,12 @@ class ClientCreate(BaseModel):
     cc_emails: Optional[str] = None  # comma-separated
     report_frequency: Optional[str] = None  # null = inherit tenant cadence
     notes: Optional[str] = None
+    # GMP auto-populate (mirrors onboarding Screen 4 — editable post-onboarding).
+    # The operator logs into GMP with either an email or a username; we match on
+    # whichever is set when the extension captures a session.
+    gmp_email: Optional[EmailStr] = None
+    gmp_username: Optional[str] = None
+    gmp_autopopulate: Optional[bool] = None
 
 
 class ClientUpdate(BaseModel):
@@ -133,6 +139,9 @@ class ClientUpdate(BaseModel):
     report_frequency: Optional[str] = None
     active: Optional[bool] = None
     notes: Optional[str] = None
+    gmp_email: Optional[EmailStr] = None
+    gmp_username: Optional[str] = None
+    gmp_autopopulate: Optional[bool] = None
 
 
 def _client_to_dict(c: Client, array_count: int = 0) -> dict:
@@ -146,6 +155,9 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "array_count": array_count,
         "last_delivery_at": c.last_delivery_at.isoformat() if c.last_delivery_at else None,
         "notes": c.notes,
+        "gmp_email": c.gmp_email,
+        "gmp_username": c.gmp_username,
+        "gmp_autopopulate": c.gmp_autopopulate,
     }
 
 
@@ -434,6 +446,10 @@ def create_client(body: ClientCreate,
             cc_emails=body.cc_emails,
             report_frequency=body.report_frequency,
             notes=body.notes,
+            gmp_email=(body.gmp_email.lower().strip() if body.gmp_email else None),
+            gmp_username=(body.gmp_username.strip()
+                          if body.gmp_username and body.gmp_username.strip() else None),
+            gmp_autopopulate=bool(body.gmp_autopopulate),
             active=True,
         )
         db.add(c); db.commit(); db.refresh(c)
@@ -467,10 +483,14 @@ def update_client(client_id: int, body: ClientUpdate,
                         "Another client already has that name")
                 c.name = new_name
         for field in ("contact_email", "cc_emails", "report_frequency",
-                      "active", "notes"):
+                      "active", "notes", "gmp_autopopulate"):
             v = getattr(body, field)
             if v is not None:
                 setattr(c, field, v)
+        if body.gmp_email is not None:
+            c.gmp_email = body.gmp_email.lower().strip() or None
+        if body.gmp_username is not None:
+            c.gmp_username = body.gmp_username.strip() or None
         db.commit(); db.refresh(c)
         n_arr = db.execute(
             select(Array).where(Array.client_id == c.id)

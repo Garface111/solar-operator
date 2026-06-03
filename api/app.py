@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
 from .adapters import get_adapter
@@ -165,14 +165,24 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         # bill_offset_months=0). Autopop will instead create 3 SEPARATE arrays.
         # The operator MUST merge those duplicates manually via the dashboard
         # afterward — do NOT attempt to guess merges from account metadata.
-        user_email = (normalized.get("user") or {}).get("email")
-        if user_email:
+        # GMP accepts either an email address or a username at login, and the
+        # capture carries both. Match a client on EITHER: its gmp_email vs the
+        # captured email, OR its gmp_username vs the captured username.
+        captured_user = normalized.get("user") or {}
+        user_email = (captured_user.get("email") or "").strip().lower()
+        user_username = (captured_user.get("username") or "").strip().lower()
+        if user_email or user_username:
+            match_terms = []
+            if user_email:
+                match_terms.append(func.lower(Client.gmp_email) == user_email)
+            if user_username:
+                match_terms.append(func.lower(Client.gmp_username) == user_username)
             clients = db.execute(
                 select(Client)
                 .where(
                     Client.tenant_id == tenant.id,
                     Client.gmp_autopopulate.is_(True),
-                    func.lower(Client.gmp_email) == user_email.strip().lower(),
+                    or_(*match_terms),
                 )
                 .order_by(Client.id)
             ).scalars().all()

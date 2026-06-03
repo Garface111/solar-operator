@@ -78,6 +78,7 @@ class ClientInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     contact_email: Optional[EmailStr] = None
     gmp_email: Optional[EmailStr] = None
+    gmp_username: Optional[str] = Field(None, max_length=120)
     gmp_autopopulate: bool = False
     arrays: list[ArrayInput] = Field(default_factory=list)
 
@@ -369,6 +370,7 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
                 name=name,
                 contact_email=ci.contact_email,
                 gmp_email=(ci.gmp_email.lower().strip() if ci.gmp_email else None),
+                gmp_username=(ci.gmp_username.strip() if ci.gmp_username and ci.gmp_username.strip() else None),
                 gmp_autopopulate=bool(ci.gmp_autopopulate),
                 active=True,
             )

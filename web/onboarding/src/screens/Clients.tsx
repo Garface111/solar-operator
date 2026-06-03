@@ -24,7 +24,9 @@ interface ClientDraft {
   name: string;
   contact_email: string;
   gmp_autopopulate: boolean;
-  gmp_email: string;
+  // GMP accepts either an email or a username at login; one field captures
+  // whichever the client uses. Split into gmp_email / gmp_username at submit.
+  gmp_login: string;
   arrays: ArrayDraft[];
 }
 
@@ -35,7 +37,7 @@ function blankClient(): ClientDraft {
     name: "",
     contact_email: "",
     gmp_autopopulate: true,
-    gmp_email: "",
+    gmp_login: "",
     arrays: [],
   };
 }
@@ -107,7 +109,8 @@ export default function Clients() {
         if (c.contact_email.trim() && !EMAIL_RE.test(c.contact_email.trim()))
           return false;
         if (c.gmp_autopopulate) {
-          return EMAIL_RE.test(c.gmp_email.trim());
+          // Accept email OR username — just require a non-empty value.
+          return c.gmp_login.trim().length >= 1;
         }
         return true;
       }),
@@ -126,20 +129,29 @@ export default function Clients() {
     setSubmitting(true);
     setSessionError(null);
 
-    const payload: ClientPayload[] = clients.map((c) => ({
-      name: c.name.trim(),
-      contact_email: c.contact_email.trim() || undefined,
-      gmp_autopopulate: c.gmp_autopopulate,
-      gmp_email: c.gmp_autopopulate ? c.gmp_email.trim() : undefined,
-      arrays: c.gmp_autopopulate
-        ? []
-        : c.arrays
-            .filter((a) => a.name.trim())
-            .map((a) => ({
-              name: a.name.trim(),
-              nepool_gis_id: a.nepool_gis_id.trim() || undefined,
-            })),
-    }));
+    const payload: ClientPayload[] = clients.map((c) => {
+      const login = c.gmp_login.trim();
+      const looksLikeEmail = EMAIL_RE.test(login);
+      return {
+        name: c.name.trim(),
+        contact_email: c.contact_email.trim() || undefined,
+        gmp_autopopulate: c.gmp_autopopulate,
+        // Route the single login field to the right column: an email-shaped
+        // value matches on gmp_email, anything else matches on gmp_username.
+        gmp_email:
+          c.gmp_autopopulate && login && looksLikeEmail ? login : undefined,
+        gmp_username:
+          c.gmp_autopopulate && login && !looksLikeEmail ? login : undefined,
+        arrays: c.gmp_autopopulate
+          ? []
+          : c.arrays
+              .filter((a) => a.name.trim())
+              .map((a) => ({
+                name: a.name.trim(),
+                nepool_gis_id: a.nepool_gis_id.trim() || undefined,
+              })),
+      };
+    });
 
     try {
       await submitClients(token, payload);
@@ -230,15 +242,13 @@ export default function Clients() {
                     <div className="mt-4">
                       <Input
                         id={`gmp-${c.id}`}
-                        label="GMP login email"
-                        type="email"
-                        placeholder="client@gmail.com"
-                        value={c.gmp_email}
-                        onChange={(e) => update(c.id, { gmp_email: e.target.value })}
+                        label="GMP login (email or username)"
+                        placeholder="client@gmail.com or jdoe"
+                        value={c.gmp_login}
+                        onChange={(e) => update(c.id, { gmp_login: e.target.value })}
                       />
                       <p className="mt-1.5 text-xs text-zinc-500">
-                        When this client logs into GMP with this email through
-                        the extension, we&apos;ll auto-add their arrays.
+                        Use whichever you log into GMP with.
                       </p>
                     </div>
                   ) : (
