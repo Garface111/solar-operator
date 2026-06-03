@@ -22,9 +22,9 @@ from typing import Any
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, func
 from .db import init_db, SessionLocal
-from .models import Tenant, UtilityAccount, UtilitySession, Bill, Job, Array, now
+from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
 from .adapters import get_adapter
 from .worker import pull_bills_for_tenant, run_pending_jobs
 from .signup import router as signup_router
@@ -141,6 +141,65 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 row.service_address = a.get("service_address") or row.service_address
                 row.extra = {**(row.extra or {}), **extra}
                 row.last_seen = now()
+
+        # Flush so the accounts just upserted above have IDs and are findable
+        # by the autopop query below (autoflush is off on this session).
+        db.flush()
+
+        # ── GMP auto-populate (onboarding wizard Screen 4) ───────────────
+        # If this capture's GMP login email matches a Client that opted into
+        # autopop, append/link Arrays automatically so the operator doesn't
+        # have to type them in by hand.
+        #
+        # ⚠️⚠️  LOUD WARNING — MULTI-ACCOUNT-PER-ARRAY CASE  ⚠️⚠️
+        # Autopop creates ONE Array per GMP account. Real-world arrays that
+        # SUM several sub-meters into a single logical array CANNOT be detected
+        # here. Bruce's "Starlake" = 3 GMP accounts → 1 array (with
+        # bill_offset_months=0). Autopop will instead create 3 SEPARATE arrays.
+        # The operator MUST merge those duplicates manually via the dashboard
+        # afterward — do NOT attempt to guess merges from account metadata.
+        user_email = (normalized.get("user") or {}).get("email")
+        if user_email:
+            clients = db.execute(
+                select(Client)
+                .where(
+                    Client.tenant_id == tenant.id,
+                    Client.gmp_autopopulate.is_(True),
+                    func.lower(Client.gmp_email) == user_email.strip().lower(),
+                )
+                .order_by(Client.id)
+            ).scalars().all()
+            if clients:
+                # gmp_email is expected to map to a single Client; if more than
+                # one matches (misconfiguration), the lowest-id Client owns the
+                # arrays and the rest just get their last_sync timestamp bumped.
+                owner = clients[0]
+                for a in normalized["accounts"]:
+                    acct_no = a.get("account_number")
+                    if not acct_no:
+                        continue
+                    acct = db.execute(
+                        select(UtilityAccount).where(
+                            UtilityAccount.tenant_id == tenant.id,
+                            UtilityAccount.provider == provider,
+                            UtilityAccount.account_number == acct_no,
+                        )
+                    ).scalar_one_or_none()
+                    if acct is None or acct.array_id is not None:
+                        # Already linked → idempotent: don't create a duplicate.
+                        continue
+                    arr = Array(
+                        tenant_id=tenant.id,
+                        client_id=owner.id,
+                        name=a.get("nickname") or acct_no,
+                        bill_offset_months=1,  # GMP default (prior-month bill)
+                    )
+                    db.add(arr)
+                    db.flush()  # assign arr.id before linking
+                    acct.array_id = arr.id
+                for c in clients:
+                    c.gmp_last_sync_at = now()
+
         db.commit()
 
     return {
