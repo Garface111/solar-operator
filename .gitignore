@@ -7,4 +7,4 @@ venv/
 bills/
 captures/
 web/onboarding/node_modules
-web/onboarding/dist
+# web/onboarding/dist  # committed for Railway deploy (Railpack buildCommand not running npm)
