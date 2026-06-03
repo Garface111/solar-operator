@@ -16,12 +16,14 @@ Admin (no auth in MVP — guard with a deploy-time env in prod):
   GET  /admin/tenants           — list all
 """
 from __future__ import annotations
-import os, secrets, json
+import os, secrets, json, logging
 from datetime import datetime
 from typing import Any
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select, func
 from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
@@ -31,6 +33,8 @@ from .signup import router as signup_router
 from .account import router as account_router
 from .onboarding import router as onboarding_router
 from . import scheduler
+
+log = logging.getLogger("solar_operator.app")
 
 app = FastAPI(title="Solar Operator API", version="1.0.0")
 
@@ -396,3 +400,52 @@ def test_email(to: str | None = None):
         "api_key_prefix": RESEND_API_KEY[:7] if RESEND_API_KEY else None,
         "last_error": getattr(_send_via_resend, "_last_error", None),
     }
+
+
+# ─── Onboarding SPA (React + Vite, built to web/onboarding/dist) ──────────
+# Served at /onboarding/*. Mounted LAST so it can never shadow the JSON API
+# routes above (/v1/*, /admin/*, /, /health) — a Mount only matches paths
+# under its own prefix anyway, but registering it last keeps that obvious.
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles that falls back to index.html on a 404.
+
+    The wizard uses React Router's BrowserRouter, so deep links like
+    /onboarding/clients have no corresponding file on disk. On a hard refresh
+    plain StaticFiles would 404; here we serve index.html instead and let the
+    client-side router resolve the path.
+
+    Per spec, ANY unmatched /onboarding/* path returns index.html — including a
+    genuinely-missing asset (e.g. a stale /onboarding/assets/*.js after a bad
+    build), which then fails to parse client-side rather than 404ing. That only
+    happens on a broken deploy, so the simpler blanket fallback is the trade.
+    """
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
+_ONBOARDING_DIST = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "web", "onboarding", "dist")
+)
+
+if os.path.isdir(_ONBOARDING_DIST):
+    app.mount(
+        "/onboarding",
+        SPAStaticFiles(directory=_ONBOARDING_DIST, html=True),
+        name="onboarding",
+    )
+    log.info("Mounted onboarding SPA from %s", _ONBOARDING_DIST)
+else:
+    # Local dev without a frontend build — don't crash startup, just warn.
+    # Build it with: cd web/onboarding && npm ci && npm run build
+    log.warning(
+        "Onboarding SPA not mounted: %s does not exist. "
+        "Run `cd web/onboarding && npm ci && npm run build` to enable /onboarding.",
+        _ONBOARDING_DIST,
+    )

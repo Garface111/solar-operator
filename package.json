@@ -1,0 +1,8 @@
+{
+  "name": "solar-operator",
+  "private": true,
+  "description": "Root manifest — present so Railway's Railpack builder provisions Node (for the onboarding SPA build) alongside the Python runtime. The actual frontend lives in web/onboarding/.",
+  "engines": {
+    "node": ">=20"
+  }
+}

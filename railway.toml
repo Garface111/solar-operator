@@ -1,5 +1,10 @@
 [build]
 builder = "RAILPACK"
+# Build the onboarding SPA into web/onboarding/dist before the image is sealed,
+# so FastAPI's StaticFiles mount has something to serve. The root package.json
+# (engines.node) makes Railpack provision Node alongside the Python runtime so
+# npm is on PATH here; pip install of requirements.txt still runs automatically.
+buildCommand = "cd web/onboarding && npm ci && npm run build"
 
 [deploy]
 startCommand = "uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
