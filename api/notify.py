@@ -188,14 +188,14 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
             f"<p>Hi {first},</p>"
             f"<p>We tried to charge your card ${amount_dollars:.2f} for your Solar Operator subscription, but it was declined.{when}</p>"
             f"<p>To keep your reports flowing, please update your card at "
-            f"<a href='https://solaroperator.org/account.html'>solaroperator.org/account</a> — "
+            f"<a href='https://web-production-49c83.up.railway.app/app/'>your Solar Operator dashboard</a> — "
             f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
             f"<p>If you don't update before our retries run out, your subscription will be canceled and reports will stop.</p>"
             f"<p>Questions or need help? Just reply.</p>"
             f"<p>— Solar Operator</p></body></html>")
     text = (f"Hi {first},\n\nWe tried to charge your card ${amount_dollars:.2f} for "
             f"Solar Operator, but it was declined.{when}\n\n"
-            f"Update your card at https://solaroperator.org/account.html — "
+            f"Update your card at https://web-production-49c83.up.railway.app/app/ — "
             f"sign in, click Manage billing.\n\nQuestions? Just reply.\n\n— Solar Operator")
     return _send_via_resend(
         to=to,

@@ -100,8 +100,8 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             f"quarters of generation data we have on file through "
             f"{datetime.utcnow():%B %d, %Y}, one sheet per array.</p>"
             f"<p>Manage your account or change report frequency at "
-            f"<a href='https://solaroperator.org/account.html'>"
-            f"solaroperator.org/account</a>.</p>"
+            f"<a href='https://web-production-49c83.up.railway.app/app/'>"
+            f"your dashboard</a>.</p>"
             f"<p>Questions? Just reply.</p>"
             f"<p>— Solar Operator</p>"
         )
@@ -110,7 +110,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             f"Your latest NEPOOL-GIS quarterly generation workbook for "
             f"{client_name} is attached (through "
             f"{datetime.utcnow():%B %d, %Y}).\n\n"
-            f"Manage your account at https://solaroperator.org/account.html\n\n"
+            f"Manage your account at https://web-production-49c83.up.railway.app/app/\n\n"
             f"Questions? Just reply.\n\n— Solar Operator"
         )
         # Send to primary; cc the extras
