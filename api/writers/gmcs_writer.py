@@ -171,7 +171,7 @@ def build_workbook(tenant_id: str, year: Optional[int] = None,
     default_sheet = wb.active
 
     TITLE_FONT = Font(bold=True, size=14, color="1F4E2A")
-    HDR_FONT = Font(bold=True, size=11, color="FFFFFF")
+    HDR_FONT = Font(bold=True, size=14, color="FFFFFF")
     HDR_FILL = PatternFill("solid", fgColor="2E6B3A")
     QUARTER_FONT = Font(bold=True, size=11, color="1F4E2A")
     FOOTNOTE_FONT = Font(italic=True, size=9, color="666666")
@@ -225,13 +225,13 @@ def build_workbook(tenant_id: str, year: Optional[int] = None,
                 mwh = round(kwh / 1000.0, 3)
                 recs = int(mwh)  # floor of MWh
                 gc = sh.cell(row, 2, mwh if kwh else None)
-                gc.number_format = "0.000"
+                gc.number_format = "General"
                 gc.alignment = Alignment(horizontal="right")
                 rc = sh.cell(row, 3, mwh if kwh else None)
-                rc.number_format = "0.000"
+                rc.number_format = "General"
                 rc.alignment = Alignment(horizontal="right")
                 ec = sh.cell(row, 4, recs if kwh else None)
-                ec.number_format = "0"
+                ec.number_format = "General"
                 ec.alignment = Alignment(horizontal="right")
                 row += 1
             row += 1  # gap row between quarter blocks
@@ -246,13 +246,12 @@ def build_workbook(tenant_id: str, year: Optional[int] = None,
         sh.merge_cells(start_row=foot_row, start_column=1,
                        end_row=foot_row, end_column=4)
 
-        # Column widths
-        sh.column_dimensions["A"].width = 18
-        sh.column_dimensions["B"].width = 18
-        sh.column_dimensions["C"].width = 18
-        sh.column_dimensions["D"].width = 10
-        sh.row_dimensions[1].height = 22
-        sh.row_dimensions[5].height = 20
+        # Column widths — match the source workbook (13.0 across the board,
+        # gives the table room to breathe and aligns headers nicely).
+        sh.column_dimensions["A"].width = 13.0
+        sh.column_dimensions["B"].width = 13.0
+        sh.column_dimensions["C"].width = 13.0
+        sh.column_dimensions["D"].width = 13.0
 
     wb.save(out_path)
     return out_path
