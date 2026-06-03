@@ -29,6 +29,7 @@ from .adapters import get_adapter
 from .worker import pull_bills_for_tenant, run_pending_jobs
 from .signup import router as signup_router
 from .account import router as account_router
+from .onboarding import router as onboarding_router
 from . import scheduler
 
 app = FastAPI(title="Solar Operator API", version="1.0.0")
@@ -51,6 +52,9 @@ app.add_middleware(
 
 app.include_router(signup_router)
 app.include_router(account_router)
+# New 5-screen onboarding flow. Legacy signup_router stays mounted so any
+# in-flight /v1/signup checkouts still complete.
+app.include_router(onboarding_router)
 
 
 @app.on_event("startup")

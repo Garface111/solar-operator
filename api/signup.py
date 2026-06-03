@@ -154,9 +154,57 @@ def signup(req: SignupRequest):
 
 # ─── stripe webhook ─────────────────────────────────────────────────────
 
+def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) -> dict:
+    """New 5-screen onboarding flow: activate the pending tenant and advance
+    it to the 'extension' stage. Crucially does NOT send the welcome email —
+    that is deferred to POST /v1/onboarding/complete so the operator only gets
+    it once they actually finish setup."""
+    stripe_customer_id = sess.get("customer")
+    stripe_subscription_id = sess.get("subscription")
+
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.onboarding_token == onboarding_token)
+        ).scalar_one_or_none()
+        if not t:
+            send_internal_alert(
+                "Stripe success for unknown onboarding token",
+                f"checkout.session.completed fired with onboarding_token="
+                f"{onboarding_token} but no such tenant. "
+                f"Email on session: {sess.get('customer_email')}"
+            )
+            return {"ignored": "onboarding tenant not found"}
+
+        t.active = True
+        t.subscription_status = "active"
+        t.onboarding_stage = "extension"
+        if stripe_customer_id:
+            t.stripe_customer_id = stripe_customer_id
+        if stripe_subscription_id:
+            t.stripe_subscription_id = stripe_subscription_id
+        db.commit()
+        tid = t.id
+
+    send_internal_alert(
+        "🌞 Onboarding payment received",
+        f"Tenant {tid} ({sess.get('customer_email')}) paid. "
+        f"Awaiting extension install + client setup.\n"
+        f"Stripe customer: {stripe_customer_id}\n"
+        f"Stripe subscription: {stripe_subscription_id}"
+    )
+    return {"tenant_activated": tid}
+
+
 def _process_checkout_completed(sess: dict) -> dict:
     """Activate tenant, link Stripe IDs, send welcome email."""
-    tenant_id = (sess.get("metadata") or {}).get("tenant_id")
+    meta = sess.get("metadata") or {}
+    # New onboarding flow tags sessions with onboarding_token — route those to
+    # the deferred-welcome handler. Legacy /v1/signup sessions fall through.
+    onboarding_token = meta.get("onboarding_token")
+    if onboarding_token:
+        return _process_onboarding_checkout_completed(sess, onboarding_token)
+
+    tenant_id = meta.get("tenant_id")
     if not tenant_id:
         return {"ignored": "no tenant_id in metadata"}
 

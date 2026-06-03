@@ -198,18 +198,21 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
 
 # ─── magic-link auth ────────────────────────────────────────────────────
 
-@router.post("/v1/auth/request")
-def auth_request(req: AuthRequest):
-    """Email a one-time login link to a known customer. Always returns OK
-    (don't leak which emails are registered)."""
-    email = req.email.lower().strip()
+def issue_magic_link(email: str) -> bool:
+    """Create a single-use login token for `email` and email the sign-in link.
+
+    Returns True if a matching tenant existed and an email was attempted,
+    False if no tenant matched (caller should NOT leak that distinction to
+    untrusted clients). Shared by /v1/auth/request and the onboarding
+    /v1/onboarding/complete flow.
+    """
+    email = email.lower().strip()
     with SessionLocal() as db:
         t = db.execute(
             select(Tenant).where(Tenant.contact_email == email)
         ).scalars().first()
         if not t:
-            # Don't leak — pretend it worked
-            return {"ok": True, "delivered": True}
+            return False
 
         token = secrets.token_urlsafe(32)
         expires = datetime.utcnow() + timedelta(seconds=LOGIN_LINK_TTL_SECONDS)
@@ -244,6 +247,14 @@ def auth_request(req: AuthRequest):
         html=html,
         text=text,
     )
+    return True
+
+
+@router.post("/v1/auth/request")
+def auth_request(req: AuthRequest):
+    """Email a one-time login link to a known customer. Always returns OK
+    (don't leak which emails are registered)."""
+    issue_magic_link(req.email)
     return {"ok": True, "delivered": True}
 
 
