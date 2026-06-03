@@ -434,8 +434,12 @@ class SPAStaticFiles(StaticFiles):
 
 
 _ONBOARDING_DIST = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "web", "onboarding", "dist")
+    os.path.join(os.path.dirname(__file__), "onboarding_dist")
 )
+# Note: lives inside api/ because Railway's Railpack builder only ships
+# directories it recognizes — web/ at the repo root was being dropped. The
+# build script (build_onboarding.sh) copies web/onboarding/dist/ → api/onboarding_dist/
+# before commit.
 
 if os.path.isdir(_ONBOARDING_DIST):
     app.mount(
