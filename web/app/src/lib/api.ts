@@ -166,6 +166,11 @@ export async function getBillingPortalUrl(): Promise<string> {
   return res.url;
 }
 
+/** Trigger an immediate report send to all clients. Does not change cadence. */
+export async function sendReportNow(): Promise<void> {
+  await request("/v1/account/send-report", { method: "POST" });
+}
+
 // ─── clients ─────────────────────────────────────────────────────────────
 
 export async function listClients(): Promise<ClientRow[]> {

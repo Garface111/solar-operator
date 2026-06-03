@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
 import { AccountSummaryCard } from "../components/AccountSummaryCard";
+import { ReportsCard } from "../components/ReportsCard";
 import { ActivationCodeCard } from "../components/ActivationCodeCard";
 import { ClientsSection } from "../components/ClientsSection";
 import { Spinner } from "../ui/Spinner";
@@ -61,13 +62,12 @@ export default function Dashboard({ onSignOut }: Props) {
           </div>
         ) : (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <AccountSummaryCard
-                account={account}
-                onAccountChange={patchAccount}
-              />
-              <ActivationCodeCard tenantKey={account.tenant_key} />
-            </div>
+            <AccountSummaryCard
+              account={account}
+              onAccountChange={patchAccount}
+            />
+            <ReportsCard account={account} onAccountChange={patchAccount} />
+            <ActivationCodeCard tenantKey={account.tenant_key} />
 
             <ClientsSection
               expandClientId={clientId ? Number(clientId) : undefined}
