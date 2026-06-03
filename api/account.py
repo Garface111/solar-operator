@@ -31,7 +31,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import Tenant, LoginToken, now
+from .models import Tenant, Client, Array, LoginToken, now
 from .notify import _send_via_resend, send_internal_alert
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,39 @@ class UpdateEmail(BaseModel):
 
 class UpdateFrequency(BaseModel):
     frequency: str  # weekly | monthly | quarterly
+
+
+# ─── Client (sub-client) CRUD ───────────────────────────────────────────
+
+class ClientCreate(BaseModel):
+    name: str
+    contact_email: Optional[EmailStr] = None
+    cc_emails: Optional[str] = None  # comma-separated
+    report_frequency: Optional[str] = None  # null = inherit tenant cadence
+    notes: Optional[str] = None
+
+
+class ClientUpdate(BaseModel):
+    name: Optional[str] = None
+    contact_email: Optional[EmailStr] = None
+    cc_emails: Optional[str] = None
+    report_frequency: Optional[str] = None
+    active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+def _client_to_dict(c: Client, array_count: int = 0) -> dict:
+    return {
+        "id": c.id,
+        "name": c.name,
+        "contact_email": c.contact_email,
+        "cc_emails": c.cc_emails,
+        "report_frequency": c.report_frequency,
+        "active": c.active,
+        "array_count": array_count,
+        "last_delivery_at": c.last_delivery_at.isoformat() if c.last_delivery_at else None,
+        "notes": c.notes,
+    }
 
 
 # ─── magic-link auth ────────────────────────────────────────────────────
@@ -297,3 +330,120 @@ def billing_portal(authorization: Optional[str] = Header(default=None)):
         return {"url": session.url}
     except stripe.error.StripeError as e:
         raise HTTPException(502, f"Stripe error: {e}")
+
+
+# ─── Clients (sub-clients) ──────────────────────────────────────────────
+
+@router.get("/v1/account/clients")
+def list_clients(authorization: Optional[str] = Header(default=None)):
+    """List all sub-clients under the calling tenant."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        clients = db.execute(
+            select(Client).where(Client.tenant_id == t.id)
+                          .order_by(Client.name.asc())
+        ).scalars().all()
+        out = []
+        for c in clients:
+            n_arr = db.execute(
+                select(Array).where(Array.client_id == c.id)
+            ).scalars().all()
+            out.append(_client_to_dict(c, array_count=len(n_arr)))
+    return {"ok": True, "clients": out}
+
+
+@router.post("/v1/account/clients")
+def create_client(body: ClientCreate,
+                  authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    if body.report_frequency and body.report_frequency not in (
+            "weekly", "monthly", "quarterly"):
+        raise HTTPException(400,
+            "report_frequency must be weekly, monthly, quarterly, or null")
+    with SessionLocal() as db:
+        existing = db.execute(
+            select(Client).where(Client.tenant_id == t.id, Client.name == name)
+        ).scalar_one_or_none()
+        if existing:
+            raise HTTPException(409, "A client with that name already exists")
+        c = Client(
+            tenant_id=t.id, name=name,
+            contact_email=body.contact_email,
+            cc_emails=body.cc_emails,
+            report_frequency=body.report_frequency,
+            notes=body.notes,
+            active=True,
+        )
+        db.add(c); db.commit(); db.refresh(c)
+        return {"ok": True, "client": _client_to_dict(c, 0)}
+
+
+@router.patch("/v1/account/clients/{client_id}")
+def update_client(client_id: int, body: ClientUpdate,
+                  authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    if body.report_frequency and body.report_frequency not in (
+            "weekly", "monthly", "quarterly"):
+        raise HTTPException(400,
+            "report_frequency must be weekly, monthly, quarterly, or null")
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+        if body.name is not None:
+            new_name = body.name.strip()
+            if new_name and new_name != c.name:
+                clash = db.execute(
+                    select(Client).where(
+                        Client.tenant_id == t.id,
+                        Client.name == new_name,
+                        Client.id != c.id,
+                    )
+                ).scalar_one_or_none()
+                if clash:
+                    raise HTTPException(409,
+                        "Another client already has that name")
+                c.name = new_name
+        for field in ("contact_email", "cc_emails", "report_frequency",
+                      "active", "notes"):
+            v = getattr(body, field)
+            if v is not None:
+                setattr(c, field, v)
+        db.commit(); db.refresh(c)
+        n_arr = db.execute(
+            select(Array).where(Array.client_id == c.id)
+        ).scalars().all()
+        return {"ok": True, "client": _client_to_dict(c, len(n_arr))}
+
+
+@router.delete("/v1/account/clients/{client_id}")
+def delete_client(client_id: int,
+                  authorization: Optional[str] = Header(default=None)):
+    """Soft delete: marks the client inactive. Arrays stay linked so we
+    don't orphan bills; reactivate by PATCHing active=True."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+        c.active = False
+        db.commit()
+    return {"ok": True, "client_id": client_id, "active": False}
+
+
+@router.post("/v1/account/clients/{client_id}/send-report")
+def send_one_client_report(client_id: int,
+                           authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+    if not t.active and t.subscription_status not in (
+            "active", "trialing", "comped"):
+        raise HTTPException(402, "Reactivate your subscription to send reports")
+    from .delivery import deliver_for_client
+    return deliver_for_client(client_id, triggered_by="self-serve")

@@ -48,8 +48,43 @@ class Tenant(Base):
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    clients: Mapped[list["Client"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     sessions: Mapped[list["UtilitySession"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+
+
+class Client(Base):
+    """A SUB-CLIENT of a tenant (NEPOOL agent → many clients → each w/ arrays).
+
+    For a small operator like Bruce, his tenant has exactly one Client
+    ("Green Mountain Community Solar") that owns all his arrays. For a
+    NEPOOL-agent tenant, each of their reporting customers is a separate
+    Client — and gets its own per-client workbook delivered to its own email.
+
+    Reports are generated PER CLIENT, not per tenant. The Client decides
+    cadence + recipients; the Tenant only sees the consolidated billing.
+    """
+    __tablename__ = "clients"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    # Primary contact + extra recipients (comma-separated; cleaner than JSON for SMTP fanout)
+    contact_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Cadence override; falls back to tenant.report_frequency when null
+    report_frequency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # weekly | monthly | quarterly | null (inherit)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="clients")
+    arrays: Mapped[list["Array"]] = relationship(back_populates="client")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_client_per_tenant"),
+    )
 
 
 class Array(Base):
@@ -58,6 +93,9 @@ class Array(Base):
     __tablename__ = "arrays"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    client_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("clients.id"), nullable=True, index=True)
+    # Which sub-client owns this array. Backfilled to a per-tenant "default
+    # Self client" by the migration so existing tenants keep working.
     name: Mapped[str] = mapped_column(String(120))
     region: Mapped[str | None] = mapped_column(String(40), nullable=True)  # north/south/central
     nepool_gis_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -71,6 +109,7 @@ class Array(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     tenant: Mapped[Tenant] = relationship(back_populates="arrays")
+    client: Mapped["Client | None"] = relationship(back_populates="arrays")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="array")
 
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_array_per_tenant"),)

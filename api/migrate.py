@@ -8,6 +8,7 @@ Idempotent migration for the June 2026 schema changes:
 Run on Railway via: `python -m api.migrate`
 Idempotent: safe to run multiple times.
 """
+from datetime import datetime
 from sqlalchemy import text, inspect
 from .db import engine, init_db
 
@@ -72,6 +73,57 @@ def main():
                 "ALTER TABLE arrays ADD COLUMN nepool_gis_id VARCHAR(20)"
             ))
             print("  + arrays.nepool_gis_id")
+
+        # 2026-06-03 Phase-1 expansion: Client layer
+        # Idempotency: create_all() above already created `clients` table
+        # via Base.metadata, so we only need to (a) add arrays.client_id and
+        # (b) backfill a default "Self" Client per existing tenant.
+        if not column_exists(conn, "arrays", "client_id"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN client_id INTEGER REFERENCES clients(id)"
+            ))
+            print("  + arrays.client_id")
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_arrays_client_id ON arrays (client_id)"
+        ))
+
+        # Backfill: every tenant that has at least one array gets a default
+        # "Self" Client; every array is linked to its tenant's default client
+        # if it currently has client_id IS NULL.
+        tenants_to_backfill = [
+            r[0] for r in conn.execute(text(
+                "SELECT DISTINCT a.tenant_id FROM arrays a "
+                "WHERE a.client_id IS NULL"
+            )).fetchall()
+        ]
+        for tid in tenants_to_backfill:
+            # Look up tenant name + contact for sensible Client defaults
+            row = conn.execute(text(
+                "SELECT name, contact_email FROM tenants WHERE id = :tid"
+            ), {"tid": tid}).fetchone()
+            if row is None:
+                continue
+            t_name, t_email = row
+            # Reuse existing default Client if migration is being re-run
+            existing = conn.execute(text(
+                "SELECT id FROM clients WHERE tenant_id = :tid AND name = :name"
+            ), {"tid": tid, "name": t_name}).fetchone()
+            if existing:
+                cid = existing[0]
+            else:
+                conn.execute(text(
+                    "INSERT INTO clients (tenant_id, name, contact_email, active, created_at) "
+                    "VALUES (:tid, :name, :email, :active, :ts)"
+                ), {"tid": tid, "name": t_name, "email": t_email,
+                    "active": True, "ts": datetime.utcnow()})
+                cid = conn.execute(text(
+                    "SELECT id FROM clients WHERE tenant_id = :tid AND name = :name"
+                ), {"tid": tid, "name": t_name}).fetchone()[0]
+            conn.execute(text(
+                "UPDATE arrays SET client_id = :cid "
+                "WHERE tenant_id = :tid AND client_id IS NULL"
+            ), {"cid": cid, "tid": tid})
+            print(f"  ↪ tenant {tid}: linked arrays to default Client id={cid} ('{t_name}')")
 
     print("=== Migration complete ===")
 

@@ -1,20 +1,20 @@
 """
 APScheduler — runs pull-bills on a cadence so new monthly bills land
-automatically. Also fires per-tenant report deliveries based on
-each tenant's report_frequency.
+automatically. Also fires per-CLIENT report deliveries based on each
+client's report_frequency (falls back to tenant.report_frequency).
 
 Schedule:
   - every 6 hours: enqueue pull_bills jobs for all active tenants
   - every 1 minute: drain the job queue
-  - every Monday at 09:00 UTC: deliver to weekly tenants
-  - 1st of every month at 09:00 UTC: deliver to monthly tenants
-  - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly tenants
+  - every Monday at 09:00 UTC: deliver to weekly clients
+  - 1st of every month at 09:00 UTC: deliver to monthly clients
+  - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly clients
 """
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from .db import SessionLocal
-from .models import Tenant, Job, now
+from .models import Tenant, Client, Job, now
 
 scheduler = BackgroundScheduler(timezone="UTC")
 
@@ -28,32 +28,45 @@ def enqueue_pull_for_all_tenants():
     return len(tenants)
 
 
-def _deliver_to_tenants_with_frequency(frequency: str) -> dict:
-    """Send the default workbook to every active tenant whose report_frequency
-    matches. Comped tenants (active=False but status=comped) get reports too."""
-    from .delivery import deliver_for_tenant
+def _deliver_clients_with_frequency(frequency: str) -> dict:
+    """Send the workbook to every active CLIENT whose effective frequency
+    matches. Effective = client.report_frequency if set, else
+    tenant.report_frequency. Skips clients of inactive non-comped tenants.
+    """
+    from .delivery import deliver_for_client
     from .notify import send_internal_alert
 
-    sent = []
-    failed = []
+    sent: list[int] = []
+    failed: list[int] = []
     with SessionLocal() as db:
-        tenants = db.execute(
-            select(Tenant).where(Tenant.report_frequency == frequency)
-        ).scalars().all()
+        # All client rows that EITHER explicitly match the cadence OR
+        # inherit it from the tenant
+        rows = db.execute(
+            select(Client, Tenant)
+            .join(Tenant, Client.tenant_id == Tenant.id)
+            .where(Client.active == True)  # noqa: E712
+            .where(
+                or_(
+                    Client.report_frequency == frequency,
+                    (Client.report_frequency.is_(None)) &
+                    (Tenant.report_frequency == frequency),
+                )
+            )
+        ).all()
         candidates = [
-            t.id for t in tenants
-            if t.active or t.subscription_status in ("comped", "trialing")
+            c.id for (c, t) in rows
+            if (t.active or t.subscription_status in ("comped", "trialing"))
         ]
 
-    for tid in candidates:
+    for cid in candidates:
         try:
-            result = deliver_for_tenant(tid, triggered_by=f"sched-{frequency}")
-            (sent if result.get("ok") and result.get("email_sent") else failed).append(tid)
+            result = deliver_for_client(cid, triggered_by=f"sched-{frequency}")
+            (sent if result.get("ok") and result.get("email_sent") else failed).append(cid)
         except Exception as e:
-            failed.append(tid)
+            failed.append(cid)
             send_internal_alert(
                 f"Scheduled delivery failed ({frequency})",
-                f"Tenant: {tid}\nError: {e}",
+                f"Client: {cid}\nError: {e}",
             )
 
     if failed:
@@ -65,15 +78,15 @@ def _deliver_to_tenants_with_frequency(frequency: str) -> dict:
 
 
 def deliver_weekly_reports():
-    return _deliver_to_tenants_with_frequency("weekly")
+    return _deliver_clients_with_frequency("weekly")
 
 
 def deliver_monthly_reports():
-    return _deliver_to_tenants_with_frequency("monthly")
+    return _deliver_clients_with_frequency("monthly")
 
 
 def deliver_quarterly_reports():
-    return _deliver_to_tenants_with_frequency("quarterly")
+    return _deliver_clients_with_frequency("quarterly")
 
 
 def start():

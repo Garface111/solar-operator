@@ -28,7 +28,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from ..db import SessionLocal, DATA_DIR
-from ..models import Tenant, UtilityAccount, Array, Bill
+from ..models import Tenant, Client, UtilityAccount, Array, Bill
 
 
 REPORTS_DIR = DATA_DIR / "reports"
@@ -95,43 +95,79 @@ def _sheet_name_for_array(name: str, used: set[str]) -> str:
 
 
 # ── main builder ─────────────────────────────────────────────────────
-def build_workbook(tenant_id: str, year: Optional[int] = None,
+def build_workbook(tenant_id: Optional[str] = None,
+                   year: Optional[int] = None,
                    out_path: Optional[pathlib.Path] = None,
                    *, quarters: int = 6,
-                   reference_date: Optional[date] = None) -> pathlib.Path:
-    """Generate the GMCS-format workbook for one tenant. Returns saved path.
+                   reference_date: Optional[date] = None,
+                   client_id: Optional[int] = None) -> pathlib.Path:
+    """Generate the GMCS-format workbook for ONE client. Returns saved path.
 
-    `year` is accepted for API back-compat with the legacy writer, but the
-    GMCS format is rolling-quarter based; if you pass a year it is used only
-    to default the output filename.
+    Calling conventions:
+      build_workbook(client_id=N, ...)         -- preferred, post-Phase-1
+      build_workbook(tenant_id="ten_…", ...)   -- legacy fallback: picks the
+                                                  first Client under that
+                                                  tenant; preserves callers
+                                                  that haven't migrated yet.
+
+    Exactly one of `client_id` or `tenant_id` must be provided.
+
+    `year` is accepted for API back-compat with the legacy month-grid writer
+    but the GMCS format is rolling-quarter based; it's only used to default
+    the output filename.
 
     `quarters` is the number of trailing complete quarters to include
     (default 6 = 18 months, matching Bruce's GMCS workbook).
     """
+    if client_id is None and tenant_id is None:
+        raise ValueError("build_workbook requires client_id or tenant_id")
+
     ref = reference_date or date.today()
     qlist = _rolling_quarters(ref, count=quarters)
-    # filename: use latest quarter
     last_y, last_q = qlist[-1]
     if year is None:
         year = last_y
-    if out_path is None:
-        out_path = REPORTS_DIR / tenant_id / f"{last_y}-Q{last_q}-GMCS-report.xlsx"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with SessionLocal() as db:
-        tenant = db.get(Tenant, tenant_id)
-        if not tenant:
-            raise ValueError(f"unknown tenant {tenant_id}")
+        # Resolve client_id from tenant_id when legacy mode used
+        if client_id is None:
+            client = db.execute(
+                select(Client).where(Client.tenant_id == tenant_id)
+                              .order_by(Client.id.asc())
+            ).scalars().first()
+            if client is None:
+                raise ValueError(
+                    f"Tenant {tenant_id} has no Client rows; run migrations.")
+            client_id = client.id
+        else:
+            client = db.get(Client, client_id)
+            if client is None:
+                raise ValueError(f"unknown client {client_id}")
 
-        accounts = db.execute(
-            select(UtilityAccount).where(UtilityAccount.tenant_id == tenant_id)
-        ).scalars().all()
+        tenant = db.get(Tenant, client.tenant_id)
+        if not tenant:
+            raise ValueError(f"unknown tenant {client.tenant_id}")
+
+        if out_path is None:
+            out_path = (REPORTS_DIR / tenant.id / f"client-{client.id}"
+                        / f"{last_y}-Q{last_q}-GMCS-report.xlsx")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Arrays scoped to THIS client only
         arrays = db.execute(
-            select(Array).where(Array.tenant_id == tenant_id)
+            select(Array).where(Array.client_id == client.id)
         ).scalars().all()
         arrays_by_id = {a.id: a for a in arrays}
+        array_ids = list(arrays_by_id.keys())
 
-        # Build account → group label (same logic as default_writer)
+        # Accounts under those arrays
+        if array_ids:
+            accounts = db.execute(
+                select(UtilityAccount).where(UtilityAccount.array_id.in_(array_ids))
+            ).scalars().all()
+        else:
+            accounts = []
+
         def group_for(acc: UtilityAccount) -> tuple[str, Optional[Array]]:
             if acc.array_id and acc.array_id in arrays_by_id:
                 a = arrays_by_id[acc.array_id]
@@ -145,9 +181,14 @@ def build_workbook(tenant_id: str, year: Optional[int] = None,
             group_of[acc.id] = name
             group_meta.setdefault(name, a)
 
-        bills = db.execute(
-            select(Bill).where(Bill.tenant_id == tenant_id)
-        ).scalars().all()
+        # Pull bills for those accounts only
+        if accounts:
+            account_ids = [a.id for a in accounts]
+            bills = db.execute(
+                select(Bill).where(Bill.account_id.in_(account_ids))
+            ).scalars().all()
+        else:
+            bills = []
 
         # Per-group kWh by (year, month)
         per_group: dict[str, dict[tuple[int, int], float]] = defaultdict(
