@@ -12,7 +12,7 @@ import {
 } from "../lib/onboarding";
 
 // Placeholder until the MV3 extension is published to the Chrome Web Store.
-const CHROME_STORE_URL = "#TODO-publish-pending";
+const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
 
 const POLL_MS = 3000;
 // After this many consecutive ping failures we surface a "having trouble" hint
