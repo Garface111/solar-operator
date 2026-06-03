@@ -60,6 +60,8 @@ class Array(Base):
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     region: Mapped[str | None] = mapped_column(String(40), nullable=True)  # north/south/central
+    nepool_gis_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # NEPOOL-GIS asset ID (e.g. "53984" → shown as "Chester (53984)" in reports)
     first_connect_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     solar_adder_cents: Mapped[float | None] = mapped_column(Float, nullable=True)
     bill_offset_months: Mapped[int] = mapped_column(Integer, default=1)

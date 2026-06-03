@@ -66,6 +66,13 @@ def main():
         else:
             print(f"✓ Added {len(added)} columns: {added}")
 
+        # arrays.nepool_gis_id (added 2026-06-03 for GMCS-format reports)
+        if not column_exists(conn, "arrays", "nepool_gis_id"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN nepool_gis_id VARCHAR(20)"
+            ))
+            print("  + arrays.nepool_gis_id")
+
     print("=== Migration complete ===")
 
 

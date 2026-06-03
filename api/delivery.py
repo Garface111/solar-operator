@@ -62,11 +62,12 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
         first_name = tenant_name.split()[0] if tenant_name else "there"
         sent = send_workbook_email(
             to=recipient,
-            subject=f"Your {year} Solar Operator monthly kWh report",
+            subject=f"Your Solar Operator NEPOOL-GIS quarterly report",
             html=(f"<p>Hi {first_name},</p>"
-                  f"<p>Your latest monthly kWh workbook is attached. "
-                  f"It covers everything we have on file through "
-                  f"{datetime.utcnow():%B %d, %Y}.</p>"
+                  f"<p>Your latest NEPOOL-GIS quarterly generation workbook "
+                  f"is attached. It covers the last 6 complete quarters of "
+                  f"generation data we have on file through "
+                  f"{datetime.utcnow():%B %d, %Y}, one sheet per array.</p>"
                   f"<p>Manage your account, change report frequency, or "
                   f"cancel anytime at "
                   f"<a href='https://solaroperator.org/account.html'>"
@@ -74,12 +75,12 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
                   f"<p>Questions? Just reply.</p>"
                   f"<p>— Solar Operator</p>"),
             text=(f"Hi {tenant_name},\n\n"
-                  f"Your latest monthly kWh workbook is attached "
-                  f"(through {datetime.utcnow():%B %d, %Y}).\n\n"
+                  f"Your latest NEPOOL-GIS quarterly generation workbook "
+                  f"is attached (through {datetime.utcnow():%B %d, %Y}).\n\n"
                   f"Manage your account at https://solaroperator.org/account.html\n\n"
                   f"Questions? Just reply.\n\n— Solar Operator"),
             workbook_path=str(path),
-            filename=f"{tenant_name.replace(' ', '_')}-{year}-monthly-kwh.xlsx",
+            filename=f"{tenant_name.replace(' ', '_')}-GMCS-report.xlsx",
         )
 
     # Update last_delivery_at marker
