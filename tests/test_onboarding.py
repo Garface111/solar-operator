@@ -187,3 +187,55 @@ def test_complete_sends_magic_link_and_finishes(client, mocks):
     assert len(mocks["magic_link"]) == 1
     assert mocks["magic_link"][0]["to"] == email
     assert "account.html?token=" in mocks["magic_link"][0]["text"]
+
+
+# ─── (e) Screen 4 reconciles Stripe quantity to the real array count ──────
+
+def test_clients_reconciles_stripe_quantity(client, mocks, monkeypatch):
+    """2 clients × 3 arrays = 6 arrays → Stripe per-array item bumped to qty 6."""
+    monkeypatch.setattr(onboarding, "STRIPE_ARRAY_PRICE_ID", "price_array_test")
+
+    # Stripe subscription has two items: the one-time setup and the recurring
+    # per-array line. Only the latter (matching STRIPE_ARRAY_PRICE_ID) is touched.
+    def fake_sub_retrieve(sub_id):
+        assert sub_id == "sub_test_123"
+        return {"items": {"data": [
+            {"id": "si_setup", "price": {"id": "price_setup_test"}},
+            {"id": "si_array", "price": {"id": "price_array_test"}},
+        ]}}
+
+    modify_calls = []
+
+    def fake_item_modify(item_id, **kwargs):
+        modify_calls.append((item_id, kwargs))
+        return SimpleNamespace(id=item_id, **kwargs)
+
+    monkeypatch.setattr(onboarding.stripe.Subscription, "retrieve", fake_sub_retrieve)
+    monkeypatch.setattr(onboarding.stripe.SubscriptionItem, "modify", fake_item_modify)
+
+    token = _do_checkout(client, email="e@example.com")["onboarding_token"]
+    _fire_checkout_webhook(client, token, event_id="evt_e")
+
+    two_by_three = [
+        {
+            "name": f"Client {n}",
+            "contact_email": f"client{n}@example.com",
+            "gmp_autopopulate": False,
+            "arrays": [{"name": f"Array {n}-{a}"} for a in range(3)],
+        }
+        for n in range(2)
+    ]
+    resp = client.post("/v1/onboarding/clients",
+                       params={"token": token}, json=two_by_three)
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["client_ids"]) == 2
+
+    # The recurring per-array item — and only it — was bumped to quantity=6.
+    assert len(modify_calls) == 1
+    item_id, kwargs = modify_calls[0]
+    assert item_id == "si_array"
+    assert kwargs["quantity"] == 6
+    assert kwargs["proration_behavior"] == "create_prorations"
+
+    # Failure path stayed quiet — no internal alert on the happy path.
+    assert mocks["internal_alert"] == []

@@ -277,6 +277,69 @@ def extension_installed(token: str = Query(...)):
         return {"ok": True, "stage": t.onboarding_stage}
 
 
+# ─── billing reconciliation ──────────────────────────────────────────────
+
+def _reconcile_subscription_quantity(
+    subscription_id: str, array_count: int, tenant_id: str, email: str
+) -> None:
+    """Bring the recurring per-array line item up to the real array count.
+
+    The Checkout session creates the subscription with the per-array item at
+    quantity=1 (we don't know the count until Screen 4). Here we find that
+    recurring item (matching STRIPE_ARRAY_PRICE_ID — NOT the one-time setup
+    item, STRIPE_SETUP_PRICE_ID) and bump its quantity, prorating the first
+    month.
+
+    Best-effort: if anything fails we log loudly and alert Ford, but we never
+    raise — the operator already paid the setup fee, and finishing onboarding
+    matters more than a perfectly-reconciled invoice (Ford fixes it manually).
+    """
+    if not subscription_id:
+        logger.error(
+            "Cannot reconcile billing for tenant %s — no stripe_subscription_id "
+            "on record. Array count = %d.", tenant_id, array_count)
+        send_internal_alert(
+            "⚠️ Billing not reconciled — missing subscription id",
+            f"Tenant {tenant_id} ({email}) finished Screen 4 with {array_count} "
+            f"array(s) but has no stripe_subscription_id. Stripe still bills for "
+            f"1 array. Fix the subscription quantity manually."
+        )
+        return
+
+    try:
+        sub = stripe.Subscription.retrieve(subscription_id)
+        recurring_item = None
+        for item in sub["items"]["data"]:
+            if item["price"]["id"] == STRIPE_ARRAY_PRICE_ID:
+                recurring_item = item
+                break
+        if recurring_item is None:
+            raise RuntimeError(
+                f"no line item matching STRIPE_ARRAY_PRICE_ID="
+                f"{STRIPE_ARRAY_PRICE_ID!r} on subscription {subscription_id}")
+
+        stripe.SubscriptionItem.modify(
+            recurring_item["id"],
+            quantity=array_count,
+            proration_behavior="create_prorations",
+        )
+        logger.info(
+            "Reconciled subscription %s for tenant %s → quantity=%d",
+            subscription_id, tenant_id, array_count)
+    except Exception as e:  # noqa: BLE001 — must never block onboarding
+        logger.exception(
+            "Stripe billing reconciliation FAILED for tenant %s (sub %s, "
+            "wanted quantity=%d): %s", tenant_id, subscription_id, array_count, e)
+        send_internal_alert(
+            "⚠️ Stripe billing reconciliation failed",
+            f"Tenant {tenant_id} ({email}) finished Screen 4 with {array_count} "
+            f"array(s), but updating subscription {subscription_id} to "
+            f"quantity={array_count} failed: {e}\n\n"
+            f"Stripe is still billing for 1 array. Fix the quantity manually in "
+            f"the Stripe dashboard (proration_behavior=create_prorations)."
+        )
+
+
 # ─── 4. clients ──────────────────────────────────────────────────────────
 
 @router.post("/clients")
@@ -331,6 +394,19 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
         if t.onboarding_stage in ("extension", "clients"):
             t.onboarding_stage = "clients"
         db.commit()
+
+        # Snapshot what we need for billing while the session is still open.
+        subscription_id = t.stripe_subscription_id
+        tenant_id = t.id
+        tenant_email = t.contact_email
+        array_count = len(db.execute(
+            select(Array).where(Array.tenant_id == t.id)
+        ).scalars().all())
+
+    # Now that every client + array is persisted, bring Stripe in line with the
+    # real array count. Best-effort — never blocks the operator reaching Screen 5.
+    _reconcile_subscription_quantity(
+        subscription_id, array_count, tenant_id, tenant_email)
 
     return {"ok": True, "client_ids": created_ids}
 
