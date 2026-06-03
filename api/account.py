@@ -31,8 +31,9 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import Tenant, Client, Array, LoginToken, now
+from .models import Tenant, Client, Array, LoginToken, UtilityAccount, now
 from .notify import _send_via_resend, send_internal_alert
+from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,53 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "array_count": array_count,
         "last_delivery_at": c.last_delivery_at.isoformat() if c.last_delivery_at else None,
         "notes": c.notes,
+    }
+
+
+# ─── Array CRUD (under a client) ────────────────────────────────────────
+
+class ArrayAccountInput(BaseModel):
+    provider: str  # one of providers.PROVIDER_CODES
+    account_number: str
+    nickname: Optional[str] = None
+
+
+class ArrayCreate(BaseModel):
+    name: str
+    nepool_gis_id: Optional[str] = None
+    region: Optional[str] = None
+    bill_offset_months: Optional[int] = 1
+    notes: Optional[str] = None
+    accounts: Optional[list[ArrayAccountInput]] = None
+    # optional list of utility logins / account numbers powering this array
+
+
+class ArrayUpdate(BaseModel):
+    name: Optional[str] = None
+    nepool_gis_id: Optional[str] = None
+    region: Optional[str] = None
+    bill_offset_months: Optional[int] = None
+    notes: Optional[str] = None
+
+
+def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
+    return {
+        "id": a.id,
+        "name": a.name,
+        "nepool_gis_id": a.nepool_gis_id,
+        "region": a.region,
+        "bill_offset_months": a.bill_offset_months,
+        "notes": a.notes,
+        "accounts": [
+            {
+                "id": ac.id,
+                "provider": ac.provider,
+                "provider_label": (get_provider(ac.provider) or {}).get("label", ac.provider),
+                "account_number": ac.account_number,
+                "nickname": ac.nickname,
+            }
+            for ac in accounts
+        ],
     }
 
 
@@ -447,3 +495,213 @@ def send_one_client_report(client_id: int,
         raise HTTPException(402, "Reactivate your subscription to send reports")
     from .delivery import deliver_for_client
     return deliver_for_client(client_id, triggered_by="self-serve")
+
+
+# ─── Utility provider catalog (UI dropdown source) ─────────────────────
+
+@router.get("/v1/providers")
+def list_providers():
+    """List all utility data providers we support, with their scrape status.
+
+    Public; no auth needed — the signup/onboarding flow shows this on the
+    'connect your utility' page before the customer is logged in.
+    """
+    return {"ok": True, "providers": PROVIDERS}
+
+
+# ─── Arrays under a client ──────────────────────────────────────────────
+
+def _resolve_client_for_tenant(db, tenant_id: str, client_id: int) -> Client:
+    c = db.get(Client, client_id)
+    if not c or c.tenant_id != tenant_id:
+        raise HTTPException(404, "Client not found")
+    return c
+
+
+@router.get("/v1/account/clients/{client_id}/arrays")
+def list_client_arrays(client_id: int,
+                       authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        arrays = db.execute(
+            select(Array).where(Array.client_id == c.id)
+                         .order_by(Array.name.asc())
+        ).scalars().all()
+        out = []
+        for a in arrays:
+            accts = db.execute(
+                select(UtilityAccount).where(UtilityAccount.array_id == a.id)
+            ).scalars().all()
+            out.append(_array_to_dict(a, accts))
+    return {"ok": True, "client_id": client_id, "arrays": out}
+
+
+@router.post("/v1/account/clients/{client_id}/arrays")
+def create_array(client_id: int, body: ArrayCreate,
+                 authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    # validate providers up front so we don't partial-insert
+    for acc in (body.accounts or []):
+        code = (acc.provider or "").lower().strip()
+        if code not in PROVIDER_CODES:
+            raise HTTPException(400,
+                f"Unknown provider '{acc.provider}'. "
+                f"Use one of: {', '.join(sorted(PROVIDER_CODES))}")
+        if not (acc.account_number or "").strip():
+            raise HTTPException(400,
+                "Each utility account needs an account_number")
+
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        existing = db.execute(
+            select(Array).where(Array.tenant_id == t.id, Array.name == name)
+        ).scalar_one_or_none()
+        if existing:
+            raise HTTPException(409, "An array with that name already exists")
+        arr = Array(
+            tenant_id=t.id, client_id=c.id, name=name,
+            nepool_gis_id=body.nepool_gis_id,
+            region=body.region,
+            bill_offset_months=body.bill_offset_months
+                if body.bill_offset_months is not None else 1,
+            notes=body.notes,
+        )
+        db.add(arr); db.flush()
+        # Add accounts (each is a sub-meter login)
+        for acc in (body.accounts or []):
+            db.add(UtilityAccount(
+                tenant_id=t.id, array_id=arr.id,
+                provider=acc.provider.lower().strip(),
+                account_number=acc.account_number.strip(),
+                nickname=(acc.nickname or arr.name).strip(),
+            ))
+        db.commit()
+        accts = db.execute(
+            select(UtilityAccount).where(UtilityAccount.array_id == arr.id)
+        ).scalars().all()
+        return {"ok": True, "array": _array_to_dict(arr, accts)}
+
+
+@router.patch("/v1/account/clients/{client_id}/arrays/{array_id}")
+def update_array(client_id: int, array_id: int, body: ArrayUpdate,
+                 authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        a = db.get(Array, array_id)
+        if not a or a.tenant_id != t.id or a.client_id != c.id:
+            raise HTTPException(404, "Array not found")
+        if body.name is not None:
+            new_name = body.name.strip()
+            if new_name and new_name != a.name:
+                clash = db.execute(
+                    select(Array).where(
+                        Array.tenant_id == t.id,
+                        Array.name == new_name,
+                        Array.id != a.id,
+                    )
+                ).scalar_one_or_none()
+                if clash:
+                    raise HTTPException(409,
+                        "Another array already has that name")
+                a.name = new_name
+        for field in ("nepool_gis_id", "region",
+                      "bill_offset_months", "notes"):
+            v = getattr(body, field)
+            if v is not None:
+                setattr(a, field, v)
+        db.commit()
+        accts = db.execute(
+            select(UtilityAccount).where(UtilityAccount.array_id == a.id)
+        ).scalars().all()
+        return {"ok": True, "array": _array_to_dict(a, accts)}
+
+
+@router.delete("/v1/account/clients/{client_id}/arrays/{array_id}")
+def delete_array(client_id: int, array_id: int,
+                 authorization: Optional[str] = Header(default=None)):
+    """Hard delete an array. Its UtilityAccount rows are cascaded; Bills
+    belonging to those accounts are also removed via FK cascade.
+
+    Use with care — there is no undo. Soft-disable is at the Client layer."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        a = db.get(Array, array_id)
+        if not a or a.tenant_id != t.id or a.client_id != c.id:
+            raise HTTPException(404, "Array not found")
+        db.delete(a); db.commit()
+    return {"ok": True, "array_id": array_id, "deleted": True}
+
+
+# ─── Utility account CRUD (per array) ───────────────────────────────────
+
+class AccountCreate(BaseModel):
+    provider: str
+    account_number: str
+    nickname: Optional[str] = None
+
+
+class AccountUpdate(BaseModel):
+    provider: Optional[str] = None
+    account_number: Optional[str] = None
+    nickname: Optional[str] = None
+
+
+@router.post("/v1/account/clients/{client_id}/arrays/{array_id}/accounts")
+def add_utility_account(client_id: int, array_id: int, body: AccountCreate,
+                        authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    code = (body.provider or "").lower().strip()
+    if code not in PROVIDER_CODES:
+        raise HTTPException(400, f"Unknown provider '{body.provider}'")
+    num = (body.account_number or "").strip()
+    if not num:
+        raise HTTPException(400, "account_number is required")
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        a = db.get(Array, array_id)
+        if not a or a.tenant_id != t.id or a.client_id != c.id:
+            raise HTTPException(404, "Array not found")
+        # idempotency: same provider + account_number per tenant already taken?
+        existing = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                UtilityAccount.provider == code,
+                UtilityAccount.account_number == num,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            raise HTTPException(409,
+                "This utility account number is already linked to another array")
+        ac = UtilityAccount(
+            tenant_id=t.id, array_id=a.id, provider=code,
+            account_number=num,
+            nickname=(body.nickname or a.name).strip(),
+        )
+        db.add(ac); db.commit()
+        return {"ok": True, "account": {
+            "id": ac.id, "provider": ac.provider,
+            "provider_label": (get_provider(ac.provider) or {}).get("label", ac.provider),
+            "account_number": ac.account_number, "nickname": ac.nickname,
+        }}
+
+
+@router.delete("/v1/account/clients/{client_id}/arrays/{array_id}/accounts/{acct_id}")
+def remove_utility_account(client_id: int, array_id: int, acct_id: int,
+                           authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        a = db.get(Array, array_id)
+        if not a or a.tenant_id != t.id or a.client_id != c.id:
+            raise HTTPException(404, "Array not found")
+        ac = db.get(UtilityAccount, acct_id)
+        if not ac or ac.tenant_id != t.id or ac.array_id != a.id:
+            raise HTTPException(404, "Utility account not found")
+        db.delete(ac); db.commit()
+    return {"ok": True, "account_id": acct_id, "deleted": True}
