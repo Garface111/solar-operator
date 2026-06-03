@@ -1,11 +1,7 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Outlet, useOutletContext } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
-import { AccountSummaryCard } from "../components/AccountSummaryCard";
-import { ReportsCard } from "../components/ReportsCard";
-import { ActivationCodeCard } from "../components/ActivationCodeCard";
-import { ClientsSection } from "../components/ClientsSection";
-import { Spinner } from "../ui/Spinner";
+import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
 
@@ -13,9 +9,28 @@ interface Props {
   onSignOut: () => void;
 }
 
-export default function Dashboard({ onSignOut }: Props) {
+/** Shared state handed to each tab via the router <Outlet> context. */
+export interface DashboardContext {
+  account: Account | null;
+  /** True once the account fetch has failed (vs. still loading). */
+  failed: boolean;
+  patchAccount: (patch: Partial<Account>) => void;
+}
+
+const TABS: Tab[] = [
+  { label: "Account", to: "/account" },
+  { label: "Clients", to: "/clients" },
+  { label: "Automatic Reports", to: "/reports" },
+];
+
+/**
+ * Persistent dashboard chrome: top nav + tab bar wrap an <Outlet> that renders
+ * the active tab. The account is loaded once here and shared with the tabs that
+ * need it (Account, Reports) via outlet context; the Clients tab loads its own
+ * data, so it never waits on the account fetch.
+ */
+export default function DashboardLayout({ onSignOut }: Props) {
   const toast = useToast();
-  const { clientId } = useParams();
   const [account, setAccount] = useState<Account | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -45,35 +60,15 @@ export default function Dashboard({ onSignOut }: Props) {
     setAccount((a) => (a ? { ...a, ...patch } : a));
   }
 
+  const ctx: DashboardContext = { account, failed, patchAccount };
+
   return (
     <div className="min-h-full">
       <TopNav email={account?.email ?? null} onSignOut={onSignOut} />
+      <TabBar tabs={TABS} />
 
       <main className="mx-auto max-w-4xl px-4 py-8">
-        {account === null ? (
-          <div className="flex items-center justify-center py-24 text-zinc-400">
-            {failed ? (
-              <p className="text-sm">
-                Couldn&apos;t load your account. Refresh to try again.
-              </p>
-            ) : (
-              <Spinner className="h-6 w-6" />
-            )}
-          </div>
-        ) : (
-          <div className="space-y-6">
-            <AccountSummaryCard
-              account={account}
-              onAccountChange={patchAccount}
-            />
-            <ReportsCard account={account} onAccountChange={patchAccount} />
-            <ActivationCodeCard tenantKey={account.tenant_key} />
-
-            <ClientsSection
-              expandClientId={clientId ? Number(clientId) : undefined}
-            />
-          </div>
-        )}
+        <Outlet context={ctx} />
       </main>
 
       <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
@@ -81,4 +76,8 @@ export default function Dashboard({ onSignOut }: Props) {
       </footer>
     </div>
   );
+}
+
+export function useDashboardContext(): DashboardContext {
+  return useOutletContext<DashboardContext>();
 }

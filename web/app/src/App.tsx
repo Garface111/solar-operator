@@ -7,7 +7,10 @@ import {
   useNavigate,
 } from "react-router-dom";
 import Login from "./screens/Login";
-import Dashboard from "./screens/Dashboard";
+import DashboardLayout from "./screens/DashboardLayout";
+import AccountTab from "./screens/AccountTab";
+import ClientsTab from "./screens/ClientsTab";
+import ReportsTab from "./screens/ReportsTab";
 import { Spinner } from "./ui/Spinner";
 import {
   getSession,
@@ -109,25 +112,22 @@ function AuthGate() {
         }
       />
       <Route
-        path="/"
         element={
           authed ? (
-            <Dashboard onSignOut={onSignOut} />
+            <DashboardLayout onSignOut={onSignOut} />
           ) : (
             <Navigate to="/login" replace />
           )
         }
-      />
-      <Route
-        path="/clients/:clientId"
-        element={
-          authed ? (
-            <Dashboard onSignOut={onSignOut} />
-          ) : (
-            <Navigate to="/login" replace />
-          )
-        }
-      />
+      >
+        {/* /accounts/ → Account tab */}
+        <Route index element={<Navigate to="/account" replace />} />
+        <Route path="/account" element={<AccountTab />} />
+        <Route path="/clients" element={<ClientsTab />} />
+        {/* Deep link that auto-expands a single client. */}
+        <Route path="/clients/:clientId" element={<ClientsTab />} />
+        <Route path="/reports" element={<ReportsTab />} />
+      </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
