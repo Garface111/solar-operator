@@ -186,11 +186,11 @@ def checkout(req: CheckoutRequest):
             customer_email=email,
             line_items=_line_items(),
             success_url=(
-                f"{APP_URL}/onboarding/extension"
+                f"{API_URL}/onboarding/extension"
                 f"?onboarding_token={onboarding_token}"
                 f"&session_id={{CHECKOUT_SESSION_ID}}"
             ),
-            cancel_url=f"{APP_URL}/onboarding/info?cancelled=1",
+            cancel_url=f"{API_URL}/onboarding/info?cancelled=1",
             allow_promotion_codes=True,
             metadata={
                 "onboarding_token": onboarding_token,
