@@ -27,7 +27,10 @@ export default function Done() {
   return (
     <ScreenLayout current={4}>
       <Card active className="text-center">
-        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary-100 text-3xl text-primary-600">
+        <div
+          aria-hidden
+          className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-primary-100 text-3xl text-primary-600"
+        >
           ✓
         </div>
         <h1 className="mt-6 text-2xl font-semibold tracking-tight text-zinc-900">
@@ -69,7 +72,7 @@ export default function Done() {
         <div className="mt-8 flex justify-center">
           <a
             href={DASHBOARD_URL}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
           >
             Open your inbox →
           </a>

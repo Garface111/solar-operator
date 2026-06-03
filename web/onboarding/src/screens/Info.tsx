@@ -4,18 +4,20 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
+import { Spinner } from "../ui/Spinner";
+import { useToast } from "../ui/Toast";
 import { createCheckout, setToken } from "../lib/onboarding";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function Info() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [touched, setTouched] = useState<{ name?: boolean; email?: boolean }>({});
   const [submitting, setSubmitting] = useState(false);
-  const [serverError, setServerError] = useState<string | null>(null);
 
   // Stripe sends operators back here with ?cancelled=1 if they bail on Checkout.
   const cancelled =
@@ -33,7 +35,6 @@ export default function Info() {
     setTouched({ name: true, email: true });
     if (!valid || submitting) return;
     setSubmitting(true);
-    setServerError(null);
     try {
       const { checkout_url, onboarding_token } = await createCheckout({
         full_name: fullName.trim(),
@@ -44,7 +45,11 @@ export default function Info() {
       setToken(onboarding_token);
       window.location.href = checkout_url;
     } catch (err) {
-      setServerError(err instanceof Error ? err.message : "Something went wrong");
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Couldn't reach checkout. Check your connection and try again.",
+      );
       setSubmitting(false);
     }
   }
@@ -98,16 +103,19 @@ export default function Info() {
           />
         </div>
 
-        {serverError && (
-          <p className="mt-4 text-sm text-red-600">{serverError}</p>
-        )}
-
         <div className="mt-8 flex items-center justify-between">
           <Button variant="ghost" onClick={() => navigate("/")} disabled={submitting}>
             ← Back
           </Button>
           <Button onClick={handleSubmit} disabled={!valid || submitting}>
-            {submitting ? "Redirecting…" : "Continue to checkout →"}
+            {submitting ? (
+              <>
+                <Spinner />
+                Redirecting…
+              </>
+            ) : (
+              "Continue to checkout →"
+            )}
           </Button>
         </div>
       </Card>

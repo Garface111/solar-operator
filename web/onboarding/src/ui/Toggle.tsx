@@ -20,8 +20,8 @@ export function Toggle({ checked, onChange, label, id, disabled }: ToggleProps) 
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={[
-          "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
-          "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2",
+          "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-150 ease-in-out",
+          "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2",
           "disabled:opacity-50 disabled:cursor-not-allowed",
           checked ? "bg-primary-500" : "bg-zinc-300",
         ].join(" ")}

@@ -14,8 +14,9 @@ export function Stepper({ steps, current }: StepperProps) {
         return (
           <li key={label} className="flex items-center gap-2">
             <div
+              aria-current={isActive ? "step" : undefined}
               className={[
-                "flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-colors",
+                "flex items-center gap-2 rounded-full px-2.5 py-1.5 text-sm font-medium transition-colors duration-150 ease-in-out sm:px-3",
                 isActive
                   ? "bg-primary-500 text-white"
                   : isDonePrior
@@ -35,7 +36,9 @@ export function Stepper({ steps, current }: StepperProps) {
               >
                 {i + 1}
               </span>
+              {/* Labels hide on mobile (numbers only); sr-only keeps them announced. */}
               <span className="hidden sm:inline">{label}</span>
+              <span className="sr-only sm:hidden">{label}</span>
             </div>
             {i < steps.length - 1 && (
               <span aria-hidden className="h-px w-4 bg-zinc-200" />

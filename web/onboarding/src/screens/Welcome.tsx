@@ -4,6 +4,7 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Checkbox } from "../ui/Checkbox";
+import { MarkdownDoc } from "../ui/MarkdownDoc";
 
 const SERVICES = [
   "Auto-pull GMP bills",
@@ -12,16 +13,9 @@ const SERVICES = [
   "Multi-client portal",
 ];
 
-// Placeholder legal copy — real TOS + Privacy land in Task 11.
-const TOS_PLACEHOLDER =
-  "Lorem ipsum dolor sit amet, consectetur adipiscing elit. These Terms of " +
-  "Service govern your use of Solar Operator. Placeholder text — final terms " +
-  "are pending legal review (Task 11). By continuing you agree to be bound by " +
-  "the finalized Terms once published.";
-const PRIVACY_PLACEHOLDER =
-  "Solar Operator accesses your Green Mountain Power portal data solely to " +
-  "generate net-metering reports on your behalf. Placeholder text — the final " +
-  "Privacy Policy is ported in Task 11. We never sell your data.";
+// Served from web/onboarding/public/ by Vite (and FastAPI in prod) under the
+// app's base path, e.g. /onboarding/tos.md.
+const BASE = import.meta.env.BASE_URL;
 
 export default function Welcome() {
   const navigate = useNavigate();
@@ -68,7 +62,8 @@ export default function Welcome() {
             type="button"
             onClick={() => setLegalOpen((o) => !o)}
             aria-expanded={legalOpen}
-            className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium text-zinc-700"
+            aria-controls="legal-panel"
+            className="flex w-full items-center justify-between rounded-xl px-4 py-3 text-left text-sm font-medium text-zinc-700 transition-colors duration-150 ease-in-out hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
           >
             Terms of Service &amp; Privacy Policy
             <span aria-hidden className="text-zinc-400">
@@ -76,19 +71,22 @@ export default function Welcome() {
             </span>
           </button>
           {legalOpen && (
-            <div className="space-y-4 border-t border-zinc-200 px-4 py-4 text-xs leading-relaxed text-zinc-500">
-              <div>
-                <h2 className="mb-1 font-semibold text-zinc-700">
+            <div
+              id="legal-panel"
+              className="max-h-80 space-y-6 overflow-y-auto border-t border-zinc-200 px-4 py-4"
+            >
+              <section aria-label="Terms of Service">
+                <h2 className="mb-2 text-sm font-semibold text-zinc-700">
                   Terms of Service
                 </h2>
-                <p>{TOS_PLACEHOLDER}</p>
-              </div>
-              <div>
-                <h2 className="mb-1 font-semibold text-zinc-700">
+                <MarkdownDoc src={`${BASE}tos.md`} title="Terms of Service" />
+              </section>
+              <section aria-label="Privacy Policy">
+                <h2 className="mb-2 text-sm font-semibold text-zinc-700">
                   Privacy Policy
                 </h2>
-                <p>{PRIVACY_PLACEHOLDER}</p>
-              </div>
+                <MarkdownDoc src={`${BASE}privacy.md`} title="Privacy Policy" />
+              </section>
             </div>
           )}
         </div>

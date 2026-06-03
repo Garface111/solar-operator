@@ -16,3 +16,25 @@ body {
   @apply bg-zinc-50 text-zinc-900 antialiased;
   font-feature-settings: "cv11", "ss01";
 }
+
+/* Toast entrance — slide+fade in from the right. */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.25rem) translateX(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) translateX(0);
+  }
+}
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

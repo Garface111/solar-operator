@@ -16,7 +16,8 @@ export function Checkbox({ label, className = "", id, ...props }: CheckboxProps)
         type="checkbox"
         className={[
           "mt-0.5 h-4 w-4 rounded border-zinc-300 text-primary-500",
-          "focus:ring-2 focus:ring-primary-500 focus:ring-offset-0",
+          "transition-colors duration-150 ease-in-out",
+          "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2",
           className,
         ].join(" ")}
         {...props}

@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
+import { Spinner } from "../ui/Spinner";
+import { useToast } from "../ui/Toast";
 import {
   getToken,
   pingExtension,
@@ -13,25 +15,31 @@ import {
 const CHROME_STORE_URL = "#TODO-publish-pending";
 
 const POLL_MS = 3000;
+// After this many consecutive ping failures we surface a "having trouble" hint
+// and stop nagging the operator with toasts.
+const FAIL_THRESHOLD = 5;
 
 export default function Extension() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [installed, setInstalled] = useState(false);
   const [advancing, setAdvancing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [pollFailures, setPollFailures] = useState(0);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const tokenRef = useRef<string | null>(getToken());
 
   // Poll extension-ping every 3s; auto-advance to /clients when installed.
   useEffect(() => {
     const token = tokenRef.current;
     if (!token) {
-      setError(
+      setSessionError(
         "We couldn't find your onboarding session. Please restart from the welcome screen.",
       );
       return;
     }
 
     let cancelled = false;
+    let failures = 0;
 
     async function advance() {
       if (cancelled) return;
@@ -48,13 +56,21 @@ export default function Extension() {
       try {
         const { installed: ok } = await pingExtension(token!);
         if (cancelled) return;
+        failures = 0;
+        setPollFailures(0);
         if (ok) {
           setInstalled(true);
           void advance();
         }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Connection problem");
+      } catch {
+        if (cancelled) return;
+        failures += 1;
+        setPollFailures(failures);
+        // One toast exactly when we cross the threshold — not on every tick.
+        if (failures === FAIL_THRESHOLD) {
+          toast.error(
+            "We're having trouble reaching the server to detect your extension.",
+          );
         }
       }
     }
@@ -65,7 +81,7 @@ export default function Extension() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [navigate]);
+  }, [navigate, toast]);
 
   async function handleManual() {
     const token = tokenRef.current;
@@ -75,12 +91,15 @@ export default function Extension() {
       await markExtensionInstalled(token);
       navigate("/clients");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't continue");
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't continue. Please try again.",
+      );
       setAdvancing(false);
     }
   }
 
   const storeUnpublished = CHROME_STORE_URL.startsWith("#");
+  const havingTrouble = pollFailures >= FAIL_THRESHOLD;
 
   return (
     <ScreenLayout current={2}>
@@ -99,7 +118,7 @@ export default function Extension() {
             href={CHROME_STORE_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-primary-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
           >
             Install Solar Operator Sync from the Chrome Web Store ↗
           </a>
@@ -117,26 +136,32 @@ export default function Extension() {
               aria-hidden
               className={[
                 "h-2.5 w-2.5 rounded-full",
-                installed
-                  ? "bg-primary-500"
-                  : "animate-pulse bg-amber-400",
+                installed ? "bg-primary-500" : "animate-pulse bg-amber-400",
               ].join(" ")}
             />
-            <span className="text-sm font-medium text-zinc-700">
+            <span className="text-sm font-medium text-zinc-700" aria-live="polite">
               {installed
                 ? "Capture received — taking you to the next step…"
                 : "We're waiting for your first GMP capture…"}
             </span>
           </div>
-          {!installed && (
+          {!installed && !havingTrouble && (
             <p className="mt-2 pl-5 text-xs text-zinc-500">
               Checking every few seconds. Leave this tab open while you install
               the extension and sign into GMP.
             </p>
           )}
+          {!installed && havingTrouble && (
+            <p className="mt-2 pl-5 text-xs text-amber-700">
+              Having trouble detecting the extension? Click &quot;I&apos;ve
+              installed it&quot; below.
+            </p>
+          )}
         </div>
 
-        {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+        {sessionError && (
+          <p className="mt-4 text-sm text-red-600">{sessionError}</p>
+        )}
 
         <div className="mt-8 flex justify-end">
           <Button
@@ -144,7 +169,14 @@ export default function Extension() {
             onClick={handleManual}
             disabled={advancing}
           >
-            I&apos;ve installed it →
+            {advancing ? (
+              <>
+                <Spinner />
+                Continuing…
+              </>
+            ) : (
+              "I've installed it →"
+            )}
           </Button>
         </div>
       </Card>

@@ -12,9 +12,11 @@ interface ScreenLayoutProps {
 /** Page chrome shared by every wizard screen: centered column + Stepper on top. */
 export function ScreenLayout({ current, children }: ScreenLayoutProps) {
   return (
-    <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-8 px-4 py-12">
-      <Stepper steps={STEPS} current={current} />
-      {children}
+    <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-8 px-4 py-8 sm:py-12">
+      <nav aria-label="Onboarding progress">
+        <Stepper steps={STEPS} current={current} />
+      </nav>
+      <main>{children}</main>
     </div>
   );
 }

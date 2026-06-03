@@ -5,6 +5,8 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Toggle } from "../ui/Toggle";
+import { Spinner } from "../ui/Spinner";
+import { useToast } from "../ui/Toast";
 import {
   getToken,
   submitClients,
@@ -42,9 +44,10 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function Clients() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [clients, setClients] = useState<ClientDraft[]>(() => [blankClient()]);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
 
   function update(id: number, patch: Partial<ClientDraft>) {
     setClients((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -115,13 +118,13 @@ export default function Clients() {
     if (!valid || submitting) return;
     const token = getToken();
     if (!token) {
-      setError(
+      setSessionError(
         "We couldn't find your onboarding session. Please restart from the welcome screen.",
       );
       return;
     }
     setSubmitting(true);
-    setError(null);
+    setSessionError(null);
 
     const payload: ClientPayload[] = clients.map((c) => ({
       name: c.name.trim(),
@@ -143,7 +146,11 @@ export default function Clients() {
       await completeOnboarding(token);
       navigate("/done");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't save your clients");
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Couldn't save your clients. Check your connection and try again.",
+      );
       setSubmitting(false);
     }
   }
@@ -186,7 +193,8 @@ export default function Clients() {
                   <button
                     type="button"
                     onClick={() => removeClient(c.id)}
-                    className="text-xs font-medium text-zinc-400 hover:text-red-600"
+                    aria-label={`Remove client ${idx + 1}`}
+                    className="rounded text-xs font-medium text-zinc-400 transition-colors duration-150 ease-in-out hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
                   >
                     Remove
                   </button>
@@ -240,7 +248,10 @@ export default function Clients() {
                       </p>
                       <div className="space-y-3">
                         {c.arrays.map((a, ai) => (
-                          <div key={ai} className="flex items-end gap-2">
+                          <div
+                            key={ai}
+                            className="flex flex-col gap-2 sm:flex-row sm:items-end"
+                          >
                             <div className="flex-1">
                               <Input
                                 id={`arr-name-${c.id}-${ai}`}
@@ -268,8 +279,8 @@ export default function Clients() {
                             <button
                               type="button"
                               onClick={() => removeArray(c.id, ai)}
-                              aria-label="Remove array"
-                              className="mb-1 px-2 py-2 text-zinc-400 hover:text-red-600"
+                              aria-label={`Remove array ${ai + 1}`}
+                              className="self-end rounded px-2 py-2 text-zinc-400 transition-colors duration-150 ease-in-out hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 sm:mb-1"
                             >
                               ✕
                             </button>
@@ -279,7 +290,7 @@ export default function Clients() {
                       <button
                         type="button"
                         onClick={() => addArray(c.id)}
-                        className="mt-3 text-sm font-medium text-primary-600 hover:text-primary-700"
+                        className="mt-3 rounded text-sm font-medium text-primary-600 transition-colors duration-150 ease-in-out hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
                       >
                         + Add array
                       </button>
@@ -294,16 +305,25 @@ export default function Clients() {
         <button
           type="button"
           onClick={addClient}
-          className="mt-6 text-sm font-medium text-primary-600 hover:text-primary-700"
+          className="mt-6 rounded text-sm font-medium text-primary-600 transition-colors duration-150 ease-in-out hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
         >
           + Add another client
         </button>
 
-        {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+        {sessionError && (
+          <p className="mt-4 text-sm text-red-600">{sessionError}</p>
+        )}
 
         <div className="mt-8 flex justify-end">
           <Button onClick={handleFinish} disabled={!valid || submitting}>
-            {submitting ? "Finishing…" : "Finish setup →"}
+            {submitting ? (
+              <>
+                <Spinner />
+                Finishing…
+              </>
+            ) : (
+              "Finish setup →"
+            )}
           </Button>
         </div>
       </Card>
