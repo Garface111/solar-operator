@@ -3,9 +3,9 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { getToken, fetchStatus, type OnboardingStatus } from "../lib/onboarding";
 
-// Relative so it resolves against whatever host serves the SPA. /app/ uses the
-// same magic-link auth as the email link, so this CTA just prompts sign-in.
-const DASHBOARD_URL = "/app/";
+// Absolute marketing-domain URL. The dashboard uses the same magic-link auth as
+// the email link, so this CTA just lands the operator on the sign-in screen.
+const DASHBOARD_URL = "https://solaroperator.org/accounts/";
 
 export default function Done() {
   const [status, setStatus] = useState<OnboardingStatus | null>(null);

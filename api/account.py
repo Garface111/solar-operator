@@ -38,11 +38,10 @@ from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 logger = logging.getLogger(__name__)
 
 APP_URL = os.getenv("APP_URL", "https://solaroperator.org").rstrip("/")
-# Where the account dashboard SPA is actually served (FastAPI mounts it at
-# /app/*). Prefer API_URL — the marketing APP_URL (Netlify) does NOT serve the
-# dashboard. Falls back to APP_URL for older single-host setups.
-API_URL = os.getenv("API_URL", "https://web-production-49c83.up.railway.app").rstrip("/")
-DASHBOARD_BASE = (API_URL or APP_URL).rstrip("/")
+# Public, buyer-facing dashboard URL. Netlify 200-proxies solaroperator.org/accounts
+# to the FastAPI mount at /app/* on Railway, so magic-link emails and Stripe
+# return URLs use the clean marketing-domain path, never the raw Railway host.
+PUBLIC_DASHBOARD_URL = os.getenv("PUBLIC_DASHBOARD_URL", f"{APP_URL}/accounts").rstrip("/")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")  # if blank, generated at startup
 SESSION_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 LOGIN_LINK_TTL_SECONDS = 15 * 60  # 15 minutes
@@ -239,7 +238,7 @@ def issue_magic_link(email: str) -> bool:
 
     # Magic link lands on the dashboard SPA, which exchanges this one-time login
     # token for a session via POST /v1/auth/verify (see web/app AuthGate).
-    link = f"{DASHBOARD_BASE}/app/?token={token}"
+    link = f"{PUBLIC_DASHBOARD_URL}/?token={token}"
     html = f"""\
 <!DOCTYPE html><html><body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f4;padding:30px 0;color:#1a2a1f;">
 <table cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center">
@@ -406,7 +405,7 @@ def billing_portal(authorization: Optional[str] = Header(default=None)):
     try:
         session = stripe.billing_portal.Session.create(
             customer=t.stripe_customer_id,
-            return_url=f"{DASHBOARD_BASE}/app/",
+            return_url=f"{PUBLIC_DASHBOARD_URL}/",
         )
         return {"url": session.url}
     except stripe.error.StripeError as e:

@@ -1,7 +1,8 @@
 // Dashboard API client + session handling.
 //
-// The SPA is served same-origin by FastAPI (mounted at /app/), so every call is
-// a relative-path fetch. The session token lives in localStorage under
+// The SPA is served same-origin (solaroperator.org/accounts, Netlify-proxied to
+// the FastAPI /app/ mount; /v1/* is proxied too), so every call is a
+// relative-path fetch. The session token lives in localStorage under
 // 'so_session' and is sent as `Authorization: Bearer <token>` on /v1/account/*.
 //
 // On a 401 we clear the session and broadcast a window event so the app shell

@@ -17,10 +17,11 @@ import {
   UNAUTHORIZED_EVENT,
 } from "./lib/api";
 
-// basename matches Vite's `base` and the FastAPI SPAStaticFiles mount at /app/.
+// basename matches Vite's `base` and the public URL solaroperator.org/accounts
+// (Netlify proxies that to the FastAPI mount at /app/ on Railway).
 export default function App() {
   return (
-    <BrowserRouter basename="/app">
+    <BrowserRouter basename="/accounts">
       <AuthGate />
     </BrowserRouter>
   );
