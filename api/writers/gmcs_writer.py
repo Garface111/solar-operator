@@ -247,13 +247,11 @@ def build_workbook(tenant_id: str, year: Optional[int] = None,
         sh.merge_cells(start_row=foot_row, start_column=1,
                        end_row=foot_row, end_column=4)
 
-        # Column widths — generous breathing room. Source uses 13.0;
-        # bumping to 16.0 for label/data columns and 12.0 for the narrow
-        # RECs column to make the table easier to read at a glance.
-        sh.column_dimensions["A"].width = 16.0
-        sh.column_dimensions["B"].width = 20.0
-        sh.column_dimensions["C"].width = 20.0
-        sh.column_dimensions["D"].width = 12.0
+        # Column widths — uniform 24 across all four columns for max readability.
+        sh.column_dimensions["A"].width = 24.0
+        sh.column_dimensions["B"].width = 24.0
+        sh.column_dimensions["C"].width = 24.0
+        sh.column_dimensions["D"].width = 24.0
 
     wb.save(out_path)
     return out_path
