@@ -100,6 +100,7 @@ export interface Account {
   active: boolean;
   subscription_status: string | null;
   report_frequency: string | null;
+  cc_on_reports: boolean;
   last_pull_at: string | null;
   last_delivery_at: string | null;
   created_at: string | null;
@@ -165,6 +166,17 @@ export async function updateAccountFrequency(
 export async function getBillingPortalUrl(): Promise<string> {
   const res = await request<{ url: string }>("/v1/account/billing-portal");
   return res.url;
+}
+
+/** Toggle 'send me a copy of every report'. Returns the updated value. */
+export async function updateCcOnReports(
+  ccOnReports: boolean,
+): Promise<boolean> {
+  const res = await request<{ cc_on_reports: boolean }>(
+    "/v1/account/cc-on-reports",
+    { body: { cc_on_reports: ccOnReports } },
+  );
+  return res.cc_on_reports;
 }
 
 /** Trigger an immediate report send to all clients. Does not change cadence. */

@@ -120,6 +120,10 @@ class UpdateFrequency(BaseModel):
     frequency: str  # weekly | monthly | quarterly
 
 
+class UpdateCcOnReports(BaseModel):
+    cc_on_reports: bool
+
+
 # ─── Client (sub-client) CRUD ───────────────────────────────────────────
 
 class ClientCreate(BaseModel):
@@ -328,6 +332,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "active": t.active,
             "subscription_status": t.subscription_status,
             "report_frequency": t.report_frequency,
+            "cc_on_reports": bool(t.cc_on_reports),
             "last_pull_at": t.last_pull_at.isoformat() if t.last_pull_at else None,
             "last_delivery_at": t.last_delivery_at.isoformat() if t.last_delivery_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
@@ -380,6 +385,19 @@ def update_frequency(body: UpdateFrequency, authorization: Optional[str] = Heade
         t.report_frequency = body.frequency
         db.commit()
     return {"ok": True, "frequency": body.frequency}
+
+
+@router.post("/v1/account/cc-on-reports")
+def update_cc_on_reports(body: UpdateCcOnReports,
+                         authorization: Optional[str] = Header(default=None)):
+    """Toggle 'send me a copy of every report'. Returns the updated value."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.cc_on_reports = bool(body.cc_on_reports)
+        db.commit()
+        value = t.cc_on_reports
+    return {"ok": True, "cc_on_reports": value}
 
 
 @router.post("/v1/account/send-report")

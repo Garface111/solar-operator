@@ -3,11 +3,13 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { Spinner } from "../ui/Spinner";
+import { Toggle } from "../ui/Toggle";
 import { useToast } from "../ui/Toast";
 import {
   type Account,
   sendReportNow,
   updateAccountFrequency,
+  updateCcOnReports,
 } from "../lib/api";
 
 const FREQUENCIES = [
@@ -32,6 +34,7 @@ interface Props {
 export function ReportsCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   const [savingFreq, setSavingFreq] = useState(false);
+  const [savingCc, setSavingCc] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -53,6 +56,30 @@ export function ReportsCard({ account, onAccountChange }: Props) {
       );
     } finally {
       setSavingFreq(false);
+    }
+  }
+
+  async function toggleCc(next: boolean) {
+    if (savingCc) return;
+    const prev = account.cc_on_reports;
+    // Optimistic — flip immediately, revert if the save fails.
+    onAccountChange({ cc_on_reports: next });
+    setSavingCc(true);
+    try {
+      const value = await updateCcOnReports(next);
+      onAccountChange({ cc_on_reports: value });
+      toast.success(
+        value
+          ? "You'll get a copy of every report"
+          : "Stopped copying you on reports",
+      );
+    } catch (err) {
+      onAccountChange({ cc_on_reports: prev });
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't update that setting",
+      );
+    } finally {
+      setSavingCc(false);
     }
   }
 
@@ -124,6 +151,21 @@ export function ReportsCard({ account, onAccountChange }: Props) {
           ? `Last sent: ${humanDate(account.last_delivery_at)}`
           : "No reports sent yet"}
       </p>
+
+      {/* Copy me on every report */}
+      <div className="mt-6 border-t border-zinc-100 pt-5">
+        <Toggle
+          id="cc-on-reports"
+          checked={account.cc_on_reports}
+          disabled={savingCc}
+          onChange={toggleCc}
+          label="Send me a copy of every report"
+        />
+        <p className="ml-14 mt-1.5 text-xs leading-relaxed text-zinc-400">
+          You&apos;ll receive an identical email to whatever each client gets,
+          every time a report goes out. Useful for keeping records or QA.
+        </p>
+      </div>
 
       {/* Send now */}
       <div className="mt-6">

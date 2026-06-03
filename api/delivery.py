@@ -66,6 +66,9 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         client_name = client.name
         tenant_name = tenant.name
         tenant_id = tenant.id
+        # Snapshot for the "copy me on every report" feature (session closes below).
+        tenant_cc_on_reports = bool(tenant.cc_on_reports)
+        tenant_email = (tenant.contact_email or "").strip()
 
     if not is_active and triggered_by != "ops":
         return {"ok": False, "reason": "tenant or client inactive",
@@ -128,6 +131,19 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         for extra in cc:
             send_workbook_email(
                 to=extra,
+                subject=f"[copy] {client_name} — NEPOOL-GIS quarterly report",
+                html=html, text=text, workbook_path=str(path),
+                filename=f"{safe_client}-GMCS-report.xlsx",
+            )
+
+        # "Copy me on every report": send the operator the identical workbook
+        # with a [copy] subject prefix. Skip when the tenant address already
+        # received it as a recipient/CC, and skip on override sends (which are
+        # explicit one-off addresses, not the normal client fan-out).
+        if (tenant_cc_on_reports and tenant_email and not override_to
+                and tenant_email not in recipients):
+            send_workbook_email(
+                to=tenant_email,
                 subject=f"[copy] {client_name} — NEPOOL-GIS quarterly report",
                 html=html, text=text, workbook_path=str(path),
                 filename=f"{safe_client}-GMCS-report.xlsx",
