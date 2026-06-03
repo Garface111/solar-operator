@@ -5,7 +5,7 @@ import sys
 from api.db import SessionLocal
 from api.models import (
     Tenant, Client, Array, UtilityAccount, UtilitySession,
-    Bill, StripeEvent,
+    Bill, StripeEvent, LoginToken,
 )
 
 if "--yes-i-mean-it" not in sys.argv:
@@ -15,7 +15,7 @@ if "--yes-i-mean-it" not in sys.argv:
 with SessionLocal() as db:
     # Order matters: leaves first to satisfy FKs.
     counts = {}
-    for model in (Bill, UtilityAccount, UtilitySession, Array, Client, Tenant, StripeEvent):
+    for model in (Bill, UtilityAccount, UtilitySession, LoginToken, Array, Client, Tenant, StripeEvent):
         n = db.query(model).count()
         counts[model.__tablename__] = n
         db.query(model).delete(synchronize_session=False)
