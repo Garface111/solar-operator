@@ -46,6 +46,9 @@ class Tenant(Base):
     # weekly | monthly | quarterly
     last_pull_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When True, the operator gets a "[copy]" of every client report email that
+    # goes out (records / QA). Wired in delivery.deliver_for_client.
+    cc_on_reports: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
     # onboarding_token is a 32-char random string handed to the SPA + passed as

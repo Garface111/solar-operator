@@ -156,6 +156,16 @@ def main():
             "UPDATE clients SET gmp_autopopulate = FALSE WHERE gmp_autopopulate IS NULL"
         ))
 
+        # 2026-06-03 "Copy me on every report" tenant preference.
+        if not column_exists(conn, "tenants", "cc_on_reports"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN cc_on_reports BOOLEAN DEFAULT FALSE"
+            ))
+            print("  + tenants.cc_on_reports")
+        conn.execute(text(
+            "UPDATE tenants SET cc_on_reports = FALSE WHERE cc_on_reports IS NULL"
+        ))
+
         # Indexes: onboarding_token lookup + (tenant_id, gmp_email) match in /v1/sync
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_tenants_onboarding_token ON tenants (onboarding_token)",

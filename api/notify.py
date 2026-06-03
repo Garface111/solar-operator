@@ -171,6 +171,84 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
     )
 
 
+SAMPLE_REPORT_HTML = """\
+<!DOCTYPE html><html><body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f4;padding:30px 0;color:#1a2a1f;">
+<table cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center">
+<table cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;background:white;border-radius:12px;overflow:hidden;">
+<tr><td style="background:#2e6b3a;padding:28px 32px;color:white;">
+  <div style="font-size:22px;font-weight:700;">Solar Operator</div>
+  <div style="font-size:14px;color:#cfe4d3;margin-top:4px;">Here's what your reports will look like</div>
+</td></tr>
+<tr><td style="padding:32px;font-size:15px;line-height:1.6;">
+<p>Hi {name},</p>
+<p>Welcome aboard! Attached is a <strong>sample report</strong> so you can see
+exactly what we'll send your clients each quarter — a pixel-perfect NEPOOL-GIS
+generation workbook, one sheet per array, covering the last six complete
+quarters with monthly MWh and REC counts.</p>
+<p>This particular file uses made-up "Demo Array" data, but once your Green
+Mountain Power bills sync through the Chrome extension, your real arrays will
+appear automatically and go out on the schedule you choose. You can manage
+everything — clients, schedule, and recipients — from your
+<a href="{dashboard_url}" style="color:#2e6b3a;">dashboard</a>.</p>
+<p style="margin-top:24px;color:#667;font-size:14px;">Questions? Just reply — we read every email.</p>
+<p style="margin-top:24px;">— The Solar Operator team</p>
+</td></tr>
+<tr><td style="background:#1f4e2a;padding:14px 32px;font-size:11px;color:#cfe4d3;text-align:center;">
+Solar Operator · solaroperator.org
+</td></tr>
+</table>
+</td></tr></table></body></html>
+"""
+
+SAMPLE_REPORT_TEXT = """\
+Hi {name},
+
+Welcome aboard! Attached is a sample report so you can see exactly what we'll
+send your clients each quarter — a pixel-perfect NEPOOL-GIS generation workbook,
+one sheet per array, covering the last six complete quarters with monthly MWh
+and REC counts.
+
+This file uses made-up "Demo Array" data, but once your Green Mountain Power
+bills sync through the Chrome extension, your real arrays appear automatically
+and go out on the schedule you choose.
+
+Manage everything at {dashboard_url}
+
+Questions? Just reply.
+
+— The Solar Operator team
+"""
+
+
+def send_sample_workbook_email(to: str, name: str,
+                               dashboard_url: str = "https://solaroperator.org/accounts") -> bool:
+    """Email the generic demo workbook so a new operator sees what their
+    quarterly reports will look like. Generates a fresh sample to a temp file
+    and attaches it. Best-effort: returns False (and logs) on any failure."""
+    import tempfile, pathlib as _p
+    # Deferred import keeps notify.py import-light and avoids any writer/db
+    # import cost for the (common) code paths that never send this email.
+    from .writers.demo_writer import build_demo_workbook
+
+    first = name.split()[0] if name else "there"
+    fmt = dict(name=first, dashboard_url=dashboard_url)
+    try:
+        with tempfile.TemporaryDirectory(prefix="so-sample-") as tmp:
+            path = build_demo_workbook(_p.Path(tmp) / "sample.xlsx")
+            return send_workbook_email(
+                to=to,
+                subject="Sample Solar Operator report — what to expect",
+                html=SAMPLE_REPORT_HTML.format(**fmt),
+                text=SAMPLE_REPORT_TEXT.format(**fmt),
+                workbook_path=str(path),
+                filename="sample.xlsx",
+            )
+    except Exception as e:  # noqa: BLE001 — never block onboarding completion
+        logger.error("send_sample_workbook_email failed: %s: %s",
+                     type(e).__name__, e)
+        return False
+
+
 def send_payment_failed_email(to: str, name: str, amount_dollars: float,
                               next_attempt_unix: int | None) -> bool:
     """Warn the customer their card was declined. Stripe will retry; we just

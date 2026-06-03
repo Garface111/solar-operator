@@ -34,7 +34,9 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .models import Tenant, Client, Array, UtilitySession, now
-from .notify import send_welcome_email, send_internal_alert
+from .notify import (
+    send_welcome_email, send_internal_alert, send_sample_workbook_email,
+)
 from .account import issue_magic_link
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,10 @@ STRIPE_SETUP_PRICE_ID = os.getenv("STRIPE_SETUP_PRICE_ID", "")  # $250 one-time
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")  # $45/array/mo
 APP_URL = os.getenv("APP_URL", "https://solaroperator.org").rstrip("/")
 API_URL = os.getenv("API_URL", "https://web-production-49c83.up.railway.app").rstrip("/")
+# Public, buyer-facing onboarding URL. Netlify 200-proxies solaroperator.org/onboarding
+# to the FastAPI /onboarding/* mount on Railway, so Stripe return URLs keep the
+# operator on the marketing domain instead of the raw Railway host.
+PUBLIC_ONBOARDING_URL = os.getenv("PUBLIC_ONBOARDING_URL", f"{APP_URL}/onboarding").rstrip("/")
 SETUP_FEE_CENTS = int(os.getenv("ONBOARDING_SETUP_CENTS", "25000"))   # $250 one-time
 ARRAY_PRICE_CENTS = int(os.getenv("ONBOARDING_ARRAY_CENTS", "4500"))  # $45/array/mo
 
@@ -187,11 +193,11 @@ def checkout(req: CheckoutRequest):
             customer_email=email,
             line_items=_line_items(),
             success_url=(
-                f"{API_URL}/onboarding/extension"
+                f"{PUBLIC_ONBOARDING_URL}/extension"
                 f"?onboarding_token={onboarding_token}"
                 f"&session_id={{CHECKOUT_SESSION_ID}}"
             ),
-            cancel_url=f"{API_URL}/onboarding/info?cancelled=1",
+            cancel_url=f"{PUBLIC_ONBOARDING_URL}/info?cancelled=1",
             allow_promotion_codes=True,
             metadata={
                 "onboarding_token": onboarding_token,
@@ -445,9 +451,15 @@ def complete(token: str = Query(...)):
     # Magic-link sign-in so they can open the dashboard immediately.
     magic_link_email_sent = issue_magic_link(email)
 
+    # Second email: a sample report so they see what their clients will receive.
+    # Best-effort — already swallows its own exceptions, never blocks completion.
+    sample_email_sent = send_sample_workbook_email(
+        to=email, name=name, dashboard_url=f"{APP_URL}/accounts")
+
     send_internal_alert(
         "🌞 Onboarding complete",
         f"Tenant {tenant_id} ({email}) finished the onboarding wizard."
     )
 
-    return {"ok": True, "magic_link_email_sent": magic_link_email_sent}
+    return {"ok": True, "magic_link_email_sent": magic_link_email_sent,
+            "sample_email_sent": sample_email_sent}
