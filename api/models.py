@@ -47,6 +47,13 @@ class Tenant(Base):
     last_pull_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
+    # onboarding_token is a 32-char random string handed to the SPA + passed as
+    # Stripe metadata so the post-payment return path can find the pending tenant.
+    onboarding_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    onboarding_stage: Mapped[str] = mapped_column(String(20), default="pending_payment")
+    # pending_payment | extension | clients | done
+
     arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     clients: Mapped[list["Client"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
@@ -79,11 +86,19 @@ class Client(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+    # GMP auto-populate (added June 2026 for onboarding wizard Screen 4).
+    # When gmp_autopopulate is on, the /v1/sync handler matches an incoming
+    # GMP capture by gmp_email and appends Arrays + UtilityAccounts for this client.
+    gmp_email: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    gmp_autopopulate: Mapped[bool] = mapped_column(Boolean, default=False)
+    gmp_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     tenant: Mapped[Tenant] = relationship(back_populates="clients")
     arrays: Mapped[list["Array"]] = relationship(back_populates="client")
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "name", name="uq_client_per_tenant"),
+        Index("ix_clients_tenant_gmp_email", "tenant_id", "gmp_email"),
     )
 
 

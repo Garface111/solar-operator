@@ -125,6 +125,43 @@ def main():
             ), {"cid": cid, "tid": tid})
             print(f"  ↪ tenant {tid}: linked arrays to default Client id={cid} ('{t_name}')")
 
+        # 2026-06-03 Onboarding wizard: tenant onboarding state + client GMP autopop
+        # Idempotent ALTER TABLE for both tables, plus their indexes.
+        onboarding_cols = [
+            ("tenants", "onboarding_token",
+             "ALTER TABLE tenants ADD COLUMN onboarding_token VARCHAR(64)"),
+            ("tenants", "onboarding_stage",
+             "ALTER TABLE tenants ADD COLUMN onboarding_stage VARCHAR(20) DEFAULT 'pending_payment'"),
+            ("clients", "gmp_email",
+             "ALTER TABLE clients ADD COLUMN gmp_email VARCHAR(200)"),
+            ("clients", "gmp_autopopulate",
+             "ALTER TABLE clients ADD COLUMN gmp_autopopulate BOOLEAN DEFAULT FALSE"),
+            ("clients", "gmp_last_sync_at",
+             "ALTER TABLE clients ADD COLUMN gmp_last_sync_at TIMESTAMP"),
+        ]
+        for table, col, sql in onboarding_cols:
+            if not column_exists(conn, table, col):
+                conn.execute(text(sql))
+                print(f"  + {table}.{col}")
+
+        # Backfill defaults for existing rows so the columns are never NULL
+        # where the model declares a default.
+        conn.execute(text(
+            "UPDATE tenants SET onboarding_stage = 'pending_payment' "
+            "WHERE onboarding_stage IS NULL"
+        ))
+        conn.execute(text(
+            "UPDATE clients SET gmp_autopopulate = FALSE WHERE gmp_autopopulate IS NULL"
+        ))
+
+        # Indexes: onboarding_token lookup + (tenant_id, gmp_email) match in /v1/sync
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_tenants_onboarding_token ON tenants (onboarding_token)",
+            "CREATE INDEX IF NOT EXISTS ix_clients_gmp_email ON clients (gmp_email)",
+            "CREATE INDEX IF NOT EXISTS ix_clients_tenant_gmp_email ON clients (tenant_id, gmp_email)",
+        ]:
+            conn.execute(text(idx_sql))
+
     print("=== Migration complete ===")
 
 
