@@ -1,5 +1,5 @@
 (async function () {
-  const PROD_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
+  const PROD_ENDPOINT = "https://api.solaroperator.org/v1/sync";
 
   const endpointEl = document.getElementById("endpoint");
   const tenantEl = document.getElementById("tenant_key");

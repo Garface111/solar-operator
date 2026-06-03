@@ -2,7 +2,10 @@
 // Receives captured tokens from content.js, persists locally, and POSTs to
 // the Solar Operator API. Also schedules periodic refresh-check alarms.
 
-const PROD_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
+// v1.0.2: primary endpoint on api.solaroperator.org with Railway fallback
+// during the CNAME transition window.
+const PROD_ENDPOINT = "https://api.solaroperator.org/v1/sync";
+const FALLBACK_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
 const STORAGE_KEYS = {
   ENDPOINT: "api_endpoint",
   TENANT_KEY: "tenant_key",
@@ -27,15 +30,30 @@ async function postSync(payload) {
   const headers = { "Content-Type": "application/json" };
   if (tenantKey) headers["Authorization"] = `Bearer ${tenantKey}`;
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
+  async function tryPost(url) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
+    }
+    return res.json().catch(() => ({}));
   }
-  return res.json().catch(() => ({}));
+
+  try {
+    return await tryPost(endpoint);
+  } catch (e) {
+    // Fall back to Railway origin if the primary (api.solaroperator.org) fails
+    // — covers the pre-CNAME window and DNS hiccups. Only retry if endpoint
+    // is the default PROD_ENDPOINT (user-customized endpoints don't fall back).
+    if (endpoint === PROD_ENDPOINT && FALLBACK_ENDPOINT !== endpoint) {
+      console.warn("[Solar Operator] primary endpoint failed, retrying fallback:", e.message);
+      return await tryPost(FALLBACK_ENDPOINT);
+    }
+    throw e;
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -115,6 +133,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   chrome.action.setBadgeText({ text: "" });
+
+  // v1.0.2 migration: existing installs have api_endpoint stuck on the
+  // Railway URL. Clear it so they pick up the new PROD_ENDPOINT
+  // (api.solaroperator.org). User-customized endpoints (anything else) are
+  // left alone.
+  if (details.reason === "update") {
+    const s = await chrome.storage.local.get(STORAGE_KEYS.ENDPOINT);
+    if (s[STORAGE_KEYS.ENDPOINT] === FALLBACK_ENDPOINT) {
+      await chrome.storage.local.remove(STORAGE_KEYS.ENDPOINT);
+      console.log("[Solar Operator] v1.0.2 migration: cleared stale Railway endpoint, now defaulting to", PROD_ENDPOINT);
+    }
+  }
 });
