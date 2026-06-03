@@ -35,6 +35,16 @@ REPORTS_DIR = DATA_DIR / "reports"
 REPORTS_DIR.mkdir(exist_ok=True, parents=True)
 
 
+# Footnote text — VERBATIM from Bruce's GMCS.xlsx. Single source of truth so
+# the demo writer (api/writers/demo_writer.py) can reuse the exact wording.
+# Never paraphrase — see CLAUDE.md "GMCS writer format rules".
+FOOTNOTE_TEXT = (
+    " † NEPOOL-GIS will award 1 REC for every MWH reported.  "
+    "Additionally, NEPOOL-GIS will keep track of the decimal "
+    "MWHs and award an additional REC when the total exceeds 1 MWH."
+)
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 def _bill_target_month(bill: Bill) -> Optional[tuple[int, int]]:
     src = bill.period_start or bill.bill_date
@@ -279,10 +289,7 @@ def build_workbook(tenant_id: Optional[str] = None,
 
         # Footnote — verbatim text from Bruce's GMCS.xlsx
         foot_row = row + (31 - row) if row <= 31 else row
-        fc = sh.cell(foot_row, 1,
-                     " † NEPOOL-GIS will award 1 REC for every MWH reported.  "
-                     "Additionally, NEPOOL-GIS will keep track of the decimal "
-                     "MWHs and award an additional REC when the total exceeds 1 MWH.")
+        fc = sh.cell(foot_row, 1, FOOTNOTE_TEXT)
         fc.font = FOOTNOTE_FONT
         fc.alignment = Alignment(horizontal="left", vertical="center")
         sh.merge_cells(start_row=foot_row, start_column=1,
