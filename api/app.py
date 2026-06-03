@@ -29,7 +29,9 @@ from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
 from .adapters import get_adapter
 from .worker import pull_bills_for_tenant, run_pending_jobs
-from .signup import router as signup_router
+# v1.1.0: api/signup.py was renamed to api/_legacy_signup.py and unmounted.
+# Its Stripe webhook moved to api/stripe_webhook.py (still mounted below).
+from .stripe_webhook import router as stripe_webhook_router
 from .account import router as account_router
 from .onboarding import router as onboarding_router
 from . import scheduler
@@ -54,10 +56,11 @@ app.add_middleware(
     allow_credentials=False,
 )
 
-app.include_router(signup_router)
+# v1.1.0: replaced by onboarding.router. Webhook handler still active via the new onboarding flow.
+# app.include_router(signup_router)
+app.include_router(stripe_webhook_router)
 app.include_router(account_router)
-# New 5-screen onboarding flow. Legacy signup_router stays mounted so any
-# in-flight /v1/signup checkouts still complete.
+# New 5-screen onboarding flow.
 app.include_router(onboarding_router)
 
 
