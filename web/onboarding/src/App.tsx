@@ -1,20 +1,23 @@
-import { Card } from "./ui/Card";
-import { Stepper } from "./ui/Stepper";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import Welcome from "./screens/Welcome";
+import Info from "./screens/Info";
+import Extension from "./screens/Extension";
+import Clients from "./screens/Clients";
+import Done from "./screens/Done";
 
-const STEPS = ["Welcome", "Your info", "Install", "Clients", "Done"];
-
+// basename matches Vite's `base` and the FastAPI StaticFiles mount at /onboarding/
+// (catch-all for deep links is wired in Task 10).
 export default function App() {
   return (
-    <div className="mx-auto flex min-h-full max-w-2xl flex-col gap-8 px-4 py-12">
-      <Stepper steps={STEPS} current={0} />
-      <Card active>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
-          Quarterly solar reports, on autopilot.
-        </h1>
-        <p className="mt-2 text-sm text-zinc-500">
-          Onboarding scaffold is up. Screens land in subsequent tasks.
-        </p>
-      </Card>
-    </div>
+    <BrowserRouter basename="/onboarding">
+      <Routes>
+        <Route path="/" element={<Welcome />} />
+        <Route path="/info" element={<Info />} />
+        <Route path="/extension" element={<Extension />} />
+        <Route path="/clients" element={<Clients />} />
+        <Route path="/done" element={<Done />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
