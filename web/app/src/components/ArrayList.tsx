@@ -37,18 +37,30 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo }: Pr
 
   useEffect(() => {
     let cancelled = false;
-    listArrays(clientId)
-      .then((rows) => {
-        if (!cancelled) setArrays(rows);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : "Couldn't load arrays");
-          setArrays([]);
-        }
-      });
+    function load() {
+      listArrays(clientId)
+        .then((rows) => {
+          if (!cancelled) setArrays(rows);
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            toast.error(err instanceof Error ? err.message : "Couldn't load arrays");
+            setArrays([]);
+          }
+        });
+    }
+    load();
+    // Listen for the same broadcast we emit on local mutations — covers the
+    // NEPOOL-import / autopop / master-import cases where the mutation
+    // happened in a sibling component (modal, ClientsSection) and the
+    // parent has no way to bump refreshSignal on every mounted ArrayList.
+    function onChanged() {
+      load();
+    }
+    window.addEventListener("so:arrays-changed", onChanged);
     return () => {
       cancelled = true;
+      window.removeEventListener("so:arrays-changed", onChanged);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId, refreshSignal]);

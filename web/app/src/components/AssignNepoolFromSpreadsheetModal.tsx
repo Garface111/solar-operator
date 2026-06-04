@@ -169,6 +169,10 @@ export function AssignNepoolFromSpreadsheetModal({ open, onClose, onAssigned, cl
         toast.error(`${res.errors.length} assignment${res.errors.length === 1 ? "" : "s"} failed — check the list`);
       }
       onAssigned();
+      // Broadcast to every mounted ArrayList (both this client's and any
+      // others if this was a master import) so the new NEPOOL IDs appear
+      // immediately without a page refresh.
+      window.dispatchEvent(new CustomEvent("so:arrays-changed"));
       onClose();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't save — try again");
