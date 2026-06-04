@@ -143,6 +143,7 @@ export interface Account {
   created_at: string | null;
   accounts_count: number;
   bills_count: number;
+  clients_count: number;
 }
 
 export interface EmailSettingsInput {

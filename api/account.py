@@ -374,6 +374,9 @@ def account_me(authorization: Optional[str] = Header(default=None)):
         bills_count = db.execute(
             select(Bill).where(Bill.tenant_id == t.id)
         ).scalars().all()
+        clients_count = db.execute(
+            select(func.count()).select_from(Client).where(Client.tenant_id == t.id)
+        ).scalar() or 0
         return {
             "tenant_id": t.id,
             # Activation code the customer pastes into the Chrome extension.
@@ -402,6 +405,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "accounts_count": len(accounts),
             "bills_count": len(bills_count),
+            "clients_count": int(clients_count),
             "session": {
                 "captured_at": last_sess.captured_at.isoformat() if last_sess else None,
                 "expires_at": last_sess.expires_at.isoformat() if last_sess and last_sess.expires_at else None,

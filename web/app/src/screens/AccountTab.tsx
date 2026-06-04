@@ -26,7 +26,10 @@ export default function AccountTab() {
     );
   }
 
-  const setupComplete = account.accounts_count > 0;
+  const step1Done = !!account.tenant_key;
+  const step2Done = account.clients_count > 0;
+  const step3Done = !!account.last_pull_at || !!account.extension_heartbeat_at;
+  const setupComplete = step1Done && step2Done && step3Done;
 
   return (
     <div className="space-y-6">
@@ -41,12 +44,12 @@ export default function AccountTab() {
           <ol className="mt-4 space-y-3">
             {[
               {
-                done: !!account.tenant_key,
+                done: step1Done,
                 label: "Activate the Chrome extension",
                 hint: "Paste your activation code from the card below into the extension.",
               },
               {
-                done: false,
+                done: step2Done,
                 label: "Add at least one client",
                 hint: (
                   <button
@@ -59,9 +62,9 @@ export default function AccountTab() {
                 ),
               },
               {
-                done: false,
+                done: step3Done,
                 label: "Log into Green Mountain Power once",
-                hint: "The extension will capture your GMP session and auto-populate arrays.",
+                hint: "The extension will capture your GMP session and begin pulling bill data automatically.",
               },
             ].map((step, i) => (
               <li key={i} className="flex items-start gap-3 text-sm">
