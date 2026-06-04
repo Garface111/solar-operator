@@ -6,6 +6,7 @@ import { Modal } from "../ui/Modal";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
+import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import {
   type ClientRow,
   listClients,
@@ -82,6 +83,7 @@ export function ClientCard({
   const [refreshing, setRefreshing] = useState(false);
   const [sendingToMe, setSendingToMe] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [assigningNepool, setAssigningNepool] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
   const pollerRef = useRef<PollerHandle | null>(null);
 
@@ -586,9 +588,19 @@ export function ClientCard({
 
           {/* arrays */}
           <div>
-            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-              Arrays
-            </h4>
+            <div className="mb-2 flex items-center justify-between">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Arrays
+              </h4>
+              <button
+                type="button"
+                data-tour-step="5"
+                onClick={() => setAssigningNepool(true)}
+                className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
+                Import NEPOOL IDs
+              </button>
+            </div>
             <ArrayList
               clientId={client.id}
               refreshSignal={arrayRefreshSignal}
@@ -619,6 +631,14 @@ export function ClientCard({
           </div>
         </div>
       )}
+
+      <AssignNepoolFromSpreadsheetModal
+        open={assigningNepool}
+        onClose={() => setAssigningNepool(false)}
+        onAssigned={() => setArrayRefreshSignal((s) => s + 1)}
+        clientId={client.id}
+        clientName={client.name}
+      />
 
       <Modal
         open={confirmDelete}

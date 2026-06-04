@@ -708,6 +708,7 @@ export function getNepoolStats(): Promise<NepoolStats> {
 export async function nepoolPreview(
   file: File,
   signal?: AbortSignal,
+  clientId?: number,
 ): Promise<NepoolPreviewResult> {
   const form = new FormData();
   form.append("file", file);
@@ -716,8 +717,13 @@ export async function nepoolPreview(
   const token = getSession();
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
+  const url =
+    clientId !== undefined
+      ? `/v1/account/nepool/preview?client_id=${clientId}`
+      : "/v1/account/nepool/preview";
+
   const res = await fetchWithTimeout(
-    "/v1/account/nepool/preview",
+    url,
     { method: "POST", headers, body: form, signal },
     120_000,
   );
