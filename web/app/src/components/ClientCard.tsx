@@ -316,7 +316,6 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
                 className="w-full rounded-xl border border-zinc-300 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
               >
                 <option value="">Inherit from account</option>
-                <option value="weekly">Weekly</option>
                 <option value="monthly">Monthly</option>
                 <option value="quarterly">Quarterly</option>
               </select>

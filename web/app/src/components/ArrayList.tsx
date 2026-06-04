@@ -384,8 +384,8 @@ function UtilityAccounts({
             + Link a utility account
           </button>
           <p className="mt-1.5 text-[11px] leading-snug text-zinc-400">
-            Merging sub-meters? Link each GMP account here to sum them into this
-            one array (the Starlake case), then delete the duplicate arrays.
+            Merging sub-meters? Link each GMP account here to sum them into one
+            array, then delete the individual array stubs.
           </p>
         </div>
       )}
