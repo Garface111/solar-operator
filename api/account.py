@@ -689,6 +689,12 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
         client_id, override_to=tenant_email, triggered_by="sample",
         subject_prefix="[SAMPLE] ",
     )
+    if not result.get("ok"):
+        raise HTTPException(500,
+            result.get("reason") or "Sample workbook generation failed — check server logs.")
+    if not result.get("email_sent"):
+        raise HTTPException(502,
+            "Sample workbook built but email delivery failed — check your Resend configuration.")
     return {**result, "sample": True, "sent_to": tenant_email}
 
 
