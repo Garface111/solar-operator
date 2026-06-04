@@ -13,6 +13,22 @@ const SERVICES = [
   "Multi-client portal",
 ];
 
+// TODO (Agent A): Replace these placeholders with the actual 3-5 bullet summary
+// that Agent A adds at the top of privacy.md and tos.md.
+const PP_BULLETS = [
+  "We never sell your data to anyone, ever.",
+  "We only collect what's needed to generate your reports (GMP bills, your contact info).",
+  "You can delete your account and all your data at any time.",
+  "We use bank-grade encryption in transit and at rest.",
+];
+
+const TOS_BULLETS = [
+  "You pay $250 once to set up, then $45 per array per month.",
+  "You can cancel anytime — no lock-in, no early-termination fees.",
+  "We never charge more without telling you first.",
+  "This service is for Vermont community solar operators using Green Mountain Power.",
+];
+
 // Served from web/onboarding/public/ by Vite (and FastAPI in prod) under the
 // app's base path, e.g. /onboarding/tos.md.
 const BASE = import.meta.env.BASE_URL;
@@ -58,7 +74,39 @@ export default function Welcome() {
           ))}
         </ul>
 
-        <div className="mt-8 rounded-xl border border-zinc-200">
+        {/* Plain-English trust bullets — prominently above the legal accordion */}
+        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Privacy &amp; Terms — the short version
+          </p>
+          <div className="mt-3 grid gap-5 sm:grid-cols-2">
+            <div>
+              <p className="mb-2 text-xs font-semibold text-zinc-700">Privacy</p>
+              <ul className="space-y-1.5">
+                {PP_BULLETS.map((b) => (
+                  <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
+                    <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
+                    {b}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-semibold text-zinc-700">Terms</p>
+              <ul className="space-y-1.5">
+                {TOS_BULLETS.map((b) => (
+                  <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
+                    <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
+                    {b}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        {/* Full legal text — collapsible */}
+        <div className="mt-4 rounded-xl border border-zinc-200">
           <button
             type="button"
             onClick={() => setLegalOpen((o) => !o)}
@@ -66,7 +114,7 @@ export default function Welcome() {
             aria-controls="legal-panel"
             className="flex w-full items-center justify-between rounded-xl px-4 py-3 text-left text-sm font-medium text-zinc-700 transition-colors duration-150 ease-in-out hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
           >
-            Terms of Service &amp; Privacy Policy
+            Read full Terms &amp; Privacy Policy
             <span aria-hidden className="text-zinc-400">
               {legalOpen ? "−" : "+"}
             </span>
@@ -101,7 +149,10 @@ export default function Welcome() {
           />
         </div>
 
-        <div className="mt-8 flex justify-end">
+        <div className="mt-8 flex items-center justify-between">
+          <Button variant="ghost" onClick={() => navigate("/demo")}>
+            ← Back
+          </Button>
           <Button disabled={!agreed} onClick={() => navigate("/info")}>
             Continue →
           </Button>
