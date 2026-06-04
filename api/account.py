@@ -1004,9 +1004,8 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
                 a.name = new_name
         for field in ("nepool_gis_id", "region",
                       "bill_offset_months", "notes"):
-            v = getattr(body, field)
-            if v is not None:
-                setattr(a, field, v)
+            if field in body.model_fields_set:
+                setattr(a, field, getattr(body, field))
         db.commit()
         accts = db.execute(
             select(UtilityAccount).where(UtilityAccount.array_id == a.id)
