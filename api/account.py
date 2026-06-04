@@ -36,7 +36,7 @@ from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_DASHBOARD_URL,
-    MERGE_TAGS, render_email, resolve_from_header,
+    MERGE_TAGS, build_context, render_email, resolve_from_header,
 )
 
 logger = logging.getLogger(__name__)
@@ -486,17 +486,10 @@ def update_cc_on_reports(body: UpdateCcOnReports,
 
 # ─── V2 email customization ─────────────────────────────────────────────
 
-# Fake values for the live preview (POST /v1/account/email-preview). A fixed
-# quarter keeps the preview deterministic regardless of when it's rendered.
+# Fake client name for the live preview. Quarter/period data is computed
+# dynamically from the real most-recently-complete quarter so the preview
+# matches what actual reports will say at send time.
 _PREVIEW_CLIENT = "Sample Client"
-_PREVIEW_CTX = {
-    "client_name": _PREVIEW_CLIENT,
-    "quarter": "2026 Q2",
-    "arrays_count": 3,
-    "period_start": "Apr 1, 2026",
-    "period_end": "Jun 30, 2026",
-    "dashboard_url": DEFAULT_DASHBOARD_URL,
-}
 _VALID_SEND_MODES = ("to_client", "to_me")
 
 
@@ -625,8 +618,11 @@ def preview_email(body: EmailSettings,
         eff_mode = ((body.send_mode if body.send_mode is not None else t.send_mode)
                     or "to_client").strip() or "to_client"
 
-    ctx = dict(_PREVIEW_CTX, tenant_name=tenant_name, tenant_email=tenant_email,
-               tenant_email_line=f"<br>{tenant_email}" if tenant_email else "")
+    ctx = build_context(
+        client_name=_PREVIEW_CLIENT, tenant_name=tenant_name,
+        arrays_count=3, tenant_email=tenant_email,
+        dashboard_url=DEFAULT_DASHBOARD_URL,
+    )
     subject, html, text = render_email(
         subject_template=eff_subject, body_template=eff_body, ctx=ctx)
     from_header = resolve_from_header(eff_from_email, eff_from_name, tenant_name)
