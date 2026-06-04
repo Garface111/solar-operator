@@ -422,7 +422,7 @@ export default function Extension() {
             {[
               "Install the extension above",
               "Paste your activation code into the extension's Options page",
-              "Log into your utility account (e.g., GMP or VEC) in any tab — we'll detect your bills automatically",
+              "Log into your utility portal (e.g., GMP or VEC) in any tab — we'll detect your bills automatically",
             ].map((step, i) => (
               <li key={i} className="flex items-start gap-3">
                 <span

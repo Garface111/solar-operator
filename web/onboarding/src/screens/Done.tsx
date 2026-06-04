@@ -116,7 +116,7 @@ export default function Done() {
           <p className="text-xs font-semibold text-zinc-700">What happens next</p>
           <ol className="mt-3 space-y-2">
             {[
-              "Log into GMP from any tab — the extension captures bills in the background.",
+              "Log into your utility portal (GMP, VEC, and others) from any tab — the extension captures bills in the background.",
               "We generate your first NEPOOL report at the end of the current quarter.",
               "Your clients get their report by email. You get a copy too.",
             ].map((step, i) => (

@@ -223,7 +223,7 @@ export default function ClientSetup() {
                         </span>
                         <span className="mt-0.5 block text-xs text-zinc-500">
                           We&apos;ll pull this client&apos;s arrays automatically
-                          when you log into GMP or VEC after checkout.
+                          when you log into your utility portal after checkout.
                         </span>
                       </span>
                     </label>
