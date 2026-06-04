@@ -168,27 +168,37 @@ function ArrayRow({
         </div>
         <div className="sm:col-span-3">
           <FieldLabel>NEPOOL-GIS ID</FieldLabel>
-          <EditableField
-            value={array.nepool_gis_id}
-            label="NEPOOL-GIS ID"
-            onSave={(v) => save({ nepool_gis_id: v || null })}
-            placeholder="NON12345"
-          />
+          <div className="flex items-center gap-2">
+            <EditableField
+              value={array.nepool_gis_id}
+              label="NEPOOL-GIS ID"
+              onSave={(v) => save({ nepool_gis_id: v || null })}
+              placeholder="53984"
+            />
+            {!array.nepool_gis_id && (
+              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                Add NEPOOL ID
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+            5-digit ISO-NE asset ID — required to ship reports. You can add it
+            later if you don&apos;t have it now.
+          </p>
         </div>
         <div className="sm:col-span-2">
-          <FieldLabel>Bill offset</FieldLabel>
-          <EditableField
-            value={
-              array.bill_offset_months === null ||
-              array.bill_offset_months === undefined
-                ? ""
-                : String(array.bill_offset_months)
+          <FieldLabel>Bill timing</FieldLabel>
+          <select
+            value={array.bill_offset_months === 0 ? "0" : "1"}
+            onChange={(e) =>
+              save({ bill_offset_months: Number(e.target.value) })
             }
-            label="bill offset months"
-            type="number"
-            onSave={(v) => save({ bill_offset_months: v === "" ? null : Number(v) })}
-            placeholder="1"
-          />
+            aria-label="Bill timing"
+            className="w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+          >
+            <option value="1">Prior month (default)</option>
+            <option value="0">Same month (sub-metered)</option>
+          </select>
         </div>
         <div className="sm:col-span-3">
           <FieldLabel>Notes</FieldLabel>
@@ -447,7 +457,7 @@ function AddArrayRow({
       const a = await createArray(clientId, {
         name: name.trim(),
         nepool_gis_id: gis.trim() || null,
-        bill_offset_months: offset.trim() === "" ? 1 : Number(offset),
+        bill_offset_months: Number(offset),
       });
       onCreated(a);
       toast.success(`Added ${a.name}`);
@@ -473,19 +483,29 @@ function AddArrayRow({
         <Input
           id={`new-array-gis-${clientId}`}
           label="NEPOOL-GIS ID"
-          placeholder="NON12345"
+          placeholder="53984"
           value={gis}
           onChange={(e) => setGis(e.target.value)}
         />
+        <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+          5-digit ISO-NE asset ID — required to ship reports. Add it later if you
+          don&apos;t have it now.
+        </p>
       </div>
-      <div className="w-full sm:w-24">
-        <Input
-          id={`new-array-offset-${clientId}`}
-          label="Offset"
-          type="number"
-          value={offset}
-          onChange={(e) => setOffset(e.target.value)}
-        />
+      <div className="w-full sm:w-44">
+        <label className="block">
+          <span className="mb-1 block text-xs font-medium text-zinc-600">
+            Bill timing
+          </span>
+          <select
+            value={offset === "0" ? "0" : "1"}
+            onChange={(e) => setOffset(e.target.value)}
+            className="w-full rounded-lg border border-zinc-300 bg-white px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+          >
+            <option value="1">Prior month (default)</option>
+            <option value="0">Same month (sub-metered)</option>
+          </select>
+        </label>
       </div>
       <div className="flex gap-2">
         <Button onClick={save} disabled={!name.trim() || saving} className="px-3 py-2">

@@ -293,8 +293,8 @@ export default function Clients() {
                             <div className="flex-1">
                               <Input
                                 id={`arr-gis-${c.id}-${ai}`}
-                                label="NEPOOL-GIS ID (optional)"
-                                placeholder="NON12345"
+                                label="NEPOOL-GIS ID"
+                                placeholder="53984"
                                 value={a.nepool_gis_id}
                                 onChange={(e) =>
                                   updateArray(c.id, ai, {
@@ -302,6 +302,11 @@ export default function Clients() {
                                   })
                                 }
                               />
+                              <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+                                The 5-digit asset ID from ISO-NE — required to
+                                ship reports. You can add this later if you do
+                                not have it now.
+                              </p>
                             </div>
                             <button
                               type="button"
