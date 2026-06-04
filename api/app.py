@@ -35,6 +35,7 @@ from .stripe_webhook import router as stripe_webhook_router
 from .account import router as account_router
 from .onboarding import router as onboarding_router
 from .ingest import router as ingest_router
+from .resend_webhook import router as resend_webhook_router
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -65,6 +66,8 @@ app.include_router(account_router)
 app.include_router(onboarding_router)
 # V4: AI spreadsheet ingest for arrays + NEPOOL IDs.
 app.include_router(ingest_router)
+# W2-6: Resend delivery webhook → per-client delivery health.
+app.include_router(resend_webhook_router)
 
 
 @app.on_event("startup")

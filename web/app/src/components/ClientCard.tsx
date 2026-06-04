@@ -24,6 +24,28 @@ function captureFreshness(iso: string | null): string {
   })}`;
 }
 
+/** Most recent Resend-reported delivery outcome for this client, or null if
+ *  we've never heard back about a send. Bounce wins ties (it's the alarming one). */
+function deliveryStatus(
+  c: ClientRow,
+): { kind: "ok" | "bounced"; text: string } | null {
+  const delivered = c.last_delivered_at
+    ? new Date(c.last_delivered_at).getTime()
+    : 0;
+  const bounced = c.last_bounced_at ? new Date(c.last_bounced_at).getTime() : 0;
+  if (!delivered && !bounced) return null;
+  if (bounced >= delivered) {
+    return {
+      kind: "bounced",
+      text: c.last_bounce_reason ? `Bounced: ${c.last_bounce_reason}` : "Bounced",
+    };
+  }
+  return {
+    kind: "ok",
+    text: `Delivered ${new Date(c.last_delivered_at!).toLocaleDateString()}`,
+  };
+}
+
 interface Props {
   client: ClientRow;
   defaultExpanded?: boolean;
@@ -97,6 +119,7 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
   }
 
   const gmpLogin = client.gmp_email || client.gmp_username || "";
+  const delivery = deliveryStatus(client);
 
   return (
     <div
@@ -143,6 +166,25 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
               placeholder="reports@client.org"
             />
           </div>
+          {delivery && (
+            <div className="mt-1 flex items-center gap-1.5 text-xs">
+              <span
+                aria-hidden
+                className={
+                  delivery.kind === "ok" ? "text-primary-600" : "text-red-600"
+                }
+              >
+                {delivery.kind === "ok" ? "✓" : "✕"}
+              </span>
+              <span
+                className={
+                  delivery.kind === "ok" ? "text-zinc-500" : "text-red-600"
+                }
+              >
+                {delivery.text}
+              </span>
+            </div>
+          )}
           {client.gmp_autopopulate && (
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
               <span

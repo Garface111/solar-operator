@@ -216,6 +216,9 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "gmp_username": c.gmp_username,
         "gmp_autopopulate": c.gmp_autopopulate,
         "gmp_last_sync_at": c.gmp_last_sync_at.isoformat() if c.gmp_last_sync_at else None,
+        "last_delivered_at": c.last_delivered_at.isoformat() if c.last_delivered_at else None,
+        "last_bounced_at": c.last_bounced_at.isoformat() if c.last_bounced_at else None,
+        "last_bounce_reason": c.last_bounce_reason,
     }
 
 

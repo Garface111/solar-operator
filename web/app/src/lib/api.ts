@@ -174,6 +174,9 @@ export interface ClientRow {
   gmp_username: string | null;
   gmp_autopopulate: boolean;
   gmp_last_sync_at: string | null;
+  last_delivered_at: string | null;
+  last_bounced_at: string | null;
+  last_bounce_reason: string | null;
 }
 
 // ─── account ───────────────────────────────────────────────────────────────

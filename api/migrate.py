@@ -187,6 +187,20 @@ def main():
             "UPDATE tenants SET send_mode = 'to_client' WHERE send_mode IS NULL"
         ))
 
+        # 2026-06 W2-6: per-client email delivery health (Resend webhook).
+        delivery_health_cols = [
+            ("last_delivered_at",
+             "ALTER TABLE clients ADD COLUMN last_delivered_at TIMESTAMP"),
+            ("last_bounced_at",
+             "ALTER TABLE clients ADD COLUMN last_bounced_at TIMESTAMP"),
+            ("last_bounce_reason",
+             "ALTER TABLE clients ADD COLUMN last_bounce_reason TEXT"),
+        ]
+        for col, sql in delivery_health_cols:
+            if not column_exists(conn, "clients", col):
+                conn.execute(text(sql))
+                print(f"  + clients.{col}")
+
         # Indexes: onboarding_token lookup + (tenant_id, gmp_email) match in /v1/sync
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_tenants_onboarding_token ON tenants (onboarding_token)",

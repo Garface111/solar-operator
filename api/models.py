@@ -119,6 +119,14 @@ class Client(Base):
     gmp_autopopulate: Mapped[bool] = mapped_column(Boolean, default=False)
     gmp_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Per-client email delivery health (W2-6, June 2026). Populated by the Resend
+    # webhook (api/resend_webhook.py) on bounced/delivered/complained events.
+    # NOTE distinct from last_delivery_at (when WE sent): these reflect what
+    # Resend reports actually happened to the recipient's inbox.
+    last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_bounced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_bounce_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     tenant: Mapped[Tenant] = relationship(back_populates="clients")
     arrays: Mapped[list["Array"]] = relationship(back_populates="client")
 
