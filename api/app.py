@@ -393,7 +393,7 @@ from datetime import datetime as _dt
 
 
 @app.get("/admin/scheduler")
-def scheduler_status():
+def scheduler_status(_: None = Depends(_require_admin)):
     """Inspect APScheduler — confirm cron is alive on Railway."""
     sched = scheduler.scheduler  # the BackgroundScheduler instance in scheduler.py
     jobs = []
@@ -411,7 +411,8 @@ def scheduler_status():
 
 
 @app.post("/admin/tenants/{tid}/deliver")
-def deliver_now(tid: str, year: int | None = None, to: str | None = None):
+def deliver_now(tid: str, year: int | None = None, to: str | None = None,
+                _: None = Depends(_require_admin)):
     """Force-run the workbook delivery for one tenant. Every tenant gets
     the default arrays×months workbook. Pass ?to=someone@example.com to
     override recipient (admin testing). Workbook is built in a tempdir
@@ -427,7 +428,7 @@ def deliver_now(tid: str, year: int | None = None, to: str | None = None):
 
 
 @app.post("/admin/test-email")
-def test_email(to: str | None = None):
+def test_email(to: str | None = None, _: None = Depends(_require_admin)):
     """Fire a 1-line test email + return the Resend error if it fails.
     Use ?to=ford.genereaux@gmail.com to override recipient."""
     import os as _os
