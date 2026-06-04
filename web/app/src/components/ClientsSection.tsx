@@ -7,11 +7,13 @@ import { useToast } from "../ui/Toast";
 import { ClientCard } from "./ClientCard";
 import { AddClientModal } from "./AddClientModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
+import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import {
   type ClientRow,
   listClients,
   bulkDeleteClients,
   undoDelete,
+  getNepoolStats,
 } from "../lib/api";
 import { useDashboardContext } from "../screens/DashboardLayout";
 
@@ -27,6 +29,8 @@ export function ClientsSection({ expandClientId }: Props) {
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [assigningNepool, setAssigningNepool] = useState(false);
+  const [missingNepoolCount, setMissingNepoolCount] = useState(0);
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
@@ -68,6 +72,12 @@ export function ClientsSection({ expandClientId }: Props) {
     };
   }, []);
 
+  function loadNepoolStats() {
+    getNepoolStats()
+      .then((s) => setMissingNepoolCount(s.arrays_missing_nepool))
+      .catch(() => { /* non-critical, ignore */ });
+  }
+
   function loadClients() {
     listClients()
       .then(setClients)
@@ -89,6 +99,9 @@ export function ClientsSection({ expandClientId }: Props) {
           setClients([]);
         }
       });
+    getNepoolStats()
+      .then((s) => { if (!cancelled) setMissingNepoolCount(s.arrays_missing_nepool); })
+      .catch(() => { /* non-critical */ });
     return () => {
       cancelled = true;
     };
@@ -185,6 +198,26 @@ export function ClientsSection({ expandClientId }: Props) {
             {bouncedClients.map((c) => c.name).join(", ")} — update their
             contact email so reports reach them.
           </p>
+        </div>
+      )}
+
+      {missingNepoolCount > 0 && (
+        <div className="mb-4 flex items-center justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <div>
+            <p className="text-sm font-semibold text-amber-900">
+              {missingNepoolCount} array{missingNepoolCount === 1 ? " is" : "s are"} missing NEPOOL IDs.
+            </p>
+            <p className="mt-0.5 text-xs text-amber-800">
+              Reports for those clients won&apos;t ship without them.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAssigningNepool(true)}
+            className="shrink-0 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100 focus:outline-none"
+          >
+            Find them in a spreadsheet
+          </button>
         </div>
       )}
 
@@ -330,6 +363,15 @@ export function ClientsSection({ expandClientId }: Props) {
         open={importing}
         onClose={() => setImporting(false)}
         onImported={loadClients}
+      />
+
+      <AssignNepoolFromSpreadsheetModal
+        open={assigningNepool}
+        onClose={() => setAssigningNepool(false)}
+        onAssigned={() => {
+          loadClients();
+          loadNepoolStats();
+        }}
       />
     </section>
   );

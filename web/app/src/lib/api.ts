@@ -645,3 +645,88 @@ export async function ingestCommit(
     body: { arrays },
   });
 }
+
+// ─── NEPOOL ID assignment ─────────────────────────────────────────────────
+
+export interface NepoolStats {
+  arrays_missing_nepool: number;
+}
+
+export interface NepoolProposal {
+  extracted_name: string;
+  extracted_nepool_gis_id: string;
+  match: {
+    array_id: number;
+    array_name: string;
+    current_nepool_gis_id: string | null;
+    confidence: number;
+    would_overwrite: boolean;
+  };
+}
+
+export interface NepoolUnmatchedPair {
+  extracted_name: string;
+  extracted_nepool_gis_id: string;
+}
+
+export interface NepoolAvailableArray {
+  array_id: number;
+  array_name: string;
+  client_name: string | null;
+}
+
+export interface NepoolPreviewResult {
+  ok: boolean;
+  source: "gmcs_shape" | "llm" | "heuristic";
+  pairs_extracted: number;
+  matches_proposed: number;
+  unmatched: number;
+  skipped_overwrites: number;
+  proposals: NepoolProposal[];
+  unmatched_pairs: NepoolUnmatchedPair[];
+  available_arrays: NepoolAvailableArray[];
+}
+
+export interface NepoolCommitResult {
+  ok: boolean;
+  updated: number;
+  errors: Array<{ array_id: number; reason: string }>;
+}
+
+export function getNepoolStats(): Promise<NepoolStats> {
+  return request<NepoolStats>("/v1/account/nepool/stats");
+}
+
+export async function nepoolPreview(
+  file: File,
+  signal?: AbortSignal,
+): Promise<NepoolPreviewResult> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const headers: Record<string, string> = {};
+  const token = getSession();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetchWithTimeout(
+    "/v1/account/nepool/preview",
+    { method: "POST", headers, body: form, signal },
+    120_000,
+  );
+
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as NepoolPreviewResult;
+}
+
+export async function nepoolCommit(
+  assignments: Array<{ array_id: number; nepool_gis_id: string }>,
+): Promise<NepoolCommitResult> {
+  return request<NepoolCommitResult>("/v1/account/nepool/commit", {
+    body: { assignments },
+  });
+}
