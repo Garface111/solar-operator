@@ -42,7 +42,7 @@ export interface ClientDraftEntry {
 
 const ARRAY_PRICE = 45;
 
-const QUICK_PICKS = [1, 10, 25, 50, 100, 250, 500];
+const QUICK_PICKS = [10, 25, 50, 100, 250, 500];
 
 export default function ClientSetup() {
   const navigate = useNavigate();
