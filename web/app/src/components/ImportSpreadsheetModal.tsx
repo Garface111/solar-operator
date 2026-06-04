@@ -32,6 +32,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   // Reset to a clean slate whenever the modal is (re)opened.
   useEffect(() => {
@@ -59,8 +60,11 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
   async function handleFile(file: File) {
     setStage("parsing");
     setError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const res = await ingestPreview(file);
+      const res = await ingestPreview(file, controller.signal);
+      if (controller.signal.aborted) return;
       if (!res.arrays.length) {
         setError(
           "We couldn't find any arrays in that file. Try a different file, or add clients manually.",
@@ -71,13 +75,24 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
       setRows(res.arrays.map((r) => ({ ...r, include: true })));
       setStage("preview");
     } catch (err) {
+      if (controller.signal.aborted) {
+        setStage("upload");
+        return;
+      }
       setError(
         err instanceof Error
           ? err.message
           : "Couldn't parse that file. Try a different file, or add manually.",
       );
       setStage("upload");
+    } finally {
+      abortRef.current = null;
     }
+  }
+
+  function cancelParsing() {
+    abortRef.current?.abort();
+    setStage("upload");
   }
 
   function onPick(e: React.ChangeEvent<HTMLInputElement>) {
@@ -213,9 +228,15 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
         )}
 
         {stage === "parsing" && (
-          <div className="mt-4 flex flex-col items-center justify-center gap-3 py-16 text-sm text-zinc-500">
+          <div className="mt-4 flex flex-col items-center justify-center gap-4 py-16 text-sm text-zinc-500">
             <Spinner className="h-6 w-6 text-primary-500" />
-            Parsing your spreadsheet…
+            <span>Parsing your spreadsheet…</span>
+            <p className="text-xs text-zinc-400">
+              AI extraction can take up to 2 minutes for large files.
+            </p>
+            <Button variant="ghost" onClick={cancelParsing}>
+              Cancel
+            </Button>
           </div>
         )}
 

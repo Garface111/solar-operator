@@ -477,7 +477,10 @@ export interface IngestCommitResult {
 }
 
 /** Upload a spreadsheet and get back parsed rows (nothing is saved yet). */
-export async function ingestPreview(file: File): Promise<IngestPreview> {
+export async function ingestPreview(
+  file: File,
+  signal?: AbortSignal,
+): Promise<IngestPreview> {
   const form = new FormData();
   form.append("file", file);
 
@@ -489,7 +492,7 @@ export async function ingestPreview(file: File): Promise<IngestPreview> {
   // Longer timeout (120s): the server-side AI parse of a roster can be slow.
   const res = await fetchWithTimeout(
     "/v1/ingest/preview",
-    { method: "POST", headers, body: form },
+    { method: "POST", headers, body: form, signal },
     120_000,
   );
 
