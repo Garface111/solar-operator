@@ -171,7 +171,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
             {domainStatus.status === "verified" ? (
               <span className="text-primary-600">✓ Domain verified — custom From active</span>
             ) : domainStatus.status === "unverified" ? (
-              <span className="text-amber-700">⚠ Domain not verified in Resend — will fall back to platform address</span>
+              <span className="text-amber-700">⚠ Your custom domain is not yet verified — emails will appear to come from our address (admin@solaroperator.org) instead of yours.</span>
             ) : domainStatus.status === "pending" ? (
               <span className="text-amber-600">⏳ Domain verification pending — DNS may take up to 48h</span>
             ) : (
@@ -181,7 +181,8 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
         )}
         <p className="-mt-3 text-xs text-zinc-400">
           Leave blank to send from the Solar Operator address. Custom domains
-          must be verified with Resend, or sends fall back to the platform address automatically.
+          must be verified before they go live — until then, emails come from
+          our address automatically.
         </p>
 
         <Input
