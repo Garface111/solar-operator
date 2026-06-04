@@ -20,11 +20,13 @@ import {
 
 interface Props {
   clientId: number;
+  /** Increment to trigger a re-fetch of arrays from the server. */
+  refreshSignal?: number;
   onCountChange?: (count: number) => void;
   onUndo?: (token: string, message: string) => void;
 }
 
-export function ArrayList({ clientId, onCountChange, onUndo }: Props) {
+export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo }: Props) {
   const toast = useToast();
   const [arrays, setArrays] = useState<ArrayRowT[] | null>(null);
   const [adding, setAdding] = useState(false);
@@ -49,7 +51,7 @@ export function ArrayList({ clientId, onCountChange, onUndo }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientId]);
+  }, [clientId, refreshSignal]);
 
   function replaceArray(updated: ArrayRowT) {
     setArrays((rows) =>
