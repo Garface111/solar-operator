@@ -133,7 +133,18 @@ function ArrayRow({
   const toast = useToast();
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
+
+  // Type-to-confirm: deleting an array is permanent and cascades to bills, so
+  // the operator must type the exact name (unlike the reversible client deactivate).
+  const confirmMatches = confirmText.trim() === array.name.trim();
+
+  function closeConfirm() {
+    if (deleting) return;
+    setConfirmDelete(false);
+    setConfirmText("");
+  }
 
   async function save(patch: Partial<ArrayRowT>) {
     const updated = await updateArray(clientId, array.id, patch as any);
@@ -141,6 +152,7 @@ function ArrayRow({
   }
 
   async function handleDelete() {
+    if (!confirmMatches || deleting) return;
     setDeleting(true);
     try {
       await deleteArray(clientId, array.id);
@@ -150,6 +162,7 @@ function ArrayRow({
       toast.error(err instanceof Error ? err.message : "Couldn't delete array");
       setDeleting(false);
       setConfirmDelete(false);
+      setConfirmText("");
     }
   }
 
@@ -245,18 +258,18 @@ function ArrayRow({
 
       <Modal
         open={confirmDelete}
-        onClose={() => !deleting && setConfirmDelete(false)}
+        onClose={closeConfirm}
         title="Delete this array?"
         footer={
           <>
-            <Button
-              variant="ghost"
-              onClick={() => setConfirmDelete(false)}
-              disabled={deleting}
-            >
+            <Button variant="ghost" onClick={closeConfirm} disabled={deleting}>
               Cancel
             </Button>
-            <Button variant="danger" onClick={handleDelete} disabled={deleting}>
+            <Button
+              variant="danger"
+              onClick={handleDelete}
+              disabled={deleting || !confirmMatches}
+            >
               {deleting ? (
                 <>
                   <Spinner />
@@ -269,10 +282,27 @@ function ArrayRow({
           </>
         }
       >
-        Deleting <span className="font-medium text-zinc-800">{array.name}</span>{" "}
-        also removes its {array.accounts.length} linked utility account
-        {array.accounts.length === 1 ? "" : "s"} and any bills tied to them. This
-        can&apos;t be undone.
+        <p className="text-sm text-zinc-600">
+          Type the array name to permanently delete{" "}
+          <span className="font-medium text-zinc-800">{array.name}</span> and all
+          its captured bills. This cannot be undone (unlike deactivating a
+          client).
+        </p>
+        <p className="mt-2 text-xs text-zinc-500">
+          Removes {array.accounts.length} linked utility account
+          {array.accounts.length === 1 ? "" : "s"} and every bill tied to them.
+        </p>
+        <div className="mt-4">
+          <Input
+            id={`confirm-delete-${array.id}`}
+            label="Array name"
+            autoFocus
+            placeholder={array.name}
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleDelete()}
+          />
+        </div>
       </Modal>
     </div>
   );
