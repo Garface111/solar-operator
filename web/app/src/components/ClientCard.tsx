@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/Button";
 import { Toggle } from "../ui/Toggle";
 import { Spinner } from "../ui/Spinner";
@@ -8,12 +8,14 @@ import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
 import {
   type ClientRow,
+  listClients,
   updateClient,
   deleteClient,
   refreshCapture,
   sendClientReportToMe,
   downloadClientReport,
 } from "../lib/api";
+import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 
 
 
@@ -80,6 +82,12 @@ export function ClientCard({
   const [refreshing, setRefreshing] = useState(false);
   const [sendingToMe, setSendingToMe] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
+  const pollerRef = useRef<PollerHandle | null>(null);
+
+  useEffect(() => {
+    return () => { pollerRef.current?.cancel(); };
+  }, []);
 
   async function handleRefresh() {
     if (refreshing) return;
@@ -108,6 +116,31 @@ export function ClientCard({
     try {
       await patch({ gmp_autopopulate: v });
       toast.success(v ? "Auto-populate on" : "Auto-populate off");
+      if (v) {
+        pollerRef.current?.cancel();
+        const clientId = client.id;
+        const [p, handle] = pollUntilChanged(
+          listClients,
+          (prev, next) => {
+            const a = prev.find((c) => c.id === clientId);
+            const b = next.find((c) => c.id === clientId);
+            if (!a || !b) return false;
+            return (
+              b.array_count > a.array_count ||
+              b.gmp_last_sync_at !== a.gmp_last_sync_at
+            );
+          },
+        );
+        pollerRef.current = handle;
+        p.then((newClients) => {
+          if (!newClients) return;
+          const updated = newClients.find((c) => c.id === clientId);
+          if (updated) {
+            onChange(updated);
+            setArrayRefreshSignal((s) => s + 1);
+          }
+        });
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't update");
     }
@@ -475,6 +508,7 @@ export function ClientCard({
             </h4>
             <ArrayList
               clientId={client.id}
+              refreshSignal={arrayRefreshSignal}
               onCountChange={(count) => onChange({ ...client, array_count: count })}
               onUndo={onUndo}
             />

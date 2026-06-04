@@ -15,6 +15,7 @@ import {
   undoDelete,
   getNepoolStats,
 } from "../lib/api";
+import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 import { useDashboardContext } from "../screens/DashboardLayout";
 
 interface Props {
@@ -41,6 +42,7 @@ export function ClientsSection({ expandClientId }: Props) {
   // Undo bar state
   const [undoPending, setUndoPending] = useState<{ token: string; message: string } | null>(null);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const importPollerRef = useRef<PollerHandle | null>(null);
 
   function scheduleUndo(token: string, message: string) {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
@@ -69,6 +71,7 @@ export function ClientsSection({ expandClientId }: Props) {
   useEffect(() => {
     return () => {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      importPollerRef.current?.cancel();
     };
   }, []);
 
@@ -85,6 +88,24 @@ export function ClientsSection({ expandClientId }: Props) {
         toast.error(err instanceof Error ? err.message : "Couldn't load clients");
         setClients([]);
       });
+  }
+
+  function handleImported() {
+    loadClients();
+    importPollerRef.current?.cancel();
+    const [p, handle] = pollUntilChanged(
+      listClients,
+      (prev, next) => {
+        if (next.length !== prev.length) return true;
+        const prevTotal = prev.reduce((s, c) => s + c.array_count, 0);
+        const nextTotal = next.reduce((s, c) => s + c.array_count, 0);
+        return nextTotal !== prevTotal;
+      },
+    );
+    importPollerRef.current = handle;
+    p.then((newClients) => {
+      if (newClients) setClients(newClients);
+    });
   }
 
   useEffect(() => {
@@ -362,7 +383,7 @@ export function ClientsSection({ expandClientId }: Props) {
       <ImportSpreadsheetModal
         open={importing}
         onClose={() => setImporting(false)}
-        onImported={loadClients}
+        onImported={handleImported}
       />
 
       <AssignNepoolFromSpreadsheetModal
