@@ -812,11 +812,14 @@ def update_client(client_id: int, body: ClientUpdate,
                     raise HTTPException(409,
                         "Another client already has that name")
                 c.name = new_name
+        # Use model_fields_set so an explicit null in the payload can clear a
+        # field (e.g. report_frequency=null → inherit from account). Fields
+        # absent from the request body are NOT in model_fields_set and are
+        # left unchanged — the standard PATCH semantic.
         for field in ("contact_email", "cc_emails", "report_frequency",
                       "active", "notes", "gmp_autopopulate"):
-            v = getattr(body, field)
-            if v is not None:
-                setattr(c, field, v)
+            if field in body.model_fields_set:
+                setattr(c, field, getattr(body, field))
         if body.gmp_email is not None:
             c.gmp_email = body.gmp_email.lower().strip() or None
         if body.gmp_username is not None:
