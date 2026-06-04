@@ -215,7 +215,7 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
                 disabled={refreshing}
                 className="rounded font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
               >
-                {refreshing ? "Refreshing…" : "Refresh"}
+                {refreshing ? "Checking…" : "Check status"}
               </button>
             </div>
           )}
