@@ -304,7 +304,7 @@ export default function Clients() {
                 )}
                 {!c.contact_email && (
                   <div className="mt-1 text-xs text-amber-600">
-                    No contact email — add one in the dashboard before the first send.
+                    Without a contact email, this client won&apos;t receive their report.
                   </div>
                 )}
               </li>
@@ -399,12 +399,17 @@ export default function Clients() {
                 />
                 <Input
                   id={`email-${c.id}`}
-                  label="Contact email"
+                  label="Contact email (optional)"
                   type="email"
                   placeholder="reports@mapleridge.org"
                   value={c.contact_email}
                   onChange={(e) => update(c.id, { contact_email: e.target.value })}
                 />
+                {!c.contact_email.trim() && (
+                  <p className="mt-1 text-[11px] text-amber-600">
+                    Without a contact email, this client won&apos;t receive their report.
+                  </p>
+                )}
 
                 <div className="rounded-xl bg-zinc-50 px-4 py-3">
                   <Toggle

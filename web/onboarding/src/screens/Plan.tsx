@@ -170,6 +170,11 @@ export default function Plan() {
                     value={c.contact_email}
                     onChange={(e) => updateClient(c.id, { contact_email: e.target.value })}
                   />
+                  {!c.contact_email.trim() && (
+                    <p className="mt-1 text-[11px] text-amber-600">
+                      Without a contact email, this client won&apos;t receive their report.
+                    </p>
+                  )}
 
                   <div>
                     <p className="mb-2 text-xs font-medium text-zinc-600">Arrays</p>

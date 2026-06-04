@@ -107,12 +107,17 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
         />
         <Input
           id="new-client-email"
-          label="Contact email (where reports go)"
+          label="Contact email (optional)"
           type="email"
           placeholder="reports@mapleridge.org"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
         />
+        {!email.trim() && (
+          <p className="-mt-2 text-[11px] text-amber-600">
+            Without a contact email, this client won&apos;t receive their report.
+          </p>
+        )}
         <div className="rounded-xl bg-zinc-50 px-4 py-3">
           <Toggle
             id="new-client-autopop"
