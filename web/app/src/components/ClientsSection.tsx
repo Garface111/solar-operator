@@ -1,12 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
+import { Modal } from "../ui/Modal";
 import { useToast } from "../ui/Toast";
 import { ClientCard } from "./ClientCard";
 import { AddClientModal } from "./AddClientModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
-import { type ClientRow, listClients } from "../lib/api";
+import {
+  type ClientRow,
+  listClients,
+  bulkDeleteClients,
+  undoDelete,
+} from "../lib/api";
 import { useDashboardContext } from "../screens/DashboardLayout";
 
 interface Props {
@@ -21,6 +27,46 @@ export function ClientsSection({ expandClientId }: Props) {
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+
+  // Multi-select state
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkConfirm, setBulkConfirm] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  // Undo bar state
+  const [undoPending, setUndoPending] = useState<{ token: string; message: string } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function scheduleUndo(token: string, message: string) {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setUndoPending({ token, message });
+    undoTimerRef.current = setTimeout(() => setUndoPending(null), 60_000);
+  }
+
+  function clearUndo() {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setUndoPending(null);
+  }
+
+  async function handleUndo(token: string) {
+    try {
+      await undoDelete(token);
+      clearUndo();
+      loadClients();
+      toast.success("Restored");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Undo failed");
+      clearUndo();
+    }
+  }
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
 
   function loadClients() {
     listClients()
@@ -53,8 +99,44 @@ export function ClientsSection({ expandClientId }: Props) {
     setClients((cs) => (cs ? cs.map((c) => (c.id === updated.id ? updated : c)) : cs));
   }
 
+  function removeClientLocal(id: number) {
+    setClients((cs) => (cs ? cs.filter((c) => c.id !== id) : cs));
+    setSelectedIds((s) => { const n = new Set(s); n.delete(id); return n; });
+  }
+
   function addClientLocal(c: ClientRow) {
     setClients((cs) => (cs ? [...cs, c].sort((a, b) => a.name.localeCompare(b.name)) : [c]));
+  }
+
+  function toggleSelect(id: number) {
+    setSelectedIds((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  async function handleBulkDelete() {
+    if (!selectedIds.size || bulkDeleting) return;
+    setBulkDeleting(true);
+    try {
+      const ids = Array.from(selectedIds);
+      const res = await bulkDeleteClients(ids);
+      ids.forEach(removeClientLocal);
+      exitSelectMode();
+      setBulkConfirm(false);
+      const n = res.soft_deleted;
+      scheduleUndo(res.undo_token, `Deleted ${n} client${n === 1 ? "" : "s"}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't delete clients");
+    } finally {
+      setBulkDeleting(false);
+    }
   }
 
   const bouncedClients =
@@ -67,7 +149,31 @@ export function ClientsSection({ expandClientId }: Props) {
     ) ?? [];
 
   return (
-    <section>
+    <section className="relative">
+      {/* Undo banner — fixed at top of viewport */}
+      {undoPending && (
+        <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-between gap-4 border-b border-amber-300 bg-amber-50 px-6 py-3 text-sm shadow-md">
+          <span className="text-amber-900">{undoPending.message}</span>
+          <div className="flex shrink-0 items-center gap-4">
+            <button
+              type="button"
+              onClick={() => handleUndo(undoPending.token)}
+              className="font-semibold text-amber-900 hover:text-amber-700 focus:outline-none"
+            >
+              Undo
+            </button>
+            <button
+              type="button"
+              onClick={clearUndo}
+              aria-label="Dismiss"
+              className="text-amber-600 hover:text-amber-500 focus:outline-none"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       {bouncedClients.length > 0 && (
         <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
           <p className="text-sm font-semibold text-red-900">
@@ -92,6 +198,20 @@ export function ClientsSection({ expandClientId }: Props) {
           )}
         </h2>
         <div className="flex items-center gap-2">
+          {clients && clients.length > 0 && (
+            <button
+              type="button"
+              onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+              className={[
+                "rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors focus:outline-none",
+                selectMode
+                  ? "border-primary-300 bg-primary-50 text-primary-700"
+                  : "border-zinc-300 bg-white text-zinc-600 hover:border-zinc-400",
+              ].join(" ")}
+            >
+              {selectMode ? "Cancel select" : "Select"}
+            </button>
+          )}
           <Button
             variant="secondary"
             onClick={() => setImporting(true)}
@@ -143,10 +263,62 @@ export function ClientsSection({ expandClientId }: Props) {
               operatorEmail={operatorEmail}
               defaultExpanded={c.id === expandClientId}
               onChange={replaceClient}
+              selectable={selectMode}
+              selected={selectedIds.has(c.id)}
+              onSelect={toggleSelect}
+              onDeleted={(token, msg) => {
+                removeClientLocal(c.id);
+                scheduleUndo(token, msg);
+              }}
+              onUndo={scheduleUndo}
             />
           ))}
         </div>
       )}
+
+      {/* Sticky bulk-action bar */}
+      {selectMode && selectedIds.size > 0 && (
+        <div className="sticky bottom-4 mt-4 flex items-center justify-between rounded-xl border border-zinc-200 bg-white px-5 py-3 shadow-lg">
+          <span className="text-sm text-zinc-600">
+            {selectedIds.size} client{selectedIds.size === 1 ? "" : "s"} selected
+          </span>
+          <Button variant="danger" onClick={() => setBulkConfirm(true)}>
+            Delete {selectedIds.size} client{selectedIds.size === 1 ? "" : "s"}
+          </Button>
+        </div>
+      )}
+
+      {/* Bulk delete confirmation */}
+      <Modal
+        open={bulkConfirm}
+        onClose={() => !bulkDeleting && setBulkConfirm(false)}
+        title={`Delete ${selectedIds.size} client${selectedIds.size === 1 ? "" : "s"}?`}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setBulkConfirm(false)} disabled={bulkDeleting}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleBulkDelete} disabled={bulkDeleting}>
+              {bulkDeleting ? <><Spinner /> Deleting…</> : `Delete ${selectedIds.size} client${selectedIds.size === 1 ? "" : "s"}`}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-zinc-600">
+          This will also delete all arrays and utility accounts under the selected{" "}
+          {selectedIds.size === 1 ? "client" : "clients"}.{" "}
+          <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
+        </p>
+        {clients && selectedIds.size > 0 && (
+          <ul className="mt-2 space-y-0.5 text-sm text-zinc-700">
+            {clients
+              .filter((c) => selectedIds.has(c.id))
+              .map((c) => (
+                <li key={c.id} className="truncate">• {c.name}</li>
+              ))}
+          </ul>
+        )}
+      </Modal>
 
       <AddClientModal
         open={adding}

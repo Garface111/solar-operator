@@ -28,6 +28,8 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
   const toast = useToast();
   const [stage, setStage] = useState<Stage>("upload");
   const [rows, setRows] = useState<EditableRow[]>([]);
+  const [source, setSource] = useState<"llm" | "heuristic" | "gmcs_shape" | null>(null);
+  const [gmcsOperator, setGmcsOperator] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
@@ -39,6 +41,8 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
     if (open) {
       setStage("upload");
       setRows([]);
+      setSource(null);
+      setGmcsOperator("");
       setError(null);
       setDragOver(false);
       setCommitting(false);
@@ -72,6 +76,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
         setStage("upload");
         return;
       }
+      setSource(res.source);
       setRows(res.arrays.map((r) => ({ ...r, include: true })));
       setStage("preview");
     } catch (err) {
@@ -118,6 +123,12 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
     setRows((rs) =>
       rs.map((r, idx) => (idx === i ? { ...r, include: !r.include } : r)),
     );
+  }
+
+  // When the GMCS global operator name changes, apply it to all selected rows.
+  function applyGmcsOperator(name: string) {
+    setGmcsOperator(name);
+    setRows((rs) => rs.map((r) => ({ ...r, operator_name: name || null })));
   }
 
   const selected = rows.filter((r) => r.include);
@@ -242,6 +253,49 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
 
         {stage === "preview" && (
           <div className="mt-4 flex min-h-0 flex-1 flex-col">
+            {/* GMCS-shape notice */}
+            {source === "gmcs_shape" && (
+              <div className="mb-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-900">
+                <p className="font-medium">Detected GMCS-format workbook</p>
+                <p className="mt-0.5 text-primary-800">
+                  Pulled one row per sheet, with the array name and NEPOOL-GIS ID
+                  from the sheet title. Set the owner below — it applies to all rows.
+                </p>
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-primary-800 mb-1">
+                    Owner / operator (all arrays belong to:)
+                  </label>
+                  <input
+                    type="text"
+                    value={gmcsOperator}
+                    onChange={(e) => applyGmcsOperator(e.target.value)}
+                    placeholder="e.g. Green Mountain Community Solar"
+                    className="w-full rounded-lg border border-primary-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Heuristic warning */}
+            {source === "heuristic" && (
+              <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                We couldn&apos;t use AI to parse this file — guessed at column
+                meanings. Double-check every row before saving.
+              </div>
+            )}
+
+            {/* Preview-is-not-saved note */}
+            <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50">
+              <summary className="cursor-pointer px-4 py-2.5 text-xs font-medium text-zinc-500 hover:text-zinc-700">
+                What if this looks wrong?
+              </summary>
+              <p className="px-4 pb-3 pt-1 text-xs text-zinc-500">
+                This is a preview — <strong>nothing has been saved yet</strong>.
+                Cancel to discard and try a different file, or edit rows
+                individually below before importing.
+              </p>
+            </details>
+
             <p className="mb-3 text-sm text-zinc-600">
               Review and edit before importing. Uncheck any row you want to skip.
             </p>
@@ -338,7 +392,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
               </span>
               <div className="flex gap-2">
                 <Button
-                  variant="ghost"
+                  variant="secondary"
                   onClick={onClose}
                   disabled={committing}
                 >

@@ -219,7 +219,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             {account.name || "Your account"}
           </h2>
           <p className="mt-0.5 text-sm text-zinc-500">
-            {account.plan ? `${account.plan} plan` : "Solar Operator"}
+            Solar Operator
           </p>
         </div>
         <StatusBadge account={account} />

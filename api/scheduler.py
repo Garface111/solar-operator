@@ -10,10 +10,12 @@ Schedule:
   - 1st of every month at 09:00 UTC: deliver to monthly clients
   - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly clients
 """
+from datetime import datetime, timedelta
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select, or_
-from .db import SessionLocal
+from sqlalchemy import select, or_, text
+from .db import SessionLocal, engine
 from .models import Tenant, Client, Job, now
 
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -89,6 +91,27 @@ def deliver_quarterly_reports():
     return _deliver_clients_with_frequency("quarterly")
 
 
+def hard_delete_old_soft_deleted():
+    """Purge rows whose deleted_at is older than 30 days.
+
+    Order: utility_accounts → arrays → clients (FK-safe).
+    Expired delete_history rows are also pruned here."""
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "DELETE FROM utility_accounts WHERE deleted_at IS NOT NULL AND deleted_at < :cutoff"
+        ), {"cutoff": cutoff})
+        conn.execute(text(
+            "DELETE FROM arrays WHERE deleted_at IS NOT NULL AND deleted_at < :cutoff"
+        ), {"cutoff": cutoff})
+        conn.execute(text(
+            "DELETE FROM clients WHERE deleted_at IS NOT NULL AND deleted_at < :cutoff"
+        ), {"cutoff": cutoff})
+        conn.execute(text(
+            "DELETE FROM delete_history WHERE expires_at < :cutoff"
+        ), {"cutoff": cutoff})
+
+
 def start():
     # Every 6 hours, enqueue pull-bills jobs for each active tenant
     scheduler.add_job(
@@ -117,5 +140,11 @@ def start():
         deliver_quarterly_reports,
         CronTrigger(month="1,4,7,10", day=1, hour=9, minute=0),
         id="deliver_quarterly", replace_existing=True,
+    )
+    # Daily at 03:00 UTC: hard-delete rows soft-deleted > 30 days ago
+    scheduler.add_job(
+        hard_delete_old_soft_deleted,
+        CronTrigger(hour=3, minute=0),
+        id="hard_delete_old", replace_existing=True,
     )
     scheduler.start()

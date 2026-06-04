@@ -85,22 +85,80 @@ class CommitBody(BaseModel):
 # ─── file → plain text ─────────────────────────────────────────────────────
 
 def _xlsx_to_text(data: bytes) -> str:
-    """Flatten the FIRST worksheet to tab-separated rows."""
-    from openpyxl import load_workbook  # local import: heavy, only needed here
+    """Flatten ALL worksheets to tab-separated rows with sheet separators.
+
+    Sheets are concatenated with a `--- Sheet: <name> ---` header so the LLM
+    can see rosters that span multiple tabs. Previously only the first sheet
+    was read, silently dropping every subsequent tab."""
+    from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
-        ws = wb.worksheets[0]
-        lines: list[str] = []
-        for row in ws.iter_rows(values_only=True):
-            if row is None:
-                continue
-            cells = ["" if c is None else str(c) for c in row]
-            if any(c.strip() for c in cells):
-                lines.append("\t".join(cells))
-        return "\n".join(lines)
+        parts: list[str] = []
+        for ws in wb.worksheets:
+            lines: list[str] = []
+            for row in ws.iter_rows(values_only=True):
+                if row is None:
+                    continue
+                cells = ["" if c is None else str(c) for c in row]
+                if any(c.strip() for c in cells):
+                    lines.append("\t".join(cells))
+            if lines:
+                parts.append(f"--- Sheet: {ws.title} ---\n" + "\n".join(lines))
+        return "\n\n".join(parts)
     finally:
         wb.close()
+
+
+# ─── GMCS-shape detection and extraction ──────────────────────────────────
+
+# Matches "<Array Name> (<NEPOOL-GIS ID>)" — the A1 title written by gmcs_writer.py.
+_GMCS_A1_RE = re.compile(r"^(.+?)\s*\((\d{2,6})\)\s*$")
+
+
+def _detect_gmcs_shape(wb) -> bool:
+    """True if every non-summary sheet looks like GMCS writer output.
+
+    Conservative: any mismatch → False so we never silently parse a real
+    roster as GMCS.  Requires at least one matching sheet."""
+    checked = 0
+    for ws in wb.worksheets:
+        title_lower = (ws.title or "").lower()
+        if title_lower in ("summary", "notes"):
+            continue
+        val = str(ws.cell(row=1, column=1).value or "").strip()
+        if not _GMCS_A1_RE.match(val):
+            return False
+        h_a = str(ws.cell(row=5, column=1).value or "").strip().lower()
+        h_b = str(ws.cell(row=5, column=2).value or "").strip().lower()
+        # Row-5 header must look like "Quarter" / "Generation (MWh)"
+        if "quarter" not in h_a or ("generation" not in h_b and "mwh" not in h_b):
+            return False
+        checked += 1
+    return checked > 0
+
+
+def _extract_from_gmcs(wb) -> list[dict]:
+    """One row per sheet for a GMCS-format workbook.
+
+    operator_name is always None here — the import preview surfaces a single
+    global 'Owner / operator' field so the user fills it in once."""
+    rows: list[dict] = []
+    for ws in wb.worksheets:
+        if (ws.title or "").lower() in ("summary", "notes"):
+            continue
+        val = str(ws.cell(row=1, column=1).value or "").strip()
+        m = _GMCS_A1_RE.match(val)
+        if not m:
+            continue
+        rows.append({
+            "operator_name": None,
+            "array_name": m.group(1).strip(),
+            "nepool_gis_id": m.group(2),
+            "gmp_account_number": None,
+            "notes": None,
+        })
+    return rows
 
 
 def _csv_to_text(data: bytes) -> str:
@@ -310,32 +368,60 @@ async def ingest_preview(
     if not data:
         raise HTTPException(400, "The uploaded file is empty")
 
-    text = _file_to_text(file.filename or "", data)
-    if not text.strip():
-        raise HTTPException(400, "Couldn't read any rows from that file")
-
-    rows = _llm_extract(text)
     source = "llm"
+    rows: Optional[list[dict]] = None
+
+    # GMCS-shape detection: load the workbook once and check before falling
+    # back to the text/LLM path.  Only applicable for .xlsx.
+    name = (file.filename or "").lower()
+    if name.endswith(".xlsx"):
+        from openpyxl import load_workbook
+        try:
+            wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+            try:
+                if _detect_gmcs_shape(wb):
+                    rows = _extract_from_gmcs(wb)
+                    source = "gmcs_shape"
+            finally:
+                wb.close()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(400, f"Couldn't open that Excel file: {exc}") from exc
+
     if rows is None:
-        rows = _heuristic_extract(text)
-        source = "heuristic"
+        text = _file_to_text(file.filename or "", data)
+        if not text.strip():
+            raise HTTPException(400, "Couldn't read any rows from that file")
+        llm_rows = _llm_extract(text)
+        if llm_rows is not None:
+            rows = llm_rows
+            source = "llm"
+        else:
+            rows = _heuristic_extract(text)
+            source = "heuristic"
 
     arrays = _normalize(rows)
 
     # ── Collision detection: flag rows whose operator/array name matches an
-    # existing client or array in this tenant's data — they'll be merged, not
-    # duplicated, but the user should know. Match is case-insensitive exact name.
+    # existing (non-deleted) client or array in this tenant's data.
     with SessionLocal() as db:
         existing_clients = {
             c.name.strip().lower()
             for c in db.execute(
-                select(Client).where(Client.tenant_id == t.id)
+                select(Client).where(
+                    Client.tenant_id == t.id,
+                    Client.deleted_at.is_(None),
+                )
             ).scalars().all()
         }
         existing_arrays = {
             a.name.strip().lower()
             for a in db.execute(
-                select(Array).where(Array.tenant_id == t.id)
+                select(Array).where(
+                    Array.tenant_id == t.id,
+                    Array.deleted_at.is_(None),
+                )
             ).scalars().all()
         }
 
@@ -415,9 +501,14 @@ def ingest_commit(
             client = find_or_create_client(operator)
 
             # Array unique on (tenant_id, name). If it already exists, reuse it
-            # and backfill NEPOOL / notes if they were blank.
+            # and backfill NEPOOL / notes if they were blank. Exclude soft-deleted
+            # rows so they don't block re-import after a bulk delete.
             arr = db.execute(
-                select(Array).where(Array.tenant_id == t.id, Array.name == array_name)
+                select(Array).where(
+                    Array.tenant_id == t.id,
+                    Array.name == array_name,
+                    Array.deleted_at.is_(None),
+                )
             ).scalar_one_or_none()
             if arr is None:
                 arr = Array(

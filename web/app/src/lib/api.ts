@@ -393,8 +393,13 @@ export async function updateClient(
   return res.client;
 }
 
-export async function deleteClient(id: number): Promise<void> {
-  await request(`/v1/account/clients/${id}`, { method: "DELETE" });
+export interface DeleteResult {
+  ok: boolean;
+  undo_token: string;
+}
+
+export async function deleteClient(id: number): Promise<DeleteResult> {
+  return request<DeleteResult>(`/v1/account/clients/${id}`, { method: "DELETE" });
 }
 
 /** Re-read a client's GMP auto-populate freshness (does not poll GMP). */
@@ -495,10 +500,35 @@ export async function updateArray(
 export async function deleteArray(
   clientId: number,
   arrayId: number,
-): Promise<void> {
-  await request(`/v1/account/clients/${clientId}/arrays/${arrayId}`, {
+): Promise<DeleteResult> {
+  return request<DeleteResult>(
+    `/v1/account/clients/${clientId}/arrays/${arrayId}`,
+    { method: "DELETE" },
+  );
+}
+
+export interface BulkDeleteResult {
+  ok: boolean;
+  soft_deleted: number;
+  undo_token: string;
+}
+
+export async function bulkDeleteArrays(ids: number[]): Promise<BulkDeleteResult> {
+  return request<BulkDeleteResult>("/v1/account/arrays/bulk", {
     method: "DELETE",
+    body: { ids },
   });
+}
+
+export async function bulkDeleteClients(ids: number[]): Promise<BulkDeleteResult> {
+  return request<BulkDeleteResult>("/v1/account/clients/bulk", {
+    method: "DELETE",
+    body: { ids },
+  });
+}
+
+export async function undoDelete(undoToken: string): Promise<{ ok: boolean; restored_arrays: number; restored_clients: number }> {
+  return request("/v1/account/undo-delete", { body: { undo_token: undoToken } });
 }
 
 // ─── utility accounts (under an array) ───────────────────────────────────
@@ -555,7 +585,7 @@ export interface IngestRow {
 }
 
 export interface IngestPreview {
-  source: "llm" | "heuristic";
+  source: "llm" | "heuristic" | "gmcs_shape";
   count: number;
   arrays: IngestRow[];
 }

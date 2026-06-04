@@ -113,6 +113,7 @@ class Client(Base):
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     # GMP auto-populate (added June 2026 for onboarding wizard Screen 4).
     # When gmp_autopopulate is on, the /v1/sync handler matches an incoming
@@ -161,6 +162,7 @@ class Array(Base):
     # 0 = bill represents same month (Bruce's Starlake rule)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="arrays")
     client: Mapped["Client | None"] = relationship(back_populates="arrays")
@@ -183,6 +185,7 @@ class UtilityAccount(Base):
     extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # provider-specific raw blob
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=now)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="accounts")
     array: Mapped[Array | None] = relationship(back_populates="accounts")
@@ -278,3 +281,20 @@ class StripeEvent(Base):
     status: Mapped[str] = mapped_column(String(20), default="received")
     # received | processed | ignored | error
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DeleteHistory(Base):
+    """Undo history for soft-deleted records. One row per delete operation
+    (single or bulk). payload stores the IDs of every row that was set to
+    deleted_at, grouped by table, so undo can reverse the full cascade.
+    Rows with expires_at in the past can no longer be undone; the daily
+    cleanup job hard-deletes the underlying data at 30 days."""
+    __tablename__ = "delete_history"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    undo_token: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # {"clients": [...], "arrays": [...], "utility_accounts": [...]}
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

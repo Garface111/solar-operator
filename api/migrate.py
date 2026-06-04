@@ -210,6 +210,26 @@ def main():
         ]:
             conn.execute(text(idx_sql))
 
+        # Soft-delete columns (bulk-delete + undo feature)
+        soft_delete_cols = [
+            ("clients", "deleted_at",
+             "ALTER TABLE clients ADD COLUMN deleted_at TIMESTAMP"),
+            ("arrays", "deleted_at",
+             "ALTER TABLE arrays ADD COLUMN deleted_at TIMESTAMP"),
+            ("utility_accounts", "deleted_at",
+             "ALTER TABLE utility_accounts ADD COLUMN deleted_at TIMESTAMP"),
+        ]
+        for table, col, sql in soft_delete_cols:
+            if not column_exists(conn, table, col):
+                conn.execute(text(sql))
+                print(f"  + {table}.{col}")
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_clients_deleted_at ON clients (deleted_at)",
+            "CREATE INDEX IF NOT EXISTS ix_arrays_deleted_at ON arrays (deleted_at)",
+            "CREATE INDEX IF NOT EXISTS ix_utility_accounts_deleted_at ON utility_accounts (deleted_at)",
+        ]:
+            conn.execute(text(idx_sql))
+
         # C3: trust-this-device toggle — persist_session on login_tokens.
         if not column_exists(conn, "login_tokens", "persist_session"):
             conn.execute(text(

@@ -37,7 +37,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func
 
 from .db import SessionLocal
-from .models import Tenant, Client, Array, LoginToken, UtilityAccount, now
+from .models import Tenant, Client, Array, LoginToken, UtilityAccount, DeleteHistory, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity
@@ -386,7 +386,10 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             select(func.count()).select_from(Bill).where(Bill.tenant_id == t.id)
         ).scalar() or 0
         clients_count = db.execute(
-            select(func.count()).select_from(Client).where(Client.tenant_id == t.id)
+            select(func.count()).select_from(Client).where(
+                Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+            )
         ).scalar() or 0
         return {
             "tenant_id": t.id,
@@ -722,7 +725,10 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         billable = db.execute(
-            select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+            )
         ).scalar() or 0
     cents, currency = _array_price_cents()
     billable = int(billable)
@@ -794,13 +800,18 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         clients = db.execute(
-            select(Client).where(Client.tenant_id == t.id)
-                          .order_by(Client.name.asc())
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+            ).order_by(Client.name.asc())
         ).scalars().all()
         # Fetch all array counts in a single query rather than one per client.
         array_counts_rows = db.execute(
             select(Array.client_id, func.count(Array.id).label("n"))
-            .where(Array.client_id.in_([c.id for c in clients]))
+            .where(
+                Array.client_id.in_([c.id for c in clients]),
+                Array.deleted_at.is_(None),
+            )
             .group_by(Array.client_id)
         ).all()
         counts = {row.client_id: row.n for row in array_counts_rows}
@@ -889,16 +900,55 @@ def update_client(client_id: int, body: ClientUpdate,
 @router.delete("/v1/account/clients/{client_id}")
 def delete_client(client_id: int,
                   authorization: Optional[str] = Header(default=None)):
-    """Soft delete: marks the client inactive. Arrays stay linked so we
-    don't orphan bills; reactivate by PATCHing active=True."""
+    """Soft-delete a client and all its arrays + utility accounts.
+    Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
+    now_ts = datetime.utcnow()
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
             raise HTTPException(404, "Client not found")
-        c.active = False
+        if c.deleted_at is not None:
+            raise HTTPException(404, "Client not found")
+
+        arrays = db.execute(
+            select(Array).where(Array.client_id == c.id, Array.deleted_at.is_(None))
+        ).scalars().all()
+        array_ids = [a.id for a in arrays]
+
+        ua_ids: list[int] = []
+        if array_ids:
+            uas = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id.in_(array_ids),
+                    UtilityAccount.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            ua_ids = [u.id for u in uas]
+            for u in uas:
+                u.deleted_at = now_ts
+        for a in arrays:
+            a.deleted_at = now_ts
+        c.deleted_at = now_ts
+
+        undo_token = _make_undo_token(t.id, [client_id], now_ts)
+        db.add(DeleteHistory(
+            tenant_id=t.id,
+            undo_token=undo_token,
+            payload={"clients": [client_id], "arrays": array_ids, "utility_accounts": ua_ids},
+            expires_at=now_ts + timedelta(minutes=5),
+        ))
         db.commit()
-    return {"ok": True, "client_id": client_id, "active": False}
+        new_count = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id, Array.deleted_at.is_(None)
+            )
+        ).scalar() or 0
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+
+    reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return {"ok": True, "undo_token": undo_token}
 
 
 @router.post("/v1/account/clients/{client_id}/refresh-capture")
@@ -1009,14 +1059,19 @@ def list_client_arrays(client_id: int,
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
         arrays = db.execute(
-            select(Array).where(Array.client_id == c.id)
-                         .order_by(Array.name.asc())
+            select(Array).where(
+                Array.client_id == c.id,
+                Array.deleted_at.is_(None),
+            ).order_by(Array.name.asc())
         ).scalars().all()
         array_ids = [a.id for a in arrays]
         # Fetch all utility accounts in one query rather than one per array.
         all_accts = db.execute(
             select(UtilityAccount)
-            .where(UtilityAccount.array_id.in_(array_ids))
+            .where(
+                UtilityAccount.array_id.in_(array_ids),
+                UtilityAccount.deleted_at.is_(None),
+            )
             .order_by(UtilityAccount.account_number.asc())
         ).scalars().all() if array_ids else []
         accts_by_array: dict[int, list] = {aid: [] for aid in array_ids}
@@ -1120,25 +1175,250 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
 @router.delete("/v1/account/clients/{client_id}/arrays/{array_id}")
 def delete_array(client_id: int, array_id: int,
                  authorization: Optional[str] = Header(default=None)):
-    """Hard delete an array. Its UtilityAccount rows are cascaded; Bills
-    belonging to those accounts are also removed via FK cascade.
-
-    Use with care — there is no undo. Soft-disable is at the Client layer."""
+    """Soft-delete an array and its utility accounts.
+    Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
+    now_ts = datetime.utcnow()
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
         a = db.get(Array, array_id)
         if not a or a.tenant_id != t.id or a.client_id != c.id:
             raise HTTPException(404, "Array not found")
-        db.delete(a); db.commit()
-        new_array_count = db.execute(
-            select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
+        if a.deleted_at is not None:
+            raise HTTPException(404, "Array not found")
+
+        uas = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.array_id == a.id,
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        ua_ids = [u.id for u in uas]
+        for u in uas:
+            u.deleted_at = now_ts
+        a.deleted_at = now_ts
+
+        undo_token = _make_undo_token(t.id, [array_id], now_ts)
+        db.add(DeleteHistory(
+            tenant_id=t.id,
+            undo_token=undo_token,
+            payload={"clients": [], "arrays": [array_id], "utility_accounts": ua_ids},
+            expires_at=now_ts + timedelta(minutes=5),
+        ))
+        db.commit()
+        new_count = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id, Array.deleted_at.is_(None)
+            )
         ).scalar() or 0
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
 
-    reconcile_subscription_quantity(sub_id, int(new_array_count), t.id, tenant_email)
-    return {"ok": True, "array_id": array_id, "deleted": True}
+    reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return {"ok": True, "undo_token": undo_token}
+
+
+# ─── Bulk delete + undo ─────────────────────────────────────────────────
+
+
+def _make_undo_token(tenant_id: str, ids: list[int], ts: datetime) -> str:
+    raw = f"{tenant_id}:{sorted(ids)}:{ts.timestamp()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+class BulkDeleteBody(BaseModel):
+    ids: list[int]
+
+
+class UndoBody(BaseModel):
+    undo_token: str
+
+
+@router.delete("/v1/account/arrays/bulk")
+def bulk_delete_arrays(
+    body: BulkDeleteBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Soft-delete multiple arrays (from any client under the tenant) in one shot.
+    Returns an undo_token valid for 5 minutes."""
+    t = tenant_from_session(authorization)
+    if not body.ids:
+        raise HTTPException(400, "ids must be non-empty")
+    now_ts = datetime.utcnow()
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.id.in_(body.ids),
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        if not arrays:
+            raise HTTPException(404, "No matching arrays found")
+        array_ids = [a.id for a in arrays]
+
+        uas = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.array_id.in_(array_ids),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        ua_ids = [u.id for u in uas]
+        for u in uas:
+            u.deleted_at = now_ts
+        for a in arrays:
+            a.deleted_at = now_ts
+
+        undo_token = _make_undo_token(t.id, array_ids, now_ts)
+        db.add(DeleteHistory(
+            tenant_id=t.id,
+            undo_token=undo_token,
+            payload={"clients": [], "arrays": array_ids, "utility_accounts": ua_ids},
+            expires_at=now_ts + timedelta(minutes=5),
+        ))
+        db.commit()
+        new_count = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id, Array.deleted_at.is_(None)
+            )
+        ).scalar() or 0
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+
+    reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return {"ok": True, "soft_deleted": len(array_ids), "undo_token": undo_token}
+
+
+@router.delete("/v1/account/clients/bulk")
+def bulk_delete_clients(
+    body: BulkDeleteBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Soft-delete multiple clients and cascade to their arrays + utility accounts.
+    Returns an undo_token valid for 5 minutes."""
+    t = tenant_from_session(authorization)
+    if not body.ids:
+        raise HTTPException(400, "ids must be non-empty")
+    now_ts = datetime.utcnow()
+    with SessionLocal() as db:
+        clients = db.execute(
+            select(Client).where(
+                Client.id.in_(body.ids),
+                Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        if not clients:
+            raise HTTPException(404, "No matching clients found")
+        client_ids = [c.id for c in clients]
+
+        arrays = db.execute(
+            select(Array).where(
+                Array.client_id.in_(client_ids),
+                Array.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        array_ids = [a.id for a in arrays]
+
+        ua_ids: list[int] = []
+        if array_ids:
+            uas = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id.in_(array_ids),
+                    UtilityAccount.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            ua_ids = [u.id for u in uas]
+            for u in uas:
+                u.deleted_at = now_ts
+        for a in arrays:
+            a.deleted_at = now_ts
+        for c in clients:
+            c.deleted_at = now_ts
+
+        undo_token = _make_undo_token(t.id, client_ids, now_ts)
+        db.add(DeleteHistory(
+            tenant_id=t.id,
+            undo_token=undo_token,
+            payload={"clients": client_ids, "arrays": array_ids, "utility_accounts": ua_ids},
+            expires_at=now_ts + timedelta(minutes=5),
+        ))
+        db.commit()
+        new_count = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id, Array.deleted_at.is_(None)
+            )
+        ).scalar() or 0
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+
+    reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return {"ok": True, "soft_deleted": len(client_ids), "undo_token": undo_token}
+
+
+@router.post("/v1/account/undo-delete")
+def undo_delete(
+    body: UndoBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Restore soft-deleted records referenced by undo_token.
+    Only works within 5 minutes of the delete. Returns 410 if expired."""
+    t = tenant_from_session(authorization)
+    now_ts = datetime.utcnow()
+    with SessionLocal() as db:
+        history = db.execute(
+            select(DeleteHistory).where(
+                DeleteHistory.undo_token == body.undo_token,
+                DeleteHistory.tenant_id == t.id,
+            )
+        ).scalar_one_or_none()
+        if not history:
+            raise HTTPException(404, "Undo token not found")
+        if history.consumed_at is not None:
+            raise HTTPException(409, "This undo token has already been used")
+        if history.expires_at < now_ts:
+            raise HTTPException(410, "Undo window expired — the 5-minute undo period has passed")
+
+        payload = history.payload or {}
+        restored_clients = payload.get("clients") or []
+        restored_arrays = payload.get("arrays") or []
+        restored_uas = payload.get("utility_accounts") or []
+
+        if restored_clients:
+            db.execute(
+                Client.__table__.update()
+                .where(Client.id.in_(restored_clients), Client.tenant_id == t.id)
+                .values(deleted_at=None)
+            )
+        if restored_arrays:
+            db.execute(
+                Array.__table__.update()
+                .where(Array.id.in_(restored_arrays), Array.tenant_id == t.id)
+                .values(deleted_at=None)
+            )
+        if restored_uas:
+            db.execute(
+                UtilityAccount.__table__.update()
+                .where(UtilityAccount.id.in_(restored_uas), UtilityAccount.tenant_id == t.id)
+                .values(deleted_at=None)
+            )
+
+        history.consumed_at = now_ts
+        db.commit()
+        new_count = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id, Array.deleted_at.is_(None)
+            )
+        ).scalar() or 0
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+
+    reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return {
+        "ok": True,
+        "restored_clients": len(restored_clients),
+        "restored_arrays": len(restored_arrays),
+    }
 
 
 # ─── Utility account CRUD (per array) ───────────────────────────────────
