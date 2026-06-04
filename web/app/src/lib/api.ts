@@ -248,6 +248,33 @@ export async function getBillingSummary(): Promise<BillingSummary> {
   return request<BillingSummary>("/v1/account/billing-summary");
 }
 
+export interface CaptureEntry {
+  pulled_at: string | null;
+  client_name: string;
+  array_name: string;
+  period_start: string | null;
+  period_end: string | null;
+}
+
+/** Last N bill captures for this tenant, annotated with client + array names. */
+export async function getRecentCaptures(limit = 5): Promise<CaptureEntry[]> {
+  const res = await request<{ captures: CaptureEntry[] }>(
+    `/v1/account/recent-captures?limit=${limit}`,
+  );
+  return res.captures;
+}
+
+export interface NextInvoice {
+  amount_cents: number | null;
+  currency: string | null;
+  period_end: string | null;
+}
+
+/** Next Stripe invoice amount + due date for the billing strip. */
+export async function getNextInvoice(): Promise<NextInvoice> {
+  return request<NextInvoice>("/v1/account/next-invoice");
+}
+
 export interface FromDomainStatus {
   domain: string | null;
   status: "verified" | "pending" | "unverified" | "unknown" | "none";

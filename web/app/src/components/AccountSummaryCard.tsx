@@ -7,9 +7,13 @@ import { useToast } from "../ui/Toast";
 import {
   type Account,
   type BillingSummary,
+  type CaptureEntry,
+  type NextInvoice,
   updateAccountEmail,
   getBillingPortalUrl,
   getBillingSummary,
+  getRecentCaptures,
+  getNextInvoice,
 } from "../lib/api";
 
 /** Next scheduled send date based on report_frequency.
@@ -38,6 +42,18 @@ function nextReportDate(freq: string | null): Date {
   return candidates.find((d) => d.getTime() > utcNow)!;
 }
 
+/** Human-readable "X ago", e.g. "2h ago", "3 days ago". */
+function timeAgo(past: Date): string {
+  const diffMs = Date.now() - past.getTime();
+  if (diffMs < 60_000) return "just now";
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(diffMs / 3_600_000);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(diffMs / 86_400_000);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 /** Human-readable relative time, e.g. "in 3h 12m" or "in 4 days". */
 function relativeTime(target: Date, overdueLabel = "soon"): string {
   const diffMs = target.getTime() - Date.now();
@@ -62,6 +78,19 @@ function fmtMoney(cents: number, currency: string): string {
     }).format(cents / 100);
   } catch {
     return `$${(cents / 100).toFixed(2)}`;
+  }
+}
+
+/** "Jan 2026" from an ISO date string, or null. */
+function shortMonth(iso: string | null): string | null {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      month: "short",
+      year: "numeric",
+    });
+  } catch {
+    return null;
   }
 }
 
@@ -131,6 +160,8 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   const [openingPortal, setOpeningPortal] = useState(false);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
+  const [captures, setCaptures] = useState<CaptureEntry[] | null>(null);
+  const [nextInvoice, setNextInvoice] = useState<NextInvoice | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -145,6 +176,15 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
     }
     fetchBilling();
     window.addEventListener("so:arrays-changed", fetchBilling);
+
+    getRecentCaptures(5)
+      .then((c) => { if (!cancelled) setCaptures(c); })
+      .catch(() => {});
+
+    getNextInvoice()
+      .then((n) => { if (!cancelled) setNextInvoice(n); })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
       window.removeEventListener("so:arrays-changed", fetchBilling);
@@ -215,9 +255,24 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             {account.bills_count}
           </span>
         </Field>
+        {account.extension_heartbeat_at && (
+          <Field label="Last GMP capture">
+            <span>
+              {new Date(account.extension_heartbeat_at).toLocaleDateString()}{" "}
+              <span className="font-normal text-zinc-400">
+                ({timeAgo(new Date(account.extension_heartbeat_at))})
+              </span>
+            </span>
+          </Field>
+        )}
         {account.last_delivery_at && (
           <Field label="Most recent delivery">
-            {new Date(account.last_delivery_at).toLocaleDateString()}
+            <span>
+              {new Date(account.last_delivery_at).toLocaleDateString()}{" "}
+              <span className="font-normal text-zinc-400">
+                ({timeAgo(new Date(account.last_delivery_at!))})
+              </span>
+            </span>
           </Field>
         )}
       </div>
@@ -246,6 +301,23 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
               arrays are added.
             </p>
           )}
+          {nextInvoice?.amount_cents != null && nextInvoice.currency && (
+            <p className="mt-1.5 text-xs text-zinc-600">
+              Next charge:{" "}
+              <span className="font-medium text-zinc-800">
+                {fmtMoney(nextInvoice.amount_cents, nextInvoice.currency)}
+              </span>
+              {nextInvoice.period_end && (
+                <>
+                  {" on "}
+                  {new Date(nextInvoice.period_end).toLocaleDateString(
+                    undefined,
+                    { month: "short", day: "numeric", year: "numeric" },
+                  )}
+                </>
+              )}
+            </p>
+          )}
           <p className="mt-1 text-xs text-zinc-400">
             Updates automatically as auto-populate adds arrays.{" "}
             <a
@@ -266,6 +338,37 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           <p className="mt-0.5 text-xs text-amber-800">
             Reports will continue while we retry. Click &ldquo;Manage billing&rdquo; below to update your payment method.
           </p>
+        </div>
+      )}
+
+      {/* Recent captures activity feed */}
+      {captures !== null && captures.length > 0 && (
+        <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+            Recent bill captures
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {captures.map((c, i) => {
+              const period = shortMonth(c.period_end) ?? shortMonth(c.period_start);
+              return (
+                <li key={i} className="flex items-baseline justify-between gap-2 text-xs">
+                  <span className="text-zinc-700">
+                    <span className="font-medium">{c.client_name}</span>
+                    {" · "}
+                    {c.array_name}
+                    {period && (
+                      <span className="text-zinc-400"> ({period} bill)</span>
+                    )}
+                  </span>
+                  {c.pulled_at && (
+                    <span className="shrink-0 text-zinc-400">
+                      {timeAgo(new Date(c.pulled_at))}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
 

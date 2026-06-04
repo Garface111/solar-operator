@@ -725,6 +725,39 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
     }
 
 
+@router.get("/v1/account/next-invoice")
+def next_invoice(authorization: Optional[str] = Header(default=None)):
+    """Return the next Stripe invoice's amount and due date.
+
+    Calls stripe.Invoice.upcoming() and surfaces the total and period_end so
+    the dashboard billing strip can show 'Next charge: $X on <date>'. Returns
+    null fields when Stripe is unconfigured, the tenant has no customer, or the
+    API call fails — the billing strip just hides the next-charge line."""
+    t = tenant_from_session(authorization)
+    if not t.stripe_customer_id or not os.getenv("STRIPE_SECRET_KEY"):
+        return {"amount_cents": None, "currency": None, "period_end": None}
+    try:
+        invoice = stripe.Invoice.upcoming(customer=t.stripe_customer_id)
+        amount = invoice.get("amount_due") or invoice.get("amount_remaining")
+        currency = invoice.get("currency")
+        period_end = invoice.get("period_end")  # Unix timestamp
+        from datetime import timezone
+        pe_iso = (
+            datetime.fromtimestamp(period_end, tz=timezone.utc).isoformat()
+            if period_end else None
+        )
+        return {"amount_cents": amount, "currency": currency, "period_end": pe_iso}
+    except stripe.error.InvalidRequestError as e:
+        # "No upcoming invoices" is not an error worth logging
+        if "No upcoming invoices" in str(e):
+            return {"amount_cents": None, "currency": None, "period_end": None}
+        logger.warning("next-invoice: Stripe error for tenant %s: %s", t.id, e)
+        return {"amount_cents": None, "currency": None, "period_end": None}
+    except Exception as e:
+        logger.warning("next-invoice: unexpected error for tenant %s: %s", t.id, e)
+        return {"amount_cents": None, "currency": None, "period_end": None}
+
+
 @router.get("/v1/account/billing-portal")
 def billing_portal(authorization: Optional[str] = Header(default=None)):
     """Return a Stripe Billing Portal URL the customer can use to update card,
@@ -1122,3 +1155,52 @@ def remove_utility_account(client_id: int, array_id: int, acct_id: int,
             raise HTTPException(404, "Utility account not found")
         db.delete(ac); db.commit()
     return {"ok": True, "account_id": acct_id, "deleted": True}
+
+
+# ─── Recent captures feed ────────────────────────────────────────────────
+
+@router.get("/v1/account/recent-captures")
+def recent_captures(
+    limit: int = 5,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Return the last N bill captures for this tenant, annotated with client
+    and array names. Powers the activity feed on the dashboard Account tab.
+
+    Each entry: {pulled_at, client_name, array_name, period_start, period_end}.
+    period_start/end are ISO strings or null if the bill parser didn't extract them."""
+    if limit < 1:
+        limit = 1
+    elif limit > 50:
+        limit = 50
+    t = tenant_from_session(authorization)
+    from .models import Bill
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(
+                Bill.pulled_at,
+                Client.name.label("client_name"),
+                Array.name.label("array_name"),
+                Bill.period_start,
+                Bill.period_end,
+            )
+            .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+            .join(Array, UtilityAccount.array_id == Array.id)
+            .join(Client, Array.client_id == Client.id)
+            .where(Bill.tenant_id == t.id)
+            .order_by(Bill.pulled_at.desc())
+            .limit(limit)
+        ).all()
+        return {
+            "ok": True,
+            "captures": [
+                {
+                    "pulled_at": r.pulled_at.isoformat() if r.pulled_at else None,
+                    "client_name": r.client_name,
+                    "array_name": r.array_name,
+                    "period_start": r.period_start.isoformat() if r.period_start else None,
+                    "period_end": r.period_end.isoformat() if r.period_end else None,
+                }
+                for r in rows
+            ],
+        }
