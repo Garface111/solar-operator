@@ -294,6 +294,17 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
                 {fmtMoney(billing.total_cents, billing.currency)}/mo
               </span>
             </p>
+          ) : nextInvoice?.amount_cents && nextInvoice.amount_cents > 0 ? (
+            // No arrays on file yet but Stripe is billing — operator used the
+            // estimate path at checkout. Make this explicit so they're not surprised.
+            <p className="mt-1 text-sm text-amber-800">
+              Billing is currently based on your initial estimate — no arrays on
+              file yet.{" "}
+              <a href="/accounts/clients" className="font-medium underline underline-offset-2 hover:text-amber-900">
+                Add your arrays
+              </a>{" "}
+              and your subscription will sync to the real count automatically.
+            </p>
           ) : (
             <p className="mt-1 text-sm text-zinc-700">
               No billable arrays yet — you&apos;ll be billed{" "}
@@ -319,7 +330,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             </p>
           )}
           <p className="mt-1 text-xs text-zinc-400">
-            Updates automatically as auto-populate adds arrays.{" "}
+            Updates automatically as you add or remove arrays.{" "}
             <a
               href="/accounts/clients"
               className="underline-offset-2 hover:text-zinc-600 hover:underline"

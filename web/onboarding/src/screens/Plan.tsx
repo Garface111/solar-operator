@@ -100,12 +100,15 @@ export default function Plan() {
   async function goToStripe(
     payload: { array_count?: number; clients?: ClientSeedPayload[] },
   ) {
+    // info is guaranteed non-null here: useEffect redirects if it's null and
+    // we return null early, but TypeScript doesn't narrow through useEffect.
+    const op = info!;
     setSubmitting(true);
     try {
       const { checkout_url, onboarding_token } = await createCheckout({
-        full_name: info.fullName,
-        email: info.email,
-        company: info.company,
+        full_name: op.fullName,
+        email: op.email,
+        company: op.company,
         ...payload,
       });
       setToken(onboarding_token);
