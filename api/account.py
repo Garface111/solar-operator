@@ -364,16 +364,17 @@ def account_me(authorization: Optional[str] = Header(default=None)):
         from .models import UtilityAccount, UtilitySession, Bill
         # Re-read inside this session for fresh relationships
         t = db.get(Tenant, t.id)
-        accounts = db.execute(
-            select(UtilityAccount).where(UtilityAccount.tenant_id == t.id)
-        ).scalars().all()
+        accounts_count = db.execute(
+            select(func.count()).select_from(UtilityAccount)
+            .where(UtilityAccount.tenant_id == t.id)
+        ).scalar() or 0
         last_sess = db.execute(
             select(UtilitySession).where(UtilitySession.tenant_id == t.id)
             .order_by(UtilitySession.captured_at.desc())
         ).scalars().first()
         bills_count = db.execute(
-            select(Bill).where(Bill.tenant_id == t.id)
-        ).scalars().all()
+            select(func.count()).select_from(Bill).where(Bill.tenant_id == t.id)
+        ).scalar() or 0
         clients_count = db.execute(
             select(func.count()).select_from(Client).where(Client.tenant_id == t.id)
         ).scalar() or 0
@@ -403,8 +404,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "last_delivery_at": t.last_delivery_at.isoformat() if t.last_delivery_at else None,
             "extension_heartbeat_at": t.extension_heartbeat_at.isoformat() if t.extension_heartbeat_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
-            "accounts_count": len(accounts),
-            "bills_count": len(bills_count),
+            "accounts_count": int(accounts_count),
+            "bills_count": int(bills_count),
             "clients_count": int(clients_count),
             "session": {
                 "captured_at": last_sess.captured_at.isoformat() if last_sess else None,
