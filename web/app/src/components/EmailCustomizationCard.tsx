@@ -18,6 +18,7 @@ import {
 const SEND_MODES = [
   { value: "to_client", label: "To my clients" },
   { value: "to_me", label: "To me only (I forward)" },
+  { value: "to_both", label: "To both my clients and me" },
 ] as const;
 
 const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{tenant_email}}, {{quarter}}";
@@ -267,8 +268,10 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           </div>
           <p className="mt-2 text-xs leading-relaxed text-zinc-400">
             {sendMode === "to_me"
-              ? "Reports come to your inbox (with the client's name in the subject and body) so you can review and forward them yourself. Clients are not emailed — not even if \"Send me a copy\" is on."
-              : "Reports go straight to each client's contact email. Enable \"Send me a copy\" on the Reports tab to receive a copy too."}
+              ? "Reports come to your inbox (with the client's name in the subject and body) so you can review and forward them yourself. Clients are not emailed."
+              : sendMode === "to_both"
+              ? "Each client gets their copy and you get a separate email for each report too."
+              : "Reports go straight to each client's contact email."}
           </p>
         </div>
       </div>

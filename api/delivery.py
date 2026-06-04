@@ -67,11 +67,14 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         client_name = client.name
         tenant_name = tenant.name
         tenant_id = tenant.id
-        # Snapshot for the "copy me on every report" feature (session closes below).
-        tenant_cc_on_reports = bool(tenant.cc_on_reports)
         tenant_email = (tenant.contact_email or "").strip()
         # V2 email customization snapshot (session closes below).
-        send_mode = (tenant.send_mode or "to_client").strip() or "to_client"
+        # Legacy: if no send_mode is set but cc_on_reports was true, treat as to_both.
+        _raw_mode = (tenant.send_mode or "").strip()
+        if not _raw_mode:
+            send_mode = "to_both" if bool(tenant.cc_on_reports) else "to_client"
+        else:
+            send_mode = _raw_mode
         from_header = resolve_from_header(
             tenant.send_from_email, tenant.send_from_name, tenant_name)
         subject_template = tenant.email_subject_template
@@ -94,6 +97,9 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # Tenant wants the workbook themselves to forward under their own name.
         # Client + client CCs are intentionally NOT contacted.
         recipients = [tenant_email] if tenant_email else []
+    elif send_mode == "to_both":
+        # Client gets their copy; tenant gets a separate email below.
+        recipients = _recipients_for_client(client, tenant, override_to)
     else:
         recipients = _recipients_for_client(client, tenant, override_to)
     if not recipients:
@@ -149,14 +155,12 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                 workbook_path=str(path), filename=filename, from_addr=from_header,
             )
 
-        # "Copy me on every report": send the operator the identical workbook
-        # with a [copy] subject prefix. Skip when the tenant address already
-        # received it as a recipient/CC, and skip on override sends (which are
-        # explicit one-off addresses, not the normal client fan-out).
-        if (tenant_cc_on_reports and tenant_email and not override_to
+        # to_both: tenant gets their own separate copy (not just a cc).
+        # Skip when tenant address is already in recipients, and on override sends.
+        if (send_mode == "to_both" and tenant_email and not override_to
                 and tenant_email not in recipients):
             send_workbook_email(
-                to=tenant_email, subject=f"[copy] {subject}", html=html, text=text,
+                to=tenant_email, subject=subject, html=html, text=text,
                 workbook_path=str(path), filename=filename, from_addr=from_header,
             )
 

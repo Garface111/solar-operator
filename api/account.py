@@ -397,6 +397,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "email_subject_template": t.email_subject_template,
             "email_body_template": t.email_body_template,
             "send_mode": t.send_mode or "to_client",
+            "valid_send_modes": list(_VALID_SEND_MODES),
+            "valid_frequencies": ["monthly", "quarterly"],
             "default_email_subject": DEFAULT_SUBJECT_TEMPLATE,
             "default_email_body": DEFAULT_BODY_TEMPLATE,
             "merge_tags": list(MERGE_TAGS),
@@ -462,8 +464,8 @@ def regen_activation_key(authorization: Optional[str] = Header(default=None)):
 @router.post("/v1/account/frequency")
 def update_frequency(body: UpdateFrequency, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
-    if body.frequency not in ("weekly", "monthly", "quarterly"):
-        raise HTTPException(400, "frequency must be weekly, monthly, or quarterly")
+    if body.frequency not in ("monthly", "quarterly"):
+        raise HTTPException(400, "frequency must be monthly or quarterly")
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.report_frequency = body.frequency
@@ -490,7 +492,7 @@ def update_cc_on_reports(body: UpdateCcOnReports,
 # dynamically from the real most-recently-complete quarter so the preview
 # matches what actual reports will say at send time.
 _PREVIEW_CLIENT = "Sample Client"
-_VALID_SEND_MODES = ("to_client", "to_me")
+_VALID_SEND_MODES = ("to_client", "to_me", "to_both")
 
 
 class EmailSettings(BaseModel):
@@ -516,7 +518,7 @@ def _validate_email_settings(body: EmailSettings) -> None:
             raise HTTPException(400, "send_from_email must be a valid email address")
     if body.send_mode is not None and body.send_mode.strip():
         if body.send_mode.strip() not in _VALID_SEND_MODES:
-            raise HTTPException(400, "send_mode must be 'to_client' or 'to_me'")
+            raise HTTPException(400, "send_mode must be 'to_client', 'to_me', or 'to_both'")
 
 
 def _effective(req_val: Optional[str], stored_val: Optional[str]) -> Optional[str]:
@@ -628,6 +630,10 @@ def preview_email(body: EmailSettings,
     from_header = resolve_from_header(eff_from_email, eff_from_name, tenant_name)
     if eff_mode == "to_me":
         recipient = tenant_email or "you (your account email)"
+    elif eff_mode == "to_both":
+        client_part = f"{_PREVIEW_CLIENT} (your client's contact email)"
+        you_part = tenant_email or "you (your account email)"
+        recipient = f"{client_part} + {you_part}"
     else:
         recipient = f"{_PREVIEW_CLIENT} (your client's contact email)"
     return {
@@ -767,9 +773,9 @@ def create_client(body: ClientCreate,
     if not name:
         raise HTTPException(400, "name is required")
     if body.report_frequency and body.report_frequency not in (
-            "weekly", "monthly", "quarterly"):
+            "monthly", "quarterly"):
         raise HTTPException(400,
-            "report_frequency must be weekly, monthly, quarterly, or null")
+            "report_frequency must be monthly, quarterly, or null")
     with SessionLocal() as db:
         existing = db.execute(
             select(Client).where(Client.tenant_id == t.id, Client.name == name)
@@ -797,9 +803,9 @@ def update_client(client_id: int, body: ClientUpdate,
                   authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     if body.report_frequency and body.report_frequency not in (
-            "weekly", "monthly", "quarterly"):
+            "monthly", "quarterly"):
         raise HTTPException(400,
-            "report_frequency must be weekly, monthly, quarterly, or null")
+            "report_frequency must be monthly, quarterly, or null")
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:

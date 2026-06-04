@@ -133,7 +133,7 @@ export interface Account {
   send_from_name: string | null;
   email_subject_template: string | null;
   email_body_template: string | null;
-  send_mode: string; // "to_client" | "to_me"
+  send_mode: string; // "to_client" | "to_me" | "to_both"
   default_email_subject: string;
   default_email_body: string;
   merge_tags: string[];

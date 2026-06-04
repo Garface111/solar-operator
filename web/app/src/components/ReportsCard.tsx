@@ -3,7 +3,6 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { Spinner } from "../ui/Spinner";
-import { Toggle } from "../ui/Toggle";
 import { useToast } from "../ui/Toast";
 import {
   type Account,
@@ -11,14 +10,22 @@ import {
   sendReportNow,
   sendSampleReport,
   updateAccountFrequency,
-  updateCcOnReports,
+  updateEmailSettings,
 } from "../lib/api";
 
 const FREQUENCIES = [
-  { value: "weekly", label: "Weekly" },
   { value: "monthly", label: "Monthly" },
   { value: "quarterly", label: "Quarterly" },
 ] as const;
+
+const SEND_MODES = [
+  { value: "to_client", label: "Send to my clients only" },
+  { value: "to_me", label: "Send to me only (no client gets emailed)" },
+  { value: "to_both", label: "Send to both my clients and me" },
+] as const;
+
+const SAMPLE_WORKBOOK_URL =
+  "https://web-production-49c83.up.railway.app/onboarding/sample.xlsx";
 
 /** Compact, human "<name> (<reason>)" list for a failed-send toast. */
 function describeFailures(failures: SendResult[]): string {
@@ -40,27 +47,26 @@ function humanDate(iso: string): string {
 
 /** Estimate the next automatic send. If a report has gone out before, it's the
  *  last delivery plus one cadence interval; otherwise the end of the current
- *  week / month / quarter. A friendly estimate — the scheduler fires on calendar
- *  boundaries, but this answers "roughly when does my next one go?". */
+ *  month / quarter. */
 function nextSendDate(freq: string, lastDeliveryIso: string | null): Date {
   if (lastDeliveryIso) {
     const d = new Date(lastDeliveryIso);
-    if (freq === "weekly") d.setDate(d.getDate() + 7);
-    else if (freq === "monthly") d.setMonth(d.getMonth() + 1);
+    if (freq === "monthly") d.setMonth(d.getMonth() + 1);
     else d.setMonth(d.getMonth() + 3); // quarterly
     return d;
   }
   const now = new Date();
-  if (freq === "weekly") {
-    const d = new Date(now);
-    d.setDate(d.getDate() + ((7 - d.getDay()) % 7)); // end of week (Sunday)
-    return d;
-  }
   if (freq === "monthly") {
     return new Date(now.getFullYear(), now.getMonth() + 1, 0); // last day of month
   }
   const endMonth = Math.floor(now.getMonth() / 3) * 3 + 3; // quarter end
   return new Date(now.getFullYear(), endMonth, 0);
+}
+
+/** Coerce legacy "weekly" rows to "monthly" for display only. */
+function displayFrequency(freq: string | null): string {
+  if (!freq || freq === "weekly") return "monthly";
+  return freq;
 }
 
 interface Props {
@@ -71,16 +77,18 @@ interface Props {
 export function ReportsCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   const [savingFreq, setSavingFreq] = useState(false);
-  const [savingCc, setSavingCc] = useState(false);
+  const [savingMode, setSavingMode] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendingSample, setSendingSample] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
+  const freq = displayFrequency(account.report_frequency);
+  const sendMode = account.send_mode || "to_client";
+
   async function selectFrequency(next: string) {
-    if (next === account.report_frequency || savingFreq) return;
+    if (next === freq || savingFreq) return;
     const prev = account.report_frequency;
-    // Optimistic — snap the control immediately, revert if the save fails.
     onAccountChange({ report_frequency: next });
     setSavingFreq(true);
     try {
@@ -97,27 +105,23 @@ export function ReportsCard({ account, onAccountChange }: Props) {
     }
   }
 
-  async function toggleCc(next: boolean) {
-    if (savingCc) return;
-    const prev = account.cc_on_reports;
-    // Optimistic — flip immediately, revert if the save fails.
-    onAccountChange({ cc_on_reports: next });
-    setSavingCc(true);
+  async function selectSendMode(next: string) {
+    if (next === sendMode || savingMode) return;
+    const prev = account.send_mode;
+    onAccountChange({ send_mode: next });
+    setSavingMode(true);
     try {
-      const value = await updateCcOnReports(next);
-      onAccountChange({ cc_on_reports: value });
-      toast.success(
-        value
-          ? "You'll get a copy of every report"
-          : "Stopped copying you on reports",
-      );
+      const saved = await updateEmailSettings({ send_mode: next });
+      onAccountChange({ send_mode: saved.send_mode });
+      const label = SEND_MODES.find((m) => m.value === saved.send_mode)?.label;
+      toast.success(label ? `Send mode: ${label}` : "Send mode updated");
     } catch (err) {
-      onAccountChange({ cc_on_reports: prev });
+      onAccountChange({ send_mode: prev });
       toast.error(
-        err instanceof Error ? err.message : "Couldn't update that setting",
+        err instanceof Error ? err.message : "Couldn't update send mode",
       );
     } finally {
-      setSavingCc(false);
+      setSavingMode(false);
     }
   }
 
@@ -142,10 +146,8 @@ export function ReportsCard({ account, onAccountChange }: Props) {
             : `Report sent to ${ok} clients.`,
         );
       } else if (ok === 0) {
-        // Everything failed — show why, per client.
         toast.error(`Report failed for all ${total}. ${describeFailures(failures)}`);
       } else {
-        // Partial — be specific about who didn't get it and why.
         toast.error(
           `Sent to ${ok} of ${total}. ${failures.length} failed: ${describeFailures(failures)}`,
         );
@@ -200,7 +202,7 @@ export function ReportsCard({ account, onAccountChange }: Props) {
           className="mt-2 inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1"
         >
           {FREQUENCIES.map((f) => {
-            const selected = account.report_frequency === f.value;
+            const selected = freq === f.value;
             return (
               <button
                 key={f.value}
@@ -230,10 +232,7 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         Next automatic report:{" "}
         <span className="font-medium text-zinc-900">
           {humanDate(
-            nextSendDate(
-              account.report_frequency ?? "quarterly",
-              account.last_delivery_at,
-            ).toISOString(),
+            nextSendDate(freq, account.last_delivery_at).toISOString(),
           )}
         </span>
       </p>
@@ -245,50 +244,6 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         {account.last_delivery_at
           ? `Last sent: ${humanDate(account.last_delivery_at)}`
           : "No reports sent yet"}
-      </p>
-
-      {/* Copy me on every report */}
-      <div className="mt-6 border-t border-zinc-100 pt-5">
-        <Toggle
-          id="cc-on-reports"
-          checked={account.cc_on_reports}
-          disabled={savingCc}
-          onChange={toggleCc}
-          label="Send me a copy of every report"
-        />
-        <p className="ml-14 mt-1.5 text-xs leading-relaxed text-zinc-400">
-          You&apos;ll receive an identical email to whatever each client gets,
-          every time a report goes out. Useful for keeping records or QA.
-        </p>
-        {account.send_mode === "to_me" && (
-          <p className="ml-14 mt-1 text-xs text-amber-700">
-            Note: when send mode is &ldquo;To me only,&rdquo; clients are never
-            emailed — this copy goes to you alongside the forwarding copy.
-          </p>
-        )}
-      </div>
-
-      {/* Send now + Send me a sample */}
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button onClick={() => setConfirmOpen(true)}>Send a report now</Button>
-        <Button
-          variant="secondary"
-          onClick={doSendSample}
-          disabled={sendingSample}
-        >
-          {sendingSample ? (
-            <>
-              <Spinner />
-              Sending…
-            </>
-          ) : (
-            "Send me a sample"
-          )}
-        </Button>
-      </div>
-      <p className="mt-2 text-xs text-zinc-400">
-        "Send a report now" emails all clients. "Send me a sample" sends one
-        workbook to your own inbox only — no client is contacted.
       </p>
 
       {/* What it looks like — collapsible */}
@@ -310,21 +265,93 @@ export function ReportsCard({ account, onAccountChange }: Props) {
           </span>
         </button>
         {detailsOpen && (
-          <ul className="mt-3 space-y-1.5 text-sm text-zinc-500">
-            <li>
-              • One workbook per client (each client&apos;s arrays get their own
-              sheet inside)
-            </li>
-            <li>• Sheet title = &ldquo;&lt;Array Name&gt; (&lt;NEPOOL-GIS ID&gt;)&rdquo;</li>
-            <li>• Rolling 6 quarters of monthly MWh + REC counts</li>
-            <li>• Standard NEPOOL footnote in row 31</li>
-            <li>
-              • Delivered to the client&apos;s contact email (+ CCs if
-              configured)
-            </li>
-          </ul>
+          <>
+            <ul className="mt-3 space-y-1.5 text-sm text-zinc-500">
+              <li>
+                • One workbook per client (each client&apos;s arrays get their own
+                sheet inside)
+              </li>
+              <li>• Sheet title = &ldquo;&lt;Array Name&gt; (&lt;NEPOOL-GIS ID&gt;)&rdquo;</li>
+              <li>• Rolling 6 quarters of monthly MWh + REC counts</li>
+              <li>• Standard NEPOOL footnote in row 31</li>
+              <li>
+                • Delivered to the client&apos;s contact email (+ CCs if
+                configured)
+              </li>
+            </ul>
+            <p className="mt-3">
+              <a
+                href={SAMPLE_WORKBOOK_URL}
+                download
+                className="text-sm text-primary-600 underline underline-offset-2 hover:text-primary-800"
+              >
+                Download example workbook (.xlsx)
+              </a>
+            </p>
+          </>
         )}
       </div>
+
+      {/* Send mode */}
+      <div className="mt-6 border-t border-zinc-100 pt-5">
+        <span className="text-sm font-medium text-zinc-700">Who gets the report</span>
+        <div
+          role="radiogroup"
+          aria-label="Send mode"
+          className="mt-2 flex flex-col gap-1.5"
+        >
+          {SEND_MODES.map((m) => {
+            const selected = sendMode === m.value;
+            return (
+              <label
+                key={m.value}
+                className={[
+                  "flex cursor-pointer items-center gap-2.5 rounded-lg border px-3.5 py-2.5 text-sm transition-colors",
+                  "focus-within:ring-2 focus-within:ring-primary-500/40",
+                  selected
+                    ? "border-primary-300 bg-primary-50 text-zinc-900"
+                    : "border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-zinc-300 hover:bg-white",
+                  savingMode ? "cursor-not-allowed opacity-60" : "",
+                ].join(" ")}
+              >
+                <input
+                  type="radio"
+                  name="send-mode"
+                  value={m.value}
+                  checked={selected}
+                  disabled={savingMode}
+                  onChange={() => selectSendMode(m.value)}
+                  className="accent-primary-600"
+                />
+                {m.label}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Sample + Send now */}
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <Button
+          variant="secondary"
+          onClick={doSendSample}
+          disabled={sendingSample}
+        >
+          {sendingSample ? (
+            <>
+              <Spinner />
+              Sending…
+            </>
+          ) : (
+            "Send me a sample"
+          )}
+        </Button>
+        <Button onClick={() => setConfirmOpen(true)}>Send a report now</Button>
+      </div>
+      <p className="mt-2 text-xs text-zinc-400">
+        &ldquo;Send a report now&rdquo; emails all clients. &ldquo;Send me a sample&rdquo; sends one
+        workbook to your own inbox only — no client is contacted.
+      </p>
 
       <Modal
         open={confirmOpen}
