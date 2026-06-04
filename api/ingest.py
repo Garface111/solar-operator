@@ -113,6 +113,8 @@ def _xlsx_to_text(data: bytes) -> str:
 # ─── GMCS-shape detection and extraction ──────────────────────────────────
 
 # Matches "<Array Name> (<NEPOOL-GIS ID>)" — the A1 title written by gmcs_writer.py.
+# NEPOOL ID part is optional: arrays without an assigned ID (e.g. "Pittsfield")
+# still have a valid GMCS sheet — the ID simply hasn't been entered yet.
 _GMCS_A1_RE = re.compile(r"^(.+?)\s*\((\d{2,6})\)\s*$")
 
 
@@ -120,14 +122,18 @@ def _detect_gmcs_shape(wb) -> bool:
     """True if every non-summary sheet looks like GMCS writer output.
 
     Conservative: any mismatch → False so we never silently parse a real
-    roster as GMCS.  Requires at least one matching sheet."""
+    roster as GMCS.  Requires at least one matching sheet.
+
+    NOTE: A1 may be just the array name ("Pittsfield") with no NEPOOL ID
+    when the ID hasn't been assigned yet.  The row-5 header check is the
+    definitive signal; we only require A1 to be non-empty."""
     checked = 0
     for ws in wb.worksheets:
         title_lower = (ws.title or "").lower()
         if title_lower in ("summary", "notes"):
             continue
         val = str(ws.cell(row=1, column=1).value or "").strip()
-        if not _GMCS_A1_RE.match(val):
+        if not val:
             return False
         h_a = str(ws.cell(row=5, column=1).value or "").strip().lower()
         h_b = str(ws.cell(row=5, column=2).value or "").strip().lower()
@@ -142,19 +148,23 @@ def _extract_from_gmcs(wb) -> list[dict]:
     """One row per sheet for a GMCS-format workbook.
 
     operator_name is always None here — the import preview surfaces a single
-    global 'Owner / operator' field so the user fills it in once."""
+    global 'Owner / operator' field so the user fills it in once.
+
+    Sheets whose A1 cell is just an array name (no NEPOOL ID in parentheses,
+    e.g. "Pittsfield") are included with nepool_gis_id=None so they appear in
+    the preview and can receive an ID from a different source."""
     rows: list[dict] = []
     for ws in wb.worksheets:
         if (ws.title or "").lower() in ("summary", "notes"):
             continue
         val = str(ws.cell(row=1, column=1).value or "").strip()
-        m = _GMCS_A1_RE.match(val)
-        if not m:
+        if not val:
             continue
+        m = _GMCS_A1_RE.match(val)
         rows.append({
             "operator_name": None,
-            "array_name": m.group(1).strip(),
-            "nepool_gis_id": m.group(2),
+            "array_name": m.group(1).strip() if m else val,
+            "nepool_gis_id": m.group(2) if m else None,
             "gmp_account_number": None,
             "notes": None,
         })

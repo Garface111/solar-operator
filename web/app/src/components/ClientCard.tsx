@@ -327,10 +327,12 @@ export function ClientCard({
 
       {expanded && (
         <div className="space-y-5 border-t border-zinc-100 px-4 py-4">
-          {/* Latest report — pinned to top of drawer so it's the first thing you see */}
+          {/* Report section — pinned to top of drawer so it's the first thing you see */}
           <div className="rounded-xl border border-primary-100 bg-primary-50/50 px-4 py-3">
             <h4 className="text-xs font-semibold uppercase tracking-wide text-primary-700">
-              Latest report
+              {client.last_delivery_at
+                ? `Report — ${new Date(client.last_delivery_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+                : "Report"}
             </h4>
             <p className="mt-1 text-xs text-zinc-600">
               Preview what you&apos;ll send {client.name} — without contacting them.
@@ -468,7 +470,6 @@ export function ClientCard({
             />
           </div>
 
-          {/* Latest report block moved to the top of this drawer */}
 
           <div className="flex justify-end">
             {client.active ? (
