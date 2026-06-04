@@ -25,25 +25,24 @@ from typing import Optional
 # template is left verbatim (see render_merge).
 MERGE_TAGS = (
     "client_name", "tenant_name", "quarter", "arrays_count",
-    "period_start", "period_end", "dashboard_url",
+    "period_start", "period_end", "dashboard_url", "tenant_email",
 )
 
 DEFAULT_DASHBOARD_URL = "https://solaroperator.org/accounts/"
 
 # Built-in defaults. These mirror the original hard-coded delivery email so an
 # operator who never touches the settings gets exactly today's behavior.
-DEFAULT_SUBJECT_TEMPLATE = "{{client_name}} — NEPOOL-GIS quarterly report"
+DEFAULT_SUBJECT_TEMPLATE = (
+    "{{client_name}} — generation report ({{period_start}} to {{period_end}})"
+)
 
 DEFAULT_BODY_TEMPLATE = (
-    "<p>Hi {{client_name}},</p>"
-    "<p>Your latest NEPOOL-GIS quarterly generation workbook for "
-    "<b>{{client_name}}</b> is attached. It covers the last 6 complete "
-    "quarters of generation data we have on file through {{period_end}}, "
-    "one sheet per array.</p>"
-    "<p>Manage your account or change report frequency at "
-    "<a href='{{dashboard_url}}'>your dashboard</a>.</p>"
-    "<p>Questions? Just reply.</p>"
-    "<p>— {{tenant_name}}</p>"
+    "<p>Dear {{client_name}},</p>"
+    "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
+    " {{period_end}}. Please reach out with any questions.</p>"
+    "<p>Thank you,<br>{{tenant_name}}<br>{{tenant_email}}</p>"
+    "<p style='margin-top:24px;font-size:12px;color:#6b7280;'>"
+    "<em>Manage at <a href='{{dashboard_url}}'>your dashboard</a>.</em></p>"
 )
 
 _TAG_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
@@ -111,6 +110,7 @@ def _fmt_date(d: date) -> str:
 
 
 def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
+                  tenant_email: str = "",
                   dashboard_url: str = DEFAULT_DASHBOARD_URL,
                   ref: Optional[date] = None) -> dict:
     """Assemble the merge-tag context for one client's email."""
@@ -123,6 +123,7 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
         "period_start": qc["period_start"],
         "period_end": qc["period_end"],
         "dashboard_url": dashboard_url,
+        "tenant_email": tenant_email,
     }
 
 

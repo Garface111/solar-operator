@@ -53,7 +53,8 @@ def _recipients_for_client(client: Client, tenant: Tenant,
 
 def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
-                       triggered_by: str = "manual") -> dict:
+                       triggered_by: str = "manual",
+                       subject_prefix: str = "") -> dict:
     """Build & email the workbook for ONE client."""
     with SessionLocal() as db:
         client = db.get(Client, client_id)
@@ -123,12 +124,14 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # headline quarter; see api/email_templates.py.
         ctx = build_context(
             client_name=client_name, tenant_name=tenant_name,
-            arrays_count=arrays_count,
+            arrays_count=arrays_count, tenant_email=tenant_email,
         )
         subject, html, text = render_email(
             subject_template=subject_template,
             body_template=body_template, ctx=ctx,
         )
+        if subject_prefix:
+            subject = f"{subject_prefix}{subject}"
         filename = f"{safe_client}-GMCS-report.xlsx"
         # Send to primary; cc the extras. from_header carries the tenant's
         # "send as me" address (send_workbook_email falls back to the platform

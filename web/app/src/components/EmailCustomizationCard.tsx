@@ -20,13 +20,13 @@ const SEND_MODES = [
   { value: "to_me", label: "To me only (I forward)" },
 ] as const;
 
-const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{quarter}}";
+const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{tenant_email}}, {{quarter}}";
 
 /** Known merge tags that are valid. Anything double-braced that isn't in this
  *  set is flagged as a probable typo so it doesn't silently pass through. */
 const KNOWN_TAGS = new Set([
   "client_name", "tenant_name", "quarter", "arrays_count",
-  "period_start", "period_end", "dashboard_url",
+  "period_start", "period_end", "dashboard_url", "tenant_email",
 ]);
 
 const TAG_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
@@ -224,7 +224,8 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           />
           <p className="mt-1.5 text-xs text-zinc-400">
             HTML supported. {MERGE_HELP}, plus {"{{period_start}}"},{" "}
-            {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{dashboard_url}}"}.
+            {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{dashboard_url}}"},
+            {"{{tenant_email}}"}.
           </p>
           {findTypoTags(body).length > 0 && (
             <p className="mt-1 text-xs text-amber-700">

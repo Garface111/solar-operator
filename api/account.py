@@ -619,7 +619,7 @@ def preview_email(body: EmailSettings,
         eff_mode = ((body.send_mode if body.send_mode is not None else t.send_mode)
                     or "to_client").strip() or "to_client"
 
-    ctx = dict(_PREVIEW_CTX, tenant_name=tenant_name)
+    ctx = dict(_PREVIEW_CTX, tenant_name=tenant_name, tenant_email=tenant_email)
     subject, html, text = render_email(
         subject_template=eff_subject, body_template=eff_body, ctx=ctx)
     from_header = resolve_from_header(eff_from_email, eff_from_name, tenant_name)
@@ -647,6 +647,43 @@ def send_my_report(authorization: Optional[str] = Header(default=None)):
     # Defer heavy import (avoid circulars at module load)
     from .delivery import deliver_for_tenant
     return deliver_for_tenant(t.id, override_to=None, triggered_by="self-serve")
+
+
+@router.post("/v1/account/send-sample-report")
+def send_sample_report(authorization: Optional[str] = Header(default=None)):
+    """Send a sample workbook to the logged-in operator's own email only.
+
+    Picks the first active client with at least one array, builds a real
+    workbook for that client, and emails it to the tenant's own contact_email
+    with '[SAMPLE]' prepended to the subject. No client is ever contacted.
+    Useful for operators who want to see exactly what their clients will receive
+    before the first real quarterly run."""
+    t = tenant_from_session(authorization)
+    if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
+        raise HTTPException(402, "Reactivate your subscription to send sample reports")
+    tenant_email = (t.contact_email or "").strip()
+    if not tenant_email:
+        raise HTTPException(422, "Add an email address to your account settings first.")
+    with SessionLocal() as db:
+        row = db.execute(
+            select(Client)
+            .join(Array, Array.client_id == Client.id)
+            .where(Client.tenant_id == t.id, Client.active == True)  # noqa: E712
+            .order_by(Client.name.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(
+                422,
+                "Add a client and at least one array first — then come back to preview the email.",
+            )
+        client_id = row.id
+    from .delivery import deliver_for_client
+    result = deliver_for_client(
+        client_id, override_to=tenant_email, triggered_by="sample",
+        subject_prefix="[SAMPLE] ",
+    )
+    return {**result, "sample": True, "sent_to": tenant_email}
 
 
 @router.get("/v1/account/billing-summary")
