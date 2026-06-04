@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Outlet, useOutletContext } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
 import { TabBar, type Tab } from "../ui/TabBar";
@@ -15,6 +15,7 @@ export interface DashboardContext {
   /** True once the account fetch has failed (vs. still loading). */
   failed: boolean;
   patchAccount: (patch: Partial<Account>) => void;
+  retryLoad: () => void;
 }
 
 const TABS: Tab[] = [
@@ -33,6 +34,12 @@ export default function DashboardLayout({ onSignOut }: Props) {
   const toast = useToast();
   const [account, setAccount] = useState<Account | null>(null);
   const [failed, setFailed] = useState(false);
+  const [loadKey, setLoadKey] = useState(0);
+
+  const retryLoad = useCallback(() => {
+    setFailed(false);
+    setLoadKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,13 +61,13 @@ export default function DashboardLayout({ onSignOut }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadKey]);
 
   function patchAccount(patch: Partial<Account>) {
     setAccount((a) => (a ? { ...a, ...patch } : a));
   }
 
-  const ctx: DashboardContext = { account, failed, patchAccount };
+  const ctx: DashboardContext = { account, failed, patchAccount, retryLoad };
 
   return (
     <div className="min-h-full">

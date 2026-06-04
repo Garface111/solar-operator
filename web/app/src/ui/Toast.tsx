@@ -25,7 +25,8 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-/** Auto-dismiss window per the spec. */
+/** Auto-dismiss window for success/info toasts. Errors are dismiss-only so they
+ *  don't vanish before the operator can read them or act on them. */
 const TOAST_MS = 5000;
 
 const KIND_STYLES: Record<ToastKind, string> = {
@@ -85,9 +86,12 @@ function ToastCard({
   onDismiss: () => void;
 }) {
   useEffect(() => {
+    // Error toasts are dismiss-only — don't auto-dismiss so the operator can
+    // read the message or act on it without a race against the timer.
+    if (toast.kind === "error") return;
     const id = window.setTimeout(onDismiss, TOAST_MS);
     return () => window.clearTimeout(id);
-  }, [onDismiss]);
+  }, [onDismiss, toast.kind]);
 
   return (
     <div
