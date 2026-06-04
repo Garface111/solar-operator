@@ -26,10 +26,21 @@ with SessionLocal() as db:
     for r in rows:
         print(f"  {r.id} | {r.contact_email} | {r.name} | active={r.active} | {r.created_at}")
     ids = [r.id for r in rows]
-    # TRUNCATE/DELETE CASCADE-equivalent: delete tenant rows, FK CASCADE handles the rest
+    # Cascade-delete via per-table DELETE in dependency order (FKs are not
+    # declared ON DELETE CASCADE at the schema level).
     with bind.begin() as conn:
-        conn.execute(
-            text("DELETE FROM tenants WHERE id = ANY(:ids)"),
-            {"ids": ids},
-        )
-    print(f"\nDeleted {len(ids)} tenant(s) and all dependent rows (CASCADE).")
+        # Find arrays + utility_accounts owned by these tenants for nested deletes
+        for tid in ids:
+            conn.execute(text("DELETE FROM bills WHERE account_id IN (SELECT id FROM utility_accounts WHERE tenant_id = :t)"), {"t": tid})
+            conn.execute(text("DELETE FROM utility_accounts WHERE tenant_id = :t"), {"t": tid})
+            conn.execute(text("DELETE FROM utility_sessions WHERE tenant_id = :t"), {"t": tid})
+            conn.execute(text("DELETE FROM login_tokens WHERE tenant_id = :t"), {"t": tid})
+            conn.execute(text("DELETE FROM arrays WHERE tenant_id = :t"), {"t": tid})
+            conn.execute(text("DELETE FROM clients WHERE tenant_id = :t"), {"t": tid})
+            # tenant_templates if present (best effort — table may not exist on older deploys)
+            try:
+                conn.execute(text("DELETE FROM tenant_templates WHERE tenant_id = :t"), {"t": tid})
+            except Exception:
+                pass
+            conn.execute(text("DELETE FROM tenants WHERE id = :t"), {"t": tid})
+    print(f"\nDeleted {len(ids)} tenant(s) and all dependent rows.")
