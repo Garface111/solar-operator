@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
@@ -50,6 +50,17 @@ export default function Clients() {
   const [clients, setClients] = useState<ClientDraft[]>(() => [blankClient()]);
   const [submitting, setSubmitting] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
+
+  // Detect a lost onboarding session on mount so we can disable "Finish setup"
+  // and surface a real restart link — instead of letting the click silently
+  // no-op the operator into a dead end.
+  useEffect(() => {
+    if (!getToken()) {
+      setSessionError(
+        "We couldn't find your onboarding session. Please restart from the welcome screen.",
+      );
+    }
+  }, []);
 
   function update(id: number, patch: Partial<ClientDraft>) {
     setClients((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -327,11 +338,22 @@ export default function Clients() {
         </button>
 
         {sessionError && (
-          <p className="mt-4 text-sm text-red-600">{sessionError}</p>
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+            <p className="text-sm text-red-700">{sessionError}</p>
+            <Link
+              to="/"
+              className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-red-700 underline underline-offset-2 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 focus-visible:ring-offset-2"
+            >
+              Restart setup →
+            </Link>
+          </div>
         )}
 
-        <div className="mt-8 flex justify-end">
-          <Button onClick={handleFinish} disabled={!valid || submitting}>
+        <div className="mt-8 flex flex-col items-end gap-1.5">
+          <Button
+            onClick={handleFinish}
+            disabled={!valid || submitting || !!sessionError}
+          >
             {submitting ? (
               <>
                 <Spinner />
@@ -341,6 +363,11 @@ export default function Clients() {
               "Finish setup →"
             )}
           </Button>
+          {sessionError && (
+            <p className="text-xs text-zinc-400">
+              Session expired — restart above to continue.
+            </p>
+          )}
         </div>
       </Card>
     </ScreenLayout>

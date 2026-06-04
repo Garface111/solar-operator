@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
@@ -302,14 +302,22 @@ export default function Extension() {
         )}
 
         {sessionError && (
-          <p className="mt-4 text-sm text-red-600">{sessionError}</p>
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+            <p className="text-sm text-red-700">{sessionError}</p>
+            <Link
+              to="/"
+              className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-red-700 underline underline-offset-2 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 focus-visible:ring-offset-2"
+            >
+              Restart setup →
+            </Link>
+          </div>
         )}
 
-        <div className="mt-8 flex justify-end">
+        <div className="mt-8 flex flex-col items-end gap-1.5">
           <Button
             variant="secondary"
             onClick={handleManual}
-            disabled={advancing}
+            disabled={advancing || !!sessionError}
           >
             {advancing ? (
               <>
@@ -320,6 +328,11 @@ export default function Extension() {
               "I've installed it →"
             )}
           </Button>
+          {sessionError && (
+            <p className="text-xs text-zinc-400">
+              Session expired — restart above to continue.
+            </p>
+          )}
         </div>
       </Card>
 
