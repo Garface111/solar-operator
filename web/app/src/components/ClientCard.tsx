@@ -240,6 +240,11 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
                   emptyText="add GMP login"
                   placeholder="client@gmail.com or jdoe"
                 />
+                <p className="mt-1.5 text-xs text-zinc-500">
+                  The credential the client uses to sign in at
+                  greenmountainpower.com. We use this to match captured bills to
+                  this client.
+                </p>
               </div>
             )}
           </div>

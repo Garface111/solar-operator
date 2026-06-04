@@ -130,8 +130,9 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
                 onChange={(e) => setGmpLogin(e.target.value)}
               />
               <p className="mt-1.5 text-xs text-zinc-500">
-                When this client logs into GMP through the extension, we&apos;ll
-                add their arrays automatically.
+                The credential the client uses to sign in at
+                greenmountainpower.com. We use this to match captured bills to
+                this client.
               </p>
             </div>
           )}

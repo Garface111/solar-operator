@@ -270,7 +270,9 @@ export default function Clients() {
                         onChange={(e) => update(c.id, { gmp_login: e.target.value })}
                       />
                       <p className="mt-1.5 text-xs text-zinc-500">
-                        Use whichever you log into GMP with.
+                        The credential the client uses to sign in at
+                        greenmountainpower.com. We use this to match captured
+                        bills to this client.
                       </p>
                     </div>
                   ) : (
