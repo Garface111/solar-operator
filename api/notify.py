@@ -218,11 +218,13 @@ def _next_quarterly_date() -> str:
 
 
 def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
+    import html as _html
     plan_label = PLAN_LABELS.get(plan, "Solar Operator")
+    first = name.split()[0] if name else "there"
     fmt = dict(
-        name=name.split()[0] if name else "there",
-        plan_label=plan_label,
-        tenant_key=tenant_key,
+        name=_html.escape(first),
+        plan_label=_html.escape(plan_label),
+        tenant_key=tenant_key,  # random token — safe
         install_url=EXTENSION_INSTALL_URL,
         next_quarter_date=_next_quarterly_date(),
     )
