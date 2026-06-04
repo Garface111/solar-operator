@@ -30,7 +30,7 @@ from typing import Optional
 import stripe
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from .db import SessionLocal
 from .models import Tenant, Client, Array, UtilitySession, now
@@ -228,11 +228,11 @@ def checkout(req: CheckoutRequest):
 def _status_payload(db, t: Tenant) -> dict:
     """Shared status dict for /status and /reconcile-checkout."""
     n_clients = db.execute(
-        select(Client).where(Client.tenant_id == t.id)
-    ).scalars().all()
+        select(func.count()).select_from(Client).where(Client.tenant_id == t.id)
+    ).scalar() or 0
     n_arrays = db.execute(
-        select(Array).where(Array.tenant_id == t.id)
-    ).scalars().all()
+        select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
+    ).scalar() or 0
     from datetime import datetime as _dt
     hb = t.extension_heartbeat_at
     # "extension_active" = heartbeat received within the last 2 minutes.
@@ -245,8 +245,8 @@ def _status_payload(db, t: Tenant) -> dict:
         "tenant_id": t.id,
         "active": t.active,
         "activation_code": t.tenant_key if t.active else None,
-        "clients_count": len(n_clients),
-        "arrays_count": len(n_arrays),
+        "clients_count": int(n_clients),
+        "arrays_count": int(n_arrays),
         "extension_active": extension_active,
         "extension_heartbeat_at": hb.isoformat() if hb else None,
     }
