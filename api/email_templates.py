@@ -1,0 +1,150 @@
+"""
+Solar Operator — client report email rendering (V2, June 2026).
+
+Single source of truth for how a per-client report email is composed: the
+built-in default subject/body, the merge-tag substitution, and the resolution
+of the From header + send mode from a tenant's customization settings.
+
+Shared by:
+  - api/delivery.py        (real sends)
+  - api/account.py         (/v1/account/email-preview live preview)
+
+We deliberately support SIMPLE merge-tag substitution ({{tag}}), not full
+Jinja control flow. A stamping agent wants to drop their name and a sentence
+in — not write loops. Keeping it to plain substitution means a malformed
+template can never raise at send time. Unknown tags are left untouched so a
+typo is visible rather than silently blanked.
+"""
+from __future__ import annotations
+
+import re
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+# The merge tags we advertise in the dashboard help text. Anything else in a
+# template is left verbatim (see render_merge).
+MERGE_TAGS = (
+    "client_name", "tenant_name", "quarter", "arrays_count",
+    "period_start", "period_end", "dashboard_url",
+)
+
+DEFAULT_DASHBOARD_URL = "https://solaroperator.org/accounts/"
+
+# Built-in defaults. These mirror the original hard-coded delivery email so an
+# operator who never touches the settings gets exactly today's behavior.
+DEFAULT_SUBJECT_TEMPLATE = "{{client_name}} — NEPOOL-GIS quarterly report"
+
+DEFAULT_BODY_TEMPLATE = (
+    "<p>Hi {{client_name}},</p>"
+    "<p>Your latest NEPOOL-GIS quarterly generation workbook for "
+    "<b>{{client_name}}</b> is attached. It covers the last 6 complete "
+    "quarters of generation data we have on file through {{period_end}}, "
+    "one sheet per array.</p>"
+    "<p>Manage your account or change report frequency at "
+    "<a href='{{dashboard_url}}'>your dashboard</a>.</p>"
+    "<p>Questions? Just reply.</p>"
+    "<p>— {{tenant_name}}</p>"
+)
+
+_TAG_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+
+def render_merge(template: str, ctx: dict) -> str:
+    """Replace {{tag}} (with optional inner whitespace) using ctx.
+
+    Tags not present in ctx are left verbatim so a typo'd tag is visible in
+    the output rather than silently producing an empty string."""
+    def sub(m: re.Match) -> str:
+        key = m.group(1)
+        if key in ctx and ctx[key] is not None:
+            return str(ctx[key])
+        return m.group(0)
+    return _TAG_RE.sub(sub, template)
+
+
+def html_to_text(html: str) -> str:
+    """Crude HTML → plain-text for the multipart text/plain alternative.
+
+    Good enough for our simple <p>/<b>/<a> bodies: drop tags, turn block
+    boundaries into newlines, collapse runs of blank lines."""
+    s = re.sub(r"(?i)</p\s*>", "\n\n", html)
+    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = (s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+           .replace("&nbsp;", " "))
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def quarter_context(ref: Optional[date] = None) -> dict:
+    """Compute the most-recent COMPLETE calendar quarter as of `ref`.
+
+    Returns {quarter, period_start, period_end} where quarter is like
+    '2026 Q2' and the period_* are human dates bounding that quarter. This is
+    the headline quarter for a report; the workbook itself still carries a
+    rolling 6 quarters."""
+    ref = ref or datetime.utcnow().date()
+    # Quarter index 1..4 of the quarter ref falls in.
+    cur_q = (ref.month - 1) // 3 + 1
+    year, q = ref.year, cur_q - 1
+    if q == 0:  # we're in Q1 → most recent complete quarter is last year's Q4
+        year, q = year - 1, 4
+    start_month = (q - 1) * 3 + 1
+    end_month = start_month + 2
+    start = date(year, start_month, 1)
+    # First day of the following month minus one day = last day of the quarter.
+    next_month = date(year + (1 if end_month == 12 else 0),
+                      1 if end_month == 12 else end_month + 1, 1)
+    end = next_month - timedelta(days=1)
+    return {
+        "quarter": f"{year} Q{q}",
+        "period_start": _fmt_date(start),
+        "period_end": _fmt_date(end),
+        "_start_date": start,
+        "_end_date": end,
+    }
+
+
+def _fmt_date(d: date) -> str:
+    """'Jun 30, 2026' with no zero-padded day, portable across platforms."""
+    return f"{d.strftime('%b')} {d.day}, {d.year}"
+
+
+def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
+                  dashboard_url: str = DEFAULT_DASHBOARD_URL,
+                  ref: Optional[date] = None) -> dict:
+    """Assemble the merge-tag context for one client's email."""
+    qc = quarter_context(ref)
+    return {
+        "client_name": client_name,
+        "tenant_name": tenant_name,
+        "quarter": qc["quarter"],
+        "arrays_count": arrays_count,
+        "period_start": qc["period_start"],
+        "period_end": qc["period_end"],
+        "dashboard_url": dashboard_url,
+    }
+
+
+def render_email(*, subject_template: Optional[str],
+                 body_template: Optional[str], ctx: dict) -> tuple[str, str, str]:
+    """Render (subject, html, text). Falls back to the built-in default for
+    any template that is None/blank."""
+    subj_t = (subject_template or "").strip() or DEFAULT_SUBJECT_TEMPLATE
+    body_t = (body_template or "").strip() or DEFAULT_BODY_TEMPLATE
+    subject = render_merge(subj_t, ctx)
+    html = render_merge(body_t, ctx)
+    text = html_to_text(html)
+    return subject, html, text
+
+
+def resolve_from_header(send_from_email: Optional[str],
+                        send_from_name: Optional[str],
+                        tenant_name: Optional[str]) -> Optional[str]:
+    """Build the Resend `from` header from a tenant's settings, or None to use
+    the platform default. Display name defaults to the tenant name."""
+    email = (send_from_email or "").strip()
+    if not email:
+        return None
+    name = (send_from_name or tenant_name or "").strip()
+    return f"{name} <{email}>" if name else email

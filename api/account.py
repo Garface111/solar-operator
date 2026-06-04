@@ -32,8 +32,12 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .models import Tenant, Client, Array, LoginToken, UtilityAccount, now
-from .notify import _send_via_resend, send_internal_alert
+from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
+from .email_templates import (
+    DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_DASHBOARD_URL,
+    MERGE_TAGS, render_email, resolve_from_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +337,16 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "subscription_status": t.subscription_status,
             "report_frequency": t.report_frequency,
             "cc_on_reports": bool(t.cc_on_reports),
+            # V2 email customization: current values (null = using default) plus
+            # the built-in defaults so the dashboard can show them as placeholders.
+            "send_from_email": t.send_from_email,
+            "send_from_name": t.send_from_name,
+            "email_subject_template": t.email_subject_template,
+            "email_body_template": t.email_body_template,
+            "send_mode": t.send_mode or "to_client",
+            "default_email_subject": DEFAULT_SUBJECT_TEMPLATE,
+            "default_email_body": DEFAULT_BODY_TEMPLATE,
+            "merge_tags": list(MERGE_TAGS),
             "last_pull_at": t.last_pull_at.isoformat() if t.last_pull_at else None,
             "last_delivery_at": t.last_delivery_at.isoformat() if t.last_delivery_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
@@ -398,6 +412,126 @@ def update_cc_on_reports(body: UpdateCcOnReports,
         db.commit()
         value = t.cc_on_reports
     return {"ok": True, "cc_on_reports": value}
+
+
+# ─── V2 email customization ─────────────────────────────────────────────
+
+# Fake values for the live preview (POST /v1/account/email-preview). A fixed
+# quarter keeps the preview deterministic regardless of when it's rendered.
+_PREVIEW_CLIENT = "Bruce Genereaux"
+_PREVIEW_CTX = {
+    "client_name": _PREVIEW_CLIENT,
+    "quarter": "2026 Q2",
+    "arrays_count": 3,
+    "period_start": "Apr 1, 2026",
+    "period_end": "Jun 30, 2026",
+    "dashboard_url": DEFAULT_DASHBOARD_URL,
+}
+_VALID_SEND_MODES = ("to_client", "to_me")
+
+
+class EmailSettings(BaseModel):
+    """All optional. A field left out (None) is untouched; an empty/blank
+    string clears that field back to the built-in default. send_mode, when
+    provided, must be one of to_client | to_me."""
+    send_from_email: Optional[str] = None
+    send_from_name: Optional[str] = None
+    email_subject_template: Optional[str] = None
+    email_body_template: Optional[str] = None
+    send_mode: Optional[str] = None
+
+
+def _blank_to_none(v: Optional[str]) -> Optional[str]:
+    s = (v or "").strip()
+    return s or None
+
+
+def _validate_email_settings(body: EmailSettings) -> None:
+    if body.send_from_email is not None:
+        e = body.send_from_email.strip()
+        if e and ("@" not in e or " " in e or "." not in e.split("@")[-1]):
+            raise HTTPException(400, "send_from_email must be a valid email address")
+    if body.send_mode is not None and body.send_mode.strip():
+        if body.send_mode.strip() not in _VALID_SEND_MODES:
+            raise HTTPException(400, "send_mode must be 'to_client' or 'to_me'")
+
+
+def _effective(req_val: Optional[str], stored_val: Optional[str]) -> Optional[str]:
+    """For preview: use the request value when the field was provided (incl.
+    explicit blank = clear), else fall back to what's stored on the tenant."""
+    if req_val is None:
+        return stored_val
+    return _blank_to_none(req_val)
+
+
+@router.post("/v1/account/email-settings")
+def update_email_settings(body: EmailSettings,
+                          authorization: Optional[str] = Header(default=None)):
+    """Persist the tenant's report-email customization. Returns the updated
+    settings. Empty-string fields clear back to the built-in default; omitted
+    fields are left unchanged."""
+    t = tenant_from_session(authorization)
+    _validate_email_settings(body)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        if body.send_from_email is not None:
+            v = _blank_to_none(body.send_from_email)
+            t.send_from_email = v.lower() if v else None
+        if body.send_from_name is not None:
+            t.send_from_name = _blank_to_none(body.send_from_name)
+        if body.email_subject_template is not None:
+            t.email_subject_template = _blank_to_none(body.email_subject_template)
+        if body.email_body_template is not None:
+            t.email_body_template = _blank_to_none(body.email_body_template)
+        if body.send_mode is not None and body.send_mode.strip():
+            t.send_mode = body.send_mode.strip()
+        db.commit()
+        return {
+            "ok": True,
+            "send_from_email": t.send_from_email,
+            "send_from_name": t.send_from_name,
+            "email_subject_template": t.email_subject_template,
+            "email_body_template": t.email_body_template,
+            "send_mode": t.send_mode or "to_client",
+        }
+
+
+@router.post("/v1/account/email-preview")
+def preview_email(body: EmailSettings,
+                  authorization: Optional[str] = Header(default=None)):
+    """Render a sample report email using the supplied settings layered over
+    the tenant's stored defaults. Uses a fake client so the tenant can eyeball
+    exactly what goes out before committing."""
+    t = tenant_from_session(authorization)
+    _validate_email_settings(body)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        tenant_name = t.name or "your company"
+        tenant_email = (t.contact_email or "").strip()
+        eff_from_email = _effective(body.send_from_email, t.send_from_email)
+        eff_from_name = _effective(body.send_from_name, t.send_from_name)
+        eff_subject = _effective(body.email_subject_template, t.email_subject_template)
+        eff_body = _effective(body.email_body_template, t.email_body_template)
+        eff_mode = ((body.send_mode if body.send_mode is not None else t.send_mode)
+                    or "to_client").strip() or "to_client"
+
+    ctx = dict(_PREVIEW_CTX, tenant_name=tenant_name)
+    subject, html, text = render_email(
+        subject_template=eff_subject, body_template=eff_body, ctx=ctx)
+    from_header = resolve_from_header(eff_from_email, eff_from_name, tenant_name)
+    if eff_mode == "to_me":
+        recipient = tenant_email or "you (your account email)"
+    else:
+        recipient = f"{_PREVIEW_CLIENT} (your client's contact email)"
+    return {
+        "ok": True,
+        "subject": subject,
+        "html": html,
+        "text": text,
+        "from": from_header or FROM_ADDRESS,
+        "to": recipient,
+        "send_mode": eff_mode,
+    }
 
 
 @router.post("/v1/account/send-report")

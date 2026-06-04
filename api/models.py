@@ -51,6 +51,25 @@ class Tenant(Base):
     # goes out (records / QA). Wired in delivery.deliver_for_client.
     cc_on_reports: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # ── Email customization (V2, June 2026) ──────────────────────────────
+    # Let the tenant (a NEPOOL stamping agent) control how reports go out
+    # under their professional name. All nullable → null means "use the
+    # built-in default". See api/email_templates.py for rendering + defaults.
+    send_from_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # From address for client report emails. null → platform default
+    # (admin@solaroperator.org). Custom addresses fall back to the platform
+    # default at send time if Resend rejects an unverified domain.
+    send_from_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Friendly From display name. null → tenant.name.
+    email_subject_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_body_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Merge-tag templates ({{client_name}}, {{tenant_name}}, {{quarter}}, …).
+    # null → built-in default template.
+    send_mode: Mapped[str] = mapped_column(String(20), default="to_client")
+    # to_client = primary recipient is the client (+ cc tenant if cc_on_reports)
+    # to_me     = primary recipient is tenant.contact_email (tenant forwards);
+    #             subject/body still rendered with client_name.
+
     # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
     # onboarding_token is a 32-char random string handed to the SPA + passed as
     # Stripe metadata so the post-payment return path can find the pending tenant.

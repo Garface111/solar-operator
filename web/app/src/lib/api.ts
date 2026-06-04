@@ -218,6 +218,26 @@ export async function sendReportNow(): Promise<void> {
   await request("/v1/account/send-report", { method: "POST" });
 }
 
+/** Persist report-email customization. Empty-string fields clear to default. */
+export async function updateEmailSettings(
+  input: EmailSettingsInput,
+): Promise<EmailSettings> {
+  return request<EmailSettings & { ok: boolean }>(
+    "/v1/account/email-settings",
+    { body: input },
+  );
+}
+
+/** Render a sample report email (fake client) without saving. */
+export async function previewEmail(
+  input: EmailSettingsInput,
+): Promise<EmailPreview> {
+  return request<EmailPreview & { ok: boolean }>(
+    "/v1/account/email-preview",
+    { body: input },
+  );
+}
+
 // ─── clients ─────────────────────────────────────────────────────────────
 
 export async function listClients(): Promise<ClientRow[]> {

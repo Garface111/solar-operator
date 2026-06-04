@@ -166,6 +166,27 @@ def main():
             "UPDATE tenants SET cc_on_reports = FALSE WHERE cc_on_reports IS NULL"
         ))
 
+        # 2026-06-03 V2 Email customization: per-tenant send-as + templates.
+        email_cust_cols = [
+            ("send_from_email",
+             "ALTER TABLE tenants ADD COLUMN send_from_email VARCHAR(200)"),
+            ("send_from_name",
+             "ALTER TABLE tenants ADD COLUMN send_from_name VARCHAR(120)"),
+            ("email_subject_template",
+             "ALTER TABLE tenants ADD COLUMN email_subject_template TEXT"),
+            ("email_body_template",
+             "ALTER TABLE tenants ADD COLUMN email_body_template TEXT"),
+            ("send_mode",
+             "ALTER TABLE tenants ADD COLUMN send_mode VARCHAR(20) DEFAULT 'to_client'"),
+        ]
+        for col, sql in email_cust_cols:
+            if not column_exists(conn, "tenants", col):
+                conn.execute(text(sql))
+                print(f"  + tenants.{col}")
+        conn.execute(text(
+            "UPDATE tenants SET send_mode = 'to_client' WHERE send_mode IS NULL"
+        ))
+
         # Indexes: onboarding_token lookup + (tenant_id, gmp_email) match in /v1/sync
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_tenants_onboarding_token ON tenants (onboarding_token)",

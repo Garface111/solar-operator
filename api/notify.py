@@ -26,9 +26,15 @@ EXTENSION_INSTALL_URL = os.getenv(
 
 
 def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
-                     attachments: list[dict] | None = None) -> bool:
+                     attachments: list[dict] | None = None,
+                     from_addr: str | None = None,
+                     reply_to: str | None = None) -> bool:
     """Returns True on success, False otherwise. Uses the official Resend
-    SDK so we play nice with their Cloudflare bot rules."""
+    SDK so we play nice with their Cloudflare bot rules.
+
+    from_addr overrides the platform default From header (V2 "send as me").
+    reply_to sets a Reply-To so replies still reach a tenant even when we fell
+    back to the platform From for an unverified domain."""
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — logging email instead of sending.")
         logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or html[:500])
@@ -43,13 +49,15 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         return False
 
     params: dict = {
-        "from": FROM_ADDRESS,
+        "from": from_addr or FROM_ADDRESS,
         "to": [to] if isinstance(to, str) else list(to),
         "subject": subject,
         "html": html,
     }
     if text:
         params["text"] = text
+    if reply_to:
+        params["reply_to"] = reply_to
     if attachments:
         params["attachments"] = attachments
 
@@ -69,18 +77,43 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
 
 
 def send_workbook_email(to: str, subject: str, html: str, text: str,
-                        workbook_path: str, filename: str | None = None) -> bool:
-    """Send a workbook as a base64-encoded attachment via Resend."""
+                        workbook_path: str, filename: str | None = None,
+                        from_addr: str | None = None,
+                        reply_to: str | None = None) -> bool:
+    """Send a workbook as a base64-encoded attachment via Resend.
+
+    When from_addr is given (V2 "send as me") and the send fails — the usual
+    cause is Resend refusing an unverified sender domain — we retry ONCE from
+    the platform default address, preserving the tenant address as Reply-To so
+    the client's reply still reaches them. Delivery beats vanity."""
     import base64, pathlib as _p
     p = _p.Path(workbook_path)
     if not p.exists():
         logger.error("Workbook missing: %s", workbook_path)
         return False
     encoded = base64.b64encode(p.read_bytes()).decode()
-    return _send_via_resend(
+    attachments = [{"filename": filename or p.name, "content": encoded}]
+    ok = _send_via_resend(
         to=to, subject=subject, html=html, text=text,
-        attachments=[{"filename": filename or p.name, "content": encoded}],
+        attachments=attachments, from_addr=from_addr, reply_to=reply_to,
     )
+    if not ok and from_addr:
+        logger.warning(
+            "Custom From %r failed (unverified domain?) — retrying from platform "
+            "default with Reply-To preserved.", from_addr)
+        fallback_reply = reply_to or _addr_only(from_addr)
+        ok = _send_via_resend(
+            to=to, subject=subject, html=html, text=text,
+            attachments=attachments, from_addr=None, reply_to=fallback_reply,
+        )
+    return ok
+
+
+def _addr_only(from_header: str) -> str:
+    """Extract the bare address from a 'Name <addr@x>' header."""
+    if "<" in from_header and ">" in from_header:
+        return from_header.split("<", 1)[1].split(">", 1)[0].strip()
+    return from_header.strip()
 
 
 # ─── customer-facing ─────────────────────────────────────────────────────

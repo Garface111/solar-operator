@@ -19,15 +19,15 @@ from __future__ import annotations
 import logging
 import pathlib
 import tempfile
-from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from .db import SessionLocal
-from .models import Tenant, Client, now
+from .models import Tenant, Client, Array, now
 from .writers import build_workbook
 from .notify import send_workbook_email, send_internal_alert
+from .email_templates import build_context, render_email, resolve_from_header
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +69,31 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # Snapshot for the "copy me on every report" feature (session closes below).
         tenant_cc_on_reports = bool(tenant.cc_on_reports)
         tenant_email = (tenant.contact_email or "").strip()
+        # V2 email customization snapshot (session closes below).
+        send_mode = (tenant.send_mode or "to_client").strip() or "to_client"
+        from_header = resolve_from_header(
+            tenant.send_from_email, tenant.send_from_name, tenant_name)
+        subject_template = tenant.email_subject_template
+        body_template = tenant.email_body_template
+        arrays_count = db.execute(
+            select(func.count()).select_from(Array)
+            .where(Array.client_id == client_id)
+        ).scalar() or 0
 
     if not is_active and triggered_by != "ops":
         return {"ok": False, "reason": "tenant or client inactive",
                 "client_id": client_id, "tenant": tenant_id}
 
-    recipients = _recipients_for_client(client, tenant, override_to)
+    # Resolve recipients, honoring send_mode. An explicit override_to (ops
+    # force-send) always wins and ignores send_mode.
+    if override_to:
+        recipients = [override_to]
+    elif send_mode == "to_me":
+        # Tenant wants the workbook themselves to forward under their own name.
+        # Client + client CCs are intentionally NOT contacted.
+        recipients = [tenant_email] if tenant_email else []
+    else:
+        recipients = _recipients_for_client(client, tenant, override_to)
     if not recipients:
         return {"ok": False, "reason": "no recipient email on file",
                 "client_id": client_id, "tenant": tenant_id}
@@ -95,45 +114,32 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             )
             return {"ok": False, "client_id": client_id, "error": str(e)}
 
-        first_name = (client_name or tenant_name).split()[0]
-        html = (
-            f"<p>Hi {first_name},</p>"
-            f"<p>Your latest NEPOOL-GIS quarterly generation workbook for "
-            f"<b>{client_name}</b> is attached. It covers the last 6 complete "
-            f"quarters of generation data we have on file through "
-            f"{datetime.utcnow():%B %d, %Y}, one sheet per array.</p>"
-            f"<p>Manage your account or change report frequency at "
-            f"<a href='https://solaroperator.org/accounts/'>"
-            f"your dashboard</a>.</p>"
-            f"<p>Questions? Just reply.</p>"
-            f"<p>— Solar Operator</p>"
+        # Render the email from the tenant's templates (or built-in defaults).
+        # Merge tags resolve against this client's real name / array count /
+        # headline quarter; see api/email_templates.py.
+        ctx = build_context(
+            client_name=client_name, tenant_name=tenant_name,
+            arrays_count=arrays_count,
         )
-        text = (
-            f"Hi {first_name},\n\n"
-            f"Your latest NEPOOL-GIS quarterly generation workbook for "
-            f"{client_name} is attached (through "
-            f"{datetime.utcnow():%B %d, %Y}).\n\n"
-            f"Manage your account at https://solaroperator.org/accounts/\n\n"
-            f"Questions? Just reply.\n\n— Solar Operator"
+        subject, html, text = render_email(
+            subject_template=subject_template,
+            body_template=body_template, ctx=ctx,
         )
-        # Send to primary; cc the extras
+        filename = f"{safe_client}-GMCS-report.xlsx"
+        # Send to primary; cc the extras. from_header carries the tenant's
+        # "send as me" address (send_workbook_email falls back to the platform
+        # default if Resend rejects an unverified domain).
         primary, *cc = recipients
         sent = send_workbook_email(
-            to=primary,
-            subject=f"{client_name} — NEPOOL-GIS quarterly report",
-            html=html,
-            text=text,
-            workbook_path=str(path),
-            filename=f"{safe_client}-GMCS-report.xlsx",
+            to=primary, subject=subject, html=html, text=text,
+            workbook_path=str(path), filename=filename, from_addr=from_header,
         )
         # If there are CCs, send a copy to each (Resend's SDK doesn't
         # always expose CC; explicit sends are safer for delivery tracking).
         for extra in cc:
             send_workbook_email(
-                to=extra,
-                subject=f"[copy] {client_name} — NEPOOL-GIS quarterly report",
-                html=html, text=text, workbook_path=str(path),
-                filename=f"{safe_client}-GMCS-report.xlsx",
+                to=extra, subject=f"[copy] {subject}", html=html, text=text,
+                workbook_path=str(path), filename=filename, from_addr=from_header,
             )
 
         # "Copy me on every report": send the operator the identical workbook
@@ -143,10 +149,8 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         if (tenant_cc_on_reports and tenant_email and not override_to
                 and tenant_email not in recipients):
             send_workbook_email(
-                to=tenant_email,
-                subject=f"[copy] {client_name} — NEPOOL-GIS quarterly report",
-                html=html, text=text, workbook_path=str(path),
-                filename=f"{safe_client}-GMCS-report.xlsx",
+                to=tenant_email, subject=f"[copy] {subject}", html=html, text=text,
+                workbook_path=str(path), filename=filename, from_addr=from_header,
             )
 
     if sent and not override_to:

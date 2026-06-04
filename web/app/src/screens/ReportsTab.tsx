@@ -1,4 +1,5 @@
 import { ReportsCard } from "../components/ReportsCard";
+import { EmailCustomizationCard } from "../components/EmailCustomizationCard";
 import { Spinner } from "../ui/Spinner";
 import { useDashboardContext } from "./DashboardLayout";
 
@@ -22,6 +23,7 @@ export default function ReportsTab() {
   return (
     <div className="space-y-6">
       <ReportsCard account={account} onAccountChange={patchAccount} />
+      <EmailCustomizationCard account={account} onAccountChange={patchAccount} />
     </div>
   );
 }
