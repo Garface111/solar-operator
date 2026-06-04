@@ -154,8 +154,16 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             {account.report_frequency ?? "—"}
           </span>
         </Field>
-        <Field label="Utility accounts">{account.accounts_count}</Field>
-        <Field label="Bills on file">{account.bills_count}</Field>
+        <Field label="Utility accounts">
+          <span title="GMP account numbers detected by the extension. Each array typically has 1–3 accounts.">
+            {account.accounts_count}
+          </span>
+        </Field>
+        <Field label="Bills on file">
+          <span title="Individual monthly bills pulled from those accounts. A full 6-quarter report needs ~18 bills per array.">
+            {account.bills_count}
+          </span>
+        </Field>
         {account.last_delivery_at && (
           <Field label="Last report sent">
             {new Date(account.last_delivery_at).toLocaleDateString()}
