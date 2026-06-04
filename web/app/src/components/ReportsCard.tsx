@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
@@ -7,6 +7,8 @@ import { useToast } from "../ui/Toast";
 import {
   type Account,
   type SendResult,
+  type ClientRow,
+  listClients,
   sendReportNow,
   sendSampleReport,
   updateAccountFrequency,
@@ -74,6 +76,28 @@ export function ReportsCard({ account, onAccountChange }: Props) {
   const [sending, setSending] = useState(false);
   const [sendingSample, setSendingSample] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Per-client checkbox state, loaded when the modal opens.
+  const [clientList, setClientList] = useState<ClientRow[] | null>(null);
+  const [loadingClients, setLoadingClients] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  // Lazy-load clients on first modal open so we never block the dashboard.
+  useEffect(() => {
+    if (!confirmOpen || clientList !== null) return;
+    setLoadingClients(true);
+    listClients()
+      .then((rows) => {
+        const active = rows.filter((c) => c.active);
+        setClientList(active);
+        // Default: every active client checked.
+        setSelectedIds(new Set(active.map((c) => c.id)));
+      })
+      .catch((err) => {
+        toast.error(err instanceof Error ? err.message : "Couldn't load clients");
+        setClientList([]);
+      })
+      .finally(() => setLoadingClients(false));
+  }, [confirmOpen, clientList, toast]);
 
   const freq = displayFrequency(account.report_frequency);
 
@@ -99,7 +123,12 @@ export function ReportsCard({ account, onAccountChange }: Props) {
   async function doSend() {
     setSending(true);
     try {
-      const res = await sendReportNow();
+      const ids = Array.from(selectedIds);
+      // If everything is selected, omit client_ids so the backend uses its
+      // "all clients" code path. If a subset is selected, send those ids.
+      const allSelected =
+        clientList !== null && ids.length === clientList.length;
+      const res = await sendReportNow(allSelected ? undefined : ids);
       setConfirmOpen(false);
 
       const total = res.client_count;
@@ -290,7 +319,7 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         onClose={() => {
           if (!sending) setConfirmOpen(false);
         }}
-        title="Send a report now?"
+        title="Send a report now"
         footer={
           <>
             <Button
@@ -300,21 +329,89 @@ export function ReportsCard({ account, onAccountChange }: Props) {
             >
               Cancel
             </Button>
-            <Button onClick={doSend} disabled={sending}>
+            <Button
+              onClick={doSend}
+              disabled={sending || selectedIds.size === 0}
+            >
               {sending ? (
                 <>
                   <Spinner />
                   Sending…
                 </>
+              ) : selectedIds.size === 0 ? (
+                "Pick at least one client"
+              ) : clientList && selectedIds.size === clientList.length ? (
+                `Send to all ${clientList.length}`
               ) : (
-                "Send report"
+                `Send to ${selectedIds.size} client${selectedIds.size === 1 ? "" : "s"}`
               )}
             </Button>
           </>
         }
       >
-        This will email this quarter&apos;s workbook to all your clients.
-        Continue?
+        {loadingClients && clientList === null ? (
+          <div className="flex items-center gap-2 text-sm text-zinc-500">
+            <Spinner />
+            Loading your clients…
+          </div>
+        ) : clientList === null || clientList.length === 0 ? (
+          <p className="text-sm text-zinc-600">
+            No active clients yet. Add a client first.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-zinc-600">
+              Pick which clients to send to. Each picked client gets this
+              quarter&apos;s workbook by email.
+            </p>
+            <div className="flex items-center justify-between border-b border-zinc-100 pb-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set(clientList.map((c) => c.id)))}
+                className="font-medium text-primary-600 hover:text-primary-700"
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(new Set())}
+                className="font-medium text-zinc-500 hover:text-zinc-700"
+              >
+                Select none
+              </button>
+            </div>
+            <ul className="max-h-64 space-y-1 overflow-y-auto pr-1">
+              {clientList.map((c) => {
+                const checked = selectedIds.has(c.id);
+                return (
+                  <li key={c.id}>
+                    <label className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-zinc-50">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          setSelectedIds((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(c.id);
+                            else next.delete(c.id);
+                            return next;
+                          });
+                        }}
+                        className="h-4 w-4 accent-primary-600"
+                      />
+                      <span className="text-sm text-zinc-800">{c.name}</span>
+                      {!c.contact_email && (
+                        <span className="ml-auto text-[11px] text-amber-600">
+                          no contact email
+                        </span>
+                      )}
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
       </Modal>
     </Card>
   );

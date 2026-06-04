@@ -660,15 +660,60 @@ def preview_email(body: EmailSettings,
     }
 
 
+class SendReportBody(BaseModel):
+    """Optional body for /v1/account/send-report. When client_ids is provided,
+    only those clients (validated against the tenant) get the report — used by
+    the dashboard's per-client checkbox picker. When omitted, ALL active
+    clients get it (legacy behavior)."""
+    client_ids: Optional[list[int]] = None
+
+
 @router.post("/v1/account/send-report")
-def send_my_report(authorization: Optional[str] = Header(default=None)):
-    """Customer-triggered: 'send me my latest report now.'"""
+def send_my_report(
+    body: Optional[SendReportBody] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Customer-triggered: 'send my latest reports now.'
+
+    Without a body or with client_ids=None: fans out to every active client.
+    With client_ids=[1,2,3]: fans out only to those clients (must belong to
+    the calling tenant). Returns the same {ok, client_count, delivered,
+    results} shape either way so the frontend can use one code path."""
     t = tenant_from_session(authorization)
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send reports")
+
+    ids = (body.client_ids if body else None) or []
     # Defer heavy import (avoid circulars at module load)
-    from .delivery import deliver_for_tenant
-    return deliver_for_tenant(t.id, override_to=None, triggered_by="self-serve")
+    from .delivery import deliver_for_tenant, deliver_for_client
+
+    if not ids:
+        # Legacy path — every active client
+        return deliver_for_tenant(t.id, override_to=None, triggered_by="self-serve")
+
+    # Per-client picker path — validate ownership, then fan out
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Client)
+            .where(Client.tenant_id == t.id, Client.id.in_(ids),
+                   Client.active == True)  # noqa: E712
+        ).scalars().all()
+        if not rows:
+            raise HTTPException(404, "None of the selected clients belong to your account.")
+        resolved_ids = [c.id for c in rows]
+    results = []
+    delivered = 0
+    for cid in resolved_ids:
+        r = deliver_for_client(cid, triggered_by="self-serve-picker")
+        results.append(r)
+        if r.get("ok") and r.get("email_sent"):
+            delivered += 1
+    return {
+        "ok": True,
+        "client_count": len(resolved_ids),
+        "delivered": delivered,
+        "results": results,
+    }
 
 
 @router.post("/v1/account/send-sample-report")

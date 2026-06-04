@@ -312,10 +312,22 @@ export interface SendReportResult {
   results: SendResult[];
 }
 
-/** Trigger an immediate report send to all clients. Does not change cadence.
+/** Trigger an immediate report send. With no clientIds, fans out to every
+ *  active client (legacy). With clientIds, sends only to the chosen subset.
  *  Returns the per-client outcome so the UI can tell the truth about partial
  *  or total failures instead of a blanket success toast. */
-export async function sendReportNow(): Promise<SendReportResult> {
+export async function sendReportNow(
+  clientIds?: number[],
+): Promise<SendReportResult> {
+  // The request helper auto-JSONifies `body` and sets Content-Type. When
+  // clientIds is empty/missing we POST with no body so the backend takes the
+  // legacy "all active clients" code path.
+  if (clientIds && clientIds.length > 0) {
+    return request<SendReportResult>("/v1/account/send-report", {
+      method: "POST",
+      body: { client_ids: clientIds },
+    });
+  }
   return request<SendReportResult>("/v1/account/send-report", {
     method: "POST",
   });
