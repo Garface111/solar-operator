@@ -8,7 +8,7 @@ Idempotent migration for the June 2026 schema changes:
 Run on Railway via: `python -m api.migrate`
 Idempotent: safe to run multiple times.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import text, inspect
 from .db import engine, init_db
 
@@ -38,7 +38,7 @@ def main():
             ("stripe_customer_id",     "ALTER TABLE tenants ADD COLUMN stripe_customer_id VARCHAR(64)"),
             ("stripe_subscription_id", "ALTER TABLE tenants ADD COLUMN stripe_subscription_id VARCHAR(64)"),
             ("subscription_status",    "ALTER TABLE tenants ADD COLUMN subscription_status VARCHAR(32)"),
-            ("report_frequency",       "ALTER TABLE tenants ADD COLUMN report_frequency VARCHAR(16) DEFAULT 'monthly'"),
+            ("report_frequency",       "ALTER TABLE tenants ADD COLUMN report_frequency VARCHAR(16) DEFAULT 'quarterly'"),
             ("last_pull_at",           "ALTER TABLE tenants ADD COLUMN last_pull_at TIMESTAMP"),
             ("last_delivery_at",       "ALTER TABLE tenants ADD COLUMN last_delivery_at TIMESTAMP"),
         ]
@@ -49,7 +49,7 @@ def main():
                 print(f"  + tenants.{col}")
         # Backfill report_frequency for existing rows
         conn.execute(text(
-            "UPDATE tenants SET report_frequency = 'monthly' WHERE report_frequency IS NULL"
+            "UPDATE tenants SET report_frequency = 'quarterly' WHERE report_frequency IS NULL"
         ))
         # Indexes on new columns
         for idx_sql, idx_name in [
@@ -174,6 +174,18 @@ def main():
             "CREATE INDEX IF NOT EXISTS ix_clients_tenant_gmp_email ON clients (tenant_id, gmp_email)",
         ]:
             conn.execute(text(idx_sql))
+
+        # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
+        # signups (last 7 days) that still carry the old 'monthly' engineer-default
+        # over to 'quarterly'. We deliberately bound this to created_at > now-7d so
+        # we DON'T touch older real users who may have intentionally chosen monthly.
+        res = conn.execute(text(
+            "UPDATE tenants SET report_frequency = 'quarterly' "
+            "WHERE report_frequency = 'monthly' "
+            "AND created_at > :cutoff"
+        ), {"cutoff": datetime.utcnow() - timedelta(days=7)})
+        flipped = res.rowcount if res.rowcount is not None else 0
+        print(f"  ↪ V1 quarterly-default backfill: {flipped} recent tenant(s) monthly→quarterly")
 
     print("=== Migration complete ===")
 

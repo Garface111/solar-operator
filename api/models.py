@@ -42,8 +42,9 @@ class Tenant(Base):
     # active, past_due, canceled, comped, trialing
 
     # Customer prefs (controlled via /account portal)
-    report_frequency: Mapped[str] = mapped_column(String(16), default="monthly")
-    # weekly | monthly | quarterly
+    report_frequency: Mapped[str] = mapped_column(String(16), default="quarterly")
+    # weekly | monthly | quarterly — quarterly is the operator default (NEPOOL
+    # reports quarterly; monthly was an engineer-default, corrected V1 Jun 2026)
     last_pull_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # When True, the operator gets a "[copy]" of every client report email that
