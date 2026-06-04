@@ -8,12 +8,9 @@ import {
   type Account,
   type BillingSummary,
   updateAccountEmail,
-  updateAccountFrequency,
   getBillingPortalUrl,
   getBillingSummary,
 } from "../lib/api";
-
-const FREQUENCIES = ["weekly", "monthly", "quarterly"] as const;
 
 function fmtMoney(cents: number, currency: string): string {
   try {
@@ -96,12 +93,6 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
     toast.success("Email updated");
   }
 
-  async function saveFrequency(next: string) {
-    const frequency = await updateAccountFrequency(next);
-    onAccountChange({ report_frequency: frequency });
-    toast.success("Report cadence updated");
-  }
-
   async function openBillingPortal() {
     setOpeningPortal(true);
     try {
@@ -140,18 +131,9 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           />
         </Field>
         <Field label="Report cadence">
-          <select
-            value={account.report_frequency ?? ""}
-            onChange={(e) => saveFrequency(e.target.value)}
-            className="rounded-lg border border-zinc-300 bg-white px-2 py-1 text-sm capitalize focus:outline-none focus:ring-2 focus:ring-primary-500/40"
-          >
-            {!account.report_frequency && <option value="">—</option>}
-            {FREQUENCIES.map((f) => (
-              <option key={f} value={f} className="capitalize">
-                {f}
-              </option>
-            ))}
-          </select>
+          <span className="capitalize">
+            {account.report_frequency ?? "—"}
+          </span>
         </Field>
         <Field label="Utility accounts">{account.accounts_count}</Field>
         <Field label="Bills on file">{account.bills_count}</Field>

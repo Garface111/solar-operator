@@ -37,6 +37,31 @@ function humanDate(iso: string): string {
   });
 }
 
+/** Estimate the next automatic send. If a report has gone out before, it's the
+ *  last delivery plus one cadence interval; otherwise the end of the current
+ *  week / month / quarter. A friendly estimate — the scheduler fires on calendar
+ *  boundaries, but this answers "roughly when does my next one go?". */
+function nextSendDate(freq: string, lastDeliveryIso: string | null): Date {
+  if (lastDeliveryIso) {
+    const d = new Date(lastDeliveryIso);
+    if (freq === "weekly") d.setDate(d.getDate() + 7);
+    else if (freq === "monthly") d.setMonth(d.getMonth() + 1);
+    else d.setMonth(d.getMonth() + 3); // quarterly
+    return d;
+  }
+  const now = new Date();
+  if (freq === "weekly") {
+    const d = new Date(now);
+    d.setDate(d.getDate() + ((7 - d.getDay()) % 7)); // end of week (Sunday)
+    return d;
+  }
+  if (freq === "monthly") {
+    return new Date(now.getFullYear(), now.getMonth() + 1, 0); // last day of month
+  }
+  const endMonth = Math.floor(now.getMonth() / 3) * 3 + 3; // quarter end
+  return new Date(now.getFullYear(), endMonth, 0);
+}
+
 interface Props {
   account: Account;
   onAccountChange: (patch: Partial<Account>) => void;
@@ -179,8 +204,23 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         </div>
       </div>
 
-      {/* Last delivery */}
-      <p className="mt-4 text-sm text-zinc-500">
+      {/* Next + last delivery */}
+      <p className="mt-4 text-sm text-zinc-700">
+        Next automatic report:{" "}
+        <span className="font-medium text-zinc-900">
+          {humanDate(
+            nextSendDate(
+              account.report_frequency ?? "quarterly",
+              account.last_delivery_at,
+            ).toISOString(),
+          )}
+        </span>
+      </p>
+      <p className="mt-1 text-xs text-zinc-400">
+        Changes take effect immediately — your next scheduled send will use the
+        new cadence.
+      </p>
+      <p className="mt-2 text-sm text-zinc-500">
         {account.last_delivery_at
           ? `Last sent: ${humanDate(account.last_delivery_at)}`
           : "No reports sent yet"}
