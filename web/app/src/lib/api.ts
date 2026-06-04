@@ -449,6 +449,9 @@ export interface IngestRow {
   nepool_gis_id: string | null;
   gmp_account_number: string | null;
   notes: string | null;
+  /** Set by the server during preview if the name matches an existing record.
+   *  "client" = operator name matches; "array" = array name matches; "both" = both. */
+  collision?: "client" | "array" | "both" | null;
 }
 
 export interface IngestPreview {

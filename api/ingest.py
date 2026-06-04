@@ -304,7 +304,7 @@ async def ingest_preview(
 ):
     """Parse an uploaded roster and return extracted rows AS A PREVIEW.
     Nothing is written to the database here."""
-    tenant_from_session(authorization)  # auth gate
+    t = tenant_from_session(authorization)
 
     data = await file.read()
     if not data:
@@ -321,6 +321,42 @@ async def ingest_preview(
         source = "heuristic"
 
     arrays = _normalize(rows)
+
+    # ── Collision detection: flag rows whose operator/array name matches an
+    # existing client or array in this tenant's data — they'll be merged, not
+    # duplicated, but the user should know. Match is case-insensitive exact name.
+    with SessionLocal() as db:
+        existing_clients = {
+            c.name.strip().lower()
+            for c in db.execute(
+                select(Client).where(Client.tenant_id == t.id)
+            ).scalars().all()
+        }
+        existing_arrays = {
+            a.name.strip().lower()
+            for a in db.execute(
+                select(Array).where(Array.tenant_id == t.id)
+            ).scalars().all()
+        }
+
+    for row in arrays:
+        client_hit = bool(
+            row.get("operator_name")
+            and (row["operator_name"] or "").strip().lower() in existing_clients
+        )
+        array_hit = bool(
+            row.get("array_name")
+            and (row["array_name"] or "").strip().lower() in existing_arrays
+        )
+        if client_hit and array_hit:
+            row["collision"] = "both"
+        elif client_hit:
+            row["collision"] = "client"
+        elif array_hit:
+            row["collision"] = "array"
+        else:
+            row["collision"] = None
+
     return {
         "ok": True,
         "source": source,

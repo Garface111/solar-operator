@@ -230,6 +230,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
                     <th className="px-2 py-2">NEPOOL ID</th>
                     <th className="px-2 py-2">GMP account</th>
                     <th className="px-2 py-2">Notes</th>
+                    <th className="px-2 py-2"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -275,6 +276,22 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
                         onChange={(v) => editRow(i, "notes", v)}
                         placeholder="—"
                       />
+                      <td className="px-2 py-1 align-middle text-xs">
+                        {r.collision && (
+                          <span
+                            title={
+                              r.collision === "both"
+                                ? "Operator and array name already exist — will be merged"
+                                : r.collision === "client"
+                                  ? "Operator name already exists — will be merged"
+                                  : "Array name already exists — will be merged"
+                            }
+                            className="whitespace-nowrap text-amber-700"
+                          >
+                            ⚠ Collides — will merge
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
