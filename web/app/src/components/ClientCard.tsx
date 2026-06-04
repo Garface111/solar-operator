@@ -192,6 +192,7 @@ export function ClientCard({
     >
       {/* header row — entire row is clickable to toggle expansion */}
       <div
+        data-tour-step="2"
         className="flex cursor-pointer items-center gap-3 p-4 select-none"
         onClick={(e) => {
           // Don't toggle when clicking interactive children (inputs, buttons, links)
@@ -381,13 +382,15 @@ export function ClientCard({
           </div>
 
           {/* GMP auto-populate */}
-          <div className="rounded-xl bg-zinc-50 px-4 py-3">
+          <div data-tour-step="3" className="rounded-xl bg-zinc-50 px-4 py-3">
+            <div data-tour-step="4">
             <Toggle
               id={`autopop-${client.id}`}
               checked={client.gmp_autopopulate}
               onChange={toggleAutopop}
               label="Auto-populate arrays from utility portal"
             />
+            </div>
             {client.gmp_autopopulate && (
               <div className="mt-3">
                 <span className="mb-1 block text-xs font-medium text-zinc-600">
