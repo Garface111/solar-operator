@@ -7,10 +7,26 @@ import { Checkbox } from "../ui/Checkbox";
 import { MarkdownDoc } from "../ui/MarkdownDoc";
 
 const SERVICES = [
-  "Auto-pull utility bills (GMP, VEC, and more)",
+  "Auto-pull GMP bills",
   "NEPOOL-format Excel reports",
   "Email delivery to your clients",
   "Multi-client portal",
+];
+
+// TODO (Agent A): Replace these placeholders with the actual 3-5 bullet summary
+// that Agent A adds at the top of privacy.md and tos.md.
+const PP_BULLETS = [
+  "We never sell your data to anyone, ever.",
+  "We only collect what's needed to generate your reports (GMP bills, your contact info).",
+  "You can delete your account and all your data at any time.",
+  "We use bank-grade encryption in transit and at rest.",
+];
+
+const TOS_BULLETS = [
+  "You pay $250 once to set up, then $45 per array per month.",
+  "You can cancel anytime — no lock-in, no early-termination fees.",
+  "We never charge more without telling you first.",
+  "This service is for Vermont community solar operators using Green Mountain Power.",
 ];
 
 // Served from web/onboarding/public/ by Vite (and FastAPI in prod) under the
@@ -29,7 +45,7 @@ export default function Welcome() {
           Quarterly solar reports, on autopilot.
         </h1>
         <p className="mt-3 text-base text-zinc-500">
-          We pull your utility bills (GMP, VEC, and more), build NEPOOL-format
+          We pull your Green Mountain Power bills, build NEPOOL-format
           net-metering credit reports, and email them to your clients every
           quarter — so you never touch a spreadsheet again.
         </p>
@@ -40,7 +56,7 @@ export default function Welcome() {
           </p>
           <p className="mt-1 text-xs text-primary-700">
             Billed monthly. Each array you manage is one billing unit — the
-            count is set automatically as utility captures come in.
+            count is set automatically as GMP captures come in.
           </p>
         </div>
 
@@ -58,32 +74,38 @@ export default function Welcome() {
           ))}
         </ul>
 
-        <div className="mt-8 flex gap-4 rounded-xl border border-primary-100 bg-primary-50/60 px-4 py-3 text-sm text-primary-800">
-          <span aria-hidden className="mt-0.5 text-primary-500">🔒</span>
-          <span>
-            Before continuing, please read our{" "}
-            <a
-              href={`${BASE}privacy.md`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-semibold underline underline-offset-2 hover:text-primary-900"
-            >
-              Privacy Policy
-            </a>{" "}
-            and{" "}
-            <a
-              href={`${BASE}tos.md`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-semibold underline underline-offset-2 hover:text-primary-900"
-            >
-              Terms of Service
-            </a>
-            . Key points: we never sell your data, you can delete your account
-            anytime, and we charge per array.
-          </span>
+        {/* Plain-English trust bullets — prominently above the legal accordion */}
+        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Privacy &amp; Terms — the short version
+          </p>
+          <div className="mt-3 grid gap-5 sm:grid-cols-2">
+            <div>
+              <p className="mb-2 text-xs font-semibold text-zinc-700">Privacy</p>
+              <ul className="space-y-1.5">
+                {PP_BULLETS.map((b) => (
+                  <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
+                    <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
+                    {b}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-semibold text-zinc-700">Terms</p>
+              <ul className="space-y-1.5">
+                {TOS_BULLETS.map((b) => (
+                  <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
+                    <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
+                    {b}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </div>
 
+        {/* Full legal text — collapsible */}
         <div className="mt-4 rounded-xl border border-zinc-200">
           <button
             type="button"
@@ -123,11 +145,14 @@ export default function Welcome() {
             id="agree"
             checked={agreed}
             onChange={(e) => setAgreed(e.target.checked)}
-            label="I have read and agree to the Terms of Service and Privacy Policy"
+            label="I agree to the Terms of Service and Privacy Policy"
           />
         </div>
 
-        <div className="mt-8 flex justify-end">
+        <div className="mt-8 flex items-center justify-between">
+          <Button variant="ghost" onClick={() => navigate("/demo")}>
+            ← Back
+          </Button>
           <Button disabled={!agreed} onClick={() => navigate("/info")}>
             Continue →
           </Button>

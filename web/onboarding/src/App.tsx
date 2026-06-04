@@ -1,6 +1,9 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import GetStarted from "./screens/GetStarted";
+import DummyReport from "./screens/DummyReport";
 import Welcome from "./screens/Welcome";
 import Info from "./screens/Info";
+import ClientSetup from "./screens/ClientSetup";
 import Plan from "./screens/Plan";
 import Extension from "./screens/Extension";
 import Clients from "./screens/Clients";
@@ -12,8 +15,13 @@ export default function App() {
   return (
     <BrowserRouter basename="/onboarding">
       <Routes>
-        <Route path="/" element={<Welcome />} />
+        {/* Pre-wizard explainer screens (no stepper) */}
+        <Route path="/" element={<GetStarted />} />
+        <Route path="/demo" element={<DummyReport />} />
+        {/* Wizard: Welcome → Info → ClientSetup → Plan → Extension → Clients → Done */}
+        <Route path="/welcome" element={<Welcome />} />
         <Route path="/info" element={<Info />} />
+        <Route path="/client-setup" element={<ClientSetup />} />
         <Route path="/plan" element={<Plan />} />
         <Route path="/extension" element={<Extension />} />
         <Route path="/clients" element={<Clients />} />

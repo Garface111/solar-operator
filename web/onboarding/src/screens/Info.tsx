@@ -7,6 +7,14 @@ import { Input } from "../ui/Input";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+export const SO_OPERATOR_KEY = "so_operator";
+
+export interface OperatorInfo {
+  email: string;
+  fullName: string;
+  company?: string;
+}
+
 export default function Info() {
   const navigate = useNavigate();
   const [fullName, setFullName] = useState("");
@@ -29,15 +37,14 @@ export default function Info() {
   function handleSubmit() {
     setTouched({ name: true, email: true });
     if (!valid) return;
-    // Pass operator info to the Plan screen via router state so it can
-    // construct the checkout request with the right quantity path.
-    navigate("/plan", {
-      state: {
-        email: email.trim(),
-        fullName: fullName.trim(),
-        company: company.trim() || undefined,
-      },
-    });
+    const info: OperatorInfo = {
+      email: email.trim(),
+      fullName: fullName.trim(),
+      company: company.trim() || undefined,
+    };
+    // Store in sessionStorage so Plan can read it after client setup.
+    sessionStorage.setItem(SO_OPERATOR_KEY, JSON.stringify(info));
+    navigate("/client-setup");
   }
 
   return (
@@ -47,8 +54,7 @@ export default function Info() {
           Tell us who you are.
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          We&apos;ll use this for your account and report sender details. Next
-          stop is secure checkout.
+          We&apos;ll use this for your account and report sender details.
         </p>
 
         {cancelled && (
@@ -90,7 +96,7 @@ export default function Info() {
         </div>
 
         <div className="mt-8 flex items-center justify-between">
-          <Button variant="ghost" onClick={() => navigate("/")}>
+          <Button variant="ghost" onClick={() => navigate("/welcome")}>
             ← Back
           </Button>
           <Button onClick={handleSubmit} disabled={!valid}>
@@ -99,9 +105,7 @@ export default function Info() {
         </div>
 
         <p className="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-xs leading-relaxed text-zinc-500">
-          Next: choose your billing option. You can enter your exact clients and
-          arrays now to lock in your monthly bill, or pick a rough estimate and
-          true-up later. Then secure checkout → extension install → done.
+          Next: add your clients and arrays, then review pricing before checkout.
         </p>
       </Card>
     </ScreenLayout>

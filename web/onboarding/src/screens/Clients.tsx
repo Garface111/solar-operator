@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
@@ -10,7 +10,6 @@ import { useToast } from "../ui/Toast";
 import {
   getToken,
   submitClients,
-  completeOnboarding,
   fetchStatus,
   type ClientPayload,
 } from "../lib/onboarding";
@@ -54,14 +53,12 @@ export default function Clients() {
   const toast = useToast();
   const [clients, setClients] = useState<ClientDraft[]>(() => [blankClient()]);
   const [submitting, setSubmitting] = useState(false);
-  const [completing, setCompleting] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [confirmSummary, setConfirmSummary] = useState<ConfirmSummary | null>(null);
-  // Path A: operator pre-entered clients before checkout — detect and skip re-entry.
   const [existingClientsCount, setExistingClientsCount] = useState(0);
-  const [existingArraysCount, setExistingArraysCount] = useState(0);
   const [statusChecked, setStatusChecked] = useState(false);
-  const [addingMore, setAddingMore] = useState(false);
+  // Tracks auto-advance for pre-seeded path so the screen doesn't flash.
+  const advancedRef = useRef(false);
 
   useEffect(() => {
     const token = getToken();
@@ -75,11 +72,19 @@ export default function Clients() {
     fetchStatus(token)
       .then((s) => {
         setExistingClientsCount(s.clients_count);
-        setExistingArraysCount(s.arrays_count);
       })
       .catch(() => { /* non-fatal — fall through to normal form */ })
       .finally(() => setStatusChecked(true));
   }, []);
+
+  // Auto-advance: if clients were pre-seeded before checkout, go straight to Done.
+  useEffect(() => {
+    if (!statusChecked || advancedRef.current) return;
+    if (existingClientsCount > 0) {
+      advancedRef.current = true;
+      navigate("/done", { replace: true });
+    }
+  }, [statusChecked, existingClientsCount, navigate]);
 
   function update(id: number, patch: Partial<ClientDraft>) {
     setClients((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -126,9 +131,6 @@ export default function Clients() {
     );
   }
 
-  // When 2+ clients use autopop, sub-meter arrays (multiple GMP accounts that
-  // should roll up into one array) will be imported as separate arrays and need
-  // a manual merge in the dashboard later.
   const autopopCount = clients.filter((c) => c.gmp_autopopulate).length;
   const showSubMeterWarning = autopopCount >= 2;
 
@@ -139,7 +141,6 @@ export default function Clients() {
         if (c.contact_email.trim() && !EMAIL_RE.test(c.contact_email.trim()))
           return false;
         if (c.gmp_autopopulate) {
-          // Accept email OR username — just require a non-empty value.
           return c.gmp_login.trim().length >= 1;
         }
         return true;
@@ -166,8 +167,6 @@ export default function Clients() {
         name: c.name.trim(),
         contact_email: c.contact_email.trim() || undefined,
         gmp_autopopulate: c.gmp_autopopulate,
-        // Route the single login field to the right column: an email-shaped
-        // value matches on gmp_email, anything else matches on gmp_username.
         gmp_email:
           c.gmp_autopopulate && login && looksLikeEmail ? login : undefined,
         gmp_username:
@@ -185,7 +184,6 @@ export default function Clients() {
 
     try {
       await submitClients(token, payload);
-      // Show the confirmation sub-screen before completing onboarding.
       setConfirmSummary({
         clients: clients.map((c) => ({
           name: c.name.trim(),
@@ -205,79 +203,21 @@ export default function Clients() {
     }
   }
 
-  async function handleComplete() {
-    if (completing) return;
-    const token = getToken();
-    if (!token) return;
-    setCompleting(true);
-    try {
-      const { session_token } = await completeOnboarding(token);
-      // Log the operator straight into the dashboard. The onboarding SPA and the
-      // dashboard SPA share an origin (solaroperator.org), so this `so_session`
-      // is the same key the dashboard's AuthGate reads — they land signed in.
-      if (session_token) {
-        localStorage.setItem("so_session", session_token);
-      }
-      navigate("/done");
-    } catch (err) {
-      toast.error(
-        err instanceof Error
-          ? err.message
-          : "Couldn't complete setup. Check your connection and try again.",
-      );
-      setCompleting(false);
-    }
-  }
-
-  // Path A: clients were pre-entered before checkout — show summary, skip re-entry.
-  if (statusChecked && existingClientsCount > 0 && !addingMore) {
+  // Show a brief loading state while we check if clients are already set up.
+  if (!statusChecked) {
     return (
-      <ScreenLayout current={4}>
-        <Card active>
-          <div aria-hidden className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary-100 text-2xl text-primary-600">
-            ✓
-          </div>
-          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-zinc-900 text-center">
-            Your clients are already set up.
-          </h1>
-          <p className="mt-2 text-center text-sm text-zinc-500">
-            You entered{" "}
-            <span className="font-medium text-zinc-700">{existingClientsCount} client{existingClientsCount === 1 ? "" : "s"}</span>{" "}
-            and{" "}
-            <span className="font-medium text-zinc-700">{existingArraysCount} array{existingArraysCount === 1 ? "" : "s"}</span>{" "}
-            before checkout.
-          </p>
-          <p className="mt-1 text-center text-xs text-zinc-400">
-            Edit clients and arrays any time in your dashboard.
-          </p>
-          <div className="mt-8 flex flex-col items-center gap-3">
-            <Button onClick={handleComplete} disabled={completing}>
-              {completing ? (
-                <>
-                  <Spinner />
-                  Finishing…
-                </>
-              ) : (
-                "Finish setup →"
-              )}
-            </Button>
-            <button
-              type="button"
-              onClick={() => setAddingMore(true)}
-              className="text-sm text-zinc-400 hover:text-zinc-600 focus:outline-none"
-            >
-              + Add more clients
-            </button>
-          </div>
+      <ScreenLayout current={5}>
+        <Card active className="flex items-center justify-center py-16">
+          <Spinner />
         </Card>
       </ScreenLayout>
     );
   }
 
-  // Confirmation sub-screen shown after submitClients succeeds, before completeOnboarding.
+  // Confirmation sub-screen shown after submitClients succeeds.
   if (confirmSummary) {
     return (
-      <ScreenLayout current={4}>
+      <ScreenLayout current={5}>
         <Card active>
           <div aria-hidden className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary-100 text-2xl text-primary-600">
             ✓
@@ -311,24 +251,13 @@ export default function Clients() {
             ))}
           </ul>
           <div className="mt-8 flex flex-col gap-3 items-center">
-            <Button
-              onClick={handleComplete}
-              disabled={completing}
-            >
-              {completing ? (
-                <>
-                  <Spinner />
-                  Finishing…
-                </>
-              ) : (
-                "Looks right — finish setup →"
-              )}
+            <Button onClick={() => navigate("/done")}>
+              Finish setup →
             </Button>
             <button
               type="button"
               onClick={() => setConfirmSummary(null)}
-              disabled={completing}
-              className="text-sm text-zinc-400 hover:text-zinc-600 focus:outline-none disabled:opacity-50"
+              className="text-sm text-zinc-400 hover:text-zinc-600 focus:outline-none"
             >
               ← Go back and edit
             </button>
@@ -339,7 +268,7 @@ export default function Clients() {
   }
 
   return (
-    <ScreenLayout current={4}>
+    <ScreenLayout current={5}>
       <Card active>
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
           Add your reporting clients.
@@ -369,10 +298,7 @@ export default function Clients() {
 
         <div className="mt-8 space-y-6">
           {clients.map((c, idx) => (
-            <div
-              key={c.id}
-              className="rounded-xl border border-zinc-200 p-5"
-            >
+            <div key={c.id} className="rounded-xl border border-zinc-200 p-5">
               <div className="mb-4 flex items-center justify-between">
                 <span className="text-sm font-semibold text-zinc-700">
                   Client {idx + 1}
@@ -512,7 +438,7 @@ export default function Clients() {
           <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
             <p className="text-sm text-red-700">{sessionError}</p>
             <Link
-              to="/"
+              to="/welcome"
               className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-red-700 underline underline-offset-2 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 focus-visible:ring-offset-2"
             >
               Restart setup →
