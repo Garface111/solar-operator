@@ -467,7 +467,7 @@ def update_cc_on_reports(body: UpdateCcOnReports,
 
 # Fake values for the live preview (POST /v1/account/email-preview). A fixed
 # quarter keeps the preview deterministic regardless of when it's rendered.
-_PREVIEW_CLIENT = "Bruce Genereaux"
+_PREVIEW_CLIENT = "Sample Client"
 _PREVIEW_CTX = {
     "client_name": _PREVIEW_CLIENT,
     "quarter": "2026 Q2",

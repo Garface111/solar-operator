@@ -306,7 +306,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
               dangerouslySetInnerHTML={{ __html: preview.html }}
             />
             <p className="text-xs text-zinc-400">
-              Sample uses {"{{client_name}}"} = Bruce Genereaux,{" "}
+              Sample uses {"{{client_name}}"} = Sample Client,{" "}
               {"{{quarter}}"} = 2026 Q2, {"{{arrays_count}}"} = 3.
             </p>
           </div>
