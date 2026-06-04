@@ -260,7 +260,9 @@ def tenant_status(tid: str, authorization: str | None = Header(default=None)):
         sess = db.execute(
             select(UtilitySession).where(UtilitySession.tenant_id == tid).order_by(UtilitySession.captured_at.desc())
         ).scalars().first()
-        bills_count = db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().all()
+        bills_count = db.execute(
+            select(func.count()).select_from(Bill).where(Bill.tenant_id == tid)
+        ).scalar() or 0
         return {
             "tenant": tid,
             "name": tenant.name,
@@ -275,7 +277,7 @@ def tenant_status(tid: str, authorization: str | None = Header(default=None)):
                 "captured_at": sess.captured_at.isoformat() if sess else None,
                 "expires_at": sess.expires_at.isoformat() if sess and sess.expires_at else None,
             } if sess else None,
-            "bills_count": len(bills_count),
+            "bills_count": int(bills_count),
         }
 
 
