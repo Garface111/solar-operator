@@ -180,6 +180,8 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
                     "trace": traceback.format_exc(limit=2),
                 })
 
+        # Stamp last_pull_at so the dashboard can show the next-pull countdown.
+        tenant.last_pull_at = now()
         db.commit()
 
     return {
