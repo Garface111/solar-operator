@@ -315,8 +315,19 @@ def tenant_pull(tid: str, authorization: str | None = Header(default=None)):
 
 # ---- admin -------------------------------------------------------------
 
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+
+def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
+    """Guard admin endpoints with ADMIN_API_KEY. If the env var is unset (local
+    dev), all requests are allowed so the local tooling keeps working. In prod
+    the key must match."""
+    if ADMIN_API_KEY and x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(403, "Invalid or missing X-Admin-Key")
+
+
 @app.post("/admin/tenants")
-def admin_create_tenant(body: dict):
+def admin_create_tenant(body: dict, _: None = Depends(_require_admin)):
     name = body.get("name")
     email = body.get("contact_email", "")
     if not name:
@@ -330,7 +341,7 @@ def admin_create_tenant(body: dict):
 
 
 @app.get("/admin/tenants")
-def admin_list_tenants():
+def admin_list_tenants(_: None = Depends(_require_admin)):
     with SessionLocal() as db:
         ts = db.execute(select(Tenant).order_by(Tenant.created_at.desc())).scalars().all()
         return [
@@ -342,7 +353,7 @@ def admin_list_tenants():
 
 
 @app.post("/admin/jobs/run")
-def admin_run_jobs():
+def admin_run_jobs(_: None = Depends(_require_admin)):
     return {"ran": run_pending_jobs()}
 
 
