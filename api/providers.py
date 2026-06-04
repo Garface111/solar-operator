@@ -33,10 +33,10 @@ PROVIDERS: list[ProviderDef] = [
     {
         "code": "vec",
         "label": "Vermont Electric Cooperative",
-        "portal_url": "https://vermontelectric.coop",
+        "portal_url": "https://vermontelectric.smarthub.coop",
         "state": "VT",
-        "scrape_status": "in-progress",
-        "notes": "VEC's MyAccount portal — adapter coming. Manual PDF upload accepted in the meantime.",
+        "scrape_status": "live",
+        "notes": "NISC SmartHub portal — Chrome extension scrapes billing history and usage data. kWh data unverified on production generation accounts; test with a real VEC generation meter before trusting reports.",
     },
     {
         "code": "bed",

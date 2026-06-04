@@ -1,0 +1,26 @@
+[
+  {
+    "account_id": "6578300",
+    "customer_name": "WEST GLOVER ROARING BROOK SOLAR LLC",
+    "service_address": "123 Main Rd, West Glover VT 05875",
+    "billing_date": "11/15/2023",
+    "bill_amount": "-245.67",
+    "adjustments": "0.00",
+    "total_due": "-245.67",
+    "pdf_url": "https://vermontelectric.smarthub.coop/services/secured/billPdfService/2023_11_15_6578300.pdf?account=6578300&timestamp=1700006400000&uuid=abc123-def456-7890&systemOfRecord=UTILITY",
+    "bill_uuid": "abc123-def456-7890",
+    "bill_timestamp": "1700006400000"
+  },
+  {
+    "account_id": "6578300",
+    "customer_name": "WEST GLOVER ROARING BROOK SOLAR LLC",
+    "service_address": "123 Main Rd, West Glover VT 05875",
+    "billing_date": "10/16/2023",
+    "bill_amount": "-198.40",
+    "adjustments": "0.00",
+    "total_due": "-198.40",
+    "pdf_url": "https://vermontelectric.smarthub.coop/services/secured/billPdfService/2023_10_16_6578300.pdf?account=6578300&timestamp=1697414400000&uuid=bcd234-ef5678-1234&systemOfRecord=UTILITY",
+    "bill_uuid": "bcd234-ef5678-1234",
+    "bill_timestamp": "1697414400000"
+  }
+]

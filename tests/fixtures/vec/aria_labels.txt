@@ -1,0 +1,5 @@
+Jun 2023 Billing Period. Usage Dates: May 18 - June 17. Meter 63698951 - Consumption - kWh: 0 kWh. Average Temperature: 58 °F
+Jul 2023 Billing Period. Usage Dates: June 17 - July 19. Meter 63698951 - Consumption - kWh: 0 kWh. Average Temperature: 72 °F
+Dec 2022 Billing Period. Usage Dates: Nov 19 - Dec 18. Meter 63698951 - Consumption - kWh: 0 kWh. Average Temperature: 31 °F
+Jan 2023 Billing Period. Usage Dates: Dec 18 - Jan 19. Meter 63698951 - Consumption - kWh: 12345 kWh.
+Mar 2024 Billing Period. Usage Dates: Feb 20 - Mar 19. Meter 63698951 - Generation - kWh: 8760.5 kWh. Average Temperature: 41 °F

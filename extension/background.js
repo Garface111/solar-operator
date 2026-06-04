@@ -1,7 +1,8 @@
 // background.js — service worker.
-// Receives captured tokens from content.js, persists locally, and POSTs to
-// the Solar Operator API. Also schedules periodic refresh-check alarms.
+// Receives captured tokens from content.js (GMP) and vec_content.js (VEC),
+// persists locally, and POSTs to the Solar Operator API.
 
+// v1.1.0: added VEC / NISC SmartHub support (VEC_DATA_CAPTURED)
 // v1.0.2: primary endpoint on api.solaroperator.org with Railway fallback
 // during the CNAME transition window.
 const PROD_ENDPOINT = "https://api.solaroperator.org/v1/sync";
@@ -56,60 +57,64 @@ async function postSync(payload) {
   }
 }
 
+// Shared sync handler — used by both GMP and VEC message types.
+// Stores capture metadata, POSTs to /v1/sync, updates badge.
+async function _handleSync(payload, tokenHash, sendResponse) {
+  try {
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.LAST_PAYLOAD]: {
+        capturedAt: payload.capturedAt,
+        provider: payload.provider || "gmp",
+        accountCount: (payload.accounts || []).length,
+        username: (payload.user || {}).username || null,
+        tokenExpires: (payload.auth || {}).apiTokenExpires || null,
+        tokenHash,
+      },
+    });
+
+    const settings = await getSettings();
+    if (!settings.tenantKey) {
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.LAST_SYNC]: {
+          ok: true,
+          at: new Date().toISOString(),
+          mode: "local-only",
+          message: "Captured locally. Set tenant key in options to enable sync.",
+        },
+        [STORAGE_KEYS.LAST_ERROR]: null,
+      });
+      chrome.action.setBadgeText({ text: "✓" });
+      chrome.action.setBadgeBackgroundColor({ color: "#666" });
+      sendResponse({ ok: true, endpoint: "local-only" });
+      return;
+    }
+
+    const result = await postSync(payload);
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.LAST_SYNC]: {
+        ok: true,
+        at: new Date().toISOString(),
+        endpoint: settings.endpoint,
+        result,
+      },
+      [STORAGE_KEYS.LAST_ERROR]: null,
+    });
+    chrome.action.setBadgeText({ text: "✓" });
+    chrome.action.setBadgeBackgroundColor({ color: "#2e6b3a" });
+    sendResponse({ ok: true, endpoint: settings.endpoint });
+  } catch (e) {
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.LAST_ERROR]: { at: new Date().toISOString(), message: String(e) },
+    });
+    chrome.action.setBadgeText({ text: "!" });
+    chrome.action.setBadgeBackgroundColor({ color: "#c97a3d" });
+    sendResponse({ ok: false, error: String(e) });
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "GMP_TOKEN_CAPTURED") {
-    (async () => {
-      try {
-        await chrome.storage.local.set({
-          [STORAGE_KEYS.LAST_PAYLOAD]: {
-            capturedAt: msg.payload.capturedAt,
-            accountCount: msg.payload.accounts.length,
-            username: msg.payload.user.username,
-            tokenExpires: msg.payload.auth.apiTokenExpires,
-            tokenHash: msg.tokenHash,
-          },
-        });
-
-        const settings = await getSettings();
-        if (!settings.tenantKey) {
-          // No tenant key configured — capture-only mode. Useful during MVP.
-          await chrome.storage.local.set({
-            [STORAGE_KEYS.LAST_SYNC]: {
-              ok: true,
-              at: new Date().toISOString(),
-              mode: "local-only",
-              message: "Captured locally. Set tenant key in options to enable sync.",
-            },
-            [STORAGE_KEYS.LAST_ERROR]: null,
-          });
-          chrome.action.setBadgeText({ text: "✓" });
-          chrome.action.setBadgeBackgroundColor({ color: "#666" });
-          sendResponse({ ok: true, endpoint: "local-only" });
-          return;
-        }
-
-        const result = await postSync(msg.payload);
-        await chrome.storage.local.set({
-          [STORAGE_KEYS.LAST_SYNC]: {
-            ok: true,
-            at: new Date().toISOString(),
-            endpoint: settings.endpoint,
-            result,
-          },
-          [STORAGE_KEYS.LAST_ERROR]: null,
-        });
-        chrome.action.setBadgeText({ text: "✓" });
-        chrome.action.setBadgeBackgroundColor({ color: "#2e6b3a" });
-        sendResponse({ ok: true, endpoint: settings.endpoint });
-      } catch (e) {
-        await chrome.storage.local.set({
-          [STORAGE_KEYS.LAST_ERROR]: { at: new Date().toISOString(), message: String(e) },
-        });
-        chrome.action.setBadgeText({ text: "!" });
-        chrome.action.setBadgeBackgroundColor({ color: "#c97a3d" });
-        sendResponse({ ok: false, error: String(e) });
-      }
-    })();
+  if (msg.type === "GMP_TOKEN_CAPTURED" || msg.type === "VEC_DATA_CAPTURED") {
+    _handleSync(msg.payload, msg.tokenHash, sendResponse);
     return true; // keep channel open for async sendResponse
   }
 });
@@ -135,7 +140,7 @@ async function sendHeartbeat() {
   }
 }
 
-// Expiry check — nudge the user before the JWT runs out.
+// Expiry check — nudge the user before the JWT runs out (GMP only).
 chrome.alarms.create("token-expiry-check", { periodInMinutes: 60 * 12 });
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === "heartbeat") {
