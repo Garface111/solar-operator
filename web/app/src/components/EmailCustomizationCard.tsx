@@ -20,6 +20,24 @@ const SEND_MODES = [
 
 const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{quarter}}";
 
+/** Known merge tags that are valid. Anything double-braced that isn't in this
+ *  set is flagged as a probable typo so it doesn't silently pass through. */
+const KNOWN_TAGS = new Set([
+  "client_name", "tenant_name", "quarter", "arrays_count",
+  "period_start", "period_end", "dashboard_url",
+]);
+
+const TAG_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
+
+function findTypoTags(text: string): string[] {
+  const typos: string[] = [];
+  for (const match of text.matchAll(TAG_RE)) {
+    const tag = match[1];
+    if (!KNOWN_TAGS.has(tag)) typos.push(`{{${tag}}}`);
+  }
+  return [...new Set(typos)];
+}
+
 interface Props {
   account: Account;
   onAccountChange: (patch: Partial<Account>) => void;
@@ -158,6 +176,12 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
             onChange={(e) => setSubject(e.target.value)}
           />
           <p className="mt-1.5 text-xs text-zinc-400">{MERGE_HELP}</p>
+          {findTypoTags(subject).length > 0 && (
+            <p className="mt-1 text-xs text-amber-700">
+              ⚠ Unknown tag{findTypoTags(subject).length > 1 ? "s" : ""}:{" "}
+              {findTypoTags(subject).join(", ")} — check for typos. Preview before saving.
+            </p>
+          )}
         </div>
 
         <div>
@@ -179,6 +203,12 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
             HTML supported. {MERGE_HELP}, plus {"{{period_start}}"},{" "}
             {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{dashboard_url}}"}.
           </p>
+          {findTypoTags(body).length > 0 && (
+            <p className="mt-1 text-xs text-amber-700">
+              ⚠ Unknown tag{findTypoTags(body).length > 1 ? "s" : ""}:{" "}
+              {findTypoTags(body).join(", ")} — check for typos. Preview before saving.
+            </p>
+          )}
         </div>
 
         {/* Send mode — segmented control */}
