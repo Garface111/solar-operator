@@ -13,6 +13,9 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onAssigned: () => void;
+  /** When set, scopes the preview to this client's arrays only. */
+  clientId?: number;
+  clientName?: string;
 }
 
 type Stage = "upload" | "parsing" | "preview";
@@ -35,7 +38,7 @@ function confidenceLabel(score: number): { label: string; className: string } {
   return { label: "Possible", className: "text-amber-700" };
 }
 
-export function AssignNepoolFromSpreadsheetModal({ open, onClose, onAssigned }: Props) {
+export function AssignNepoolFromSpreadsheetModal({ open, onClose, onAssigned, clientId, clientName }: Props) {
   const toast = useToast();
   const [stage, setStage] = useState<Stage>("upload");
   const [proposals, setProposals] = useState<ProposalRow[]>([]);
@@ -80,7 +83,7 @@ export function AssignNepoolFromSpreadsheetModal({ open, onClose, onAssigned }: 
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const res = await nepoolPreview(file, controller.signal);
+      const res = await nepoolPreview(file, controller.signal, clientId);
       if (controller.signal.aborted) return;
       if (!res.proposals.length && !res.unmatched_pairs.length) {
         setError(
@@ -192,15 +195,27 @@ export function AssignNepoolFromSpreadsheetModal({ open, onClose, onAssigned }: 
         className="flex max-h-full w-full max-w-3xl flex-col rounded-xl border border-zinc-200 bg-white p-6 shadow-xl"
       >
         <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
-          Find NEPOOL IDs in a spreadsheet
+          {clientId !== undefined && clientName
+            ? `Import NEPOOL IDs for ${clientName}`
+            : "Find NEPOOL IDs in a spreadsheet"}
         </h2>
 
         {stage === "upload" && (
           <div className="mt-4">
             <p className="mb-3 text-sm text-zinc-600">
-              Drop any spreadsheet that has your array names + NEPOOL IDs. We&apos;ll
-              find the matches and ask before saving. We never create new arrays from
-              this — only fill in missing IDs.
+              {clientId !== undefined && clientName ? (
+                <>
+                  Drop a spreadsheet with {clientName}&apos;s array names + NEPOOL IDs.
+                  We&apos;ll match against <strong>this client&apos;s arrays only</strong> and
+                  ask before saving. We never create new arrays from this — only fill in missing IDs.
+                </>
+              ) : (
+                <>
+                  Drop any spreadsheet that has your array names + NEPOOL IDs. We&apos;ll
+                  find the matches and ask before saving. We never create new arrays from
+                  this — only fill in missing IDs.
+                </>
+              )}
             </p>
             <p className="mb-4 text-xs text-zinc-400">
               File contents are sent to an AI model to extract the data. No data

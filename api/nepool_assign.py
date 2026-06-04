@@ -21,13 +21,13 @@ from difflib import SequenceMatcher
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, UploadFile, File
+from fastapi import APIRouter, Header, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
 from .db import SessionLocal
-from .models import Array
+from .models import Array, Client
 from .account import tenant_from_session
 from .ingest import (
     _file_to_text,
@@ -215,11 +215,26 @@ def nepool_stats(authorization: Optional[str] = Header(default=None)):
 @router.post("/v1/account/nepool/preview")
 async def nepool_preview(
     file: UploadFile = File(...),
+    client_id: Optional[int] = Query(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
     """Parse an uploaded file, extract (array_name, nepool_gis_id) pairs,
-    and fuzzy-match each to existing arrays. Nothing is written here."""
+    and fuzzy-match each to existing arrays. Nothing is written here.
+
+    When client_id is provided, matching is scoped to that client's arrays only."""
     t = tenant_from_session(authorization)
+
+    if client_id is not None:
+        with SessionLocal() as db:
+            client = db.execute(
+                select(Client).where(
+                    Client.id == client_id,
+                    Client.tenant_id == t.id,
+                    Client.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+        if client is None:
+            raise HTTPException(404, f"Client {client_id} not found")
 
     data = await file.read()
     if not data:
@@ -272,14 +287,15 @@ async def nepool_preview(
         clean_pairs.append({"array_name": name_val, "nepool_gis_id": gis_val})
 
     # Load tenant's existing arrays (eager-load client for display names).
+    # When client_id is set, scope to that client's arrays only.
     with SessionLocal() as db:
+        array_filters = [Array.tenant_id == t.id, Array.deleted_at.is_(None)]
+        if client_id is not None:
+            array_filters.append(Array.client_id == client_id)
         existing_arrays: list[Array] = db.execute(
             select(Array)
             .options(joinedload(Array.client))
-            .where(
-                Array.tenant_id == t.id,
-                Array.deleted_at.is_(None),
-            )
+            .where(*array_filters)
         ).scalars().all()
 
     proposals: list[dict] = []
