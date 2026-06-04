@@ -215,6 +215,7 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "gmp_email": c.gmp_email,
         "gmp_username": c.gmp_username,
         "gmp_autopopulate": c.gmp_autopopulate,
+        "gmp_last_sync_at": c.gmp_last_sync_at.isoformat() if c.gmp_last_sync_at else None,
     }
 
 
@@ -740,6 +741,27 @@ def delete_client(client_id: int,
         c.active = False
         db.commit()
     return {"ok": True, "client_id": client_id, "active": False}
+
+
+@router.post("/v1/account/clients/{client_id}/refresh-capture")
+def refresh_capture(client_id: int,
+                    authorization: Optional[str] = Header(default=None)):
+    """Re-read this client's GMP auto-populate freshness on demand.
+
+    This does NOT poll GMP — captures arrive asynchronously via the extension's
+    /v1/sync handler (which stamps Client.gmp_last_sync_at). The button just lets
+    the operator pull the latest stored status without a full page reload, so the
+    'Last GMP capture' indicator reflects any capture that has landed since the
+    page opened. A real on-demand GMP poll is a separate feature."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+        n_arr = db.execute(
+            select(Array).where(Array.client_id == c.id)
+        ).scalars().all()
+        return {"ok": True, "client": _client_to_dict(c, len(n_arr))}
 
 
 @router.post("/v1/account/clients/{client_id}/send-report")

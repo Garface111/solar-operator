@@ -173,6 +173,7 @@ export interface ClientRow {
   gmp_email: string | null;
   gmp_username: string | null;
   gmp_autopopulate: boolean;
+  gmp_last_sync_at: string | null;
 }
 
 // ─── account ───────────────────────────────────────────────────────────────
@@ -311,6 +312,15 @@ export async function updateClient(
 
 export async function deleteClient(id: number): Promise<void> {
   await request(`/v1/account/clients/${id}`, { method: "DELETE" });
+}
+
+/** Re-read a client's GMP auto-populate freshness (does not poll GMP). */
+export async function refreshCapture(id: number): Promise<ClientRow> {
+  const res = await request<{ client: ClientRow }>(
+    `/v1/account/clients/${id}/refresh-capture`,
+    { method: "POST" },
+  );
+  return res.client;
 }
 
 // ─── arrays ──────────────────────────────────────────────────────────────

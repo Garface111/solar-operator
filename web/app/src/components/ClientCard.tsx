@@ -10,7 +10,19 @@ import {
   type ClientRow,
   updateClient,
   deleteClient,
+  refreshCapture,
 } from "../lib/api";
+
+function captureFreshness(iso: string | null): string {
+  if (!iso) return "No captures yet";
+  return `Last GMP capture: ${new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  })}`;
+}
 
 interface Props {
   client: ClientRow;
@@ -23,6 +35,25 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
   const [expanded, setExpanded] = useState(!!defaultExpanded);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  async function handleRefresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const updated = await refreshCapture(client.id);
+      onChange(updated);
+      toast.success(
+        updated.gmp_last_sync_at
+          ? "Capture status refreshed"
+          : "No captures received yet",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't refresh");
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function patch(p: Partial<ClientRow>) {
     const updated = await updateClient(client.id, p as any);
@@ -112,6 +143,25 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
               placeholder="reports@client.org"
             />
           </div>
+          {client.gmp_autopopulate && (
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={
+                  client.gmp_last_sync_at ? "text-zinc-500" : "text-amber-600"
+                }
+              >
+                {captureFreshness(client.gmp_last_sync_at)}
+              </span>
+              <button
+                type="button"
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="rounded font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+              >
+                {refreshing ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="hidden shrink-0 text-right text-xs text-zinc-400 sm:block">
