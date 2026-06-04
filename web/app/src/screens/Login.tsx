@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
@@ -34,6 +34,8 @@ export default function Login(_props: LoginProps) {
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  // Cooldown counter (seconds) after a resend — prevents hammering the API.
+  const [resendCooldown, setResendCooldown] = useState(0);
   const emailRef = useRef<HTMLInputElement>(null);
 
   const linkError = loginErrorMessage(searchParams.get("error"));
@@ -58,6 +60,37 @@ export default function Login(_props: LoginProps) {
         err instanceof Error
           ? err.message
           : "Couldn't send the link. Check your connection and try again.",
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const startCooldown = useCallback(() => {
+    setResendCooldown(60);
+    const id = window.setInterval(() => {
+      setResendCooldown((c) => {
+        if (c <= 1) {
+          window.clearInterval(id);
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
+  }, []);
+
+  async function handleResend() {
+    if (resendCooldown > 0 || sending) return;
+    setSending(true);
+    try {
+      await requestLoginLink(email.trim().toLowerCase());
+      startCooldown();
+      toast.show("New sign-in link sent.", "success");
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Couldn't resend the link. Try again in a moment.",
       );
     } finally {
       setSending(false);
@@ -89,13 +122,27 @@ export default function Login(_props: LoginProps) {
               <span className="font-medium text-zinc-700">{email.trim()}</span>.
               It expires in 15 minutes. No password needed.
             </p>
-            <button
-              type="button"
-              onClick={() => setSent(false)}
-              className="mt-6 rounded text-sm font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-            >
-              Use a different email
-            </button>
+            <div className="mt-6 flex flex-col items-center gap-3">
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={sending || resendCooldown > 0}
+                className="rounded text-sm font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+              >
+                {sending
+                  ? "Sending…"
+                  : resendCooldown > 0
+                    ? `Resend link (${resendCooldown}s)`
+                    : "Resend link"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSent(false)}
+                className="rounded text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+              >
+                Use a different email
+              </button>
+            </div>
           </div>
         ) : (
           <form onSubmit={handleSubmit}>
