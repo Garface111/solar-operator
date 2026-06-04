@@ -39,9 +39,9 @@ function nextReportDate(freq: string | null): Date {
 }
 
 /** Human-readable relative time, e.g. "in 3h 12m" or "in 4 days". */
-function relativeTime(target: Date): string {
+function relativeTime(target: Date, overdueLabel = "soon"): string {
   const diffMs = target.getTime() - Date.now();
-  if (diffMs <= 0) return "now";
+  if (diffMs <= 0) return overdueLabel;
   const mins = Math.floor(diffMs / 60_000);
   if (mins < 60) return `in ${mins}m`;
   const hrs = Math.floor(diffMs / 3_600_000);
@@ -279,11 +279,14 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
                   new Date(
                     new Date(account.last_pull_at).getTime() + 6 * 60 * 60 * 1000,
                   ),
+                  "soon",
                 )}{" "}
                 <span className="text-xs text-zinc-400">(every 6 hours)</span>
               </>
             ) : (
-              <span className="text-zinc-400">soon — the extension will begin pulling automatically</span>
+              <span className="text-zinc-400">
+                soon — the extension will begin pulling automatically
+              </span>
             )}
           </li>
           <li>
