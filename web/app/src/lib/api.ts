@@ -101,11 +101,45 @@ export interface Account {
   subscription_status: string | null;
   report_frequency: string | null;
   cc_on_reports: boolean;
+  // V2 email customization. null template fields mean "use the built-in default".
+  send_from_email: string | null;
+  send_from_name: string | null;
+  email_subject_template: string | null;
+  email_body_template: string | null;
+  send_mode: string; // "to_client" | "to_me"
+  default_email_subject: string;
+  default_email_body: string;
+  merge_tags: string[];
   last_pull_at: string | null;
   last_delivery_at: string | null;
   created_at: string | null;
   accounts_count: number;
   bills_count: number;
+}
+
+export interface EmailSettingsInput {
+  send_from_email?: string | null;
+  send_from_name?: string | null;
+  email_subject_template?: string | null;
+  email_body_template?: string | null;
+  send_mode?: string | null;
+}
+
+export interface EmailSettings {
+  send_from_email: string | null;
+  send_from_name: string | null;
+  email_subject_template: string | null;
+  email_body_template: string | null;
+  send_mode: string;
+}
+
+export interface EmailPreview {
+  subject: string;
+  html: string;
+  text: string;
+  from: string;
+  to: string;
+  send_mode: string;
 }
 
 export interface UtilityAccount {
@@ -311,4 +345,61 @@ export async function listProviders(): Promise<Provider[]> {
     noAuth: true,
   });
   return res.providers;
+}
+
+// ─── spreadsheet ingest (V4) ─────────────────────────────────────────────
+
+/** One extracted array row from a roster upload — every field user-editable. */
+export interface IngestRow {
+  operator_name: string | null;
+  array_name: string | null;
+  nepool_gis_id: string | null;
+  gmp_account_number: string | null;
+  notes: string | null;
+}
+
+export interface IngestPreview {
+  source: "llm" | "heuristic";
+  count: number;
+  arrays: IngestRow[];
+}
+
+export interface IngestCommitResult {
+  clients_created: number;
+  arrays_created: number;
+  accounts_created: number;
+}
+
+/** Upload a spreadsheet and get back parsed rows (nothing is saved yet). */
+export async function ingestPreview(file: File): Promise<IngestPreview> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const headers: Record<string, string> = {};
+  const token = getSession();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  // NOTE: do NOT set Content-Type — the browser adds the multipart boundary.
+
+  const res = await fetch("/v1/ingest/preview", {
+    method: "POST",
+    headers,
+    body: form,
+  });
+
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as IngestPreview;
+}
+
+/** Commit the (user-confirmed, possibly edited) rows. */
+export async function ingestCommit(
+  arrays: IngestRow[],
+): Promise<IngestCommitResult> {
+  return request<IngestCommitResult>("/v1/ingest/commit", {
+    body: { arrays },
+  });
 }

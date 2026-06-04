@@ -34,6 +34,7 @@ from .worker import pull_bills_for_tenant, run_pending_jobs
 from .stripe_webhook import router as stripe_webhook_router
 from .account import router as account_router
 from .onboarding import router as onboarding_router
+from .ingest import router as ingest_router
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -62,6 +63,8 @@ app.include_router(stripe_webhook_router)
 app.include_router(account_router)
 # New 5-screen onboarding flow.
 app.include_router(onboarding_router)
+# V4: AI spreadsheet ingest for arrays + NEPOOL IDs.
+app.include_router(ingest_router)
 
 
 @app.on_event("startup")

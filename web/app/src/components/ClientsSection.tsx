@@ -5,6 +5,7 @@ import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
 import { ClientCard } from "./ClientCard";
 import { AddClientModal } from "./AddClientModal";
+import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { type ClientRow, listClients } from "../lib/api";
 
 interface Props {
@@ -16,6 +17,16 @@ export function ClientsSection({ expandClientId }: Props) {
   const toast = useToast();
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  function loadClients() {
+    listClients()
+      .then(setClients)
+      .catch((err) => {
+        toast.error(err instanceof Error ? err.message : "Couldn't load clients");
+        setClients([]);
+      });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -54,9 +65,18 @@ export function ClientsSection({ expandClientId }: Props) {
             </span>
           )}
         </h2>
-        <Button onClick={() => setAdding(true)} className="px-4 py-2">
-          + Add client
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => setImporting(true)}
+            className="px-4 py-2"
+          >
+            Import spreadsheet
+          </Button>
+          <Button onClick={() => setAdding(true)} className="px-4 py-2">
+            + Add client
+          </Button>
+        </div>
       </div>
 
       {clients === null ? (
@@ -89,6 +109,12 @@ export function ClientsSection({ expandClientId }: Props) {
         open={adding}
         onClose={() => setAdding(false)}
         onCreated={addClientLocal}
+      />
+
+      <ImportSpreadsheetModal
+        open={importing}
+        onClose={() => setImporting(false)}
+        onImported={loadClients}
       />
     </section>
   );
