@@ -199,12 +199,17 @@ export default function Clients() {
           <div className="mt-6 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             <p className="font-semibold">⚠ Sub-metered arrays need a manual merge</p>
             <p className="mt-1 text-xs leading-relaxed text-amber-800">
-              Auto-populate creates one array per GMP account. If a client&apos;s
-              array is actually fed by several sub-meters (e.g. the Starlake
-              case — 3 GMP accounts rolling up into 1 array), those will come in
-              as separate arrays. You&apos;ll need to merge them by hand in the
-              dashboard after onboarding. We can&apos;t detect this automatically.
+              Some arrays (like Bruce Genereaux&apos;s Starlake) sum multiple GMP
+              accounts into one. Auto-populate can&apos;t detect that — it creates
+              one array per GMP account. If autopop creates separate arrays you
+              wanted merged, fix it in the dashboard after onboarding:
             </p>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs leading-relaxed text-amber-800">
+              <li>Open one of the arrays you want to keep</li>
+              <li>Click <span className="font-medium">Link a utility account</span></li>
+              <li>Add the other arrays&apos; GMP account numbers</li>
+              <li>Delete the now-duplicate arrays</li>
+            </ol>
           </div>
         )}
 

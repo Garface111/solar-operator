@@ -373,13 +373,19 @@ function UtilityAccounts({
           }}
         />
       ) : (
-        <button
-          type="button"
-          onClick={() => setAdding(true)}
-          className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-        >
-          + Link a utility account
-        </button>
+        <div>
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+          >
+            + Link a utility account
+          </button>
+          <p className="mt-1.5 text-[11px] leading-snug text-zinc-400">
+            Merging sub-meters? Link each GMP account here to sum them into this
+            one array (the Starlake case), then delete the duplicate arrays.
+          </p>
+        </div>
       )}
     </div>
   );
