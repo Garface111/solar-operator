@@ -528,6 +528,46 @@ def _effective(req_val: Optional[str], stored_val: Optional[str]) -> Optional[st
     return _blank_to_none(req_val)
 
 
+@router.get("/v1/account/from-domain-status")
+def from_domain_status(authorization: Optional[str] = Header(default=None)):
+    """Return the Resend verification status for the tenant's custom send_from_email
+    domain. Returns {"domain": ..., "status": "verified"|"pending"|"unverified"|"none"}.
+
+    "none" means no custom address is set (platform default in use).
+    "unverified" means the domain exists in Resend but DNS isn't confirmed.
+    "pending" means the domain was added but verification hasn't resolved yet.
+    "verified" means Resend has confirmed the domain and custom-From will work.
+
+    On any Resend API error, returns {"domain": ..., "status": "unknown"} so the
+    UI can show a neutral state rather than a hard error."""
+    t = tenant_from_session(authorization)
+    email = (t.send_from_email or "").strip().lower()
+    if not email or "@" not in email:
+        return {"domain": None, "status": "none"}
+
+    domain = email.split("@", 1)[1]
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    if not resend_key:
+        return {"domain": domain, "status": "unknown"}
+
+    try:
+        import resend as resend_sdk
+        resend_sdk.api_key = resend_key
+        domains = resend_sdk.Domains.list()
+        # SDK returns a list of domain objects; find one matching our domain.
+        for d in (domains.get("data") or []):
+            if (d.get("name") or "").lower() == domain:
+                status = (d.get("status") or "").lower()
+                if status == "verified":
+                    return {"domain": domain, "status": "verified"}
+                return {"domain": domain, "status": status or "pending"}
+        # Domain not found in this Resend account — can't verify custom From.
+        return {"domain": domain, "status": "unverified"}
+    except Exception as exc:
+        logger.warning("from-domain-status: Resend API error: %s", exc)
+        return {"domain": domain, "status": "unknown"}
+
+
 @router.post("/v1/account/email-settings")
 def update_email_settings(body: EmailSettings,
                           authorization: Optional[str] = Header(default=None)):

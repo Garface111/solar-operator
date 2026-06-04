@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
@@ -9,8 +9,10 @@ import {
   type Account,
   type EmailPreview,
   type EmailSettingsInput,
+  type FromDomainStatus,
   previewEmail,
   updateEmailSettings,
+  getFromDomainStatus,
 } from "../lib/api";
 
 const SEND_MODES = [
@@ -55,6 +57,14 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
   const [saving, setSaving] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<EmailPreview | null>(null);
+  const [domainStatus, setDomainStatus] = useState<FromDomainStatus | null>(null);
+
+  // Load domain verification status once on mount (non-fatal if it fails).
+  useEffect(() => {
+    getFromDomainStatus()
+      .then(setDomainStatus)
+      .catch(() => {/* non-fatal */});
+  }, []);
 
   function currentInput(): EmailSettingsInput {
     return {
@@ -154,9 +164,22 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           value={fromEmail}
           onChange={(e) => setFromEmail(e.target.value)}
         />
+        {domainStatus && domainStatus.status !== "none" && fromEmail && (
+          <p className="-mt-3 mb-1 text-xs">
+            {domainStatus.status === "verified" ? (
+              <span className="text-primary-600">✓ Domain verified — custom From active</span>
+            ) : domainStatus.status === "unverified" ? (
+              <span className="text-amber-700">⚠ Domain not verified in Resend — will fall back to platform address</span>
+            ) : domainStatus.status === "pending" ? (
+              <span className="text-amber-600">⏳ Domain verification pending — DNS may take up to 48h</span>
+            ) : (
+              <span className="text-zinc-400">Domain status unknown</span>
+            )}
+          </p>
+        )}
         <p className="-mt-3 text-xs text-zinc-400">
           Leave blank to send from the Solar Operator address. Custom domains
-          must be verified, or we fall back to the default automatically.
+          must be verified with Resend, or sends fall back to the platform address automatically.
         </p>
 
         <Input

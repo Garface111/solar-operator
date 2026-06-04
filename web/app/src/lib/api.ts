@@ -246,6 +246,16 @@ export async function getBillingSummary(): Promise<BillingSummary> {
   return request<BillingSummary>("/v1/account/billing-summary");
 }
 
+export interface FromDomainStatus {
+  domain: string | null;
+  status: "verified" | "pending" | "unverified" | "unknown" | "none";
+}
+
+/** Check Resend verification status for the tenant's custom send_from_email domain. */
+export async function getFromDomainStatus(): Promise<FromDomainStatus> {
+  return request<FromDomainStatus>("/v1/account/from-domain-status");
+}
+
 /** Toggle 'send me a copy of every report'. Returns the updated value. */
 export async function updateCcOnReports(
   ccOnReports: boolean,
