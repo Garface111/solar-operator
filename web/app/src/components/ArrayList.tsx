@@ -169,7 +169,7 @@ function ArrayRow({
   return (
     <div className="rounded-xl border border-zinc-200">
       <div className="grid grid-cols-1 gap-x-4 gap-y-2 p-3 sm:grid-cols-12 sm:items-center">
-        <div className="sm:col-span-4">
+        <div className="sm:col-span-3">
           <FieldLabel>Name</FieldLabel>
           <EditableField
             value={array.name}
@@ -199,7 +199,7 @@ function ArrayRow({
             later if you don&apos;t have it now.
           </p>
         </div>
-        <div className="sm:col-span-2">
+        <div className="sm:col-span-3">
           <FieldLabel>Bill timing</FieldLabel>
           <select
             value={array.bill_offset_months === 0 ? "0" : "1"}
@@ -207,7 +207,7 @@ function ArrayRow({
               save({ bill_offset_months: Number(e.target.value) })
             }
             aria-label="Bill timing"
-            className="w-full rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+            className="w-full rounded-xl border border-zinc-300 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
           >
             <option value="1">Prior month (default)</option>
             <option value="0">Same month (sub-metered)</option>
