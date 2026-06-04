@@ -267,7 +267,7 @@ function ArrayRow({
   }
 
   return (
-    <div className={`rounded-xl border border-zinc-200${selected ? " ring-2 ring-primary-400" : ""}`}>
+    <div className={`rounded-xl border ${array.excluded ? "border-zinc-200 opacity-60" : "border-zinc-200"}${selected ? " ring-2 ring-primary-400" : ""}`}>
       <div className="grid grid-cols-1 gap-x-4 gap-y-2 p-3 sm:grid-cols-12 sm:items-center">
         {selectable && (
           <div className="sm:col-span-1 flex items-center">
@@ -336,13 +336,24 @@ function ArrayRow({
           {array.accounts.length} utility{" "}
           {array.accounts.length === 1 ? "account" : "accounts"}
         </button>
-        <button
-          type="button"
-          onClick={() => setConfirmDelete(true)}
-          className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-        >
-          Delete
-        </button>
+        <div className="flex items-center gap-3">
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-zinc-500" title="Excluded arrays are hidden from reports and don't count toward billing (e.g. below the REC threshold)">
+            <input
+              type="checkbox"
+              checked={!!array.excluded}
+              onChange={(e) => save({ excluded: e.target.checked })}
+              className="h-3.5 w-3.5 accent-amber-500"
+            />
+            Hide from reports
+          </label>
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+          >
+            Delete
+          </button>
+        </div>
       </div>
 
       {expanded && (

@@ -50,7 +50,7 @@ interface Props {
 export function EmailCustomizationCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   // The form mirrors the stored template fields; "" means "use the default".
-  const [fromEmail, setFromEmail] = useState(account.send_from_email ?? "");
+  const [fromEmail, setFromEmail] = useState(account.send_from_email ?? account.email ?? "");
   const [fromName, setFromName] = useState(account.send_from_name ?? account.name ?? "");
   const [subject, setSubject] = useState(account.email_subject_template ?? "");
   const [body, setBody] = useState(account.email_body_template ?? "");
@@ -150,12 +150,31 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
 
   return (
     <Card>
-      <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
-        Your reports, your voice
-      </h2>
-      <p className="mt-2 text-sm leading-relaxed text-zinc-600">
-        Customize how reports go out to your clients. Preview before saving.
-      </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
+            Your reports, your voice
+          </h2>
+          <p className="mt-1 text-sm leading-relaxed text-zinc-600">
+            Customize how reports go out to your clients.
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          onClick={doPreview}
+          disabled={previewing || saving}
+          className="shrink-0"
+        >
+          {previewing ? (
+            <>
+              <Spinner />
+              Rendering…
+            </>
+          ) : (
+            "Preview"
+          )}
+        </Button>
+      </div>
 
       <div className="mt-6 space-y-5">
         <Input
@@ -280,20 +299,6 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
 
       {/* Actions */}
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button
-          variant="secondary"
-          onClick={doPreview}
-          disabled={previewing || saving}
-        >
-          {previewing ? (
-            <>
-              <Spinner />
-              Rendering…
-            </>
-          ) : (
-            "Preview"
-          )}
-        </Button>
         <Button onClick={() => persist(currentInput(), "Email settings saved")} disabled={saving}>
           {saving ? (
             <>

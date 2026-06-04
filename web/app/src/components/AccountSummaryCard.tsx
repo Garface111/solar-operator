@@ -81,18 +81,6 @@ function fmtMoney(cents: number, currency: string): string {
   }
 }
 
-/** "Jan 2026" from an ISO date string, or null. */
-function shortMonth(iso: string | null): string | null {
-  if (!iso) return null;
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      year: "numeric",
-    });
-  } catch {
-    return null;
-  }
-}
 
 const STATUS_STYLES: Record<string, string> = {
   active: "bg-primary-100 text-primary-700",
@@ -376,36 +364,44 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
         </div>
       )}
 
-      {/* Recent captures activity feed */}
-      {captures !== null && captures.length > 0 && (
-        <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
-            Recent bill captures
+      {/* Recent captures activity feed — aggregated by array (deduplicated) */}
+      {captures !== null && captures.length > 0 && (() => {
+        // Deduplicate: keep only the most recent capture per unique array name.
+        const seen = new Map<string, CaptureEntry>();
+        for (const c of captures) {
+          const key = `${c.client_name}|${c.array_name}`;
+          if (!seen.has(key) || (c.pulled_at && (!seen.get(key)!.pulled_at || c.pulled_at > seen.get(key)!.pulled_at!))) {
+            seen.set(key, c);
+          }
+        }
+        const deduped = Array.from(seen.values());
+        const sortedAts = deduped.map((c) => c.pulled_at).filter(Boolean).sort() as string[];
+        const latestAt = sortedAts.length > 0 ? sortedAts[sortedAts.length - 1] : undefined;
+        const arrayNames = deduped.map((c) => c.array_name).join(", ");
+        return (
+          <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+              Recent activity
+            </div>
+            <p className="mt-1.5 text-xs text-zinc-700">
+              {latestAt ? (
+                <>
+                  <span className="font-medium">{timeAgo(new Date(latestAt))}</span>
+                  {" — collected data from "}
+                  <span className="font-medium">{deduped.length} {deduped.length === 1 ? "array" : "arrays"}</span>
+                  <span className="text-zinc-400"> ({arrayNames})</span>
+                </>
+              ) : (
+                <>
+                  Collected data from{" "}
+                  <span className="font-medium">{deduped.length} {deduped.length === 1 ? "array" : "arrays"}</span>
+                  <span className="text-zinc-400"> ({arrayNames})</span>
+                </>
+              )}
+            </p>
           </div>
-          <ul className="mt-2 space-y-1.5">
-            {captures.map((c, i) => {
-              const period = shortMonth(c.period_end) ?? shortMonth(c.period_start);
-              return (
-                <li key={i} className="flex items-baseline justify-between gap-2 text-xs">
-                  <span className="text-zinc-700">
-                    <span className="font-medium">{c.client_name}</span>
-                    {" · "}
-                    {c.array_name}
-                    {period && (
-                      <span className="text-zinc-400"> ({period} bill)</span>
-                    )}
-                  </span>
-                  {c.pulled_at && (
-                    <span className="shrink-0 text-zinc-400">
-                      {timeAgo(new Date(c.pulled_at))}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
+        );
+      })()}
 
       {/* What happens next — forward-looking timeline so new operators know
           the system is running without them having to wonder. */}

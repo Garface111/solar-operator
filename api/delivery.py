@@ -82,8 +82,13 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             send_mode = "to_both" if bool(tenant.cc_on_reports) else "to_client"
         else:
             send_mode = _raw_mode
+        # Use the tenant's explicitly-set send_from_email if configured; otherwise
+        # fall back to their contact_email so reports appear to come FROM them,
+        # not from admin@solaroperator.org.  send_workbook_email will retry with
+        # the platform default + Reply-To if Resend rejects an unverified domain.
+        effective_from_email = tenant.send_from_email or tenant.contact_email
         from_header = resolve_from_header(
-            tenant.send_from_email, tenant.send_from_name, tenant_name)
+            effective_from_email, tenant.send_from_name, tenant_name)
         subject_template = tenant.email_subject_template
         body_template = tenant.email_body_template
         arrays_count = db.execute(
@@ -109,11 +114,11 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         recipients = _recipients_for_client(client, tenant, override_to)
     else:
         # send_mode == "to_client" — only fan out if the client has its own
-        # contact email. Otherwise we'd silently route to tenant.contact_email
-        # and the operator gets one extra copy per under-configured client
-        # (each labeled with that client's name). The right UX is "add a contact
-        # email" — not "spam the operator until they notice."
-        if not (client.contact_email or "").strip():
+        # contact email, UNLESS cc_on_reports is on (legacy solo-operator mode where
+        # the tenant IS the client and tenant.contact_email is the correct recipient).
+        # Without cc_on_reports, silently routing to tenant.contact_email would spam
+        # a NEPOOL-agent operator once per under-configured client.
+        if not (client.contact_email or "").strip() and not bool(tenant.cc_on_reports):
             return {"ok": False, "reason": "no recipient email on file",
                     "client_id": client_id, "client_name": client_name,
                     "recipient": "", "tenant": tenant_id}
@@ -171,12 +176,14 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                 workbook_path=str(path), filename=filename, from_addr=from_header,
             )
 
-        # to_both: tenant gets their own separate copy (not just a cc).
-        # Skip when tenant address is already in recipients, and on override sends.
-        if (send_mode == "to_both" and tenant_email and not override_to
-                and tenant_email not in recipients):
+        # Operator copy: send a separate email to the operator when:
+        #   (a) send_mode is "to_both", OR
+        #   (b) the legacy cc_on_reports flag is on (additive — works with any send_mode).
+        # Skip when the operator address is already in recipients, and on override sends.
+        if (tenant_email and not override_to and tenant_email not in recipients
+                and (send_mode == "to_both" or bool(tenant.cc_on_reports))):
             send_workbook_email(
-                to=tenant_email, subject=subject, html=html, text=text,
+                to=tenant_email, subject=f"[copy] {subject}", html=html, text=text,
                 workbook_path=str(path), filename=filename, from_addr=from_header,
             )
 
