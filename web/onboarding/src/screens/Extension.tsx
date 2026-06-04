@@ -68,6 +68,33 @@ export default function Extension() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTest | null>(null);
   const [extensionActive, setExtensionActive] = useState(false);
+  /** Per-portal "visited" flag — set when the operator clicks Open <Portal>.
+   *  Drives the "log into both" UX: even if a capture lands from one portal,
+   *  we don't auto-advance until every visited portal has been captured (or
+   *  the operator explicitly clicks "I've installed it →"). Persisted to
+   *  sessionStorage so a refresh during onboarding doesn't lose state. */
+  const [portalsVisited, setPortalsVisited] = useState<Record<string, boolean>>(
+    () => {
+      try {
+        const raw = sessionStorage.getItem("so_portals_visited");
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        return {};
+      }
+    },
+  );
+  function markPortalVisited(url: string) {
+    setPortalsVisited((prev) => {
+      const next = { ...prev, [url]: true };
+      try {
+        sessionStorage.setItem("so_portals_visited", JSON.stringify(next));
+      } catch {
+        /* noop */
+      }
+      return next;
+    });
+  }
+  const visitedCount = Object.values(portalsVisited).filter(Boolean).length;
   // Paid-but-inactive self-heal: when we return from Stripe with a session_id
   // but the webhook hasn't activated us yet, we reassure + reconcile rather
   // than letting the operator hit a 402 "pay again".
@@ -210,17 +237,6 @@ export default function Extension() {
     let failures = 0;
     let waits = 0;
 
-    async function advance() {
-      if (cancelled) return;
-      setAdvancing(true);
-      try {
-        await markExtensionInstalled(token!);
-      } catch {
-        /* non-fatal — ping already proved a capture landed */
-      }
-      if (!cancelled) navigate("/clients");
-    }
-
     async function tick() {
       try {
         const { installed: ok } = await pingExtension(token!);
@@ -229,9 +245,10 @@ export default function Extension() {
         setPollFailures(0);
         if (ok) {
           setInstalled(true);
-          // Hold on the "Captured ✓" state briefly so the operator can see it
-          // before auto-advancing — avoids a jarring instant screen change.
-          window.setTimeout(() => { if (!cancelled) void advance(); }, 1500);
+          // Hold on the "Captured ✓" state. Do NOT auto-advance: the operator
+          // may have multiple utilities (GMP + VEC) to log into, and we don't
+          // want to whisk them off to /clients after the first capture.
+          // They'll click "I've installed it →" when they're done.
           return;
         }
       } catch {
@@ -488,22 +505,40 @@ export default function Extension() {
             ))}
           </ol>
           <div className="mt-5 flex flex-wrap gap-2">
-            {UTILITY_PORTALS.map((p) => (
-              <a
-                key={p.url}
-                href={p.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-              >
-                Open {p.name} →
-              </a>
-            ))}
+            {UTILITY_PORTALS.map((p) => {
+              const visited = !!portalsVisited[p.url];
+              return (
+                <a
+                  key={p.url}
+                  href={p.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => markPortalVisited(p.url)}
+                  className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-medium transition-colors duration-150 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 ${
+                    visited
+                      ? "border border-primary-200 bg-primary-50 text-primary-700 hover:bg-primary-100"
+                      : "bg-primary-500 text-white hover:bg-primary-600 active:bg-primary-700"
+                  }`}
+                >
+                  {visited ? "✓ " : ""}
+                  Open {p.name} →
+                </a>
+              );
+            })}
           </div>
           <p className="mt-3 text-xs text-zinc-500">
-            You don&apos;t need to do anything else. We pick up your bills in the
-            background.
+            If you manage clients on multiple utilities (e.g. GMP and VEC),
+            sign in to each portal so we can capture all of them. Click
+            &quot;I&apos;ve installed it&quot; below when you&apos;re done —
+            we won&apos;t advance automatically.
           </p>
+          {installed && (
+            <p className="mt-2 text-xs font-medium text-primary-700">
+              ✓ Capture received. {visitedCount > 1
+                ? "Make sure you've signed into every portal you use, then continue below."
+                : "If you use another utility too, sign into it now before continuing."}
+            </p>
+          )}
         </div>
 
         <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-4">
@@ -517,7 +552,7 @@ export default function Extension() {
             />
             <span className="text-sm font-medium text-zinc-700" aria-live="polite">
               {installed
-                ? "Capture received — taking you to the next step…"
+                ? "Capture received ✓ — sign into your other utilities too, then click \"I've installed it\" below."
                 : "We're waiting for your first utility capture…"}
             </span>
             {!installed && extensionActive && (
