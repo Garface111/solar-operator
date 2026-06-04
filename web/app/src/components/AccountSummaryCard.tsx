@@ -183,6 +183,11 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             {account.report_frequency ?? "—"}
           </span>
         </Field>
+        <Field label="Clients">
+          <span title="Reporting clients you manage — each gets their own workbook.">
+            {account.clients_count}
+          </span>
+        </Field>
         <Field label="Utility accounts">
           <span title="GMP account numbers detected by the extension. Each array typically has 1–3 accounts.">
             {account.accounts_count}
@@ -225,7 +230,13 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             </p>
           )}
           <p className="mt-1 text-xs text-zinc-400">
-            Updates automatically as auto-populate adds arrays.
+            Updates automatically as auto-populate adds arrays.{" "}
+            <a
+              href="/accounts/clients"
+              className="underline-offset-2 hover:text-zinc-600 hover:underline"
+            >
+              See your arrays →
+            </a>
           </p>
         </div>
       )}
