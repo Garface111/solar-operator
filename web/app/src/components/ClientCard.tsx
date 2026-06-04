@@ -11,6 +11,8 @@ import {
   updateClient,
   deleteClient,
   refreshCapture,
+  sendClientReportToMe,
+  downloadClientReport,
 } from "../lib/api";
 
 function captureFreshness(iso: string | null): string {
@@ -48,16 +50,19 @@ function deliveryStatus(
 
 interface Props {
   client: ClientRow;
+  operatorEmail: string | null;
   defaultExpanded?: boolean;
   onChange: (c: ClientRow) => void;
 }
 
-export function ClientCard({ client, defaultExpanded, onChange }: Props) {
+export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }: Props) {
   const toast = useToast();
   const [expanded, setExpanded] = useState(!!defaultExpanded);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [sendingToMe, setSendingToMe] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   async function handleRefresh() {
     if (refreshing) return;
@@ -115,6 +120,45 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
       toast.success(`Reactivated ${client.name}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't reactivate");
+    }
+  }
+
+  async function handleSendToMe() {
+    if (!operatorEmail || sendingToMe) return;
+    setSendingToMe(true);
+    try {
+      await sendClientReportToMe(client.id, operatorEmail);
+      toast.success(`Sent to ${operatorEmail}. Check your inbox.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Couldn't send report";
+      if (msg.toLowerCase().includes("no bills")) {
+        toast.error(
+          `No bills captured yet — log into GMP as ${client.name} so the extension can pull their data.`,
+        );
+      } else {
+        toast.error(msg);
+      }
+    } finally {
+      setSendingToMe(false);
+    }
+  }
+
+  async function handleDownload() {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      await downloadClientReport(client.id, client.name);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Couldn't download report";
+      if (msg.toLowerCase().includes("no bills")) {
+        toast.error(
+          `No bills captured yet — log into GMP as ${client.name} so the extension can pull their data.`,
+        );
+      } else {
+        toast.error(msg);
+      }
+    } finally {
+      setDownloading(false);
     }
   }
 
@@ -357,6 +401,47 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
               clientId={client.id}
               onCountChange={(count) => onChange({ ...client, array_count: count })}
             />
+          </div>
+
+          {/* Latest report — send to self or download */}
+          <div className="border-t border-zinc-100 pt-3">
+            <h4 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+              Latest report
+            </h4>
+            <p className="mt-1 text-xs text-zinc-500">
+              Preview what you'll send {client.name} — without contacting them.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                onClick={handleSendToMe}
+                disabled={sendingToMe || !operatorEmail}
+              >
+                {sendingToMe ? (
+                  <>
+                    <Spinner />
+                    Sending…
+                  </>
+                ) : (
+                  "Email it to me"
+                )}
+              </Button>
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
+                {downloading ? (
+                  <>
+                    <Spinner />
+                    Downloading…
+                  </>
+                ) : (
+                  "Download .xlsx"
+                )}
+              </button>
+            </div>
           </div>
 
           <div className="flex justify-end">

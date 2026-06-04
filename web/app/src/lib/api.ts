@@ -406,6 +406,52 @@ export async function refreshCapture(id: number): Promise<ClientRow> {
   return res.client;
 }
 
+/** Send the client's latest report to the operator's own email (not the client).
+ *  `toEmail` must match the operator's account email — validated server-side. */
+export async function sendClientReportToMe(
+  clientId: number,
+  toEmail: string,
+): Promise<{ ok: boolean; recipient: string }> {
+  return request<{ ok: boolean; recipient: string }>(
+    `/v1/account/clients/${clientId}/send-report?to=${encodeURIComponent(toEmail)}`,
+    { method: "POST" },
+  );
+}
+
+/** Fetch the latest .xlsx workbook for a client and trigger a browser download.
+ *  Uses the session token (a plain <a download> can't send Authorization headers). */
+export async function downloadClientReport(
+  clientId: number,
+  clientName: string,
+): Promise<void> {
+  const token = getSession();
+  const res = await fetchWithTimeout(`/v1/account/clients/${clientId}/report.xlsx`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the report (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${clientName.replace(/[^A-Za-z0-9_.-]+/g, "_")}-latest.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
 // ─── arrays ──────────────────────────────────────────────────────────────
 
 export async function listArrays(clientId: number): Promise<ArrayRow[]> {

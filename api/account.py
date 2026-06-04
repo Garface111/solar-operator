@@ -15,18 +15,23 @@ Tokens expire after 15 minutes (login link) or 30 days (session).
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import logging
 import hmac
 import hashlib
 import base64
 import json
+import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func
 
@@ -915,6 +920,7 @@ def refresh_capture(client_id: int,
 
 @router.post("/v1/account/clients/{client_id}/send-report")
 def send_one_client_report(client_id: int,
+                           to: Optional[str] = Query(default=None),
                            authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
@@ -924,8 +930,45 @@ def send_one_client_report(client_id: int,
     if not t.active and t.subscription_status not in (
             "active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send reports")
+    override_to: Optional[str] = None
+    if to is not None:
+        tenant_email = (t.contact_email or "").strip().lower()
+        if not tenant_email or to.strip().lower() != tenant_email:
+            raise HTTPException(403, "?to must match your account email")
+        override_to = to.strip()
     from .delivery import deliver_for_client
-    return deliver_for_client(client_id, triggered_by="self-serve")
+    return deliver_for_client(client_id, override_to=override_to,
+                              triggered_by="self-serve")
+
+
+@router.get("/v1/account/clients/{client_id}/report.xlsx")
+def download_client_report(client_id: int,
+                           authorization: Optional[str] = Header(default=None)):
+    """Stream the latest workbook for a client as a downloadable .xlsx attachment."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+        client_name = c.name
+    from .writers import build_workbook
+    tmpdir = tempfile.mkdtemp(prefix=f"so-dl-c{client_id}-")
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", client_name)
+    out_path = f"{tmpdir}/{safe_name}-latest.xlsx"
+    try:
+        build_workbook(client_id=client_id, out_path=out_path)
+    except Exception:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(
+            422,
+            f"No bills captured yet for {client_name} — the extension needs to pull from GMP first.",
+        )
+    return FileResponse(
+        out_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"{safe_name}-latest.xlsx",
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
 
 
 # ─── Utility provider catalog (UI dropdown source) ─────────────────────

@@ -7,6 +7,7 @@ import { ClientCard } from "./ClientCard";
 import { AddClientModal } from "./AddClientModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { type ClientRow, listClients } from "../lib/api";
+import { useDashboardContext } from "../screens/DashboardLayout";
 
 interface Props {
   /** Client id to auto-expand on load (from a /clients/:id deep link). */
@@ -15,6 +16,8 @@ interface Props {
 
 export function ClientsSection({ expandClientId }: Props) {
   const toast = useToast();
+  const { account } = useDashboardContext();
+  const operatorEmail = account?.email ?? null;
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -137,6 +140,7 @@ export function ClientsSection({ expandClientId }: Props) {
             <ClientCard
               key={c.id}
               client={c}
+              operatorEmail={operatorEmail}
               defaultExpanded={c.id === expandClientId}
               onChange={replaceClient}
             />
