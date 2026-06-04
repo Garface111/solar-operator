@@ -86,9 +86,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
     try {
       const saved = await updateEmailSettings(input);
       // Reflect server-normalized values (blank → null) back into the form + account.
-      // When the server returns null, fall back to the operator's contact_email/name so the
-      // field shows their real default rather than implying the platform address.
-      setFromEmail(saved.send_from_email ?? account.contact_email ?? "");
+      setFromEmail(saved.send_from_email ?? "");
       setFromName(saved.send_from_name ?? account.name ?? "");
       setSubject(saved.email_subject_template ?? "");
       setBody(saved.email_body_template ?? "");
