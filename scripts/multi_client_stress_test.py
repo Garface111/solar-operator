@@ -153,10 +153,64 @@ def main() -> None:
                     help="Months of bills to seed (default 18)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Seed + workbook assertion only — no emails, no scheduler calls")
+    ap.add_argument("--client-count", type=int, default=None,
+                    help="Override total client count for capacity testing (implies --dry-run --no-oneshot)")
     args = ap.parse_args()
+
+    # --client-count implies dry-run and no-oneshot (capacity test mode)
+    if args.client_count is not None:
+        args.dry_run = True
+        args.no_oneshot = True
 
     months = MONTHS_18[:args.bills_months]
     rng = random.Random(20260604)  # deterministic — same seed → same numbers
+
+    # Expand CLIENTS_DEF to the requested client count by cycling through
+    # synthetic client templates.
+    clients_def = CLIENTS_DEF
+    if args.client_count is not None and args.client_count > 0:
+        vt_towns = [
+            "Addison", "Barnard", "Bethel", "Bolton", "Brandon", "Bridport",
+            "Bristol", "Burlington", "Cabot", "Calais", "Cambridge", "Charlotte",
+            "Chelsea", "Chester", "Colchester", "Cornwall", "Craftsbury",
+            "Danville", "Derby", "Duxbury", "East Montpelier", "Eden",
+            "Fairfax", "Fairlee", "Ferrisburgh", "Franklin", "Georgia",
+            "Glover", "Goshen", "Granville", "Greensboro", "Groton",
+            "Hardwick", "Hinesburg", "Huntington", "Hyde Park", "Irasburg",
+            "Isle La Motte", "Jamaica", "Johnson", "Kirby", "Leicester",
+            "Lincoln", "Londonderry", "Ludlow", "Lyndon", "Marshfield",
+            "Middlebury", "Milton", "Montpelier", "Morrisville", "Newark",
+            "Newbury", "Newfane", "Newport", "Northfield", "Norwich",
+            "Orwell", "Panton", "Pawlet", "Peacham", "Pittsfield",
+            "Plainfield", "Plymouth", "Pomfret", "Poultney", "Proctor",
+            "Randolph", "Richmond", "Rochester", "Royalton", "Rupert",
+            "Rutland", "Ryegate", "Saint Albans", "Salisbury", "Shoreham",
+            "Springfield", "Starksboro", "Stowe", "Sudbury", "Swanton",
+            "Thetford", "Tinmouth", "Topsham", "Townshend", "Troy",
+            "Tunbridge", "Underhill", "Vergennes", "Vernon", "Waitsfield",
+            "Wallingford", "Warren", "Waterbury", "Weathersfield", "Wells",
+            "West Rutland", "Westminster", "Whiting", "Williston", "Wilmington",
+            "Wolcott", "Woodstock", "Worcester",
+        ]
+        clients_def = []
+        arrays_per_client_cycle = [3, 4, 2, 5, 3, 4]  # cycle for variety
+        for i in range(args.client_count):
+            town = vt_towns[i % len(vt_towns)]
+            n_arrays = arrays_per_client_cycle[i % len(arrays_per_client_cycle)]
+            freq = ["quarterly", "monthly", None][i % 3]
+            arrays = []
+            for j in range(n_arrays):
+                array_town = vt_towns[(i * 7 + j) % len(vt_towns)]
+                nepool_id = f"SC{i:04d}{j}"
+                kw = 100 + ((i * 13 + j * 7) % 400)
+                meters = 1 if j % 3 != 2 else 2
+                arrays.append((f"{array_town} Array C{i+1}-{j+1}", nepool_id, kw, meters))
+            clients_def.append({
+                "name": f"{town} Solar Operator {i+1}",
+                "frequency": freq,
+                "email": f"ford.genereaux+stress-{i}@gmail.com",
+                "arrays": arrays,
+            })
 
     init_db()
 
@@ -173,6 +227,7 @@ def main() -> None:
     client_meta: list[dict] = []   # {id, name, frequency, array_ids, n_arrays, email}
     n_accounts = 0
     n_bills = 0
+    t_seed_start = time.monotonic()
 
     with SessionLocal() as db:
         tenant = Tenant(
@@ -190,7 +245,7 @@ def main() -> None:
         db.add(tenant)
         db.flush()
 
-        for cdef in CLIENTS_DEF:
+        for cdef in clients_def:
             client = Client(
                 tenant_id=TID,
                 name=cdef["name"],
@@ -261,10 +316,14 @@ def main() -> None:
 
         db.commit()
 
+    t_seed_elapsed = time.monotonic() - t_seed_start
     n_arrays_total = sum(c["n_arrays"] for c in client_meta)
     print(f"  Tenant:   {TID}")
-    print(f"  Clients:  3 ({', '.join(c['name'] + ': ' + str(c['n_arrays']) + ' arrays' for c in client_meta)})")
-    print(f"  Accounts: {n_accounts}  Bills: {n_bills}")
+    print(f"  Clients:  {len(client_meta)}")
+    if len(client_meta) <= 10:
+        for cm in client_meta:
+            print(f"    {cm['name']}: {cm['n_arrays']} arrays")
+    print(f"  Arrays:   {n_arrays_total}  Accounts: {n_accounts}  Bills: {n_bills}")
 
     # ── Assert bill counts before delivery ────────────────────────────────────
     bills_ok = True
@@ -293,21 +352,37 @@ def main() -> None:
     if args.dry_run:
         # Still build workbooks to prove the writer path works.
         _sep("Dry-run — workbook generation only (no emails)")
+        t_wb_start = time.monotonic()
+        total_sheets = 0
+        total_kb = 0
+        errors = 0
         with tempfile.TemporaryDirectory(prefix="so-stress-mc-dry-") as tmpdir:
             from openpyxl import load_workbook as _load_wb
             for cm in client_meta:
-                out = Path(tmpdir) / f"{cm['name'].replace(' ', '_')}.xlsx"
-                wb_path = _build_workbook(client_id=cm["id"], out_path=out)
-                wb = _load_wb(str(wb_path))
-                size_kb = wb_path.stat().st_size // 1024
-                print(f"  {cm['name']}: {len(wb.sheetnames)} sheets, {size_kb}KB — OK")
+                out = Path(tmpdir) / f"{cm['name'].replace(' ', '_')[:60]}.xlsx"
+                try:
+                    wb_path = _build_workbook(client_id=cm["id"], out_path=out)
+                    wb = _load_wb(str(wb_path))
+                    size_kb = wb_path.stat().st_size // 1024
+                    total_sheets += len(wb.sheetnames)
+                    total_kb += size_kb
+                    if len(client_meta) <= 10:
+                        print(f"  {cm['name']}: {len(wb.sheetnames)} sheets, {size_kb}KB — OK")
+                except Exception as e:
+                    errors += 1
+                    print(f"  FAIL {cm['name']}: {e}")
+        t_wb_elapsed = time.monotonic() - t_wb_start
+        print(f"  Workbook generation: {len(client_meta)} clients, "
+              f"{n_arrays_total} arrays, {total_kb}KB total, "
+              f"{t_wb_elapsed:.1f}s ({t_wb_elapsed/len(client_meta)*1000:.0f}ms/client) "
+              f"— {'PASS' if errors == 0 else f'{errors} ERRORS'}")
         if not args.keep_tenant:
             _hard_delete(TID)
             print("  Cleanup: done")
         else:
             print(f"  Cleanup: SKIPPED (--keep-tenant). Tenant: {TID}")
-        print("\nDry-run complete.")
-        sys.exit(0)
+        print(f"\nDry-run complete. Seeding: {t_seed_elapsed:.1f}s, Generation: {t_wb_elapsed:.1f}s")
+        sys.exit(0 if errors == 0 else 1)
 
     # ── Step 2: Scheduler delivery path ───────────────────────────────────────
     _sep("Step 2 — _deliver_clients_with_frequency (direct call)")
