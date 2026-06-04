@@ -61,7 +61,7 @@ export default function Done() {
           You&apos;re set up. One last step.
         </h1>
         <p className="mx-auto mt-2 max-w-md text-sm text-zinc-500">
-          Log into Green Mountain Power so the extension can start capturing
+          Log into your utility portal so the extension can start capturing
           your bill data.
         </p>
 
@@ -82,7 +82,7 @@ export default function Done() {
               </a>
               <p className="mx-auto mt-3 max-w-md text-sm text-zinc-600">
                 <strong>Next step in your dashboard:</strong> for each client, open
-                Green Mountain Power signed in with that client&apos;s account. The
+                their utility portal signed in with that client&apos;s account. The
                 extension captures their bills and auto-creates their arrays. You only
                 do this once per client.
               </p>
@@ -128,8 +128,8 @@ export default function Done() {
 
         {status && status.arrays_count === 0 && (
           <p className="mx-auto mt-4 max-w-md text-xs text-zinc-400">
-            Arrays from auto-populate clients will appear once they sign into GMP
-            through the extension. Your monthly total updates automatically as
+            Arrays from auto-populate clients will appear once they sign into their
+            utility portal through the extension. Your monthly total updates automatically as
             they do.
           </p>
         )}

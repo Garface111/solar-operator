@@ -19,7 +19,7 @@ import {
 
 function captureFreshness(iso: string | null): string {
   if (!iso) return "No captures yet";
-  return `Last GMP capture: ${new Date(iso).toLocaleString(undefined, {
+  return `Last capture: ${new Date(iso).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -147,7 +147,7 @@ export function ClientCard({
       const msg = err instanceof Error ? err.message : "Couldn't send report";
       if (msg.toLowerCase().includes("no bills")) {
         toast.error(
-          `No bills captured yet — log into GMP as ${client.name} so the extension can pull their data.`,
+          `No bills captured yet — log into your utility portal as ${client.name} so the extension can pull their data.`,
         );
       } else {
         toast.error(msg);
@@ -166,7 +166,7 @@ export function ClientCard({
       const msg = err instanceof Error ? err.message : "Couldn't download report";
       if (msg.toLowerCase().includes("no bills")) {
         toast.error(
-          `No bills captured yet — log into GMP as ${client.name} so the extension can pull their data.`,
+          `No bills captured yet — log into your utility portal as ${client.name} so the extension can pull their data.`,
         );
       } else {
         toast.error(msg);
@@ -294,12 +294,12 @@ export function ClientCard({
                     {!client.gmp_last_sync_at ? (
                       <>
                         First-time setup — sign in as{" "}
-                        <span className="font-medium">{gmpLogin}</span> at GMP so
+                        <span className="font-medium">{gmpLogin}</span> at their utility portal so
                         we can auto-detect their arrays
                       </>
                     ) : (
                       <>
-                        Open GMP signed in as{" "}
+                        Open portal signed in as{" "}
                         <span className="font-medium">{gmpLogin}</span> to refresh
                       </>
                     )}
@@ -314,7 +314,7 @@ export function ClientCard({
                   </a>
                 </>
               ) : (
-                <span>Sign into GMP to refresh this client&apos;s data</span>
+                <span>Sign into your utility portal to refresh this client&apos;s data</span>
               )}
             </div>
           )}
@@ -374,16 +374,16 @@ export function ClientCard({
               id={`autopop-${client.id}`}
               checked={client.gmp_autopopulate}
               onChange={toggleAutopop}
-              label="Auto-populate arrays from GMP"
+              label="Auto-populate arrays from utility portal"
             />
             {client.gmp_autopopulate && (
               <div className="mt-3">
                 <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  GMP login (email or username)
+                  Utility login (email or username)
                 </span>
                 <EditableField
                   value={gmpLogin}
-                  label="GMP login"
+                  label="Utility login"
                   onSave={(v) => {
                     // Route to the right column: email-shaped → gmp_email.
                     const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
@@ -392,7 +392,7 @@ export function ClientCard({
                       gmp_username: v && !looksLikeEmail ? v : null,
                     });
                   }}
-                  emptyText="add GMP login"
+                  emptyText="add utility login"
                   placeholder="client@gmail.com or jdoe"
                 />
                 <p className="mt-1.5 text-xs text-zinc-500">

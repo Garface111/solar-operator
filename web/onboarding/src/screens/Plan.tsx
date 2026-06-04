@@ -132,7 +132,7 @@ export default function Plan() {
             Add your clients and arrays.
           </h1>
           <p className="mt-2 text-sm text-zinc-500">
-            Enter them now to lock in your exact monthly bill. You can add GMP
+            Enter them now to lock in your exact monthly bill. You can add utility
             credentials and NEPOOL-GIS IDs after payment.
           </p>
 

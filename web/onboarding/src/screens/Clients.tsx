@@ -346,22 +346,22 @@ export default function Clients() {
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
           A client is whoever receives a quarterly report. Turn on auto-populate
-          to pull their arrays straight from GMP, or add arrays by hand.
+          to pull their arrays straight from their utility portal, or add arrays by hand.
         </p>
 
         {showSubMeterWarning && (
           <div className="mt-6 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             <p className="font-semibold">⚠ Sub-metered arrays need a manual merge</p>
             <p className="mt-1 text-xs leading-relaxed text-amber-800">
-              Some arrays sum multiple GMP accounts into one (e.g. a site with
+              Some arrays sum multiple utility accounts into one (e.g. a site with
               three sub-meters that report separately). Auto-populate creates one
-              array per GMP account. If autopop creates arrays you wanted merged,
+              array per utility account. If autopop creates arrays you wanted merged,
               fix it in the dashboard after onboarding:
             </p>
             <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs leading-relaxed text-amber-800">
               <li>Open one of the arrays you want to keep</li>
               <li>Click <span className="font-medium">Link a utility account</span></li>
-              <li>Add the other arrays&apos; GMP account numbers</li>
+              <li>Add the other arrays&apos; utility account numbers</li>
               <li>Delete the now-duplicate arrays</li>
             </ol>
           </div>
@@ -416,14 +416,14 @@ export default function Clients() {
                     id={`autopop-${c.id}`}
                     checked={c.gmp_autopopulate}
                     onChange={(v) => update(c.id, { gmp_autopopulate: v })}
-                    label="Auto-populate arrays from GMP"
+                    label="Auto-populate arrays from utility portal"
                   />
 
                   {c.gmp_autopopulate ? (
                     <div className="mt-4">
                       <Input
                         id={`gmp-${c.id}`}
-                        label="GMP login (email or username)"
+                        label="Utility login (email or username)"
                         placeholder="client@gmail.com or jdoe"
                         value={c.gmp_login}
                         onChange={(e) => update(c.id, { gmp_login: e.target.value })}

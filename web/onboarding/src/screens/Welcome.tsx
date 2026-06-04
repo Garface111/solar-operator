@@ -7,7 +7,7 @@ import { Checkbox } from "../ui/Checkbox";
 import { MarkdownDoc } from "../ui/MarkdownDoc";
 
 const SERVICES = [
-  "Auto-pull GMP bills",
+  "Auto-pull utility bills (GMP, VEC, and more)",
   "NEPOOL-format Excel reports",
   "Email delivery to your clients",
   "Multi-client portal",
@@ -29,7 +29,7 @@ export default function Welcome() {
           Quarterly solar reports, on autopilot.
         </h1>
         <p className="mt-3 text-base text-zinc-500">
-          We pull your Green Mountain Power bills, build NEPOOL-format
+          We pull your utility bills (GMP, VEC, and more), build NEPOOL-format
           net-metering credit reports, and email them to your clients every
           quarter — so you never touch a spreadsheet again.
         </p>
@@ -40,7 +40,7 @@ export default function Welcome() {
           </p>
           <p className="mt-1 text-xs text-primary-700">
             Billed monthly. Each array you manage is one billing unit — the
-            count is set automatically as GMP captures come in.
+            count is set automatically as utility captures come in.
           </p>
         </div>
 

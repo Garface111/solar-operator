@@ -79,7 +79,7 @@ export function ActivationCodeCard({ tenantKey, onKeyRegenerated }: Props) {
         <li>1. Open the Solar Operator extension and click &ldquo;Options&rdquo;.</li>
         <li>2. Paste the code above into the activation field and save.</li>
         <li>
-          3. Log into Green Mountain Power as usual — captures now flow to your
+          3. Log into your utility portal (e.g., Green Mountain Power) as usual — captures now flow to your
           account automatically.
         </li>
       </ol>

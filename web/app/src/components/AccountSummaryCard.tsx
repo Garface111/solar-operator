@@ -246,7 +246,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           </span>
         </Field>
         <Field label="Utility accounts">
-          <span title="GMP account numbers detected by the extension. Each array typically has 1–3 accounts.">
+          <span title="Utility account numbers detected by the extension. Each array typically has 1–3 accounts.">
             {account.accounts_count}
           </span>
         </Field>
@@ -256,7 +256,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           </span>
         </Field>
         {account.extension_heartbeat_at && (
-          <Field label="Last GMP capture">
+          <Field label="Last capture">
             <span>
               {new Date(account.extension_heartbeat_at).toLocaleDateString()}{" "}
               <span className="font-normal text-zinc-400">
@@ -330,7 +330,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             </p>
           )}
           <p className="mt-1.5 text-xs text-zinc-500">
-            Arrays count toward your bill as soon as they&apos;re added — whether by manual entry or by GMP capture. We sync with Stripe automatically; you&apos;ll see the change on your next statement.
+            Arrays count toward your bill as soon as they&apos;re added — whether by manual entry or by utility capture. We sync with Stripe automatically; you&apos;ll see the change on your next statement.
           </p>
           <p className="mt-1 text-xs text-zinc-400">
             Updates automatically as you add or remove arrays.{" "}
@@ -363,7 +363,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             Extension is active but no bills captured yet.
           </p>
           <p className="mt-0.5 text-xs text-amber-800">
-            Make sure you&apos;re signed into GMP with an account that has community
+            Make sure you&apos;re signed into your utility portal (GMP, VEC) with an account that has community
             solar. If your account isn&apos;t showing community solar billing,{" "}
             <a
               href="mailto:support@solaroperator.org"
@@ -415,7 +415,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
         </div>
         <ul className="mt-2 space-y-1.5 text-sm text-zinc-700">
           <li>
-            <span className="font-medium">Next GMP data pull:</span>{" "}
+            <span className="font-medium">Next utility data pull:</span>{" "}
             {account.last_pull_at ? (
               <>
                 {relativeTime(

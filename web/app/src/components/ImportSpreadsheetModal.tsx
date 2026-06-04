@@ -307,7 +307,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
                     <th className="px-2 py-2">Operator</th>
                     <th className="px-2 py-2">Array</th>
                     <th className="px-2 py-2">NEPOOL ID</th>
-                    <th className="px-2 py-2">GMP account</th>
+                    <th className="px-2 py-2">Utility account</th>
                     <th className="px-2 py-2">Notes</th>
                     <th className="px-2 py-2"></th>
                   </tr>
