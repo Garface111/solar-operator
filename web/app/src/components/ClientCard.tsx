@@ -260,10 +260,12 @@ export function ClientCard({
         expanded ? "border-zinc-300 shadow-sm" : "border-zinc-200"
       } ${selected ? "ring-2 ring-primary-400" : ""}`}
     >
-      {/* header row — entire row is clickable to toggle expansion */}
+      {/* header row — entire row is clickable to toggle expansion. The
+          `group` class lets the chevron react on hover even though hover
+          is on the parent. */}
       <div
         data-tour-step="2"
-        className="flex cursor-pointer items-center gap-3 p-4 select-none"
+        className="group flex cursor-pointer items-center gap-3 p-4 select-none hover:bg-zinc-50/60 rounded-xl"
         onClick={(e) => {
           // Don't toggle when clicking interactive children (inputs, buttons, links)
           const tag = (e.target as HTMLElement).tagName;
@@ -286,12 +288,28 @@ export function ClientCard({
             className="h-4 w-4 shrink-0 accent-primary-500"
           />
         )}
-        {/* Expand/collapse chevron — always visible, not hover-only */}
+        {/* Expand/collapse affordance — circular button-shaped, always
+            visible, hover-styled. Whole header row is still clickable
+            (handler on the parent div) — this just makes the click target
+            obvious to scanning eyes. */}
         <span
           aria-hidden
-          className={`shrink-0 text-zinc-400 transition-transform ${expanded ? "rotate-90" : ""}`}
+          className={`grid h-8 w-8 shrink-0 place-items-center rounded-full border border-zinc-200 bg-zinc-50 text-zinc-500 transition-all group-hover:border-zinc-300 group-hover:bg-zinc-100 group-hover:text-zinc-700 ${
+            expanded ? "rotate-90 border-zinc-300 bg-zinc-100 text-zinc-700" : ""
+          }`}
         >
-          ▸
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <polyline points="4,2 10,7 4,12" />
+          </svg>
         </span>
 
         <div className="min-w-0 flex-1">
