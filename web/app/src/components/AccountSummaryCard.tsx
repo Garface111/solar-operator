@@ -12,18 +12,30 @@ import {
   getBillingSummary,
 } from "../lib/api";
 
-/** Compute the next quarterly-delivery calendar date (Jan 1/Apr 1/Jul 1/Oct 1
- *  at 09:00 UTC, whichever comes next from now). */
-function nextQuarterlyDate(): Date {
+/** Next scheduled send date based on report_frequency.
+ *  quarterly: Jan 1/Apr 1/Jul 1/Oct 1 at 09:00 UTC
+ *  monthly:   1st of next month at 09:00 UTC
+ *  weekly:    next Monday at 09:00 UTC */
+function nextReportDate(freq: string | null): Date {
   const now = new Date();
-  const year = now.getUTCFullYear();
-  const candidates = [0, 3, 6, 9].map((m) => {
-    const d = new Date(Date.UTC(year, m, 1, 9, 0, 0));
+  const utcNow = now.getTime();
+  if (freq === "monthly") {
+    const d = now.getUTCMonth() === 11
+      ? new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1, 9, 0, 0))
+      : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 9, 0, 0));
     return d;
-  });
-  // Also check next year's Jan 1 for when we're in Q4 past Oct 1
+  }
+  if (freq === "weekly") {
+    const day = now.getUTCDay(); // 0=Sun, 1=Mon
+    const daysUntilMon = day === 0 ? 1 : 8 - day;
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilMon, 9, 0, 0));
+    return d;
+  }
+  // default: quarterly
+  const year = now.getUTCFullYear();
+  const candidates = [0, 3, 6, 9].map((m) => new Date(Date.UTC(year, m, 1, 9, 0, 0)));
   candidates.push(new Date(Date.UTC(year + 1, 0, 1, 9, 0, 0)));
-  return candidates.find((d) => d.getTime() > now.getTime())!;
+  return candidates.find((d) => d.getTime() > utcNow)!;
 }
 
 /** Human-readable relative time, e.g. "in 3h 12m" or "in 4 days". */
@@ -215,7 +227,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
               <span className="font-semibold text-zinc-900">
                 {billing.billable_arrays}
               </span>{" "}
-              billable {billing.billable_arrays === 1 ? "array" : "arrays"} · ~
+              billable {billing.billable_arrays === 1 ? "array" : "arrays"} ·{" "}
               {fmtMoney(billing.price_cents, billing.currency)} ×{" "}
               {billing.billable_arrays} ={" "}
               <span className="font-semibold text-zinc-900">
@@ -278,22 +290,21 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             <span className="font-medium">
               Next {account.report_frequency ?? "quarterly"} report:
             </span>{" "}
-            {account.report_frequency === "quarterly" || !account.report_frequency ? (
-              <>
-                {nextQuarterlyDate().toLocaleDateString(undefined, {
-                  month: "long",
-                  day: "numeric",
-                  year: "numeric",
-                })}{" "}
-                <span className="text-xs text-zinc-400">
-                  ({relativeTime(nextQuarterlyDate())})
-                </span>
-              </>
-            ) : (
-              <span className="text-xs text-zinc-400">
-                based on your {account.report_frequency} schedule
-              </span>
-            )}
+            {(() => {
+              const d = nextReportDate(account.report_frequency);
+              return (
+                <>
+                  {d.toLocaleDateString(undefined, {
+                    month: "long",
+                    day: "numeric",
+                    year: "numeric",
+                  })}{" "}
+                  <span className="text-xs text-zinc-400">
+                    ({relativeTime(d)})
+                  </span>
+                </>
+              );
+            })()}
           </li>
         </ul>
       </div>
