@@ -58,7 +58,33 @@ export default function Welcome() {
           ))}
         </ul>
 
-        <div className="mt-8 rounded-xl border border-zinc-200">
+        <div className="mt-8 flex gap-4 rounded-xl border border-primary-100 bg-primary-50/60 px-4 py-3 text-sm text-primary-800">
+          <span aria-hidden className="mt-0.5 text-primary-500">🔒</span>
+          <span>
+            Before continuing, please read our{" "}
+            <a
+              href={`${BASE}privacy.md`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold underline underline-offset-2 hover:text-primary-900"
+            >
+              Privacy Policy
+            </a>{" "}
+            and{" "}
+            <a
+              href={`${BASE}tos.md`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold underline underline-offset-2 hover:text-primary-900"
+            >
+              Terms of Service
+            </a>
+            . Key points: we never sell your data, you can delete your account
+            anytime, and we charge per array.
+          </span>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-zinc-200">
           <button
             type="button"
             onClick={() => setLegalOpen((o) => !o)}
@@ -66,7 +92,7 @@ export default function Welcome() {
             aria-controls="legal-panel"
             className="flex w-full items-center justify-between rounded-xl px-4 py-3 text-left text-sm font-medium text-zinc-700 transition-colors duration-150 ease-in-out hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
           >
-            Terms of Service &amp; Privacy Policy
+            Read full Terms &amp; Privacy Policy
             <span aria-hidden className="text-zinc-400">
               {legalOpen ? "−" : "+"}
             </span>
@@ -97,7 +123,7 @@ export default function Welcome() {
             id="agree"
             checked={agreed}
             onChange={(e) => setAgreed(e.target.checked)}
-            label="I agree to the Terms of Service and Privacy Policy"
+            label="I have read and agree to the Terms of Service and Privacy Policy"
           />
         </div>
 
