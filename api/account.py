@@ -438,6 +438,21 @@ def update_email(body: UpdateEmail, authorization: Optional[str] = Header(defaul
     return {"ok": True, "email": new_email}
 
 
+@router.post("/v1/account/regen-key")
+def regen_activation_key(authorization: Optional[str] = Header(default=None)):
+    """Generate a new tenant_key (activation code), invalidating the old one.
+
+    The old code stops working immediately. The operator must paste the new
+    code into the extension options page to resume captures."""
+    t = tenant_from_session(authorization)
+    new_key = "sol_live_" + secrets.token_urlsafe(32)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.tenant_key = new_key
+        db.commit()
+    return {"ok": True, "tenant_key": new_key}
+
+
 @router.post("/v1/account/frequency")
 def update_frequency(body: UpdateFrequency, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)

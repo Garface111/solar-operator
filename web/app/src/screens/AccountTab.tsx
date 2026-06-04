@@ -23,7 +23,10 @@ export default function AccountTab() {
   return (
     <div className="space-y-6">
       <AccountSummaryCard account={account} onAccountChange={patchAccount} />
-      <ActivationCodeCard tenantKey={account.tenant_key} />
+      <ActivationCodeCard
+        tenantKey={account.tenant_key}
+        onKeyRegenerated={(newKey) => patchAccount({ tenant_key: newKey })}
+      />
     </div>
   );
 }
