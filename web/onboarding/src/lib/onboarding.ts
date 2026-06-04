@@ -35,6 +35,31 @@ export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY);
 }
 
+/** Default per-request timeout. A stalled connection should surface an error
+ *  rather than hang the wizard on a spinner forever. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** fetch() with an AbortController timeout, surfacing a clear user-facing error
+ *  on abort instead of a bare DOMException. */
+async function fetchWithTimeout(
+  input: RequestInfo,
+  init: RequestInit = {},
+  ms: number = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Request timed out — check your connection and try again.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function parseError(res: Response): Promise<string> {
   try {
     const body = await res.json();
@@ -56,7 +81,7 @@ export async function createCheckout(body: {
   full_name: string;
   company?: string;
 }): Promise<CheckoutResponse> {
-  const res = await fetch("/v1/onboarding/checkout", {
+  const res = await fetchWithTimeout("/v1/onboarding/checkout", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -71,7 +96,7 @@ export interface ExtensionPing {
 }
 
 export async function pingExtension(token: string): Promise<ExtensionPing> {
-  const res = await fetch(`/v1/onboarding/extension-ping?token=${encodeURIComponent(token)}`);
+  const res = await fetchWithTimeout(`/v1/onboarding/extension-ping?token=${encodeURIComponent(token)}`);
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
@@ -85,7 +110,7 @@ export async function markExtensionInstalled(
   const sid = sessionId
     ? `&session_id=${encodeURIComponent(sessionId)}`
     : "";
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `/v1/onboarding/extension-installed?token=${encodeURIComponent(token)}${sid}`,
     { method: "POST" },
   );
@@ -98,7 +123,7 @@ export async function reconcileCheckout(
   token: string,
   sessionId: string,
 ): Promise<OnboardingStatus> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `/v1/onboarding/reconcile-checkout?token=${encodeURIComponent(token)}` +
       `&session_id=${encodeURIComponent(sessionId)}`,
     { method: "POST" },
@@ -116,7 +141,7 @@ export interface ConnectionTest {
 /** In-flow check: has the extension captured a GMP session for this tenant in
  *  the last 5 minutes? */
 export async function testConnection(token: string): Promise<ConnectionTest> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `/v1/onboarding/test-connection?token=${encodeURIComponent(token)}`,
     { method: "POST" },
   );
@@ -140,7 +165,7 @@ export interface ClientPayload {
 }
 
 export async function submitClients(token: string, clients: ClientPayload[]): Promise<void> {
-  const res = await fetch(`/v1/onboarding/clients?token=${encodeURIComponent(token)}`, {
+  const res = await fetchWithTimeout(`/v1/onboarding/clients?token=${encodeURIComponent(token)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(clients),
@@ -158,7 +183,7 @@ export interface CompleteResponse {
 }
 
 export async function completeOnboarding(token: string): Promise<CompleteResponse> {
-  const res = await fetch(`/v1/onboarding/complete?token=${encodeURIComponent(token)}`, {
+  const res = await fetchWithTimeout(`/v1/onboarding/complete?token=${encodeURIComponent(token)}`, {
     method: "POST",
   });
   if (!res.ok) throw new Error(await parseError(res));
@@ -175,7 +200,7 @@ export interface OnboardingStatus {
 }
 
 export async function fetchStatus(token: string): Promise<OnboardingStatus> {
-  const res = await fetch(`/v1/onboarding/status?token=${encodeURIComponent(token)}`);
+  const res = await fetchWithTimeout(`/v1/onboarding/status?token=${encodeURIComponent(token)}`);
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }

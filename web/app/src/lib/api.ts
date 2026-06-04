@@ -50,6 +50,33 @@ interface RequestOptions {
   noAuth?: boolean;
 }
 
+/** Default per-request timeout. A stalled connection should surface an error,
+ *  not a forever-spinner or a permanently-disabled button. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+const TIMEOUT_MESSAGE =
+  "Request timed out — check your connection and try again.";
+
+/** fetch() with an AbortController timeout. Translates the abort into a clear,
+ *  user-facing error instead of a bare DOMException. */
+export async function fetchWithTimeout(
+  input: RequestInfo,
+  init: RequestInit = {},
+  ms: number = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(TIMEOUT_MESSAGE);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -58,7 +85,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     if (token) headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const res = await fetch(path, {
+  const res = await fetchWithTimeout(path, {
     method: opts.method ?? (opts.body !== undefined ? "POST" : "GET"),
     headers,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
@@ -446,11 +473,12 @@ export async function ingestPreview(file: File): Promise<IngestPreview> {
   if (token) headers["Authorization"] = `Bearer ${token}`;
   // NOTE: do NOT set Content-Type — the browser adds the multipart boundary.
 
-  const res = await fetch("/v1/ingest/preview", {
-    method: "POST",
-    headers,
-    body: form,
-  });
+  // Longer timeout (120s): the server-side AI parse of a roster can be slow.
+  const res = await fetchWithTimeout(
+    "/v1/ingest/preview",
+    { method: "POST", headers, body: form },
+    120_000,
+  );
 
   if (res.status === 401) {
     clearSession();
