@@ -276,6 +276,19 @@ def main():
         conn.execute(text(
             "UPDATE clients SET vec_autopopulate = FALSE WHERE vec_autopopulate IS NULL"
         ))
+
+        # 2026-06-04: clients.is_placeholder — seed-flag for the "your first
+        # client" row dropped in by the array-count-only onboarding path.
+        # Cleared the moment the operator renames the client or the extension
+        # auto-populates real arrays into it.
+        if not column_exists(conn, "clients", "is_placeholder"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN is_placeholder BOOLEAN DEFAULT FALSE"
+            ))
+            conn.execute(text(
+                "UPDATE clients SET is_placeholder = FALSE WHERE is_placeholder IS NULL"
+            ))
+            print("  + clients.is_placeholder")
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_clients_vec_email ON clients (vec_email)",
             "CREATE INDEX IF NOT EXISTS ix_clients_vec_username ON clients (vec_username)",

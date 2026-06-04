@@ -139,6 +139,15 @@ class Client(Base):
     last_bounced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_bounce_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Placeholder flag (June 2026): set when the onboarding flow seeded this
+    # row as "Your first client" because the operator didn't pre-enter any
+    # clients (Path B / array-count-only path). The dashboard treats these
+    # specially — surfaces a 'Rename this to your real client name' prompt
+    # and uses it as the anchor for the first-visit walkthrough. As soon
+    # as the operator renames it OR adds arrays through the extension,
+    # is_placeholder gets cleared.
+    is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)
+
     tenant: Mapped[Tenant] = relationship(back_populates="clients")
     arrays: Mapped[list["Array"]] = relationship(back_populates="client")
 

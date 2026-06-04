@@ -59,6 +59,39 @@ ARRAY_PRICE_CENTS = int(os.getenv("ONBOARDING_ARRAY_CENTS", "4500"))  # $45/arra
 
 stripe.api_key = STRIPE_SECRET_KEY
 
+
+def ensure_placeholder_client(db, tenant_id: str) -> Optional[int]:
+    """Seed a single 'Your first client' Client when the tenant has none.
+
+    Called on tenant activation. If the operator pre-entered clients during
+    onboarding (Path A), this is a no-op. If they used the array-count-only
+    path (Path B), this drops a placeholder so:
+      - the dashboard has somewhere to anchor the first-visit walkthrough
+      - autopop has a Client to bind captured Arrays into (the operator just
+        needs to paste their utility-login email into the placeholder and
+        toggle autopop ON)
+      - the spreadsheet importer has a Client target
+
+    Returns the new Client.id, or None if a real client already existed.
+    """
+    existing = db.execute(
+        select(Client).where(
+            Client.tenant_id == tenant_id,
+            Client.deleted_at.is_(None),
+        )
+    ).first()
+    if existing:
+        return None
+    placeholder = Client(
+        tenant_id=tenant_id,
+        name="Your first client",
+        active=True,
+        is_placeholder=True,
+    )
+    db.add(placeholder)
+    db.flush()
+    return placeholder.id
+
 router = APIRouter(prefix="/v1/onboarding")
 
 
@@ -420,6 +453,8 @@ def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
                 t.stripe_customer_id = customer
             if subscription:
                 t.stripe_subscription_id = subscription
+            # Seed a placeholder client if Path B (array-count-only).
+            ensure_placeholder_client(db, t.id)
             db.commit()
             logger.info("reconcile: self-healed tenant %s from paid session %s",
                         t.id, session_id)

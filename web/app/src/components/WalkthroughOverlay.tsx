@@ -26,18 +26,18 @@ const STEPS: StepDef[] = [
   {
     anchor: null,
     title: "Quick 60-second tour",
-    body: "We'll show you the fastest path to working reports.",
+    body: "We'll walk you through the magic — name your first client, paste their utility-login email, and watch their arrays auto-populate live on this page.",
   },
   {
     anchor: "2",
-    title: "Click a client to expand",
-    body: "Click any client card to expand it and see their arrays. Try it now.",
+    title: "Meet your first client",
+    body: "We dropped this placeholder card here so you have somewhere to start. Click the name field to rename it to your real client — \"Maple Ridge HOA\" or whatever fits. The amber styling goes away as soon as you do.",
     waitForClick: true,
   },
   {
     anchor: "3",
     title: "Enter the utility login",
-    body: "Paste the email or username this client uses to log into their utility portal. Click into the field to start typing.",
+    body: "Paste the email or username this client uses to log into their utility portal (GMP, VEC, and others). Click into the field to start typing.",
     waitForClick: true,
   },
   {
@@ -63,7 +63,7 @@ const STEPS: StepDef[] = [
   {
     anchor: null,
     title: "You're all set",
-    body: "When you come back, your client will have all their arrays auto-populated. Pricing reconciles automatically.",
+    body: "From here on it runs itself. Add more clients with the + button at the top, or just come back when you want to check on your reports. Pricing reconciles to your real array count automatically.",
   },
 ];
 

@@ -238,6 +238,7 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "last_delivered_at": c.last_delivered_at.isoformat() if c.last_delivered_at else None,
         "last_bounced_at": c.last_bounced_at.isoformat() if c.last_bounced_at else None,
         "last_bounce_reason": c.last_bounce_reason,
+        "is_placeholder": c.is_placeholder,
     }
 
 
@@ -957,6 +958,11 @@ def update_client(client_id: int, body: ClientUpdate,
             c.vec_email = (body.vec_email or "").lower().strip() or None
         if "vec_username" in body.model_fields_set:
             c.vec_username = (body.vec_username or "").strip() or None
+        # Any meaningful edit graduates the placeholder to a real client. The
+        # walkthrough + dashboard prompts that depend on is_placeholder
+        # vanish the moment the operator engages with the row.
+        if c.is_placeholder:
+            c.is_placeholder = False
         db.commit(); db.refresh(c)
         n_arr = db.execute(
             select(Array).where(Array.client_id == c.id)

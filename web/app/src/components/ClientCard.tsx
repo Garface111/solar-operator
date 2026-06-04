@@ -77,7 +77,13 @@ export function ClientCard({
   onSelect,
 }: Props) {
   const toast = useToast();
-  const [expanded, setExpanded] = useState(!!defaultExpanded);
+  // Placeholder clients (the "Your first client" row dropped in by the
+  // array-count-only onboarding path) auto-expand by default and get a
+  // visual nudge: amber ring + "Rename this to your real client" hint.
+  // The walkthrough also anchors here so the operator's first interaction
+  // is exactly the one we want — rename, paste utility email, toggle autopop.
+  const isPlaceholder = !!client.is_placeholder;
+  const [expanded, setExpanded] = useState(!!defaultExpanded || isPlaceholder);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -258,7 +264,9 @@ export function ClientCard({
     <div
       className={`rounded-xl border bg-white transition-shadow ${
         expanded ? "border-zinc-300 shadow-sm" : "border-zinc-200"
-      } ${selected ? "ring-2 ring-primary-400" : ""}`}
+      } ${selected ? "ring-2 ring-primary-400" : ""} ${
+        isPlaceholder ? "ring-2 ring-amber-300/70 border-amber-200" : ""
+      }`}
     >
       {/* header row — entire row is clickable to toggle expansion. The
           `group` class lets the chevron react on hover even though hover
@@ -319,14 +327,26 @@ export function ClientCard({
               label="client name"
               onSave={(v) => patch({ name: v })}
               emptyText="Unnamed client"
-              className="text-base font-semibold"
+              className={`text-base font-semibold ${isPlaceholder ? "text-amber-700" : ""}`}
             />
+            {isPlaceholder && (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                placeholder
+              </span>
+            )}
             {!client.active && (
               <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-500">
                 inactive
               </span>
             )}
           </div>
+          {isPlaceholder && (
+            <p className="mt-0.5 text-xs leading-snug text-amber-700">
+              Rename this to your real client (and paste their utility-login email
+              below) — then log into your utility portal and watch their arrays
+              appear here automatically.
+            </p>
+          )}
           <div className="mt-0.5 text-sm text-zinc-500">
             <EditableField
               value={client.contact_email}

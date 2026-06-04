@@ -255,6 +255,9 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         db.add(arr)
                         db.flush()  # assign arr.id before linking
                         acct.array_id = arr.id
+                        # Real arrays landed → this client is no longer a placeholder.
+                        if owner.is_placeholder:
+                            owner.is_placeholder = False
                     for c in clients:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
 

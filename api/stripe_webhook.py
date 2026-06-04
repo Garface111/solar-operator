@@ -79,6 +79,10 @@ def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) ->
             t.stripe_customer_id = stripe_customer_id
         if stripe_subscription_id:
             t.stripe_subscription_id = stripe_subscription_id
+        # Seed a placeholder client when no clients pre-entered (Path B).
+        # Lazy import avoids a circular dep with onboarding.py.
+        from .onboarding import ensure_placeholder_client
+        ensure_placeholder_client(db, t.id)
         db.commit()
         tid = t.id
 
