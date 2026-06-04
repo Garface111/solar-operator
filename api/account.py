@@ -28,7 +28,7 @@ from typing import Optional
 import stripe
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from .db import SessionLocal
 from .models import Tenant, Client, Array, LoginToken, UtilityAccount, now
@@ -49,6 +49,41 @@ PUBLIC_DASHBOARD_URL = os.getenv("PUBLIC_DASHBOARD_URL", f"{APP_URL}/accounts").
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")  # if blank, generated at startup
 SESSION_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 LOGIN_LINK_TTL_SECONDS = 15 * 60  # 15 minutes
+
+# Per-array monthly price for the dashboard billing summary. Sourced from the
+# live Stripe price (STRIPE_ARRAY_PRICE_ID) when configured, falling back to the
+# same $45 default used by the onboarding checkout (ONBOARDING_ARRAY_CENTS).
+STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
+ARRAY_PRICE_CENTS = int(os.getenv("ONBOARDING_ARRAY_CENTS", "4500"))  # $45/array/mo
+_array_price_cache: dict = {}
+
+
+def _array_price_cents() -> tuple[int, str]:
+    """Monthly per-array price in (cents, currency).
+
+    Prefers the live Stripe price referenced by STRIPE_ARRAY_PRICE_ID and caches
+    the result for the process lifetime; falls back to the hardcoded $45 default
+    when Stripe is unconfigured or unreachable. Only successful lookups (and the
+    stable no-Stripe fallback) are cached, so a transient Stripe error doesn't
+    pin us to the fallback forever."""
+    if _array_price_cache:
+        return _array_price_cache["cents"], _array_price_cache["currency"]
+    cents, currency, cacheable = ARRAY_PRICE_CENTS, "usd", True
+    if STRIPE_ARRAY_PRICE_ID and os.getenv("STRIPE_SECRET_KEY"):
+        cacheable = False
+        try:
+            price = stripe.Price.retrieve(STRIPE_ARRAY_PRICE_ID)
+            if price.get("unit_amount") is not None:
+                cents = int(price["unit_amount"])
+            if price.get("currency"):
+                currency = price["currency"]
+            cacheable = True
+        except Exception as e:  # noqa: BLE001 — billing display must never 500
+            logger.warning("billing-summary: Stripe price retrieve failed: %s", e)
+    if cacheable:
+        _array_price_cache["cents"] = cents
+        _array_price_cache["currency"] = currency
+    return cents, currency
 
 # Fallback: derive a stable secret from DATABASE_URL so it survives restarts
 # but is unique per environment. Set SESSION_SECRET explicitly in prod for
@@ -553,6 +588,29 @@ def send_my_report(authorization: Optional[str] = Header(default=None)):
     # Defer heavy import (avoid circulars at module load)
     from .delivery import deliver_for_tenant
     return deliver_for_tenant(t.id, override_to=None, triggered_by="self-serve")
+
+
+@router.get("/v1/account/billing-summary")
+def billing_summary(authorization: Optional[str] = Header(default=None)):
+    """What the tenant is actually billed for: the array count that drives the
+    Stripe per-array quantity (every Array row under the tenant — the same count
+    api/onboarding._reconcile_subscription_quantity reconciles), times the
+    per-array price. Lets the operator verify their own invoice on the Account
+    tab instead of inferring it from utility-account / bill counts that don't
+    drive billing."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        billable = db.execute(
+            select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
+        ).scalar() or 0
+    cents, currency = _array_price_cents()
+    billable = int(billable)
+    return {
+        "billable_arrays": billable,
+        "price_cents": cents,
+        "total_cents": billable * cents,
+        "currency": currency,
+    }
 
 
 @router.get("/v1/account/billing-portal")

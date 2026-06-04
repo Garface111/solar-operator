@@ -202,6 +202,19 @@ export async function getBillingPortalUrl(): Promise<string> {
   return res.url;
 }
 
+export interface BillingSummary {
+  billable_arrays: number;
+  price_cents: number;
+  total_cents: number;
+  currency: string;
+}
+
+/** What the tenant is billed for: array count (the Stripe quantity) × per-array
+ *  price. Lets the Account tab show the real monthly figure. */
+export async function getBillingSummary(): Promise<BillingSummary> {
+  return request<BillingSummary>("/v1/account/billing-summary");
+}
+
 /** Toggle 'send me a copy of every report'. Returns the updated value. */
 export async function updateCcOnReports(
   ccOnReports: boolean,

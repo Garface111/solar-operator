@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -6,12 +6,26 @@ import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import {
   type Account,
+  type BillingSummary,
   updateAccountEmail,
   updateAccountFrequency,
   getBillingPortalUrl,
+  getBillingSummary,
 } from "../lib/api";
 
 const FREQUENCIES = ["weekly", "monthly", "quarterly"] as const;
+
+function fmtMoney(cents: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency.toUpperCase(),
+      minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
+    }).format(cents / 100);
+  } catch {
+    return `$${(cents / 100).toFixed(2)}`;
+  }
+}
 
 const STATUS_STYLES: Record<string, string> = {
   active: "bg-primary-100 text-primary-700",
@@ -59,6 +73,21 @@ interface Props {
 export function AccountSummaryCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [billing, setBilling] = useState<BillingSummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getBillingSummary()
+      .then((b) => {
+        if (!cancelled) setBilling(b);
+      })
+      .catch(() => {
+        /* non-fatal — the billing strip just stays hidden */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function saveEmail(next: string) {
     if (!next) throw new Error("Email can't be empty");
@@ -132,6 +161,36 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           </Field>
         )}
       </div>
+
+      {billing && (
+        <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+            Billing
+          </div>
+          {billing.billable_arrays > 0 ? (
+            <p className="mt-1 text-sm text-zinc-700">
+              <span className="font-semibold text-zinc-900">
+                {billing.billable_arrays}
+              </span>{" "}
+              billable {billing.billable_arrays === 1 ? "array" : "arrays"} · ~
+              {fmtMoney(billing.price_cents, billing.currency)} ×{" "}
+              {billing.billable_arrays} ={" "}
+              <span className="font-semibold text-zinc-900">
+                {fmtMoney(billing.total_cents, billing.currency)}/mo
+              </span>
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-zinc-700">
+              No billable arrays yet — you&apos;ll be billed{" "}
+              {fmtMoney(billing.price_cents, billing.currency)}/array per month as
+              arrays are added.
+            </p>
+          )}
+          <p className="mt-1 text-xs text-zinc-400">
+            Updates automatically as auto-populate adds arrays.
+          </p>
+        </div>
+      )}
 
       <div className="mt-5 flex justify-end">
         <Button
