@@ -286,6 +286,59 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
             )}
           </div>
 
+          {/* Extra delivery fields — CC recipients, report cadence, notes */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <span className="mb-1 block text-xs font-medium text-zinc-600">
+                CC emails
+              </span>
+              <EditableField
+                value={client.cc_emails}
+                label="CC emails"
+                onSave={(v) => patch({ cc_emails: v || null })}
+                emptyText="none"
+                placeholder="extra@example.com, other@example.com"
+              />
+              <p className="mt-1 text-[11px] text-zinc-400">
+                Comma-separated. These addresses get a copy of every report.
+              </p>
+            </div>
+            <div>
+              <span className="mb-1 block text-xs font-medium text-zinc-600">
+                Report frequency
+              </span>
+              <select
+                value={client.report_frequency ?? ""}
+                onChange={(e) =>
+                  patch({ report_frequency: e.target.value || null })
+                }
+                aria-label="Report frequency override"
+                className="w-full rounded-xl border border-zinc-300 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
+              >
+                <option value="">Inherit from account</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="quarterly">Quarterly</option>
+              </select>
+              <p className="mt-1 text-[11px] text-zinc-400">
+                Override the account-wide schedule for this client only.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <span className="mb-1 block text-xs font-medium text-zinc-600">
+              Notes
+            </span>
+            <EditableField
+              value={client.notes}
+              label="notes"
+              onSave={(v) => patch({ notes: v || null })}
+              emptyText="—"
+              placeholder="Internal notes — not sent to the client"
+            />
+          </div>
+
           {/* arrays */}
           <div>
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
