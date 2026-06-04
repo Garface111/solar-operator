@@ -220,7 +220,7 @@ def _process_subscription_deleted(sub: dict) -> dict:
     send_internal_alert(
         f"❌ Subscription canceled: {tid}",
         f"Tenant {tid} ({email}) canceled their subscription. "
-        f"They will no longer receive monthly reports."
+        f"They will no longer receive automatic reports."
     )
     return {"tenant_canceled": tid}
 

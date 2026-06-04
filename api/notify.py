@@ -351,7 +351,7 @@ def send_cancellation_email(to: str, name: str) -> bool:
             f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is canceled</h2>"
             f"<p>Hi {first},</p>"
             f"<p>Your Solar Operator subscription has been canceled. "
-            f"You won't be charged again, and we'll stop sending monthly reports.</p>"
+            f"You won't be charged again, and we'll stop sending automatic reports.</p>"
             f"<p>Your historical data is still in our system. If you change your "
             f"mind, sign up again any time at "
             f"<a href='https://solaroperator.org/signup.html'>solaroperator.org/signup</a> — "
