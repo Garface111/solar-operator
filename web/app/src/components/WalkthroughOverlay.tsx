@@ -47,18 +47,18 @@ const STEPS: StepDef[] = [
     waitForClick: true,
   },
   {
-    anchor: "5",
-    title: "Bulk-import NEPOOL IDs",
-    body: "If your client already has a spreadsheet with their array names and NEPOOL-GIS IDs, click this Import button and drop the file in. We'll auto-fill the IDs for every array we can match — no typing required. You can also do this from the master Import button at the top of the page when you've got a master sheet covering multiple clients.",
-  },
-  {
     anchor: null,
-    title: "Go log in",
-    body: "Now open your utility portal (Green Mountain Power, Vermont Electric Coop, and more) and sign in with that account. We'll capture the arrays in the background and they'll appear here automatically.",
+    title: "Go log in — watch the magic",
+    body: "Now open your utility portal (Green Mountain Power, Vermont Electric Coop, and more) and sign in with that account. The extension captures your arrays in the background and they'll appear under this client automatically — no manual entry, nothing to refresh.",
     cta: {
       label: "Open Green Mountain Power →",
       href: "https://www.greenmountainpower.com/account/",
     },
+  },
+  {
+    anchor: "5",
+    title: "Now: attach NEPOOL IDs in one shot",
+    body: "Your arrays are populated. If your client already has a spreadsheet with their array names and NEPOOL-GIS IDs, click this Import button and drop the file in — we'll fuzzy-match the rows to the arrays we just pulled and attach the IDs automatically. There's also a master Import at the top of the page for a sheet covering multiple clients.",
   },
   {
     anchor: null,
