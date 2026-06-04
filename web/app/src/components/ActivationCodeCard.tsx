@@ -19,6 +19,9 @@ export function ActivationCodeCard({ tenantKey }: Props) {
         Paste this into the Solar Operator Chrome extension&apos;s options page to
         connect it to your account.
       </p>
+      <p className="mt-1 text-xs font-medium text-amber-700">
+        Treat this like a password — anyone with this code can send data to your account.
+      </p>
 
       {tenantKey ? (
         <div className="mt-4 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
