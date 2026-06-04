@@ -125,6 +125,12 @@ class Client(Base):
     gmp_autopopulate: Mapped[bool] = mapped_column(Boolean, default=False)
     gmp_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # VEC auto-populate (added June 2026 — mirrors GMP triple for the VEC provider).
+    vec_email: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    vec_username: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    vec_autopopulate: Mapped[bool] = mapped_column(Boolean, default=False)
+    vec_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Per-client email delivery health (W2-6, June 2026). Populated by the Resend
     # webhook (api/resend_webhook.py) on bounced/delivered/complained events.
     # NOTE distinct from last_delivery_at (when WE sent): these reflect what
@@ -139,6 +145,7 @@ class Client(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "name", name="uq_client_per_tenant"),
         Index("ix_clients_tenant_gmp_email", "tenant_id", "gmp_email"),
+        Index("ix_clients_tenant_vec_email", "tenant_id", "vec_email"),
     )
 
 

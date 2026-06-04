@@ -204,6 +204,10 @@ export interface ClientRow {
   gmp_username: string | null;
   gmp_autopopulate: boolean;
   gmp_last_sync_at: string | null;
+  vec_email: string | null;
+  vec_username: string | null;
+  vec_autopopulate: boolean;
+  vec_last_sync_at: string | null;
   last_delivered_at: string | null;
   last_bounced_at: string | null;
   last_bounce_reason: string | null;
@@ -384,6 +388,9 @@ export interface ClientCreateInput {
   gmp_email?: string | null;
   gmp_username?: string | null;
   gmp_autopopulate?: boolean;
+  vec_email?: string | null;
+  vec_username?: string | null;
+  vec_autopopulate?: boolean;
 }
 
 export async function createClient(

@@ -41,6 +41,26 @@ from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
 
+# Maps provider code → which Client columns drive auto-populate for that provider.
+# Using string attribute names for setattr (last_sync_attr) and column descriptors
+# for SQLAlchemy where-clause matching (email_col, username_col, autopop_col).
+_PROVIDER_AUTOPOP_FIELDS: dict[str, dict] = {
+    "gmp": {
+        "email_col":          Client.gmp_email,
+        "username_col":       Client.gmp_username,
+        "autopop_col":        Client.gmp_autopopulate,
+        "last_sync_attr":     "gmp_last_sync_at",
+        "bill_offset_months": 1,   # GMP bills represent the prior month
+    },
+    "vec": {
+        "email_col":          Client.vec_email,
+        "username_col":       Client.vec_username,
+        "autopop_col":        Client.vec_autopopulate,
+        "last_sync_attr":     "vec_last_sync_at",
+        "bill_offset_months": 0,   # VEC bills represent the same month
+    },
+}
+
 app = FastAPI(title="Solar Operator API", version="1.0.0")
 
 # CORS — allow the marketing site to call /v1/signup, and any Chrome
@@ -177,69 +197,66 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         # by the autopop query below (autoflush is off on this session).
         db.flush()
 
-        # ── GMP auto-populate (onboarding wizard Screen 4) ───────────────
-        # If this capture's GMP login email matches a Client that opted into
-        # autopop, append/link Arrays automatically so the operator doesn't
-        # have to type them in by hand.
+        # ── auto-populate arrays from utility portal ─────────────────────
+        # If this capture's login email/username matches a Client that opted
+        # into autopop for this provider, append/link Arrays automatically.
         #
         # ⚠️⚠️  LOUD WARNING — MULTI-ACCOUNT-PER-ARRAY CASE  ⚠️⚠️
-        # Autopop creates ONE Array per GMP account. Real-world arrays that
+        # Autopop creates ONE Array per utility account. Real-world arrays that
         # SUM several sub-meters into a single logical array CANNOT be detected
         # here. Bruce's "Starlake" = 3 GMP accounts → 1 array (with
         # bill_offset_months=0). Autopop will instead create 3 SEPARATE arrays.
         # The operator MUST merge those duplicates manually via the dashboard
         # afterward — do NOT attempt to guess merges from account metadata.
-        # GMP accepts either an email address or a username at login, and the
-        # capture carries both. Match a client on EITHER: its gmp_email vs the
-        # captured email, OR its gmp_username vs the captured username.
-        captured_user = normalized.get("user") or {}
-        user_email = (captured_user.get("email") or "").strip().lower()
-        user_username = (captured_user.get("username") or "").strip().lower()
-        if user_email or user_username:
-            match_terms = []
-            if user_email:
-                match_terms.append(func.lower(Client.gmp_email) == user_email)
-            if user_username:
-                match_terms.append(func.lower(Client.gmp_username) == user_username)
-            clients = db.execute(
-                select(Client)
-                .where(
-                    Client.tenant_id == tenant.id,
-                    Client.gmp_autopopulate.is_(True),
-                    or_(*match_terms),
-                )
-                .order_by(Client.id)
-            ).scalars().all()
-            if clients:
-                # gmp_email is expected to map to a single Client; if more than
-                # one matches (misconfiguration), the lowest-id Client owns the
-                # arrays and the rest just get their last_sync timestamp bumped.
-                owner = clients[0]
-                for a in normalized["accounts"]:
-                    acct_no = a.get("account_number")
-                    if not acct_no:
-                        continue
-                    acct = db.execute(
-                        select(UtilityAccount).where(
-                            UtilityAccount.tenant_id == tenant.id,
-                            UtilityAccount.provider == provider,
-                            UtilityAccount.account_number == acct_no,
-                        )
-                    ).scalar_one_or_none()
-                    if acct is None or acct.array_id is not None:
-                        # Already linked → idempotent: don't create a duplicate.
-                        continue
-                    arr = Array(
-                        tenant_id=tenant.id,
-                        client_id=owner.id,
-                        name=a.get("nickname") or acct_no,
-                        bill_offset_months=1,  # GMP default (prior-month bill)
+        _autopop_cfg = _PROVIDER_AUTOPOP_FIELDS.get(provider)
+        if _autopop_cfg:
+            captured_user = normalized.get("user") or {}
+            user_email = (captured_user.get("email") or "").strip().lower()
+            user_username = (captured_user.get("username") or "").strip().lower()
+            if user_email or user_username:
+                match_terms = []
+                if user_email:
+                    match_terms.append(func.lower(_autopop_cfg["email_col"]) == user_email)
+                if user_username:
+                    match_terms.append(func.lower(_autopop_cfg["username_col"]) == user_username)
+                clients = db.execute(
+                    select(Client)
+                    .where(
+                        Client.tenant_id == tenant.id,
+                        _autopop_cfg["autopop_col"].is_(True),
+                        or_(*match_terms),
                     )
-                    db.add(arr)
-                    db.flush()  # assign arr.id before linking
-                    acct.array_id = arr.id
-                for c in clients:
-                    c.gmp_last_sync_at = now()
+                    .order_by(Client.id)
+                ).scalars().all()
+                if clients:
+                    # If more than one matches (misconfiguration), the lowest-id
+                    # Client owns the arrays; the rest just get their sync timestamp bumped.
+                    owner = clients[0]
+                    for a in normalized["accounts"]:
+                        acct_no = a.get("account_number")
+                        if not acct_no:
+                            continue
+                        acct = db.execute(
+                            select(UtilityAccount).where(
+                                UtilityAccount.tenant_id == tenant.id,
+                                UtilityAccount.provider == provider,
+                                UtilityAccount.account_number == acct_no,
+                            )
+                        ).scalar_one_or_none()
+                        if acct is None or acct.array_id is not None:
+                            # Already linked → idempotent: don't create a duplicate.
+                            continue
+                        arr = Array(
+                            tenant_id=tenant.id,
+                            client_id=owner.id,
+                            name=a.get("nickname") or acct_no,
+                            bill_offset_months=_autopop_cfg["bill_offset_months"],
+                        )
+                        db.add(arr)
+                        db.flush()  # assign arr.id before linking
+                        acct.array_id = arr.id
+                    for c in clients:
+                        setattr(c, _autopop_cfg["last_sync_attr"], now())
 
         # ── VEC bill/usage persistence (extension-scraped) ──────────────
         # GMP has a separate worker that pulls bill PDFs server-side and
