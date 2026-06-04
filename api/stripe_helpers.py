@@ -61,14 +61,22 @@ def reconcile_subscription_quantity(
                 f"no line item matching STRIPE_ARRAY_PRICE_ID="
                 f"{STRIPE_ARRAY_PRICE_ID!r} on subscription {subscription_id}")
 
+        target_qty = max(array_count, 1)  # Stripe requires quantity >= 1
+        current_qty = recurring_item.get("quantity", 0)
+        if current_qty == target_qty:
+            logger.info(
+                "reconcile: subscription %s for tenant %s already at quantity=%d — no-op",
+                subscription_id, tenant_id, target_qty)
+            return
+
         stripe.SubscriptionItem.modify(
             recurring_item["id"],
-            quantity=max(array_count, 1),  # Stripe requires quantity >= 1
+            quantity=target_qty,
             proration_behavior="create_prorations",
         )
         logger.info(
-            "Reconciled subscription %s for tenant %s → quantity=%d",
-            subscription_id, tenant_id, array_count)
+            "Reconciled subscription %s for tenant %s: quantity %d → %d",
+            subscription_id, tenant_id, current_qty, target_qty)
     except Exception as e:  # noqa: BLE001 — must never block callers
         logger.exception(
             "Stripe billing reconciliation FAILED for tenant %s (sub %s, "

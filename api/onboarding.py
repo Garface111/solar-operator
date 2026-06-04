@@ -64,10 +64,31 @@ router = APIRouter(prefix="/v1/onboarding")
 
 # ─── schemas ─────────────────────────────────────────────────────────────
 
+class ArraySeed(BaseModel):
+    """Pre-checkout array entry (Path A). Simpler than ArrayInput — no GMP
+    fields needed before payment."""
+    name: str = Field(..., min_length=1, max_length=120)
+    nepool_gis_id: Optional[str] = Field(None, max_length=20)
+    bill_offset_months: Optional[int] = 1
+
+
+class ClientSeed(BaseModel):
+    """Pre-checkout client entry (Path A). GMP credentials are added later on
+    the Clients screen post-payment."""
+    name: str = Field(..., min_length=1, max_length=200)
+    contact_email: Optional[EmailStr] = None
+    arrays: list[ArraySeed] = Field(default_factory=list)
+
+
 class CheckoutRequest(BaseModel):
     email: EmailStr
     full_name: str = Field(..., min_length=2, max_length=120)
     company: Optional[str] = Field(None, max_length=200)
+    # N4: honest checkout pricing.
+    # Path A — operator enters clients+arrays before paying; quantity = real count.
+    clients: Optional[list[ClientSeed]] = None
+    # Path B — operator provides an estimate; quantity syncs to reality later.
+    array_count: Optional[int] = Field(None, ge=1)
 
 
 class CheckoutResponse(BaseModel):
@@ -117,20 +138,22 @@ def _tenant_by_token(db, token: str) -> Tenant:
     return t
 
 
-def _line_items() -> list[dict]:
-    """Setup fee (one-time) + per-array subscription. Falls back to inline
-    price_data when the price IDs aren't configured (dev mode)."""
+def _line_items(quantity: int = 1) -> list[dict]:
+    """Setup fee (one-time) + per-array subscription at the given quantity.
+
+    Falls back to inline price_data when the price IDs aren't configured (dev
+    mode). quantity defaults to 1 for backwards compat with old SPA builds that
+    don't send array_count or clients."""
     if STRIPE_SETUP_PRICE_ID and STRIPE_ARRAY_PRICE_ID:
         return [
             {"price": STRIPE_SETUP_PRICE_ID, "quantity": 1},
-            # Quantity is reconciled to the real array count after Screen 4.
-            {"price": STRIPE_ARRAY_PRICE_ID, "quantity": 1},
+            {"price": STRIPE_ARRAY_PRICE_ID, "quantity": quantity},
         ]
     return [
         {
             "price_data": {
                 "currency": "usd",
-                "product_data": {"name": "Solar Operator — setup"},
+                "product_data": {"name": "Solar Operator — one-time setup"},
                 "unit_amount": SETUP_FEE_CENTS,
             },
             "quantity": 1,
@@ -138,11 +161,11 @@ def _line_items() -> list[dict]:
         {
             "price_data": {
                 "currency": "usd",
-                "product_data": {"name": "Solar Operator — per array"},
+                "product_data": {"name": "Solar Operator — monthly per-array fee"},
                 "unit_amount": ARRAY_PRICE_CENTS,
                 "recurring": {"interval": "month"},
             },
-            "quantity": 1,
+            "quantity": quantity,
         },
     ]
 
@@ -163,6 +186,15 @@ def checkout(req: CheckoutRequest):
 
     email = req.email.lower().strip()
     display_name = (req.company or req.full_name).strip()[:200]
+
+    # N4: derive Stripe line-item quantity from pre-entered clients (Path A) or
+    # operator estimate (Path B). Old SPA builds send neither → quantity=1.
+    if req.clients is not None:
+        quantity = max(1, sum(len(c.arrays) for c in req.clients))
+    elif req.array_count is not None:
+        quantity = max(1, req.array_count)
+    else:
+        quantity = 1
 
     tenant_id = gen_tenant_id()
     tenant_key = gen_tenant_key()
@@ -185,6 +217,38 @@ def checkout(req: CheckoutRequest):
             onboarding_stage="pending_payment",
         )
         db.add(t)
+
+        # Path A: persist clients + arrays before payment so the Stripe quantity
+        # matches the real count from the moment the subscription is created.
+        # Cascade delete on Tenant handles cleanup if Stripe session creation fails.
+        if req.clients:
+            for ci in req.clients:
+                cname = ci.name.strip()
+                if not cname:
+                    continue
+                c = Client(
+                    tenant_id=tenant_id,
+                    name=cname,
+                    contact_email=ci.contact_email,
+                    gmp_autopopulate=False,
+                    active=True,
+                )
+                db.add(c)
+                db.flush()  # get c.id for the Array FK
+                for ai in ci.arrays:
+                    aname = ai.name.strip()
+                    if aname:
+                        db.add(Array(
+                            tenant_id=tenant_id,
+                            client_id=c.id,
+                            name=aname,
+                            nepool_gis_id=ai.nepool_gis_id,
+                            bill_offset_months=(
+                                ai.bill_offset_months
+                                if ai.bill_offset_months is not None else 1
+                            ),
+                        ))
+
         db.commit()
 
     try:
@@ -192,7 +256,7 @@ def checkout(req: CheckoutRequest):
             mode="subscription",
             payment_method_types=["card"],
             customer_email=email,
-            line_items=_line_items(),
+            line_items=_line_items(quantity),
             success_url=(
                 f"{PUBLIC_ONBOARDING_URL}/extension"
                 f"?onboarding_token={onboarding_token}"
