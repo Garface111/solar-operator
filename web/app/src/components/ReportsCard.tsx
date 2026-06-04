@@ -10,18 +10,11 @@ import {
   sendReportNow,
   sendSampleReport,
   updateAccountFrequency,
-  updateEmailSettings,
 } from "../lib/api";
 
 const FREQUENCIES = [
   { value: "monthly", label: "Monthly" },
   { value: "quarterly", label: "Quarterly" },
-] as const;
-
-const SEND_MODES = [
-  { value: "to_client", label: "Send to my clients only" },
-  { value: "to_me", label: "Send to me only (no client gets emailed)" },
-  { value: "to_both", label: "Send to both my clients and me" },
 ] as const;
 
 const SAMPLE_WORKBOOK_URL =
@@ -77,14 +70,12 @@ interface Props {
 export function ReportsCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   const [savingFreq, setSavingFreq] = useState(false);
-  const [savingMode, setSavingMode] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendingSample, setSendingSample] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   const freq = displayFrequency(account.report_frequency);
-  const sendMode = account.send_mode || "to_client";
 
   async function selectFrequency(next: string) {
     if (next === freq || savingFreq) return;
@@ -102,26 +93,6 @@ export function ReportsCard({ account, onAccountChange }: Props) {
       );
     } finally {
       setSavingFreq(false);
-    }
-  }
-
-  async function selectSendMode(next: string) {
-    if (next === sendMode || savingMode) return;
-    const prev = account.send_mode;
-    onAccountChange({ send_mode: next });
-    setSavingMode(true);
-    try {
-      const saved = await updateEmailSettings({ send_mode: next });
-      onAccountChange({ send_mode: saved.send_mode });
-      const label = SEND_MODES.find((m) => m.value === saved.send_mode)?.label;
-      toast.success(label ? `Send mode: ${label}` : "Send mode updated");
-    } catch (err) {
-      onAccountChange({ send_mode: prev });
-      toast.error(
-        err instanceof Error ? err.message : "Couldn't update send mode",
-      );
-    } finally {
-      setSavingMode(false);
     }
   }
 
@@ -292,44 +263,6 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         )}
       </div>
 
-      {/* Send mode */}
-      <div className="mt-6 border-t border-zinc-100 pt-5">
-        <span className="text-sm font-medium text-zinc-700">Who gets the report</span>
-        <div
-          role="radiogroup"
-          aria-label="Send mode"
-          className="mt-2 flex flex-col gap-1.5"
-        >
-          {SEND_MODES.map((m) => {
-            const selected = sendMode === m.value;
-            return (
-              <label
-                key={m.value}
-                className={[
-                  "flex cursor-pointer items-center gap-2.5 rounded-lg border px-3.5 py-2.5 text-sm transition-colors",
-                  "focus-within:ring-2 focus-within:ring-primary-500/40",
-                  selected
-                    ? "border-primary-300 bg-primary-50 text-zinc-900"
-                    : "border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-zinc-300 hover:bg-white",
-                  savingMode ? "cursor-not-allowed opacity-60" : "",
-                ].join(" ")}
-              >
-                <input
-                  type="radio"
-                  name="send-mode"
-                  value={m.value}
-                  checked={selected}
-                  disabled={savingMode}
-                  onChange={() => selectSendMode(m.value)}
-                  className="accent-primary-600"
-                />
-                {m.label}
-              </label>
-            );
-          })}
-        </div>
-      </div>
-
       {/* Sample + Send now */}
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <Button
@@ -349,8 +282,7 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         <Button onClick={() => setConfirmOpen(true)}>Send a report now</Button>
       </div>
       <p className="mt-2 text-xs text-zinc-400">
-        &ldquo;Send a report now&rdquo; emails all clients. &ldquo;Send me a sample&rdquo; sends one
-        workbook to your own inbox only — no client is contacted.
+        &ldquo;Send me a sample&rdquo; sends one workbook to your own inbox only — no client is contacted.
       </p>
 
       <Modal
