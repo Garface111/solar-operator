@@ -240,6 +240,26 @@ async def sync(request: Request, authorization: str | None = Header(default=None
 
         db.commit()
 
+    # Fire a bill-pull immediately so the operator sees data the moment they
+    # finish logging into GMP. The 6h scheduler tick is the long-tail safety
+    # net; this is the "trust the system" moment. Best-effort, never blocks
+    # the response.
+    try:
+        from threading import Thread
+        from .worker import pull_bills_for_tenant
+        def _bg_pull(tid: str):
+            try:
+                pull_bills_for_tenant(tid)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "post-/v1/sync pull_bills_for_tenant failed for %s", tid)
+        Thread(target=_bg_pull, args=(tenant.id,), daemon=True).start()
+    except Exception:
+        # Never let pull-kickoff failures break the sync response.
+        import logging
+        logging.getLogger(__name__).exception("failed to kick off post-sync pull")
+
     return {
         "ok": True,
         "tenant": tenant.id,
