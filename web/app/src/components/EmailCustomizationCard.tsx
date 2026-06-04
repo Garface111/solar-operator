@@ -224,8 +224,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           />
           <p className="mt-1.5 text-xs text-zinc-400">
             HTML supported. {MERGE_HELP}, plus {"{{period_start}}"},{" "}
-            {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{dashboard_url}}"},
-            {"{{tenant_email}}"}.
+            {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{dashboard_url}}"}.
           </p>
           {findTypoTags(body).length > 0 && (
             <p className="mt-1 text-xs text-amber-700">
