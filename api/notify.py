@@ -128,7 +128,7 @@ WELCOME_HTML = """\
 </td></tr>
 <tr><td style="padding:32px;font-size:15px;line-height:1.6;">
 <p>Your Solar Operator account is live on the <strong>{plan_label}</strong> plan.
-You're 5 minutes from automatic monthly reporting.</p>
+You're 5 minutes from automatic quarterly reporting.</p>
 
 <div style="background:#eef3ec;border-radius:8px;padding:18px 22px;margin:24px 0;">
   <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#557060;font-weight:600;">YOUR ACTIVATION CODE</div>
@@ -146,6 +146,15 @@ You're 5 minutes from automatic monthly reporting.</p>
       <a href="https://greenmountainpower.com" style="color:#2e6b3a;">greenmountainpower.com</a>,
       log in, check "Stay signed in". Close the tab. You're done.</li>
 </ol>
+
+<p style="margin-top:24px;background:#f4f9f5;border-radius:8px;padding:16px 20px;font-size:14px;color:#3a5a42;">
+  <strong>What happens next:</strong><br>
+  Once you finish setup, the extension will pull your GMP bills automatically
+  every 6 hours in the background. Your first quarterly NEPOOL-GIS report goes
+  out on <strong>{next_quarter_date}</strong> — you don't need to do anything
+  between now and then. If you ever want to trigger a report early, there's a
+  "Send a report now" button in your dashboard.
+</p>
 
 <p style="margin-top:24px;color:#667;font-size:14px;">
 Questions? Just reply — we read every email and respond same business day.
@@ -178,6 +187,12 @@ Setup (3 steps):
   3. Visit greenmountainpower.com, log in, check "Stay signed in." Close
      the tab. That's it.
 
+What happens next:
+  Once you finish setup, the extension pulls your GMP bills every 6 hours in the
+  background. Your first quarterly report goes out on {next_quarter_date}. You
+  don't need to do anything between now and then. There's a "Send a report now"
+  button on your dashboard if you ever want to trigger one early.
+
 Questions? Just reply.
 
 — The Solar Operator team
@@ -188,6 +203,20 @@ PLAN_LABELS = {"standard": "Solar Operator", "comped": "Solar Operator (comped)"
                "solo": "Solo", "manager": "Manager", "operator": "Operator"}
 
 
+def _next_quarterly_date() -> str:
+    """Return the next Jan 1/Apr 1/Jul 1/Oct 1 as a human date, e.g. 'Oct 1, 2026'."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    year = now.year
+    candidates = [(year, 1), (year, 4), (year, 7), (year, 10),
+                  (year + 1, 1)]
+    for y, m in candidates:
+        d = datetime(y, m, 1, 9, 0, tzinfo=timezone.utc)
+        if d > now:
+            return d.strftime(f"%b {d.day}, {d.year}")
+    return "the next quarter"
+
+
 def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
     plan_label = PLAN_LABELS.get(plan, "Solar Operator")
     fmt = dict(
@@ -195,6 +224,7 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
         plan_label=plan_label,
         tenant_key=tenant_key,
         install_url=EXTENSION_INSTALL_URL,
+        next_quarter_date=_next_quarterly_date(),
     )
     return _send_via_resend(
         to=to,
