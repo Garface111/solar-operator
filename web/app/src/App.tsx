@@ -12,6 +12,7 @@ import AccountTab from "./screens/AccountTab";
 import ClientsTab from "./screens/ClientsTab";
 import ReportsTab from "./screens/ReportsTab";
 import { Spinner } from "./ui/Spinner";
+import { useToast } from "./ui/Toast";
 import {
   getSession,
   setSession,
@@ -50,6 +51,7 @@ function classifyLoginError(err: unknown): string {
  */
 function AuthGate() {
   const navigate = useNavigate();
+  const toast = useToast();
   const [state, setState] = useState<AuthState>("loading");
 
   useEffect(() => {
@@ -104,12 +106,13 @@ function AuthGate() {
   // Global 401 handler — clearSession() already ran inside the api client.
   useEffect(() => {
     function onUnauthorized() {
+      toast.show("Your session expired — sign in again to continue.", "info");
       setState("anon");
       navigate("/login", { replace: true });
     }
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
-  }, [navigate]);
+  }, [navigate, toast]);
 
   if (state === "loading") {
     return (
