@@ -171,6 +171,16 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
               placeholder="reports@client.org"
             />
           </div>
+          {client.last_delivery_at && !delivery && (
+            <div className="mt-0.5 text-xs text-zinc-400">
+              Last sent:{" "}
+              {new Date(client.last_delivery_at).toLocaleDateString(undefined, {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              })}
+            </div>
+          )}
           {delivery && (
             <div className="mt-1 flex items-center gap-1.5 text-xs">
               <span

@@ -165,7 +165,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           </span>
         </Field>
         {account.last_delivery_at && (
-          <Field label="Last report sent">
+          <Field label="Most recent delivery">
             {new Date(account.last_delivery_at).toLocaleDateString()}
           </Field>
         )}
