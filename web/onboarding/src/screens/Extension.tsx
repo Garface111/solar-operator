@@ -4,6 +4,7 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
+import { Modal } from "../ui/Modal";
 import { useToast } from "../ui/Toast";
 import {
   getToken,
@@ -15,10 +16,17 @@ import {
 // Placeholder until the MV3 extension is published to the Chrome Web Store.
 const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
 
+// Where to send the tenant to trigger their first capture.
+const GMP_LOGIN_URL = "https://www.greenmountainpower.com/account/";
+
 const POLL_MS = 3000;
 // After this many consecutive ping failures we surface a "having trouble" hint
 // and stop nagging the operator with toasts.
 const FAIL_THRESHOLD = 5;
+// After this many poll ticks with no capture (~30s at POLL_MS) we offer the
+// troubleshooting modal. This counts *waiting*, not network failures — the
+// common bounce is "reachable server, tenant never logged into GMP".
+const HELP_THRESHOLD = 10;
 
 export default function Extension() {
   const navigate = useNavigate();
@@ -26,6 +34,8 @@ export default function Extension() {
   const [installed, setInstalled] = useState(false);
   const [advancing, setAdvancing] = useState(false);
   const [pollFailures, setPollFailures] = useState(0);
+  const [waitTicks, setWaitTicks] = useState(0);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [activationCode, setActivationCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -87,6 +97,7 @@ export default function Extension() {
 
     let cancelled = false;
     let failures = 0;
+    let waits = 0;
 
     async function advance() {
       if (cancelled) return;
@@ -108,6 +119,7 @@ export default function Extension() {
         if (ok) {
           setInstalled(true);
           void advance();
+          return;
         }
       } catch {
         if (cancelled) return;
@@ -120,6 +132,10 @@ export default function Extension() {
           );
         }
       }
+      // Reached only while still waiting (no capture yet, success or failure).
+      // After ~30s we offer the troubleshooting modal.
+      waits += 1;
+      setWaitTicks(waits);
     }
 
     void tick();
@@ -147,6 +163,7 @@ export default function Extension() {
 
   const storeUnpublished = CHROME_STORE_URL.startsWith("#");
   const havingTrouble = pollFailures >= FAIL_THRESHOLD;
+  const showHelp = waitTicks >= HELP_THRESHOLD && !installed;
 
   return (
     <ScreenLayout current={2}>
@@ -204,6 +221,45 @@ export default function Extension() {
           </div>
         </div>
 
+        {/* Activation guidance — the #1 onboarding bounce point is the tenant
+            not realizing they still have to log into GMP to trigger a capture. */}
+        <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 px-5 py-5">
+          <div className="text-base font-semibold tracking-tight text-zinc-900">
+            Almost there — activate by logging into GMP
+          </div>
+          <ol className="mt-4 flex flex-col gap-4">
+            {[
+              "Install the extension above",
+              "Paste your activation code into the extension's Options page",
+              "Log into your Green Mountain Power account in any tab — we'll detect your bills automatically",
+            ].map((step, i) => (
+              <li key={i} className="flex items-start gap-3">
+                <span
+                  aria-hidden
+                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary-500 text-xs font-semibold text-white"
+                >
+                  {i + 1}
+                </span>
+                <span className="text-sm leading-snug text-zinc-700">
+                  {step}
+                </span>
+              </li>
+            ))}
+          </ol>
+          <a
+            href={GMP_LOGIN_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+          >
+            Open Green Mountain Power →
+          </a>
+          <p className="mt-3 text-xs text-zinc-500">
+            You don&apos;t need to do anything else. We pick up your bills in the
+            background.
+          </p>
+        </div>
+
         <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-4">
           <div className="flex items-center gap-3">
             <span
@@ -233,6 +289,18 @@ export default function Extension() {
           )}
         </div>
 
+        {showHelp && (
+          <div className="mt-4 flex justify-center">
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              className="inline-flex animate-pulse items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-5 py-2.5 text-sm font-medium text-amber-800 transition-colors duration-150 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 focus-visible:ring-offset-2"
+            >
+              Having trouble?
+            </button>
+          </div>
+        )}
+
         {sessionError && (
           <p className="mt-4 text-sm text-red-600">{sessionError}</p>
         )}
@@ -254,6 +322,59 @@ export default function Extension() {
           </Button>
         </div>
       </Card>
+
+      <Modal
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="Not seeing a capture yet?"
+      >
+        <p className="text-sm text-zinc-600">
+          Run through this checklist — one of these is almost always the reason:
+        </p>
+        <ul className="mt-4 flex flex-col gap-3">
+          {[
+            "You installed the extension from the Chrome Web Store (the Chrome toolbar should show its icon)",
+            "You pasted the activation code into the extension's Options page and clicked Save",
+            "You logged into greenmountainpower.com in any tab while the extension is active",
+          ].map((item, i) => (
+            <li key={i} className="flex items-start gap-3 text-sm text-zinc-700">
+              <span aria-hidden className="mt-0.5 shrink-0 text-primary-600">
+                ✓
+              </span>
+              <span className="leading-snug">{item}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-5 text-sm text-zinc-600">
+          Still stuck? Email{" "}
+          <a
+            href="mailto:admin@solaroperator.org"
+            className="font-medium text-primary-600 hover:text-primary-700"
+          >
+            admin@solaroperator.org
+          </a>{" "}
+          and we&apos;ll personally walk you through it.
+        </p>
+        <div className="mt-6 flex justify-end">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setHelpOpen(false);
+              void handleManual();
+            }}
+            disabled={advancing}
+          >
+            {advancing ? (
+              <>
+                <Spinner />
+                Continuing…
+              </>
+            ) : (
+              "I've installed it manually — continue →"
+            )}
+          </Button>
+        </div>
+      </Modal>
     </ScreenLayout>
   );
 }
