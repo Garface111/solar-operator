@@ -39,6 +39,9 @@ export default function Extension() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [activationCode, setActivationCode] = useState<string | null>(null);
+  const [codeFailed, setCodeFailed] = useState(false);
+  // Bumping this re-runs the activation-code retry loop (manual "Refresh").
+  const [codeReload, setCodeReload] = useState(0);
   const [copied, setCopied] = useState(false);
   // Paid-but-inactive self-heal: when we return from Stripe with a session_id
   // but the webhook hasn't activated us yet, we reassure + reconcile rather
@@ -59,6 +62,7 @@ export default function Extension() {
     let cancelled = false;
     let retries = 0;
     const MAX_RETRIES = 20; // ~60s of retries at 3s intervals
+    setCodeFailed(false);
     async function loadCode() {
       if (cancelled) return;
       try {
@@ -75,13 +79,17 @@ export default function Extension() {
       retries += 1;
       if (retries < MAX_RETRIES && !cancelled) {
         window.setTimeout(loadCode, 3000);
+      } else if (!cancelled) {
+        // Retries exhausted — stop the silent permanent "Loading…" and offer
+        // a real error + manual refresh instead.
+        setCodeFailed(true);
       }
     }
     void loadCode();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [codeReload]);
 
   // Paid-but-inactive self-heal. On mount, if we returned from Stripe with a
   // session_id but we're still pending_payment (webhook lag), verify the
@@ -300,20 +308,39 @@ export default function Extension() {
             <strong>Activation code</strong>, and click Save. This links the
             extension to your account so we can find your bills.
           </p>
-          <div className="mt-3 flex items-stretch gap-2">
-            <code className="flex-1 select-all rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-sm text-zinc-800 break-all">
-              {activationCode ?? "Loading…"}
-            </code>
-            <button
-              type="button"
-              onClick={handleCopy}
-              disabled={!activationCode}
-              className="inline-flex items-center justify-center rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors duration-150 hover:bg-zinc-50 active:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-              aria-label="Copy activation code"
-            >
-              {copied ? "Copied ✓" : "Copy"}
-            </button>
-          </div>
+          {codeFailed && !activationCode ? (
+            <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-3">
+              <p className="text-xs leading-relaxed text-amber-800">
+                We&apos;re still confirming your activation code — this can take
+                up to a minute after payment.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setCodeFailed(false);
+                  setCodeReload((n) => n + 1);
+                }}
+                className="mt-2 inline-flex items-center justify-center rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors duration-150 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 focus-visible:ring-offset-2"
+              >
+                Refresh
+              </button>
+            </div>
+          ) : (
+            <div className="mt-3 flex items-stretch gap-2">
+              <code className="flex-1 select-all rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-sm text-zinc-800 break-all">
+                {activationCode ?? "Loading…"}
+              </code>
+              <button
+                type="button"
+                onClick={handleCopy}
+                disabled={!activationCode}
+                className="inline-flex items-center justify-center rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors duration-150 hover:bg-zinc-50 active:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+                aria-label="Copy activation code"
+              >
+                {copied ? "Copied ✓" : "Copy"}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Activation guidance — the #1 onboarding bounce point is the tenant
