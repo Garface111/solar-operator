@@ -39,7 +39,8 @@ export default function Welcome() {
             $250 one-time setup · $45/array/month · cancel anytime
           </p>
           <p className="mt-1 text-xs text-primary-700">
-            from $45/array/month, billed monthly · $250 one-time setup
+            Billed monthly. Each array you manage is one billing unit — the
+            count is set automatically as GMP captures come in.
           </p>
         </div>
 
