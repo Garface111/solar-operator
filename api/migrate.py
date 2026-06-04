@@ -258,6 +258,31 @@ def main():
             ))
             print("  + arrays.excluded")
 
+        # 2026-06-04 VEC auto-populate: mirror of GMP triple for VEC provider.
+        vec_cols = [
+            ("clients", "vec_email",
+             "ALTER TABLE clients ADD COLUMN vec_email VARCHAR(200)"),
+            ("clients", "vec_username",
+             "ALTER TABLE clients ADD COLUMN vec_username VARCHAR(120)"),
+            ("clients", "vec_autopopulate",
+             "ALTER TABLE clients ADD COLUMN vec_autopopulate BOOLEAN DEFAULT FALSE"),
+            ("clients", "vec_last_sync_at",
+             "ALTER TABLE clients ADD COLUMN vec_last_sync_at TIMESTAMP"),
+        ]
+        for table, col, sql in vec_cols:
+            if not column_exists(conn, table, col):
+                conn.execute(text(sql))
+                print(f"  + {table}.{col}")
+        conn.execute(text(
+            "UPDATE clients SET vec_autopopulate = FALSE WHERE vec_autopopulate IS NULL"
+        ))
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_clients_vec_email ON clients (vec_email)",
+            "CREATE INDEX IF NOT EXISTS ix_clients_vec_username ON clients (vec_username)",
+            "CREATE INDEX IF NOT EXISTS ix_clients_tenant_vec_email ON clients (tenant_id, vec_email)",
+        ]:
+            conn.execute(text(idx_sql))
+
         # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
         # signups (last 7 days) that still carry the old 'monthly' engineer-default
         # over to 'quarterly'. We deliberately bound this to created_at > now-7d so

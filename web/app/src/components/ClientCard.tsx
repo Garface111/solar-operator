@@ -107,7 +107,16 @@ export function ClientCard({
   async function toggleAutopop(v: boolean) {
     try {
       await patch({ gmp_autopopulate: v });
-      toast.success(v ? "Auto-populate on" : "Auto-populate off");
+      toast.success(v ? "GMP auto-populate on" : "GMP auto-populate off");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't update");
+    }
+  }
+
+  async function toggleVecAutopop(v: boolean) {
+    try {
+      await patch({ vec_autopopulate: v });
+      toast.success(v ? "VEC auto-populate on" : "VEC auto-populate off");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't update");
     }
@@ -177,6 +186,7 @@ export function ClientCard({
   }
 
   const gmpLogin = client.gmp_email || client.gmp_username || "";
+  const vecLogin = client.vec_email || client.vec_username || "";
   const delivery = deliveryStatus(client);
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
   const captureStale =
@@ -386,16 +396,16 @@ export function ClientCard({
               id={`autopop-${client.id}`}
               checked={client.gmp_autopopulate}
               onChange={toggleAutopop}
-              label="Auto-populate arrays from utility portal"
+              label="GMP — auto-populate arrays from portal"
             />
             {client.gmp_autopopulate && (
               <div className="mt-3">
                 <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  Utility login (email or username)
+                  GMP login (email or username)
                 </span>
                 <EditableField
                   value={gmpLogin}
-                  label="Utility login"
+                  label="GMP login"
                   onSave={(v) => {
                     // Route to the right column: email-shaped → gmp_email.
                     const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
@@ -404,7 +414,7 @@ export function ClientCard({
                       gmp_username: v && !looksLikeEmail ? v : null,
                     });
                   }}
-                  emptyText="add utility login"
+                  emptyText="add GMP login"
                   placeholder="client@gmail.com or jdoe"
                 />
                 <p className="mt-1.5 text-xs text-zinc-500">
@@ -412,6 +422,51 @@ export function ClientCard({
                   greenmountainpower.com. We use this to match captured bills to
                   this client.
                 </p>
+                {client.gmp_last_sync_at && (
+                  <p className="mt-1 text-xs text-zinc-400">
+                    {captureFreshness(client.gmp_last_sync_at)}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* VEC auto-populate */}
+          <div className="rounded-xl bg-zinc-50 px-4 py-3">
+            <Toggle
+              id={`vec-autopop-${client.id}`}
+              checked={client.vec_autopopulate}
+              onChange={toggleVecAutopop}
+              label="VEC — auto-populate arrays from portal"
+            />
+            {client.vec_autopopulate && (
+              <div className="mt-3">
+                <span className="mb-1 block text-xs font-medium text-zinc-600">
+                  VEC login (email or username)
+                </span>
+                <EditableField
+                  value={vecLogin}
+                  label="VEC login"
+                  onSave={(v) => {
+                    const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+                    return patch({
+                      vec_email: v && looksLikeEmail ? v : null,
+                      vec_username: v && !looksLikeEmail ? v : null,
+                    });
+                  }}
+                  emptyText="add VEC login"
+                  placeholder="client@gmail.com or jdoe"
+                />
+                <p className="mt-1.5 text-xs text-zinc-500">
+                  The credential the client uses to sign in at
+                  vermontelectric.coop. We use this to match captured bills to
+                  this client.
+                </p>
+                {client.vec_last_sync_at && (
+                  <p className="mt-1 text-xs text-zinc-400">
+                    {captureFreshness(client.vec_last_sync_at)}
+                  </p>
+                )}
               </div>
             )}
           </div>

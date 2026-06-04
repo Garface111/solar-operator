@@ -195,6 +195,10 @@ class ClientCreate(BaseModel):
     gmp_email: Optional[EmailStr] = None
     gmp_username: Optional[str] = None
     gmp_autopopulate: Optional[bool] = None
+    # VEC auto-populate (mirrors GMP triple for the VEC provider).
+    vec_email: Optional[EmailStr] = None
+    vec_username: Optional[str] = None
+    vec_autopopulate: Optional[bool] = None
 
 
 class ClientUpdate(BaseModel):
@@ -207,6 +211,9 @@ class ClientUpdate(BaseModel):
     gmp_email: Optional[EmailStr] = None
     gmp_username: Optional[str] = None
     gmp_autopopulate: Optional[bool] = None
+    vec_email: Optional[EmailStr] = None
+    vec_username: Optional[str] = None
+    vec_autopopulate: Optional[bool] = None
 
 
 def _client_to_dict(c: Client, array_count: int = 0) -> dict:
@@ -224,6 +231,10 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "gmp_username": c.gmp_username,
         "gmp_autopopulate": c.gmp_autopopulate,
         "gmp_last_sync_at": c.gmp_last_sync_at.isoformat() if c.gmp_last_sync_at else None,
+        "vec_email": c.vec_email,
+        "vec_username": c.vec_username,
+        "vec_autopopulate": c.vec_autopopulate,
+        "vec_last_sync_at": c.vec_last_sync_at.isoformat() if c.vec_last_sync_at else None,
         "last_delivered_at": c.last_delivered_at.isoformat() if c.last_delivered_at else None,
         "last_bounced_at": c.last_bounced_at.isoformat() if c.last_bounced_at else None,
         "last_bounce_reason": c.last_bounce_reason,
@@ -894,6 +905,10 @@ def create_client(body: ClientCreate,
             gmp_username=(body.gmp_username.strip()
                           if body.gmp_username and body.gmp_username.strip() else None),
             gmp_autopopulate=bool(body.gmp_autopopulate),
+            vec_email=(body.vec_email.lower().strip() if body.vec_email else None),
+            vec_username=(body.vec_username.strip()
+                          if body.vec_username and body.vec_username.strip() else None),
+            vec_autopopulate=bool(body.vec_autopopulate),
             active=True,
         )
         db.add(c); db.commit(); db.refresh(c)
@@ -931,13 +946,17 @@ def update_client(client_id: int, body: ClientUpdate,
         # absent from the request body are NOT in model_fields_set and are
         # left unchanged — the standard PATCH semantic.
         for field in ("contact_email", "cc_emails", "report_frequency",
-                      "active", "notes", "gmp_autopopulate"):
+                      "active", "notes", "gmp_autopopulate", "vec_autopopulate"):
             if field in body.model_fields_set:
                 setattr(c, field, getattr(body, field))
         if "gmp_email" in body.model_fields_set:
             c.gmp_email = (body.gmp_email or "").lower().strip() or None
         if "gmp_username" in body.model_fields_set:
             c.gmp_username = (body.gmp_username or "").strip() or None
+        if "vec_email" in body.model_fields_set:
+            c.vec_email = (body.vec_email or "").lower().strip() or None
+        if "vec_username" in body.model_fields_set:
+            c.vec_username = (body.vec_username or "").strip() or None
         db.commit(); db.refresh(c)
         n_arr = db.execute(
             select(Array).where(Array.client_id == c.id)
