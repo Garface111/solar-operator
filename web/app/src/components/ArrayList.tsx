@@ -443,6 +443,9 @@ function AddAccountRow({
           {providers.map((p) => (
             <option key={p.code} value={p.code}>
               {p.label}
+              {p.scrape_status && p.scrape_status !== "live"
+                ? " (manual — auto-capture coming)"
+                : ""}
             </option>
           ))}
         </select>

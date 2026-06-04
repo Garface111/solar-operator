@@ -457,6 +457,7 @@ export interface Provider {
   code: string;
   label: string;
   status?: string;
+  scrape_status?: string;
 }
 
 export async function listProviders(): Promise<Provider[]> {
