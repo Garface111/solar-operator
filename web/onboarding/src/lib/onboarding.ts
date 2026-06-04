@@ -76,10 +76,26 @@ export interface CheckoutResponse {
   onboarding_token: string;
 }
 
+export interface ArraySeedPayload {
+  name: string;
+  nepool_gis_id?: string;
+  bill_offset_months?: number;
+}
+
+export interface ClientSeedPayload {
+  name: string;
+  contact_email?: string;
+  arrays: ArraySeedPayload[];
+}
+
 export async function createCheckout(body: {
   email: string;
   full_name: string;
   company?: string;
+  /** Path A: pre-entered clients+arrays; quantity = total arrays across all clients. */
+  clients?: ClientSeedPayload[];
+  /** Path B: operator estimate; quantity syncs to reality when real arrays are added. */
+  array_count?: number;
 }): Promise<CheckoutResponse> {
   const res = await fetchWithTimeout("/v1/onboarding/checkout", {
     method: "POST",

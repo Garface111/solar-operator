@@ -11,6 +11,7 @@ import {
   getToken,
   submitClients,
   completeOnboarding,
+  fetchStatus,
   type ClientPayload,
 } from "../lib/onboarding";
 
@@ -56,16 +57,28 @@ export default function Clients() {
   const [completing, setCompleting] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [confirmSummary, setConfirmSummary] = useState<ConfirmSummary | null>(null);
+  // Path A: operator pre-entered clients before checkout — detect and skip re-entry.
+  const [existingClientsCount, setExistingClientsCount] = useState(0);
+  const [existingArraysCount, setExistingArraysCount] = useState(0);
+  const [statusChecked, setStatusChecked] = useState(false);
+  const [addingMore, setAddingMore] = useState(false);
 
-  // Detect a lost onboarding session on mount so we can disable "Finish setup"
-  // and surface a real restart link — instead of letting the click silently
-  // no-op the operator into a dead end.
   useEffect(() => {
-    if (!getToken()) {
+    const token = getToken();
+    if (!token) {
       setSessionError(
         "We couldn't find your onboarding session. Please restart from the welcome screen.",
       );
+      setStatusChecked(true);
+      return;
     }
+    fetchStatus(token)
+      .then((s) => {
+        setExistingClientsCount(s.clients_count);
+        setExistingArraysCount(s.arrays_count);
+      })
+      .catch(() => { /* non-fatal — fall through to normal form */ })
+      .finally(() => setStatusChecked(true));
   }, []);
 
   function update(id: number, patch: Partial<ClientDraft>) {
@@ -216,10 +229,55 @@ export default function Clients() {
     }
   }
 
+  // Path A: clients were pre-entered before checkout — show summary, skip re-entry.
+  if (statusChecked && existingClientsCount > 0 && !addingMore) {
+    return (
+      <ScreenLayout current={4}>
+        <Card active>
+          <div aria-hidden className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary-100 text-2xl text-primary-600">
+            ✓
+          </div>
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-zinc-900 text-center">
+            Your clients are already set up.
+          </h1>
+          <p className="mt-2 text-center text-sm text-zinc-500">
+            You entered{" "}
+            <span className="font-medium text-zinc-700">{existingClientsCount} client{existingClientsCount === 1 ? "" : "s"}</span>{" "}
+            and{" "}
+            <span className="font-medium text-zinc-700">{existingArraysCount} array{existingArraysCount === 1 ? "" : "s"}</span>{" "}
+            before checkout.
+          </p>
+          <p className="mt-1 text-center text-xs text-zinc-400">
+            Edit clients and arrays any time in your dashboard.
+          </p>
+          <div className="mt-8 flex flex-col items-center gap-3">
+            <Button onClick={handleComplete} disabled={completing}>
+              {completing ? (
+                <>
+                  <Spinner />
+                  Finishing…
+                </>
+              ) : (
+                "Finish setup →"
+              )}
+            </Button>
+            <button
+              type="button"
+              onClick={() => setAddingMore(true)}
+              className="text-sm text-zinc-400 hover:text-zinc-600 focus:outline-none"
+            >
+              + Add more clients
+            </button>
+          </div>
+        </Card>
+      </ScreenLayout>
+    );
+  }
+
   // Confirmation sub-screen shown after submitClients succeeds, before completeOnboarding.
   if (confirmSummary) {
     return (
-      <ScreenLayout current={3}>
+      <ScreenLayout current={4}>
         <Card active>
           <div aria-hidden className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary-100 text-2xl text-primary-600">
             ✓
@@ -281,7 +339,7 @@ export default function Clients() {
   }
 
   return (
-    <ScreenLayout current={3}>
+    <ScreenLayout current={4}>
       <Card active>
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
           Add your reporting clients.

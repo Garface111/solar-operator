@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Stepper } from "./Stepper";
 
-export const STEPS = ["Welcome", "Your info", "Install", "Clients", "Done"];
+export const STEPS = ["Welcome", "Your info", "Plan", "Install", "Clients", "Done"];
 
 interface ScreenLayoutProps {
   /** Zero-based index of the active wizard step — drives the Stepper. */

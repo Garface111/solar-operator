@@ -4,20 +4,15 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
-import { Spinner } from "../ui/Spinner";
-import { useToast } from "../ui/Toast";
-import { createCheckout, setToken } from "../lib/onboarding";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function Info() {
   const navigate = useNavigate();
-  const toast = useToast();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [touched, setTouched] = useState<{ name?: boolean; email?: boolean }>({});
-  const [submitting, setSubmitting] = useState(false);
 
   // Stripe sends operators back here with ?cancelled=1 if they bail on Checkout.
   const cancelled =
@@ -31,27 +26,18 @@ export default function Info() {
       : undefined;
   const valid = fullName.trim().length >= 2 && EMAIL_RE.test(email.trim());
 
-  async function handleSubmit() {
+  function handleSubmit() {
     setTouched({ name: true, email: true });
-    if (!valid || submitting) return;
-    setSubmitting(true);
-    try {
-      const { checkout_url, onboarding_token } = await createCheckout({
-        full_name: fullName.trim(),
+    if (!valid) return;
+    // Pass operator info to the Plan screen via router state so it can
+    // construct the checkout request with the right quantity path.
+    navigate("/plan", {
+      state: {
         email: email.trim(),
+        fullName: fullName.trim(),
         company: company.trim() || undefined,
-      });
-      // Persist before redirect; Stripe's success_url carries it back too.
-      setToken(onboarding_token);
-      window.location.href = checkout_url;
-    } catch (err) {
-      toast.error(
-        err instanceof Error
-          ? err.message
-          : "Couldn't reach checkout. Check your connection and try again.",
-      );
-      setSubmitting(false);
-    }
+      },
+    });
   }
 
   return (
@@ -104,27 +90,18 @@ export default function Info() {
         </div>
 
         <div className="mt-8 flex items-center justify-between">
-          <Button variant="ghost" onClick={() => navigate("/")} disabled={submitting}>
+          <Button variant="ghost" onClick={() => navigate("/")}>
             ← Back
           </Button>
-          <Button onClick={handleSubmit} disabled={!valid || submitting}>
-            {submitting ? (
-              <>
-                <Spinner />
-                Redirecting…
-              </>
-            ) : (
-              "Continue to checkout →"
-            )}
+          <Button onClick={handleSubmit} disabled={!valid}>
+            Continue →
           </Button>
         </div>
 
         <p className="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-xs leading-relaxed text-zinc-500">
-          Next: secure checkout. After paying, you&apos;ll install the Chrome
-          extension, then add your clients and arrays — the extension can
-          auto-detect arrays from GMP, or you can enter them manually.
-          Initial charge: <span className="font-medium text-zinc-700">$250 setup</span>{" "}
-          + first month prorated by your array count.
+          Next: choose your billing option. You can enter your exact clients and
+          arrays now to lock in your monthly bill, or pick a rough estimate and
+          true-up later. Then secure checkout → extension install → done.
         </p>
       </Card>
     </ScreenLayout>

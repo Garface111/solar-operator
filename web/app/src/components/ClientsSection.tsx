@@ -111,9 +111,25 @@ export function ClientsSection({ expandClientId }: Props) {
         </Card>
       ) : clients.length === 0 ? (
         <Card>
-          <p className="text-center text-sm text-zinc-500">
-            No clients yet. Add your first reporting client to get started.
-          </p>
+          <div className="space-y-3">
+            <h3 className="text-base font-semibold text-zinc-900">
+              Add your first client to auto-detect their arrays
+            </h3>
+            <p className="text-sm text-zinc-600">
+              For each client, add their name and the GMP username they use to
+              sign in. Then open Green Mountain Power once signed in with that
+              client&apos;s login — the extension captures their bills and
+              creates the arrays for you. You only do this once per client.
+            </p>
+            <ol className="ml-5 list-decimal space-y-1 text-sm text-zinc-700">
+              <li>Click <b>+ Add client</b> and enter their GMP login.</li>
+              <li>Open <a href="https://greenmountainpower.com" target="_blank" rel="noopener noreferrer" className="text-primary-600 underline-offset-2 hover:underline">greenmountainpower.com</a> signed in as that client.</li>
+              <li>Their arrays show up here automatically.</li>
+            </ol>
+            <div className="pt-1">
+              <Button onClick={() => setAdding(true)}>+ Add your first client</Button>
+            </div>
+          </div>
         </Card>
       ) : (
         <div className="space-y-3">

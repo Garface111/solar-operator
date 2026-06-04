@@ -49,7 +49,7 @@ export default function Done() {
   }, []);
 
   return (
-    <ScreenLayout current={4}>
+    <ScreenLayout current={5}>
       <Card active className="text-center">
         <div
           aria-hidden
