@@ -72,7 +72,13 @@ export default function DashboardLayout({ onSignOut }: Props) {
   // Show a banner if the extension hasn't phoned home in 48+ hours. After 48h
   // without a heartbeat, new bill captures aren't flowing — the operator should
   // know so they can reconnect the extension.
-  const heartbeatStale = account
+  // Only fire for accounts older than 2 days — new operators who haven't
+  // finished setting up the extension yet shouldn't see this immediately.
+  const accountAgeMs = account?.created_at
+    ? Date.now() - new Date(account.created_at).getTime()
+    : 0;
+  const accountMature = accountAgeMs > 2 * 24 * 60 * 60 * 1000;
+  const heartbeatStale = account && accountMature
     ? !account.extension_heartbeat_at ||
       Date.now() - new Date(account.extension_heartbeat_at).getTime() >
         48 * 60 * 60 * 1000
