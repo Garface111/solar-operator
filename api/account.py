@@ -24,6 +24,7 @@ import base64
 import json
 import shutil
 import tempfile
+from pathlib import Path
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -954,17 +955,23 @@ def download_client_report(client_id: int,
     from .writers import build_workbook
     tmpdir = tempfile.mkdtemp(prefix=f"so-dl-c{client_id}-")
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", client_name)
-    out_path = f"{tmpdir}/{safe_name}-latest.xlsx"
+    out_path = Path(tmpdir) / f"{safe_name}-latest.xlsx"
     try:
         build_workbook(client_id=client_id, out_path=out_path)
-    except Exception:
+    except HTTPException:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        import logging
+        logging.getLogger(__name__).exception(
+            "download_client_report: build_workbook failed for client_id=%s", client_id)
         raise HTTPException(
-            422,
-            f"No bills captured yet for {client_name} — the extension needs to pull from GMP first.",
+            500,
+            f"Couldn't build the report for {client_name}: {e}",
         )
     return FileResponse(
-        out_path,
+        str(out_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{safe_name}-latest.xlsx",
         background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
