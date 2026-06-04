@@ -14,8 +14,13 @@ import {
   reconcileCheckout,
 } from "../lib/onboarding";
 
-// Placeholder until the MV3 extension is published to the Chrome Web Store.
 const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
+// Listing verified live 2026-06-03 (HTTP 200, real "Solar Operator Sync" product
+// page). This explicit flag drives the "pending publication" warning instead of
+// the old `CHROME_STORE_URL.startsWith("#")` heuristic, which could never fire
+// once the URL became a real store path. Flip to false if the listing is ever
+// unpublished and the warning needs to render again.
+const CHROME_STORE_PUBLISHED = true;
 
 // Where to send the tenant to trigger their first capture.
 const GMP_LOGIN_URL = "https://www.greenmountainpower.com/account/";
@@ -233,7 +238,7 @@ export default function Extension() {
     }
   }
 
-  const storeUnpublished = CHROME_STORE_URL.startsWith("#");
+  const storeUnpublished = !CHROME_STORE_PUBLISHED;
   const havingTrouble = pollFailures >= FAIL_THRESHOLD;
   const showHelp = waitTicks >= HELP_THRESHOLD && !installed;
 
