@@ -107,6 +107,23 @@ export async function reconcileCheckout(
   return res.json();
 }
 
+export interface ConnectionTest {
+  connected: boolean;
+  captures_count: number;
+  last_capture_at: string | null;
+}
+
+/** In-flow check: has the extension captured a GMP session for this tenant in
+ *  the last 5 minutes? */
+export async function testConnection(token: string): Promise<ConnectionTest> {
+  const res = await fetch(
+    `/v1/onboarding/test-connection?token=${encodeURIComponent(token)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
 export interface ArrayPayload {
   name: string;
   nepool_gis_id?: string;

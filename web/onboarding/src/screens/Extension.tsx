@@ -12,7 +12,18 @@ import {
   markExtensionInstalled,
   fetchStatus,
   reconcileCheckout,
+  testConnection,
+  type ConnectionTest,
 } from "../lib/onboarding";
+
+/** Compact "Xs ago" / "Xm ago" relative time for a capture timestamp. */
+function timeAgo(iso: string): string {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.round(mins / 60)}h ago`;
+}
 
 const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
 // Listing verified live 2026-06-03 (HTTP 200, real "Solar Operator Sync" product
@@ -49,6 +60,8 @@ export default function Extension() {
   // Bumping this re-runs the activation-code retry loop (manual "Refresh").
   const [codeReload, setCodeReload] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ConnectionTest | null>(null);
   // Paid-but-inactive self-heal: when we return from Stripe with a session_id
   // but the webhook hasn't activated us yet, we reassure + reconcile rather
   // than letting the operator hit a 402 "pay again".
@@ -150,6 +163,20 @@ export default function Extension() {
       if (timer) window.clearTimeout(timer);
     };
   }, []);
+
+  async function runConnectionTest() {
+    const token = tokenRef.current;
+    if (!token || testing) return;
+    setTesting(true);
+    try {
+      const r = await testConnection(token);
+      setTestResult(r);
+    } catch {
+      toast.error("Couldn't run the connection test — please try again.");
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function handleCopy() {
     if (!activationCode) return;
@@ -357,6 +384,51 @@ export default function Extension() {
           )}
         </div>
 
+        {/* Test connection — let the operator confirm the extension + code are
+            wired up instead of sitting here wondering. */}
+        <div className="mt-4 rounded-xl border border-zinc-200 bg-white px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-sm font-medium text-zinc-900">
+                Test connection
+              </div>
+              <p className="mt-0.5 text-xs text-zinc-500">
+                Check whether the extension has reached us yet.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={runConnectionTest}
+              disabled={testing}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors duration-150 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+            >
+              {testing ? (
+                <>
+                  <Spinner />
+                  Testing…
+                </>
+              ) : (
+                "Test connection"
+              )}
+            </button>
+          </div>
+          {testResult && (
+            <p
+              className={`mt-3 text-sm ${
+                testResult.connected ? "text-primary-700" : "text-amber-700"
+              }`}
+            >
+              {testResult.connected
+                ? `Extension connected ✓ — last capture ${
+                    testResult.last_capture_at
+                      ? timeAgo(testResult.last_capture_at)
+                      : "just now"
+                  }`
+                : "Not detected yet — install the extension and visit greenmountainpower.com."}
+            </p>
+          )}
+        </div>
+
         {/* Activation guidance — the #1 onboarding bounce point is the tenant
             not realizing they still have to log into GMP to trigger a capture. */}
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 px-5 py-5">
@@ -494,6 +566,39 @@ export default function Extension() {
             </li>
           ))}
         </ul>
+        <div className="mt-5 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+          <button
+            type="button"
+            onClick={runConnectionTest}
+            disabled={testing}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors duration-150 hover:bg-white/70 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+          >
+            {testing ? (
+              <>
+                <Spinner />
+                Testing…
+              </>
+            ) : (
+              "Test connection"
+            )}
+          </button>
+          {testResult && (
+            <p
+              className={`mt-2 text-sm ${
+                testResult.connected ? "text-primary-700" : "text-amber-700"
+              }`}
+            >
+              {testResult.connected
+                ? `Extension connected ✓ — last capture ${
+                    testResult.last_capture_at
+                      ? timeAgo(testResult.last_capture_at)
+                      : "just now"
+                  }`
+                : "Not detected yet — install the extension and visit greenmountainpower.com."}
+            </p>
+          )}
+        </div>
+
         <p className="mt-5 text-sm text-zinc-600">
           Still stuck? Email{" "}
           <a

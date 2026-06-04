@@ -274,6 +274,31 @@ def extension_ping(token: str = Query(...)):
         }
 
 
+@router.post("/test-connection")
+def test_connection(token: str = Query(...)):
+    """In-flow 'Test connection' (V3): has the extension actually reached us?
+
+    Returns whether a UtilitySession landed for this tenant in the last 5
+    minutes (connected), the total capture count, and the most recent capture
+    time. Lets the operator confirm the extension + activation code are wired up
+    instead of sitting on Screen 3 wondering whether anything is happening."""
+    from datetime import timedelta
+    with SessionLocal() as db:
+        t = _tenant_by_token(db, token)
+        sessions = db.execute(
+            select(UtilitySession)
+            .where(UtilitySession.tenant_id == t.id)
+            .order_by(UtilitySession.captured_at.desc())
+        ).scalars().all()
+        last = sessions[0] if sessions else None
+        cutoff = now() - timedelta(minutes=5)
+        return {
+            "connected": bool(last and last.captured_at >= cutoff),
+            "captures_count": len(sessions),
+            "last_capture_at": last.captured_at.isoformat() if last else None,
+        }
+
+
 def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
     """Self-heal a paid-but-inactive tenant when the Stripe webhook is lagging.
 
