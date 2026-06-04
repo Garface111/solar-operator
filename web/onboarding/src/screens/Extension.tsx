@@ -222,7 +222,9 @@ export default function Extension() {
         setPollFailures(0);
         if (ok) {
           setInstalled(true);
-          void advance();
+          // Hold on the "Captured ✓" state briefly so the operator can see it
+          // before auto-advancing — avoids a jarring instant screen change.
+          window.setTimeout(() => { if (!cancelled) void advance(); }, 1500);
           return;
         }
       } catch {
