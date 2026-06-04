@@ -826,10 +826,10 @@ def update_client(client_id: int, body: ClientUpdate,
                       "active", "notes", "gmp_autopopulate"):
             if field in body.model_fields_set:
                 setattr(c, field, getattr(body, field))
-        if body.gmp_email is not None:
-            c.gmp_email = body.gmp_email.lower().strip() or None
-        if body.gmp_username is not None:
-            c.gmp_username = body.gmp_username.strip() or None
+        if "gmp_email" in body.model_fields_set:
+            c.gmp_email = (body.gmp_email or "").lower().strip() or None
+        if "gmp_username" in body.model_fields_set:
+            c.gmp_username = (body.gmp_username or "").strip() or None
         db.commit(); db.refresh(c)
         n_arr = db.execute(
             select(Array).where(Array.client_id == c.id)
