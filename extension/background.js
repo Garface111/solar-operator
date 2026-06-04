@@ -114,9 +114,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// Heartbeat — ping the server every 60s so the onboarding screen can
+// distinguish "extension active" from "not detected." Only fires when the
+// tenant key is set and at least one GMP tab is open.
+const HEARTBEAT_ENDPOINT_PATH = "/v1/extension/heartbeat";
+chrome.alarms.create("heartbeat", { periodInMinutes: 1 });
+
+async function sendHeartbeat() {
+  const { tenantKey, endpoint } = await getSettings();
+  if (!tenantKey) return;
+  // Derive the base URL from the sync endpoint (same origin).
+  const base = endpoint.replace(/\/v1\/sync$/, "");
+  try {
+    await fetch(`${base}${HEARTBEAT_ENDPOINT_PATH}`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${tenantKey}` },
+    });
+  } catch {
+    // Non-fatal — heartbeat is best-effort.
+  }
+}
+
 // Expiry check — nudge the user before the JWT runs out.
 chrome.alarms.create("token-expiry-check", { periodInMinutes: 60 * 12 });
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === "heartbeat") {
+    await sendHeartbeat();
+    return;
+  }
   if (alarm.name !== "token-expiry-check") return;
   const s = await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD);
   const last = s[STORAGE_KEYS.LAST_PAYLOAD];

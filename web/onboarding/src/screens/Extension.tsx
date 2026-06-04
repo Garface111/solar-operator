@@ -62,6 +62,7 @@ export default function Extension() {
   const [copied, setCopied] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTest | null>(null);
+  const [extensionActive, setExtensionActive] = useState(false);
   // Paid-but-inactive self-heal: when we return from Stripe with a session_id
   // but the webhook hasn't activated us yet, we reassure + reconcile rather
   // than letting the operator hit a 402 "pay again".
@@ -88,6 +89,7 @@ export default function Extension() {
         const status = await fetchStatus(token!);
         if (cancelled) return;
         if (status.active) setPaymentActive(true);
+        if (status.extension_active) setExtensionActive(true);
         if (status.activation_code) {
           setActivationCode(status.activation_code);
           return; // got it — stop retrying
@@ -471,11 +473,11 @@ export default function Extension() {
         </div>
 
         <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-4">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span
               aria-hidden
               className={[
-                "h-2.5 w-2.5 rounded-full",
+                "h-2.5 w-2.5 rounded-full shrink-0",
                 installed ? "bg-primary-500" : "animate-pulse bg-amber-400",
               ].join(" ")}
             />
@@ -484,6 +486,12 @@ export default function Extension() {
                 ? "Capture received — taking you to the next step…"
                 : "We're waiting for your first GMP capture…"}
             </span>
+            {!installed && extensionActive && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary-100 px-2 py-0.5 text-xs font-medium text-primary-700">
+                <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-primary-500" />
+                Extension active
+              </span>
+            )}
           </div>
           {!installed && !havingTrouble && (
             <p className="mt-2 pl-5 text-xs text-zinc-500">

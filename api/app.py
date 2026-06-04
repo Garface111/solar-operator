@@ -81,6 +81,21 @@ def health():
     return {"ok": True, "service": "solar-operator-api"}
 
 
+@app.post("/v1/extension/heartbeat")
+def extension_heartbeat(authorization: str | None = Header(default=None)):
+    """Lightweight periodic ping from the Chrome extension so the onboarding
+    screen can distinguish 'extension installed and active' from 'not detected.'
+    Called by background.js every 60s when on a GMP tab. Returns the server
+    timestamp so the extension can show clock-skew warnings if needed."""
+    tenant = tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant.id)
+        if t:
+            t.extension_heartbeat_at = now()
+            db.commit()
+    return {"ok": True, "at": datetime.utcnow().isoformat()}
+
+
 # ---- helpers ------------------------------------------------------------
 
 def tenant_from_bearer(authorization: str | None) -> Tenant:

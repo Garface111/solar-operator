@@ -197,6 +197,8 @@ export interface OnboardingStatus {
   activation_code: string | null;
   clients_count: number;
   arrays_count: number;
+  extension_active: boolean;
+  extension_heartbeat_at: string | null;
 }
 
 export async function fetchStatus(token: string): Promise<OnboardingStatus> {

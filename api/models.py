@@ -70,6 +70,11 @@ class Tenant(Base):
     # to_me     = primary recipient is tenant.contact_email (tenant forwards);
     #             subject/body still rendered with client_name.
 
+    # Extension heartbeat (W3-19, June 2026). Updated by the background.js
+    # periodic ping so the onboarding screen can distinguish "extension active"
+    # from "extension installed but not seen recently."
+    extension_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
     # onboarding_token is a 32-char random string handed to the SPA + passed as
     # Stripe metadata so the post-payment return path can find the pending tenant.

@@ -233,6 +233,13 @@ def _status_payload(db, t: Tenant) -> dict:
     n_arrays = db.execute(
         select(Array).where(Array.tenant_id == t.id)
     ).scalars().all()
+    from datetime import datetime as _dt
+    hb = t.extension_heartbeat_at
+    # "extension_active" = heartbeat received within the last 2 minutes.
+    extension_active = (
+        hb is not None
+        and (_dt.utcnow() - hb).total_seconds() < 120
+    )
     return {
         "stage": t.onboarding_stage,
         "tenant_id": t.id,
@@ -240,6 +247,8 @@ def _status_payload(db, t: Tenant) -> dict:
         "activation_code": t.tenant_key if t.active else None,
         "clients_count": len(n_clients),
         "arrays_count": len(n_arrays),
+        "extension_active": extension_active,
+        "extension_heartbeat_at": hb.isoformat() if hb else None,
     }
 
 

@@ -210,6 +210,13 @@ def main():
         ]:
             conn.execute(text(idx_sql))
 
+        # W3-19: extension heartbeat timestamp on Tenant.
+        if not column_exists(conn, "tenants", "extension_heartbeat_at"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN extension_heartbeat_at TIMESTAMP"
+            ))
+            print("  + tenants.extension_heartbeat_at")
+
         # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
         # signups (last 7 days) that still carry the old 'monthly' engineer-default
         # over to 'quarterly'. We deliberately bound this to created_at > now-7d so
