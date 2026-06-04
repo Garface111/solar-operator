@@ -3,14 +3,27 @@
 
 const TOKEN_KEY = "onboarding_token";
 
-/** Persist the onboarding token for the rest of the wizard (survives the Stripe round-trip). */
+/**
+ * Persist the onboarding token for the rest of the wizard.
+ *
+ * Written to BOTH localStorage and sessionStorage: sessionStorage keeps the
+ * existing single-tab flow working, while localStorage survives the Stripe
+ * Checkout round-trip landing in a *fresh tab* (or a browser that opened the
+ * payment page in a new context) — the #1 source of stranded onboarding.
+ */
 export function setToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* localStorage may be unavailable (private mode) — sessionStorage still set */
+  }
   sessionStorage.setItem(TOKEN_KEY, token);
 }
 
 /**
  * Resolve the onboarding token, preferring a `?onboarding_token=` query param
- * (Stripe's success_url carries it back) and falling back to sessionStorage.
+ * (Stripe's success_url carries it back), then localStorage (survives a
+ * fresh-tab / interrupted-checkout return), then sessionStorage.
  * A token found in the URL is persisted so later screens can read it.
  */
 export function getToken(): string | null {
@@ -19,7 +32,7 @@ export function getToken(): string | null {
     setToken(fromUrl);
     return fromUrl;
   }
-  return sessionStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY);
 }
 
 async function parseError(res: Response): Promise<string> {
