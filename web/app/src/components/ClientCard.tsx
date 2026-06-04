@@ -224,8 +224,18 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
               {gmpLogin ? (
                 <>
                   <span>
-                    Open GMP signed in as{" "}
-                    <span className="font-medium">{gmpLogin}</span> to refresh
+                    {!client.gmp_last_sync_at ? (
+                      <>
+                        First-time setup — sign in as{" "}
+                        <span className="font-medium">{gmpLogin}</span> at GMP so
+                        we can auto-detect their arrays
+                      </>
+                    ) : (
+                      <>
+                        Open GMP signed in as{" "}
+                        <span className="font-medium">{gmpLogin}</span> to refresh
+                      </>
+                    )}
                   </span>
                   <a
                     href="https://www.greenmountainpower.com/account/"

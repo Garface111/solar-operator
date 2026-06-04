@@ -6,7 +6,6 @@ import { getToken, fetchStatus, type OnboardingStatus } from "../lib/onboarding"
 // Absolute marketing-domain URL. The dashboard uses the same magic-link auth as
 // the email link, so this CTA just lands the operator on the sign-in screen.
 const DASHBOARD_URL = "https://solaroperator.org/accounts/";
-const GMP_URL = "https://mypower.greenmountainpower.com/";
 
 export default function Done() {
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -66,25 +65,26 @@ export default function Done() {
           your bill data.
         </p>
 
-        {/* GMP CTA — flips to a success state once the extension heartbeats */}
+        {/* Dashboard CTA — flips to a ready badge once the extension heartbeats */}
         <div className="mt-8">
           {extensionActive ? (
             <div className="mx-auto inline-flex max-w-sm items-center gap-2.5 rounded-xl border border-primary-200 bg-primary-50 px-5 py-3 text-sm font-medium text-primary-700">
               <span aria-hidden className="text-lg">✓</span>
-              Extension active on GMP — capturing your data now
+              Extension installed and ready.
             </div>
           ) : (
             <>
               <a
-                href={GMP_URL}
-                target="_blank"
-                rel="noopener noreferrer"
+                href={DASHBOARD_URL}
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-6 py-3 text-sm font-semibold text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
               >
-                Open greenmountainpower.com →
+                Go to your dashboard →
               </a>
-              <p className="mt-2 text-xs text-zinc-400">
-                This page will update automatically once the extension sees your GMP session.
+              <p className="mx-auto mt-3 max-w-md text-sm text-zinc-600">
+                <strong>Next step in your dashboard:</strong> for each client, open
+                Green Mountain Power signed in with that client&apos;s account. The
+                extension captures their bills and auto-creates their arrays. You only
+                do this once per client.
               </p>
             </>
           )}
@@ -139,7 +139,7 @@ export default function Done() {
             href={DASHBOARD_URL}
             className="text-sm text-zinc-500 underline underline-offset-2 hover:text-zinc-700"
           >
-            Or go to your account dashboard →
+            Sign in with magic link →
           </a>
         </div>
       </Card>
