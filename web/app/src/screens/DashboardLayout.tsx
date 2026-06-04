@@ -135,8 +135,8 @@ export default function DashboardLayout({ onSignOut }: Props) {
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
           <div className="mx-auto flex max-w-4xl items-center justify-between gap-4">
             <p className="text-sm text-amber-800">
-              <span className="font-semibold">GMP extension hasn't been seen in 48+ hours.</span>{" "}
-              New bill data may not be flowing. Log into your GMP account to reconnect.
+              <span className="font-semibold">Extension hasn't been seen in 48+ hours.</span>{" "}
+              New bill data may not be flowing. Log into your utility account to reconnect.
             </p>
             <a
               href="https://mypower.greenmountainpower.com/"
@@ -144,7 +144,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
               rel="noopener noreferrer"
               className="shrink-0 text-sm font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
             >
-              Open GMP →
+              Open utility portal →
             </a>
           </div>
         </div>

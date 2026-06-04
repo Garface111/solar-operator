@@ -287,7 +287,7 @@ export default function Extension() {
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
           You&apos;ll paste this code into the Solar Operator Sync Chrome extension
-          right after installing it — then log into GMP once and we&apos;ll detect
+          right after installing it — then log into your utility account once and we&apos;ll detect
           it automatically.
         </p>
 
@@ -461,13 +461,13 @@ export default function Extension() {
             not realizing they still have to log into GMP to trigger a capture. */}
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 px-5 py-5">
           <div className="text-base font-semibold tracking-tight text-zinc-900">
-            Almost there — activate by logging into GMP
+            Almost there — activate by logging into your utility portal
           </div>
           <ol className="mt-4 flex flex-col gap-4">
             {[
               "Install the extension above",
               "Paste your activation code into the extension's Options page",
-              "Log into your Green Mountain Power account in any tab — we'll detect your bills automatically",
+              "Log into your utility account (e.g., GMP or VEC) in any tab — we'll detect your bills automatically",
             ].map((step, i) => (
               <li key={i} className="flex items-start gap-3">
                 <span
@@ -508,7 +508,7 @@ export default function Extension() {
             <span className="text-sm font-medium text-zinc-700" aria-live="polite">
               {installed
                 ? "Capture received — taking you to the next step…"
-                : "We're waiting for your first GMP capture…"}
+                : "We're waiting for your first utility capture…"}
             </span>
             {!installed && extensionActive && (
               <span className="inline-flex items-center gap-1 rounded-full bg-primary-100 px-2 py-0.5 text-xs font-medium text-primary-700">
@@ -520,7 +520,7 @@ export default function Extension() {
           {!installed && !havingTrouble && (
             <p className="mt-2 pl-5 text-xs text-zinc-500">
               Checking every few seconds. Leave this tab open while you install
-              the extension and sign into GMP.
+              the extension and sign into your utility portal.
             </p>
           )}
           {!installed && havingTrouble && (

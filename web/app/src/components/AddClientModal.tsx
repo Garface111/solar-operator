@@ -123,13 +123,13 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
             id="new-client-autopop"
             checked={autopop}
             onChange={setAutopop}
-            label="Auto-populate arrays from GMP"
+            label="Auto-populate arrays from utility portal"
           />
           {autopop && (
             <div className="mt-4">
               <Input
                 id="new-client-gmp"
-                label="GMP login (email or username)"
+                label="Utility login (email or username)"
                 placeholder="client@gmail.com or jdoe"
                 value={gmpLogin}
                 onChange={(e) => setGmpLogin(e.target.value)}

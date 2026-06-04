@@ -188,9 +188,9 @@ export function ReportsCard({ account, onAccountChange }: Props) {
       <p className="mt-2 text-sm leading-relaxed text-zinc-600">
         Solar Operator generates NEPOOL-GIS quarterly generation workbooks for
         each of your clients and emails them automatically. Each workbook has
-        one sheet per array, covering the last 6 complete quarters of GMP bill
-        data, with REC counts (floor of MWh) per month and the standard NEPOOL
-        footnote.
+        one sheet per array, covering the last 6 complete quarters of utility
+        bill data, with REC counts (floor of MWh) per month and the standard
+        NEPOOL footnote.
       </p>
 
       {/* Frequency selector — segmented control */}

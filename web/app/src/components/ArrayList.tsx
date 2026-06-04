@@ -147,7 +147,7 @@ export function ArrayList({ clientId, onCountChange, onUndo }: Props) {
 
       {arrays.length === 0 && !adding && (
         <p className="rounded-xl border border-dashed border-zinc-200 px-4 py-6 text-center text-sm text-zinc-400">
-          No arrays yet. Arrays appear here once GMP auto-populate runs, or add
+          No arrays yet. Arrays appear here once utility auto-populate runs, or add
           one manually.
         </p>
       )}
@@ -475,7 +475,7 @@ function UtilityAccounts({
             + Link a utility account
           </button>
           <p className="mt-1.5 text-[11px] leading-snug text-zinc-400">
-            Merging sub-meters? Link each GMP account here to sum them into one
+            Merging sub-meters? Link each utility account here to sum them into one
             array, then delete the individual array stubs.
           </p>
         </div>
