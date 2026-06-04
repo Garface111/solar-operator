@@ -54,8 +54,31 @@ export function ClientsSection({ expandClientId }: Props) {
     setClients((cs) => (cs ? [...cs, c].sort((a, b) => a.name.localeCompare(b.name)) : [c]));
   }
 
+  const bouncedClients =
+    clients?.filter(
+      (c) =>
+        c.active &&
+        c.last_bounced_at &&
+        (!c.last_delivered_at ||
+          new Date(c.last_bounced_at) > new Date(c.last_delivered_at)),
+    ) ?? [];
+
   return (
     <section>
+      {bouncedClients.length > 0 && (
+        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <p className="text-sm font-semibold text-red-900">
+            {bouncedClients.length === 1
+              ? "1 client has a bounced delivery email"
+              : `${bouncedClients.length} clients have bounced delivery emails`}
+          </p>
+          <p className="mt-1 text-xs text-red-800">
+            {bouncedClients.map((c) => c.name).join(", ")} — update their
+            contact email so reports reach them.
+          </p>
+        </div>
+      )}
+
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
           Clients
