@@ -915,12 +915,17 @@ def list_client_arrays(client_id: int,
             select(Array).where(Array.client_id == c.id)
                          .order_by(Array.name.asc())
         ).scalars().all()
-        out = []
-        for a in arrays:
-            accts = db.execute(
-                select(UtilityAccount).where(UtilityAccount.array_id == a.id)
-            ).scalars().all()
-            out.append(_array_to_dict(a, accts))
+        array_ids = [a.id for a in arrays]
+        # Fetch all utility accounts in one query rather than one per array.
+        all_accts = db.execute(
+            select(UtilityAccount)
+            .where(UtilityAccount.array_id.in_(array_ids))
+            .order_by(UtilityAccount.account_number.asc())
+        ).scalars().all() if array_ids else []
+        accts_by_array: dict[int, list] = {aid: [] for aid in array_ids}
+        for acc in all_accts:
+            accts_by_array.setdefault(acc.array_id, []).append(acc)
+        out = [_array_to_dict(a, accts_by_array.get(a.id, [])) for a in arrays]
     return {"ok": True, "client_id": client_id, "arrays": out}
 
 
