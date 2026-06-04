@@ -57,6 +57,7 @@ export function ArrayList({ clientId, onCountChange }: Props) {
       onCountChange?.(next.length);
       return next;
     });
+    window.dispatchEvent(new CustomEvent("so:arrays-changed"));
   }
 
   function removeArrayLocal(id: number) {
@@ -65,6 +66,7 @@ export function ArrayList({ clientId, onCountChange }: Props) {
       if (next) onCountChange?.(next.length);
       return next;
     });
+    window.dispatchEvent(new CustomEvent("so:arrays-changed"));
   }
 
   if (arrays === null) {

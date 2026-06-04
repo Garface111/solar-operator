@@ -134,15 +134,20 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    getBillingSummary()
-      .then((b) => {
-        if (!cancelled) setBilling(b);
-      })
-      .catch(() => {
-        /* non-fatal — the billing strip just stays hidden */
-      });
+    function fetchBilling() {
+      getBillingSummary()
+        .then((b) => {
+          if (!cancelled) setBilling(b);
+        })
+        .catch(() => {
+          /* non-fatal — the billing strip just stays hidden */
+        });
+    }
+    fetchBilling();
+    window.addEventListener("so:arrays-changed", fetchBilling);
     return () => {
       cancelled = true;
+      window.removeEventListener("so:arrays-changed", fetchBilling);
     };
   }, []);
 

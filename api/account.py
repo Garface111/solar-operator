@@ -34,6 +34,7 @@ from .db import SessionLocal
 from .models import Tenant, Client, Array, LoginToken, UtilityAccount, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
+from .stripe_helpers import reconcile_subscription_quantity
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_DASHBOARD_URL,
     MERGE_TAGS, build_context, render_email, resolve_from_header,
@@ -985,7 +986,15 @@ def create_array(client_id: int, body: ArrayCreate,
         accts = db.execute(
             select(UtilityAccount).where(UtilityAccount.array_id == arr.id)
         ).scalars().all()
-        return {"ok": True, "array": _array_to_dict(arr, accts)}
+        new_array_count = db.execute(
+            select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
+        ).scalar() or 0
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+        result = {"ok": True, "array": _array_to_dict(arr, accts)}
+
+    reconcile_subscription_quantity(sub_id, int(new_array_count), t.id, tenant_email)
+    return result
 
 
 @router.patch("/v1/account/clients/{client_id}/arrays/{array_id}")
@@ -1036,6 +1045,13 @@ def delete_array(client_id: int, array_id: int,
         if not a or a.tenant_id != t.id or a.client_id != c.id:
             raise HTTPException(404, "Array not found")
         db.delete(a); db.commit()
+        new_array_count = db.execute(
+            select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
+        ).scalar() or 0
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+
+    reconcile_subscription_quantity(sub_id, int(new_array_count), t.id, tenant_email)
     return {"ok": True, "array_id": array_id, "deleted": True}
 
 
