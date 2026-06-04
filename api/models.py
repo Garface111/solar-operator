@@ -161,6 +161,9 @@ class Array(Base):
     # 1 = bill represents prior month (default for GMP)
     # 0 = bill represents same month (Bruce's Starlake rule)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When True, this array is excluded from reports and billing (e.g. Pittsfield:
+    # below the REC-threshold, operator can't sell its RECs). Data still flows.
+    excluded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 

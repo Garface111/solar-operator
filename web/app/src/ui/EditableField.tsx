@@ -94,7 +94,7 @@ export function EditableField({
         ) : (
           <span
             aria-hidden
-            className="text-xs text-zinc-300 opacity-0 transition-opacity group-hover:opacity-100"
+            className="text-xs text-zinc-300 transition-opacity group-hover:text-zinc-500"
           >
             ✎
           </span>

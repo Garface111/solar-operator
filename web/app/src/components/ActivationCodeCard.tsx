@@ -33,6 +33,7 @@ export function ActivationCodeCard({ tenantKey, onKeyRegenerated }: Props) {
   const toast = useToast();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [showCode, setShowCode] = useState(false);
 
   async function handleRegen() {
     setRegenerating(true);
@@ -50,49 +51,55 @@ export function ActivationCodeCard({ tenantKey, onKeyRegenerated }: Props) {
 
   return (
     <Card>
-      <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
-        Extension activation code
-      </h2>
-      <p className="mt-1 text-sm text-zinc-500">
-        Paste this into the Solar Operator Chrome extension&apos;s options page to
-        connect it to your account.
-      </p>
-      <p className="mt-1 text-xs font-medium text-amber-700">
-        Treat this like a password — anyone with this code can send data to your account.
-      </p>
-
-      {tenantKey ? (
-        <div className="mt-4 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
-          <code className="flex-1 select-all break-all font-mono text-sm text-zinc-800">
-            {tenantKey}
-          </code>
-          <CopyButton value={tenantKey} label="Copy code" />
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
+            Extension code
+            <span className="ml-1.5 text-sm font-normal text-zinc-400">(reference)</span>
+          </h2>
+          <p className="mt-0.5 text-sm text-zinc-500">
+            You already pasted this into the extension. Kept here in case you
+            reinstall or set it up on another computer.
+          </p>
         </div>
-      ) : (
-        <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          No activation code on file. Email support@solaroperator.org and
-          we&apos;ll sort it out.
-        </p>
-      )}
-
-      <ol className="mt-4 space-y-1.5 text-xs text-zinc-500">
-        <li>1. Open the Solar Operator extension and click &ldquo;Options&rdquo;.</li>
-        <li>2. Paste the code above into the activation field and save.</li>
-        <li>
-          3. Log into your utility portal (e.g., Green Mountain Power) as usual — captures now flow to your
-          account automatically.
-        </li>
-      </ol>
-
-      <div className="mt-4 flex justify-end">
         <button
           type="button"
-          onClick={() => setConfirmOpen(true)}
-          className="text-xs font-medium text-zinc-400 underline-offset-2 hover:text-zinc-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+          onClick={() => setShowCode((s) => !s)}
+          className="shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
         >
-          Regenerate code
+          {showCode ? "Hide" : "Show"}
         </button>
       </div>
+
+      {showCode && (
+        <>
+          {tenantKey ? (
+            <div className="mt-3 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+              <code className="flex-1 select-all break-all font-mono text-sm text-zinc-800">
+                {tenantKey}
+              </code>
+              <CopyButton value={tenantKey} label="Copy code" />
+            </div>
+          ) : (
+            <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              No activation code on file. Email support@solaroperator.org and
+              we&apos;ll sort it out.
+            </p>
+          )}
+          <p className="mt-2 text-xs font-medium text-amber-700">
+            Treat this like a password — anyone with this code can send data to your account.
+          </p>
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              onClick={() => setConfirmOpen(true)}
+              className="text-xs font-medium text-zinc-400 underline-offset-2 hover:text-zinc-600 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+            >
+              Regenerate code
+            </button>
+          </div>
+        </>
+      )}
 
       <Modal
         open={confirmOpen}

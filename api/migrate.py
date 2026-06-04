@@ -247,6 +247,17 @@ def main():
             ))
             print("  + tenants.extension_heartbeat_at")
 
+        # 2026-06-04: arrays.excluded — hide below-REC-threshold arrays from
+        # reports and billing (data still flows; operator can toggle per array).
+        if not column_exists(conn, "arrays", "excluded"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN excluded BOOLEAN DEFAULT FALSE"
+            ))
+            conn.execute(text(
+                "UPDATE arrays SET excluded = FALSE WHERE excluded IS NULL"
+            ))
+            print("  + arrays.excluded")
+
         # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
         # signups (last 7 days) that still carry the old 'monthly' engineer-default
         # over to 'quarterly'. We deliberately bound this to created_at > now-7d so

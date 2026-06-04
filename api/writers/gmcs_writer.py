@@ -163,9 +163,12 @@ def build_workbook(tenant_id: Optional[str] = None,
                         / f"{last_y}-Q{last_q}-GMCS-report.xlsx")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Arrays scoped to THIS client only
+        # Arrays scoped to THIS client only; skip excluded (below-REC-threshold) arrays.
         arrays = db.execute(
-            select(Array).where(Array.client_id == client.id)
+            select(Array).where(
+                Array.client_id == client.id,
+                Array.excluded.is_(False),
+            )
         ).scalars().all()
         arrays_by_id = {a.id: a for a in arrays}
         array_ids = list(arrays_by_id.keys())

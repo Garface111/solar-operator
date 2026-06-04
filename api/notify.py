@@ -102,9 +102,16 @@ def send_workbook_email(to: str, subject: str, html: str, text: str,
             "Custom From %r failed (unverified domain?) — retrying from platform "
             "default with Reply-To preserved.", from_addr)
         fallback_reply = reply_to or _addr_only(from_addr)
+        # Build "Operator Name via Solar Operator <admin@solaroperator.org>"
+        # so the recipient sees the operator's name even when we can't send as them.
+        op_name = _name_part(from_addr)
+        fallback_from = (
+            f'"{op_name} via Solar Operator" <{_addr_only(FROM_ADDRESS)}>'
+            if op_name else FROM_ADDRESS
+        )
         ok = _send_via_resend(
             to=to, subject=subject, html=html, text=text,
-            attachments=attachments, from_addr=None, reply_to=fallback_reply,
+            attachments=attachments, from_addr=fallback_from, reply_to=fallback_reply,
         )
     return ok
 
@@ -114,6 +121,13 @@ def _addr_only(from_header: str) -> str:
     if "<" in from_header and ">" in from_header:
         return from_header.split("<", 1)[1].split(">", 1)[0].strip()
     return from_header.strip()
+
+
+def _name_part(from_header: str) -> str:
+    """Extract the display name from a 'Name <addr@x>' header, or empty string."""
+    if "<" in from_header:
+        return from_header.split("<", 1)[0].strip().strip('"').strip("'")
+    return ""
 
 
 # ─── customer-facing ─────────────────────────────────────────────────────

@@ -190,28 +190,38 @@ export function ClientCard({
         expanded ? "border-zinc-300 shadow-sm" : "border-zinc-200"
       } ${selected ? "ring-2 ring-primary-400" : ""}`}
     >
-      {/* header row */}
-      <div className="flex items-center gap-3 p-4">
+      {/* header row — entire row is clickable to toggle expansion */}
+      <div
+        className="flex cursor-pointer items-center gap-3 p-4 select-none"
+        onClick={(e) => {
+          // Don't toggle when clicking interactive children (inputs, buttons, links)
+          const tag = (e.target as HTMLElement).tagName;
+          if (tag === "INPUT" || tag === "BUTTON" || tag === "A" || tag === "SELECT") return;
+          if ((e.target as HTMLElement).closest("button, a, input, select")) return;
+          setExpanded((prev) => !prev);
+        }}
+        role="button"
+        aria-expanded={expanded}
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded((prev) => !prev); } }}
+      >
         {selectable && (
           <input
             type="checkbox"
             checked={!!selected}
             onChange={() => onSelect?.(client.id)}
+            onClick={(e) => e.stopPropagation()}
             aria-label={`Select ${client.name}`}
             className="h-4 w-4 shrink-0 accent-primary-500"
           />
         )}
-        <button
-          type="button"
-          onClick={() => setExpanded((e) => !e)}
-          aria-expanded={expanded}
-          aria-label={expanded ? "Collapse client" : "Expand client"}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+        {/* Expand/collapse chevron — always visible, not hover-only */}
+        <span
+          aria-hidden
+          className={`shrink-0 text-zinc-400 transition-transform ${expanded ? "rotate-90" : ""}`}
         >
-          <span aria-hidden className={`transition-transform ${expanded ? "rotate-90" : ""}`}>
-            ▸
-          </span>
-        </button>
+          ▸
+        </span>
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">

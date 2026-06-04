@@ -186,6 +186,7 @@ export interface ArrayRow {
   region: string | null;
   bill_offset_months: number | null;
   notes: string | null;
+  excluded: boolean;
   accounts: UtilityAccount[];
 }
 

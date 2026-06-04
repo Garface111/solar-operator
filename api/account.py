@@ -254,6 +254,7 @@ class ArrayUpdate(BaseModel):
     region: Optional[str] = None
     bill_offset_months: Optional[int] = None
     notes: Optional[str] = None
+    excluded: Optional[bool] = None
 
 
 def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
@@ -264,6 +265,7 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
         "region": a.region,
         "bill_offset_months": a.bill_offset_months,
         "notes": a.notes,
+        "excluded": bool(a.excluded),
         "accounts": [
             {
                 "id": ac.id,
@@ -773,6 +775,7 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
             select(func.count()).select_from(Array).where(
                 Array.tenant_id == t.id,
                 Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
             )
         ).scalar() or 0
     cents, currency = _array_price_cents()
@@ -1207,7 +1210,7 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
                         "Another array already has that name")
                 a.name = new_name
         for field in ("nepool_gis_id", "region",
-                      "bill_offset_months", "notes"):
+                      "bill_offset_months", "notes", "excluded"):
             if field in body.model_fields_set:
                 setattr(a, field, getattr(body, field))
         db.commit()
