@@ -1,6 +1,6 @@
 # Terms of Service — Solar Operator
 
-*Last updated: June 3, 2026*
+*Last updated: June 4, 2026*
 
 These Terms of Service ("Terms") are a binding agreement between you ("you,"
 "the Operator") and Solar Operator ("we," "us," "the Service"), a Vermont
@@ -38,8 +38,8 @@ without authorization.
 Use of the Service requires payment of the following fees, billed through our
 payment processor (Stripe):
 
-- **Setup fee:** a one-time charge of **$50** at the time you complete onboarding.
-- **Subscription fee:** **$5 per array per month**, billed monthly in advance,
+- **Setup fee:** a one-time charge of **$250** at the time you complete onboarding.
+- **Subscription fee:** **$45 per array per month**, billed monthly in advance,
   based on the number of solar arrays active in your account.
 
 Your array count may change as you add or remove arrays. We will adjust your
