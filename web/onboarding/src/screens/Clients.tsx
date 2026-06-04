@@ -44,12 +44,18 @@ function blankClient(): ClientDraft {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+interface ConfirmSummary {
+  clients: Array<{ name: string; contact_email: string; arrayCount: number; autopop: boolean }>;
+}
+
 export default function Clients() {
   const navigate = useNavigate();
   const toast = useToast();
   const [clients, setClients] = useState<ClientDraft[]>(() => [blankClient()]);
   const [submitting, setSubmitting] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [confirmSummary, setConfirmSummary] = useState<ConfirmSummary | null>(null);
 
   // Detect a lost onboarding session on mount so we can disable "Finish setup"
   // and surface a real restart link — instead of letting the click silently
@@ -107,9 +113,9 @@ export default function Clients() {
     );
   }
 
-  // The Starlake case: when 2+ clients use autopop, sub-meter arrays (multiple
-  // GMP accounts that should roll up into one array) will be imported as
-  // separate arrays and need a manual merge in the dashboard later.
+  // When 2+ clients use autopop, sub-meter arrays (multiple GMP accounts that
+  // should roll up into one array) will be imported as separate arrays and need
+  // a manual merge in the dashboard later.
   const autopopCount = clients.filter((c) => c.gmp_autopopulate).length;
   const showSubMeterWarning = autopopCount >= 2;
 
@@ -128,7 +134,7 @@ export default function Clients() {
     [clients],
   );
 
-  async function handleFinish() {
+  async function handleSubmitClients() {
     if (!valid || submitting) return;
     const token = getToken();
     if (!token) {
@@ -166,6 +172,32 @@ export default function Clients() {
 
     try {
       await submitClients(token, payload);
+      // Show the confirmation sub-screen before completing onboarding.
+      setConfirmSummary({
+        clients: clients.map((c) => ({
+          name: c.name.trim(),
+          contact_email: c.contact_email.trim(),
+          arrayCount: c.gmp_autopopulate ? 0 : c.arrays.filter((a) => a.name.trim()).length,
+          autopop: c.gmp_autopopulate,
+        })),
+      });
+      setSubmitting(false);
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Couldn't save your clients. Check your connection and try again.",
+      );
+      setSubmitting(false);
+    }
+  }
+
+  async function handleComplete() {
+    if (completing) return;
+    const token = getToken();
+    if (!token) return;
+    setCompleting(true);
+    try {
       const { session_token } = await completeOnboarding(token);
       // Log the operator straight into the dashboard. The onboarding SPA and the
       // dashboard SPA share an origin (solaroperator.org), so this `so_session`
@@ -178,10 +210,74 @@ export default function Clients() {
       toast.error(
         err instanceof Error
           ? err.message
-          : "Couldn't save your clients. Check your connection and try again.",
+          : "Couldn't complete setup. Check your connection and try again.",
       );
-      setSubmitting(false);
+      setCompleting(false);
     }
+  }
+
+  // Confirmation sub-screen shown after submitClients succeeds, before completeOnboarding.
+  if (confirmSummary) {
+    return (
+      <ScreenLayout current={3}>
+        <Card active>
+          <div aria-hidden className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary-100 text-2xl text-primary-600">
+            ✓
+          </div>
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight text-zinc-900 text-center">
+            Looks good — here&apos;s what we&apos;ll do.
+          </h1>
+          <p className="mt-2 text-center text-sm text-zinc-500">
+            We&apos;ll start generating reports for these clients each quarter.
+          </p>
+          <ul className="mt-6 space-y-3">
+            {confirmSummary.clients.map((c, i) => (
+              <li key={i} className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="font-medium text-zinc-900">{c.name}</span>
+                  <span className="shrink-0 rounded-full bg-primary-100 px-2 py-0.5 text-[11px] font-medium text-primary-700">
+                    {c.autopop ? "auto-detect arrays" : `${c.arrayCount} array${c.arrayCount === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+                {c.contact_email && (
+                  <div className="mt-1 text-xs text-zinc-500">
+                    Reports → {c.contact_email}
+                  </div>
+                )}
+                {!c.contact_email && (
+                  <div className="mt-1 text-xs text-amber-600">
+                    No contact email — add one in the dashboard before the first send.
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-8 flex flex-col gap-3 items-center">
+            <Button
+              onClick={handleComplete}
+              disabled={completing}
+            >
+              {completing ? (
+                <>
+                  <Spinner />
+                  Finishing…
+                </>
+              ) : (
+                "Looks right — finish setup →"
+              )}
+            </Button>
+            <button
+              type="button"
+              onClick={() => setConfirmSummary(null)}
+              disabled={completing}
+              className="text-sm text-zinc-400 hover:text-zinc-600 focus:outline-none disabled:opacity-50"
+            >
+              ← Go back and edit
+            </button>
+          </div>
+        </Card>
+      </ScreenLayout>
+    );
   }
 
   return (
@@ -199,10 +295,10 @@ export default function Clients() {
           <div className="mt-6 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             <p className="font-semibold">⚠ Sub-metered arrays need a manual merge</p>
             <p className="mt-1 text-xs leading-relaxed text-amber-800">
-              Some arrays (like Bruce Genereaux&apos;s Starlake) sum multiple GMP
-              accounts into one. Auto-populate can&apos;t detect that — it creates
-              one array per GMP account. If autopop creates separate arrays you
-              wanted merged, fix it in the dashboard after onboarding:
+              Some arrays sum multiple GMP accounts into one (e.g. a site with
+              three sub-meters that report separately). Auto-populate creates one
+              array per GMP account. If autopop creates arrays you wanted merged,
+              fix it in the dashboard after onboarding:
             </p>
             <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs leading-relaxed text-amber-800">
               <li>Open one of the arrays you want to keep</li>
@@ -363,7 +459,7 @@ export default function Clients() {
 
         <div className="mt-8 flex flex-col items-end gap-1.5">
           <Button
-            onClick={handleFinish}
+            onClick={handleSubmitClients}
             disabled={!valid || submitting || !!sessionError}
           >
             {submitting ? (
