@@ -15,6 +15,8 @@ import {
   downloadClientReport,
 } from "../lib/api";
 
+
+
 function captureFreshness(iso: string | null): string {
   if (!iso) return "No captures yet";
   return `Last GMP capture: ${new Date(iso).toLocaleString(undefined, {
@@ -53,9 +55,24 @@ interface Props {
   operatorEmail: string | null;
   defaultExpanded?: boolean;
   onChange: (c: ClientRow) => void;
+  onDeleted?: (token: string, message: string) => void;
+  onUndo?: (token: string, message: string) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onSelect?: (id: number) => void;
 }
 
-export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }: Props) {
+export function ClientCard({
+  client,
+  operatorEmail,
+  defaultExpanded,
+  onChange,
+  onDeleted,
+  onUndo,
+  selectable,
+  selected,
+  onSelect,
+}: Props) {
   const toast = useToast();
   const [expanded, setExpanded] = useState(!!defaultExpanded);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -97,17 +114,14 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
   }
 
   async function handleDelete() {
-    // DELETE is a soft-delete server-side (active=false); keep the row visible
-    // as inactive so it can be reactivated.
     setDeleting(true);
     try {
-      await deleteClient(client.id);
-      onChange({ ...client, active: false });
+      const res = await deleteClient(client.id);
       setConfirmDelete(false);
       setDeleting(false);
-      toast.success(`Deactivated ${client.name}`);
+      onDeleted?.(res.undo_token, `Deleted ${client.name}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't deactivate");
+      toast.error(err instanceof Error ? err.message : "Couldn't delete");
       setDeleting(false);
       setConfirmDelete(false);
     }
@@ -174,10 +188,19 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
     <div
       className={`rounded-xl border bg-white transition-shadow ${
         expanded ? "border-zinc-300 shadow-sm" : "border-zinc-200"
-      }`}
+      } ${selected ? "ring-2 ring-primary-400" : ""}`}
     >
       {/* header row */}
       <div className="flex items-center gap-3 p-4">
+        {selectable && (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={() => onSelect?.(client.id)}
+            aria-label={`Select ${client.name}`}
+            className="h-4 w-4 shrink-0 accent-primary-500"
+          />
+        )}
         <button
           type="button"
           onClick={() => setExpanded((e) => !e)}
@@ -441,6 +464,7 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
             <ArrayList
               clientId={client.id}
               onCountChange={(count) => onChange({ ...client, array_count: count })}
+              onUndo={onUndo}
             />
           </div>
 
@@ -453,7 +477,7 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
                 onClick={() => setConfirmDelete(true)}
                 className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
               >
-                Deactivate client
+                Delete client
               </button>
             ) : (
               <button
@@ -471,7 +495,7 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
       <Modal
         open={confirmDelete}
         onClose={() => !deleting && setConfirmDelete(false)}
-        title="Deactivate this client?"
+        title="Delete this client?"
         footer={
           <>
             <Button variant="ghost" onClick={() => setConfirmDelete(false)} disabled={deleting}>
@@ -481,18 +505,20 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
               {deleting ? (
                 <>
                   <Spinner />
-                  Deactivating…
+                  Deleting…
                 </>
               ) : (
-                "Deactivate"
+                "Delete client"
               )}
             </Button>
           </>
         }
       >
-        <span className="font-medium text-zinc-800">{client.name}</span> will stop
-        receiving reports. Their arrays and bills are kept, so you can reactivate
-        later — nothing is deleted.
+        <p className="text-sm text-zinc-600">
+          <span className="font-medium text-zinc-800">{client.name}</span> and all
+          their arrays will be removed.{" "}
+          <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
+        </p>
       </Modal>
     </div>
   );

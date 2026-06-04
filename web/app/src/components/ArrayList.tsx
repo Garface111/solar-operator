@@ -12,6 +12,7 @@ import {
   createArray,
   updateArray,
   deleteArray,
+  bulkDeleteArrays,
   addUtilityAccount,
   removeUtilityAccount,
   listProviders,
@@ -20,12 +21,17 @@ import {
 interface Props {
   clientId: number;
   onCountChange?: (count: number) => void;
+  onUndo?: (token: string, message: string) => void;
 }
 
-export function ArrayList({ clientId, onCountChange }: Props) {
+export function ArrayList({ clientId, onCountChange, onUndo }: Props) {
   const toast = useToast();
   const [arrays, setArrays] = useState<ArrayRowT[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkConfirm, setBulkConfirm] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,7 +72,39 @@ export function ArrayList({ clientId, onCountChange }: Props) {
       if (next) onCountChange?.(next.length);
       return next;
     });
+    setSelectedIds((s) => { const n = new Set(s); n.delete(id); return n; });
     window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+  }
+
+  function toggleSelect(id: number) {
+    setSelectedIds((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  async function handleBulkDelete() {
+    if (!selectedIds.size || bulkDeleting) return;
+    setBulkDeleting(true);
+    try {
+      const ids = Array.from(selectedIds);
+      const res = await bulkDeleteArrays(ids);
+      ids.forEach(removeArrayLocal);
+      exitSelectMode();
+      setBulkConfirm(false);
+      const n = res.soft_deleted;
+      onUndo?.(res.undo_token, `Deleted ${n} array${n === 1 ? "" : "s"}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't delete arrays");
+    } finally {
+      setBulkDeleting(false);
+    }
   }
 
   if (arrays === null) {
@@ -80,6 +118,33 @@ export function ArrayList({ clientId, onCountChange }: Props) {
 
   return (
     <div className="space-y-3">
+      {/* Select mode header */}
+      {arrays.length > 0 && (
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+            className={[
+              "rounded border px-2.5 py-1 text-xs font-medium transition-colors focus:outline-none",
+              selectMode
+                ? "border-primary-300 bg-primary-50 text-primary-700"
+                : "border-zinc-200 text-zinc-500 hover:border-zinc-300",
+            ].join(" ")}
+          >
+            {selectMode ? "Cancel" : "Select"}
+          </button>
+          {selectMode && selectedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setBulkConfirm(true)}
+              className="rounded border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus:outline-none"
+            >
+              Delete {selectedIds.size} array{selectedIds.size === 1 ? "" : "s"}
+            </button>
+          )}
+        </div>
+      )}
+
       {arrays.length === 0 && !adding && (
         <p className="rounded-xl border border-dashed border-zinc-200 px-4 py-6 text-center text-sm text-zinc-400">
           No arrays yet. Arrays appear here once GMP auto-populate runs, or add
@@ -93,7 +158,13 @@ export function ArrayList({ clientId, onCountChange }: Props) {
           clientId={clientId}
           array={a}
           onChange={replaceArray}
-          onDelete={removeArrayLocal}
+          onDelete={(id, token, name) => {
+            removeArrayLocal(id);
+            onUndo?.(token, `Deleted ${name}`);
+          }}
+          selectable={selectMode}
+          selected={selectedIds.has(a.id)}
+          onSelect={toggleSelect}
         />
       ))}
 
@@ -115,6 +186,39 @@ export function ArrayList({ clientId, onCountChange }: Props) {
           + Add array
         </button>
       )}
+
+      <Modal
+        open={bulkConfirm}
+        onClose={() => !bulkDeleting && setBulkConfirm(false)}
+        title={`Delete ${selectedIds.size} array${selectedIds.size === 1 ? "" : "s"}?`}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setBulkConfirm(false)} disabled={bulkDeleting}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleBulkDelete} disabled={bulkDeleting}>
+              {bulkDeleting ? (
+                <><Spinner /> Deleting…</>
+              ) : (
+                `Delete ${selectedIds.size} array${selectedIds.size === 1 ? "" : "s"}`
+              )}
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-zinc-600">
+          {selectedIds.size === 1 ? "This array" : `These ${selectedIds.size} arrays`} will be
+          removed.{" "}
+          <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
+        </p>
+        {arrays && selectedIds.size > 0 && (
+          <ul className="mt-2 space-y-0.5 text-sm text-zinc-700">
+            {arrays.filter((a) => selectedIds.has(a.id)).map((a) => (
+              <li key={a.id} className="truncate">• {a.name}</li>
+            ))}
+          </ul>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -126,27 +230,22 @@ function ArrayRow({
   array,
   onChange,
   onDelete,
+  selectable,
+  selected,
+  onSelect,
 }: {
   clientId: number;
   array: ArrayRowT;
   onChange: (a: ArrayRowT) => void;
-  onDelete: (id: number) => void;
+  onDelete: (id: number, token: string, name: string) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onSelect?: (id: number) => void;
 }) {
   const toast = useToast();
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmText, setConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
-
-  // Type-to-confirm: deleting an array is permanent and cascades to bills, so
-  // the operator must type the exact name (unlike the reversible client deactivate).
-  const confirmMatches = confirmText.trim() === array.name.trim();
-
-  function closeConfirm() {
-    if (deleting) return;
-    setConfirmDelete(false);
-    setConfirmText("");
-  }
 
   async function save(patch: Partial<ArrayRowT>) {
     const updated = await updateArray(clientId, array.id, patch as any);
@@ -154,24 +253,34 @@ function ArrayRow({
   }
 
   async function handleDelete() {
-    if (!confirmMatches || deleting) return;
+    if (deleting) return;
     setDeleting(true);
     try {
-      await deleteArray(clientId, array.id);
-      onDelete(array.id);
-      toast.success(`Deleted ${array.name}`);
+      const res = await deleteArray(clientId, array.id);
+      onDelete(array.id, res.undo_token, array.name);
+      setConfirmDelete(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't delete array");
       setDeleting(false);
       setConfirmDelete(false);
-      setConfirmText("");
     }
   }
 
   return (
-    <div className="rounded-xl border border-zinc-200">
+    <div className={`rounded-xl border border-zinc-200${selected ? " ring-2 ring-primary-400" : ""}`}>
       <div className="grid grid-cols-1 gap-x-4 gap-y-2 p-3 sm:grid-cols-12 sm:items-center">
-        <div className="sm:col-span-3">
+        {selectable && (
+          <div className="sm:col-span-1 flex items-center">
+            <input
+              type="checkbox"
+              checked={!!selected}
+              onChange={() => onSelect?.(array.id)}
+              aria-label={`Select ${array.name}`}
+              className="h-4 w-4 accent-primary-500"
+            />
+          </div>
+        )}
+        <div className={selectable ? "sm:col-span-2" : "sm:col-span-3"}>
           <FieldLabel>Name</FieldLabel>
           <EditableField
             value={array.name}
@@ -250,7 +359,7 @@ function ArrayRow({
           onClick={() => setConfirmDelete(true)}
           className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
         >
-          Delete array
+          Delete
         </button>
       </div>
 
@@ -264,23 +373,16 @@ function ArrayRow({
 
       <Modal
         open={confirmDelete}
-        onClose={closeConfirm}
+        onClose={() => !deleting && setConfirmDelete(false)}
         title="Delete this array?"
         footer={
           <>
-            <Button variant="ghost" onClick={closeConfirm} disabled={deleting}>
+            <Button variant="ghost" onClick={() => setConfirmDelete(false)} disabled={deleting}>
               Cancel
             </Button>
-            <Button
-              variant="danger"
-              onClick={handleDelete}
-              disabled={deleting || !confirmMatches}
-            >
+            <Button variant="danger" onClick={handleDelete} disabled={deleting}>
               {deleting ? (
-                <>
-                  <Spinner />
-                  Deleting…
-                </>
+                <><Spinner /> Deleting…</>
               ) : (
                 "Delete array"
               )}
@@ -289,26 +391,11 @@ function ArrayRow({
         }
       >
         <p className="text-sm text-zinc-600">
-          Type the array name to permanently delete{" "}
-          <span className="font-medium text-zinc-800">{array.name}</span> and all
-          its captured bills. This cannot be undone (unlike deactivating a
-          client).
+          <span className="font-medium text-zinc-800">{array.name}</span> will be
+          removed along with its {array.accounts.length} linked utility account
+          {array.accounts.length === 1 ? "" : "s"}.{" "}
+          <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
         </p>
-        <p className="mt-2 text-xs text-zinc-500">
-          Removes {array.accounts.length} linked utility account
-          {array.accounts.length === 1 ? "" : "s"} and every bill tied to them.
-        </p>
-        <div className="mt-4">
-          <Input
-            id={`confirm-delete-${array.id}`}
-            label="Array name"
-            autoFocus
-            placeholder={array.name}
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleDelete()}
-          />
-        </div>
       </Modal>
     </div>
   );
