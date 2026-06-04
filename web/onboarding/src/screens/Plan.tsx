@@ -7,7 +7,11 @@ import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
 import { createCheckout, setToken, type ClientSeedPayload } from "../lib/onboarding";
 import { SO_OPERATOR_KEY, type OperatorInfo } from "./Info";
-import { SO_CLIENTS_DRAFT_KEY, type ClientDraftEntry } from "./ClientSetup";
+import {
+  SO_CLIENTS_DRAFT_KEY,
+  SO_ARRAY_ESTIMATE_KEY,
+  type ClientDraftEntry,
+} from "./ClientSetup";
 
 const ARRAY_PRICE = 45;
 const SETUP_FEE = 250;
@@ -43,8 +47,20 @@ export default function Plan() {
 
   const totalArrays = clientsDraft.reduce((n, c) => n + (c.arrays?.length ?? 0), 0);
 
-  // If the draft has no arrays, let the user adjust the estimate.
-  const [estimate, setEstimate] = useState(Math.max(1, totalArrays || 1));
+  // Read the operator's array-count estimate from the previous screen.
+  // Falls back to total entered arrays (legacy path) or 1.
+  const initialEstimate = (() => {
+    try {
+      const raw = sessionStorage.getItem(SO_ARRAY_ESTIMATE_KEY);
+      const n = raw ? parseInt(raw, 10) : NaN;
+      if (Number.isFinite(n) && n > 0) return n;
+    } catch {
+      /* noop */
+    }
+    return Math.max(1, totalArrays || 1);
+  })();
+
+  const [estimate, setEstimate] = useState(initialEstimate);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
