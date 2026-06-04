@@ -153,9 +153,13 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
 
         {stage === "upload" && (
           <div className="mt-4">
-            <p className="mb-4 text-sm text-zinc-600">
+            <p className="mb-3 text-sm text-zinc-600">
               Drop your roster of operators, arrays, and NEPOOL-GIS IDs. We&apos;ll
               read it and let you review everything before anything is saved.
+            </p>
+            <p className="mb-4 text-xs text-zinc-400">
+              File contents are sent to an AI model to extract the row data. No data
+              is stored by the AI provider. Review all rows before importing.
             </p>
             <div
               onDragOver={(e) => {
