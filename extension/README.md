@@ -1,5 +1,12 @@
 # Solar Operator Sync — Chrome Extension
 
+> **TODO — next Chrome Web Store submission:** manifest is at **1.0.3** locally,
+> but the Store still serves **1.0.2**. The 1.0.3 change (options page shows a
+> "return to setup" link after the user saves their activation code) won't reach
+> existing users until we re-submit the packaged extension to the Chrome Web
+> Store. Bundle this with the next review push.
+
+
 A Manifest V3 Chrome extension that captures the user's utility-portal session
 (currently Green Mountain Power) and forwards it to the Solar Operator API so
 quarterly investor reports can be drafted automatically.

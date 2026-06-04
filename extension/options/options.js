@@ -4,6 +4,7 @@
   const endpointEl = document.getElementById("endpoint");
   const tenantEl = document.getElementById("tenant_key");
   const savedMsg = document.getElementById("saved-msg");
+  const returnSetup = document.getElementById("return-setup");
   const lastCaptureEl = document.getElementById("last-capture");
   const acctCountEl = document.getElementById("acct-count");
   const tokenExpiresEl = document.getElementById("token-expires");
@@ -41,6 +42,9 @@
     });
     savedMsg.style.display = "block";
     setTimeout(() => (savedMsg.style.display = "none"), 2200);
+    // Direct the user back to onboarding to finish setup. Persist this link
+    // (don't auto-hide) so they always have a clear way back.
+    returnSetup.style.display = "block";
   });
 
   document.getElementById("clear").addEventListener("click", async () => {
