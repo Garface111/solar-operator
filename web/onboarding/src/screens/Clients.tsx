@@ -155,7 +155,13 @@ export default function Clients() {
 
     try {
       await submitClients(token, payload);
-      await completeOnboarding(token);
+      const { session_token } = await completeOnboarding(token);
+      // Log the operator straight into the dashboard. The onboarding SPA and the
+      // dashboard SPA share an origin (solaroperator.org), so this `so_session`
+      // is the same key the dashboard's AuthGate reads — they land signed in.
+      if (session_token) {
+        localStorage.setItem("so_session", session_token);
+      }
       navigate("/done");
     } catch (err) {
       toast.error(

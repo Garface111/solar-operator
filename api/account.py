@@ -70,6 +70,16 @@ def _sign_session(tenant_id: str, ttl_seconds: int = SESSION_TTL_SECONDS) -> str
     return body.decode() + "." + sig
 
 
+def mint_session_for_tenant(tenant_id: str) -> str:
+    """Mint a fresh ~30-day dashboard session token bound to `tenant_id`.
+
+    Same opaque format and TTL as the session handed out by /v1/auth/verify
+    after a magic-link exchange. Lets the onboarding /complete flow log the
+    operator straight into the dashboard without a round-trip through their
+    email inbox."""
+    return _sign_session(tenant_id)
+
+
 def _verify_session(token: str) -> Optional[str]:
     """Return tenant_id if valid, None otherwise."""
     try:
@@ -302,7 +312,7 @@ def auth_verify(req: AuthVerify):
         tenant_id = row.tenant_id
         db.commit()
 
-    session_token = _sign_session(tenant_id)
+    session_token = mint_session_for_tenant(tenant_id)
     return {"ok": True, "session_token": session_token, "expires_in": SESSION_TTL_SECONDS}
 
 

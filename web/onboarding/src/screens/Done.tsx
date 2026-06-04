@@ -39,8 +39,9 @@ export default function Done() {
           You&apos;re all set.
         </h1>
         <p className="mx-auto mt-2 max-w-md text-sm text-zinc-500">
-          Check your inbox for your login link. We&apos;ve emailed you a secure
-          link to your dashboard — no password needed.
+          You&apos;re signed in and ready to go — head straight to your
+          dashboard below. We&apos;ve also emailed you a secure sign-in link for
+          next time you log in from another browser or device.
         </p>
 
         {status && (

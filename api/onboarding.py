@@ -37,7 +37,7 @@ from .models import Tenant, Client, Array, UtilitySession, now
 from .notify import (
     send_welcome_email, send_internal_alert, send_sample_workbook_email,
 )
-from .account import issue_magic_link
+from .account import issue_magic_link, mint_session_for_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -448,7 +448,13 @@ def complete(token: str = Query(...)):
             f"email failed: {e}. Send manually."
         )
 
-    # Magic-link sign-in so they can open the dashboard immediately.
+    # Log them straight into the dashboard: mint a session bound to this tenant
+    # and hand it back so the SPA can stash it in localStorage. The user just
+    # paid us — don't force a detour through their email to reach the dashboard.
+    session_token = mint_session_for_tenant(tenant_id)
+
+    # Magic-link sign-in too, for when they later sign in from a new browser
+    # or device (the session token above only lives in this browser).
     magic_link_email_sent = issue_magic_link(email)
 
     # Second email: a sample report so they see what their clients will receive.
@@ -461,5 +467,6 @@ def complete(token: str = Query(...)):
         f"Tenant {tenant_id} ({email}) finished the onboarding wizard."
     )
 
-    return {"ok": True, "magic_link_email_sent": magic_link_email_sent,
+    return {"ok": True, "session_token": session_token,
+            "magic_link_email_sent": magic_link_email_sent,
             "sample_email_sent": sample_email_sent}

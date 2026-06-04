@@ -95,11 +95,21 @@ export async function submitClients(token: string, clients: ClientPayload[]): Pr
   if (!res.ok) throw new Error(await parseError(res));
 }
 
-export async function completeOnboarding(token: string): Promise<void> {
+export interface CompleteResponse {
+  ok: boolean;
+  // Fresh dashboard session bound to this tenant. Stash it as `so_session` so
+  // the operator lands on the dashboard already signed in — no email detour.
+  session_token?: string;
+  magic_link_email_sent?: boolean;
+  sample_email_sent?: boolean;
+}
+
+export async function completeOnboarding(token: string): Promise<CompleteResponse> {
   const res = await fetch(`/v1/onboarding/complete?token=${encodeURIComponent(token)}`, {
     method: "POST",
   });
   if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
 }
 
 export interface OnboardingStatus {
