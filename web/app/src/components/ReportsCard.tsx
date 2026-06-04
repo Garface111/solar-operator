@@ -9,6 +9,7 @@ import {
   type Account,
   type SendResult,
   sendReportNow,
+  sendSampleReport,
   updateAccountFrequency,
   updateCcOnReports,
 } from "../lib/api";
@@ -73,6 +74,7 @@ export function ReportsCard({ account, onAccountChange }: Props) {
   const [savingCc, setSavingCc] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [sending, setSending] = useState(false);
+  const [sendingSample, setSendingSample] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   async function selectFrequency(next: string) {
@@ -154,6 +156,25 @@ export function ReportsCard({ account, onAccountChange }: Props) {
       );
     } finally {
       setSending(false);
+    }
+  }
+
+  async function doSendSample() {
+    setSendingSample(true);
+    try {
+      const res = await sendSampleReport();
+      toast.success(`Sample sent to ${res.sent_to}. Check your inbox.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Couldn't send sample";
+      if (msg.includes("Add a client")) {
+        toast.error(
+          "Add a client and at least one array first — then come back to preview the email.",
+        );
+      } else {
+        toast.error(msg);
+      }
+    } finally {
+      setSendingSample(false);
     }
   }
 
@@ -247,14 +268,28 @@ export function ReportsCard({ account, onAccountChange }: Props) {
         )}
       </div>
 
-      {/* Send now */}
-      <div className="mt-6">
+      {/* Send now + Send me a sample */}
+      <div className="mt-6 flex flex-wrap items-center gap-3">
         <Button onClick={() => setConfirmOpen(true)}>Send a report now</Button>
-        <p className="mt-2 text-xs text-zinc-400">
-          Manual sends don&apos;t change your schedule — your next automatic
-          report will still go out on the cadence above.
-        </p>
+        <Button
+          variant="secondary"
+          onClick={doSendSample}
+          disabled={sendingSample}
+        >
+          {sendingSample ? (
+            <>
+              <Spinner />
+              Sending…
+            </>
+          ) : (
+            "Send me a sample"
+          )}
+        </Button>
       </div>
+      <p className="mt-2 text-xs text-zinc-400">
+        "Send a report now" emails all clients. "Send me a sample" sends one
+        workbook to your own inbox only — no client is contacted.
+      </p>
 
       {/* What it looks like — collapsible */}
       <div className="mt-6 border-t border-zinc-100 pt-4">

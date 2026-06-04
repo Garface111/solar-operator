@@ -292,6 +292,20 @@ export async function sendReportNow(): Promise<SendReportResult> {
   });
 }
 
+export interface SampleReportResult {
+  ok: boolean;
+  client_name: string | null;
+  sent_to: string;
+  sample: boolean;
+}
+
+/** Send a sample workbook to the operator's own email only — no client is contacted. */
+export async function sendSampleReport(): Promise<SampleReportResult> {
+  return request<SampleReportResult>("/v1/account/send-sample-report", {
+    method: "POST",
+  });
+}
+
 /** Persist report-email customization. Empty-string fields clear to default. */
 export async function updateEmailSettings(
   input: EmailSettingsInput,
