@@ -4,7 +4,7 @@ builder = "RAILPACK"
 # No buildCommand: Railpack only provisions Python, npm is not on PATH here.
 
 [deploy]
-startCommand = "uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
+startCommand = "python -m api.migrate && uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
