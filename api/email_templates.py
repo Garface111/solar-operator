@@ -26,6 +26,7 @@ from typing import Optional
 MERGE_TAGS = (
     "client_name", "tenant_name", "quarter", "arrays_count",
     "period_start", "period_end", "dashboard_url", "tenant_email",
+    "tenant_email_line",
 )
 
 DEFAULT_DASHBOARD_URL = "https://solaroperator.org/accounts/"
@@ -40,7 +41,7 @@ DEFAULT_BODY_TEMPLATE = (
     "<p>Dear {{client_name}},</p>"
     "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
     " {{period_end}}. Please reach out with any questions.</p>"
-    "<p>Thank you,<br>{{tenant_name}}<br>{{tenant_email}}</p>"
+    "<p>Thank you,<br>{{tenant_name}}{{tenant_email_line}}</p>"
     "<p style='margin-top:24px;font-size:12px;color:#6b7280;'>"
     "<em>Manage at <a href='{{dashboard_url}}'>your dashboard</a>.</em></p>"
 )
@@ -115,6 +116,7 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
                   ref: Optional[date] = None) -> dict:
     """Assemble the merge-tag context for one client's email."""
     qc = quarter_context(ref)
+    email = tenant_email.strip()
     return {
         "client_name": client_name,
         "tenant_name": tenant_name,
@@ -123,7 +125,10 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
         "period_start": qc["period_start"],
         "period_end": qc["period_end"],
         "dashboard_url": dashboard_url,
-        "tenant_email": tenant_email,
+        "tenant_email": email,
+        # {{tenant_email_line}} renders as "<br>email" when set, else "".
+        # Avoids a dangling <br> in the default body when email is blank.
+        "tenant_email_line": f"<br>{email}" if email else "",
     }
 
 

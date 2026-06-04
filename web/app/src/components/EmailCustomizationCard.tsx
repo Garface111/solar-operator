@@ -27,6 +27,7 @@ const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{tenant_email}}, {{qu
 const KNOWN_TAGS = new Set([
   "client_name", "tenant_name", "quarter", "arrays_count",
   "period_start", "period_end", "dashboard_url", "tenant_email",
+  "tenant_email_line",
 ]);
 
 const TAG_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;

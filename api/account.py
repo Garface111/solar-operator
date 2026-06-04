@@ -625,7 +625,8 @@ def preview_email(body: EmailSettings,
         eff_mode = ((body.send_mode if body.send_mode is not None else t.send_mode)
                     or "to_client").strip() or "to_client"
 
-    ctx = dict(_PREVIEW_CTX, tenant_name=tenant_name, tenant_email=tenant_email)
+    ctx = dict(_PREVIEW_CTX, tenant_name=tenant_name, tenant_email=tenant_email,
+               tenant_email_line=f"<br>{tenant_email}" if tenant_email else "")
     subject, html, text = render_email(
         subject_template=eff_subject, body_template=eff_body, ctx=ctx)
     from_header = resolve_from_header(eff_from_email, eff_from_name, tenant_name)
