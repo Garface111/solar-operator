@@ -39,6 +39,7 @@ export default function Extension() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [activationCode, setActivationCode] = useState<string | null>(null);
+  const [paymentActive, setPaymentActive] = useState(false);
   const [codeFailed, setCodeFailed] = useState(false);
   // Bumping this re-runs the activation-code retry loop (manual "Refresh").
   const [codeReload, setCodeReload] = useState(0);
@@ -68,6 +69,7 @@ export default function Extension() {
       try {
         const status = await fetchStatus(token!);
         if (cancelled) return;
+        if (status.active) setPaymentActive(true);
         if (status.activation_code) {
           setActivationCode(status.activation_code);
           return; // got it — stop retrying
@@ -120,6 +122,7 @@ export default function Extension() {
           if (cancelled) return;
         }
         if (st.active) {
+          setPaymentActive(true);
           setPaymentState("none");
           return;
         }
@@ -237,6 +240,12 @@ export default function Extension() {
   return (
     <ScreenLayout current={2}>
       <Card active>
+        {paymentActive && (
+          <div className="mb-5 inline-flex items-center gap-2 rounded-lg border border-primary-200 bg-primary-50 px-3 py-1.5 text-sm font-medium text-primary-700">
+            <span aria-hidden>✓</span>
+            Payment received — your subscription is active.
+          </div>
+        )}
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
           Install the Solar Operator Sync extension.
         </h1>
