@@ -329,6 +329,9 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
               )}
             </p>
           )}
+          <p className="mt-1.5 text-xs text-zinc-500">
+            Arrays count toward your bill as soon as they&apos;re added — whether by manual entry or by GMP capture. We sync with Stripe automatically; you&apos;ll see the change on your next statement.
+          </p>
           <p className="mt-1 text-xs text-zinc-400">
             Updates automatically as you add or remove arrays.{" "}
             <a
