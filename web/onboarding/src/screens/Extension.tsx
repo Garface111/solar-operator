@@ -485,7 +485,7 @@ export default function Extension() {
             />
             <span className="text-sm font-medium text-zinc-700" aria-live="polite">
               {installed
-                ? "Capture received ✓ — sign into your other utilities too, then click \"I've installed it\" below."
+                ? "Capture received ✓"
                 : "We're waiting for your first utility capture…"}
             </span>
             {!installed && extensionActive && (
