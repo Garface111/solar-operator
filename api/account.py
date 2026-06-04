@@ -744,12 +744,14 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
             select(Client).where(Client.tenant_id == t.id)
                           .order_by(Client.name.asc())
         ).scalars().all()
-        out = []
-        for c in clients:
-            n_arr = db.execute(
-                select(Array).where(Array.client_id == c.id)
-            ).scalars().all()
-            out.append(_client_to_dict(c, array_count=len(n_arr)))
+        # Fetch all array counts in a single query rather than one per client.
+        array_counts_rows = db.execute(
+            select(Array.client_id, func.count(Array.id).label("n"))
+            .where(Array.client_id.in_([c.id for c in clients]))
+            .group_by(Array.client_id)
+        ).all()
+        counts = {row.client_id: row.n for row in array_counts_rows}
+        out = [_client_to_dict(c, array_count=counts.get(c.id, 0)) for c in clients]
     return {"ok": True, "clients": out}
 
 
