@@ -51,7 +51,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
   const toast = useToast();
   // The form mirrors the stored template fields; "" means "use the default".
   const [fromEmail, setFromEmail] = useState(account.send_from_email ?? "");
-  const [fromName, setFromName] = useState(account.send_from_name ?? "");
+  const [fromName, setFromName] = useState(account.send_from_name ?? account.name ?? "");
   const [subject, setSubject] = useState(account.email_subject_template ?? "");
   const [body, setBody] = useState(account.email_body_template ?? "");
   const [sendMode, setSendMode] = useState(account.send_mode || "to_client");
@@ -86,8 +86,10 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
     try {
       const saved = await updateEmailSettings(input);
       // Reflect server-normalized values (blank → null) back into the form + account.
-      setFromEmail(saved.send_from_email ?? "");
-      setFromName(saved.send_from_name ?? "");
+      // When the server returns null, fall back to the operator's contact_email/name so the
+      // field shows their real default rather than implying the platform address.
+      setFromEmail(saved.send_from_email ?? account.contact_email ?? "");
+      setFromName(saved.send_from_name ?? account.name ?? "");
       setSubject(saved.email_subject_template ?? "");
       setBody(saved.email_body_template ?? "");
       setSendMode(saved.send_mode || "to_client");
@@ -180,9 +182,10 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           </p>
         )}
         <p className="-mt-3 text-xs text-zinc-400">
-          Leave blank to send from the Solar Operator address. Custom domains
-          must be verified before they go live — until then, emails come from
-          our address automatically.
+          Your email is prefilled. Replace it with a custom address on your own
+          domain if you want — until the domain is verified, emails fall back
+          to our address automatically. Leave blank to use the Solar Operator
+          address.
         </p>
 
         <Input

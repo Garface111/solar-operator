@@ -214,6 +214,10 @@ function ArrayRow({
             <option value="1">Prior month (default)</option>
             <option value="0">Same month (sub-metered)</option>
           </select>
+          <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+            Prior month: GMP bills one month after generation (standard).
+            Same month: bill and generation period match (sub-metered configurations).
+          </p>
         </div>
         <div className="sm:col-span-3">
           <FieldLabel>Notes</FieldLabel>
@@ -547,6 +551,10 @@ function AddArrayRow({
             <option value="0">Same month (sub-metered)</option>
           </select>
         </label>
+        <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+          Prior month: GMP bills one month after generation (standard).
+          Same month: bill and generation period match (sub-metered configurations).
+        </p>
       </div>
       <div className="flex gap-2">
         <Button onClick={save} disabled={!name.trim() || saving} className="px-3 py-2">
