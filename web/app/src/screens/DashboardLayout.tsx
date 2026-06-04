@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
+import { WalkthroughOverlay } from "../components/WalkthroughOverlay";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
+import { hasSeenWalkthrough } from "../lib/walkthrough";
 
 interface Props {
   onSignOut: () => void;
@@ -35,6 +37,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
   const [account, setAccount] = useState<Account | null>(null);
   const [failed, setFailed] = useState(false);
   const [loadKey, setLoadKey] = useState(0);
+  const [showWalkthrough, setShowWalkthrough] = useState(() => !hasSeenWalkthrough());
 
   const retryLoad = useCallback(() => {
     setFailed(false);
@@ -128,7 +131,11 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
   return (
     <div className="min-h-full">
-      <TopNav email={account?.email ?? null} onSignOut={onSignOut} />
+      <TopNav
+        email={account?.email ?? null}
+        onSignOut={onSignOut}
+        onShowWalkthrough={() => setShowWalkthrough(true)}
+      />
       <TabBar tabs={TABS} unvisited={unvisited} />
 
       {heartbeatStale && (
@@ -153,6 +160,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
       <main className="mx-auto max-w-4xl px-4 py-8">
         <Outlet context={ctx} />
       </main>
+
+      {showWalkthrough && (
+        <WalkthroughOverlay onClose={() => setShowWalkthrough(false)} />
+      )}
 
       <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
         Solar Operator · support@solaroperator.org ·{" "}
