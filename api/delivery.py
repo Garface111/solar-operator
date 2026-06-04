@@ -82,7 +82,8 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
 
     if not is_active and triggered_by != "ops":
         return {"ok": False, "reason": "tenant or client inactive",
-                "client_id": client_id, "tenant": tenant_id}
+                "client_id": client_id, "client_name": client_name,
+                "recipient": "", "tenant": tenant_id}
 
     # Resolve recipients, honoring send_mode. An explicit override_to (ops
     # force-send) always wins and ignores send_mode.
@@ -96,7 +97,8 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         recipients = _recipients_for_client(client, tenant, override_to)
     if not recipients:
         return {"ok": False, "reason": "no recipient email on file",
-                "client_id": client_id, "tenant": tenant_id}
+                "client_id": client_id, "client_name": client_name,
+                "recipient": "", "tenant": tenant_id}
 
     safe_client = client_name.replace(" ", "_").replace("/", "-")
     with tempfile.TemporaryDirectory(prefix=f"so-deliver-c{client_id}-") as tmpdir:
@@ -112,7 +114,9 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                 f"Tenant: {tenant_id} ({tenant_name})\n"
                 f"Triggered by: {triggered_by}\nError: {e}",
             )
-            return {"ok": False, "client_id": client_id, "error": str(e)}
+            return {"ok": False, "client_id": client_id,
+                    "client_name": client_name, "recipient": "",
+                    "reason": "report generation failed", "error": str(e)}
 
         # Render the email from the tenant's templates (or built-in defaults).
         # Merge tags resolve against this client's real name / array count /
@@ -166,8 +170,10 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
     return {
         "ok": True,
         "client_id": client_id,
+        "client_name": client_name,
         "tenant": tenant_id,
         "email_sent": sent,
+        "recipient": recipients[0] if recipients else "",
         "recipients": recipients,
         "triggered_by": triggered_by,
     }
@@ -207,7 +213,9 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
                 triggered_by=triggered_by))
         except Exception as e:
             logger.exception("Delivery failed for client %s", cid)
-            results.append({"ok": False, "client_id": cid, "error": str(e)})
+            results.append({"ok": False, "client_id": cid,
+                            "client_name": None, "recipient": "",
+                            "reason": "unexpected error", "error": str(e)})
     ok_count = sum(1 for r in results if r.get("ok"))
     return {
         "ok": ok_count > 0,

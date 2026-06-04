@@ -7,6 +7,7 @@ import { Toggle } from "../ui/Toggle";
 import { useToast } from "../ui/Toast";
 import {
   type Account,
+  type SendResult,
   sendReportNow,
   updateAccountFrequency,
   updateCcOnReports,
@@ -17,6 +18,16 @@ const FREQUENCIES = [
   { value: "monthly", label: "Monthly" },
   { value: "quarterly", label: "Quarterly" },
 ] as const;
+
+/** Compact, human "<name> (<reason>)" list for a failed-send toast. */
+function describeFailures(failures: SendResult[]): string {
+  return failures
+    .map((f) => {
+      const name = f.client_name?.trim() || "a client";
+      return f.reason ? `${name} (${f.reason})` : name;
+    })
+    .join("; ");
+}
 
 function humanDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, {
@@ -86,9 +97,32 @@ export function ReportsCard({ account, onAccountChange }: Props) {
   async function doSend() {
     setSending(true);
     try {
-      await sendReportNow();
+      const res = await sendReportNow();
       setConfirmOpen(false);
-      toast.success("Report is on its way to your clients");
+
+      const total = res.client_count;
+      const ok = res.delivered;
+      const failures = res.results.filter((r) => !r.ok);
+
+      if (total === 0) {
+        toast.error(
+          "No active clients to send to — add a client first.",
+        );
+      } else if (failures.length === 0) {
+        toast.success(
+          ok === 1
+            ? "Report sent to 1 client."
+            : `Report sent to ${ok} clients.`,
+        );
+      } else if (ok === 0) {
+        // Everything failed — show why, per client.
+        toast.error(`Report failed for all ${total}. ${describeFailures(failures)}`);
+      } else {
+        // Partial — be specific about who didn't get it and why.
+        toast.error(
+          `Sent to ${ok} of ${total}. ${failures.length} failed: ${describeFailures(failures)}`,
+        );
+      }
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Couldn't send the report",

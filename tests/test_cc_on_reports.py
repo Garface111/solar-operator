@@ -57,7 +57,8 @@ def captured_emails(monkeypatch):
     """Capture every send_workbook_email call (avoids real Resend sends)."""
     sent: list[dict] = []
 
-    def fake_send(to, subject, html, text, workbook_path, filename=None):
+    def fake_send(to, subject, html, text, workbook_path, filename=None,
+                  from_addr=None):
         sent.append({"to": to, "subject": subject, "filename": filename})
         return True
 

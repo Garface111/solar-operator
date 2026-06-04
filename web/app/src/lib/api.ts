@@ -213,9 +213,29 @@ export async function updateCcOnReports(
   return res.cc_on_reports;
 }
 
-/** Trigger an immediate report send to all clients. Does not change cadence. */
-export async function sendReportNow(): Promise<void> {
-  await request("/v1/account/send-report", { method: "POST" });
+/** One client's outcome from a send-report run. */
+export interface SendResult {
+  client_id: number;
+  client_name: string | null;
+  ok: boolean;
+  recipient: string;
+  reason?: string;
+}
+
+export interface SendReportResult {
+  ok: boolean;
+  client_count: number;
+  delivered: number;
+  results: SendResult[];
+}
+
+/** Trigger an immediate report send to all clients. Does not change cadence.
+ *  Returns the per-client outcome so the UI can tell the truth about partial
+ *  or total failures instead of a blanket success toast. */
+export async function sendReportNow(): Promise<SendReportResult> {
+  return request<SendReportResult>("/v1/account/send-report", {
+    method: "POST",
+  });
 }
 
 /** Persist report-email customization. Empty-string fields clear to default. */
