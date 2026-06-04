@@ -36,7 +36,14 @@ def _recipients_for_client(client: Client, tenant: Tenant,
                            override_to: Optional[str]) -> list[str]:
     """Resolve who should receive this client's report.
     Order of preference: override > client.contact_email > tenant.contact_email.
-    Always dedupes and includes client.cc_emails when present."""
+    Always dedupes and includes client.cc_emails when present.
+
+    Falling back to tenant.contact_email is only safe when the client genuinely
+    represents the operator themselves (e.g. solo-operator pilot pattern). For
+    auto-created or partially-set-up clients, the caller should prefer the
+    `to_me` send_mode or filter such clients out — otherwise the operator gets
+    an extra copy per missing-contact client they never asked for.
+    """
     if override_to:
         return [override_to]
     primary = client.contact_email or tenant.contact_email
@@ -101,6 +108,15 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # Client gets their copy; tenant gets a separate email below.
         recipients = _recipients_for_client(client, tenant, override_to)
     else:
+        # send_mode == "to_client" — only fan out if the client has its own
+        # contact email. Otherwise we'd silently route to tenant.contact_email
+        # and the operator gets one extra copy per under-configured client
+        # (each labeled with that client's name). The right UX is "add a contact
+        # email" — not "spam the operator until they notice."
+        if not (client.contact_email or "").strip():
+            return {"ok": False, "reason": "no recipient email on file",
+                    "client_id": client_id, "client_name": client_name,
+                    "recipient": "", "tenant": tenant_id}
         recipients = _recipients_for_client(client, tenant, override_to)
     if not recipients:
         return {"ok": False, "reason": "no recipient email on file",
