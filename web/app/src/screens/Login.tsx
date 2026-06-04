@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
@@ -8,6 +9,20 @@ import { requestLoginLink } from "../lib/api";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/** Friendly translation of a magic-link verify failure carried via ?error=. */
+function loginErrorMessage(code: string | null): string | null {
+  switch (code) {
+    case "expired":
+      return "Your sign-in link expired — request a fresh one below.";
+    case "used":
+      return "That sign-in link has already been used — request a fresh one below.";
+    case "invalid":
+      return "We couldn't verify your sign-in link — request a fresh one below.";
+    default:
+      return null;
+  }
+}
+
 interface LoginProps {
   /** Called once a session exists (unused here — the magic link drives auth). */
   onLogin: () => void;
@@ -15,9 +30,19 @@ interface LoginProps {
 
 export default function Login(_props: LoginProps) {
   const toast = useToast();
+  const [searchParams] = useSearchParams();
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  const linkError = loginErrorMessage(searchParams.get("error"));
+
+  // After a failed magic-link verify, focus the email field so the operator can
+  // immediately request a new link.
+  useEffect(() => {
+    if (linkError) emailRef.current?.focus();
+  }, [linkError]);
 
   const valid = EMAIL_RE.test(email.trim());
 
@@ -80,8 +105,17 @@ export default function Login(_props: LoginProps) {
             <p className="mt-2 text-sm text-zinc-500">
               Enter your email and we&apos;ll send you a one-time sign-in link.
             </p>
+            {linkError && (
+              <div
+                role="alert"
+                className="mt-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+              >
+                {linkError}
+              </div>
+            )}
             <div className="mt-6">
               <Input
+                ref={emailRef}
                 id="login-email"
                 label="Email"
                 type="email"

@@ -32,6 +32,15 @@ export default function App() {
 
 type AuthState = "loading" | "authed" | "anon";
 
+/** Map a /v1/auth/verify failure to a stable login-screen error code. The API
+ *  returns specific reasons ("already used", "expired", "invalid"). */
+function classifyLoginError(err: unknown): string {
+  const msg = (err instanceof Error ? err.message : "").toLowerCase();
+  if (msg.includes("already used")) return "used";
+  if (msg.includes("expired")) return "expired";
+  return "invalid";
+}
+
 /**
  * Owns the session lifecycle:
  *  - On load, if the magic-link dropped a `?token=` in the URL, exchange it for
@@ -52,13 +61,16 @@ function AuthGate() {
     const loginToken = params.get("token") ?? params.get("session");
 
     async function boot() {
+      let loginError: string | null = null;
       if (loginToken) {
         try {
           const session = await verifyLoginToken(loginToken);
           if (cancelled) return;
           setSession(session);
-        } catch {
-          // Bad/expired link — fall through to whatever session we have.
+        } catch (err) {
+          // Bad/expired/used link — carry the reason to the login screen so we
+          // can tell the operator *why* instead of dropping them on a bare form.
+          loginError = classifyLoginError(err);
         }
         // Strip the token from the URL so a refresh/back doesn't re-use it.
         const url = new URL(window.location.href);
@@ -67,6 +79,12 @@ function AuthGate() {
         window.history.replaceState({}, "", url.toString());
       }
       if (cancelled) return;
+      // A failed verify with no existing session → login, surfacing the reason.
+      if (loginError && !getSession()) {
+        setState("anon");
+        navigate(`/login?error=${loginError}`, { replace: true });
+        return;
+      }
       setState(getSession() ? "authed" : "anon");
     }
 
