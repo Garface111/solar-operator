@@ -243,8 +243,8 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           </div>
           <p className="mt-2 text-xs leading-relaxed text-zinc-400">
             {sendMode === "to_me"
-              ? "Reports come to your inbox (with the client's name in the subject and body) so you can review and forward them yourself."
-              : "Reports go straight to each client's contact email."}
+              ? "Reports come to your inbox (with the client's name in the subject and body) so you can review and forward them yourself. Clients are not emailed — not even if \"Send me a copy\" is on."
+              : "Reports go straight to each client's contact email. Enable \"Send me a copy\" on the Reports tab to receive a copy too."}
           </p>
         </div>
       </div>

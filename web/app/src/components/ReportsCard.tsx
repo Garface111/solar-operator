@@ -239,6 +239,12 @@ export function ReportsCard({ account, onAccountChange }: Props) {
           You&apos;ll receive an identical email to whatever each client gets,
           every time a report goes out. Useful for keeping records or QA.
         </p>
+        {account.send_mode === "to_me" && (
+          <p className="ml-14 mt-1 text-xs text-amber-700">
+            Note: when send mode is &ldquo;To me only,&rdquo; clients are never
+            emailed — this copy goes to you alongside the forwarding copy.
+          </p>
+        )}
       </div>
 
       {/* Send now */}
