@@ -104,8 +104,8 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
 // ─── auth ──────────────────────────────────────────────────────────────────
 
-export async function requestLoginLink(email: string): Promise<void> {
-  await request("/v1/auth/request", { body: { email }, noAuth: true });
+export async function requestLoginLink(email: string, persist = true): Promise<void> {
+  await request("/v1/auth/request", { body: { email, persist }, noAuth: true });
 }
 
 export async function verifyLoginToken(token: string): Promise<string> {

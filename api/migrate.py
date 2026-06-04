@@ -210,6 +210,16 @@ def main():
         ]:
             conn.execute(text(idx_sql))
 
+        # C3: trust-this-device toggle — persist_session on login_tokens.
+        if not column_exists(conn, "login_tokens", "persist_session"):
+            conn.execute(text(
+                "ALTER TABLE login_tokens ADD COLUMN persist_session BOOLEAN DEFAULT TRUE"
+            ))
+            conn.execute(text(
+                "UPDATE login_tokens SET persist_session = TRUE WHERE persist_session IS NULL"
+            ))
+            print("  + login_tokens.persist_session")
+
         # W3-19: extension heartbeat timestamp on Tenant.
         if not column_exists(conn, "tenants", "extension_heartbeat_at"):
             conn.execute(text(

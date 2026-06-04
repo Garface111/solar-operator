@@ -263,6 +263,7 @@ class LoginToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    persist_session: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class StripeEvent(Base):

@@ -28,12 +28,17 @@ interface LoginProps {
   onLogin: () => void;
 }
 
+const PERSIST_KEY = "so_persist_session";
+
 export default function Login(_props: LoginProps) {
   const toast = useToast();
   const [searchParams] = useSearchParams();
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [persist, setPersist] = useState(
+    () => localStorage.getItem(PERSIST_KEY) !== "false",
+  );
   // Cooldown counter (seconds) after a resend — prevents hammering the API.
   const [resendCooldown, setResendCooldown] = useState(0);
   const emailRef = useRef<HTMLInputElement>(null);
@@ -52,8 +57,9 @@ export default function Login(_props: LoginProps) {
     e.preventDefault();
     if (!valid || sending) return;
     setSending(true);
+    localStorage.setItem(PERSIST_KEY, String(persist));
     try {
-      await requestLoginLink(email.trim().toLowerCase());
+      await requestLoginLink(email.trim().toLowerCase(), persist);
       setSent(true);
     } catch (err) {
       toast.error(
@@ -83,7 +89,7 @@ export default function Login(_props: LoginProps) {
     if (resendCooldown > 0 || sending) return;
     setSending(true);
     try {
-      await requestLoginLink(email.trim().toLowerCase());
+      await requestLoginLink(email.trim().toLowerCase(), persist);
       startCooldown();
       toast.show("New sign-in link sent.", "success");
     } catch (err) {
@@ -173,6 +179,15 @@ export default function Login(_props: LoginProps) {
                 onChange={(e) => setEmail(e.target.value)}
               />
             </div>
+            <label className="mt-4 flex cursor-pointer items-center gap-2.5 text-sm text-zinc-600">
+              <input
+                type="checkbox"
+                checked={persist}
+                onChange={(e) => setPersist(e.target.checked)}
+                className="h-4 w-4 rounded border-zinc-300 text-primary-600 focus:ring-primary-500/40"
+              />
+              Trust this device for 30 days
+            </label>
             <Button
               type="submit"
               disabled={!valid || sending}

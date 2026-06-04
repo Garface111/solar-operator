@@ -162,6 +162,7 @@ def tenant_from_session(authorization: Optional[str]) -> Tenant:
 
 class AuthRequest(BaseModel):
     email: EmailStr
+    persist: bool = True  # if True, mint 30-day session; if False, mint 1-day session
 
 
 class AuthVerify(BaseModel):
@@ -278,7 +279,7 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
 
 # ─── magic-link auth ────────────────────────────────────────────────────
 
-def issue_magic_link(email: str) -> bool:
+def issue_magic_link(email: str, persist: bool = True) -> bool:
     """Create a single-use login token for `email` and email the sign-in link.
 
     Returns True if a matching tenant existed and an email was attempted,
@@ -296,7 +297,7 @@ def issue_magic_link(email: str) -> bool:
 
         token = secrets.token_urlsafe(32)
         expires = datetime.utcnow() + timedelta(seconds=LOGIN_LINK_TTL_SECONDS)
-        db.add(LoginToken(token=token, tenant_id=t.id, email=email, expires_at=expires))
+        db.add(LoginToken(token=token, tenant_id=t.id, email=email, expires_at=expires, persist_session=persist))
         db.commit()
         tenant_name = t.name
 
@@ -336,7 +337,7 @@ def issue_magic_link(email: str) -> bool:
 def auth_request(req: AuthRequest):
     """Email a one-time login link to a known customer. Always returns OK
     (don't leak which emails are registered)."""
-    issue_magic_link(req.email)
+    issue_magic_link(req.email, persist=req.persist)
     return {"ok": True, "delivered": True}
 
 
@@ -356,10 +357,12 @@ def auth_verify(req: AuthVerify):
             raise HTTPException(401, "Sign-in link expired — request a new one")
         row.used_at = datetime.utcnow()
         tenant_id = row.tenant_id
+        persist = row.persist_session if row.persist_session is not None else True
         db.commit()
 
-    session_token = mint_session_for_tenant(tenant_id)
-    return {"ok": True, "session_token": session_token, "expires_in": SESSION_TTL_SECONDS}
+    ttl = SESSION_TTL_SECONDS if persist else 24 * 3600  # 30 days or 1 day
+    session_token = _sign_session(tenant_id, ttl_seconds=ttl)
+    return {"ok": True, "session_token": session_token, "expires_in": ttl}
 
 
 # ─── account read ───────────────────────────────────────────────────────
