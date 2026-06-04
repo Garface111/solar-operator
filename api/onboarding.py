@@ -513,11 +513,13 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
         ).scalars().all())
 
     # Now that every client + array is persisted, bring Stripe in line with the
-    # real array count. Best-effort — never blocks the operator reaching Screen 5.
+    # real array count. This runs SYNCHRONOUSLY before we return (W2-11) so the
+    # Done screen's reconciled count + monthly total are accurate the moment the
+    # SPA advances. Best-effort — never blocks the operator reaching Screen 5.
     _reconcile_subscription_quantity(
         subscription_id, array_count, tenant_id, tenant_email)
 
-    return {"ok": True, "client_ids": created_ids}
+    return {"ok": True, "client_ids": created_ids, "array_count": array_count}
 
 
 # ─── 5. complete ─────────────────────────────────────────────────────────

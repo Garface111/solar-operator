@@ -118,6 +118,12 @@ export default function Info() {
             )}
           </Button>
         </div>
+
+        <p className="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-xs leading-relaxed text-zinc-500">
+          You&apos;ll be billed for the array count you add in the next step.
+          Initial charge: <span className="font-medium text-zinc-700">$250 setup</span>{" "}
+          + first month prorated by array count.
+        </p>
       </Card>
     </ScreenLayout>
   );

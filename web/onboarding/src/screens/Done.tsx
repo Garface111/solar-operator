@@ -65,10 +65,26 @@ export default function Done() {
           </div>
         )}
 
+        {status && status.arrays_count > 0 && (
+          <p className="mx-auto mt-6 max-w-md text-sm text-zinc-600">
+            Your subscription is now billed for{" "}
+            <span className="font-medium text-zinc-900">
+              {status.arrays_count}{" "}
+              {status.arrays_count === 1 ? "array" : "arrays"}
+            </span>{" "}
+            at $45 each ={" "}
+            <span className="font-medium text-zinc-900">
+              ${status.arrays_count * 45}/month
+            </span>
+            .
+          </p>
+        )}
+
         {status && status.arrays_count === 0 && (
           <p className="mx-auto mt-4 max-w-md text-xs text-zinc-400">
             Arrays from auto-populate clients will appear once they sign into GMP
-            through the extension.
+            through the extension. Your monthly total updates automatically as
+            they do.
           </p>
         )}
 
