@@ -141,8 +141,9 @@ function AuthGate() {
           )
         }
       >
-        {/* /accounts/ → Account tab */}
-        <Route index element={<Navigate to="/account" replace />} />
+        {/* /accounts/ → Clients tab (the post-onboarding landing where the
+            walkthrough anchors live). Account tab is one tab away. */}
+        <Route index element={<Navigate to="/clients" replace />} />
         <Route path="/account" element={<AccountTab />} />
         <Route path="/clients" element={<ClientsTab />} />
         {/* Deep link that auto-expands a single client. */}

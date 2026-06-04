@@ -9,12 +9,16 @@ interface SpotRect {
 }
 
 const PAD = 10;
+const RADIUS = 14;
 const DIM = "rgba(0,0,0,0.55)";
 
 interface StepDef {
   anchor: string | null;
   title: string;
   body: string;
+  /** When true the tour does not advance until the operator clicks the
+   *  spotlighted element. Used for steps that teach a click. */
+  waitForClick?: boolean;
   cta?: { label: string; href: string };
 }
 
@@ -27,24 +31,27 @@ const STEPS: StepDef[] = [
   {
     anchor: "2",
     title: "Click a client to expand",
-    body: "Click any client to expand it and see their arrays.",
+    body: "Click any client card to expand it and see their arrays. Try it now.",
+    waitForClick: true,
   },
   {
     anchor: "3",
     title: "Enter the utility login",
-    body: "Paste the email or username this client uses to log into their utility portal.",
+    body: "Paste the email or username this client uses to log into their utility portal. Click into the field to start typing.",
+    waitForClick: true,
   },
   {
     anchor: "4",
     title: "Toggle auto-populate ON",
-    body: "Turn this on so we automatically pull this client's arrays the next time you log into their utility portal — no manual array entry.",
+    body: "Flip this on so we automatically pull this client's arrays the next time you log into their utility portal — no manual array entry. Click the toggle.",
+    waitForClick: true,
   },
   {
     anchor: null,
     title: "Go log in",
-    body: "Now open Green Mountain Power and sign in with that account. We'll capture the arrays in the background and they'll appear here automatically.",
+    body: "Now open your utility portal (Green Mountain Power, Vermont Electric Coop, and more) and sign in with that account. We'll capture the arrays in the background and they'll appear here automatically.",
     cta: {
-      label: "Open GMP →",
+      label: "Open Green Mountain Power →",
       href: "https://www.greenmountainpower.com/account/",
     },
   },
@@ -62,6 +69,7 @@ interface Props {
 export function WalkthroughOverlay({ onClose }: Props) {
   const [step, setStep] = useState(0);
   const [spot, setSpot] = useState<SpotRect | null>(null);
+  const [viewport, setViewport] = useState({ w: 0, h: 0 });
   const tooltipRef = useRef<HTMLDivElement>(null);
 
   const current = STEPS[step];
@@ -81,6 +89,7 @@ export function WalkthroughOverlay({ onClose }: Props) {
   }
 
   const updateSpot = useCallback(() => {
+    setViewport({ w: window.innerWidth, h: window.innerHeight });
     if (!current.anchor) {
       setSpot(null);
       return;
@@ -103,13 +112,45 @@ export function WalkthroughOverlay({ onClose }: Props) {
 
   useEffect(() => {
     updateSpot();
+    // Re-measure after layout settles (expanding a card animates).
+    const id1 = window.setTimeout(updateSpot, 100);
+    const id2 = window.setTimeout(updateSpot, 400);
     window.addEventListener("scroll", updateSpot, { passive: true });
     window.addEventListener("resize", updateSpot);
     return () => {
+      window.clearTimeout(id1);
+      window.clearTimeout(id2);
       window.removeEventListener("scroll", updateSpot);
       window.removeEventListener("resize", updateSpot);
     };
   }, [updateSpot]);
+
+  // When a waitForClick step is active, listen for clicks INSIDE the anchored
+  // element and advance the step. Click outside dismisses (unless it's on the
+  // tooltip itself).
+  useEffect(() => {
+    if (!current.waitForClick || !current.anchor) return;
+    function onDocClick(e: MouseEvent) {
+      const anchorEl = document.querySelector<HTMLElement>(
+        `[data-tour-step="${current.anchor}"]`,
+      );
+      if (!anchorEl) return;
+      const target = e.target as Node;
+      const tooltip = tooltipRef.current;
+      if (anchorEl.contains(target)) {
+        // Let the click pass through to the underlying control; advance after a
+        // tick so any state updates from that click land first.
+        window.setTimeout(() => setStep((s) => Math.min(s + 1, STEPS.length - 1)), 50);
+      } else if (tooltip && tooltip.contains(target)) {
+        // ignore — tooltip clicks handled by its own buttons
+      }
+      // Clicks on the dimmed mask are intentionally ignored during
+      // waitForClick steps so the operator can't dismiss-by-accident
+      // while reaching for the highlighted control.
+    }
+    document.addEventListener("click", onDocClick, true);
+    return () => document.removeEventListener("click", onDocClick, true);
+  }, [current.waitForClick, current.anchor]);
 
   // Tooltip position: below spotlight if space allows, else above, else centered.
   const tooltipStyle = (() => {
@@ -131,80 +172,74 @@ export function WalkthroughOverlay({ onClose }: Props) {
     if (aboveBottom + 200 <= vp.h) {
       return { ...base, bottom: aboveBottom, left };
     }
-    // fall back to centered
     return { ...base, top: "50%", left: "50%", transform: "translate(-50%,-50%)" };
   })();
 
-  const tooltipRef2 = tooltipRef;
+  // Mask rendered as a single SVG with a rect-with-rounded-cutout so the
+  // spotlight has truly rounded corners (the old 4-strip approach gave
+  // sharp corners around the highlighted element).
+  const w = viewport.w || (typeof window !== "undefined" ? window.innerWidth : 1280);
+  const h = viewport.h || (typeof window !== "undefined" ? window.innerHeight : 720);
 
   return (
     // Hide on mobile — dashboard is desktop-first
     <div className="hidden md:block" style={{ position: "fixed", inset: 0, zIndex: 9998 }}>
-      {spot ? (
-        // Spotlight: 4 dimmed strips leaving the anchor area clear
-        <>
-          <div
-            style={{ position: "fixed", inset: `0 0 auto 0`, height: spot.top, background: DIM }}
-            onClick={dismiss}
-          />
-          <div
-            style={{
-              position: "fixed",
-              top: spot.top + spot.height,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: DIM,
-            }}
-            onClick={dismiss}
-          />
-          <div
-            style={{
-              position: "fixed",
-              top: spot.top,
-              left: 0,
-              width: spot.left,
-              height: spot.height,
-              background: DIM,
-            }}
-            onClick={dismiss}
-          />
-          <div
-            style={{
-              position: "fixed",
-              top: spot.top,
-              left: spot.left + spot.width,
-              right: 0,
-              height: spot.height,
-              background: DIM,
-            }}
-            onClick={dismiss}
-          />
-          {/* Rounded border ring around the spotlight */}
-          <div
-            style={{
-              position: "fixed",
-              top: spot.top,
-              left: spot.left,
-              width: spot.width,
-              height: spot.height,
-              borderRadius: 10,
-              outline: "2px solid rgba(255,255,255,0.25)",
-              pointerEvents: "none",
-            }}
-          />
-        </>
-      ) : (
-        // No anchor: full-screen dim
-        <div
-          style={{ position: "fixed", inset: 0, background: DIM }}
-          onClick={dismiss}
+      {/* SVG mask: full-screen dim with a rounded cutout around the anchor.
+          pointerEvents on the SVG = none lets clicks pass through to the
+          spotlighted UI; the dim rect catches clicks via its own onClick to
+          dismiss the tour when the operator clicks an unrelated area
+          (skipped when waitForClick is active to prevent accidental
+          dismissal). */}
+      <svg
+        width={w}
+        height={h}
+        style={{ position: "fixed", inset: 0, pointerEvents: "none" }}
+      >
+        <defs>
+          <mask id="walkthrough-mask">
+            <rect x={0} y={0} width={w} height={h} fill="white" />
+            {spot && (
+              <rect
+                x={spot.left}
+                y={spot.top}
+                width={spot.width}
+                height={spot.height}
+                rx={RADIUS}
+                ry={RADIUS}
+                fill="black"
+              />
+            )}
+          </mask>
+        </defs>
+        <rect
+          x={0}
+          y={0}
+          width={w}
+          height={h}
+          fill={DIM}
+          mask="url(#walkthrough-mask)"
+          style={{ pointerEvents: current.waitForClick ? "none" : "auto", cursor: current.waitForClick ? "default" : "pointer" }}
+          onClick={current.waitForClick ? undefined : dismiss}
         />
-      )}
+        {spot && (
+          // Rounded border ring around the spotlight
+          <rect
+            x={spot.left}
+            y={spot.top}
+            width={spot.width}
+            height={spot.height}
+            rx={RADIUS}
+            ry={RADIUS}
+            fill="none"
+            stroke="rgba(255,255,255,0.35)"
+            strokeWidth={2}
+          />
+        )}
+      </svg>
 
       {/* Tooltip card */}
       <div
-        ref={tooltipRef2}
+        ref={tooltipRef}
         style={tooltipStyle}
         className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl"
       >
@@ -250,13 +285,19 @@ export function WalkthroughOverlay({ onClose }: Props) {
           ) : (
             <div />
           )}
-          <button
-            type="button"
-            onClick={next}
-            className="rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700"
-          >
-            {isLast ? "Done" : step === 0 ? "Get started →" : "Next →"}
-          </button>
+          {current.waitForClick ? (
+            <span className="rounded-xl bg-zinc-100 px-4 py-2 text-xs font-medium text-zinc-500">
+              Click the highlighted area to continue
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={next}
+              className="rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700"
+            >
+              {isLast ? "Done" : step === 0 ? "Get started →" : "Next →"}
+            </button>
+          )}
         </div>
       </div>
     </div>
