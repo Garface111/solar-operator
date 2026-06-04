@@ -9,17 +9,17 @@ const PANELS = [
   {
     icon: "📋",
     heading: "Quarterly reports used to mean hours every three months.",
-    body: "VT community solar operators spend 3–5 hours per client pulling GMP bills, calculating net-metering credits, and formatting NEPOOL Excel reports. With 10 clients, that's a full day gone — every quarter.",
+    body: "VT community solar operators spend 3–5 hours per client pulling utility bills, calculating net-metering credits, and formatting NEPOOL Excel reports. With 10 clients, that's a full day gone — every quarter.",
   },
   {
     icon: "⚡",
     heading: "Tell us how many arrays you manage. We handle the rest.",
-    body: "Solar Operator connects to your Green Mountain Power account, pulls your bills automatically, and generates NEPOOL-format reports for every client — every quarter, without you touching a spreadsheet.",
+    body: "Solar Operator connects to your utility account (Green Mountain Power, Vermont Electric Coop, and more), pulls your bills automatically, and generates NEPOOL-format reports for every client — every quarter, without you touching a spreadsheet.",
   },
   {
     icon: "🌐",
     heading: "One requirement: Google Chrome.",
-    body: "We use a lightweight Chrome extension to securely capture your GMP bill data. It takes about two minutes to install and you only do it once.",
+    body: "We use a lightweight Chrome extension to securely capture your utility bill data. It takes about two minutes to install and you only do it once.",
     cta: "Preview the Chrome extension →",
     ctaHref: CHROME_STORE_URL,
   },

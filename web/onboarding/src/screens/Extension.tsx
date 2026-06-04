@@ -33,8 +33,13 @@ const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/solar-operato
 // unpublished and the warning needs to render again.
 const CHROME_STORE_PUBLISHED = true;
 
-// Where to send the tenant to trigger their first capture.
-const GMP_LOGIN_URL = "https://www.greenmountainpower.com/account/";
+// Where to send the tenant to trigger their first capture. We list the
+// utilities Solar Operator currently scrapes; the operator clicks whichever
+// one their client uses. Add new entries here as new adapters ship.
+const UTILITY_PORTALS: { name: string; url: string }[] = [
+  { name: "Green Mountain Power", url: "https://www.greenmountainpower.com/account/" },
+  { name: "Vermont Electric Coop", url: "https://vermontelectric.smarthub.coop/" },
+];
 
 const POLL_MS = 3000;
 // After this many consecutive ping failures we surface a "having trouble" hint
@@ -452,7 +457,7 @@ export default function Extension() {
                       ? timeAgo(testResult.last_capture_at)
                       : "just now"
                   }`
-                : "Not detected yet — install the extension and visit greenmountainpower.com."}
+                : "Not detected yet — install the extension and visit your utility portal (Green Mountain Power, Vermont Electric Coop)."}
             </p>
           )}
         </div>
@@ -482,14 +487,19 @@ export default function Extension() {
               </li>
             ))}
           </ol>
-          <a
-            href={GMP_LOGIN_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-          >
-            Open Green Mountain Power →
-          </a>
+          <div className="mt-5 flex flex-wrap gap-2">
+            {UTILITY_PORTALS.map((p) => (
+              <a
+                key={p.url}
+                href={p.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+              >
+                Open {p.name} →
+              </a>
+            ))}
+          </div>
           <p className="mt-3 text-xs text-zinc-500">
             You don&apos;t need to do anything else. We pick up your bills in the
             background.
@@ -590,7 +600,7 @@ export default function Extension() {
           {[
             "You installed the extension from the Chrome Web Store (the Chrome toolbar should show its icon)",
             "You pasted the activation code into the extension's Options page and clicked Save",
-            "You logged into greenmountainpower.com in any tab while the extension is active",
+            "You logged into your utility portal (greenmountainpower.com or vermontelectric.smarthub.coop) in any tab while the extension is active",
           ].map((item, i) => (
             <li key={i} className="flex items-start gap-3 text-sm text-zinc-700">
               <span aria-hidden className="mt-0.5 shrink-0 text-primary-600">
@@ -628,7 +638,7 @@ export default function Extension() {
                       ? timeAgo(testResult.last_capture_at)
                       : "just now"
                   }`
-                : "Not detected yet — install the extension and visit greenmountainpower.com."}
+                : "Not detected yet — install the extension and visit your utility portal (Green Mountain Power, Vermont Electric Coop)."}
             </p>
           )}
         </div>

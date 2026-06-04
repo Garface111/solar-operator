@@ -13,20 +13,22 @@ const SERVICES = [
   "Multi-client portal",
 ];
 
-// TODO (Agent A): Replace these placeholders with the actual 3-5 bullet summary
-// that Agent A adds at the top of privacy.md and tos.md.
+// Plain-English bullets mirrored from web/onboarding/public/privacy.md
+// and tos.md (Quick summary sections). If you edit those files, update here.
 const PP_BULLETS = [
-  "We never sell your data to anyone, ever.",
-  "We only collect what's needed to generate your reports (GMP bills, your contact info).",
-  "You can delete your account and all your data at any time.",
-  "We use bank-grade encryption in transit and at rest.",
+  "We never sell your data — it's only used to run the reporting service.",
+  "We only read your utility billing data (Green Mountain Power, Vermont Electric Coop) — nothing else from your browser.",
+  "You can delete everything by emailing support@solaroperator.org. We purge your data within 24 hours.",
+  "Your utility login session expires automatically (~21 days) and is refreshed each time you log in with the extension active.",
+  "Our only email provider is Resend.com — it delivers your reports and sign-in links. No other third party sees your data.",
 ];
 
 const TOS_BULLETS = [
-  "You pay $250 once to set up, then $45 per array per month.",
-  "You can cancel anytime — no lock-in, no early-termination fees.",
-  "We never charge more without telling you first.",
-  "This service is for Vermont community solar operators using Green Mountain Power.",
+  "$250 one-time setup, then $45 per solar array per month, billed monthly.",
+  "Cancel anytime — no penalty. Access continues until the period you already paid for.",
+  "You own your data. We use it only to run the service. We never sell it.",
+  "You're responsible for entering correct NEPOOL-GIS IDs — we don't verify them.",
+  "Currently supports Green Mountain Power and Vermont Electric Cooperative. More utilities coming.",
 ];
 
 // Served from web/onboarding/public/ by Vite (and FastAPI in prod) under the
@@ -45,9 +47,10 @@ export default function Welcome() {
           Quarterly solar reports, on autopilot.
         </h1>
         <p className="mt-3 text-base text-zinc-500">
-          We pull your Green Mountain Power bills, build NEPOOL-format
-          net-metering credit reports, and email them to your clients every
-          quarter — so you never touch a spreadsheet again.
+          We pull your utility bills (Green Mountain Power, Vermont Electric
+          Coop, and more), build NEPOOL-format net-metering credit reports,
+          and email them to your clients every quarter — so you never touch
+          a spreadsheet again.
         </p>
 
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 p-5">

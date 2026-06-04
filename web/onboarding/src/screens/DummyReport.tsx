@@ -52,7 +52,8 @@ export default function DummyReport() {
         </h1>
         <p className="mt-2 text-base leading-relaxed text-zinc-500">
           This NEPOOL-format Excel report is what your clients receive every quarter.
-          We build it automatically from your Green Mountain Power bills — no
+          We build it automatically from your utility bills (Green Mountain
+          Power, Vermont Electric Coop, and more) — no
           spreadsheets, no manual data entry.
         </p>
       </div>
@@ -111,7 +112,7 @@ export default function DummyReport() {
         {/* Footnote row mimics the GMCS footnote pinned below data */}
         <div className="border-t border-zinc-200 bg-zinc-50/60 px-5 py-3 text-[11px] leading-relaxed text-zinc-400">
           Net-metering credits are estimates calculated per VT PSB Rule 5.100 and GMP Schedule NM-2.
-          Data auto-pulled from Green Mountain Power and cross-checked against NEPOOL-GIS.
+          Data auto-pulled from your utility (Green Mountain Power, Vermont Electric Coop) and cross-checked against NEPOOL-GIS.
           RECs = integer floor of monthly MWh generation.
         </div>
       </div>

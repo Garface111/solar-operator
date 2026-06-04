@@ -241,6 +241,67 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 for c in clients:
                     c.gmp_last_sync_at = now()
 
+        # ── VEC bill/usage persistence (extension-scraped) ──────────────
+        # GMP has a separate worker that pulls bill PDFs server-side and
+        # parses them. VEC's portal uses cookie-only auth, so the extension
+        # is the only path to data; the extension POSTs bills_raw + usage_raw
+        # in the payload and we persist them here.
+        if provider == "vec":
+            from .adapters.vec import parse_bill as _vec_parse_bill, parse_usage as _vec_parse_usage
+            # Build an account-number → UtilityAccount.id map from this tenant's accounts
+            acct_map = {
+                r.account_number: r.id
+                for r in db.execute(
+                    select(UtilityAccount).where(
+                        UtilityAccount.tenant_id == tenant.id,
+                        UtilityAccount.provider == "vec",
+                    )
+                ).scalars().all()
+            }
+            # Usage rows keyed by (account_number, period_end) so we can attach kWh
+            usage_by_acct: dict[str, dict[str, dict]] = {}
+            for u_raw in (normalized.get("usage_raw") or []):
+                u = _vec_parse_usage(u_raw.get("aria_label", "") if isinstance(u_raw, dict) else str(u_raw))
+                if not u:
+                    continue
+                acct_no = (u_raw.get("account_id") if isinstance(u_raw, dict) else None)
+                # When the aria-label scrape doesn't carry an account_id, fall back to
+                # the only account in this payload (single-account VEC logins).
+                if not acct_no and len(acct_map) == 1:
+                    acct_no = next(iter(acct_map.keys()))
+                if not acct_no or not u["period_end"]:
+                    continue
+                usage_by_acct.setdefault(acct_no, {})[u["period_end"].strftime("%Y-%m")] = u
+
+            for b_raw in (normalized.get("bills_raw") or []):
+                b = _vec_parse_bill(b_raw)
+                acct_no = b.get("account_id")
+                acct_id = acct_map.get(acct_no)
+                if not acct_id or not b.get("billing_date"):
+                    continue
+                doc_no = b.get("bill_uuid") or b.get("pdf_url") or b["billing_date"].strftime("VEC-%Y-%m-%d")
+                exists = db.execute(
+                    select(Bill).where(
+                        Bill.account_id == acct_id,
+                        Bill.document_number == doc_no,
+                    )
+                ).scalar_one_or_none()
+                if exists:
+                    continue
+                # Attach usage from the same billing month, if available
+                u = usage_by_acct.get(acct_no, {}).get(b["billing_date"].strftime("%Y-%m"))
+                db.add(Bill(
+                    tenant_id=tenant.id,
+                    account_id=acct_id,
+                    bill_date=b["billing_date"],
+                    period_start=u["period_start"] if u else None,
+                    period_end=u["period_end"] if u else None,
+                    kwh_generated=int(u["kwh"]) if u else None,
+                    document_number=doc_no,
+                    pdf_path=b.get("pdf_url"),
+                    parse_status="parsed" if u else "partial",
+                ))
+
         db.commit()
 
     # Fire a bill-pull immediately so the operator sees data the moment they
