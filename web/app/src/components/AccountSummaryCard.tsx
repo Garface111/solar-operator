@@ -341,6 +341,27 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
         </div>
       )}
 
+      {/* Vein F: warn when extension is active but no bills have been captured */}
+      {account.extension_heartbeat_at && account.bills_count === 0 &&
+       account.accounts_count > 0 && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm font-medium text-amber-900">
+            Extension is active but no bills captured yet.
+          </p>
+          <p className="mt-0.5 text-xs text-amber-800">
+            Make sure you&apos;re signed into GMP with an account that has community
+            solar. If your account isn&apos;t showing community solar billing,{" "}
+            <a
+              href="mailto:support@solaroperator.org"
+              className="underline underline-offset-2 hover:text-amber-700"
+            >
+              contact support
+            </a>
+            .
+          </p>
+        </div>
+      )}
+
       {/* Recent captures activity feed */}
       {captures !== null && captures.length > 0 && (
         <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
