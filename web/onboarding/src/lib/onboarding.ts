@@ -76,12 +76,35 @@ export async function pingExtension(token: string): Promise<ExtensionPing> {
   return res.json();
 }
 
-export async function markExtensionInstalled(token: string): Promise<void> {
+export async function markExtensionInstalled(
+  token: string,
+  sessionId?: string | null,
+): Promise<void> {
+  // Pass the Stripe session_id when we have it so a webhook-lagged tenant can
+  // self-heal instead of getting a 402 "complete payment" error mid-onboarding.
+  const sid = sessionId
+    ? `&session_id=${encodeURIComponent(sessionId)}`
+    : "";
   const res = await fetch(
-    `/v1/onboarding/extension-installed?token=${encodeURIComponent(token)}`,
+    `/v1/onboarding/extension-installed?token=${encodeURIComponent(token)}${sid}`,
     { method: "POST" },
   );
   if (!res.ok) throw new Error(await parseError(res));
+}
+
+/** Self-heal a paid-but-inactive tenant via the Stripe Checkout session_id.
+ *  Idempotent; always resolves to the current onboarding status. */
+export async function reconcileCheckout(
+  token: string,
+  sessionId: string,
+): Promise<OnboardingStatus> {
+  const res = await fetch(
+    `/v1/onboarding/reconcile-checkout?token=${encodeURIComponent(token)}` +
+      `&session_id=${encodeURIComponent(sessionId)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
 }
 
 export interface ArrayPayload {

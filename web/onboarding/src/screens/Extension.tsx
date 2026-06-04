@@ -11,6 +11,7 @@ import {
   pingExtension,
   markExtensionInstalled,
   fetchStatus,
+  reconcileCheckout,
 } from "../lib/onboarding";
 
 // Placeholder until the MV3 extension is published to the Chrome Web Store.
@@ -39,7 +40,15 @@ export default function Extension() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [activationCode, setActivationCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Paid-but-inactive self-heal: when we return from Stripe with a session_id
+  // but the webhook hasn't activated us yet, we reassure + reconcile rather
+  // than letting the operator hit a 402 "pay again".
+  const [paymentState, setPaymentState] =
+    useState<"none" | "confirming" | "processing">("none");
   const tokenRef = useRef<string | null>(getToken());
+  const sessionIdRef = useRef<string | null>(
+    new URLSearchParams(window.location.search).get("session_id"),
+  );
 
   // Fetch the activation code (tenant_key) the moment the tenant is active.
   // The user needs to paste this into the extension's options page so its
@@ -71,6 +80,58 @@ export default function Extension() {
     void loadCode();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Paid-but-inactive self-heal. On mount, if we returned from Stripe with a
+  // session_id but we're still pending_payment (webhook lag), verify the
+  // Checkout session server-side and poll until active — up to ~30s — instead
+  // of stranding a paying customer.
+  useEffect(() => {
+    const token = tokenRef.current;
+    const sessionId = sessionIdRef.current;
+    if (!token || !sessionId) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    let ticks = 0;
+    const MAX_TICKS = 10; // ~30s at POLL_MS
+
+    async function loop(first: boolean) {
+      if (cancelled) return;
+      try {
+        let st = await fetchStatus(token!);
+        if (cancelled) return;
+        if (first) {
+          if (st.active || st.stage !== "pending_payment") {
+            return; // nothing to heal — webhook already landed
+          }
+          setPaymentState("confirming");
+          // Kick the server-side self-heal once, then poll for the result.
+          st = await reconcileCheckout(token!, sessionId!);
+          if (cancelled) return;
+        }
+        if (st.active) {
+          setPaymentState("none");
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+        // Network/Stripe hiccup — keep the reassuring state and keep polling.
+        setPaymentState((s) => (s === "none" ? "confirming" : s));
+      }
+      ticks += 1;
+      if (ticks >= MAX_TICKS) {
+        if (!cancelled) setPaymentState("processing");
+        return;
+      }
+      timer = window.setTimeout(() => void loop(false), POLL_MS);
+    }
+
+    void loop(true);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
     };
   }, []);
 
@@ -151,7 +212,7 @@ export default function Extension() {
     if (!token || advancing) return;
     setAdvancing(true);
     try {
-      await markExtensionInstalled(token);
+      await markExtensionInstalled(token, sessionIdRef.current);
       navigate("/clients");
     } catch (err) {
       toast.error(
@@ -176,6 +237,40 @@ export default function Extension() {
           your reports. Install it, then log into GMP once — we&apos;ll detect
           it automatically.
         </p>
+
+        {paymentState === "confirming" && (
+          <div className="mt-6 flex items-center gap-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3">
+            <Spinner />
+            <div>
+              <p className="text-sm font-medium text-zinc-900">
+                Confirming your payment…
+              </p>
+              <p className="text-xs text-zinc-500">
+                Hang tight — we&apos;re verifying your subscription with Stripe.
+                This only takes a moment.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {paymentState === "processing" && (
+          <div className="mt-6 rounded-xl border border-amber-300 bg-amber-50 px-4 py-4">
+            <p className="text-sm font-medium text-amber-900">
+              Your payment is processing
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-amber-800">
+              This usually takes a minute. We&apos;ll email you the moment it
+              clears, and you can pick up right where you left off — no need to
+              pay again.
+            </p>
+            <a
+              href="/onboarding/?recover=1"
+              className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-800 transition-colors duration-150 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 focus-visible:ring-offset-2"
+            >
+              I&apos;ll check back later
+            </a>
+          </div>
+        )}
 
         <div className="mt-8 flex flex-col gap-3">
           <a

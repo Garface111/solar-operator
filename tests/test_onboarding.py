@@ -242,3 +242,88 @@ def test_clients_reconciles_stripe_quantity(client, mocks, monkeypatch):
 
     # Failure path stayed quiet — no internal alert on the happy path.
     assert mocks["internal_alert"] == []
+
+
+# ─── (f) paid-but-inactive self-heal (W1-4) ──────────────────────────────
+
+def _fake_paid_session(token, *, paid=True, customer="cus_heal", sub="sub_heal"):
+    """A Stripe Checkout session object (dict-like) for reconcile tests."""
+    return {
+        "id": "cs_test_heal",
+        "payment_status": "paid" if paid else "unpaid",
+        "customer": customer,
+        "subscription": sub,
+        "metadata": {"onboarding_token": token},
+    }
+
+
+def test_reconcile_activates_pending_tenant(client, mocks, monkeypatch):
+    """Webhook lag: tenant still pending, but the Checkout session is paid →
+    reconcile flips it active and advances to the extension stage."""
+    token = _do_checkout(client, email="heal@example.com")["onboarding_token"]
+    # NOTE: deliberately do NOT fire the webhook — simulate it lagging.
+
+    monkeypatch.setattr(
+        onboarding.stripe.checkout.Session, "retrieve",
+        lambda sid: _fake_paid_session(token),
+    )
+
+    resp = client.post("/v1/onboarding/reconcile-checkout",
+                       params={"token": token, "session_id": "cs_test_heal"})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["active"] is True
+    assert data["stage"] == "extension"
+    assert data["activation_code"] is not None
+
+
+def test_reconcile_idempotent_when_unpaid(client, mocks, monkeypatch):
+    """Unpaid session → no activation, but never an error: returns pending."""
+    token = _do_checkout(client, email="unpaid@example.com")["onboarding_token"]
+    monkeypatch.setattr(
+        onboarding.stripe.checkout.Session, "retrieve",
+        lambda sid: _fake_paid_session(token, paid=False),
+    )
+    resp = client.post("/v1/onboarding/reconcile-checkout",
+                       params={"token": token, "session_id": "cs_test_heal"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["active"] is False
+    assert resp.json()["stage"] == "pending_payment"
+
+
+def test_reconcile_rejects_session_for_other_token(client, mocks, monkeypatch):
+    """A session_id whose metadata token doesn't match must not activate us."""
+    token = _do_checkout(client, email="victim@example.com")["onboarding_token"]
+    monkeypatch.setattr(
+        onboarding.stripe.checkout.Session, "retrieve",
+        lambda sid: _fake_paid_session("someone-elses-token"),
+    )
+    resp = client.post("/v1/onboarding/reconcile-checkout",
+                       params={"token": token, "session_id": "cs_test_heal"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["active"] is False
+
+
+def test_extension_installed_self_heals_instead_of_402(client, mocks, monkeypatch):
+    """Clicking 'I've installed it' while pending must self-heal with a paid
+    session_id rather than 402 a paying customer."""
+    token = _do_checkout(client, email="click@example.com")["onboarding_token"]
+    monkeypatch.setattr(
+        onboarding.stripe.checkout.Session, "retrieve",
+        lambda sid: _fake_paid_session(token),
+    )
+    resp = client.post(
+        "/v1/onboarding/extension-installed",
+        params={"token": token, "session_id": "cs_test_heal"},
+    )
+    assert resp.status_code == 200, resp.text
+    # Advanced past extension since we healed from pending in one shot.
+    assert resp.json()["stage"] == "clients"
+
+
+def test_extension_installed_still_402s_without_paid_session(client, mocks):
+    """No session_id and still pending → the 402 guard stays intact."""
+    token = _do_checkout(client, email="nopay@example.com")["onboarding_token"]
+    resp = client.post("/v1/onboarding/extension-installed",
+                       params={"token": token})
+    assert resp.status_code == 402

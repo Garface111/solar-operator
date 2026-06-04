@@ -225,26 +225,31 @@ def checkout(req: CheckoutRequest):
 
 # ─── 2. status ───────────────────────────────────────────────────────────
 
+def _status_payload(db, t: Tenant) -> dict:
+    """Shared status dict for /status and /reconcile-checkout."""
+    n_clients = db.execute(
+        select(Client).where(Client.tenant_id == t.id)
+    ).scalars().all()
+    n_arrays = db.execute(
+        select(Array).where(Array.tenant_id == t.id)
+    ).scalars().all()
+    return {
+        "stage": t.onboarding_stage,
+        "tenant_id": t.id,
+        "active": t.active,
+        "activation_code": t.tenant_key if t.active else None,
+        "clients_count": len(n_clients),
+        "arrays_count": len(n_arrays),
+    }
+
+
 @router.get("/status")
 def status(token: str = Query(...)):
     """Poll target for the SPA. Returns the current wizard stage plus the
     activation code (tenant_key) once the tenant is active."""
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
-        n_clients = db.execute(
-            select(Client).where(Client.tenant_id == t.id)
-        ).scalars().all()
-        n_arrays = db.execute(
-            select(Array).where(Array.tenant_id == t.id)
-        ).scalars().all()
-        return {
-            "stage": t.onboarding_stage,
-            "tenant_id": t.id,
-            "active": t.active,
-            "activation_code": t.tenant_key if t.active else None,
-            "clients_count": len(n_clients),
-            "arrays_count": len(n_arrays),
-        }
+        return _status_payload(db, t)
 
 
 # ─── 3. extension install ────────────────────────────────────────────────
@@ -269,15 +274,86 @@ def extension_ping(token: str = Query(...)):
         }
 
 
+def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
+    """Self-heal a paid-but-inactive tenant when the Stripe webhook is lagging.
+
+    The Checkout success_url carries both `onboarding_token` and `session_id`.
+    If the tenant is still inactive, look the Checkout session up directly and,
+    if Stripe reports it `paid`, activate the tenant and advance to the
+    'extension' stage — exactly what the webhook would have done.
+
+    Idempotent (a no-op once active) and never raises: returns True iff the
+    tenant is active afterward. The session must belong to this onboarding
+    token, so a stray/forged session_id can't activate someone else's tenant.
+    """
+    with SessionLocal() as db:
+        t = _tenant_by_token(db, token)
+        if t.active:
+            return True
+        token_val = t.onboarding_token
+
+    if not session_id or not STRIPE_SECRET_KEY:
+        return False
+
+    try:
+        sess = stripe.checkout.Session.retrieve(session_id)
+    except Exception:  # noqa: BLE001 — never block onboarding on a Stripe hiccup
+        logger.exception("reconcile: Stripe session retrieve failed for %s", session_id)
+        return False
+
+    meta = sess.get("metadata") or {}
+    if meta.get("onboarding_token") and meta.get("onboarding_token") != token_val:
+        logger.warning("reconcile: session %s does not belong to token", session_id)
+        return False
+    if sess.get("payment_status") != "paid":
+        return False
+
+    customer = sess.get("customer")
+    subscription = sess.get("subscription")
+    with SessionLocal() as db:
+        t = _tenant_by_token(db, token)
+        if not t.active:
+            t.active = True
+            t.subscription_status = "active"
+            if t.onboarding_stage == "pending_payment":
+                t.onboarding_stage = "extension"
+            if customer:
+                t.stripe_customer_id = customer
+            if subscription:
+                t.stripe_subscription_id = subscription
+            db.commit()
+            logger.info("reconcile: self-healed tenant %s from paid session %s",
+                        t.id, session_id)
+    return True
+
+
+@router.post("/reconcile-checkout")
+def reconcile_checkout(token: str = Query(...), session_id: str = Query(...)):
+    """Self-heal endpoint for Screen 3: verify the Stripe Checkout session and,
+    if paid, activate the tenant. Safe to call repeatedly while the webhook is
+    in flight. Always returns the current onboarding status — never 402s a
+    tenant we just redirected back from Checkout."""
+    _activate_from_paid_session(token, session_id)
+    with SessionLocal() as db:
+        t = _tenant_by_token(db, token)
+        return _status_payload(db, t)
+
+
 @router.post("/extension-installed")
-def extension_installed(token: str = Query(...)):
+def extension_installed(token: str = Query(...),
+                        session_id: Optional[str] = Query(default=None)):
     """Manual fallback for Screen 3 — operator clicks "I've installed it".
     Advances the stage to 'clients'."""
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
-        if t.onboarding_stage in ("pending_payment",):
-            # Haven't paid yet — don't let them skip ahead.
+        stage = t.onboarding_stage
+    if stage == "pending_payment":
+        # Webhook may simply be lagging. If we hold a paid Checkout session,
+        # self-heal instead of telling a paying customer to pay again.
+        if not _activate_from_paid_session(token, session_id):
             raise HTTPException(402, "Complete payment before installing the extension")
+    with SessionLocal() as db:
+        t = _tenant_by_token(db, token)
         if t.onboarding_stage == "extension":
             t.onboarding_stage = "clients"
             db.commit()
