@@ -33,14 +33,33 @@ const STATUS_STYLES: Record<string, string> = {
   pending: "bg-zinc-100 text-zinc-500",
 };
 
+/** Human-readable label for a subscription status value. DB values stay unchanged. */
+function statusLabel(status: string): string {
+  if (status === "comped") return "Complimentary";
+  if (status === "past_due") return "Past due";
+  return status.replace(/_/g, " ");
+}
+
+/** One-line tooltip explaining each badge, shown on hover. */
+const STATUS_TOOLTIP: Record<string, string> = {
+  active: "Subscription active — billing is current",
+  trialing: "Trial period — no charge yet",
+  comped: "Complimentary access — no charge",
+  past_due: "Payment failed — update your card to keep access",
+  canceled: "Subscription canceled",
+  pending: "Subscription pending",
+};
+
 function StatusBadge({ account }: { account: Account }) {
   const status = account.subscription_status || (account.active ? "active" : "inactive");
   const cls = STATUS_STYLES[status] ?? "bg-zinc-100 text-zinc-600";
+  const tooltip = STATUS_TOOLTIP[status];
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${cls}`}
+      title={tooltip}
+      className={`inline-flex cursor-default items-center rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${cls}`}
     >
-      {status.replace("_", " ")}
+      {statusLabel(status)}
     </span>
   );
 }
@@ -170,6 +189,17 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           )}
           <p className="mt-1 text-xs text-zinc-400">
             Updates automatically as auto-populate adds arrays.
+          </p>
+        </div>
+      )}
+
+      {account.subscription_status === "past_due" && (
+        <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm font-medium text-amber-900">
+            Payment failed — please update your card.
+          </p>
+          <p className="mt-0.5 text-xs text-amber-800">
+            Reports will continue while we retry. Click &ldquo;Manage billing&rdquo; below to update your payment method.
           </p>
         </div>
       )}
