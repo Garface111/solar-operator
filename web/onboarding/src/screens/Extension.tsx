@@ -283,11 +283,11 @@ export default function Extension() {
           </div>
         )}
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
-          Install the Solar Operator Sync extension.
+          Copy your activation code, then install the extension.
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          The Chrome extension securely captures your GMP bills so we can build
-          your reports. Install it, then log into GMP once — we&apos;ll detect
+          You&apos;ll paste this code into the Solar Operator Sync Chrome extension
+          right after installing it — then log into GMP once and we&apos;ll detect
           it automatically.
         </p>
 
@@ -325,33 +325,14 @@ export default function Extension() {
           </div>
         )}
 
-        <div className="mt-8 flex flex-col gap-3">
-          <a
-            href={CHROME_STORE_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-          >
-            Install Solar Operator Sync from the Chrome Web Store ↗
-          </a>
-          {storeUnpublished && (
-            <p className="text-xs text-amber-600">
-              Heads up: the Chrome Web Store listing is still pending publication
-              — this link is a placeholder for now.
-            </p>
-          )}
-        </div>
-
-        {/* Activation code — paste into the extension's options page */}
-        <div className="mt-6 rounded-xl border border-zinc-200 bg-white px-4 py-4">
-          <div className="text-sm font-medium text-zinc-900">
-            Step 2 — paste your activation code into the extension
+        {/* Step 1 — Copy activation code (FIRST so it's the first thing they do) */}
+        <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50/40 px-4 py-4">
+          <div className="text-sm font-semibold text-zinc-900">
+            Step 1 — Copy your activation code
           </div>
-          <p className="mt-1 text-xs text-zinc-500">
-            Once the extension is installed, click its icon in your Chrome
-            toolbar → <strong>Options</strong>, paste this code into{" "}
-            <strong>Activation code</strong>, and click Save. This links the
-            extension to your account so we can find your bills.
+          <p className="mt-1 text-xs text-zinc-600">
+            Keep this somewhere safe for a minute — you&apos;ll paste it into the
+            extension in Step 3. Treat it like a password.
           </p>
           {codeFailed && !activationCode ? (
             <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-3">
@@ -372,7 +353,7 @@ export default function Extension() {
             </div>
           ) : (
             <div className="mt-3 flex items-stretch gap-2">
-              <code className="flex-1 select-all rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-sm text-zinc-800 break-all">
+              <code className="flex-1 select-all rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-sm text-zinc-800 break-all">
                 {activationCode ?? "Loading…"}
               </code>
               <button
@@ -386,6 +367,49 @@ export default function Extension() {
               </button>
             </div>
           )}
+        </div>
+
+        {/* Step 2 — Install the extension */}
+        <div className="mt-4 rounded-xl border border-zinc-200 bg-white px-4 py-4">
+          <div className="text-sm font-semibold text-zinc-900">
+            Step 2 — Install Solar Operator Sync
+          </div>
+          <p className="mt-1 text-xs text-zinc-600">
+            Then pin it to your toolbar so it&apos;s always one click away.
+          </p>
+          <a
+            href={CHROME_STORE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+          >
+            Install Solar Operator Sync from the Chrome Web Store ↗
+          </a>
+          {storeUnpublished && (
+            <p className="mt-2 text-xs text-amber-600">
+              Heads up: the Chrome Web Store listing is still pending publication
+              — this link is a placeholder for now.
+            </p>
+          )}
+          <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs leading-relaxed text-zinc-700">
+            <span className="font-semibold text-zinc-900">Pin the extension:</span>{" "}
+            click the puzzle-piece <span aria-hidden>🧩</span> icon in the top-right
+            of Chrome → find <strong>Solar Operator Sync</strong> → click the pin
+            icon next to it. Now its icon sits in your toolbar for one-click access.
+          </div>
+        </div>
+
+        {/* Step 3 — Paste activation code */}
+        <div className="mt-4 rounded-xl border border-zinc-200 bg-white px-4 py-4">
+          <div className="text-sm font-semibold text-zinc-900">
+            Step 3 — Paste your code into the extension
+          </div>
+          <p className="mt-1 text-xs text-zinc-600">
+            Click the Solar Operator Sync icon in your toolbar →{" "}
+            <strong>Options</strong>, paste the code from Step 1 into{" "}
+            <strong>Activation code</strong>, and click Save. That links the
+            extension to your account.
+          </p>
         </div>
 
         {/* Test connection — let the operator confirm the extension + code are
