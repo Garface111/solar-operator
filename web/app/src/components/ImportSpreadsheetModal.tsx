@@ -255,11 +255,21 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
                           className="h-4 w-4 accent-primary-500"
                         />
                       </td>
-                      <CellInput
-                        value={r.operator_name}
-                        onChange={(v) => editRow(i, "operator_name", v)}
-                        placeholder="Unassigned"
-                      />
+                      <td className="px-1 py-1">
+                        <div className="relative">
+                          <input
+                            value={r.operator_name ?? ""}
+                            placeholder="(blank — will create Unassigned client)"
+                            onChange={(e) => editRow(i, "operator_name", e.target.value)}
+                            className={[
+                              "w-full rounded-md border bg-transparent px-1.5 py-1 text-sm placeholder:text-zinc-300 hover:border-zinc-200 focus:bg-white focus:outline-none focus:ring-1",
+                              !r.operator_name
+                                ? "border-amber-300 text-amber-800 focus:border-amber-400 focus:ring-amber-400/40"
+                                : "border-transparent text-zinc-800 focus:border-primary-400 focus:ring-primary-400/40",
+                            ].join(" ")}
+                          />
+                        </div>
+                      </td>
                       <CellInput
                         value={r.array_name}
                         onChange={(v) => editRow(i, "array_name", v)}
