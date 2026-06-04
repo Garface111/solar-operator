@@ -79,7 +79,15 @@ export default function DashboardLayout({ onSignOut }: Props) {
       </main>
 
       <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
-        Solar Operator · support@solaroperator.org
+        Solar Operator · support@solaroperator.org ·{" "}
+        <a
+          href="https://solaroperator.org/privacy"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline-offset-2 hover:text-zinc-600 hover:underline"
+        >
+          Privacy &amp; Data
+        </a>
       </footer>
     </div>
   );
