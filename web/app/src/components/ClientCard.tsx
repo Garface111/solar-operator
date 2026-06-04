@@ -304,6 +304,47 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
 
       {expanded && (
         <div className="space-y-5 border-t border-zinc-100 px-4 py-4">
+          {/* Latest report — pinned to top of drawer so it's the first thing you see */}
+          <div className="rounded-xl border border-primary-100 bg-primary-50/50 px-4 py-3">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-primary-700">
+              Latest report
+            </h4>
+            <p className="mt-1 text-xs text-zinc-600">
+              Preview what you&apos;ll send {client.name} — without contacting them.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                onClick={handleSendToMe}
+                disabled={sendingToMe || !operatorEmail}
+              >
+                {sendingToMe ? (
+                  <>
+                    <Spinner />
+                    Sending…
+                  </>
+                ) : (
+                  "Email it to me"
+                )}
+              </Button>
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
+                {downloading ? (
+                  <>
+                    <Spinner />
+                    Downloading…
+                  </>
+                ) : (
+                  "Download .xlsx"
+                )}
+              </button>
+            </div>
+          </div>
+
           {/* GMP auto-populate */}
           <div className="rounded-xl bg-zinc-50 px-4 py-3">
             <Toggle
@@ -403,46 +444,7 @@ export function ClientCard({ client, operatorEmail, defaultExpanded, onChange }:
             />
           </div>
 
-          {/* Latest report — send to self or download */}
-          <div className="border-t border-zinc-100 pt-3">
-            <h4 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-              Latest report
-            </h4>
-            <p className="mt-1 text-xs text-zinc-500">
-              Preview what you'll send {client.name} — without contacting them.
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button
-                variant="secondary"
-                onClick={handleSendToMe}
-                disabled={sendingToMe || !operatorEmail}
-              >
-                {sendingToMe ? (
-                  <>
-                    <Spinner />
-                    Sending…
-                  </>
-                ) : (
-                  "Email it to me"
-                )}
-              </Button>
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={downloading}
-                className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-              >
-                {downloading ? (
-                  <>
-                    <Spinner />
-                    Downloading…
-                  </>
-                ) : (
-                  "Download .xlsx"
-                )}
-              </button>
-            </div>
-          </div>
+          {/* Latest report block moved to the top of this drawer */}
 
           <div className="flex justify-end">
             {client.active ? (
