@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Outlet, useOutletContext } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
@@ -67,6 +67,48 @@ export default function DashboardLayout({ onSignOut }: Props) {
     setAccount((a) => (a ? { ...a, ...patch } : a));
   }
 
+  // ── First-visit dots on the tab nav ────────────────────────────────────
+  // Per-tenant localStorage key so multiple operators on the same machine
+  // don't share visit state. Key updates only after we know which tenant
+  // we're looking at.
+  const visitKey = account?.tenant_key
+    ? `so:visited_tabs:${account.tenant_key}`
+    : null;
+  const [visited, setVisited] = useState<Set<string>>(() => new Set());
+  // Hydrate visited set once the tenant id is known.
+  useEffect(() => {
+    if (!visitKey) return;
+    try {
+      const raw = window.localStorage.getItem(visitKey);
+      if (raw) setVisited(new Set(JSON.parse(raw)));
+    } catch {
+      /* ignore corrupt storage */
+    }
+  }, [visitKey]);
+  // Mark the current tab as visited any time the route changes.
+  const location = useLocation();
+  useEffect(() => {
+    if (!visitKey) return;
+    const path = location.pathname;
+    const match = TABS.find((t) => path.startsWith(t.to));
+    if (!match || visited.has(match.to)) return;
+    const next = new Set(visited);
+    next.add(match.to);
+    setVisited(next);
+    try {
+      window.localStorage.setItem(visitKey, JSON.stringify(Array.from(next)));
+    } catch {
+      /* ignore quota */
+    }
+  }, [location.pathname, visitKey, visited]);
+  const unvisited = useMemo(() => {
+    const s = new Set<string>();
+    TABS.forEach((t) => {
+      if (!visited.has(t.to)) s.add(t.to);
+    });
+    return s;
+  }, [visited]);
+
   const ctx: DashboardContext = { account, failed, patchAccount, retryLoad };
 
   // Show a banner if the extension hasn't phoned home in 48+ hours. After 48h
@@ -87,7 +129,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
   return (
     <div className="min-h-full">
       <TopNav email={account?.email ?? null} onSignOut={onSignOut} />
-      <TabBar tabs={TABS} />
+      <TabBar tabs={TABS} unvisited={unvisited} />
 
       {heartbeatStale && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
