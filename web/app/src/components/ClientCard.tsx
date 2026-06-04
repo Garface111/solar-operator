@@ -120,6 +120,11 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
 
   const gmpLogin = client.gmp_email || client.gmp_username || "";
   const delivery = deliveryStatus(client);
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  const captureStale =
+    client.gmp_autopopulate &&
+    (!client.gmp_last_sync_at ||
+      Date.now() - new Date(client.gmp_last_sync_at).getTime() > THIRTY_DAYS_MS);
 
   return (
     <div
@@ -202,6 +207,28 @@ export function ClientCard({ client, defaultExpanded, onChange }: Props) {
               >
                 {refreshing ? "Refreshing…" : "Refresh"}
               </button>
+            </div>
+          )}
+          {captureStale && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
+              {gmpLogin ? (
+                <>
+                  <span>
+                    Open GMP signed in as{" "}
+                    <span className="font-medium">{gmpLogin}</span> to refresh
+                  </span>
+                  <a
+                    href="https://www.greenmountainpower.com/account/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0 font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
+                  >
+                    Open greenmountainpower.com ↗
+                  </a>
+                </>
+              ) : (
+                <span>Sign into GMP to refresh this client&apos;s data</span>
+              )}
             </div>
           )}
         </div>
