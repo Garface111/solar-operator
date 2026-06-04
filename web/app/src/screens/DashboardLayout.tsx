@@ -69,10 +69,38 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
   const ctx: DashboardContext = { account, failed, patchAccount, retryLoad };
 
+  // Show a banner if the extension hasn't phoned home in 48+ hours. After 48h
+  // without a heartbeat, new bill captures aren't flowing — the operator should
+  // know so they can reconnect the extension.
+  const heartbeatStale = account
+    ? !account.extension_heartbeat_at ||
+      Date.now() - new Date(account.extension_heartbeat_at).getTime() >
+        48 * 60 * 60 * 1000
+    : false;
+
   return (
     <div className="min-h-full">
       <TopNav email={account?.email ?? null} onSignOut={onSignOut} />
       <TabBar tabs={TABS} />
+
+      {heartbeatStale && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
+          <div className="mx-auto flex max-w-4xl items-center justify-between gap-4">
+            <p className="text-sm text-amber-800">
+              <span className="font-semibold">GMP extension hasn't been seen in 48+ hours.</span>{" "}
+              New bill data may not be flowing. Log into your GMP account to reconnect.
+            </p>
+            <a
+              href="https://mypower.greenmountainpower.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 text-sm font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
+            >
+              Open GMP →
+            </a>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-4xl px-4 py-8">
         <Outlet context={ctx} />

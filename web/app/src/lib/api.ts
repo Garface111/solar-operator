@@ -139,6 +139,7 @@ export interface Account {
   merge_tags: string[];
   last_pull_at: string | null;
   last_delivery_at: string | null;
+  extension_heartbeat_at: string | null;
   created_at: string | null;
   accounts_count: number;
   bills_count: number;

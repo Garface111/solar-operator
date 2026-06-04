@@ -12,6 +12,35 @@ import {
   getBillingSummary,
 } from "../lib/api";
 
+/** Compute the next quarterly-delivery calendar date (Jan 1/Apr 1/Jul 1/Oct 1
+ *  at 09:00 UTC, whichever comes next from now). */
+function nextQuarterlyDate(): Date {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const candidates = [0, 3, 6, 9].map((m) => {
+    const d = new Date(Date.UTC(year, m, 1, 9, 0, 0));
+    return d;
+  });
+  // Also check next year's Jan 1 for when we're in Q4 past Oct 1
+  candidates.push(new Date(Date.UTC(year + 1, 0, 1, 9, 0, 0)));
+  return candidates.find((d) => d.getTime() > now.getTime())!;
+}
+
+/** Human-readable relative time, e.g. "in 3h 12m" or "in 4 days". */
+function relativeTime(target: Date): string {
+  const diffMs = target.getTime() - Date.now();
+  if (diffMs <= 0) return "now";
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.floor(diffMs / 3_600_000);
+  if (hrs < 24) {
+    const rem = Math.floor((diffMs % 3_600_000) / 60_000);
+    return rem > 0 ? `in ${hrs}h ${rem}m` : `in ${hrs}h`;
+  }
+  const days = Math.ceil(diffMs / 86_400_000);
+  return `in ${days} day${days === 1 ? "" : "s"}`;
+}
+
 function fmtMoney(cents: number, currency: string): string {
   try {
     return new Intl.NumberFormat(undefined, {
@@ -211,6 +240,52 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           </p>
         </div>
       )}
+
+      {/* What happens next — forward-looking timeline so new operators know
+          the system is running without them having to wonder. */}
+      <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+          What happens next
+        </div>
+        <ul className="mt-2 space-y-1.5 text-sm text-zinc-700">
+          <li>
+            <span className="font-medium">Next GMP data pull:</span>{" "}
+            {account.last_pull_at ? (
+              <>
+                {relativeTime(
+                  new Date(
+                    new Date(account.last_pull_at).getTime() + 6 * 60 * 60 * 1000,
+                  ),
+                )}{" "}
+                <span className="text-xs text-zinc-400">(every 6 hours)</span>
+              </>
+            ) : (
+              <span className="text-zinc-400">soon — the extension will begin pulling automatically</span>
+            )}
+          </li>
+          <li>
+            <span className="font-medium">
+              Next {account.report_frequency ?? "quarterly"} report:
+            </span>{" "}
+            {account.report_frequency === "quarterly" || !account.report_frequency ? (
+              <>
+                {nextQuarterlyDate().toLocaleDateString(undefined, {
+                  month: "long",
+                  day: "numeric",
+                  year: "numeric",
+                })}{" "}
+                <span className="text-xs text-zinc-400">
+                  ({relativeTime(nextQuarterlyDate())})
+                </span>
+              </>
+            ) : (
+              <span className="text-xs text-zinc-400">
+                based on your {account.report_frequency} schedule
+              </span>
+            )}
+          </li>
+        </ul>
+      </div>
 
       <div className="mt-5 flex justify-end">
         <Button

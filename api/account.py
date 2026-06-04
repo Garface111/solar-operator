@@ -398,6 +398,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "merge_tags": list(MERGE_TAGS),
             "last_pull_at": t.last_pull_at.isoformat() if t.last_pull_at else None,
             "last_delivery_at": t.last_delivery_at.isoformat() if t.last_delivery_at else None,
+            "extension_heartbeat_at": t.extension_heartbeat_at.isoformat() if t.extension_heartbeat_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "accounts_count": len(accounts),
             "bills_count": len(bills_count),
