@@ -300,23 +300,11 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
               arrays are added.
             </p>
           )}
-          {nextInvoice?.amount_cents != null && nextInvoice.currency && (
-            <p className="mt-1.5 text-xs text-zinc-600">
-              Next charge:{" "}
-              <span className="font-medium text-zinc-800">
-                {fmtMoney(nextInvoice.amount_cents, nextInvoice.currency)}
-              </span>
-              {nextInvoice.period_end && (
-                <>
-                  {" on "}
-                  {new Date(nextInvoice.period_end).toLocaleDateString(
-                    undefined,
-                    { month: "short", day: "numeric", year: "numeric" },
-                  )}
-                </>
-              )}
-            </p>
-          )}
+          {/* Removed "Next charge: $X on <date>" — Stripe's upcoming_invoice
+              endpoint was returning confusing values (zero amounts during the
+              estimate-path window, stale period_ends after the first cycle).
+              The headline above (billable arrays × price = monthly total) is
+              the source of truth; the auto-sync note below covers the rest. */}
           <p className="mt-1.5 text-xs text-zinc-500">
             Arrays count toward your bill as soon as they&apos;re added — whether by manual entry or by utility capture. We sync with Stripe automatically; you&apos;ll see the change on your next statement.
           </p>
