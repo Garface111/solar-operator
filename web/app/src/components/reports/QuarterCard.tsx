@@ -4,7 +4,7 @@ import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
 import type { ClientRow } from "../../lib/api";
 
-type Status = "draft" | "ready" | "sent";
+type Status = "draft" | "ready" | "sent" | "empty";
 
 export interface QuarterCardProps {
   label: string;
@@ -13,6 +13,8 @@ export interface QuarterCardProps {
   clientCount: number;
   /** ISO timestamp of the most-recent delivery, shown as relative time. */
   lastGeneratedAt: string | null;
+  /** Total MWh generated in this quarter across all arrays, or null if unknown. */
+  mwhTotal?: number | null;
   clients: ClientRow[];
   onDownload: (client: ClientRow) => Promise<void>;
   onRegenerate: () => Promise<void>;
@@ -25,6 +27,7 @@ const STATUS_CONFIG: Record<
   sent:  { label: "Sent",  chipVariant: "emerald" },
   ready: { label: "Ready", chipVariant: "wood"    },
   draft: { label: "Draft", chipVariant: "muted"   },
+  empty: { label: "Empty", chipVariant: "muted"   },
 };
 
 function relativeTime(iso: string): string {
@@ -46,6 +49,7 @@ export function QuarterCard({
   arrayCount,
   clientCount,
   lastGeneratedAt,
+  mwhTotal,
   clients,
   onDownload,
   onRegenerate,
@@ -104,6 +108,9 @@ export function QuarterCard({
         {arrayCount > 0
           ? `${arrayCount} array${arrayCount === 1 ? "" : "s"} · ${clientCount} client${clientCount === 1 ? "" : "s"}`
           : "No arrays configured"}
+        {mwhTotal != null && mwhTotal > 0 && (
+          <> · {mwhTotal.toFixed(1)} MWh</>
+        )}
         {lastGeneratedAt && (
           <>
             {" · "}
