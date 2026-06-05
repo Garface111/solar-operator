@@ -140,7 +140,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   return (
     <div
       className={[
-        'so-node-enter w-72 rounded-2xl border bg-white transition-all duration-150',
+        'so-node-enter w-72 rounded-2xl border-[1.5px] bg-white transition-all duration-150',
         client.pinned && !isMergeTarget && !isMergeSource && !dropHover
           ? 'ring-2 ring-amber-300/60 shadow-[0_0_0_2px_rgba(251,191,36,0.18)]'
           : '',
@@ -152,7 +152,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
               ? 'scale-[1.02] border-primary-400 bg-primary-50/40 shadow-[0_0_0_3px_rgba(132,204,22,0.25),0_10px_28px_-8px_rgba(132,204,22,0.4)] ring-2 ring-primary-300'
               : selected
                 ? 'border-primary-400 shadow-md ring-2 ring-primary-300/40'
-                : 'border-cream-border shadow hover:shadow-md',
+                : 'border-zinc-300 shadow-[0_4px_14px_-2px_rgba(15,23,42,0.12),0_2px_4px_-1px_rgba(15,23,42,0.06)] hover:shadow-[0_8px_24px_-4px_rgba(15,23,42,0.16),0_3px_6px_-1px_rgba(15,23,42,0.08)] hover:border-zinc-400',
       ].join(' ')}
       style={{ animationDelay: `${entryDelay}ms` }}
       onDragOver={onDragOver}

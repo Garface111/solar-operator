@@ -43,7 +43,9 @@ export function UnclassifiedNodeComponent({ data: rawData, selected }: NodeProps
     <div
       className={[
         'so-node-enter w-60 rounded-2xl border-2 border-dashed bg-white/90 transition-shadow',
-        selected ? `${th.border} shadow-md` : `${th.border} shadow-sm hover:shadow`,
+        selected
+          ? `${th.border} shadow-[0_8px_24px_-4px_rgba(15,23,42,0.16)]`
+          : `${th.border} shadow-[0_4px_14px_-2px_rgba(15,23,42,0.12),0_2px_4px_-1px_rgba(15,23,42,0.06)] hover:shadow-[0_8px_24px_-4px_rgba(15,23,42,0.16)]`,
       ].join(' ')}
       style={{ animationDelay: `${entryDelay}ms` }}
     >
