@@ -215,9 +215,11 @@ export function AddClientByLoginModal({
           />
         </div>
 
-        <p className="text-xs text-zinc-400">
-          Tip: to add another client, just click <b>+ Add client</b> again
-          after the first one lands.
+        <p className="text-xs text-zinc-500">
+          <b className="text-zinc-700">Adding multiple clients?</b> Stay in the
+          portal tab and sign out, then sign into the next client's account.
+          Each sign-in captures another client automatically — you don't need
+          to come back here between them.
         </p>
       </div>
     </Modal>
