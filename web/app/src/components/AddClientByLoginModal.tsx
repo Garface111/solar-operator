@@ -88,9 +88,8 @@ export function AddClientByLoginModal({
     // everything else is bookkeeping.
     const newTab = window.open(PORTAL_URLS[provider], "_blank", "noopener,noreferrer");
     if (!newTab) {
-      toast.error(
-        "Your browser blocked the new tab. Allow pop-ups for this site and try again.",
-      );
+      // Pop-up blocked — silently bail. Toast removed per Ford's call;
+      // user-initiated click should always be allowed by browsers anyway.
       return;
     }
 
