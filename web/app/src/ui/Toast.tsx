@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 
-type ToastKind = "error" | "success" | "info";
+type ToastKind = "error" | "warning" | "success" | "info";
 
 interface ToastItem {
   id: number;
@@ -20,6 +20,7 @@ interface ToastApi {
   /** Show a toast. Errors are the common case for network failures. */
   show: (message: string, kind?: ToastKind) => void;
   error: (message: string) => void;
+  warning: (message: string) => void;
   success: (message: string) => void;
 }
 
@@ -31,12 +32,14 @@ const TOAST_MS = 5000;
 
 const KIND_STYLES: Record<ToastKind, string> = {
   error: "border-red-200 bg-red-50 text-red-800",
+  warning: "border-amber-300 bg-amber-50 text-amber-900",
   success: "border-primary-200 bg-primary-50 text-primary-800",
   info: "border-zinc-200 bg-white text-zinc-800",
 };
 
 const KIND_ICON: Record<ToastKind, string> = {
   error: "⚠",
+  warning: "⚠",
   success: "✓",
   info: "ℹ",
 };
@@ -58,6 +61,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const api: ToastApi = {
     show,
     error: useCallback((m: string) => show(m, "error"), [show]),
+    warning: useCallback((m: string) => show(m, "warning"), [show]),
     success: useCallback((m: string) => show(m, "success"), [show]),
   };
 
@@ -86,9 +90,9 @@ function ToastCard({
   onDismiss: () => void;
 }) {
   useEffect(() => {
-    // Error toasts are dismiss-only — don't auto-dismiss so the operator can
-    // read the message or act on it without a race against the timer.
-    if (toast.kind === "error") return;
+    // Error and warning toasts are dismiss-only — don't auto-dismiss so the
+    // operator can read the message or act on it without a race against the timer.
+    if (toast.kind === "error" || toast.kind === "warning") return;
     const id = window.setTimeout(onDismiss, TOAST_MS);
     return () => window.clearTimeout(id);
   }, [onDismiss, toast.kind]);

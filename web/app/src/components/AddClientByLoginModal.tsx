@@ -115,6 +115,11 @@ export function AddClientByLoginModal({
               knownIds: before.map((c) => c.id),
             }),
           );
+          try {
+            window.dispatchEvent(
+              new CustomEvent("so:capture-pending", { detail: { provider } }),
+            );
+          } catch { /* ignore */ }
         } catch { /* non-fatal */ }
       } catch { /* parent surfaces its own errors */ }
     })();

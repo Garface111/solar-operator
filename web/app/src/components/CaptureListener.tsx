@@ -79,6 +79,7 @@ export function CaptureListener({ onCaptureLanded }: Props) {
             : "Capture failed — try signing in again, or add the client manually.",
         );
         clearPending();
+        try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
         return;
       }
 
@@ -96,6 +97,7 @@ export function CaptureListener({ onCaptureLanded }: Props) {
         // was adding (ambient resync, page reload between pick and
         // landing, etc.). Quiet info toast — not an error.
         toast.show("Captured fresh utility data.", "info");
+        try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
         return;
       }
 
@@ -105,17 +107,19 @@ export function CaptureListener({ onCaptureLanded }: Props) {
 
       if (newRows.length === 0) {
         // No new client ID → extension re-scraped the previously-
-        // signed-in account. Tell the operator what to do.
-        toast.error(
+        // signed-in account. Warning (amber, actionable) per spec.
+        toast.warning(
           "Looks like the extension re-captured a client you already have. " +
           "Sign out of the portal in that tab first, then click Add client again.",
         );
+        try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
         return;
       }
 
       const newRow = newRows[0];
       const extra = newRows.length > 1 ? ` (+${newRows.length - 1} more)` : "";
       toast.success(`${newRow.name} added${extra} — they're on your dashboard.`);
+      try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
     }
     handlerRef.current = handler;
     window.addEventListener("message", handler);
