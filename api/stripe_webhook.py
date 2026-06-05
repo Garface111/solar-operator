@@ -55,9 +55,16 @@ def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) ->
     """New 5-screen onboarding flow: activate the pending tenant and advance
     it to the 'extension' stage. Crucially does NOT send the welcome email —
     that is deferred to POST /v1/onboarding/complete so the operator only gets
-    it once they actually finish setup."""
+    it once they actually finish setup.
+
+    Handles two modes:
+      setup mode (deferred billing) — collect card only, set trial_ends_at
+      subscription mode (legacy)    — immediate charge, set stripe_subscription_id
+    """
+    from datetime import timedelta
+
+    mode = sess.get("mode", "subscription")
     stripe_customer_id = sess.get("customer")
-    stripe_subscription_id = sess.get("subscription")
 
     with SessionLocal() as db:
         t = db.execute(
@@ -73,26 +80,53 @@ def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) ->
             return {"ignored": "onboarding tenant not found"}
 
         t.active = True
-        t.subscription_status = "active"
         t.onboarding_stage = "extension"
         if stripe_customer_id:
             t.stripe_customer_id = stripe_customer_id
-        if stripe_subscription_id:
-            t.stripe_subscription_id = stripe_subscription_id
+
+        if mode == "setup":
+            setup_intent_id = sess.get("setup_intent")
+            stripe_payment_method_id = None
+            if setup_intent_id:
+                try:
+                    si = stripe.SetupIntent.retrieve(setup_intent_id)
+                    stripe_payment_method_id = si.get("payment_method")
+                except Exception:
+                    logger.exception("Could not retrieve SetupIntent %s", setup_intent_id)
+            if stripe_payment_method_id:
+                t.stripe_payment_method_id = stripe_payment_method_id
+            t.trial_ends_at = now() + timedelta(days=4)
+            t.subscription_status = "trialing"
+        else:
+            # Legacy subscription mode: immediate charge, subscription already created.
+            stripe_subscription_id = sess.get("subscription")
+            if stripe_subscription_id:
+                t.stripe_subscription_id = stripe_subscription_id
+            t.subscription_status = "active"
+
         # Seed a placeholder client when no clients pre-entered (Path B).
         # Lazy import avoids a circular dep with onboarding.py.
         from .onboarding import ensure_placeholder_client
         ensure_placeholder_client(db, t.id)
         db.commit()
         tid = t.id
+        payment_method_id = t.stripe_payment_method_id
 
-    send_internal_alert(
-        "🌞 Onboarding payment received",
-        f"Tenant {tid} ({sess.get('customer_email')}) paid. "
-        f"Awaiting extension install + client setup.\n"
-        f"Stripe customer: {stripe_customer_id}\n"
-        f"Stripe subscription: {stripe_subscription_id}"
-    )
+    if mode == "setup":
+        send_internal_alert(
+            "🌞 Onboarding card collected (trial started)",
+            f"Tenant {tid} ({sess.get('customer_email')}) entered card. Trial active.\n"
+            f"Stripe customer: {stripe_customer_id}\n"
+            f"Payment method: {payment_method_id}"
+        )
+    else:
+        send_internal_alert(
+            "🌞 Onboarding payment received",
+            f"Tenant {tid} ({sess.get('customer_email')}) paid. "
+            f"Awaiting extension install + client setup.\n"
+            f"Stripe customer: {stripe_customer_id}\n"
+            f"Stripe subscription: {sess.get('subscription')}"
+        )
     return {"tenant_activated": tid}
 
 
