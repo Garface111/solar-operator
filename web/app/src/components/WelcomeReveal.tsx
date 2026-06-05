@@ -1,22 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import type { ClientRow } from "../lib/api";
 
-type Phase = "idle" | "animating" | "done";
+type Phase = "idle" | "greeting" | "cascading" | "done";
 
 export type GetItemProps = (
   index: number,
-) => React.HTMLAttributes<HTMLDivElement>;
+) => React.HTMLAttributes<HTMLDivElement> & { ["data-reveal-index"]?: number };
 
 interface Props {
   clients: ClientRow[] | null;
   operatorName: string | null;
-  children: (getItemProps: GetItemProps) => React.ReactNode;
+  children: (getItemProps: GetItemProps, revealPhase: Phase) => React.ReactNode;
 }
 
 const THROTTLE_KEY = "so_last_reveal";
-const THROTTLE_MS = 2 * 60 * 60 * 1000; // 2 hours
-const GREETING_MS = 700;
-const CARD_STAGGER_MS = 80;
+const THROTTLE_MS = 5 * 60 * 1000; // 5 minutes — short enough to see on demand
+const GREETING_MS = 1100;
+const CARD_STAGGER_MS = 140;
+const CARD_ANIM_MS = 560;
 
 function checkThrottle(): boolean {
   try {
@@ -31,7 +32,7 @@ function markRevealed(): void {
   try {
     localStorage.setItem(THROTTLE_KEY, String(Date.now()));
   } catch {
-    // storage quota — ignore
+    /* ignore */
   }
 }
 
@@ -48,48 +49,67 @@ function formatAgo(isoStr: string | null): string {
 
 export function WelcomeReveal({ clients, operatorName, children }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
-  // Stable across renders — read once on mount.
   const freshVisit = useRef(
     new URLSearchParams(window.location.search).get("fresh") === "1",
+  ).current;
+  const forceReveal = useRef(
+    new URLSearchParams(window.location.search).get("reveal") === "1",
   ).current;
 
   useEffect(() => {
     if (clients === null || clients.length === 0) return;
     if (phase !== "idle") return;
 
-    if (!freshVisit && checkThrottle()) {
+    if (!freshVisit && !forceReveal && checkThrottle()) {
       setPhase("done");
     } else {
-      setPhase("animating");
+      setPhase("greeting");
     }
-  }, [clients, phase, freshVisit]);
+  }, [clients, phase, freshVisit, forceReveal]);
+
+  // Move from greeting → cascading after the greeting holds.
+  useEffect(() => {
+    if (phase !== "greeting") return;
+    const t = window.setTimeout(() => setPhase("cascading"), GREETING_MS);
+    return () => window.clearTimeout(t);
+  }, [phase]);
+
+  // When cascading: schedule the final-done after the last card lands.
+  useEffect(() => {
+    if (phase !== "cascading" || !clients) return;
+    const total = clients.length * CARD_STAGGER_MS + CARD_ANIM_MS + 200;
+    const t = window.setTimeout(() => {
+      setPhase("done");
+      markRevealed();
+    }, total);
+    return () => window.clearTimeout(t);
+  }, [phase, clients]);
 
   function skip() {
-    if (phase !== "animating") return;
+    if (phase === "done") return;
     setPhase("done");
     markRevealed();
   }
 
-  function getItemProps(index: number): React.HTMLAttributes<HTMLDivElement> {
-    if (phase !== "animating") return {};
-    const isLast = index === (clients?.length ?? 1) - 1;
-    return {
-      className: "so-cascade-row",
-      style: {
-        animationDelay: `${GREETING_MS + index * CARD_STAGGER_MS}ms`,
-      } as React.CSSProperties,
-      ...(isLast
-        ? {
-            onAnimationEnd: (e: React.AnimationEvent<HTMLDivElement>) => {
-              // Guard against bubbled events from children.
-              if (e.animationName === "so-cascade-row-in") {
-                setPhase("done");
-                markRevealed();
-              }
-            },
-          }
-        : {}),
-    };
+  function getItemProps(
+    index: number,
+  ): React.HTMLAttributes<HTMLDivElement> & { ["data-reveal-index"]?: number } {
+    if (phase === "idle" || phase === "greeting") {
+      // hide cards entirely until cascade starts so the greeting owns the stage
+      return {
+        style: { opacity: 0 } as React.CSSProperties,
+      };
+    }
+    if (phase === "cascading") {
+      return {
+        className: "so-reveal-card",
+        style: {
+          animationDelay: `${index * CARD_STAGGER_MS}ms`,
+        } as React.CSSProperties,
+        "data-reveal-index": index,
+      };
+    }
+    return {};
   }
 
   const totalClients = clients?.length ?? 0;
@@ -105,28 +125,35 @@ export function WelcomeReveal({ clients, operatorName, children }: Props) {
   })();
 
   const displayName = operatorName ?? "there";
+  const showOverlay = phase === "greeting" || phase === "cascading";
 
   return (
-    // Clicking anywhere during the animation skips to the final state.
-    <div
-      className="relative"
-      onClick={phase === "animating" ? skip : undefined}
-    >
-      {phase === "animating" && (
+    <div className="relative" onClick={showOverlay ? skip : undefined}>
+      {showOverlay && (
         <div
-          className="so-welcome-greeting pointer-events-none absolute left-0 right-0 top-0 z-10"
+          className="so-reveal-overlay pointer-events-none fixed inset-0 z-30 flex flex-col items-center justify-start pt-24"
           aria-live="polite"
         >
-          <p className="font-serif text-2xl font-bold text-wood-600">
-            Welcome back, {displayName}.
-          </p>
+          <div className="so-reveal-greeting text-center">
+            <p className="font-serif text-4xl font-semibold tracking-tight text-wood-700 md:text-5xl">
+              Welcome back,
+              <br />
+              <span className="text-emerald-700">{displayName}</span>.
+            </p>
+            {phase === "cascading" && (
+              <p className="so-reveal-subline mt-4 text-sm text-wood-500">
+                Loading {totalClients} client{totalClients === 1 ? "" : "s"} ·{" "}
+                {totalArrays} array{totalArrays === 1 ? "" : "s"}…
+              </p>
+            )}
+          </div>
         </div>
       )}
 
-      {children(getItemProps)}
+      {children(getItemProps, phase)}
 
       {phase === "done" && totalClients > 0 && (
-        <p className="so-welcome-footer mt-3 text-center text-xs text-wood-500">
+        <p className="so-welcome-footer mt-4 text-center text-xs text-wood-500">
           {totalClients} client{totalClients === 1 ? "" : "s"} ·{" "}
           {totalArrays} array{totalArrays === 1 ? "" : "s"} · last update{" "}
           {formatAgo(latestSync)} ago
