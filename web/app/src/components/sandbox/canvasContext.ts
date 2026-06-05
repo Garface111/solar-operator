@@ -9,6 +9,8 @@ export interface CanvasActions {
   deleteNode: (nodeId: string) => void;
   detachAccount: (clientId: string, accountId: string) => void;
   moveAccountToClient: (srcClientId: string, accountId: string, dstClientId: string) => void;
+  detachLogin: (clientId: string, utility: 'GMP' | 'VEC' | 'WEC') => void;
+  moveLoginToClient: (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string) => void;
 }
 
 export const CanvasActionsContext = createContext<CanvasActions | null>(null);

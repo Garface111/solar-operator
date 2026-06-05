@@ -549,6 +549,126 @@ export default function SandboxCanvas() {
     [setNodes, toast, loadCanvas],
   );
 
+  // ── Login-level (group) actions ──────────────────────────────────────────
+
+  const detachLogin = useCallback(
+    (clientId: string, utility: 'GMP' | 'VEC' | 'WEC') => {
+      const current = nodesRef.current;
+      const clientNode = current.find((n) => n.id === clientId && n.type === 'client');
+      if (!clientNode) return;
+      const d = clientNode.data as ClientNodeData;
+      const detachedAccounts = d.client.accounts.filter((a) => a.utility === utility);
+      if (detachedAccounts.length === 0) return;
+
+      const snapshot = current;
+      // Optimistic UI: strip the whole login from the client; pop accounts
+      // out as unclassified nodes fanned to the right of the client card.
+      setNodes((ns) => {
+        const updatedClient: ClientData = {
+          ...d.client,
+          accounts: d.client.accounts.filter((a) => a.utility !== utility),
+        };
+        const baseX = clientNode.position.x + 360;
+        const baseY = clientNode.position.y;
+        const newNodes: Node[] = detachedAccounts.map((acc, i) => ({
+          id: acc.id,
+          type: 'unclassified',
+          position: { x: baseX + (i % 2) * 200, y: baseY + Math.floor(i / 2) * 110 },
+          data: { account: acc, entryDelay: i * 25 } as UnclassifiedNodeData,
+        }));
+        return [
+          ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
+          ...newNodes,
+        ];
+      });
+
+      toast.show(
+        `${utility} login (${detachedAccounts.length} ${detachedAccounts.length === 1 ? 'account' : 'accounts'}) detached.`,
+        'info',
+      );
+
+      // Persist — fan out reassignAccount(null) per account; collect failures
+      Promise.all(
+        detachedAccounts.map((acc) => {
+          const numId = parseInt(acc.id.replace('account_', ''), 10);
+          if (isNaN(numId)) return Promise.resolve();
+          return reassignAccount(numId, null);
+        }),
+      ).catch(() => {
+        setNodes(snapshot);
+        toast.show('Detach failed — reverted.', 'error');
+      });
+    },
+    [setNodes, toast],
+  );
+
+  const moveLoginToClient = useCallback(
+    (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string) => {
+      if (srcClientId === dstClientId) return;
+      const current = nodesRef.current;
+      const src = current.find((n) => n.id === srcClientId && n.type === 'client');
+      const dst = current.find((n) => n.id === dstClientId && n.type === 'client');
+      if (!src || !dst) return;
+
+      const srcData = src.data as ClientNodeData;
+      const dstData = dst.data as ClientNodeData;
+      const moved = srcData.client.accounts.filter((a) => a.utility === utility);
+      if (moved.length === 0) return;
+
+      const snapshot = current;
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.id === srcClientId) {
+            return {
+              ...n,
+              data: {
+                ...srcData,
+                client: {
+                  ...srcData.client,
+                  accounts: srcData.client.accounts.filter((a) => a.utility !== utility),
+                },
+              },
+            };
+          }
+          if (n.id === dstClientId) {
+            return {
+              ...n,
+              data: {
+                ...dstData,
+                client: {
+                  ...dstData.client,
+                  accounts: [...dstData.client.accounts, ...moved],
+                },
+              },
+            };
+          }
+          return n;
+        }),
+      );
+
+      toast.show(
+        `${utility} login (${moved.length} ${moved.length === 1 ? 'account' : 'accounts'}) → ${dstData.client.name}.`,
+        'success',
+      );
+
+      const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
+      if (isNaN(dstNumId)) return;
+      Promise.all(
+        moved.map((acc) => {
+          const numId = parseInt(acc.id.replace('account_', ''), 10);
+          if (isNaN(numId)) return Promise.resolve();
+          return reassignAccount(numId, dstNumId);
+        }),
+      )
+        .then(() => { void loadCanvas(); })
+        .catch(() => {
+          setNodes(snapshot);
+          toast.show('Move failed — reverted.', 'error');
+        });
+    },
+    [setNodes, toast, loadCanvas],
+  );
+
   const actions: CanvasActions = {
     toggleExpand,
     startRename,
@@ -558,6 +678,8 @@ export default function SandboxCanvas() {
     deleteNode,
     detachAccount,
     moveAccountToClient,
+    detachLogin,
+    moveLoginToClient,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────

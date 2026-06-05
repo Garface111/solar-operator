@@ -90,7 +90,10 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   // ── Native drop target for cross-client account drags ────────────────────
   const [dropHover, setDropHover] = useState(false);
   const onDragOver = (e: React.DragEvent) => {
-    if (!e.dataTransfer.types.includes('application/x-so-account')) return;
+    if (
+      !e.dataTransfer.types.includes('application/x-so-account') &&
+      !e.dataTransfer.types.includes('application/x-so-login')
+    ) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -101,15 +104,22 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
     if (e.currentTarget === e.target) setDropHover(false);
   };
   const onDrop = (e: React.DragEvent) => {
-    const raw = e.dataTransfer.getData('application/x-so-account');
-    if (!raw) return;
+    const accountRaw = e.dataTransfer.getData('application/x-so-account');
+    const loginRaw = e.dataTransfer.getData('application/x-so-login');
+    if (!accountRaw && !loginRaw) return;
     e.preventDefault();
     e.stopPropagation();
     setDropHover(false);
     try {
-      const { srcClientId, accountId } = JSON.parse(raw) as { srcClientId: string; accountId: string };
-      if (srcClientId === id) return; // dropped on own client — no-op
-      actions.moveAccountToClient(srcClientId, accountId, id);
+      if (accountRaw) {
+        const { srcClientId, accountId } = JSON.parse(accountRaw) as { srcClientId: string; accountId: string };
+        if (srcClientId === id) return;
+        actions.moveAccountToClient(srcClientId, accountId, id);
+      } else if (loginRaw) {
+        const { srcClientId, utility } = JSON.parse(loginRaw) as { srcClientId: string; utility: 'GMP' | 'VEC' | 'WEC' };
+        if (srcClientId === id) return;
+        actions.moveLoginToClient(srcClientId, utility, id);
+      }
     } catch {
       /* malformed payload — ignore */
     }
@@ -214,6 +224,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
               utility={group.utility}
               accounts={group.accounts}
               onDetach={(accountId) => actions.detachAccount(id, accountId)}
+              onDetachLogin={() => actions.detachLogin(id, group.utility)}
             />
           ))}
         </div>
@@ -247,47 +258,83 @@ function LoginGroupRow({
   utility,
   accounts,
   onDetach,
+  onDetachLogin,
 }: {
   clientId: string;
   utility: Utility;
   accounts: UtilityAccount[];
   onDetach: (accountId: string) => void;
+  onDetachLogin: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const th = UTILITY_THEME[utility];
   const accountCount = accounts.length;
   const arrayTotal = accounts.reduce((n, a) => n + a.arrays.length, 0);
 
+  const onDragStart = (e: React.DragEvent) => {
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(
+      'application/x-so-login',
+      JSON.stringify({ srcClientId: clientId, utility }),
+    );
+    e.dataTransfer.setData('text/plain', `${utility} login`);
+    setDragging(true);
+  };
+  const onDragEnd = () => setDragging(false);
+
   return (
-    <div className={`rounded-xl border px-3 py-2.5 ${th.row}`}>
+    <div
+      className={[
+        'group/login rounded-xl border px-3 py-2.5 transition-opacity',
+        th.row,
+        dragging ? 'opacity-40' : '',
+      ].join(' ')}
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      title="Drag to move all accounts under this login to another client"
+    >
       {/* Login header — click to reveal individual accounts */}
-      <button
-        type="button"
-        className="nodrag flex w-full items-center gap-1.5 text-left"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
-        aria-label={expanded ? 'Collapse login' : 'Expand login'}
-      >
-        <svg
-          className={`h-3 w-3 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''} ${th.rowText}`}
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2.5}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="nodrag flex flex-1 items-center gap-1.5 text-left"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse login' : 'Expand login'}
         >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-        </svg>
-        <span className={`h-2 w-2 rounded-full ${th.rowDot}`} />
-        <span className={`text-[10px] font-semibold uppercase tracking-wider ${th.rowText}`}>
-          Login
-        </span>
-        <span className={`text-xs font-semibold ${th.rowText}`}>
-          {utility}
-        </span>
-        <span className={`ml-auto text-[10px] font-medium opacity-60 ${th.rowText}`}>
-          {accountCount} {accountCount === 1 ? 'account' : 'accounts'} · {arrayTotal} {arrayTotal === 1 ? 'array' : 'arrays'}
-        </span>
-      </button>
+          <svg
+            className={`h-3 w-3 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''} ${th.rowText}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2.5}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+          <span className={`h-2 w-2 rounded-full ${th.rowDot}`} />
+          <span className={`text-[10px] font-semibold uppercase tracking-wider ${th.rowText}`}>
+            Login
+          </span>
+          <span className={`text-xs font-semibold ${th.rowText}`}>
+            {utility}
+          </span>
+          <span className={`ml-auto text-[10px] font-medium opacity-60 ${th.rowText}`}>
+            {accountCount} {accountCount === 1 ? 'account' : 'accounts'} · {arrayTotal} {arrayTotal === 1 ? 'array' : 'arrays'}
+          </span>
+        </button>
+        <button
+          type="button"
+          className={`nodrag invisible shrink-0 rounded p-0.5 text-sm opacity-60 transition-all hover:opacity-100 group-hover/login:visible ${th.rowText}`}
+          onClick={onDetachLogin}
+          title={`Detach entire ${utility} login`}
+          aria-label={`Detach entire ${utility} login`}
+        >
+          ×
+        </button>
+      </div>
       {expanded && (
         <div className="mt-2 space-y-2 border-t border-current/10 pt-2">
           {accounts.map((acc) => (
