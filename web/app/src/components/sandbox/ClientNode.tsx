@@ -509,11 +509,13 @@ function LoginGroupRow({
       <div className="flex items-center gap-1.5 px-3 py-2.5">
         {/* Six-dot drag handle — the ONLY draggable surface on the login row */}
         <span
-          className={`nodrag shrink-0 cursor-grab active:cursor-grabbing rounded p-0.5 opacity-40 hover:opacity-80 transition-opacity ${th.rowText}`}
+          className={`nodrag nopan shrink-0 cursor-grab active:cursor-grabbing rounded p-0.5 opacity-40 hover:opacity-80 transition-opacity ${th.rowText}`}
           draggable
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
-          onMouseDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => { e.stopPropagation(); }}
+          onPointerDown={(e) => { e.stopPropagation(); }}
+          onPointerDownCapture={(e) => { e.stopPropagation(); }}
           title="Drag to move this login to another client"
           aria-label="Drag handle"
         >
