@@ -5,7 +5,7 @@ interface Props {
   value: number;
   /** Decimal places. 0 = integer. */
   decimals?: number;
-  /** Animation duration in ms. Default 1500 — slow enough to see. */
+  /** Animation duration in ms. Default 2200 — slow + visible. */
   durationMs?: number;
   /** Delay before counting starts. */
   delayMs?: number;
@@ -28,7 +28,7 @@ interface Props {
 export function RevealNumber({
   value,
   decimals = 0,
-  durationMs = 1500,
+  durationMs = 2200,
   delayMs = 0,
   suffix = "",
   prefix = "",
@@ -95,7 +95,7 @@ export function RevealNumber({
   // While animating: emerald + faint glow + slight scale. On done: snap to
   // inherited color (the number "lands" into the layout's natural tone).
   const animClass = animating
-    ? "text-emerald-600 transition-colors duration-300 [text-shadow:0_0_8px_rgba(16,185,129,0.35)]"
+    ? "font-bold text-emerald-600 transition-colors duration-300 [text-shadow:0_0_12px_rgba(16,185,129,0.55)]"
     : "transition-colors duration-300";
 
   return (

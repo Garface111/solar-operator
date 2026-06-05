@@ -8,6 +8,7 @@ import { useToast } from "../ui/Toast";
 import { ClientCard } from "./ClientCard";
 import { WelcomeReveal } from "./WelcomeReveal";
 import { AddClientModal } from "./AddClientModal";
+import { AddClientByLoginModal } from "./AddClientByLoginModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import { CaptureCeremony } from "./CaptureCeremony";
@@ -32,6 +33,7 @@ export function ClientsSection({ expandClientId }: Props) {
   const operatorEmail = account?.email ?? null;
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [addingByLogin, setAddingByLogin] = useState(false);
   const [importing, setImporting] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
   const [missingNepoolCount, setMissingNepoolCount] = useState(0);
@@ -281,7 +283,7 @@ export function ClientsSection({ expandClientId }: Props) {
             Import spreadsheet
           </Button>
           <Button
-            onClick={() => setAdding(true)}
+            onClick={() => setAddingByLogin(true)}
             className="px-4 py-2"
             data-tour-step="6-add"
           >
@@ -315,7 +317,7 @@ export function ClientsSection({ expandClientId }: Props) {
               <li>Their arrays show up here automatically.</li>
             </ol>
             <div className="pt-1">
-              <Button onClick={() => setAdding(true)}>+ Add your first client</Button>
+              <Button onClick={() => setAddingByLogin(true)}>+ Add your first client</Button>
             </div>
           </div>
         </Card>
@@ -398,6 +400,16 @@ export function ClientsSection({ expandClientId }: Props) {
         open={adding}
         onClose={() => setAdding(false)}
         onCreated={addClientLocal}
+      />
+
+      <AddClientByLoginModal
+        open={addingByLogin}
+        onClose={() => setAddingByLogin(false)}
+        onCaptured={loadClients}
+        onSwitchToManual={() => {
+          setAddingByLogin(false);
+          setAdding(true);
+        }}
       />
 
       <ImportSpreadsheetModal
