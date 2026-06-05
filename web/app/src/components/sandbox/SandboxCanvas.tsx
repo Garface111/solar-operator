@@ -29,6 +29,7 @@ import { Spinner } from '../../ui/Spinner';
 import { AddClientModal } from '../AddClientModal';
 import { AddClientByLoginModal } from '../AddClientByLoginModal';
 import { listClients } from '../../lib/api';
+import { CommandPalette } from './CommandPalette';
 
 // ── Node type registry (stable reference — must live outside component) ────
 
@@ -955,6 +956,15 @@ export default function SandboxCanvas() {
           open={showAddModal}
           onClose={() => setShowAddModal(false)}
           onCreated={(_client) => { setShowAddModal(false); void loadCanvas(); }}
+        />
+
+        {/* Cmd+K / Ctrl+K command palette */}
+        <CommandPalette
+          nodes={nodes}
+          setNodes={setNodes}
+          onAddClient={() => setShowAddByLogin(true)}
+          onAutoArrange={autoArrange}
+          onFitView={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}
         />
       </div>
     </CanvasActionsContext.Provider>
