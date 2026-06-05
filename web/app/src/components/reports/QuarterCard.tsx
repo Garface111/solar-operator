@@ -186,42 +186,53 @@ function ClientDeliveryRow({
   return (
     <div className="flex items-center gap-3 py-2">
       <div className="min-w-0 flex-1">
-        <span className="text-sm text-zinc-800">{client.name}</span>
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="text-sm text-zinc-800">{client.name}</span>
+          {client.contact_email ? (
+            <a
+              href={`mailto:${client.contact_email}`}
+              className="text-xs text-zinc-500 underline-offset-2 hover:text-zinc-700 hover:underline"
+              title="Click to email this client"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {client.contact_email}
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 align-middle">
+              <input
+                type="email"
+                value={emailDraft}
+                onChange={(e) => setEmailDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); void saveEmail(); }
+                }}
+                placeholder="add contact email…"
+                disabled={savingEmail}
+                className="w-48 rounded-md border border-amber-300 bg-amber-50/40 px-2 py-0.5 text-xs text-amber-900 placeholder:text-amber-500/70 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-400/40"
+                aria-label={`Contact email for ${client.name}`}
+              />
+              {emailDraft.trim() && (
+                <button
+                  type="button"
+                  onClick={() => void saveEmail()}
+                  disabled={savingEmail}
+                  className="rounded-md bg-amber-500 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-amber-600 disabled:opacity-50"
+                >
+                  {savingEmail ? <Spinner className="h-3 w-3" /> : "Save"}
+                </button>
+              )}
+            </span>
+          )}
+        </div>
         {deliveryStatus === "bounced" && client.last_bounce_reason && (
-          <span className="ml-2 text-xs text-red-500">
+          <div className="mt-0.5 text-xs text-red-500">
             {client.last_bounce_reason}
-          </span>
+          </div>
         )}
         {deliveryStatus === "sent" && client.last_delivered_at && (
-          <span className="ml-2 text-xs text-zinc-400">
-            {shortDate(client.last_delivered_at)}
-          </span>
-        )}
-        {deliveryStatus === "no_email" && (
-          <span className="ml-2 inline-flex items-center gap-1.5 align-middle">
-            <input
-              type="email"
-              value={emailDraft}
-              onChange={(e) => setEmailDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); void saveEmail(); }
-              }}
-              placeholder="add contact email…"
-              disabled={savingEmail}
-              className="w-48 rounded-md border border-amber-300 bg-amber-50/40 px-2 py-0.5 text-xs text-amber-900 placeholder:text-amber-500/70 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-400/40"
-              aria-label={`Contact email for ${client.name}`}
-            />
-            {emailDraft.trim() && (
-              <button
-                type="button"
-                onClick={() => void saveEmail()}
-                disabled={savingEmail}
-                className="rounded-md bg-amber-500 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-amber-600 disabled:opacity-50"
-              >
-                {savingEmail ? <Spinner className="h-3 w-3" /> : "Save"}
-              </button>
-            )}
-          </span>
+          <div className="mt-0.5 text-xs text-zinc-400">
+            delivered {shortDate(client.last_delivered_at)}
+          </div>
         )}
       </div>
       {statusChip}
