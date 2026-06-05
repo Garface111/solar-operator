@@ -460,7 +460,7 @@ def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
             if mode == "setup":
                 t.subscription_status = "trialing"
                 if t.trial_ends_at is None:
-                    t.trial_ends_at = now() + timedelta(days=4)
+                    t.trial_ends_at = now() + timedelta(days=14)
             else:
                 t.subscription_status = "active"
             if t.onboarding_stage == "pending_payment":

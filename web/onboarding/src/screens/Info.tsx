@@ -105,7 +105,7 @@ export default function Info() {
         </div>
 
         <p className="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-xs leading-relaxed text-zinc-500">
-          Next: add your clients and arrays, then review pricing before checkout.
+          Next: add your clients and arrays. We&apos;ll save your card to start your 14-day free trial — no charge today.
         </p>
       </Card>
     </ScreenLayout>

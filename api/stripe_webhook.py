@@ -95,7 +95,7 @@ def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) ->
                     logger.exception("Could not retrieve SetupIntent %s", setup_intent_id)
             if stripe_payment_method_id:
                 t.stripe_payment_method_id = stripe_payment_method_id
-            t.trial_ends_at = now() + timedelta(days=4)
+            t.trial_ends_at = now() + timedelta(days=14)
             t.subscription_status = "trialing"
         else:
             # Legacy subscription mode: immediate charge, subscription already created.

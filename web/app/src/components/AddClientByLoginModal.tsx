@@ -157,7 +157,7 @@ export function AddClientByLoginModal({
             {extensionUsable ? "Add manually instead" : "Add manually →"}
           </Button>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            I'm done
           </Button>
         </>
       }

@@ -112,7 +112,7 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
             }}
             disabled={saving}
           >
-            Cancel
+            I&apos;m done
           </Button>
           <Button onClick={handleCreate} disabled={!valid || saving}>
             {saving ? (

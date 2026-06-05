@@ -24,7 +24,7 @@ export interface DashboardContext {
 }
 
 const TABS: Tab[] = [
-  { label: "Account", to: "/account" },
+  { label: "Master account", to: "/account" },
   { label: "Clients", to: "/clients" },
   { label: "Automatic Reports", to: "/reports" },
 ];

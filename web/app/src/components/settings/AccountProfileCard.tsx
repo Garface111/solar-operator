@@ -69,7 +69,7 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
     <Card>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight text-zinc-900">Account</h2>
+          <h2 className="text-lg font-semibold tracking-tight text-zinc-900">Master account</h2>
           <p className="mt-0.5 text-sm text-zinc-500">
             {account.name || "Your account"} · Solar Operator
           </p>

@@ -85,7 +85,6 @@ export default function ClientSetup() {
   if (!info?.email) return null;
 
   const monthly = Math.max(0, count) * ARRAY_PRICE;
-  const todayTotal = SETUP_FEE + monthly;
   const canContinue = count >= 1 && !submitting;
 
   async function handleContinue() {
@@ -121,11 +120,12 @@ export default function ClientSetup() {
           About how many arrays do you manage?
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          A ballpark is fine — we just need it to set up your subscription.
-          You&apos;ll add the exact clients and arrays from your dashboard
-          after checkout, and the extension will auto-populate most of it
-          when you log into your utility portal. Billing reconciles
-          automatically as the real count is established.
+          A ballpark is fine — we use it to set up your subscription pricing.
+          You won&apos;t be charged today; your free trial begins as soon as
+          you save your payment method. You&apos;ll add your real clients
+          and arrays in the dashboard, and the extension auto-populates most
+          of it when you log into your utility portal. We reconcile your
+          subscription quantity automatically as the real count comes in.
         </p>
 
         {/* Quick picks */}
@@ -181,21 +181,30 @@ export default function ClientSetup() {
           </div>
         </div>
 
-        {/* Billing breakdown — folded in from the deleted Plan screen */}
-        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-5 space-y-3">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-zinc-600">One-time setup</span>
-            <span className="font-medium text-zinc-900">${SETUP_FEE}</span>
+        {/* Billing breakdown — folded in from the deleted Plan screen.
+            In setup-mode checkout we collect the payment method only;
+            nothing is charged until trial_ends_at. */}
+        <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 p-5 space-y-3">
+          <div className="flex items-center justify-between text-sm font-semibold text-primary-800">
+            <span>Charged today</span>
+            <span>$0.00</span>
           </div>
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-zinc-600">
-              Monthly ({count} {count === 1 ? "array" : "arrays"} × ${ARRAY_PRICE})
-            </span>
-            <span className="font-medium text-zinc-900">${monthly}/month</span>
-          </div>
-          <div className="border-t border-zinc-200 pt-3 flex items-center justify-between text-sm font-medium">
-            <span className="text-zinc-700">Charged today</span>
-            <span className="text-zinc-900">${todayTotal}</span>
+          <p className="text-xs text-primary-700">
+            Your 14-day free trial starts the moment you save your card. Use
+            it to add your clients and arrays. We won&apos;t charge you until
+            the trial ends — and we&apos;ll email you a few days before that.
+          </p>
+          <div className="border-t border-primary-200 pt-3 space-y-2 text-xs text-primary-800">
+            <div className="flex items-center justify-between">
+              <span>After trial — one-time setup</span>
+              <span>${SETUP_FEE}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>
+                Monthly ({count} {count === 1 ? "array" : "arrays"} × ${ARRAY_PRICE})
+              </span>
+              <span>${monthly}/month</span>
+            </div>
           </div>
         </div>
 
@@ -210,16 +219,17 @@ export default function ClientSetup() {
                 Redirecting…
               </>
             ) : (
-              "Continue to payment →"
+              "Save payment method & start free trial →"
             )}
           </Button>
         </div>
 
         <p className="mt-6 text-xs text-zinc-400">
           Not sure yet? Pick the closest estimate — your subscription
-          quantity is reconciled automatically once your real arrays are
-          set up in the dashboard. You won&apos;t be charged extra without
-          notice. Secure checkout powered by Stripe.
+          quantity reconciles automatically once your real arrays are set
+          up in the dashboard. You won&apos;t be charged anything today and
+          you won&apos;t be charged extra later without notice. Card details
+          are stored securely by Stripe — we never see them.
         </p>
       </Card>
     </ScreenLayout>
