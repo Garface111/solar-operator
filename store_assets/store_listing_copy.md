@@ -10,13 +10,13 @@ Copy these fields verbatim into the Web Store Developer Dashboard.
 
 ## Short description (max 132 chars)
 
-`Automatically updates your community solar reporting spreadsheet every month with fresh Green Mountain Power data.`
+`Automatically updates your community solar reporting spreadsheet every quarter with fresh Green Mountain Power data.`
 
 ## Detailed description
 
 ```
 Solar Operator Sync is the easiest way for community-solar operators in
-Vermont to keep their quarterly and monthly reporting current.
+Vermont to keep their quarterly reporting current.
 
 You produce solar. We do the paperwork.
 
@@ -26,9 +26,9 @@ HOW IT WORKS
 2. Open your Solar Operator dashboard — the extension pairs to your account automatically.
 3. Sign into greenmountainpower.com once.
 
-That's it. Every month, around the 20th, we email you your reporting
+That's it. Every quarter, around the 20th, we email you your reporting
 spreadsheet — in your exact format — fully populated with the previous
-month's kWh production for every one of your arrays.
+quarter's kWh production for every one of your arrays.
 
 WHAT WE DO
 
@@ -156,7 +156,7 @@ shipped within the extension package."
 "Solar Operator Sync has one purpose: to capture an authenticated Green
 Mountain Power session from a logged-in user's browser and forward it to
 the Solar Operator backend so that the user's community-solar reporting
-spreadsheet can be automatically updated each month."
+spreadsheet can be automatically updated each quarter."
 
 ---
 
