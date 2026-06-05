@@ -97,6 +97,9 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
         </div>
 
         <div className="min-w-0 flex-1">
+          <span className="block text-[10px] font-semibold uppercase tracking-wider text-primary-600/80 select-none">
+            Client
+          </span>
           {isRenaming ? (
             <input
               ref={inputRef}
