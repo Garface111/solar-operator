@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "../../ui/Card";
 import { Spinner } from "../../ui/Spinner";
-import { type Account, type Provider, type CaptureEntry, listProviders, getRecentCaptures } from "../../lib/api";
+import { type Account, type Provider, type CaptureEntry, type UtilitySessionStatus, listProviders, getRecentCaptures } from "../../lib/api";
 import { openPortalTab } from "../../lib/openPortalTab";
 import { timeAgo } from "./utils";
 
@@ -96,30 +96,48 @@ export function UtilityConnectionsCard({ account }: Props) {
       )}
 
       <div className="mt-4 divide-y divide-zinc-100 border-t border-zinc-100">
-        {providers.map((p) => (
-          <div key={p.code} className="flex items-center justify-between gap-4 py-3">
-            <div>
-              <p className="text-sm font-medium text-zinc-800">{p.label}</p>
-              <p className="text-xs capitalize text-zinc-400">
-                {p.scrape_status === "live" ? "Automated capture" : p.scrape_status}
-              </p>
+        {providers.map((p) => {
+          const sess: UtilitySessionStatus | null =
+            p.code === "gmp" ? (account.session ?? null) : null;
+          const lastRefresh = sess?.last_refresh_at
+            ? new Date(sess.last_refresh_at)
+            : null;
+          const needsReauth = (sess?.refresh_failures ?? 0) > 0;
+          return (
+            <div key={p.code} className="flex items-center justify-between gap-4 py-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium text-zinc-800">{p.label}</p>
+                  {needsReauth && (
+                    <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                      Re-auth needed
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs capitalize text-zinc-400">
+                  {p.scrape_status === "live" ? "Automated capture" : p.scrape_status}
+                  {lastRefresh && (
+                    <> · auto-refreshed {timeAgo(lastRefresh)}</>
+                  )}
+                </p>
+              </div>
+              {PORTAL_URLS[p.code] && (
+                <button
+                  type="button"
+                  disabled={reconnecting === p.code}
+                  onClick={() => reconnect(p.code)}
+                  className="shrink-0 text-sm font-medium text-primary-600 hover:text-primary-800 focus:outline-none focus-visible:underline disabled:opacity-50"
+                >
+                  {reconnecting === p.code ? (
+                    <Spinner className="h-4 w-4" />
+                  ) : (
+                    "Open portal →"
+                  )}
+                </button>
+              )}
             </div>
-            {PORTAL_URLS[p.code] && (
-              <button
-                type="button"
-                disabled={reconnecting === p.code}
-                onClick={() => reconnect(p.code)}
-                className="shrink-0 text-sm font-medium text-primary-600 hover:text-primary-800 focus:outline-none focus-visible:underline disabled:opacity-50"
-              >
-                {reconnecting === p.code ? (
-                  <Spinner className="h-4 w-4" />
-                ) : (
-                  "Open portal →"
-                )}
-              </button>
-            )}
-          </div>
-        ))}
+          );
+        })}
         {providers.length === 0 && (
           <div className="flex items-center gap-2 py-4 text-sm text-zinc-400">
             <Spinner className="h-4 w-4" />

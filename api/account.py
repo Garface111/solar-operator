@@ -442,6 +442,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "session": {
                 "captured_at": last_sess.captured_at.isoformat() if last_sess else None,
                 "expires_at": last_sess.expires_at.isoformat() if last_sess and last_sess.expires_at else None,
+                "last_refresh_at": last_sess.last_refresh_at.isoformat() if last_sess and last_sess.last_refresh_at else None,
+                "refresh_failures": last_sess.refresh_failures if last_sess else 0,
             } if last_sess else None,
         }
 
