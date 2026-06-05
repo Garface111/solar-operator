@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/Button";
+import { Chip } from "../ui/Chip";
 import { Toggle } from "../ui/Toggle";
 import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
@@ -336,14 +337,10 @@ export function ClientCard({
               className={`text-base font-semibold ${isPlaceholder ? "text-amber-700" : ""}`}
             />
             {isPlaceholder && (
-              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
-                placeholder
-              </span>
+              <Chip variant="amber">placeholder</Chip>
             )}
             {!client.active && (
-              <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-[11px] font-medium text-zinc-500">
-                inactive
-              </span>
+              <Chip variant="muted">inactive</Chip>
             )}
           </div>
           {isPlaceholder && (

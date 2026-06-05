@@ -240,7 +240,7 @@ export function WalkthroughOverlay({ onClose }: Props) {
       <div
         ref={tooltipRef}
         style={tooltipStyle}
-        className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl"
+        className="rounded-2xl border border-cream-border bg-cream p-5 shadow-xl"
       >
         <div className="mb-3 flex items-center justify-between">
           <span className="text-xs font-medium text-zinc-400">
