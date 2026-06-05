@@ -453,7 +453,7 @@ function LoginGroupRow({
     <div
       data-walkthrough="login-row"
       className={[
-        'group/login rounded-xl border px-3 py-2.5 transition-opacity',
+        'nodrag group/login rounded-xl border px-3 py-2.5 transition-opacity',
         th.row,
         dragging ? 'opacity-40' : '',
       ].join(' ')}
