@@ -1,11 +1,16 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { QuarterCard } from "../components/reports/QuarterCard";
 import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
 import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
 import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
 import { NextRunCard } from "../components/reports/NextRunCard";
-import { EmailTemplateStudio } from "../components/reports/EmailTemplateStudio";
+
+const EmailTemplateStudio = lazy(() =>
+  import("../components/reports/EmailTemplateStudio").then((m) => ({
+    default: m.EmailTemplateStudio,
+  })),
+);
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { ScreenLayout } from "../ui/ScreenLayout";
@@ -231,10 +236,14 @@ export default function ReportsTab() {
         )}
       </div>
 
-      <EmailTemplateStudio
-        open={studioOpen}
-        onClose={() => setStudioOpen(false)}
-      />
+      {studioOpen && (
+        <Suspense fallback={null}>
+          <EmailTemplateStudio
+            open={studioOpen}
+            onClose={() => setStudioOpen(false)}
+          />
+        </Suspense>
+      )}
     </ScreenLayout>
   );
 }
