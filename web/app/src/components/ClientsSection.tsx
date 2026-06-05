@@ -74,10 +74,18 @@ export function ClientsSection({ expandClientId }: Props) {
 
   // Clean up timer on unmount
   useEffect(() => {
+    // Refresh clients when a merge completes anywhere on the page —
+    // the merged-from card needs to disappear without a full reload.
+    function onMerged() {
+      loadClients();
+    }
+    window.addEventListener("so:client-merged", onMerged);
     return () => {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
       importPollerRef.current?.cancel();
+      window.removeEventListener("so:client-merged", onMerged);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function loadNepoolStats() {

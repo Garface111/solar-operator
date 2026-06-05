@@ -473,6 +473,48 @@ export async function deleteClient(id: number): Promise<DeleteResult> {
   return request<DeleteResult>(`/v1/account/clients/${id}`, { method: "DELETE" });
 }
 
+// ── Merge suggestions ───────────────────────────────────────────────
+export interface MergeSuggestion {
+  id: number;
+  name: string;
+  score: number;
+  reasons: string[];
+  has_gmp: boolean;
+  has_vec: boolean;
+}
+
+export async function getMergeSuggestions(
+  clientId: number,
+): Promise<MergeSuggestion[]> {
+  const res = await request<{ ok: true; suggestions: MergeSuggestion[] }>(
+    `/v1/account/clients/${clientId}/merge-suggestions`,
+  );
+  return res.suggestions;
+}
+
+/** Merge `srcId` INTO `dstId`. Reparents arrays, merges login fields,
+ *  soft-deletes src. Returns the updated dst client. */
+export async function mergeClientInto(
+  srcId: number,
+  dstId: number,
+): Promise<ClientRow> {
+  const res = await request<{ ok: true; dst_client: ClientRow }>(
+    `/v1/account/clients/${srcId}/merge-into`,
+    { method: "POST", body: { dst_client_id: dstId } },
+  );
+  return res.dst_client;
+}
+
+export async function dismissMergeSuggestion(
+  clientId: number,
+  otherId: number,
+): Promise<void> {
+  await request(
+    `/v1/account/clients/${clientId}/dismiss-merge/${otherId}`,
+    { method: "POST" },
+  );
+}
+
 /** Re-read a client's GMP auto-populate freshness (does not poll GMP). */
 export async function refreshCapture(id: number): Promise<ClientRow> {
   const res = await request<{ client: ClientRow }>(

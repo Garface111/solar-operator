@@ -20,6 +20,7 @@ import { ArrayList } from "./ArrayList";
 import { openPortalTab } from "../lib/openPortalTab";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
+import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
 import {
   type ClientRow,
   listClients,
@@ -498,6 +499,25 @@ export function ClientCard({
           style={!expanded ? { display: "none" } : undefined}
           aria-hidden={!expanded}
         >
+          {/* Possible-duplicate banner — surfaces cross-provider matches
+              the create-time dedup can't catch (e.g. same human on GMP
+              under bruce@example.com + VEC under bgenereaux). One-click
+              merge or persistent "Keep separate". */}
+          <MergeSuggestionBanner
+            client={client}
+            onMerged={(dst, mergedFromId) => {
+              onChange(dst);
+              // Sibling-card cleanup: parent reloads clients, but we
+              // also emit a lightweight event so the soft-deleted card
+              // disappears immediately without a flash.
+              window.dispatchEvent(
+                new CustomEvent("so:client-merged", {
+                  detail: { src: mergedFromId, dst: dst.id },
+                }),
+              );
+            }}
+          />
+
           {/* Report section — pinned to top of drawer so it's the first thing you see */}
           <div className="rounded-xl border border-primary-100 bg-primary-50/50 px-4 py-3">
             <h4 className="text-xs font-semibold uppercase tracking-wide text-primary-700">

@@ -39,7 +39,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
 
 from .db import SessionLocal
-from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, now
+from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity
@@ -969,6 +969,290 @@ def create_client(body: ClientCreate,
         )
         db.add(c); db.commit(); db.refresh(c)
         return {"ok": True, "client": _client_to_dict(c, 0)}
+
+
+# ── Merge-suggestion + merge endpoints ──────────────────────────────────
+# Cross-provider dup detection: a single human signed in via GMP under
+# bruce@example.com and via VEC under bgenereaux — backend can't dedup
+# automatically (no field overlap) but the data has signals: shared
+# contact_email, normalized name match, overlapping NEPOOL IDs on
+# arrays. We score those signals, surface the top match per client, and
+# let the operator merge with one click. "Keep separate" dismissals are
+# remembered in client_merge_dismissals so we don't nag.
+
+
+def _normalize_name(name: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace, drop common
+    business suffixes so 'Bruce Genereaux LLC' and 'bruce genereaux'
+    compare equal."""
+    import re
+    s = (name or "").lower()
+    s = re.sub(r"[,.\-_/]", " ", s)
+    s = re.sub(
+        r"\b(llc|inc|incorporated|llp|lp|corp|corporation|co|company|trust)\b",
+        " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _last_name_token(normalized: str) -> str:
+    """Heuristic last-name extraction: last whitespace-delimited token
+    of the normalized name. 'bruce genereaux' → 'genereaux'."""
+    parts = normalized.split()
+    return parts[-1] if parts else ""
+
+
+def _merge_candidates_for(db, tenant_id: str, target: Client) -> list[dict]:
+    """Score plausible merge candidates for `target` within `tenant_id`.
+    Returns at most 3, sorted by score desc. Skips dismissed pairs."""
+    others = db.execute(
+        select(Client).where(
+            Client.tenant_id == tenant_id,
+            Client.deleted_at.is_(None),
+            Client.id != target.id,
+        )
+    ).scalars().all()
+
+    if not others:
+        return []
+
+    # Look up dismissed pairs once
+    dismissed_pairs: set[tuple[int, int]] = set()
+    for d in db.execute(
+        select(ClientMergeDismissal).where(
+            ClientMergeDismissal.tenant_id == tenant_id,
+        )
+    ).scalars().all():
+        dismissed_pairs.add((d.client_a_id, d.client_b_id))
+
+    # NEPOOL IDs by client (for shared-array signal). Bills are tied
+    # to UtilityAccounts → Arrays → Client.
+    nepool_by_client: dict[int, set[str]] = {}
+    for arr in db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant_id,
+            Array.nepool_gis_id.is_not(None),
+        )
+    ).scalars().all():
+        if arr.client_id is not None:
+            nepool_by_client.setdefault(arr.client_id, set()).add(
+                str(arr.nepool_gis_id))
+
+    target_nepool = nepool_by_client.get(target.id, set())
+    target_norm = _normalize_name(target.name)
+    target_last = _last_name_token(target_norm)
+    target_contact = (target.contact_email or "").lower().strip()
+
+    candidates: list[tuple[int, dict]] = []
+    for other in others:
+        # Dismissed?
+        a, b = sorted([target.id, other.id])
+        if (a, b) in dismissed_pairs:
+            continue
+
+        score = 0
+        reasons: list[str] = []
+
+        # Contact email match — very strong
+        other_contact = (other.contact_email or "").lower().strip()
+        if target_contact and other_contact and target_contact == other_contact:
+            score += 60
+            reasons.append("same contact email")
+
+        # Name signals
+        other_norm = _normalize_name(other.name)
+        if target_norm and other_norm:
+            if target_norm == other_norm:
+                score += 50
+                reasons.append("same name")
+            else:
+                other_last = _last_name_token(other_norm)
+                if target_last and other_last and target_last == other_last and len(target_last) >= 3:
+                    score += 25
+                    reasons.append(f"shared last name “{target_last}”")
+
+        # Shared NEPOOL-GIS array — same physical site
+        other_nepool = nepool_by_client.get(other.id, set())
+        shared = target_nepool & other_nepool
+        if shared:
+            score += 40 * min(len(shared), 2)
+            sample = next(iter(shared))
+            reasons.append(f"shared NEPOOL-GIS array {sample}")
+
+        # Cross-provider login complement — one has GMP, the other VEC.
+        # Weak on its own but a small nudge so an isolated name match
+        # ranks above an isolated contact-email match across the same
+        # provider (which would already have been hard-blocked at
+        # create-time).
+        t_has_gmp = bool(target.gmp_email or target.gmp_username)
+        t_has_vec = bool(target.vec_email or target.vec_username)
+        o_has_gmp = bool(other.gmp_email or other.gmp_username)
+        o_has_vec = bool(other.vec_email or other.vec_username)
+        cross_provider = (t_has_gmp and o_has_vec and not t_has_vec and not o_has_gmp) or \
+                         (t_has_vec and o_has_gmp and not t_has_gmp and not o_has_vec)
+        if cross_provider and score > 0:
+            score += 10
+            reasons.append("cross-provider logins")
+
+        if score >= 30:
+            candidates.append((score, {
+                "id": other.id,
+                "name": other.name,
+                "score": score,
+                "reasons": reasons,
+                "has_gmp": o_has_gmp,
+                "has_vec": o_has_vec,
+            }))
+
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return [c[1] for c in candidates[:3]]
+
+
+@router.get("/v1/account/clients/{client_id}/merge-suggestions")
+def get_merge_suggestions(client_id: int,
+                          authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        client = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.id == client_id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if not client:
+            raise HTTPException(404, "client not found")
+        return {"ok": True, "suggestions": _merge_candidates_for(db, t.id, client)}
+
+
+class MergeIntoBody(BaseModel):
+    dst_client_id: int
+
+
+@router.post("/v1/account/clients/{src_client_id}/merge-into")
+def merge_client_into(src_client_id: int, body: MergeIntoBody,
+                      authorization: Optional[str] = Header(default=None)):
+    """Merge `src_client_id` INTO `body.dst_client_id`. Reparents arrays
+    + utility accounts, merges login fields (dst keeps its own if set,
+    otherwise inherits from src), then soft-deletes src.
+
+    Login-conflict rule: if BOTH clients have a non-null value for the
+    same login field (e.g. both have a gmp_email), we keep dst's value
+    and discard src's. This is intentional — operator confirmation
+    happens at the UI layer; this endpoint trusts the choice.
+
+    Idempotent on already-deleted src (returns 200 with no-op flag)."""
+    t = tenant_from_session(authorization)
+    if src_client_id == body.dst_client_id:
+        raise HTTPException(400, "src and dst must differ")
+
+    with SessionLocal() as db:
+        src = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.id == src_client_id,
+            )
+        ).scalar_one_or_none()
+        dst = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.id == body.dst_client_id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if not src or not dst:
+            raise HTTPException(404, "client not found")
+        if src.deleted_at is not None:
+            return {"ok": True, "noop": True, "dst_client_id": dst.id}
+
+        # Reparent arrays
+        for arr in db.execute(
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.client_id == src.id,
+            )
+        ).scalars().all():
+            arr.client_id = dst.id
+
+        # Reparent utility_accounts — handled via Array's client_id
+        # above (UtilityAccount.array_id), but VEC bills/usage_raw may
+        # be keyed differently. UtilityAccount table has tenant_id, not
+        # client_id, so no per-account reparent needed.
+
+        # Merge login fields — dst wins on conflict
+        for field in ("contact_email", "gmp_email", "gmp_username",
+                      "vec_email", "vec_username", "notes"):
+            if getattr(dst, field) in (None, "") and getattr(src, field):
+                setattr(dst, field, getattr(src, field))
+
+        # Always preserve autopop flags as True if either side had them
+        if src.gmp_autopopulate or dst.gmp_autopopulate:
+            dst.gmp_autopopulate = True
+        if src.vec_autopopulate or dst.vec_autopopulate:
+            dst.vec_autopopulate = True
+
+        # Soft-delete src
+        src.deleted_at = now()
+
+        # Clear any dismissal entries involving src (they're irrelevant now)
+        pair_a, pair_b = sorted([src.id, dst.id])
+        db.query(ClientMergeDismissal).filter(
+            ClientMergeDismissal.tenant_id == t.id,
+            or_(
+                ClientMergeDismissal.client_a_id == src.id,
+                ClientMergeDismissal.client_b_id == src.id,
+            ),
+        ).delete(synchronize_session=False)
+
+        db.commit()
+        db.refresh(dst)
+        # Re-count arrays for the response
+        n_arrays = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.client_id == dst.id
+            )
+        ).scalar() or 0
+        return {
+            "ok": True,
+            "dst_client": _client_to_dict(dst, array_count=n_arrays),
+            "merged_from_id": src.id,
+        }
+
+
+@router.post("/v1/account/clients/{client_id}/dismiss-merge/{other_id}")
+def dismiss_merge_suggestion(client_id: int, other_id: int,
+                             authorization: Optional[str] = Header(default=None)):
+    """Operator clicked 'Keep separate' on a suggested pair. Persist so
+    we don't suggest the same merge again. Symmetric — pair is stored
+    as (min_id, max_id)."""
+    t = tenant_from_session(authorization)
+    if client_id == other_id:
+        raise HTTPException(400, "ids must differ")
+    a, b = sorted([client_id, other_id])
+    with SessionLocal() as db:
+        # Both must still exist + belong to this tenant
+        n = db.execute(
+            select(func.count()).select_from(Client).where(
+                Client.tenant_id == t.id,
+                Client.id.in_([a, b]),
+                Client.deleted_at.is_(None),
+            )
+        ).scalar() or 0
+        if n != 2:
+            raise HTTPException(404, "one or both clients not found")
+        existing = db.execute(
+            select(ClientMergeDismissal).where(
+                ClientMergeDismissal.tenant_id == t.id,
+                ClientMergeDismissal.client_a_id == a,
+                ClientMergeDismissal.client_b_id == b,
+            )
+        ).scalar_one_or_none()
+        if not existing:
+            db.add(ClientMergeDismissal(
+                tenant_id=t.id, client_a_id=a, client_b_id=b,
+            ))
+            db.commit()
+        return {"ok": True}
 
 
 @router.patch("/v1/account/clients/{client_id}")
