@@ -1,0 +1,37 @@
+/* Solar Operator design tokens
+   Consumed by index.css and indirectly by every component via CSS vars.
+   Tailwind classes (bg-cream, text-wood-600, etc.) are defined in tailwind.config.js
+   alongside this file — keep them in sync. */
+:root {
+  /* Cream — warm off-white page surface */
+  --so-cream: #faf8f5;
+  --so-cream-border: #e8e2d9;
+
+  /* Emerald — full palette mirroring the Tailwind primary scale */
+  --so-emerald-50:  #ecfdf5;
+  --so-emerald-100: #d1fae5;
+  --so-emerald-200: #a7f3d0;
+  --so-emerald-300: #6ee7b7;
+  --so-emerald-400: #34d399;
+  --so-emerald-500: #047857;
+  --so-emerald-600: #065f46;
+  --so-emerald-700: #064e3b;
+
+  /* Wood — warm ochre tones for accent borders and status badges */
+  --so-wood-50:     #fdf8f2;
+  --so-wood-100:    #faedd8;
+  --so-wood-200:    #f3d5a8;
+  --so-wood-300:    #e6b470;
+  --so-wood-400:    #d4914a;
+  --so-wood-500:    #b56d2c;
+  --so-wood-600:    #8c4e1c;
+  --so-wood-border: #e6d4bd;
+
+  /* Shape */
+  --so-radius-card: 0.75rem;
+  --so-radius-chip: 9999px;
+
+  /* Shadows */
+  --so-shadow-soft: 0 1px 3px 0 rgb(0 0 0 / 0.07), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+  --so-shadow-card: 0 2px 8px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+}
