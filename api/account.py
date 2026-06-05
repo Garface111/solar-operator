@@ -2476,6 +2476,120 @@ def get_reports(
     return {"reports": result}
 
 
+# ─── Next-run preview ────────────────────────────────────────────────────
+
+@router.get("/v1/account/reports/next-run")
+def get_reports_next_run(
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """STUB: Returns next scheduled delivery date and a current-quarter preview.
+
+    Next-run date is derived from the account's report_frequency:
+      - quarterly: 1st of the next quarter-start month (Jan/Apr/Jul/Oct)
+      - monthly:   1st of next calendar month
+
+    MWh/array preview is the current in-progress quarter's data so far
+    (same Bill-aggregation logic as GET /v1/account/reports).
+
+    TODO: When delivery history is stored per-run (ReportRun table), replace
+    the bill-aggregation preview with real "arrays confirmed for next run" data.
+    """
+    t = tenant_from_session(authorization)
+    today = date.today()
+    freq = (t.report_frequency or "quarterly").lower()
+    if freq not in ("monthly", "quarterly"):
+        freq = "quarterly"
+
+    # Compute next scheduled run date
+    if freq == "monthly":
+        if today.month == 12:
+            next_run = date(today.year + 1, 1, 1)
+        else:
+            next_run = date(today.year, today.month + 1, 1)
+    else:
+        quarter_months = [1, 4, 7, 10]
+        next_month = next(
+            (m for m in quarter_months if m > today.month), None
+        )
+        if next_month is None:
+            next_run = date(today.year + 1, 1, 1)
+        else:
+            next_run = date(today.year, next_month, 1)
+
+    days_until = (next_run - today).days
+
+    # Current-quarter preview — reuse the same Bill aggregation
+    cy, cq = today.year, _quarter_of(today.month)
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
+        ).scalars().all()
+        array_ids = [a.id for a in arrays]
+
+        clients = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+                Client.active == True,  # noqa: E712
+            )
+        ).scalars().all()
+        client_count = len(clients)
+
+        if array_ids:
+            ua_rows = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id.in_(array_ids)
+                )
+            ).scalars().all()
+            account_ids = [a.id for a in ua_rows]
+            account_to_array: dict[int, int] = {
+                a.id: a.array_id for a in ua_rows
+            }
+        else:
+            account_ids = []
+            account_to_array = {}
+
+        bills: list[Bill] = (
+            db.execute(
+                select(Bill).where(Bill.account_id.in_(account_ids))
+            ).scalars().all()
+            if account_ids
+            else []
+        )
+
+    kwh_total = 0.0
+    arrays_with_data: set[int] = set()
+    for b in bills:
+        if not b.kwh_generated or b.kwh_generated <= 0:
+            continue
+        src = b.period_start or b.bill_date
+        if not src:
+            continue
+        if (src.year, _quarter_of(src.month)) == (cy, cq):
+            kwh_total += b.kwh_generated
+            arr_id = account_to_array.get(b.account_id)
+            if arr_id is not None:
+                arrays_with_data.add(arr_id)
+
+    mwh_preview = round(kwh_total / 1000.0, 3)
+    preview_array_count = len(arrays_with_data) if arrays_with_data else len(array_ids)
+
+    return {
+        "next_run_date": next_run.isoformat(),
+        "days_until": days_until,
+        "frequency": freq,
+        "array_count": preview_array_count,
+        "mwh_preview": mwh_preview,
+        "rec_preview": int(mwh_preview),
+        "client_count": client_count,
+    }
+
+
 # ─── Regenerate ──────────────────────────────────────────────────────────
 
 class RegenerateBody(BaseModel):

@@ -801,6 +801,21 @@ export async function regenerateReport(
   );
 }
 
+/** Preview of the next scheduled delivery run. */
+export interface NextRunPreview {
+  next_run_date: string;
+  days_until: number;
+  frequency: string;
+  array_count: number;
+  mwh_preview: number;
+  rec_preview: number;
+  client_count: number;
+}
+
+export async function getNextRun(): Promise<NextRunPreview> {
+  return request<NextRunPreview>("/v1/account/reports/next-run");
+}
+
 // ─── spreadsheet ingest (V4) ─────────────────────────────────────────────
 
 /** One extracted array row from a roster upload — every field user-editable. */
