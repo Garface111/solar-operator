@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -30,7 +30,10 @@ import {
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
 import { AddClientModal } from '../AddClientModal';
-import { AddClientByLoginModal } from '../AddClientByLoginModal';
+
+const AddClientByLoginModal = lazy(() =>
+  import('../AddClientByLoginModal').then((m) => ({ default: m.AddClientByLoginModal })),
+);
 import { CommandPalette } from './CommandPalette';
 import { DevPanel } from './DevPanel';
 import { SandboxWalkthrough } from './SandboxWalkthrough';
@@ -1896,50 +1899,54 @@ export default function SandboxCanvas() {
         )}
 
         {/* Add client — portal-picker first, manual entry as fallback */}
-        <AddClientByLoginModal
-          open={showAddByLogin}
-          onClose={() => setShowAddByLogin(false)}
-          onCaptured={async () => {
-            void loadCanvas();
-            try {
-              const rows = await listClients();
-              const before = clientIdsBeforeModal.current;
-              const newClients = rows.filter((r) => !before.has(r.id));
-              for (const nc of newClients) {
-                const ncId = nc.id;
-                const ncName = nc.name;
-                pushUndo({
-                  label: `Add client "${ncName}"`,
-                  timestamp: Date.now(),
-                  undo: () => {
-                    deleteClient(ncId)
-                      .then(() => void loadCanvas())
-                      .catch(() => toast.show('Undo add client failed.', 'error'));
-                  },
-                });
-              }
-              const focus = newClients[newClients.length - 1];
-              if (focus) {
-                centerOnClientId(focus.id);
-                setLastCapturedClientId(focus.id);
-                setNodes((ns) =>
-                  ns.map((n) =>
-                    n.id === `client_${focus.id}`
-                      ? { ...n, data: { ...(n.data as ClientNodeData), expanded: true } }
-                      : n,
-                  ),
-                );
-              }
-              return rows.map((r) => ({ id: r.id, name: r.name }));
-            } catch {
-              return [];
-            }
-          }}
-          onSwitchToManual={() => {
-            setShowAddByLogin(false);
-            setShowAddModal(true);
-          }}
-        />
+        {showAddByLogin && (
+          <Suspense fallback={null}>
+            <AddClientByLoginModal
+              open={showAddByLogin}
+              onClose={() => setShowAddByLogin(false)}
+              onCaptured={async () => {
+                void loadCanvas();
+                try {
+                  const rows = await listClients();
+                  const before = clientIdsBeforeModal.current;
+                  const newClients = rows.filter((r) => !before.has(r.id));
+                  for (const nc of newClients) {
+                    const ncId = nc.id;
+                    const ncName = nc.name;
+                    pushUndo({
+                      label: `Add client "${ncName}"`,
+                      timestamp: Date.now(),
+                      undo: () => {
+                        deleteClient(ncId)
+                          .then(() => void loadCanvas())
+                          .catch(() => toast.show('Undo add client failed.', 'error'));
+                      },
+                    });
+                  }
+                  const focus = newClients[newClients.length - 1];
+                  if (focus) {
+                    centerOnClientId(focus.id);
+                    setLastCapturedClientId(focus.id);
+                    setNodes((ns) =>
+                      ns.map((n) =>
+                        n.id === `client_${focus.id}`
+                          ? { ...n, data: { ...(n.data as ClientNodeData), expanded: true } }
+                          : n,
+                      ),
+                    );
+                  }
+                  return rows.map((r) => ({ id: r.id, name: r.name }));
+                } catch {
+                  return [];
+                }
+              }}
+              onSwitchToManual={() => {
+                setShowAddByLogin(false);
+                setShowAddModal(true);
+              }}
+            />
+          </Suspense>
+        )}
         <AddClientModal
           open={showAddModal}
           onClose={() => setShowAddModal(false)}
