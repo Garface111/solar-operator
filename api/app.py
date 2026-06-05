@@ -37,6 +37,7 @@ from .onboarding import router as onboarding_router
 from .ingest import router as ingest_router
 from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
+from .sandbox import router as sandbox_router
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -80,7 +81,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in ALLOWED_ORIGINS if o.strip()],
     allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["*"],
     allow_credentials=False,
 )
@@ -97,6 +98,8 @@ app.include_router(ingest_router)
 app.include_router(nepool_router)
 # W2-6: Resend delivery webhook → per-client delivery health.
 app.include_router(resend_webhook_router)
+# Sandbox canvas: client graph visualization + position persistence.
+app.include_router(sandbox_router)
 
 
 @app.on_event("startup")
