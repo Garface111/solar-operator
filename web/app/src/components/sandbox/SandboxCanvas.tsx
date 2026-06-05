@@ -1564,6 +1564,29 @@ export default function SandboxCanvas() {
         if (patch.name !== undefined) apiPatch.name = patch.name;
         if (patch.contact_email !== undefined) apiPatch.contact_email = patch.contact_email || null;
         await updateClient(numId, apiPatch);
+        // Re-apply the patch AFTER the PATCH succeeds. Reason: an inflight
+        // capture-cleared / sandbox-mutated event can fire `loadCanvas()`
+        // concurrently and overwrite our optimistic state with a pre-PATCH
+        // server snapshot. Re-applying here guarantees the field sticks
+        // even if a racing reload landed in the middle. The PATCH is now
+        // committed, so any subsequent loadCanvas will already include it.
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id !== clientId) return n;
+            const d = n.data as ClientNodeData;
+            return {
+              ...n,
+              data: {
+                ...d,
+                client: {
+                  ...d.client,
+                  ...(patch.name !== undefined ? { name: patch.name } : {}),
+                  ...(patch.contact_email !== undefined ? { contact_email: patch.contact_email || null } : {}),
+                },
+              },
+            };
+          }),
+        );
       } catch (err) {
         // Roll back on failure.
         setNodes((ns) =>
