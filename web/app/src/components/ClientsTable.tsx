@@ -868,7 +868,7 @@ function ExpandedPanel({
           )}
 
           {loginGroups.length > 0 && (
-            <div className="space-y-2.5">
+            <div className="max-h-[420px] space-y-2.5 overflow-y-auto pr-1">
               {loginGroups.map((group) => {
                 const th = UTIL_THEME[group.util] ?? DEFAULT_UTIL_THEME;
                 return (
@@ -890,38 +890,11 @@ function ExpandedPanel({
                       ) : (
                         <span className="text-[11px] text-zinc-400">No credential set</span>
                       )}
+                      <span className="ml-auto text-[10px] text-zinc-400">
+                        {group.accounts.length} account{group.accounts.length === 1 ? "" : "s"}
+                      </span>
                     </div>
-                    <div className="space-y-2 pl-1">
-                      {group.accounts.map(({ account, arrays: acctArrays }) => (
-                        <div key={account.id}>
-                          <p className="text-[11px] font-medium text-zinc-600">
-                            Account {account.account_number}
-                            {account.customer_number && (
-                              <span className="ml-2 font-normal text-zinc-400">
-                                cust #{account.customer_number}
-                              </span>
-                            )}
-                            {account.nickname && (
-                              <span className="ml-1.5 font-normal text-zinc-400">
-                                ({account.nickname})
-                              </span>
-                            )}
-                          </p>
-                          <ul className="mt-0.5 space-y-0.5 pl-3">
-                            {acctArrays.map((arr) => (
-                              <li key={arr.id} className="text-[10px] text-zinc-500">
-                                <span className="font-medium text-zinc-700">{arr.name}</span>
-                                {arr.nepool_gis_id && (
-                                  <span className="ml-1.5 font-mono text-[9px] text-zinc-400">
-                                    {arr.nepool_gis_id}
-                                  </span>
-                                )}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ))}
-                    </div>
+                    <LoginAccountList group={group} />
                   </div>
                 );
               })}
@@ -1168,5 +1141,103 @@ function ExpandedPanel({
         </p>
       </Modal>
     </div>
+  );
+}
+
+// ── Collapsible login → accounts → arrays renderer ─────────────────────────
+// When a client has many utility accounts and each has many arrays, the inline
+// expansion can grow taller than the rest of the page. These two components
+// show the first few items and a "+ N more" toggle so the row stays compact
+// by default but every detail is one click away.
+
+function LoginAccountList({ group }: { group: LoginGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const COLLAPSED_LIMIT = 3;
+  const visible = expanded
+    ? group.accounts
+    : group.accounts.slice(0, COLLAPSED_LIMIT);
+  const remainder = group.accounts.length - visible.length;
+  return (
+    <div className="space-y-2 pl-1">
+      {visible.map(({ account, arrays: acctArrays }) => (
+        <div key={account.id}>
+          <p className="text-[11px] font-medium text-zinc-600">
+            Account {account.account_number}
+            {account.customer_number && (
+              <span className="ml-2 font-normal text-zinc-400">
+                cust #{account.customer_number}
+              </span>
+            )}
+            {account.nickname && (
+              <span className="ml-1.5 font-normal text-zinc-400">
+                ({account.nickname})
+              </span>
+            )}
+          </p>
+          <AccountArraysList arrays={acctArrays} />
+        </div>
+      ))}
+      {remainder > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="text-[11px] font-medium text-primary-600 hover:text-primary-700 focus:outline-none"
+        >
+          + {remainder} more account{remainder === 1 ? "" : "s"}
+        </button>
+      )}
+      {expanded && group.accounts.length > COLLAPSED_LIMIT && (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          className="text-[11px] font-medium text-zinc-400 hover:text-zinc-600 focus:outline-none"
+        >
+          Show less
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AccountArraysList({ arrays }: { arrays: ArrayRow[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const ARRAY_LIMIT = 3;
+  const visible = expanded ? arrays : arrays.slice(0, ARRAY_LIMIT);
+  const remainder = arrays.length - visible.length;
+  return (
+    <ul className="mt-0.5 space-y-0.5 pl-3">
+      {visible.map((arr) => (
+        <li key={arr.id} className="text-[10px] text-zinc-500">
+          <span className="font-medium text-zinc-700">{arr.name}</span>
+          {arr.nepool_gis_id && (
+            <span className="ml-1.5 font-mono text-[9px] text-zinc-400">
+              {arr.nepool_gis_id}
+            </span>
+          )}
+        </li>
+      ))}
+      {remainder > 0 && (
+        <li>
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="text-[10px] font-medium text-primary-600 hover:text-primary-700 focus:outline-none"
+          >
+            + {remainder} more array{remainder === 1 ? "" : "s"}
+          </button>
+        </li>
+      )}
+      {expanded && arrays.length > ARRAY_LIMIT && (
+        <li>
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            className="text-[10px] font-medium text-zinc-400 hover:text-zinc-600 focus:outline-none"
+          >
+            Show less
+          </button>
+        </li>
+      )}
+    </ul>
   );
 }
