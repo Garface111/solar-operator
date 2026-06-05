@@ -17,9 +17,13 @@ typo is visible rather than silently blanked.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Optional
+
+import httpx
 
 # The merge tags we advertise in the dashboard help text. Anything else in a
 # template is left verbatim (see render_merge).
@@ -154,3 +158,78 @@ def resolve_from_header(send_from_email: Optional[str],
         return None
     name = (send_from_name or tenant_name or "").strip()
     return f"{name} <{email}>" if name else email
+
+
+# ── AI template regeneration ──────────────────────────────────────────────────
+
+_TEMPLATE_SYSTEM_PROMPT = (
+    "You are a writing assistant helping a solar energy consultant customize "
+    "their client report email. The template uses merge tags like {{client_name}}, "
+    "{{quarter}}, {{period_start}}, {{period_end}}, {{tenant_name}}, "
+    "{{tenant_email_line}}, {{arrays_count}}, {{dashboard_url}}.\n\n"
+    "CRITICAL RULES:\n"
+    "- Preserve ALL {{...}} merge tags exactly — never remove, rename, or modify them.\n"
+    "- The body is simple HTML: use only <p>, <br>, <a href='...'>, <b>, <em> tags.\n"
+    "- Keep the professional tone appropriate for a regulated energy market.\n\n"
+    "Respond ONLY with a JSON object, NO markdown fences, with this exact shape:\n"
+    '{"reply": "Brief 1-2 sentence description of what you changed", '
+    '"body": "complete updated HTML body template", '
+    '"subject": null}'
+    "\nSet subject to null when unchanged, or to the new subject string if you changed it."
+)
+
+
+def regenerate_template_via_ai(
+    *,
+    current_body: str,
+    current_subject: str,
+    messages: list[dict],
+    api_key: str,
+) -> dict:
+    """Call Anthropic to regenerate the email template body/subject.
+
+    messages is the full conversation history [{role, content}].
+    Returns {'reply': str, 'body': str, 'subject': str | None}.
+    Raises httpx.HTTPStatusError on API failure, ValueError on bad JSON.
+    """
+    model = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5-20250514")
+    system = (
+        f"{_TEMPLATE_SYSTEM_PROMPT}\n\n"
+        f"Current subject template:\n{current_subject}\n\n"
+        f"Current body template:\n{current_body}"
+    )
+    resp = httpx.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": 4096,
+            "system": system,
+            "messages": messages,
+        },
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    content = "".join(b.get("text", "") for b in body.get("content", []))
+    raw = content.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw).rstrip("`").strip()
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end > start:
+            result = json.loads(raw[start : end + 1])
+        else:
+            raise ValueError("LLM response did not contain valid JSON")
+    return {
+        "reply": str(result.get("reply") or "Updated."),
+        "body": str(result.get("body") or current_body),
+        "subject": result.get("subject"),
+    }

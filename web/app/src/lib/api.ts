@@ -371,22 +371,27 @@ export interface SendReportResult {
 
 /** Trigger an immediate report send. With no clientIds, fans out to every
  *  active client (legacy). With clientIds, sends only to the chosen subset.
+ *  sendMode, when provided, is saved as the tenant default before delivery.
  *  Returns the per-client outcome so the UI can tell the truth about partial
  *  or total failures instead of a blanket success toast. */
 export async function sendReportNow(
   clientIds?: number[],
+  sendMode?: string,
 ): Promise<SendReportResult> {
-  // The request helper auto-JSONifies `body` and sets Content-Type. When
-  // clientIds is empty/missing we POST with no body so the backend takes the
-  // legacy "all active clients" code path.
-  if (clientIds && clientIds.length > 0) {
-    return request<SendReportResult>("/v1/account/send-report", {
-      method: "POST",
-      body: { client_ids: clientIds },
-    });
-  }
+  const payload: Record<string, unknown> = {};
+  if (clientIds && clientIds.length > 0) payload.client_ids = clientIds;
+  if (sendMode) payload.send_mode = sendMode;
+  const hasPayload = Object.keys(payload).length > 0;
   return request<SendReportResult>("/v1/account/send-report", {
     method: "POST",
+    ...(hasPayload ? { body: payload } : {}),
+  });
+}
+
+/** Quick-save the recipient routing mode (from the NextRunCard slider). */
+export async function patchSendMode(mode: string): Promise<void> {
+  await request<{ ok: boolean }>("/v1/account/reports/send-mode", {
+    body: { send_mode: mode },
   });
 }
 
@@ -420,6 +425,85 @@ export async function previewEmail(
 ): Promise<EmailPreview> {
   return request<EmailPreview & { ok: boolean }>(
     "/v1/account/email-preview",
+    { body: input },
+  );
+}
+
+// ─── email template studio ────────────────────────────────────────────────
+
+export interface EmailTemplateData {
+  subject_template: string | null;
+  body_template: string | null;
+  is_default: boolean;
+  available_tokens: string[];
+  has_client_with_email: boolean;
+}
+
+export interface EmailTemplatePreviewResult {
+  subject_rendered: string;
+  body_rendered: string;
+  sample_client: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface EmailTemplateChatResult {
+  assistant_reply: string;
+  proposed_body: string;
+  proposed_subject?: string | null;
+}
+
+export async function getEmailTemplate(): Promise<EmailTemplateData> {
+  return request<EmailTemplateData>("/v1/account/reports/email-template");
+}
+
+export async function previewEmailTemplate(input: {
+  subject_template?: string | null;
+  body_template?: string | null;
+}): Promise<EmailTemplatePreviewResult> {
+  return request<EmailTemplatePreviewResult>(
+    "/v1/account/reports/email-template/preview",
+    { body: input },
+  );
+}
+
+export async function saveEmailTemplate(input: {
+  subject_template?: string | null;
+  body_template?: string | null;
+}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/v1/account/reports/email-template",
+    { method: "PUT", body: input },
+  );
+}
+
+export async function resetEmailTemplate(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/v1/account/reports/email-template/reset",
+    { body: {} },
+  );
+}
+
+export async function testSendEmailTemplate(input: {
+  subject_template?: string | null;
+  body_template?: string | null;
+}): Promise<{ ok: boolean; sent_to: string }> {
+  return request<{ ok: boolean; sent_to: string }>(
+    "/v1/account/reports/email-template/test-send",
+    { body: input },
+  );
+}
+
+export async function chatEmailTemplate(input: {
+  messages: ChatMessage[];
+  current_body: string;
+  current_subject?: string;
+}): Promise<EmailTemplateChatResult> {
+  return request<EmailTemplateChatResult>(
+    "/v1/account/reports/email-template/chat",
     { body: input },
   );
 }
