@@ -8,6 +8,7 @@ export interface CanvasActions {
   renamingNodeId: string | null;
   deleteNode: (nodeId: string) => void;
   detachAccount: (clientId: string, accountId: string) => void;
+  moveAccountToClient: (srcClientId: string, accountId: string, dstClientId: string) => void;
 }
 
 export const CanvasActionsContext = createContext<CanvasActions | null>(null);

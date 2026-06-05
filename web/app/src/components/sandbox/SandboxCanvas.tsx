@@ -483,6 +483,72 @@ export default function SandboxCanvas() {
 
   // ── Context ───────────────────────────────────────────────────────────────
 
+  // ── Cross-client account drag (HTML5 dnd) ────────────────────────────────
+
+  const moveAccountToClient = useCallback(
+    (srcClientId: string, accountId: string, dstClientId: string) => {
+      if (srcClientId === dstClientId) return;
+      const current = nodesRef.current;
+      const src = current.find((n) => n.id === srcClientId && n.type === 'client');
+      const dst = current.find((n) => n.id === dstClientId && n.type === 'client');
+      if (!src || !dst) return;
+
+      const srcData = src.data as ClientNodeData;
+      const dstData = dst.data as ClientNodeData;
+      const moved = srcData.client.accounts.find((a) => a.id === accountId);
+      if (!moved) return;
+
+      // Optimistic UI: swap the account from src to dst
+      const snapshot = current;
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.id === srcClientId) {
+            return {
+              ...n,
+              data: {
+                ...srcData,
+                client: {
+                  ...srcData.client,
+                  accounts: srcData.client.accounts.filter((a) => a.id !== accountId),
+                },
+              },
+            };
+          }
+          if (n.id === dstClientId) {
+            return {
+              ...n,
+              data: {
+                ...dstData,
+                client: {
+                  ...dstData.client,
+                  accounts: [...dstData.client.accounts, moved],
+                },
+              },
+            };
+          }
+          return n;
+        }),
+      );
+
+      toast.show(
+        `${moved.utility} · ${moved.account_number} → ${dstData.client.name}.`,
+        'success',
+      );
+
+      const accNumId = parseInt(accountId.replace('account_', ''), 10);
+      const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
+      if (!isNaN(accNumId) && !isNaN(dstNumId)) {
+        reassignAccount(accNumId, dstNumId)
+          .then(() => { void loadCanvas(); })  // resync so arr_id/holder array reflect server truth
+          .catch(() => {
+            setNodes(snapshot);
+            toast.show('Move failed — reverted.', 'error');
+          });
+      }
+    },
+    [setNodes, toast, loadCanvas],
+  );
+
   const actions: CanvasActions = {
     toggleExpand,
     startRename,
@@ -491,6 +557,7 @@ export default function SandboxCanvas() {
     renamingNodeId,
     deleteNode,
     detachAccount,
+    moveAccountToClient,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────

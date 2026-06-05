@@ -87,6 +87,34 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   const isMergeTarget = mergeIntent === 'target';
   const isMergeSource = mergeIntent === 'source';
 
+  // ── Native drop target for cross-client account drags ────────────────────
+  const [dropHover, setDropHover] = useState(false);
+  const onDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('application/x-so-account')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    if (!dropHover) setDropHover(true);
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    // Only clear when leaving the card itself, not crossing a child boundary
+    if (e.currentTarget === e.target) setDropHover(false);
+  };
+  const onDrop = (e: React.DragEvent) => {
+    const raw = e.dataTransfer.getData('application/x-so-account');
+    if (!raw) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDropHover(false);
+    try {
+      const { srcClientId, accountId } = JSON.parse(raw) as { srcClientId: string; accountId: string };
+      if (srcClientId === id) return; // dropped on own client — no-op
+      actions.moveAccountToClient(srcClientId, accountId, id);
+    } catch {
+      /* malformed payload — ignore */
+    }
+  };
+
   return (
     <div
       className={[
@@ -95,11 +123,16 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
           ? 'scale-[1.03] border-amber-400 bg-amber-50 shadow-[0_0_0_4px_rgba(251,191,36,0.25),0_12px_32px_-8px_rgba(217,119,6,0.4)] ring-2 ring-amber-300'
           : isMergeSource
             ? 'border-amber-300 opacity-90 shadow-[0_0_0_3px_rgba(251,191,36,0.2)]'
-            : selected
-              ? 'border-primary-400 shadow-md ring-2 ring-primary-300/40'
-              : 'border-cream-border shadow hover:shadow-md',
+            : dropHover
+              ? 'scale-[1.02] border-primary-400 bg-primary-50/40 shadow-[0_0_0_3px_rgba(132,204,22,0.25),0_10px_28px_-8px_rgba(132,204,22,0.4)] ring-2 ring-primary-300'
+              : selected
+                ? 'border-primary-400 shadow-md ring-2 ring-primary-300/40'
+                : 'border-cream-border shadow hover:shadow-md',
       ].join(' ')}
       style={{ animationDelay: `${entryDelay}ms` }}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
     >
       {/* Header */}
       <div className="flex items-center gap-3 px-4 pt-4 pb-3">
@@ -176,6 +209,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
           {client.accounts.map((acc) => (
             <AccountRow
               key={acc.id}
+              clientId={id}
               account={acc}
               onDetach={() => actions.detachAccount(id, acc.id)}
             />
@@ -194,18 +228,47 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 }
 
 function AccountRow({
+  clientId,
   account,
   onDetach,
 }: {
+  clientId: string;
   account: UtilityAccount;
   onDetach: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const th = UTILITY_THEME[account.utility];
   const arrayCount = account.arrays.length;
   const hasArrays = arrayCount > 0;
+
+  const onDragStart = (e: React.DragEvent) => {
+    // Native HTML5 drag — escapes React Flow's drag system so we can
+    // drop on a different ReactFlow node (target client).
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(
+      'application/x-so-account',
+      JSON.stringify({ srcClientId: clientId, accountId: account.id }),
+    );
+    // Plain-text fallback so other DnD listeners don't choke
+    e.dataTransfer.setData('text/plain', account.account_number);
+    setDragging(true);
+  };
+  const onDragEnd = () => setDragging(false);
+
   return (
-    <div className={`group/acc rounded-xl border px-3 py-2.5 ${th.row}`}>
+    <div
+      className={[
+        'group/acc rounded-xl border px-3 py-2.5 transition-opacity',
+        th.row,
+        dragging ? 'opacity-40' : '',
+      ].join(' ')}
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      title="Drag to move to another client"
+    >
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
