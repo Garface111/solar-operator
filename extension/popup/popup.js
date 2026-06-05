@@ -1,83 +1,110 @@
 (async function () {
-  const statusEl = document.getElementById("status");
-  const detailEl = document.getElementById("detail");
+  "use strict";
 
+  const pillEl        = document.getElementById("status-pill");
+  const toastEl       = document.getElementById("toast");
+  const errorBlockEl  = document.getElementById("error-block");
+  const errorMsgEl    = document.getElementById("error-msg");
+  const retryBtnEl    = document.getElementById("retry-btn");
+  const lastCaptureEl = document.getElementById("last-capture");
+  const countTodayEl  = document.getElementById("count-today");
+
+  // ── Load state from storage ───────────────────────────────────────────────
   const s = await chrome.storage.local.get([
-    "last_payload", "last_sync", "last_error", "tenant_key",
+    "tenant_key", "last_sync", "last_payload", "last_error", "captures_today",
   ]);
 
-  const lp = s.last_payload;
-  const ls = s.last_sync;
-  const le = s.last_error;
   const hasKey = !!s.tenant_key;
+  const ls = s.last_sync    || null;
+  const lp = s.last_payload || null;
+  const le = s.last_error   || null;
+  const ct = s.captures_today || null;
 
-  // Status banner logic — clearer for non-technical users
+  // Error is "recent" if it happened within 5 min and after the last good sync.
+  const ERROR_WINDOW_MS = 5 * 60 * 1000;
+  const isRecentError = le &&
+    (Date.now() - new Date(le.at).getTime()) < ERROR_WINDOW_MS &&
+    (!ls || new Date(le.at) > new Date(ls.at));
+
+  // ── Status pill ───────────────────────────────────────────────────────────
   if (!hasKey) {
-    statusEl.className = "status warn";
-    statusEl.innerHTML = `<strong>Activation code needed.</strong> Click Settings below and paste your code from the welcome email.`;
-  } else if (le && (!ls || new Date(le.at) > new Date(ls.at))) {
-    statusEl.className = "status warn";
-    statusEl.innerHTML = `<strong>Connection problem.</strong> ${escapeHtml(le.message)}`;
-  } else if (ls && lp) {
-    statusEl.className = "status ok";
-    const when = timeAgo(ls.at);
-    statusEl.innerHTML = `<strong>✓ Connected.</strong> Last sync ${when}.`;
+    setPill("Not paired", "pill-not-paired");
+  } else if (isRecentError) {
+    setPill("API offline", "pill-offline");
   } else {
-    statusEl.className = "status idle";
-    statusEl.innerHTML = `<strong>Ready.</strong> Visit <a href="#" id="goto-gmp">greenmountainpower.com</a> and sign in to start.`;
-    const goto = document.getElementById("goto-gmp");
-    if (goto) goto.addEventListener("click", openGmp);
+    setPill("Connected to Solar Operator", "pill-connected");
   }
 
-  if (lp) {
-    const expiresAt = lp.tokenExpires ? new Date(lp.tokenExpires) : null;
-    const daysLeft = expiresAt
-      ? Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000))
-      : null;
-    const daysClass = daysLeft != null && daysLeft < 3 ? "warn-text" : "";
-    const daysLabel = daysLeft != null
-      ? (daysLeft === 0 ? "expired" : `${daysLeft} day${daysLeft === 1 ? "" : "s"}`)
-      : "—";
-
-    detailEl.innerHTML = `
-      <div class="row"><span class="k">Arrays</span><span class="v">${lp.accountCount ?? "—"}</span></div>
-      <div class="row"><span class="k">Session refresh</span><span class="v ${daysClass}">${daysLabel}</span></div>
-    `;
-
-    if (daysLeft != null && daysLeft < 5) {
-      const hint = document.createElement("div");
-      hint.className = "hint";
-      hint.innerHTML = `Visit greenmountainpower.com soon to keep your session active.`;
-      detailEl.appendChild(hint);
-    }
+  function setPill(text, cls) {
+    pillEl.textContent = text;
+    pillEl.className = `pill ${cls}`;
   }
+
+  // ── Error block ───────────────────────────────────────────────────────────
+  if (isRecentError) {
+    errorMsgEl.textContent = le.message;
+    errorBlockEl.classList.remove("hidden");
+  }
+
+  // Retry: open GMP so the user can trigger a fresh capture.
+  retryBtnEl.addEventListener("click", () => {
+    chrome.tabs.create({ url: "https://greenmountainpower.com/" });
+    window.close();
+  });
+
+  // ── Last capture ──────────────────────────────────────────────────────────
+  if (lp && lp.capturedAt) {
+    const provider = (lp.provider || "gmp").toUpperCase();
+    lastCaptureEl.textContent = `${provider} · ${timeAgo(lp.capturedAt)}`;
+  }
+
+  // ── Count today ───────────────────────────────────────────────────────────
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (ct && ct.date === todayStr && ct.count > 0) {
+    countTodayEl.textContent = `${ct.count} capture${ct.count === 1 ? "" : "s"} today`;
+  } else {
+    countTodayEl.textContent = "0 captures today";
+  }
+
+  // ── Buttons ───────────────────────────────────────────────────────────────
+  document.getElementById("open-dashboard").addEventListener("click", () => {
+    chrome.tabs.create({ url: "https://solaroperator.org/app" });
+  });
 
   document.getElementById("open-options").addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
   });
-  document.getElementById("open-gmp").addEventListener("click", openGmp);
 
-  function openGmp(e) {
-    if (e) e.preventDefault();
+  document.getElementById("open-gmp").addEventListener("click", (e) => {
+    e.preventDefault();
     chrome.tabs.create({ url: "https://greenmountainpower.com/" });
+  });
+
+  // ── Live toast on SO_CAPTURE_LANDED (while popup is open) ─────────────────
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type !== "SO_CAPTURE_LANDED") return;
+    showToast(msg.ok);
+  });
+
+  function showToast(ok) {
+    toastEl.textContent = ok ? "✓ Captured!" : "⚠ Capture failed";
+    toastEl.classList.remove("hidden", "fading");
+    setTimeout(() => {
+      toastEl.classList.add("fading");
+      setTimeout(() => toastEl.classList.add("hidden"), 400);
+    }, 3000);
   }
 
+  // ── Helpers ───────────────────────────────────────────────────────────────
   function timeAgo(iso) {
     const ms = Date.now() - new Date(iso).getTime();
     const m = Math.round(ms / 60000);
-    if (m < 1) return "just now";
+    if (m < 1)  return "just now";
     if (m < 60) return `${m} min ago`;
     const h = Math.round(m / 60);
-    if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+    if (h < 24) return `${h} hr${h === 1 ? "" : "s"} ago`;
     const d = Math.round(h / 24);
     return `${d} day${d === 1 ? "" : "s"} ago`;
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;",
-      "\"": "&quot;", "'": "&#39;",
-    }[c]));
   }
 })();
