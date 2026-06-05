@@ -204,14 +204,16 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
       )}
 
       {/* Expanded: account rows */}
+      {/* Expanded: one row per utility login (groups accounts by provider) */}
       {expanded && (
         <div className="space-y-2 px-3 pb-3">
-          {client.accounts.map((acc) => (
-            <AccountRow
-              key={acc.id}
+          {groupAccountsByLogin(client.accounts).map((group) => (
+            <LoginGroupRow
+              key={group.utility}
               clientId={id}
-              account={acc}
-              onDetach={() => actions.detachAccount(id, acc.id)}
+              utility={group.utility}
+              accounts={group.accounts}
+              onDetach={(accountId) => actions.detachAccount(id, accountId)}
             />
           ))}
         </div>
@@ -223,6 +225,81 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
           {arrayCount} {arrayCount === 1 ? 'array' : 'arrays'} · {totalMwh} MWh/qtr
         </p>
       </div>
+    </div>
+  );
+}
+
+function groupAccountsByLogin(accounts: UtilityAccount[]): { utility: Utility; accounts: UtilityAccount[] }[] {
+  const groups = new Map<Utility, UtilityAccount[]>();
+  for (const acc of accounts) {
+    const list = groups.get(acc.utility) ?? [];
+    list.push(acc);
+    groups.set(acc.utility, list);
+  }
+  // Stable order: GMP, VEC, WEC
+  return (['GMP', 'VEC', 'WEC'] as Utility[])
+    .filter((u) => groups.has(u))
+    .map((u) => ({ utility: u, accounts: groups.get(u)! }));
+}
+
+function LoginGroupRow({
+  clientId,
+  utility,
+  accounts,
+  onDetach,
+}: {
+  clientId: string;
+  utility: Utility;
+  accounts: UtilityAccount[];
+  onDetach: (accountId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const th = UTILITY_THEME[utility];
+  const accountCount = accounts.length;
+  const arrayTotal = accounts.reduce((n, a) => n + a.arrays.length, 0);
+
+  return (
+    <div className={`rounded-xl border px-3 py-2.5 ${th.row}`}>
+      {/* Login header — click to reveal individual accounts */}
+      <button
+        type="button"
+        className="nodrag flex w-full items-center gap-1.5 text-left"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        aria-label={expanded ? 'Collapse login' : 'Expand login'}
+      >
+        <svg
+          className={`h-3 w-3 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''} ${th.rowText}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2.5}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+        <span className={`h-2 w-2 rounded-full ${th.rowDot}`} />
+        <span className={`text-[10px] font-semibold uppercase tracking-wider ${th.rowText}`}>
+          Login
+        </span>
+        <span className={`text-xs font-semibold ${th.rowText}`}>
+          {utility}
+        </span>
+        <span className={`ml-auto text-[10px] font-medium opacity-60 ${th.rowText}`}>
+          {accountCount} {accountCount === 1 ? 'account' : 'accounts'} · {arrayTotal} {arrayTotal === 1 ? 'array' : 'arrays'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-2 border-t border-current/10 pt-2">
+          {accounts.map((acc) => (
+            <AccountRow
+              key={acc.id}
+              clientId={clientId}
+              account={acc}
+              onDetach={() => onDetach(acc.id)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
