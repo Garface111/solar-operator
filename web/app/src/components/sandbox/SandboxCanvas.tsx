@@ -402,6 +402,54 @@ export default function SandboxCanvas() {
 
   useEffect(() => { void loadCanvas(); }, [loadCanvas]);
 
+  // First-visit race fix: if a capture landed BEFORE this canvas mounted
+  // (e.g. user just finished onboarding → got redirected → extension fired
+  // SO_CAPTURE_LANDED while we were still en route), CaptureListener writes
+  // a timestamp to localStorage. We check it once on mount, and if it's
+  // fresh AND our first load came back empty, poll until the new client
+  // shows up or we give up (~8s). Clears the flag once consumed.
+  useEffect(() => {
+    let canceled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 10; // 10 × 800ms = 8s
+    const POLL_MS = 800;
+    const FRESH_WINDOW_MS = 60_000; // capture flag must be within last 60s
+    const tryRecover = async () => {
+      if (canceled) return;
+      let tsRaw: string | null = null;
+      try { tsRaw = localStorage.getItem('so:capture:landed:ts'); } catch { /* noop */ }
+      if (!tsRaw) return;
+      const ts = parseInt(tsRaw, 10);
+      if (!ts || Date.now() - ts > FRESH_WINDOW_MS) {
+        try { localStorage.removeItem('so:capture:landed:ts'); } catch { /* noop */ }
+        return;
+      }
+      // Already populated → consume the flag and stop.
+      if (nodesRef.current.some((n) => n.type === 'client')) {
+        try { localStorage.removeItem('so:capture:landed:ts'); } catch { /* noop */ }
+        return;
+      }
+      attempts += 1;
+      await loadCanvas({ silent: true });
+      if (canceled) return;
+      if (nodesRef.current.some((n) => n.type === 'client')) {
+        try { localStorage.removeItem('so:capture:landed:ts'); } catch { /* noop */ }
+        return;
+      }
+      if (attempts < MAX_ATTEMPTS) {
+        setTimeout(() => void tryRecover(), POLL_MS);
+      } else {
+        try { localStorage.removeItem('so:capture:landed:ts'); } catch { /* noop */ }
+      }
+    };
+    // Give the initial loadCanvas a beat to settle, then start polling.
+    const kickoff = setTimeout(() => void tryRecover(), 400);
+    return () => {
+      canceled = true;
+      clearTimeout(kickoff);
+    };
+  }, [loadCanvas]);
+
   // Forward-refs to drag-target actions so the document-level rescue handler
   // (declared below, before these callbacks) can call them. We bind these
   // after their useCallbacks resolve.

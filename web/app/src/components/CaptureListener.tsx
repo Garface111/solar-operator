@@ -119,6 +119,11 @@ export function CaptureListener({ onCaptureLanded }: Props) {
       const newRow = newRows[0];
       const extra = newRows.length > 1 ? ` (+${newRows.length - 1} more)` : "";
       toast.success(`${newRow.name} added${extra} — they're on your dashboard.`);
+      // Persist a short-lived flag so listeners that mounted AFTER the
+      // SO_CAPTURE_LANDED message can still discover the recent capture and
+      // refresh their state (e.g. SandboxCanvas mounted post-event during a
+      // first-visit redirect). The flag carries a timestamp so it can self-expire.
+      try { localStorage.setItem("so:capture:landed:ts", String(Date.now())); } catch { /* ignore */ }
       try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
     }
     handlerRef.current = handler;
