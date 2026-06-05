@@ -11,6 +11,7 @@ import DashboardLayout from "./screens/DashboardLayout";
 import AccountTab from "./screens/AccountTab";
 import ClientsTab from "./screens/ClientsTab";
 import ReportsTab from "./screens/ReportsTab";
+import SandboxScreen from "./screens/SandboxScreen";
 import { Spinner } from "./ui/Spinner";
 import { useToast } from "./ui/Toast";
 import {
@@ -149,6 +150,7 @@ function AuthGate() {
         {/* Deep link that auto-expands a single client. */}
         <Route path="/clients/:clientId" element={<ClientsTab />} />
         <Route path="/reports" element={<ReportsTab />} />
+        <Route path="/sandbox" element={<SandboxScreen />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

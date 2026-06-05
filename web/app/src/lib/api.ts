@@ -952,6 +952,55 @@ export async function nepoolPreview(
   return (await res.json()) as NepoolPreviewResult;
 }
 
+// ─── sandbox canvas ────────────────────────────────────────────────────────
+
+export interface CanvasAccountData {
+  id: number;
+  provider: string;
+  account_number: string;
+  service_address: Record<string, unknown> | null;
+  canvas_x: number | null;
+  canvas_y: number | null;
+  canvas_pinned: boolean;
+  array_id: number | null;
+  array_name: string | null;
+  nepool_gis_id: string | null;
+}
+
+export interface CanvasClientData {
+  id: number;
+  name: string;
+  canvas_x: number | null;
+  canvas_y: number | null;
+  canvas_pinned: boolean;
+  accounts: CanvasAccountData[];
+}
+
+export interface CanvasResponse {
+  clients: CanvasClientData[];
+  unclassified: CanvasAccountData[];
+}
+
+export async function getCanvasData(): Promise<CanvasResponse> {
+  return request<CanvasResponse>("/v1/sandbox/canvas");
+}
+
+export interface CanvasPositionUpdate {
+  node_type: "client" | "account";
+  node_id: number;
+  x: number;
+  y: number;
+}
+
+export async function patchCanvasPositions(
+  updates: CanvasPositionUpdate[],
+): Promise<void> {
+  if (updates.length === 0) return;
+  await request("/v1/sandbox/positions", { method: "PATCH", body: updates });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+
 export async function nepoolCommit(
   assignments: Array<{ array_id: number; nepool_gis_id: string }>,
 ): Promise<NepoolCommitResult> {
