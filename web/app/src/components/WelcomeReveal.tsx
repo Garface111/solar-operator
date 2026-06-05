@@ -96,12 +96,13 @@ export function WelcomeReveal({ clients, operatorName, children }: Props) {
   const totalArrays =
     clients?.reduce((s, c) => s + c.array_count, 0) ?? 0;
 
-  const latestSync =
-    clients
+  const latestSync = (() => {
+    const sorted = clients
       ?.flatMap((c) => [c.gmp_last_sync_at, c.vec_last_sync_at])
       .filter((d): d is string => d !== null)
-      .sort()
-      .at(-1) ?? null;
+      .sort();
+    return sorted && sorted.length > 0 ? sorted[sorted.length - 1] : null;
+  })();
 
   const displayName = operatorName ?? "there";
 
