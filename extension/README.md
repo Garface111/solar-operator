@@ -1,10 +1,9 @@
 # Solar Operator Sync — Chrome Extension
 
-> **TODO — next Chrome Web Store submission:** manifest is at **1.0.3** locally,
-> but the Store still serves **1.0.2**. The 1.0.3 change (options page shows a
-> "return to setup" link after the user saves their activation code) won't reach
-> existing users until we re-submit the packaged extension to the Chrome Web
-> Store. Bundle this with the next review push.
+> **ACTION REQUIRED — Chrome Web Store submission:** manifest is at **1.4.5**
+> locally but the Store still serves an older version. New users who install
+> from the Store miss all fixes since the last submission. Push the packaged
+> extension to the Chrome Web Store before the next marketing push.
 
 
 A Manifest V3 Chrome extension that captures the user's utility-portal session
