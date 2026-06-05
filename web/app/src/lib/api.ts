@@ -141,6 +141,7 @@ export interface Account {
   last_delivery_at: string | null;
   extension_heartbeat_at: string | null;
   created_at: string | null;
+  trial_ends_at: string | null;
   accounts_count: number;
   bills_count: number;
   clients_count: number;
@@ -292,6 +293,13 @@ export interface FromDomainStatus {
 /** Check Resend verification status for the tenant's custom send_from_email domain. */
 export async function getFromDomainStatus(): Promise<FromDomainStatus> {
   return request<FromDomainStatus>("/v1/account/from-domain-status");
+}
+
+/** Cancel a trial in progress — detaches payment method and tombstones the account. */
+export async function cancelTrial(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/v1/onboarding/cancel-trial", {
+    method: "POST",
+  });
 }
 
 /** Toggle 'send me a copy of every report'. Returns the updated value. */

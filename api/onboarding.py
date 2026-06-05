@@ -28,7 +28,7 @@ import logging
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, func
 
@@ -37,7 +37,7 @@ from .models import Tenant, Client, Array, UtilitySession, now
 from .notify import (
     send_welcome_email, send_internal_alert, send_sample_workbook_email,
 )
-from .account import issue_magic_link, mint_session_for_tenant
+from .account import issue_magic_link, mint_session_for_tenant, tenant_from_session
 from .stripe_helpers import reconcile_subscription_quantity
 
 logger = logging.getLogger(__name__)
@@ -286,28 +286,27 @@ def checkout(req: CheckoutRequest):
 
     try:
         session = stripe.checkout.Session.create(
-            mode="subscription",
+            mode="setup",
             payment_method_types=["card"],
             customer_email=email,
-            line_items=_line_items(quantity),
+            setup_intent_data={
+                "usage": "off_session",
+                "metadata": {
+                    "onboarding_token": onboarding_token,
+                    "tenant_id": tenant_id,
+                },
+            },
             success_url=(
                 f"{PUBLIC_ONBOARDING_URL}/extension"
                 f"?onboarding_token={onboarding_token}"
                 f"&session_id={{CHECKOUT_SESSION_ID}}"
             ),
             cancel_url=f"{PUBLIC_ONBOARDING_URL}/info?cancelled=1",
-            allow_promotion_codes=True,
             metadata={
                 "onboarding_token": onboarding_token,
                 "tenant_id": tenant_id,
                 "name": req.full_name,
                 "company": req.company or "",
-            },
-            subscription_data={
-                "metadata": {
-                    "onboarding_token": onboarding_token,
-                    "tenant_id": tenant_id,
-                },
             },
         )
     except stripe.error.StripeError as e:
@@ -437,16 +436,27 @@ def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
     if meta.get("onboarding_token") and meta.get("onboarding_token") != token_val:
         logger.warning("reconcile: session %s does not belong to token", session_id)
         return False
-    if sess.get("payment_status") != "paid":
-        return False
+    mode = sess.get("mode", "subscription")
+    if mode == "setup":
+        if sess.get("status") != "complete":
+            return False
+    else:
+        if sess.get("payment_status") != "paid":
+            return False
 
+    from datetime import timedelta
     customer = sess.get("customer")
     subscription = sess.get("subscription")
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
         if not t.active:
             t.active = True
-            t.subscription_status = "active"
+            if mode == "setup":
+                t.subscription_status = "trialing"
+                if t.trial_ends_at is None:
+                    t.trial_ends_at = now() + timedelta(days=4)
+            else:
+                t.subscription_status = "active"
             if t.onboarding_stage == "pending_payment":
                 t.onboarding_stage = "extension"
             if customer:
@@ -635,3 +645,45 @@ def complete(token: str = Query(...)):
     return {"ok": True, "session_token": session_token,
             "magic_link_email_sent": magic_link_email_sent,
             "sample_email_sent": sample_email_sent}
+
+
+# ─── 6. cancel trial ─────────────────────────────────────────────────────
+
+@router.post("/cancel-trial")
+def cancel_trial(authorization: Optional[str] = Header(default=None)):
+    """Cancel the trial before it ends. Free, one-click, no questions.
+
+    Auth: session Bearer token (same as /v1/account/*). Detaches the stored
+    payment method from Stripe and marks the tenant cancelled. Must be called
+    while subscription_status='trialing'; post-trial cancellations go through
+    Stripe Billing Portal.
+    """
+    t = tenant_from_session(authorization)
+    if t.subscription_status != "trialing":
+        raise HTTPException(400, "No active trial to cancel")
+
+    pm_id = t.stripe_payment_method_id
+    cus_id = t.stripe_customer_id
+
+    if STRIPE_SECRET_KEY and pm_id:
+        try:
+            stripe.PaymentMethod.detach(pm_id)
+        except Exception:
+            logger.exception("Could not detach payment method %s for tenant %s",
+                             pm_id, t.id)
+
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        if tenant:
+            tenant.active = False
+            tenant.subscription_status = "cancelled"
+            tenant.trial_ends_at = None
+            tenant.stripe_payment_method_id = None
+            db.commit()
+
+    send_internal_alert(
+        f"Trial cancelled: {t.id}",
+        f"Tenant {t.id} ({t.contact_email}) cancelled their trial. "
+        f"PM {pm_id} detached. Customer: {cus_id}"
+    )
+    return {"ok": True}

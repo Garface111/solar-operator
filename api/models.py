@@ -75,6 +75,14 @@ class Tenant(Base):
     # from "extension installed but not seen recently."
     extension_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Deferred billing (June 2026). trial_ends_at is set when the operator
+    # completes setup-mode checkout; the cron job creates the real subscription
+    # at trial end. trial_extended tracks whether we've already done the 3-day
+    # zero-array grace extension so we only do it once.
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stripe_payment_method_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    trial_extended: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
     # onboarding_token is a 32-char random string handed to the SPA + passed as
     # Stripe metadata so the post-payment return path can find the pending tenant.

@@ -10,13 +10,20 @@ Schedule:
   - 1st of every month at 09:00 UTC: deliver to monthly clients
   - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly clients
 """
+import os
 from datetime import datetime, timedelta
 
+import stripe as stripe
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select, or_, text
+from sqlalchemy import select, or_, func, text
 from .db import SessionLocal, engine
-from .models import Tenant, Client, Job, now
+from .models import Tenant, Client, Array, Job, now
+from .notify import (
+    send_add_first_array_email,
+    send_trial_charged_email,
+    send_internal_alert,
+)
 
 scheduler = BackgroundScheduler(timezone="UTC")
 
@@ -91,6 +98,114 @@ def deliver_quarterly_reports():
     return _deliver_clients_with_frequency("quarterly")
 
 
+def finalize_expired_trials():
+    """Convert expired trials to live subscriptions (or extend zero-array trials).
+
+    Runs hourly. For each tenant in 'trialing' state whose trial_ends_at has
+    passed:
+      - If they have no arrays yet and haven't been extended: add 3 days,
+        send the 'add your first array' email, and leave them trialing.
+      - Otherwise: create the Stripe subscription on the stored payment method
+        (quantity = actual array count, minimum 1), mark active, clear trial.
+    """
+    stripe_secret = os.getenv("STRIPE_SECRET_KEY", "")
+    setup_price_id = os.getenv("STRIPE_SETUP_PRICE_ID", "")
+    array_price_id = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
+
+    if not stripe_secret:
+        return  # not configured — skip silently
+
+    stripe.api_key = stripe_secret
+
+    cutoff = datetime.utcnow()
+    with SessionLocal() as db:
+        trialing = db.execute(
+            select(Tenant).where(
+                Tenant.trial_ends_at <= cutoff,
+                Tenant.subscription_status == "trialing",
+            )
+        ).scalars().all()
+
+        for t in trialing:
+            array_count = db.execute(
+                select(func.count()).select_from(Array).where(
+                    Array.tenant_id == t.id,
+                    Array.deleted_at.is_(None),
+                    Array.excluded.is_(False),
+                )
+            ).scalar() or 0
+
+            if array_count == 0 and not t.trial_extended:
+                t.trial_ends_at = t.trial_ends_at + timedelta(days=3)
+                t.trial_extended = True
+                db.commit()
+                try:
+                    send_add_first_array_email(
+                        to=t.contact_email, name=t.name)
+                except Exception:
+                    pass
+                send_internal_alert(
+                    f"Trial extended (no arrays): {t.id}",
+                    f"Tenant {t.id} ({t.contact_email}) had 0 arrays at trial end. "
+                    f"Extended 3 days."
+                )
+                continue
+
+            # Charge the card.
+            quantity = max(array_count, 1)
+            try:
+                items = []
+                if setup_price_id:
+                    items.append({"price": setup_price_id, "quantity": 1})
+                if array_price_id:
+                    items.append({"price": array_price_id, "quantity": quantity})
+                sub = stripe.Subscription.create(
+                    customer=t.stripe_customer_id,
+                    items=items if items else None,
+                    default_payment_method=t.stripe_payment_method_id,
+                )
+                # Stripe SDK v15 returns StripeObjects without .get(); use [] with `in`.
+                sub_dict = sub.to_dict() if hasattr(sub, "to_dict") else sub
+                sub_id = sub_dict["id"]
+                t.stripe_subscription_id = sub_id
+                t.subscription_status = "active"
+                t.trial_ends_at = None
+                db.commit()
+
+                # Estimate the charge for the confirmation email.
+                amount_dollars = 0.0
+                latest_inv_id = sub_dict.get("latest_invoice") if hasattr(sub_dict, "get") else (
+                    sub_dict["latest_invoice"] if "latest_invoice" in sub_dict else None
+                )
+                try:
+                    if latest_inv_id:
+                        inv = stripe.Invoice.retrieve(latest_inv_id)
+                        inv_dict = inv.to_dict() if hasattr(inv, "to_dict") else inv
+                        amount_dollars = (inv_dict.get("amount_due") or 0) / 100
+                except Exception:
+                    pass
+
+                try:
+                    send_trial_charged_email(
+                        to=t.contact_email, name=t.name,
+                        array_count=quantity, amount_dollars=amount_dollars)
+                except Exception:
+                    pass
+                send_internal_alert(
+                    f"Trial ended — charged {t.id}",
+                    f"Tenant {t.id} ({t.contact_email}) trial ended. "
+                    f"Arrays: {array_count}, billed qty: {quantity}. "
+                    f"Subscription: {sub_id}"
+                )
+            except Exception as e:
+                send_internal_alert(
+                    f"Trial-end charge FAILED: {t.id}",
+                    f"Tenant {t.id} ({t.contact_email}) could not be charged at trial end.\n"
+                    f"Arrays: {array_count}, pm: {t.stripe_payment_method_id}\n"
+                    f"Error: {e}\nManual intervention needed."
+                )
+
+
 def hard_delete_old_soft_deleted():
     """Purge rows whose deleted_at is older than 30 days.
 
@@ -117,6 +232,11 @@ def start():
     scheduler.add_job(
         enqueue_pull_for_all_tenants,
         "interval", hours=6, id="enqueue_pull_bills", replace_existing=True,
+    )
+    # Hourly: finalize expired trials (charge or extend)
+    scheduler.add_job(
+        finalize_expired_trials,
+        "interval", hours=1, id="finalize_expired_trials", replace_existing=True,
     )
     # Drain the queue every minute
     from .worker import run_pending_jobs

@@ -433,6 +433,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "last_delivery_at": t.last_delivery_at.isoformat() if t.last_delivery_at else None,
             "extension_heartbeat_at": t.extension_heartbeat_at.isoformat() if t.extension_heartbeat_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
+            "trial_ends_at": t.trial_ends_at.isoformat() if t.trial_ends_at else None,
             "accounts_count": int(accounts_count),
             "bills_count": int(bills_count),
             "clients_count": int(clients_count),
