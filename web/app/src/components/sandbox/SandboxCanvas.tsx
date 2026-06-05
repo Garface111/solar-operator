@@ -182,7 +182,7 @@ export default function SandboxCanvas() {
       const built = buildNodesFromApi(data);
       setNodes(built);
       if (built.length > 0) {
-        setTimeout(() => fitView({ padding: 0.12, duration: 300 }), 80);
+        setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to load canvas');
@@ -443,7 +443,7 @@ export default function SandboxCanvas() {
         })),
       ];
     });
-    setTimeout(() => fitView({ padding: 0.12, duration: 400 }), 80);
+    setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
   }, [setNodes, fitView]);
 
   // ── Context ───────────────────────────────────────────────────────────────
@@ -473,7 +473,7 @@ export default function SandboxCanvas() {
           nodeTypes={NODE_TYPES}
           nodesConnectable={false}
           fitView={nodes.length > 0}
-          fitViewOptions={{ padding: 0.12 }}
+          fitViewOptions={{ padding: 0.35, maxZoom: 0.85 }}
           deleteKeyCode={null}
           onPaneClick={() => setContextMenu(null)}
           onNodeClick={() => setContextMenu(null)}
@@ -503,7 +503,7 @@ export default function SandboxCanvas() {
               <div className="flex gap-2">
                 <ToolbarButton onClick={() => setShowAddModal(true)}>+ Add Client</ToolbarButton>
                 <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
-                <ToolbarButton onClick={() => fitView({ padding: 0.12, duration: 400 })}>
+                <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
                 </ToolbarButton>
               </div>
