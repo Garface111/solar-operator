@@ -32,7 +32,7 @@ const STEPS: StepDef[] = [
   {
     anchor: "2",
     title: "Each card is a client",
-    body: "We named this one from the utility account we just captured. Click the name to rename it to whatever you'd put on a report — your operator name, the LLC, whatever you'd say to Bruce over coffee.",
+    body: "We named this one from the utility account we just captured. Click the name to rename it to whatever you'd put on a report — your operator name, the LLC, whatever you'd say to a client over coffee.",
   },
   {
     anchor: "7",
@@ -57,7 +57,7 @@ const STEPS: StepDef[] = [
   {
     anchor: null,
     title: "You're set",
-    body: "From here it runs itself. Reports auto-generate on your selected cadence. We email you a sample after the first quarter so you can show Bruce. Holler if anything looks off.",
+    body: "From here it runs itself. Reports auto-generate on your selected cadence. We email you a sample after the first quarter so you can review the format. Holler if anything looks off.",
   },
 ];
 
