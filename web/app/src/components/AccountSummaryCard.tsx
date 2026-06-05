@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
+import { RevealNumber } from "../ui/RevealNumber";
 import { Spinner } from "../ui/Spinner";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
@@ -230,17 +231,17 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
         </Field>
         <Field label="Clients">
           <span title="Reporting clients you manage — each gets their own workbook.">
-            {account.clients_count}
+            <RevealNumber value={account.clients_count} delayMs={0} />
           </span>
         </Field>
         <Field label="Utility accounts">
           <span title="Utility account numbers detected by the extension. Each array typically has 1–3 accounts.">
-            {account.accounts_count}
+            <RevealNumber value={account.accounts_count} delayMs={120} />
           </span>
         </Field>
         <Field label="Bills on file">
           <span title="Individual monthly bills pulled from those accounts. A full 6-quarter report needs ~18 bills per array.">
-            {account.bills_count}
+            <RevealNumber value={account.bills_count} delayMs={240} />
           </span>
         </Field>
         {account.extension_heartbeat_at && (

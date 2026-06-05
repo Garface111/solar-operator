@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/Button";
 import { Chip } from "../ui/Chip";
+import { RevealNumber } from "../ui/RevealNumber";
+import { useReveal } from "./WelcomeReveal";
+
+/** Helper to compute stagger delay for numeric reveals inside a card.
+ *  Returns 0 when reveal is inactive — RevealNumber will snap instantly. */
+function useRevealDelay() {
+  const reveal = useReveal();
+  return (cardIndex: number, slot = 0): number =>
+    reveal.active ? reveal.delayFor(cardIndex, slot) : 0;
+}
 import { Toggle } from "../ui/Toggle";
 import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
@@ -67,6 +77,8 @@ interface Props {
   selectable?: boolean;
   selected?: boolean;
   onSelect?: (id: number) => void;
+  /** Index in the client list — used by WelcomeReveal for staggered number fill. */
+  revealIndex?: number;
 }
 
 export function ClientCard({
@@ -79,8 +91,10 @@ export function ClientCard({
   selectable,
   selected,
   onSelect,
+  revealIndex = 0,
 }: Props) {
   const toast = useToast();
+  const revealDelay = useRevealDelay();
   // Placeholder clients (the "Your first client" row dropped in by the
   // array-count-only onboarding path) auto-expand by default and get a
   // visual nudge: amber ring + "Rename this to your real client" hint.
@@ -448,7 +462,8 @@ export function ClientCard({
         </div>
 
         <div className="hidden shrink-0 text-right text-xs text-zinc-400 sm:block">
-          {client.array_count} {client.array_count === 1 ? "array" : "arrays"}
+          <RevealNumber value={client.array_count} delayMs={revealDelay(revealIndex, 0)} />{" "}
+          {client.array_count === 1 ? "array" : "arrays"}
         </div>
       </div>
 

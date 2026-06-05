@@ -336,6 +336,7 @@ export function ClientsSection({ expandClientId }: Props) {
                     selectable={selectMode}
                     selected={selectedIds.has(c.id)}
                     onSelect={toggleSelect}
+                    revealIndex={i}
                     onDeleted={(token, msg) => {
                       removeClientLocal(c.id);
                       scheduleUndo(token, msg);
