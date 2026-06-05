@@ -139,6 +139,8 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 
   return (
     <div
+      data-walkthrough="client-card"
+      data-walkthrough-client-id={id}
       className={[
         'so-node-enter w-72 rounded-2xl border-[1.5px] bg-white transition-all duration-150',
         client.pinned && !isMergeTarget && !isMergeSource && !dropHover
@@ -369,6 +371,7 @@ function LoginGroupRow({
 
   return (
     <div
+      data-walkthrough="login-row"
       className={[
         'group/login rounded-xl border px-3 py-2.5 transition-opacity',
         th.row,

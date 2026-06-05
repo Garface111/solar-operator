@@ -32,6 +32,7 @@ import { AddClientModal } from '../AddClientModal';
 import { AddClientByLoginModal } from '../AddClientByLoginModal';
 import { CommandPalette } from './CommandPalette';
 import { DevPanel } from './DevPanel';
+import { SandboxWalkthrough } from './SandboxWalkthrough';
 
 // ── Node type registry (stable reference — must live outside component) ────
 
@@ -207,6 +208,7 @@ export default function SandboxCanvas() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddByLogin, setShowAddByLogin] = useState(false);
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
+  const [lastCapturedClientId, setLastCapturedClientId] = useState<number | null>(null);
 
   const { getIntersectingNodes, fitView, setCenter } = useReactFlow();
 
@@ -1214,7 +1216,10 @@ export default function SandboxCanvas() {
           {!loading && !isEmpty && (
             <Panel position="top-right">
               <div className="flex gap-2">
-                <ToolbarButton
+                <button
+                  type="button"
+                  data-walkthrough="add-client-btn"
+                  className="rounded-lg bg-primary-500 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-primary-600 active:bg-primary-700"
                   onClick={() => {
                     clientIdsBeforeModal.current = new Set(
                       nodesRef.current
@@ -1226,6 +1231,9 @@ export default function SandboxCanvas() {
                   }}
                 >
                   + Add Client
+                </button>
+                <ToolbarButton onClick={() => setShowAddModal(true)}>
+                  + Add empty
                 </ToolbarButton>
                 <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
@@ -1394,7 +1402,19 @@ export default function SandboxCanvas() {
               // Center on the last newly created client so the user actually
               // sees what they just added.
               const focus = newClients[newClients.length - 1];
-              if (focus) centerOnClientId(focus.id);
+              if (focus) {
+                centerOnClientId(focus.id);
+                setLastCapturedClientId(focus.id);
+                // Auto-expand the new card so the login row is visible for
+                // the walkthrough "captured" pointer.
+                setNodes((ns) =>
+                  ns.map((n) =>
+                    n.id === `client_${focus.id}`
+                      ? { ...n, data: { ...(n.data as ClientNodeData), expanded: true } }
+                      : n,
+                  ),
+                );
+              }
               return rows.map((r) => ({ id: r.id, name: r.name }));
             } catch {
               return [];
@@ -1425,6 +1445,24 @@ export default function SandboxCanvas() {
             centerOnClientId(ncId);
           }}
         />
+
+        {/* Walkthrough — only once canvas is loaded and has at least one client */}
+        {!loading && !loadError && nodes.filter((n) => n.type === 'client').length > 0 && (
+          <SandboxWalkthrough
+            clientCount={nodes.filter((n) => n.type === 'client').length}
+            lastCapturedClientId={lastCapturedClientId}
+            onOpenByLogin={() => {
+              clientIdsBeforeModal.current = new Set(
+                nodesRef.current
+                  .filter((n) => n.type === 'client' && n.id.startsWith('client_'))
+                  .map((n) => parseInt(n.id.replace('client_', ''), 10))
+                  .filter((id) => !isNaN(id)),
+              );
+              setShowAddByLogin(true);
+            }}
+            onOpenManual={() => setShowAddModal(true)}
+          />
+        )}
 
         {/* Cmd+K / Ctrl+K command palette */}
         <CommandPalette
