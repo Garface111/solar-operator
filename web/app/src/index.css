@@ -66,6 +66,18 @@ body {
   animation: so-cascade-chip-in 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* CaptureCeremony — shimmer placeholder used while we wait for the
+   extension to finish scraping. Subtle wash of color across each chip
+   so it feels alive without competing with the real data. */
+@keyframes so-shimmer-pulse {
+  0%, 100% { opacity: 0.4; transform: scaleX(0.92); }
+  50%      { opacity: 0.9; transform: scaleX(1); }
+}
+.so-shimmer {
+  animation: so-shimmer-pulse 1.4s ease-in-out infinite both;
+  transform-origin: left center;
+}
+
 /* WelcomeReveal v3 — invisible state. Cards fade-in subtly while the
    numbers inside (RevealNumber) tick up from 0 like an AI is filling them. */
 @keyframes so-reveal-card-fade {

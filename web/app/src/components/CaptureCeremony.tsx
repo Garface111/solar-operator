@@ -39,6 +39,8 @@ const DISMISS_KEY = "so_capture_ceremony_dismissed";
 
 export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
   const [events, setEvents] = useState<CaptureEvent[]>([]);
+  const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
+  const [pendingSince, setPendingSince] = useState<number | null>(null);
   const [dismissed, setDismissed] = useState(() => {
     try {
       return sessionStorage.getItem(DISMISS_KEY) === "true";
@@ -47,6 +49,8 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
     }
   });
   const nextIdRef = useRef(1);
+  const knownClientIdsRef = useRef<Set<number>>(new Set());
+  const pollAbortRef = useRef<{ canceled: boolean } | null>(null);
 
   // Resolve a capture event into a Client row so we can render names + arrays.
   // /v1/sync runs synchronously before sending SO_CAPTURE_LANDED, so the
@@ -97,7 +101,13 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
       const data = e.data;
       if (!data || typeof data !== "object") return;
       if (data.type !== "SO_CAPTURE_LANDED") return;
-      if (!data.ok) return; // capture failed — ignored (toast lives elsewhere)
+      if (!data.ok) {
+        // Capture failed → clear pending so we don't loop on it.
+        setPendingProvider(null);
+        setPendingSince(null);
+        if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+        return;
+      }
       const ev: CaptureEvent = {
         id: nextIdRef.current++,
         provider: (data.provider as Provider) || "gmp",
@@ -105,6 +115,9 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
         at: String(data.at || new Date().toISOString()),
       };
       setEvents((prev) => [...prev, ev]);
+      setPendingProvider(null);
+      setPendingSince(null);
+      if (pollAbortRef.current) pollAbortRef.current.canceled = true;
       setDismissed(false); // un-dismiss on new event so user sees the magic
       try {
         sessionStorage.removeItem(DISMISS_KEY);
@@ -115,6 +128,73 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [resolveEvent, onCaptureLanded]);
+
+  // Listen for so:capture-pending — fired the moment the operator picks
+  // GMP/VEC in the Add Client modal. Show a "Scraping…" pending row
+  // INSTANTLY so they know something's happening when they tab back here.
+  useEffect(() => {
+    async function onPending(e: Event) {
+      const ev = e as CustomEvent<{ provider?: Provider }>;
+      const provider = (ev.detail?.provider as Provider) || "gmp";
+      setPendingProvider(provider);
+      setPendingSince(Date.now());
+      setDismissed(false);
+      try { sessionStorage.removeItem(DISMISS_KEY); } catch { /* ignore */ }
+      // Snapshot known client IDs so we can detect the newcomer if the
+      // postMessage gets lost in the tab handoff.
+      try {
+        const snap = await listClients();
+        knownClientIdsRef.current = new Set(snap.map((c) => c.id));
+      } catch { /* non-fatal */ }
+      // Kick off a polling fallback: every 1.5s, refetch clients and look
+      // for a new ID. If we find one, synthesize a CaptureEvent. Caps at
+      // 60s to avoid running forever on a failed sign-in.
+      if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+      const abortToken = { canceled: false };
+      pollAbortRef.current = abortToken;
+      const startedAt = Date.now();
+      const POLL_MS = 1500;
+      const MAX_MS = 60_000;
+      const tick = async () => {
+        if (abortToken.canceled) return;
+        if (Date.now() - startedAt > MAX_MS) {
+          setPendingProvider(null);
+          setPendingSince(null);
+          return;
+        }
+        try {
+          const fresh = await listClients();
+          const newcomer = fresh.find((c) => !knownClientIdsRef.current.has(c.id));
+          if (newcomer && !abortToken.canceled) {
+            const synth: CaptureEvent = {
+              id: nextIdRef.current++,
+              provider,
+              accountCount: 0, // we don't know yet — resolveEvent will fill in arrays
+              at: new Date().toISOString(),
+            };
+            setEvents((prev) => [...prev, synth]);
+            setPendingProvider(null);
+            setPendingSince(null);
+            abortToken.canceled = true;
+            void resolveEvent(synth);
+            onCaptureLanded();
+            return;
+          }
+        } catch { /* keep polling */ }
+        setTimeout(() => void tick(), POLL_MS);
+      };
+      setTimeout(() => void tick(), POLL_MS);
+    }
+    window.addEventListener("so:capture-pending", onPending as EventListener);
+    return () => window.removeEventListener("so:capture-pending", onPending as EventListener);
+  }, [resolveEvent, onCaptureLanded]);
+
+  // Cleanup on unmount.
+  useEffect(() => {
+    return () => {
+      if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+    };
+  }, []);
 
   function dismiss() {
     setDismissed(true);
@@ -132,8 +212,9 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
   }
 
   // Render nothing if dismissed AND no live events; spare returning users.
-  if (dismissed && events.length === 0) return null;
-  if (!freshVisit && events.length === 0) return null;
+  // Render nothing if dismissed AND no live activity; spare returning users.
+  if (dismissed && events.length === 0 && !pendingProvider) return null;
+  if (!freshVisit && events.length === 0 && !pendingProvider) return null;
 
   const totalClients = new Set(events.map((e) => e.client?.id).filter(Boolean)).size;
   const totalArrays = events.reduce((sum, e) => sum + (e.accountCount || 0), 0);
@@ -143,17 +224,26 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
       <div className="flex items-start justify-between gap-4 px-5 pt-5">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-primary-700">
-            {events.length === 0
+            {pendingProvider
+              ? "Scraping…"
+              : events.length === 0
               ? "Waiting for your first capture"
               : "Live capture"}
           </p>
           <h2 className="mt-1 text-lg font-semibold text-zinc-900">
-            {events.length === 0
+            {pendingProvider
+              ? `Reading ${pendingProvider.toUpperCase()} — your new client will appear here in a moment`
+              : events.length === 0
               ? "Sign into a utility portal and watch your clients land here"
               : totalClients > 0
               ? `${totalClients} client${totalClients === 1 ? "" : "s"} · ${totalArrays} array${totalArrays === 1 ? "" : "s"} captured`
               : `${totalArrays} array${totalArrays === 1 ? "" : "s"} captured`}
           </h2>
+          {pendingProvider && pendingSince && (
+            <p className="mt-1 text-xs text-zinc-500">
+              {`Started ${Math.max(1, Math.round((Date.now() - pendingSince) / 1000))}s ago · usually takes 5–30 seconds`}
+            </p>
+          )}
         </div>
         <button
           type="button"
@@ -164,6 +254,35 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
           ×
         </button>
       </div>
+
+      {/* Pending shimmer row — shows immediately when a capture starts so
+          the operator knows the system is working even before SO_CAPTURE_LANDED. */}
+      {pendingProvider && (
+        <ol className="mt-4 space-y-2 px-5">
+          <li className="rounded-xl border border-primary-100 bg-white/80 px-4 py-3 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 truncate font-medium text-zinc-900">
+                  <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-primary-300 border-t-primary-700" />
+                  <span>Capturing client data…</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="so-shimmer inline-block h-4 w-16 rounded-md bg-primary-50"
+                      style={{ animationDelay: `${i * 150}ms` } as React.CSSProperties}
+                    />
+                  ))}
+                </div>
+              </div>
+              <span className="shrink-0 text-xs font-semibold uppercase tracking-wider text-primary-600">
+                {pendingProvider}
+              </span>
+            </div>
+          </li>
+        </ol>
+      )}
 
       {/* Cascading event list */}
       {events.length > 0 && (
