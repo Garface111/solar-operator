@@ -679,12 +679,33 @@ def preview_email(body: EmailSettings,
     }
 
 
+class _SendModeBody(BaseModel):
+    send_mode: str
+
+
+@router.post("/v1/account/reports/send-mode")
+def patch_reports_send_mode(body: _SendModeBody,
+                             authorization: Optional[str] = Header(default=None)):
+    """Quick-save the recipient-routing default (from the NextRunCard toggle)."""
+    mode = (body.send_mode or "").strip()
+    if mode not in _VALID_SEND_MODES:
+        raise HTTPException(400, "send_mode must be 'to_client', 'to_me', or 'to_both'")
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.send_mode = mode
+        db.commit()
+        return {"ok": True, "send_mode": t.send_mode}
+
+
 class SendReportBody(BaseModel):
     """Optional body for /v1/account/send-report. When client_ids is provided,
     only those clients (validated against the tenant) get the report — used by
     the dashboard's per-client checkbox picker. When omitted, ALL active
-    clients get it (legacy behavior)."""
+    clients get it (legacy behavior). send_mode, when provided, is saved as
+    the tenant default before delivery so the modal slider takes immediate effect."""
     client_ids: Optional[list[int]] = None
+    send_mode: Optional[str] = None
 
 
 @router.post("/v1/account/send-report")
@@ -701,6 +722,17 @@ def send_my_report(
     t = tenant_from_session(authorization)
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send reports")
+
+    # If the modal slider included a send_mode, save it as the new default first.
+    # This covers the race where the toggle PATCH might not have completed yet.
+    if body and body.send_mode:
+        mode = body.send_mode.strip()
+        if mode in _VALID_SEND_MODES:
+            with SessionLocal() as db:
+                t_db = db.get(Tenant, t.id)
+                if t_db:
+                    t_db.send_mode = mode
+                    db.commit()
 
     ids = (body.client_ids if body else None) or []
     # Defer heavy import (avoid circulars at module load)
@@ -776,6 +808,199 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
         raise HTTPException(502,
             "Sample workbook built but email delivery failed — check your Resend configuration.")
     return {**result, "sample": True, "sent_to": tenant_email}
+
+
+# ─── Email template studio (V2, June 2026) ──────────────────────────────────
+# Operators can customize the per-client report email template through a
+# full-screen AI-assisted studio. The tenant's overrides live in
+# Tenant.email_subject_template / email_body_template; null means "use the
+# built-in default" (see api/email_templates.py).
+
+def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
+                             tenant_email: str) -> tuple[dict, str]:
+    """Return (merge_ctx, sample_client_name) using first client with email or fallback."""
+    client = db.execute(
+        select(Client)
+        .where(
+            Client.tenant_id == tenant_id,
+            Client.active == True,  # noqa: E712
+            Client.contact_email.is_not(None),
+            Client.deleted_at.is_(None),
+        )
+        .order_by(Client.name.asc())
+        .limit(1)
+    ).scalars().first()
+    if client:
+        n_arrays = db.execute(
+            select(func.count()).select_from(Array)
+            .where(Array.client_id == client.id, Array.deleted_at.is_(None))
+        ).scalar() or 1
+        client_name = client.name
+    else:
+        n_arrays = 3
+        client_name = "Sample Client"
+    ctx = build_context(
+        client_name=client_name,
+        tenant_name=tenant_name,
+        arrays_count=n_arrays,
+        tenant_email=tenant_email,
+        dashboard_url=DEFAULT_DASHBOARD_URL,
+    )
+    return ctx, client_name
+
+
+class _TemplateBody(BaseModel):
+    subject_template: Optional[str] = None
+    body_template: Optional[str] = None
+
+
+@router.get("/v1/account/reports/email-template")
+def get_email_template(authorization: Optional[str] = Header(default=None)):
+    """Return the tenant's current email template (null fields = built-in default)."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        has_client_email = bool(db.execute(
+            select(func.count()).select_from(Client).where(
+                Client.tenant_id == t.id,
+                Client.active == True,  # noqa: E712
+                Client.contact_email.is_not(None),
+                Client.deleted_at.is_(None),
+            )
+        ).scalar() or 0)
+        return {
+            "subject_template": t.email_subject_template,
+            "body_template": t.email_body_template,
+            "is_default": (t.email_subject_template is None and t.email_body_template is None),
+            "available_tokens": list(MERGE_TAGS),
+            "has_client_with_email": has_client_email,
+        }
+
+
+@router.post("/v1/account/reports/email-template/preview")
+def preview_email_template(body: _TemplateBody,
+                           authorization: Optional[str] = Header(default=None)):
+    """Render the proposed template with real sample data (first client with email)."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        tenant_name = t.name or "Your Company"
+        tenant_email = (t.contact_email or "").strip()
+        stored_subject = t.email_subject_template
+        stored_body = t.email_body_template
+        ctx, sample_client = _query_sample_client_ctx(db, t.id, tenant_name, tenant_email)
+    subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
+    body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
+    return {
+        "subject_rendered": render_merge(subj_t, ctx),
+        "body_rendered": render_merge(body_t, ctx),
+        "sample_client": sample_client,
+    }
+
+
+class _ChatBody(BaseModel):
+    messages: list[dict]
+    current_body: str
+    current_subject: Optional[str] = None
+
+
+@router.post("/v1/account/reports/email-template/chat")
+def chat_email_template(body: _ChatBody,
+                        authorization: Optional[str] = Header(default=None)):
+    """Call the LLM to regenerate the template body/subject based on the conversation."""
+    import os as _os
+    from .email_templates import regenerate_template_via_ai
+    tenant_from_session(authorization)
+    api_key = _os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "AI assistant not configured — set ANTHROPIC_API_KEY")
+    recent_messages = body.messages[-10:]  # cap at 5 turns (10 messages) to bound tokens
+    for m in recent_messages:
+        if m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str):
+            raise HTTPException(400, "Each message must have role 'user'|'assistant' and string content")
+    current_subject = (body.current_subject or "").strip() or DEFAULT_SUBJECT_TEMPLATE
+    try:
+        result = regenerate_template_via_ai(
+            current_body=body.current_body,
+            current_subject=current_subject,
+            messages=recent_messages,
+            api_key=api_key,
+        )
+    except Exception as exc:
+        logger.exception("Template AI regen failed")
+        raise HTTPException(502, f"AI request failed: {exc}") from exc
+    return {
+        "assistant_reply": result["reply"],
+        "proposed_body": result["body"],
+        "proposed_subject": result["subject"],
+    }
+
+
+@router.put("/v1/account/reports/email-template")
+def save_email_template(body: _TemplateBody,
+                        authorization: Optional[str] = Header(default=None)):
+    """Persist the operator's custom template as their send-time default."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        if body.subject_template is not None:
+            t.email_subject_template = _blank_to_none(body.subject_template)
+        if body.body_template is not None:
+            t.email_body_template = _blank_to_none(body.body_template)
+        db.commit()
+        return {
+            "ok": True,
+            "subject_template": t.email_subject_template,
+            "body_template": t.email_body_template,
+        }
+
+
+@router.post("/v1/account/reports/email-template/test-send")
+def test_send_email_template(body: _TemplateBody,
+                             authorization: Optional[str] = Header(default=None)):
+    """Render the proposed template with real data and send a [TEST] to the tenant's email."""
+    t = tenant_from_session(authorization)
+    tenant_email = (t.contact_email or "").strip()
+    if not tenant_email:
+        raise HTTPException(422, "Add an email address to your account first.")
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        tenant_name = t.name or "Your Company"
+        from_header = resolve_from_header(
+            t.send_from_email or t.contact_email,
+            t.send_from_name,
+            t.name,
+        )
+        stored_subject = t.email_subject_template
+        stored_body = t.email_body_template
+        ctx, _ = _query_sample_client_ctx(db, t.id, tenant_name, tenant_email)
+    subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
+    body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
+    subject, html, text = render_email(
+        subject_template=subj_t, body_template=body_t, ctx=ctx)
+    from .notify import _send_via_resend
+    sent = _send_via_resend(
+        to=tenant_email,
+        subject=f"[TEST] {subject}",
+        html=html,
+        text=text,
+        from_addr=from_header,
+    )
+    if not sent:
+        raise HTTPException(502, "Email delivery failed — check your Resend configuration.")
+    return {"ok": True, "sent_to": tenant_email}
+
+
+@router.post("/v1/account/reports/email-template/reset")
+def reset_email_template(authorization: Optional[str] = Header(default=None)):
+    """Clear the tenant's template overrides — reverts to the system built-in default."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.email_subject_template = None
+        t.email_body_template = None
+        db.commit()
+    return {"ok": True}
 
 
 @router.get("/v1/account/billing-summary")

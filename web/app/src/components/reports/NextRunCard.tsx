@@ -3,12 +3,14 @@ import { Button } from "../../ui/Button";
 import { Modal } from "../../ui/Modal";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
+import { useDashboardContext } from "../../screens/DashboardLayout";
 import {
   type NextRunPreview,
   type ClientRow,
   getNextRun,
   listClients,
   sendReportNow,
+  patchSendMode,
 } from "../../lib/api";
 
 interface Props {
@@ -18,9 +20,19 @@ interface Props {
   onSent?: () => void;
 }
 
+type SendModeValue = "to_me" | "to_client" | "to_both";
+
+const SEND_MODES: { value: SendModeValue; label: string }[] = [
+  { value: "to_me", label: "Just to me" },
+  { value: "to_client", label: "Just to clients" },
+  { value: "to_both", label: "Both" },
+];
+
 /** "Next run" countdown card with send-now action. */
 export function NextRunCard({ data: prefetched, onSent }: Props) {
   const toast = useToast();
+  const { account, patchAccount } = useDashboardContext();
+
   const [data, setData] = useState<NextRunPreview | null>(prefetched ?? null);
   const [loadError, setLoadError] = useState(false);
   const [loading, setLoading] = useState(prefetched === undefined);
@@ -30,6 +42,17 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
   const [clientList, setClientList] = useState<ClientRow[] | null>(null);
   const [loadingClients, setLoadingClients] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const [sendMode, setSendMode] = useState<SendModeValue>(
+    () => (account?.send_mode as SendModeValue) ?? "to_client",
+  );
+
+  // Sync with account once it loads (account starts null while fetching).
+  useEffect(() => {
+    if (account?.send_mode) {
+      setSendMode(account.send_mode as SendModeValue);
+    }
+  }, [account?.send_mode]);
 
   useEffect(() => {
     if (prefetched !== undefined) return;
@@ -55,12 +78,22 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
       .finally(() => setLoadingClients(false));
   }, [confirmOpen, clientList, toast]);
 
+  async function handleModeChange(mode: SendModeValue) {
+    setSendMode(mode);
+    patchAccount({ send_mode: mode });
+    try {
+      await patchSendMode(mode);
+    } catch {
+      // Silently ignore — the send-report call will re-save the mode anyway.
+    }
+  }
+
   async function doSend() {
     setSending(true);
     try {
       const ids = Array.from(selectedIds);
       const allSelected = clientList !== null && ids.length === clientList.length;
-      const res = await sendReportNow(allSelected ? undefined : ids);
+      const res = await sendReportNow(allSelected ? undefined : ids, sendMode);
       setConfirmOpen(false);
       const failures = res.results.filter((r) => !r.ok);
       if (res.client_count === 0) {
@@ -130,12 +163,45 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
               Will include {preview}
             </p>
           </div>
-          <Button
-            className="h-8 shrink-0 px-3 text-xs"
-            onClick={() => setConfirmOpen(true)}
-          >
-            Send now
-          </Button>
+          <div className="flex flex-col items-end gap-2">
+            {/* Send mode — 3-segment toggle */}
+            <div
+              role="radiogroup"
+              aria-label="Report recipients"
+              className="flex rounded-xl border border-zinc-200 bg-zinc-50 p-1"
+            >
+              {SEND_MODES.map((m) => {
+                const selected = sendMode === m.value;
+                return (
+                  <button
+                    key={m.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => handleModeChange(m.value)}
+                    className={[
+                      "rounded-lg px-3 py-1 text-xs font-medium transition-colors",
+                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40",
+                      selected
+                        ? "bg-white text-zinc-900 shadow-sm"
+                        : "text-zinc-500 hover:text-zinc-800",
+                    ].join(" ")}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-zinc-500">
+              Applies to this run and saves as your default.
+            </p>
+            <Button
+              className="h-8 shrink-0 px-3 text-xs"
+              onClick={() => setConfirmOpen(true)}
+            >
+              Send now
+            </Button>
+          </div>
         </div>
       </div>
 

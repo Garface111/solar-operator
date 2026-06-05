@@ -5,6 +5,7 @@ import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
 import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
 import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
 import { NextRunCard } from "../components/reports/NextRunCard";
+import { EmailTemplateStudio } from "../components/reports/EmailTemplateStudio";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { ScreenLayout } from "../ui/ScreenLayout";
@@ -72,6 +73,7 @@ export default function ReportsTab() {
   const [reports, setReports] = useState<QuarterReport[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [studioOpen, setStudioOpen] = useState(false);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -219,6 +221,22 @@ export default function ReportsTab() {
           </div>
         )}
       </div>
+
+      {/* ── Email template studio ── */}
+      <div className="pt-2 flex justify-center">
+        <button
+          type="button"
+          onClick={() => setStudioOpen(true)}
+          className="text-xs font-medium text-zinc-400 hover:text-zinc-600 underline underline-offset-2 transition-colors"
+        >
+          Customize email template ✨
+        </button>
+      </div>
+
+      <EmailTemplateStudio
+        open={studioOpen}
+        onClose={() => setStudioOpen(false)}
+      />
     </ScreenLayout>
   );
 }
