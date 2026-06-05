@@ -283,13 +283,30 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 acct.array_id = None
                             else:
                                 continue
-                        arr = Array(
-                            tenant_id=tenant.id,
-                            client_id=owner.id,
-                            name=a.get("nickname") or acct_no,
-                            bill_offset_months=_autopop_cfg["bill_offset_months"],
-                        )
-                        db.add(arr)
+                        arr_name = (a.get("nickname") or acct_no)[:200]
+                        # Resurrect a soft-deleted Array with the same
+                        # (tenant_id, name) — the uq_array_per_tenant
+                        # unique constraint doesn't exclude deleted_at.
+                        ghost_arr = db.execute(
+                            select(Array).where(
+                                Array.tenant_id == tenant.id,
+                                Array.name == arr_name,
+                                Array.deleted_at.is_not(None),
+                            ).limit(1)
+                        ).scalar_one_or_none()
+                        if ghost_arr is not None:
+                            ghost_arr.deleted_at = None
+                            ghost_arr.client_id = owner.id
+                            ghost_arr.bill_offset_months = _autopop_cfg["bill_offset_months"]
+                            arr = ghost_arr
+                        else:
+                            arr = Array(
+                                tenant_id=tenant.id,
+                                client_id=owner.id,
+                                name=arr_name,
+                                bill_offset_months=_autopop_cfg["bill_offset_months"],
+                            )
+                            db.add(arr)
                         db.flush()  # assign arr.id before linking
                         acct.array_id = arr.id
                         # Real arrays landed → this client is no longer a placeholder.
@@ -426,13 +443,27 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                     acct.array_id = None
                                 else:
                                     continue
-                            arr = Array(
-                                tenant_id=tenant.id,
-                                client_id=target.id,
-                                name=a.get("nickname") or acct_no,
-                                bill_offset_months=_autopop_cfg["bill_offset_months"],
-                            )
-                            db.add(arr)
+                            arr_name = (a.get("nickname") or acct_no)[:200]
+                            ghost_arr = db.execute(
+                                select(Array).where(
+                                    Array.tenant_id == tenant.id,
+                                    Array.name == arr_name,
+                                    Array.deleted_at.is_not(None),
+                                ).limit(1)
+                            ).scalar_one_or_none()
+                            if ghost_arr is not None:
+                                ghost_arr.deleted_at = None
+                                ghost_arr.client_id = target.id
+                                ghost_arr.bill_offset_months = _autopop_cfg["bill_offset_months"]
+                                arr = ghost_arr
+                            else:
+                                arr = Array(
+                                    tenant_id=tenant.id,
+                                    client_id=target.id,
+                                    name=arr_name,
+                                    bill_offset_months=_autopop_cfg["bill_offset_months"],
+                                )
+                                db.add(arr)
                             db.flush()
                             acct.array_id = arr.id
                         if target.is_placeholder:
