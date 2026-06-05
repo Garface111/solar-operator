@@ -1172,7 +1172,23 @@ export default function SandboxCanvas() {
 
   return (
     <CanvasActionsContext.Provider value={actions}>
-      <div className="relative h-full w-full">
+      <div className="relative h-full w-full overflow-hidden bg-gradient-to-br from-[#fbf9f3] via-[#f6fbf2] to-[#f0f9ec]">
+        {/* Soft sun-glow ambient flare — top-right warmth */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -right-32 -top-32 z-0 h-[560px] w-[560px] rounded-full opacity-60 blur-3xl"
+          style={{
+            background: 'radial-gradient(closest-side, rgba(250, 220, 140, 0.55), rgba(250, 220, 140, 0) 70%)',
+          }}
+        />
+        {/* Cool meadow glow — bottom-left depth */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -bottom-40 -left-32 z-0 h-[620px] w-[620px] rounded-full opacity-50 blur-3xl"
+          style={{
+            background: 'radial-gradient(closest-side, rgba(110, 231, 183, 0.45), rgba(110, 231, 183, 0) 70%)',
+          }}
+        />
         <ReactFlow
           nodes={nodes}
           edges={[]}
@@ -1206,7 +1222,7 @@ export default function SandboxCanvas() {
           }}
           proOptions={{ hideAttribution: true }}
         >
-          <Background variant={BackgroundVariant.Dots} color="#d4d4d8" gap={22} size={1.5} />
+          <Background variant={BackgroundVariant.Dots} color="#9caf88" gap={22} size={1.6} />
 
           <Controls showInteractive={false} />
 

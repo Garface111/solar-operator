@@ -106,6 +106,15 @@ body {
   animation: so-node-enter 200ms ease-out both;
 }
 
+/* Let the sandbox wrapper's gradient + glow flares show through ReactFlow's
+   default solid background, so the canvas reads warm/welcoming. */
+.react-flow {
+  background: transparent !important;
+}
+.react-flow__pane {
+  background: transparent !important;
+}
+
 /* Respect users who prefer reduced motion. */
 @media (prefers-reduced-motion: reduce) {
   *,
