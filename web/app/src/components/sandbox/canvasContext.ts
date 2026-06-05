@@ -1,6 +1,9 @@
 import { createContext, useContext } from 'react';
 
+export type Density = 'full' | 'compact' | 'dense';
+
 export interface CanvasActions {
+  density: Density;
   toggleExpand: (nodeId: string) => void;
   startRename: (nodeId: string) => void;
   finishRename: (nodeId: string, name: string) => void;

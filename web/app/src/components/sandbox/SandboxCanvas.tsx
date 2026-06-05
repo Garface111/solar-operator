@@ -11,7 +11,7 @@ import {
   type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { CanvasActionsContext, type CanvasActions } from './canvasContext';
+import { CanvasActionsContext, type CanvasActions, type Density } from './canvasContext';
 import { ClientNodeComponent, type ClientNodeData } from './ClientNode';
 import { UnclassifiedNodeComponent, type UnclassifiedNodeData } from './UnclassifiedAccountNode';
 import { type ClientData, type UtilityAccount, type Utility } from './mockData';
@@ -43,8 +43,22 @@ const NODE_TYPES: NodeTypes = {
 // ── Layout constants ────────────────────────────────────────────────────────
 
 const COLS = 4;
-const COL_W = 330;
-const ROW_H = 295;
+
+type DensityOverride = 'auto' | Density;
+
+const GRID: Record<Density, { COL_W: number; ROW_H: number }> = {
+  full:    { COL_W: 330, ROW_H: 295 },
+  compact: { COL_W: 250, ROW_H: 200 },
+  dense:   { COL_W: 190, ROW_H:  90 },
+};
+
+const DENSITY_THRESH = { compact: 6, dense: 16 };
+
+function deriveDensity(clientCount: number): Density {
+  if (clientCount >= DENSITY_THRESH.dense) return 'dense';
+  if (clientCount >= DENSITY_THRESH.compact) return 'compact';
+  return 'full';
+}
 
 // ── Provider normalizer ─────────────────────────────────────────────────────
 
@@ -55,7 +69,11 @@ function normalizeProvider(p: string): Utility {
 
 // ── API → React Flow nodes ──────────────────────────────────────────────────
 
-function buildNodesFromApi(data: CanvasResponse): { nodes: Node[]; autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] } {
+function buildNodesFromApi(
+  data: CanvasResponse,
+  colW: number,
+  rowH: number,
+): { nodes: Node[]; autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] } {
   const nodes: Node[] = [];
   const autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] = [];
 
@@ -64,8 +82,8 @@ function buildNodesFromApi(data: CanvasResponse): { nodes: Node[]; autoPositione
   // of stacking on top of existing cards.
   const slotOccupied = new Set<string>();
   const slotKey = (x: number, y: number) => {
-    const col = Math.round((x - 40) / COL_W);
-    const row = Math.round((y - 40) / ROW_H);
+    const col = Math.round((x - 40) / colW);
+    const row = Math.round((y - 40) / rowH);
     return `${col},${row}`;
   };
   data.clients.forEach((c) => {
@@ -81,7 +99,7 @@ function buildNodesFromApi(data: CanvasResponse): { nodes: Node[]; autoPositione
       const row = Math.floor(nextSlotIdx / COLS);
       nextSlotIdx++;
       if (!slotOccupied.has(`${col},${row}`)) {
-        return { x: col * COL_W + 40, y: row * ROW_H + 40 };
+        return { x: col * colW + 40, y: row * rowH + 40 };
       }
     }
   };
@@ -150,7 +168,7 @@ function buildNodesFromApi(data: CanvasResponse): { nodes: Node[]; autoPositione
       position = { x: acc.canvas_x!, y: acc.canvas_y! };
     } else {
       const idx = autoAccIdx++;
-      position = { x: COLS * COL_W + 80, y: idx * 240 + 40 };
+      position = { x: COLS * colW + 80, y: idx * 240 + 40 };
       autoPositioned.push({ node_type: 'account', node_id: acc.id, x: position.x, y: position.y });
     }
 
@@ -208,6 +226,19 @@ export default function SandboxCanvas() {
   const [showAddByLogin, setShowAddByLogin] = useState(false);
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
 
+  const [densityOverride, setDensityOverride] = useState<DensityOverride>(() => {
+    try {
+      const saved = localStorage.getItem('so:sandbox:density');
+      if (saved === 'auto' || saved === 'full' || saved === 'compact' || saved === 'dense') return saved;
+    } catch { /* ignore */ }
+    return 'auto';
+  });
+  const densityOverrideRef = useRef<DensityOverride>(densityOverride);
+  densityOverrideRef.current = densityOverride;
+
+  const clientCount = nodes.filter((n) => n.type === 'client').length;
+  const density: Density = densityOverride === 'auto' ? deriveDensity(clientCount) : densityOverride;
+
   const { getIntersectingNodes, fitView, setCenter } = useReactFlow();
 
   // Pre-drag node positions captured at drag start so we can snap a node
@@ -254,7 +285,11 @@ export default function SandboxCanvas() {
     setLoading(true);
     try {
       const data = await getCanvasData();
-      const { nodes: built, autoPositioned } = buildNodesFromApi(data);
+      const loadedCount = data.clients.length;
+      const effectiveDensity: Density =
+        densityOverrideRef.current === 'auto' ? deriveDensity(loadedCount) : densityOverrideRef.current;
+      const { COL_W: colW, ROW_H: rowH } = GRID[effectiveDensity];
+      const { nodes: built, autoPositioned } = buildNodesFromApi(data, colW, rowH);
       setNodes(built);
       // Persist any auto-assigned grid slots right away so the next reload
       // sees them as saved positions and reuses the SAME slot instead of
@@ -779,22 +814,42 @@ export default function SandboxCanvas() {
   // ── Auto-arrange ──────────────────────────────────────────────────────────
 
   const autoArrange = useCallback(() => {
+    const { COL_W: colW, ROW_H: rowH } = GRID[density];
     setNodes((ns) => {
       const clientNodes = ns.filter((n) => n.type === 'client');
       const uncNodes = ns.filter((n) => n.type === 'unclassified');
       return [
         ...clientNodes.map((n, i) => ({
           ...n,
-          position: { x: (i % COLS) * COL_W + 40, y: Math.floor(i / COLS) * ROW_H + 40 },
+          position: { x: (i % COLS) * colW + 40, y: Math.floor(i / COLS) * rowH + 40 },
         })),
         ...uncNodes.map((n, i) => ({
           ...n,
-          position: { x: COLS * COL_W + 80, y: i * 240 + 40 },
+          position: { x: COLS * colW + 80, y: i * 240 + 40 },
         })),
       ];
     });
     setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
-  }, [setNodes, fitView]);
+  }, [density, setNodes, fitView]);
+
+  // ── Density change ────────────────────────────────────────────────────────
+
+  // Flag is set only on explicit user toolbar action so auto-arrange fires
+  // after the state update settles with the new density constants, but NOT
+  // on initial load (which would stomp saved card positions).
+  const userDensityActionRef = useRef(false);
+
+  const handleDensityChange = useCallback((override: DensityOverride) => {
+    userDensityActionRef.current = true;
+    setDensityOverride(override);
+    try { localStorage.setItem('so:sandbox:density', override); } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    if (!userDensityActionRef.current) return;
+    userDensityActionRef.current = false;
+    autoArrange();
+  }, [density, autoArrange]);
 
   // ── Cross-client account drag (HTML5 dnd) ────────────────────────────────
 
@@ -1161,6 +1216,7 @@ export default function SandboxCanvas() {
     moveLoginToClient,
     getOriginClient: (cid: number) => originLookup[cid] ?? null,
     togglePin,
+    density,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -1227,6 +1283,11 @@ export default function SandboxCanvas() {
                 >
                   + Add Client
                 </ToolbarButton>
+                <DensityControl
+                  override={densityOverride}
+                  derived={density}
+                  onChange={handleDensityChange}
+                />
                 <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
@@ -1440,6 +1501,52 @@ export default function SandboxCanvas() {
 }
 
 // ── Small presentational sub-components ────────────────────────────────────
+
+function DensityControl({
+  override,
+  derived,
+  onChange,
+}: {
+  override: DensityOverride;
+  derived: Density;
+  onChange: (v: DensityOverride) => void;
+}) {
+  const opts: { key: DensityOverride; label: string }[] = [
+    {
+      key: 'auto',
+      label: override === 'auto'
+        ? `Auto · ${derived.charAt(0).toUpperCase() + derived.slice(1)}`
+        : 'Auto',
+    },
+    { key: 'full',    label: 'Full' },
+    { key: 'compact', label: 'Compact' },
+    { key: 'dense',   label: 'Dense' },
+  ];
+  return (
+    <div className="flex overflow-hidden rounded-lg border border-cream-border divide-x divide-cream-border">
+      {opts.map(({ key, label }) => (
+        <button
+          key={key}
+          type="button"
+          className={[
+            'px-2.5 py-1.5 text-xs font-medium transition-colors',
+            override === key
+              ? 'bg-primary-50 text-primary-800'
+              : 'bg-white text-zinc-600 hover:bg-zinc-50 active:bg-zinc-100',
+          ].join(' ')}
+          onClick={() => onChange(key)}
+          title={
+            key === 'auto'
+              ? `Auto-select density (currently ${derived})`
+              : `${key.charAt(0).toUpperCase() + key.slice(1)} cards`
+          }
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function ToolbarButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
   return (
