@@ -52,6 +52,19 @@ const UTILITY_THEME: Record<Utility, { pill: string; dot: string; row: string; r
   },
 };
 
+// Box-shadow values for the utility-colored drop indicator ring.
+// Inline style avoids Tailwind purging dynamic class names.
+const UTILITY_RING_CSS: Record<Utility, string> = {
+  GMP: '0 0 0 2px rgba(52,211,153,0.85), 0 10px 28px -8px rgba(52,211,153,0.4)',
+  VEC: '0 0 0 2px rgba(96,165,250,0.85), 0 10px 28px -8px rgba(96,165,250,0.4)',
+  WEC: '0 0 0 2px rgba(251,191,36,0.85), 0 10px 28px -8px rgba(251,191,36,0.4)',
+};
+
+// Module-level tracker: which login utility is currently being dragged.
+// Set on dragstart of the six-dot handle, cleared on dragend.
+// Used by cards to determine which ring color to show on hover.
+let _activeDragLoginUtility: Utility | null = null;
+
 function getInitials(name: string): string {
   return name
     .split(/\s+/)
@@ -94,9 +107,6 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 
   const chips = utilityChips(client.accounts);
   const arrayCount = clientArrayCount(client);
-  // The numeric DB id of this client — used to tell groupAccountsByLogin
-  // which login_origin tags are "this is your home" (clear) vs. "moved in
-  // from elsewhere" (separate group).
   const ownClientNumId = (() => {
     const m = id.match(/^client_(\d+)$/);
     return m ? parseInt(m[1], 10) : null;
@@ -106,21 +116,30 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   const isMergeTarget = mergeIntent === 'target';
   const isMergeSource = mergeIntent === 'source';
 
-  // ── Native drop target for cross-client account drags ────────────────────
-  const [dropHover, setDropHover] = useState(false);
+  // ── Native drop target for cross-client drags ────────────────────────────
+  const [dropHoverType, setDropHoverType] = useState<'account' | 'login' | null>(null);
+  const [dropHoverUtility, setDropHoverUtility] = useState<Utility | null>(null);
+
   const onDragOver = (e: React.DragEvent) => {
-    if (
-      !e.dataTransfer.types.includes('application/x-so-account') &&
-      !e.dataTransfer.types.includes('application/x-so-login')
-    ) return;
+    const isAccount = e.dataTransfer.types.includes('application/x-so-account');
+    const isLogin = e.dataTransfer.types.includes('application/x-so-login');
+    if (!isAccount && !isLogin) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
-    if (!dropHover) setDropHover(true);
+    if (isLogin) {
+      setDropHoverType('login');
+      setDropHoverUtility(_activeDragLoginUtility);
+    } else {
+      setDropHoverType('account');
+      setDropHoverUtility(null);
+    }
   };
   const onDragLeave = (e: React.DragEvent) => {
-    // Only clear when leaving the card itself, not crossing a child boundary
-    if (e.currentTarget === e.target) setDropHover(false);
+    if (e.currentTarget === e.target) {
+      setDropHoverType(null);
+      setDropHoverUtility(null);
+    }
   };
   const onDrop = (e: React.DragEvent) => {
     const accountRaw = e.dataTransfer.getData('application/x-so-account');
@@ -128,7 +147,8 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
     if (!accountRaw && !loginRaw) return;
     e.preventDefault();
     e.stopPropagation();
-    setDropHover(false);
+    setDropHoverType(null);
+    setDropHoverUtility(null);
     try {
       if (accountRaw) {
         const { srcClientId, accountId } = JSON.parse(accountRaw) as { srcClientId: string; accountId: string };
@@ -149,9 +169,32 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
     }
   };
 
+  // Auto-expand the card after 400ms of hovering with a login drag
+  const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (dropHoverType !== 'login' || expanded || density === 'dense') {
+      if (autoExpandTimerRef.current !== null) {
+        clearTimeout(autoExpandTimerRef.current);
+        autoExpandTimerRef.current = null;
+      }
+      return;
+    }
+    autoExpandTimerRef.current = setTimeout(() => {
+      autoExpandTimerRef.current = null;
+      actions.toggleExpand(id);
+    }, 400);
+    return () => {
+      if (autoExpandTimerRef.current !== null) {
+        clearTimeout(autoExpandTimerRef.current);
+        autoExpandTimerRef.current = null;
+      }
+    };
+  }, [dropHoverType, expanded, density, id, actions]);
+
   // Effective width key for the card
   const widthKey = density === 'dense' ? (denseExpanded ? 'dense-expanded' : 'dense') : density;
   const cardWidth = CARD_WIDTH[widthKey];
+  const dropHover = dropHoverType !== null;
 
   const baseCardClass = [
     'so-node-enter rounded-2xl border-[1.5px] bg-white transition-all duration-150',
@@ -164,18 +207,26 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
       : isMergeSource
         ? 'border-amber-300 opacity-90 shadow-[0_0_0_3px_rgba(251,191,36,0.2)]'
         : dropHover
-          ? 'scale-[1.02] border-primary-400 bg-primary-50/40 shadow-[0_0_0_3px_rgba(132,204,22,0.25),0_10px_28px_-8px_rgba(132,204,22,0.4)] ring-2 ring-primary-300'
+          ? dropHoverType === 'login'
+            ? 'scale-[1.02] border-zinc-300'
+            : 'scale-[1.02] border-primary-400 bg-primary-50/40 shadow-[0_0_0_3px_rgba(132,204,22,0.25),0_10px_28px_-8px_rgba(132,204,22,0.4)] ring-2 ring-primary-300'
           : selected
             ? 'border-primary-400 shadow-md ring-2 ring-primary-300/40'
             : 'border-zinc-300 shadow-[0_4px_14px_-2px_rgba(15,23,42,0.12),0_2px_4px_-1px_rgba(15,23,42,0.06)] hover:shadow-[0_8px_24px_-4px_rgba(15,23,42,0.16),0_3px_6px_-1px_rgba(15,23,42,0.08)] hover:border-zinc-400',
   ].join(' ');
+
+  // Inline box-shadow for login-drop utility color (can't use Tailwind for dynamic values)
+  const dropInlineStyle: React.CSSProperties =
+    dropHoverType === 'login' && dropHoverUtility
+      ? { boxShadow: UTILITY_RING_CSS[dropHoverUtility] }
+      : {};
 
   // ── Dense card (collapsed) ─────────────────────────────────────────────────
   if (density === 'dense' && !denseExpanded) {
     return (
       <div
         className={baseCardClass}
-        style={{ animationDelay: `${entryDelay}ms` }}
+        style={{ animationDelay: `${entryDelay}ms`, ...dropInlineStyle }}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
@@ -222,8 +273,6 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   }
 
   // ── Full card (used for full, compact, and dense-expanded) ─────────────────
-  // Compact: narrower card, smaller fonts, no footer.
-  // Dense-expanded: same as full but triggered by denseExpanded toggle.
   const isCompact = density === 'compact';
   const isDenseExpanded = density === 'dense' && denseExpanded;
   const headerPad = isCompact ? 'px-3 pt-3 pb-2' : 'px-4 pt-4 pb-3';
@@ -238,7 +287,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
       data-walkthrough="client-card"
       data-walkthrough-client-id={id}
       className={baseCardClass}
-      style={{ animationDelay: `${entryDelay}ms` }}
+      style={{ animationDelay: `${entryDelay}ms`, ...dropInlineStyle }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -369,17 +418,6 @@ function groupAccountsByLogin(
   accounts: UtilityAccount[],
   ownClientNumId: number | null,
 ): { utility: Utility; originClientId: number | null; loginId: string; accounts: UtilityAccount[]; key: string }[] {
-  // A "login" = one credential at the utility portal (e.g. one GMP web
-  // account). The utility assigns DIFFERENT customer_numbers / account_numbers
-  // to each metered account under that login, so we MUST NOT split by them —
-  // doing so creates one row per array instead of one row per credential.
-  //
-  // Key by (utility, login_origin_client_id || own) only. Two same-utility
-  // logins under one client (a real but rare case — would require a separate
-  // Login table to model properly) currently collapse here; that's an
-  // intentional regression vs the customer_number split, because the user
-  // flow is "one capture = one login = one batch under the client", and a
-  // future PR can split when the data model supports it.
   const groups = new Map<string, { utility: Utility; originClientId: number | null; loginId: string; accounts: UtilityAccount[] }>();
   for (const acc of accounts) {
     const origin =
@@ -390,8 +428,6 @@ function groupAccountsByLogin(
     const entry = groups.get(key) ?? {
       utility: acc.utility,
       originClientId: origin,
-      // loginId is now a stable label for the group (utility + origin), used
-      // for drag payload narrowing. It's NOT a per-account discriminator.
       loginId: `${acc.utility}-${origin ?? 'home'}`,
       accounts: [],
     };
@@ -439,6 +475,7 @@ function LoginGroupRow({
 
   const onDragStart = (e: React.DragEvent) => {
     e.stopPropagation();
+    _activeDragLoginUtility = utility;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData(
       'application/x-so-login',
@@ -447,32 +484,50 @@ function LoginGroupRow({
     e.dataTransfer.setData('text/plain', `${utility} login`);
     setDragging(true);
   };
-  // Stop React Flow from claiming the mousedown — it would start dragging
-  // the parent client node instead of letting native HTML5 fire on the row.
+
+  const onDragEnd = () => {
+    _activeDragLoginUtility = null;
+    setDragging(false);
+  };
+
+  // Prevent ReactFlow from starting a node drag when interacting with login rows
   const onMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
   };
-  const onDragEnd = () => setDragging(false);
 
   return (
     <div
       data-walkthrough="login-row"
       className={[
-        'nodrag group/login rounded-xl border px-3 py-2.5 transition-opacity',
+        'nodrag group/login rounded-xl border transition-opacity',
         th.row,
         dragging ? 'opacity-40' : '',
       ].join(' ')}
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
       onMouseDown={onMouseDown}
-      title="Drag to move all accounts under this login to another client"
     >
-      {/* Login header — click to reveal individual accounts */}
-      <div className="flex items-center gap-2">
-        {/* Click anywhere on this row to toggle expand; drag is captured by
-            the parent div (HTML5 draggable). Avoid using a <button> here —
-            buttons are not draggable and would swallow the row's drag. */}
+      {/* Login header */}
+      <div className="flex items-center gap-1.5 px-3 py-2.5">
+        {/* Six-dot drag handle — the ONLY draggable surface on the login row */}
+        <span
+          className={`nodrag shrink-0 cursor-grab active:cursor-grabbing rounded p-0.5 opacity-40 hover:opacity-80 transition-opacity ${th.rowText}`}
+          draggable
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onMouseDown={(e) => e.stopPropagation()}
+          title="Drag to move this login to another client"
+          aria-label="Drag handle"
+        >
+          <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden>
+            <circle cx="2" cy="2" r="1.2"/>
+            <circle cx="8" cy="2" r="1.2"/>
+            <circle cx="2" cy="7" r="1.2"/>
+            <circle cx="8" cy="7" r="1.2"/>
+            <circle cx="2" cy="12" r="1.2"/>
+            <circle cx="8" cy="12" r="1.2"/>
+          </svg>
+        </span>
+
+        {/* Click anywhere on the content area to toggle expand — row body is click-only */}
         <div
           role="button"
           tabIndex={0}
@@ -521,7 +576,7 @@ function LoginGroupRow({
         </button>
       </div>
       {expanded && (
-        <div className="nowheel max-h-72 overflow-y-auto mt-2 space-y-1 border-t border-current/10 pt-2 overscroll-contain">
+        <div className="nowheel max-h-72 overflow-y-auto mx-3 mb-2.5 space-y-1 border-t border-current/10 pt-2 overscroll-contain">
           {loginCredential && (
             <div className={`flex items-center gap-1.5 rounded-md bg-white/70 px-2 py-1 text-[11px] ${th.rowText}`}>
               <span className="text-[10px] font-semibold uppercase tracking-wider opacity-60">
@@ -532,7 +587,6 @@ function LoginGroupRow({
               </span>
             </div>
           )}
-          {/* Flat list of arrays under this login — Client → Login → Arrays */}
           {accounts.flatMap((acc) =>
             acc.arrays.length > 0
               ? acc.arrays.map((arr) => (
@@ -587,4 +641,3 @@ function LoginGroupRow({
     </div>
   );
 }
-
