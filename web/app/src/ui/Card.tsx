@@ -9,7 +9,7 @@ export function Card({ active = false, className = "", ...props }: CardProps) {
   return (
     <div
       className={[
-        "bg-white border border-zinc-200 rounded-xl p-6 sm:p-8",
+        "bg-white border border-zinc-200 rounded-xl p-8",
         active ? "shadow-lg" : "shadow-sm",
         className,
       ].join(" ")}

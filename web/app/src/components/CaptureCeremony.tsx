@@ -139,7 +139,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
   const totalArrays = events.reduce((sum, e) => sum + (e.accountCount || 0), 0);
 
   return (
-    <div className="mb-6 overflow-hidden rounded-2xl border border-primary-200 bg-gradient-to-b from-primary-50 to-white shadow-sm">
+    <div className="mb-6 overflow-hidden rounded-2xl border border-primary-200 bg-gradient-to-b from-primary-50 to-cream shadow-sm">
       <div className="flex items-start justify-between gap-4 px-5 pt-5">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-primary-700">

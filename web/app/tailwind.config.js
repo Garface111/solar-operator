@@ -35,6 +35,22 @@ export default {
           900: "#064e3b",
           950: "#022c22",
         },
+        // Cream — warm off-white for page surface and nav bars.
+        cream: {
+          DEFAULT: "#faf8f5",
+          border: "#e8e2d9",
+        },
+        // Wood — warm ochre for accent borders and status badges.
+        wood: {
+          50: "#fdf8f2",
+          100: "#faedd8",
+          200: "#f3d5a8",
+          300: "#e6b470",
+          400: "#d4914a",
+          500: "#b56d2c",
+          600: "#8c4e1c",
+          border: "#e6d4bd",
+        },
       },
       borderRadius: {
         xl: "0.75rem",

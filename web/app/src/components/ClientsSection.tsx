@@ -3,6 +3,7 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
+import { SectionTitle } from "../ui/SectionTitle";
 import { useToast } from "../ui/Toast";
 import { ClientCard } from "./ClientCard";
 import { AddClientModal } from "./AddClientModal";
@@ -254,14 +255,7 @@ export function ClientsSection({ expandClientId }: Props) {
       />
 
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
-          Clients
-          {clients && (
-            <span className="ml-2 text-sm font-normal text-zinc-400">
-              {clients.length}
-            </span>
-          )}
-        </h2>
+        <SectionTitle title="Clients" count={clients?.length} />
         <div className="flex items-center gap-2">
           {clients && clients.length > 0 && (
             <button

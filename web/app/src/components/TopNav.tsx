@@ -8,9 +8,12 @@ interface TopNavProps {
 
 export function TopNav({ email, onSignOut, onShowWalkthrough }: TopNavProps) {
   return (
-    <header className="sticky top-0 z-30 border-b border-zinc-200 bg-white/80 backdrop-blur">
+    <header className="sticky top-0 z-30 border-b border-cream-border bg-cream/90 backdrop-blur">
       <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3.5">
-        <div className="text-base font-semibold tracking-tight text-zinc-900">
+        <div
+          className="text-base font-semibold tracking-tight text-zinc-900"
+          style={{ fontFamily: "'Georgia', ui-serif, serif" }}
+        >
           <span className="text-primary-600">Solar</span> Operator
         </div>
         <div className="flex items-center gap-3">
