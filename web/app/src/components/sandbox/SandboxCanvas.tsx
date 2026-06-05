@@ -22,13 +22,15 @@ import {
   patchCanvasPositions,
   pinClient,
   reassignAccount,
+  updateClient,
+  deleteClient,
+  listClients,
   type CanvasResponse,
 } from '../../lib/api';
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
 import { AddClientModal } from '../AddClientModal';
 import { AddClientByLoginModal } from '../AddClientByLoginModal';
-import { listClients } from '../../lib/api';
 
 // ── Node type registry (stable reference — must live outside component) ────
 
@@ -149,6 +151,13 @@ interface ContextMenu {
   nodeType: string;
 }
 
+interface UndoEntry {
+  label: string;
+  undo: () => void;
+  redo?: () => void;
+  timestamp: number;
+}
+
 // ── Component ───────────────────────────────────────────────────────────────
 
 export default function SandboxCanvas() {
@@ -157,32 +166,31 @@ export default function SandboxCanvas() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mergeDialog, setMergeDialog] = useState<MergeDialog | null>(null);
-  const [mergeUndo, setMergeUndo] = useState<{ label: string; snapshot: Node[] } | null>(null);
+  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
-  // The toolbar Add Client opens the portal-picker first (same flow as the
-  // list view's primary CTA). Manual entry is the fallback.
   const [showAddByLogin, setShowAddByLogin] = useState(false);
-  // Lookup map for origin clients (populated from /v1/sandbox/canvas
-  // response.clients_index). Used by LoginGroupRow to label moved logins.
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
 
   const { getIntersectingNodes, fitView } = useReactFlow();
 
-  // Always-fresh ref used in callbacks to avoid stale closures
+  // Always-fresh refs used in callbacks to avoid stale closures
   const nodesRef = useRef<Node[]>(nodes);
   nodesRef.current = nodes;
+
+  const undoStackRef = useRef<UndoEntry[]>(undoStack);
+  undoStackRef.current = undoStack;
+  const redoStackRef = useRef<UndoEntry[]>(redoStack);
+  redoStackRef.current = redoStack;
 
   // Per-node debounce timers for position persistence
   const posTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Auto-dismiss merge undo after 5 s
-  useEffect(() => {
-    if (!mergeUndo) return;
-    const t = setTimeout(() => setMergeUndo(null), 5000);
-    return () => clearTimeout(t);
-  }, [mergeUndo]);
+  // Snapshot of client IDs before the portal-picker modal opens, used to
+  // detect which clients were newly created so we can push undo entries.
+  const clientIdsBeforeModal = useRef<Set<number>>(new Set());
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
@@ -213,6 +221,54 @@ export default function SandboxCanvas() {
     return () => window.removeEventListener('so:capture-cleared', onCapture);
   }, [loadCanvas]);
 
+  // ── Undo / redo stack ─────────────────────────────────────────────────────
+
+  const pushUndo = useCallback((entry: UndoEntry) => {
+    setUndoStack(prev => [entry, ...prev].slice(0, 25));
+    setRedoStack([]);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    const stack = undoStackRef.current;
+    if (stack.length === 0) return;
+    const [top, ...rest] = stack;
+    setUndoStack(rest);
+    // Only entries with a redo fn go to the redo stack
+    if (top.redo) setRedoStack(prev => [top, ...prev]);
+    top.undo();
+    toast.show(`Undid: ${top.label}`, 'info');
+  }, [toast]);
+
+  const handleRedo = useCallback(() => {
+    const stack = redoStackRef.current;
+    if (stack.length === 0) return;
+    const [top, ...rest] = stack;
+    if (!top.redo) { setRedoStack(rest); return; }
+    setRedoStack(rest);
+    setUndoStack(prev => [top, ...prev].slice(0, 25));
+    top.redo();
+    toast.show(`Redid: ${top.label}`, 'info');
+  }, [toast]);
+
+  // Global Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo); skip when focus is in an input
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement) {
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'z') {
+        e.preventDefault();
+        handleUndo();
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'z') {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleUndo, handleRedo]);
+
   // ── Canvas actions ────────────────────────────────────────────────────────
 
   const toggleExpand = useCallback(
@@ -237,15 +293,49 @@ export default function SandboxCanvas() {
     (nodeId: string, name: string) => {
       setRenamingNodeId(null);
       if (!name) return;
-      setNodes((ns) =>
-        ns.map((n) => {
-          if (n.id !== nodeId || n.type !== 'client') return n;
-          const d = n.data as ClientNodeData;
-          return { ...n, data: { ...d, client: { ...d.client, name } } };
-        }),
-      );
+
+      const current = nodesRef.current;
+      const node = current.find((n) => n.id === nodeId && n.type === 'client');
+      if (!node) return;
+      const oldName = (node.data as ClientNodeData).client.name;
+      if (oldName === name) return;
+
+      const applyName = (n: string) =>
+        setNodes((ns) =>
+          ns.map((nd) => {
+            if (nd.id !== nodeId || nd.type !== 'client') return nd;
+            const d = nd.data as ClientNodeData;
+            return { ...nd, data: { ...d, client: { ...d.client, name: n } } };
+          }),
+        );
+
+      applyName(name);
+
+      const numId = parseInt(nodeId.replace('client_', ''), 10);
+      if (!isNaN(numId)) {
+        updateClient(numId, { name }).catch(() => {
+          applyName(oldName);
+          toast.show('Rename failed — reverted.', 'error');
+        });
+        pushUndo({
+          label: `Rename to "${name}"`,
+          timestamp: Date.now(),
+          undo: () => {
+            applyName(oldName);
+            updateClient(numId, { name: oldName }).catch(() =>
+              toast.show('Undo rename failed.', 'error'),
+            );
+          },
+          redo: () => {
+            applyName(name);
+            updateClient(numId, { name }).catch(() =>
+              toast.show('Redo rename failed.', 'error'),
+            );
+          },
+        });
+      }
     },
-    [setNodes],
+    [setNodes, pushUndo, toast],
   );
 
   const cancelRename = useCallback(() => setRenamingNodeId(null), []);
@@ -268,37 +358,57 @@ export default function SandboxCanvas() {
       const detached = d.client.accounts.find((a) => a.id === accountId);
       if (!detached) return;
 
-      // Optimistic UI: pop the account out as an unclassified node next to the client.
       const snapshot = current;
-      setNodes((ns) => {
-        const updatedClient: ClientData = {
-          ...d.client,
-          accounts: d.client.accounts.filter((a) => a.id !== accountId),
-        };
-        const unclNode: Node = {
-          id: accountId,
-          type: 'unclassified',
-          position: { x: clientNode.position.x + 360, y: clientNode.position.y },
-          data: { account: detached, entryDelay: 0 } as UnclassifiedNodeData,
-        };
-        return [
-          ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
-          unclNode,
-        ];
-      });
 
+      const applyDetach = () =>
+        setNodes((ns) => {
+          const updatedClient: ClientData = {
+            ...d.client,
+            accounts: d.client.accounts.filter((a) => a.id !== accountId),
+          };
+          const unclNode: Node = {
+            id: accountId,
+            type: 'unclassified',
+            position: { x: clientNode.position.x + 360, y: clientNode.position.y },
+            data: { account: detached, entryDelay: 0 } as UnclassifiedNodeData,
+          };
+          return [
+            ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
+            unclNode,
+          ];
+        });
+
+      applyDetach();
       toast.show(`${detached.utility} · ${detached.account_number} detached.`, 'info');
 
-      // Persist if this is a real backend account
       const numId = parseInt(accountId.replace('account_', ''), 10);
+      const clientNumId = parseInt(clientId.replace('client_', ''), 10);
       if (!isNaN(numId)) {
         reassignAccount(numId, null).catch(() => {
           setNodes(snapshot);
           toast.show('Detach failed — reverted.', 'error');
         });
+        if (!isNaN(clientNumId)) {
+          pushUndo({
+            label: `Detach ${detached.utility} · ${detached.account_number}`,
+            timestamp: Date.now(),
+            undo: () => {
+              setNodes(snapshot);
+              reassignAccount(numId, clientNumId).catch(() =>
+                toast.show('Undo detach failed.', 'error'),
+              );
+            },
+            redo: () => {
+              applyDetach();
+              reassignAccount(numId, null).catch(() =>
+                toast.show('Redo detach failed.', 'error'),
+              );
+            },
+          });
+        }
       }
     },
-    [setNodes, toast],
+    [setNodes, toast, pushUndo],
   );
 
   const attachToClient = useCallback(
@@ -311,36 +421,53 @@ export default function SandboxCanvas() {
       const uData = unclNode.data as UnclassifiedNodeData;
       const cData = clientNode.data as ClientNodeData;
 
-      // Optimistic UI
       const snapshot = current;
-      setNodes((ns) => {
-        const updatedClient: ClientData = {
-          ...cData.client,
-          accounts: [...cData.client.accounts, uData.account],
-        };
-        return ns
-          .filter((n) => n.id !== unclassifiedId)
-          .map((n) => n.id === targetClientId ? { ...n, data: { ...cData, client: updatedClient } } : n);
-      });
 
+      const applyAttach = () =>
+        setNodes((ns) => {
+          const updatedClient: ClientData = {
+            ...cData.client,
+            accounts: [...cData.client.accounts, uData.account],
+          };
+          return ns
+            .filter((n) => n.id !== unclassifiedId)
+            .map((n) => n.id === targetClientId ? { ...n, data: { ...cData, client: updatedClient } } : n);
+        });
+
+      applyAttach();
       toast.show(
         `${uData.account.utility} · ${uData.account.account_number} added to ${cData.client.name}.`,
         'success',
       );
 
-      // Persist
       const accNumId = parseInt(unclassifiedId.replace('account_', ''), 10);
       const clientNumId = parseInt(targetClientId.replace('client_', ''), 10);
       if (!isNaN(accNumId) && !isNaN(clientNumId)) {
         reassignAccount(accNumId, clientNumId)
-          .then(() => { void loadCanvas(); })  // resync to get the new array_id
+          .then(() => { void loadCanvas(); })
           .catch(() => {
             setNodes(snapshot);
             toast.show('Move failed — reverted.', 'error');
           });
+        pushUndo({
+          label: `Assign ${uData.account.utility} · ${uData.account.account_number} to ${cData.client.name}`,
+          timestamp: Date.now(),
+          undo: () => {
+            setNodes(snapshot);
+            reassignAccount(accNumId, null).catch(() =>
+              toast.show('Undo assign failed.', 'error'),
+            );
+          },
+          redo: () => {
+            applyAttach();
+            reassignAccount(accNumId, clientNumId)
+              .then(() => { void loadCanvas(); })
+              .catch(() => toast.show('Redo assign failed.', 'error'));
+          },
+        });
       }
     },
-    [setNodes, toast, loadCanvas],
+    [setNodes, toast, loadCanvas, pushUndo],
   );
 
   const confirmMerge = useCallback(
@@ -360,31 +487,37 @@ export default function SandboxCanvas() {
         accounts: [...sData.client.accounts, ...oData.client.accounts],
       };
 
-      // Optimistic update so the UI feels instant
       setNodes((ns) =>
         ns
           .filter((n) => n.id !== otherId)
           .map((n) => n.id === survivorId ? { ...n, data: { ...sData, client: merged } } : n),
       );
-      setMergeUndo({ label: `Merged into "${sData.client.name}".`, snapshot });
       setMergeDialog(null);
 
-      // Persist if both are real backend-persisted client nodes
+      // Undo is UI-only — no unmerge API exists; reload will show merged server state
+      pushUndo({
+        label: `Merge "${oData.client.name}" into "${sData.client.name}"`,
+        timestamp: Date.now(),
+        undo: () => {
+          setNodes(snapshot);
+          // NOTE: server state is still merged — this is a view-only revert
+        },
+        // No redo: can't reliably re-merge after a UI-only undo
+      });
+
       if (survivorId.startsWith('client_') && otherId.startsWith('client_')) {
         const srcId = parseInt(otherId.replace('client_', ''), 10);
         const dstId = parseInt(survivorId.replace('client_', ''), 10);
         try {
           await mergeClientInto(srcId, dstId);
-          // Re-sync from server to capture credential-merge effects
           void loadCanvas();
         } catch (_err) {
           setNodes(snapshot);
-          setMergeUndo(null);
           toast.show('Merge failed — changes reverted.', 'error');
         }
       }
     },
-    [mergeDialog, setNodes, loadCanvas, toast],
+    [mergeDialog, setNodes, loadCanvas, toast, pushUndo],
   );
 
   const cancelMerge = useCallback(() => setMergeDialog(null), []);
@@ -494,8 +627,6 @@ export default function SandboxCanvas() {
     setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
   }, [setNodes, fitView]);
 
-  // ── Context ───────────────────────────────────────────────────────────────
-
   // ── Cross-client account drag (HTML5 dnd) ────────────────────────────────
 
   const moveAccountToClient = useCallback(
@@ -511,55 +642,76 @@ export default function SandboxCanvas() {
       const moved = srcData.client.accounts.find((a) => a.id === accountId);
       if (!moved) return;
 
-      // Optimistic UI: swap the account from src to dst
       const snapshot = current;
-      setNodes((ns) =>
-        ns.map((n) => {
-          if (n.id === srcClientId) {
-            return {
-              ...n,
-              data: {
-                ...srcData,
-                client: {
-                  ...srcData.client,
-                  accounts: srcData.client.accounts.filter((a) => a.id !== accountId),
-                },
-              },
-            };
-          }
-          if (n.id === dstClientId) {
-            return {
-              ...n,
-              data: {
-                ...dstData,
-                client: {
-                  ...dstData.client,
-                  accounts: [...dstData.client.accounts, moved],
-                },
-              },
-            };
-          }
-          return n;
-        }),
-      );
 
+      const applyMove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id === srcClientId) {
+              return {
+                ...n,
+                data: {
+                  ...srcData,
+                  client: {
+                    ...srcData.client,
+                    accounts: srcData.client.accounts.filter((a) => a.id !== accountId),
+                  },
+                },
+              };
+            }
+            if (n.id === dstClientId) {
+              return {
+                ...n,
+                data: {
+                  ...dstData,
+                  client: {
+                    ...dstData.client,
+                    accounts: [...dstData.client.accounts, moved],
+                  },
+                },
+              };
+            }
+            return n;
+          }),
+        );
+
+      applyMove();
       toast.show(
         `${moved.utility} · ${moved.account_number} → ${dstData.client.name}.`,
         'success',
       );
 
       const accNumId = parseInt(accountId.replace('account_', ''), 10);
+      const srcNumId = parseInt(srcClientId.replace('client_', ''), 10);
       const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
       if (!isNaN(accNumId) && !isNaN(dstNumId)) {
         reassignAccount(accNumId, dstNumId)
-          .then(() => { void loadCanvas(); })  // resync so arr_id/holder array reflect server truth
+          .then(() => { void loadCanvas(); })
           .catch(() => {
             setNodes(snapshot);
             toast.show('Move failed — reverted.', 'error');
           });
+        if (!isNaN(srcNumId)) {
+          pushUndo({
+            label: `Move ${moved.utility} · ${moved.account_number} to ${dstData.client.name}`,
+            timestamp: Date.now(),
+            undo: () => {
+              setNodes(snapshot);
+              reassignAccount(accNumId, srcNumId).catch(() =>
+                toast.show('Undo move failed.', 'error'),
+              );
+            },
+            redo: () => {
+              applyMove();
+              reassignAccount(accNumId, dstNumId)
+                .then(() => { void loadCanvas(); })
+                .catch(() => toast.show('Redo move failed.', 'error'));
+            },
+          });
+        }
       }
     },
-    [setNodes, toast, loadCanvas],
+    [setNodes, toast, loadCanvas, pushUndo],
   );
 
   // ── Login-level (group) actions ──────────────────────────────────────────
@@ -574,8 +726,6 @@ export default function SandboxCanvas() {
         const m = clientId.match(/^client_(\d+)$/);
         return m ? parseInt(m[1], 10) : null;
       })();
-      // Filter narrows to JUST this login group: same utility AND same origin
-      // (where origin == own id means "home" group).
       const detachedAccounts = d.client.accounts.filter((a) => {
         if (a.utility !== utility) return false;
         const aOrigin =
@@ -588,33 +738,33 @@ export default function SandboxCanvas() {
       if (detachedAccounts.length === 0) return;
 
       const snapshot = current;
-      // Optimistic UI: strip the whole login from the client; pop accounts
-      // out as unclassified nodes fanned to the right of the client card.
-      setNodes((ns) => {
-        const updatedClient: ClientData = {
-          ...d.client,
-          accounts: d.client.accounts.filter((a) => a.utility !== utility),
-        };
-        const baseX = clientNode.position.x + 360;
-        const baseY = clientNode.position.y;
-        const newNodes: Node[] = detachedAccounts.map((acc, i) => ({
-          id: acc.id,
-          type: 'unclassified',
-          position: { x: baseX + (i % 2) * 200, y: baseY + Math.floor(i / 2) * 110 },
-          data: { account: acc, entryDelay: i * 25 } as UnclassifiedNodeData,
-        }));
-        return [
-          ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
-          ...newNodes,
-        ];
-      });
 
+      const applyDetach = () =>
+        setNodes((ns) => {
+          const updatedClient: ClientData = {
+            ...d.client,
+            accounts: d.client.accounts.filter((a) => a.utility !== utility),
+          };
+          const baseX = clientNode.position.x + 360;
+          const baseY = clientNode.position.y;
+          const newNodes: Node[] = detachedAccounts.map((acc, i) => ({
+            id: acc.id,
+            type: 'unclassified',
+            position: { x: baseX + (i % 2) * 200, y: baseY + Math.floor(i / 2) * 110 },
+            data: { account: acc, entryDelay: i * 25 } as UnclassifiedNodeData,
+          }));
+          return [
+            ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
+            ...newNodes,
+          ];
+        });
+
+      applyDetach();
       toast.show(
         `${utility} login (${detachedAccounts.length} ${detachedAccounts.length === 1 ? 'account' : 'accounts'}) detached.`,
         'info',
       );
 
-      // Persist — fan out reassignAccount(null) per account; collect failures
       Promise.all(
         detachedAccounts.map((acc) => {
           const numId = parseInt(acc.id.replace('account_', ''), 10);
@@ -625,8 +775,35 @@ export default function SandboxCanvas() {
         setNodes(snapshot);
         toast.show('Detach failed — reverted.', 'error');
       });
+
+      if (ownNumId !== null) {
+        pushUndo({
+          label: `Detach ${utility} login (${detachedAccounts.length} account${detachedAccounts.length === 1 ? '' : 's'})`,
+          timestamp: Date.now(),
+          undo: () => {
+            setNodes(snapshot);
+            Promise.all(
+              detachedAccounts.map((acc) => {
+                const numId = parseInt(acc.id.replace('account_', ''), 10);
+                if (isNaN(numId)) return Promise.resolve();
+                return reassignAccount(numId, ownNumId);
+              }),
+            ).catch(() => toast.show('Undo detach login failed.', 'error'));
+          },
+          redo: () => {
+            applyDetach();
+            Promise.all(
+              detachedAccounts.map((acc) => {
+                const numId = parseInt(acc.id.replace('account_', ''), 10);
+                if (isNaN(numId)) return Promise.resolve();
+                return reassignAccount(numId, null);
+              }),
+            ).catch(() => toast.show('Redo detach login failed.', 'error'));
+          },
+        });
+      }
     },
-    [setNodes, toast],
+    [setNodes, toast, pushUndo],
   );
 
   const moveLoginToClient = useCallback(
@@ -643,7 +820,6 @@ export default function SandboxCanvas() {
         const m = srcClientId.match(/^client_(\d+)$/);
         return m ? parseInt(m[1], 10) : null;
       })();
-      // Same narrowing as detachLogin: only THIS group's accounts move.
       const moved = srcData.client.accounts.filter((a) => {
         if (a.utility !== utility) return false;
         const aOrigin =
@@ -656,36 +832,39 @@ export default function SandboxCanvas() {
       if (moved.length === 0) return;
 
       const snapshot = current;
-      setNodes((ns) =>
-        ns.map((n) => {
-          if (n.id === srcClientId) {
-            return {
-              ...n,
-              data: {
-                ...srcData,
-                client: {
-                  ...srcData.client,
-                  accounts: srcData.client.accounts.filter((a) => a.utility !== utility),
-                },
-              },
-            };
-          }
-          if (n.id === dstClientId) {
-            return {
-              ...n,
-              data: {
-                ...dstData,
-                client: {
-                  ...dstData.client,
-                  accounts: [...dstData.client.accounts, ...moved],
-                },
-              },
-            };
-          }
-          return n;
-        }),
-      );
 
+      const applyMove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id === srcClientId) {
+              return {
+                ...n,
+                data: {
+                  ...srcData,
+                  client: {
+                    ...srcData.client,
+                    accounts: srcData.client.accounts.filter((a) => a.utility !== utility),
+                  },
+                },
+              };
+            }
+            if (n.id === dstClientId) {
+              return {
+                ...n,
+                data: {
+                  ...dstData,
+                  client: {
+                    ...dstData.client,
+                    accounts: [...dstData.client.accounts, ...moved],
+                  },
+                },
+              };
+            }
+            return n;
+          }),
+        );
+
+      applyMove();
       toast.show(
         `${utility} login (${moved.length} ${moved.length === 1 ? 'account' : 'accounts'}) → ${dstData.client.name}.`,
         'success',
@@ -705,9 +884,85 @@ export default function SandboxCanvas() {
           setNodes(snapshot);
           toast.show('Move failed — reverted.', 'error');
         });
+
+      if (srcOwnNumId !== null) {
+        pushUndo({
+          label: `Move ${utility} login to ${dstData.client.name}`,
+          timestamp: Date.now(),
+          undo: () => {
+            setNodes(snapshot);
+            Promise.all(
+              moved.map((acc) => {
+                const numId = parseInt(acc.id.replace('account_', ''), 10);
+                if (isNaN(numId)) return Promise.resolve();
+                return reassignAccount(numId, srcOwnNumId);
+              }),
+            ).catch(() => toast.show('Undo move login failed.', 'error'));
+          },
+          redo: () => {
+            applyMove();
+            Promise.all(
+              moved.map((acc) => {
+                const numId = parseInt(acc.id.replace('account_', ''), 10);
+                if (isNaN(numId)) return Promise.resolve();
+                return reassignAccount(numId, dstNumId);
+              }),
+            )
+              .then(() => { void loadCanvas(); })
+              .catch(() => toast.show('Redo move login failed.', 'error'));
+          },
+        });
+      }
     },
-    [setNodes, toast, loadCanvas],
+    [setNodes, toast, loadCanvas, pushUndo],
   );
+
+  const togglePin = useCallback(
+    (clientId: string) => {
+      const numId = parseInt(clientId.replace('client_', ''), 10);
+      if (isNaN(numId)) return;
+      const current = nodesRef.current;
+      const node = current.find((n) => n.id === clientId && n.type === 'client');
+      if (!node) return;
+      const wasPinned = !!(node.data as ClientNodeData).client.pinned;
+      const next = !wasPinned;
+
+      const applyPin = (val: boolean) =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id !== clientId) return n;
+            const d = n.data as ClientNodeData;
+            return { ...n, data: { ...d, client: { ...d.client, pinned: val } } };
+          }),
+        );
+
+      applyPin(next);
+      toast.show(next ? 'Pinned to top.' : 'Unpinned.', 'info');
+      pinClient(numId, next).catch(() => {
+        applyPin(wasPinned);
+        toast.show('Pin failed — reverted.', 'error');
+      });
+      pushUndo({
+        label: next ? `Pin "${(node.data as ClientNodeData).client.name}"` : `Unpin "${(node.data as ClientNodeData).client.name}"`,
+        timestamp: Date.now(),
+        undo: () => {
+          applyPin(wasPinned);
+          pinClient(numId, wasPinned).catch(() =>
+            toast.show('Undo pin failed.', 'error'),
+          );
+        },
+        redo: () => {
+          applyPin(next);
+          pinClient(numId, next).catch(() =>
+            toast.show('Redo pin failed.', 'error'),
+          );
+        },
+      });
+    },
+    [setNodes, toast, pushUndo],
+  );
+
+  // ── Context ───────────────────────────────────────────────────────────────
 
   const actions: CanvasActions = {
     toggleExpand,
@@ -721,40 +976,15 @@ export default function SandboxCanvas() {
     detachLogin,
     moveLoginToClient,
     getOriginClient: (cid: number) => originLookup[cid] ?? null,
-    togglePin: (clientId: string) => {
-      const numId = parseInt(clientId.replace('client_', ''), 10);
-      if (isNaN(numId)) return;
-      const current = nodesRef.current;
-      const node = current.find((n) => n.id === clientId && n.type === 'client');
-      if (!node) return;
-      const wasPinned = !!(node.data as ClientNodeData).client.pinned;
-      const next = !wasPinned;
-      // Optimistic UI
-      setNodes((ns) =>
-        ns.map((n) => {
-          if (n.id !== clientId) return n;
-          const d = n.data as ClientNodeData;
-          return { ...n, data: { ...d, client: { ...d.client, pinned: next } } };
-        }),
-      );
-      toast.show(next ? 'Pinned to top.' : 'Unpinned.', 'info');
-      pinClient(numId, next).catch(() => {
-        // Revert on failure
-        setNodes((ns) =>
-          ns.map((n) => {
-            if (n.id !== clientId) return n;
-            const d = n.data as ClientNodeData;
-            return { ...n, data: { ...d, client: { ...d.client, pinned: wasPinned } } };
-          }),
-        );
-        toast.show('Pin failed — reverted.', 'error');
-      });
-    },
+    togglePin,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   const isEmpty = !loading && !loadError && nodes.length === 0;
+
+  const topUndo = undoStack[0] ?? null;
+  const topRedo = redoStack[0] ?? null;
 
   return (
     <CanvasActionsContext.Provider value={actions}>
@@ -768,7 +998,6 @@ export default function SandboxCanvas() {
           nodeTypes={NODE_TYPES}
           nodesConnectable={false}
           {...(() => {
-            // Restore viewport from localStorage if present; otherwise fitView once.
             try {
               const raw = localStorage.getItem('so:sandbox:viewport');
               if (raw) {
@@ -810,40 +1039,50 @@ export default function SandboxCanvas() {
           {!loading && !isEmpty && (
             <Panel position="top-right">
               <div className="flex gap-2">
-                <ToolbarButton onClick={() => setShowAddByLogin(true)}>+ Add Client</ToolbarButton>
+                <ToolbarButton
+                  onClick={() => {
+                    clientIdsBeforeModal.current = new Set(
+                      nodesRef.current
+                        .filter((n) => n.type === 'client' && n.id.startsWith('client_'))
+                        .map((n) => parseInt(n.id.replace('client_', ''), 10))
+                        .filter((id) => !isNaN(id)),
+                    );
+                    setShowAddByLogin(true);
+                  }}
+                >
+                  + Add Client
+                </ToolbarButton>
                 <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
                 </ToolbarButton>
                 <button
                   type="button"
-                  disabled={!mergeUndo}
-                  onClick={() => { if (mergeUndo) { setNodes(mergeUndo.snapshot); setMergeUndo(null); } }}
+                  disabled={!topUndo}
+                  onClick={handleUndo}
                   className={[
                     'rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
-                    mergeUndo
+                    topUndo
                       ? 'bg-amber-50 text-amber-800 hover:bg-amber-100 ring-1 ring-amber-300'
                       : 'bg-cream-bg text-zinc-400 ring-1 ring-cream-border cursor-not-allowed',
                   ].join(' ')}
-                  title={mergeUndo ? mergeUndo.label + ' (⌘Z)' : 'Nothing to undo'}
+                  title={topUndo ? `${topUndo.label} (⌘Z)` : 'Nothing to undo'}
                 >
-                  ↶ Undo
+                  ↶ {topUndo ? `Undo: ${topUndo.label}` : 'Undo'}
                 </button>
-              </div>
-            </Panel>
-          )}
-
-          {/* Merge undo banner — bottom-center */}
-          {mergeUndo && (
-            <Panel position="bottom-center">
-              <div className="mb-2 flex items-center gap-4 rounded-xl border border-zinc-200 bg-white px-5 py-3 text-sm shadow-md">
-                <span className="text-zinc-700">{mergeUndo.label}</span>
                 <button
                   type="button"
-                  className="font-semibold text-primary-600 transition-colors hover:text-primary-800"
-                  onClick={() => { setNodes(mergeUndo.snapshot); setMergeUndo(null); }}
+                  disabled={!topRedo}
+                  onClick={handleRedo}
+                  className={[
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
+                    topRedo
+                      ? 'bg-sky-50 text-sky-800 hover:bg-sky-100 ring-1 ring-sky-300'
+                      : 'bg-cream-bg text-zinc-400 ring-1 ring-cream-border cursor-not-allowed',
+                  ].join(' ')}
+                  title={topRedo ? `${topRedo.label} (⌘⇧Z)` : 'Nothing to redo'}
                 >
-                  Undo
+                  ↷ {topRedo ? `Redo: ${topRedo.label}` : 'Redo'}
                 </button>
               </div>
             </Panel>
@@ -885,7 +1124,15 @@ export default function SandboxCanvas() {
             <button
               type="button"
               className="rounded-xl bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-primary-700 active:bg-primary-800"
-              onClick={() => setShowAddByLogin(true)}
+              onClick={() => {
+                clientIdsBeforeModal.current = new Set(
+                  nodesRef.current
+                    .filter((n) => n.type === 'client' && n.id.startsWith('client_'))
+                    .map((n) => parseInt(n.id.replace('client_', ''), 10))
+                    .filter((id) => !isNaN(id)),
+                );
+                setShowAddByLogin(true);
+              }}
             >
               + Add Client
             </button>
@@ -941,6 +1188,21 @@ export default function SandboxCanvas() {
             void loadCanvas();
             try {
               const rows = await listClients();
+              const before = clientIdsBeforeModal.current;
+              const newClients = rows.filter((r) => !before.has(r.id));
+              for (const nc of newClients) {
+                const ncId = nc.id;
+                const ncName = nc.name;
+                pushUndo({
+                  label: `Add client "${ncName}"`,
+                  timestamp: Date.now(),
+                  undo: () => {
+                    deleteClient(ncId)
+                      .then(() => void loadCanvas())
+                      .catch(() => toast.show('Undo add client failed.', 'error'));
+                  },
+                });
+              }
               return rows.map((r) => ({ id: r.id, name: r.name }));
             } catch {
               return [];
@@ -954,7 +1216,21 @@ export default function SandboxCanvas() {
         <AddClientModal
           open={showAddModal}
           onClose={() => setShowAddModal(false)}
-          onCreated={(_client) => { setShowAddModal(false); void loadCanvas(); }}
+          onCreated={(client) => {
+            setShowAddModal(false);
+            void loadCanvas();
+            const ncId = client.id;
+            const ncName = client.name;
+            pushUndo({
+              label: `Add client "${ncName}"`,
+              timestamp: Date.now(),
+              undo: () => {
+                deleteClient(ncId)
+                  .then(() => void loadCanvas())
+                  .catch(() => toast.show('Undo add client failed.', 'error'));
+              },
+            });
+          }}
         />
       </div>
     </CanvasActionsContext.Provider>
