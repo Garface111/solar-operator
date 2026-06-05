@@ -84,8 +84,11 @@ def test_placeholder_adopted_on_first_capture(client):
     with SessionLocal() as db:
         c = db.get(Client, cid)
         assert c is not None
-        # Renamed using the captured nickname (GMP doesn't expose customer_name).
-        assert c.name == "Spencer LLC", f"expected rename, got name={c.name!r}"
+        # Renamed using the captured login email. We intentionally do NOT
+        # use account nicknames here (they're per-array names like "Roof"
+        # or "Barn" and make terrible client names). GMP doesn't expose
+        # a customer_name, so the email is the best signal.
+        assert c.name == email, f"expected rename to email, got name={c.name!r}"
         assert c.gmp_email == email.lower(), c.gmp_email
         assert c.gmp_autopopulate is True
         assert c.is_placeholder is False

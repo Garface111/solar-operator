@@ -84,10 +84,12 @@ def test_second_distinct_login_auto_creates_client(client):
             select(Client).where(Client.tenant_id == tid).order_by(Client.id)
         ).scalars().all()
         # Two clients: alice (from placeholder adoption) + bob (auto-create).
+        # Names default to the captured login email — per-array nicknames
+        # (Alice Roof, Bob Barn) are intentionally NOT used as client names.
         assert len(clients) == 2, [(c.id, c.name, c.gmp_email) for c in clients]
         names_by_email = {c.gmp_email: c.name for c in clients}
-        assert names_by_email["alice@gmp.test"] == "Alice Roof"
-        assert names_by_email["bob@gmp.test"] == "Bob Barn"
+        assert names_by_email["alice@gmp.test"] == "alice@gmp.test"
+        assert names_by_email["bob@gmp.test"] == "bob@gmp.test"
         # Both autopop-enabled so future captures flow through fast path.
         assert all(c.gmp_autopopulate for c in clients)
         # Arrays attached to the right client.

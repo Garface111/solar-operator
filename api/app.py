@@ -307,11 +307,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
 
                     if user_email or user_username:
                         # ── Pick the display name ────────────────────────────
-                        # Priority: customer_name > account nickname > login
-                        # email > login username. customer_name/nickname carry
-                        # the "Spencer LLC" wow when the adapter exposes them;
-                        # email/username is the user-requested DEFAULT for the
-                        # 50-account case where nothing better is available.
+                        # Default to the captured login (email or username) —
+                        # the operator can rename via the dashboard. We
+                        # intentionally do NOT use the account nickname here
+                        # because nicknames are per-array (often "Roof",
+                        # "Barn", "Field") and make terrible client names.
+                        # customer_name (when the adapter exposes it — e.g.
+                        # VEC) IS a good client-level label, so we keep it
+                        # as the top preference.
                         inferred_name = None
                         for a in normalized["accounts"]:
                             extra = a.get("extra") or {}
@@ -319,7 +322,6 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 a.get("customer_name")
                                 or extra.get("customerName")
                                 or extra.get("customer_name")
-                                or a.get("nickname")
                             )
                             if inferred_name:
                                 break
