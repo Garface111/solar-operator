@@ -46,7 +46,7 @@ from .stripe_helpers import reconcile_subscription_quantity
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_SIGNOFF,
     DEFAULT_DASHBOARD_URL, MERGE_TAGS, build_context, render_email,
-    resolve_from_header,
+    render_merge, resolve_from_header,
 )
 
 logger = logging.getLogger(__name__)
