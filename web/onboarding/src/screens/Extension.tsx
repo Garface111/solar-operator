@@ -6,6 +6,7 @@ import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
 import { useToast } from "../ui/Toast";
+import { openPortalTab } from "../lib/openPortalTab";
 import {
   getToken,
   pingExtension,
@@ -446,7 +447,15 @@ export default function Extension() {
                   href={p.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  onClick={() => markPortalVisited(p.url)}
+                  onClick={(e) => {
+                    // Prefer background-tab path so the operator keeps
+                    // watching the onboarding "waiting for capture" UI.
+                    // Falls back to a normal new tab if the extension
+                    // isn't installed/listening.
+                    e.preventDefault();
+                    markPortalVisited(p.url);
+                    void openPortalTab(p.url);
+                  }}
                   className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-medium transition-colors duration-150 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 ${
                     visited
                       ? "border border-primary-200 bg-primary-50 text-primary-700 hover:bg-primary-100"

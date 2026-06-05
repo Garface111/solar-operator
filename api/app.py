@@ -50,6 +50,9 @@ _PROVIDER_AUTOPOP_FIELDS: dict[str, dict] = {
         "username_col":       Client.gmp_username,
         "autopop_col":        Client.gmp_autopopulate,
         "last_sync_attr":     "gmp_last_sync_at",
+        "email_attr":         "gmp_email",
+        "username_attr":      "gmp_username",
+        "autopop_attr":       "gmp_autopopulate",
         "bill_offset_months": 1,   # GMP bills represent the prior month
     },
     "vec": {
@@ -57,6 +60,9 @@ _PROVIDER_AUTOPOP_FIELDS: dict[str, dict] = {
         "username_col":       Client.vec_username,
         "autopop_col":        Client.vec_autopopulate,
         "last_sync_attr":     "vec_last_sync_at",
+        "email_attr":         "vec_email",
+        "username_attr":      "vec_username",
+        "autopop_attr":       "vec_autopopulate",
         "bill_offset_months": 0,   # VEC bills represent the same month
     },
 }
@@ -260,6 +266,75 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             owner.is_placeholder = False
                     for c in clients:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
+                else:
+                    # ── Placeholder adoption (Note4) ──────────────────────────
+                    # No Client matched on (email|username) for this provider.
+                    # If this tenant has a placeholder Client (seeded at signup
+                    # when they didn't pre-enter clients), adopt it: rename
+                    # using the captured customer_name, backfill the login
+                    # fields + autopopulate flag, attach the captured arrays,
+                    # and clear is_placeholder. This is the "no manual entry"
+                    # path — the operator literally never types a client name.
+                    placeholder = db.execute(
+                        select(Client).where(
+                            Client.tenant_id == tenant.id,
+                            Client.is_placeholder.is_(True),
+                            Client.deleted_at.is_(None),
+                        )
+                        .order_by(Client.id)
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if placeholder is not None and (user_email or user_username):
+                        # Pick the best display name from the captured payload.
+                        # accounts[].nickname is per-array; customer_name (if
+                        # the adapter exposes it via extra/raw) is per-account
+                        # and usually the LLC / community-solar entity name.
+                        inferred_name = None
+                        for a in normalized["accounts"]:
+                            extra = a.get("extra") or {}
+                            inferred_name = (
+                                a.get("customer_name")
+                                or extra.get("customerName")
+                                or extra.get("customer_name")
+                                or a.get("nickname")
+                            )
+                            if inferred_name:
+                                break
+                        if inferred_name:
+                            placeholder.name = str(inferred_name).strip()[:200]
+                        # Backfill the login fields + autopop flag so the NEXT
+                        # capture from the same login goes through the normal
+                        # autopop branch above.
+                        if user_email and not getattr(placeholder, _autopop_cfg["email_attr"]):
+                            setattr(placeholder, _autopop_cfg["email_attr"], user_email)
+                        if user_username and not getattr(placeholder, _autopop_cfg["username_attr"]):
+                            setattr(placeholder, _autopop_cfg["username_attr"], user_username)
+                        setattr(placeholder, _autopop_cfg["autopop_attr"], True)
+                        setattr(placeholder, _autopop_cfg["last_sync_attr"], now())
+                        # Attach the captured arrays.
+                        for a in normalized["accounts"]:
+                            acct_no = a.get("account_number")
+                            if not acct_no:
+                                continue
+                            acct = db.execute(
+                                select(UtilityAccount).where(
+                                    UtilityAccount.tenant_id == tenant.id,
+                                    UtilityAccount.provider == provider,
+                                    UtilityAccount.account_number == acct_no,
+                                )
+                            ).scalar_one_or_none()
+                            if acct is None or acct.array_id is not None:
+                                continue
+                            arr = Array(
+                                tenant_id=tenant.id,
+                                client_id=placeholder.id,
+                                name=a.get("nickname") or acct_no,
+                                bill_offset_months=_autopop_cfg["bill_offset_months"],
+                            )
+                            db.add(arr)
+                            db.flush()
+                            acct.array_id = arr.id
+                        placeholder.is_placeholder = False
 
         # ── VEC bill/usage persistence (extension-scraped) ──────────────
         # GMP has a separate worker that pulls bill PDFs server-side and

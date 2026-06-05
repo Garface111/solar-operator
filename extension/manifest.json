@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Solar Operator Sync",
   "short_name": "Solar Operator",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Solar Operator updates your community solar reporting spreadsheet every month with fresh Green Mountain Power data — automatically.",
   "author": "Solar Operator",
   "homepage_url": "https://solaroperator.com",
@@ -17,6 +17,8 @@
     "https://vermontelectric.smarthub.coop/*",
     "https://*.smarthub.coop/*",
     "https://api.solaroperator.org/*",
+    "https://solaroperator.org/*",
+    "https://*.solaroperator.org/*",
     "https://web-production-49c83.up.railway.app/*"
   ],
   "background": {
@@ -42,6 +44,17 @@
         "vec_content.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://solaroperator.org/*",
+        "https://*.solaroperator.org/*",
+        "https://web-production-49c83.up.railway.app/*"
+      ],
+      "js": [
+        "so_bridge.js"
+      ],
+      "run_at": "document_start"
     }
   ],
   "action": {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { markWalkthroughSeen } from "../lib/walkthrough";
+import { openPortalTab } from "../lib/openPortalTab";
 
 interface SpotRect {
   top: number;
@@ -272,6 +273,13 @@ export function WalkthroughOverlay({ onClose }: Props) {
             href={current.cta.href}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={(e) => {
+              // Prefer the extension's background-tab path so the operator
+              // keeps watching the dashboard while data lands. Fall back to
+              // a normal new tab if the extension isn't installed.
+              e.preventDefault();
+              void openPortalTab(current.cta!.href);
+            }}
             className="mb-4 flex items-center justify-center rounded-xl bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-700"
           >
             {current.cta.label}

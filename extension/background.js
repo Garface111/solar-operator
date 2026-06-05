@@ -117,6 +117,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     _handleSync(msg.payload, msg.tokenHash, sendResponse);
     return true; // keep channel open for async sendResponse
   }
+  // v1.2.0: SPA asks the extension to open the utility portal in a
+  // background tab — gives content.js a chance to capture without
+  // stealing the operator's focus from solaroperator.org.
+  if (msg.type === "OPEN_UTILITY_PORTAL") {
+    const url = String(msg.url || "");
+    if (!/^https:\/\//i.test(url)) {
+      sendResponse({ ok: false, error: "invalid-url" });
+      return; // sync response, no need to return true
+    }
+    chrome.tabs.create({ url, active: false }, (tab) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+      } else {
+        sendResponse({ ok: true, tabId: tab && tab.id });
+      }
+    });
+    return true; // chrome.tabs.create callback is async
+  }
 });
 
 // Heartbeat — ping the server every 60s so the onboarding screen can

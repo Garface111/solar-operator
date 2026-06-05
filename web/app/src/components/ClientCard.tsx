@@ -6,6 +6,7 @@ import { Modal } from "../ui/Modal";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
+import { openPortalTab } from "../lib/openPortalTab";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import {
   type ClientRow,
@@ -427,6 +428,10 @@ export function ClientCard({
                     href="https://www.greenmountainpower.com/account/"
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void openPortalTab("https://www.greenmountainpower.com/account/");
+                    }}
                     className="shrink-0 font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
                   >
                     Open greenmountainpower.com ↗

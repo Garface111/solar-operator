@@ -6,6 +6,7 @@ import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
 import { hasSeenWalkthrough } from "../lib/walkthrough";
+import { openPortalTab } from "../lib/openPortalTab";
 
 interface Props {
   onSignOut: () => void;
@@ -149,6 +150,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
               href="https://mypower.greenmountainpower.com/"
               target="_blank"
               rel="noopener noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                void openPortalTab("https://mypower.greenmountainpower.com/");
+              }}
               className="shrink-0 text-sm font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
             >
               Open utility portal →
