@@ -4,6 +4,10 @@ import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
 import { openPortalTab } from "../lib/openPortalTab";
+import {
+  useExtensionStatus,
+  type ExtensionStatus,
+} from "../lib/useExtensionStatus";
 
 type Provider = "gmp" | "vec";
 type Phase = "choose" | "waiting" | "captured";
@@ -29,31 +33,36 @@ const FRIENDLY: Record<Provider, string> = {
   vec: "Vermont Electric Cooperative",
 };
 
-// After this long with no capture event, surface a "still waiting?" nudge
-// with a manual refresh button so the operator isn't stuck if the
-// extension never fires SO_CAPTURE_LANDED (not installed, paused,
-// pairing stale, etc.).
+// After this long with no SO_CAPTURE_LANDED, surface a "still waiting?"
+// nudge so a hung modal can't trap the operator.
 const STILL_WAITING_MS = 30_000;
 
 /**
  * AddClientByLoginModal — the high-agency "just log in" flow.
  *
- * 1. Operator picks a portal.
- * 2. Extension opens the portal in a background tab.
- * 3. Operator signs in there.
- * 4. The extension captures and POSTs /v1/sync.
- * 5. Backend auto-creates a Client for the captured login.
- * 6. We get SO_CAPTURE_LANDED → flip to "captured" state with a
- *    "log into another" CTA so they can chain 50 logins in one sitting.
+ * Intelligence upgrades (June 2026):
+ *   - Probes extension status BEFORE the operator picks a portal, so a
+ *     flow that can't complete is never offered as the default.
+ *   - When the extension is absent or unpaired, prominently steers the
+ *     operator to the manual-entry flow instead of letting them fall
+ *     into a frozen "waiting for capture" state.
+ *   - "I signed in already — check now" escape hatch still appears as a
+ *     safety net for slow networks / missed events.
+ *   - Title falls back gracefully when SO_CAPTURE_LANDED carries no
+ *     clientName/provider (was rendering "Got it — null").
+ *   - Probes are cached at module level by useExtensionStatus, so
+ *     re-opening the modal is instant.
  *
- * Failure mode: if the extension isn't paired/installed, the
- * SO_CAPTURE_LANDED message never arrives and the modal sits in
- * "waiting" forever. We handle that with:
- *   - a 30s "still waiting?" nudge with a manual "I signed in" button
- *     that calls onCaptured() (parent reloads clients from server)
- *   - explicit "extension not detected" copy when openPortalTab returns
- *     something other than "extension", so the operator knows the modal
- *     can't auto-detect their sign-in
+ * Flow:
+ *   1. Operator opens modal → we probe extension status passively + actively.
+ *   2. If extension absent/unpaired, top-of-modal banner says so AND the
+ *      manual-entry CTA is promoted to primary.
+ *   3. If extension is paired, the portal-picker is the primary path.
+ *   4. Pick portal → background tab opens → user signs in → extension
+ *      POSTs /v1/sync → backend creates Client → SO_CAPTURE_LANDED fires
+ *      → modal flips to captured state.
+ *   5. Safety nets (30s nudge + manual refresh + extension-absent banner)
+ *      cover the "extension didn't fire" failure mode.
  */
 export function AddClientByLoginModal({
   open,
@@ -62,25 +71,26 @@ export function AddClientByLoginModal({
   onSwitchToManual,
 }: Props) {
   const toast = useToast();
+  const ext = useExtensionStatus(open);
   const [phase, setPhase] = useState<Phase>("choose");
   const [lastProvider, setLastProvider] = useState<Provider | null>(null);
   const [capturedClient, setCapturedClient] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
-  const [extensionDetected, setExtensionDetected] = useState(true);
   const [stillWaiting, setStillWaiting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const capturesThisSession = useRef(0);
 
-  // Reset whenever the modal opens.
+  // Reset whenever the modal opens; re-probe to get a fresh status.
   useEffect(() => {
     if (open) {
       setPhase("choose");
       setLastProvider(null);
       setCapturedClient(null);
-      setExtensionDetected(true);
       setStillWaiting(false);
       capturesThisSession.current = 0;
+      void ext.probe();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Listen for SO_CAPTURE_LANDED while the modal is open.
@@ -91,7 +101,13 @@ export function AddClientByLoginModal({
       const data = e.data;
       if (!data || data.type !== "SO_CAPTURE_LANDED") return;
       capturesThisSession.current += 1;
-      setCapturedClient(data.clientName ?? data.provider ?? "your account");
+      // Prefer real client name, then provider, then "your account" —
+      // never let the user see "Got it — null".
+      const label =
+        (typeof data.clientName === "string" && data.clientName.trim()) ||
+        (typeof data.provider === "string" && FRIENDLY[data.provider as Provider]) ||
+        "your account";
+      setCapturedClient(label);
       setPhase("captured");
       onCaptured();
     }
@@ -99,8 +115,7 @@ export function AddClientByLoginModal({
     return () => window.removeEventListener("message", handler);
   }, [open, onCaptured]);
 
-  // "Still waiting?" nudge timer — fires after STILL_WAITING_MS in the
-  // waiting phase so a frozen modal can't trap an operator forever.
+  // "Still waiting?" nudge timer in waiting phase.
   useEffect(() => {
     if (phase !== "waiting") {
       setStillWaiting(false);
@@ -115,14 +130,14 @@ export function AddClientByLoginModal({
     setOpeningTab(true);
     const result = await openPortalTab(PORTAL_URLS[provider]);
     setOpeningTab(false);
-    setExtensionDetected(result === "extension");
     if (result === "blocked") {
       toast.error(
-        "Pop-up was blocked. Click the link below to open the portal in a new tab.",
+        "Pop-up was blocked. Click the link in the next panel to open the portal.",
       );
       window.open(PORTAL_URLS[provider], "_blank");
     } else if (result !== "extension") {
-      // No extension — open in a new tab and ask them to come back
+      // No extension → open in a new tab; user finishes flow via the
+      // manual "I signed in already" refresh button.
       window.open(PORTAL_URLS[provider], "_blank");
     }
     setPhase("waiting");
@@ -136,11 +151,6 @@ export function AddClientByLoginModal({
     onClose();
   }
 
-  // Manual escape hatch: "I signed in already" → tell parent to refresh
-  // clients from server. If a real capture landed via the extension we
-  // would've already flipped to "captured" via the message handler; this
-  // covers the case where the extension never POSTed (not installed,
-  // pairing stale, slow network).
   async function handleManualRefresh() {
     setRefreshing(true);
     try {
@@ -154,13 +164,18 @@ export function AddClientByLoginModal({
     }
   }
 
+  const extensionUsable = ext.status === "present-paired";
+  const extensionPresentButUnpaired = ext.status === "present-unpaired";
+  const extensionAbsent = ext.status === "absent";
+  const extensionUnknown = ext.status === "unknown";
+
   return (
     <Modal
       open={open}
       onClose={closeAndReset}
       title={
         phase === "captured"
-          ? `Got it — ${capturedClient}`
+          ? `Got it${capturedClient ? ` — ${capturedClient}` : ""}`
           : phase === "waiting"
             ? `Sign in at ${lastProvider ? FRIENDLY[lastProvider] : "the portal"}`
             : "Add a client"
@@ -186,8 +201,11 @@ export function AddClientByLoginModal({
           </>
         ) : (
           <>
-            <Button variant="ghost" onClick={onSwitchToManual}>
-              Add manually instead
+            <Button
+              variant={extensionUsable ? "ghost" : "primary"}
+              onClick={onSwitchToManual}
+            >
+              {extensionUsable ? "Add manually instead" : "Add manually →"}
             </Button>
             <Button variant="ghost" onClick={closeAndReset}>
               Cancel
@@ -198,33 +216,64 @@ export function AddClientByLoginModal({
     >
       {phase === "choose" && (
         <div className="space-y-4">
-          <p className="text-sm text-zinc-600">
-            Pick the portal your client signs into. We&apos;ll open it in a new
-            tab — just sign in there as them, and their arrays appear here
-            automatically.
-          </p>
+          <ExtensionStatusBanner status={ext.status} version={ext.version} />
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {extensionUsable && (
+            <p className="text-sm text-zinc-600">
+              Pick the portal your client signs into. We&apos;ll open it in a
+              background tab — sign in there as them, and their arrays appear
+              here automatically.
+            </p>
+          )}
+          {extensionPresentButUnpaired && (
+            <p className="text-sm text-zinc-600">
+              Your extension is installed but not paired to this account
+              yet. You can still pick a portal — after sign-in we&apos;ll fall
+              back to a manual refresh.
+            </p>
+          )}
+          {extensionAbsent && (
+            <p className="text-sm text-zinc-600">
+              Without the extension, the auto-capture flow can&apos;t finish.
+              <b className="text-zinc-900"> Add manually instead</b> — it&apos;s
+              fast, and you can turn on auto-populate after the extension is
+              installed.
+            </p>
+          )}
+          {extensionUnknown && (
+            <p className="text-sm text-zinc-500">
+              Checking your extension&hellip;
+            </p>
+          )}
+
+          <div
+            className={[
+              "grid grid-cols-1 gap-3 sm:grid-cols-2",
+              extensionAbsent ? "opacity-50" : "",
+            ].join(" ")}
+          >
             <PortalCard
               provider="gmp"
               label="Green Mountain Power"
               hint="Most VT solar clients"
               onClick={() => pick("gmp")}
-              disabled={openingTab}
+              disabled={openingTab || extensionUnknown}
             />
             <PortalCard
               provider="vec"
               label="Vermont Electric Co-op"
               hint="Northeast Kingdom area"
               onClick={() => pick("vec")}
-              disabled={openingTab}
+              disabled={openingTab || extensionUnknown}
             />
           </div>
 
-          <p className="text-xs text-zinc-400">
-            You can sign into as many clients as you want in one sitting —
-            each capture creates its own client here.
-          </p>
+          {extensionUsable && (
+            <p className="text-xs text-zinc-400">
+              Tip: sign into as many clients as you want in one sitting — each
+              capture creates its own client here.
+            </p>
+          )}
         </div>
       )}
 
@@ -233,7 +282,7 @@ export function AddClientByLoginModal({
           <div className="flex items-center justify-center gap-3 text-emerald-600">
             <Spinner className="h-5 w-5" />
             <span className="text-sm font-medium">
-              {extensionDetected
+              {extensionUsable
                 ? "Waiting for sign-in…"
                 : "Sign in at the portal, then come back"}
             </span>
@@ -248,21 +297,34 @@ export function AddClientByLoginModal({
             </ol>
           </div>
 
-          {!extensionDetected && (
+          {!extensionUsable && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              <p className="font-medium">Extension not detected.</p>
+              <p className="font-medium">
+                {extensionAbsent
+                  ? "Extension not detected"
+                  : "Extension not paired"}
+                .
+              </p>
               <p className="mt-1 text-xs">
-                Your client will still be added once you finish signing in —
+                Your client won&apos;t auto-add. Once you&apos;ve signed in,
                 tap{" "}
                 <span className="font-semibold">
                   &ldquo;I signed in already&rdquo;
                 </span>{" "}
-                below when you&apos;re back.
+                below to refresh — or close this and use{" "}
+                <button
+                  type="button"
+                  onClick={onSwitchToManual}
+                  className="font-semibold underline hover:text-amber-700"
+                >
+                  add manually
+                </button>{" "}
+                instead.
               </p>
             </div>
           )}
 
-          {(stillWaiting || !extensionDetected) && (
+          {(stillWaiting || !extensionUsable) && (
             <div className="flex flex-col items-center gap-2">
               <Button
                 onClick={handleManualRefresh}
@@ -278,7 +340,7 @@ export function AddClientByLoginModal({
                   "I signed in already — check now"
                 )}
               </Button>
-              {stillWaiting && extensionDetected && (
+              {stillWaiting && extensionUsable && (
                 <p className="text-center text-xs text-amber-700">
                   Still waiting? Click above to refresh — your client may have
                   landed without the modal noticing.
@@ -289,12 +351,12 @@ export function AddClientByLoginModal({
 
           <p className="text-xs text-zinc-400">
             If you signed in but nothing happened, the extension may not be
-            paired. Visit{" "}
+            paired. Try{" "}
             <button
               onClick={onSwitchToManual}
               className="text-primary-600 underline hover:text-primary-700"
             >
-              add manually
+              adding manually
             </button>
             .
           </p>
@@ -314,7 +376,7 @@ export function AddClientByLoginModal({
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
             <span className="text-base font-medium">
-              {capturedClient} added
+              {capturedClient || "Client"} added
             </span>
           </div>
           <p className="text-center text-sm text-zinc-600">
@@ -328,6 +390,55 @@ export function AddClientByLoginModal({
         </div>
       )}
     </Modal>
+  );
+}
+
+function ExtensionStatusBanner({
+  status,
+  version,
+}: {
+  status: ExtensionStatus;
+  version: string | null;
+}) {
+  if (status === "unknown") return null;
+  if (status === "present-paired") {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+        <span aria-hidden>✓</span>
+        <span>
+          Extension paired{version ? ` (v${version})` : ""} — auto-capture is on.
+        </span>
+      </div>
+    );
+  }
+  if (status === "present-unpaired") {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <span aria-hidden>⚠</span>
+        <span>
+          Extension installed{version ? ` (v${version})` : ""} but not paired
+          yet. Auto-capture may not fire.
+        </span>
+      </div>
+    );
+  }
+  // absent
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900">
+      <span aria-hidden>✗</span>
+      <span>
+        Extension not detected. Install it from{" "}
+        <a
+          href="/onboarding/#/extension"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-semibold underline hover:text-red-700"
+        >
+          Setup
+        </a>{" "}
+        to enable auto-capture, or add this client manually below.
+      </span>
+    </div>
   );
 }
 
@@ -349,7 +460,7 @@ function PortalCard({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group flex flex-col items-start gap-1 rounded-xl border-2 border-zinc-200 bg-white p-4 text-left transition-all hover:border-emerald-400 hover:bg-emerald-50/50 disabled:opacity-50"
+      className="group flex flex-col items-start gap-1 rounded-xl border-2 border-zinc-200 bg-white p-4 text-left transition-all hover:border-emerald-400 hover:bg-emerald-50/50 disabled:cursor-not-allowed disabled:opacity-50"
     >
       <span className="text-base font-semibold text-zinc-900 group-hover:text-emerald-800">
         {label}
