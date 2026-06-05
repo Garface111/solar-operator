@@ -144,6 +144,10 @@ interface MergeDialog {
   targetId: string;
   sourceName: string;
   targetName: string;
+  /** Pre-drag position of the source node so cancelling the dialog can
+   *  snap the dragged card back instead of leaving it overlapping the
+   *  target. */
+  sourceOrigin: { x: number; y: number };
 }
 
 interface ContextMenu {
@@ -176,7 +180,12 @@ export default function SandboxCanvas() {
   const [showAddByLogin, setShowAddByLogin] = useState(false);
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
 
-  const { getIntersectingNodes, fitView } = useReactFlow();
+  const { getIntersectingNodes, fitView, setCenter } = useReactFlow();
+
+  // Pre-drag node positions captured at drag start so we can snap a node
+  // back if a merge dialog gets cancelled (otherwise the dragged card stays
+  // overlapping the target).
+  const dragOriginRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
   // Always-fresh refs used in callbacks to avoid stale closures
   const nodesRef = useRef<Node[]>(nodes);
@@ -236,6 +245,25 @@ export default function SandboxCanvas() {
   }, [setNodes, fitView]);
 
   useEffect(() => { void loadCanvas(); }, [loadCanvas]);
+
+  /** After a new client is created, scroll/zoom the canvas to focus on it
+   *  so the user sees the result of their action instead of an unrelated
+   *  area of the graph. Polls briefly because the node may not exist in
+   *  state yet when loadCanvas is still in flight. */
+  const centerOnClientId = useCallback((numericId: number) => {
+    const nodeId = `client_${numericId}`;
+    const tryFocus = (attempt = 0) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId);
+      if (node) {
+        // Select it so it visually pops + center it under the viewport
+        setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })));
+        setCenter(node.position.x + 144, node.position.y + 110, { zoom: 1, duration: 600 });
+        return;
+      }
+      if (attempt < 20) setTimeout(() => tryFocus(attempt + 1), 100);
+    };
+    tryFocus();
+  }, [setCenter, setNodes]);
 
   // Refresh the canvas when a new capture completes
   useEffect(() => {
@@ -543,7 +571,22 @@ export default function SandboxCanvas() {
     [mergeDialog, setNodes, loadCanvas, toast, pushUndo],
   );
 
-  const cancelMerge = useCallback(() => setMergeDialog(null), []);
+  const cancelMerge = useCallback(() => {
+    setMergeDialog((dlg) => {
+      if (dlg) {
+        // Snap the dragged card back to where it was before the drag started
+        // so it doesn't sit on top of the target after the user bails. The
+        // backend position never changed (we don't savePosition on a merge
+        // drop), so visual-only restore is enough.
+        const { sourceId, sourceOrigin } = dlg;
+        setNodes((ns) =>
+          ns.map((n) => (n.id === sourceId ? { ...n, position: sourceOrigin } : n)),
+        );
+        dragOriginRef.current.delete(sourceId);
+      }
+      return null;
+    });
+  }, [setNodes]);
 
   // ── Position persistence (debounced 800 ms per node) ─────────────────────
 
@@ -567,6 +610,14 @@ export default function SandboxCanvas() {
   }, []);
 
   // ── Drag: live merge-intent highlight ────────────────────────────────────
+
+  const onNodeDragStart = useCallback(
+    (_event: MouseEvent | TouchEvent, node: Node) => {
+      if (node.type !== 'client') return;
+      dragOriginRef.current.set(node.id, { x: node.position.x, y: node.position.y });
+    },
+    [],
+  );
 
   const onNodeDrag = useCallback(
     (_event: MouseEvent | TouchEvent, node: Node) => {
@@ -615,16 +666,20 @@ export default function SandboxCanvas() {
         if (target) {
           const nData = node.data as ClientNodeData;
           const tData = target.data as ClientNodeData;
+          const origin = dragOriginRef.current.get(node.id) ?? node.position;
           setMergeDialog({
             sourceId: node.id,
             targetId: target.id,
             sourceName: nData.client.name,
             targetName: tData.client.name,
+            sourceOrigin: { x: origin.x, y: origin.y },
           });
           return;
         }
       }
 
+      // Not a merge / attach drop — clear any cached origin and persist.
+      dragOriginRef.current.delete(node.id);
       savePosition(node.id, node.position.x, node.position.y);
     },
     [getIntersectingNodes, attachToClient, savePosition, clearMergeIntent],
@@ -1031,6 +1086,7 @@ export default function SandboxCanvas() {
           nodes={nodes}
           edges={[]}
           onNodesChange={onNodesChange}
+          onNodeDragStart={onNodeDragStart}
           onNodeDrag={onNodeDrag}
           onNodeDragStop={onNodeDragStop}
           nodeTypes={NODE_TYPES}
@@ -1240,6 +1296,10 @@ export default function SandboxCanvas() {
                   },
                 });
               }
+              // Center on the last newly created client so the user actually
+              // sees what they just added.
+              const focus = newClients[newClients.length - 1];
+              if (focus) centerOnClientId(focus.id);
               return rows.map((r) => ({ id: r.id, name: r.name }));
             } catch {
               return [];
@@ -1267,6 +1327,7 @@ export default function SandboxCanvas() {
                   .catch(() => toast.show('Undo add client failed.', 'error'));
               },
             });
+            centerOnClientId(ncId);
           }}
         />
 
