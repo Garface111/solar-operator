@@ -227,7 +227,11 @@ export default function ClientSetup() {
           </Button>
         </div>
 
-        <p className="mt-6 text-xs text-zinc-400">
+        <p className="mt-4 text-xs text-zinc-500">
+          Chrome desktop required — extension scrapes utility portals
+        </p>
+
+        <p className="mt-2 text-xs text-zinc-400">
           Not sure yet? Pick the closest estimate — your subscription
           quantity reconciles automatically once your real arrays are set
           up in the dashboard. You won&apos;t be charged anything today and
