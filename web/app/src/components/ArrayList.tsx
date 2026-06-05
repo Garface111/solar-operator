@@ -5,6 +5,7 @@ import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
+import { ArrayMergeSuggestionBanner } from "./ArrayMergeSuggestionBanner";
 import {
   type ArrayRow as ArrayRowT,
   type Provider,
@@ -389,11 +390,27 @@ function ArrayRow({
       </div>
 
       {expanded && (
-        <UtilityAccounts
-          clientId={clientId}
-          array={array}
-          onChange={onChange}
-        />
+        <>
+          {/* Possible-duplicate banner — surfaces another array on this
+              tenant that shares NEPOOL ID, name, or utility accounts.
+              One-click merge moves the duplicate's UAs under THIS array. */}
+          <div className="px-3 pt-3">
+            <ArrayMergeSuggestionBanner
+              arrayId={array.id}
+              arrayName={array.name}
+              onMerged={() => {
+                // Signal the list to refresh so the merged-away row
+                // disappears + UA counts update.
+                window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+              }}
+            />
+          </div>
+          <UtilityAccounts
+            clientId={clientId}
+            array={array}
+            onChange={onChange}
+          />
+        </>
       )}
 
       <Modal

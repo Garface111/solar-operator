@@ -347,3 +347,20 @@ class ClientMergeDismissal(Base):
         UniqueConstraint("tenant_id", "client_a_id", "client_b_id",
                          name="uq_merge_dismissal_pair"),
     )
+
+
+class ArrayMergeDismissal(Base):
+    """Like ClientMergeDismissal but for Array pairs. Same shape:
+    normalize the pair as (min_id, max_id) so a dismissal in either
+    direction is remembered once."""
+    __tablename__ = "array_merge_dismissals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_a_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    array_b_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    dismissed_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "array_a_id", "array_b_id",
+                         name="uq_array_merge_dismissal_pair"),
+    )

@@ -515,6 +515,55 @@ export async function dismissMergeSuggestion(
   );
 }
 
+// ── Array merge suggestions ─────────────────────────────────────────
+export interface ArrayMergeSuggestion {
+  id: number;
+  name: string;
+  score: number;
+  reasons: string[];
+  client_id: number | null;
+  nepool_gis_id: string | null;
+}
+
+export async function getArrayMergeSuggestions(
+  arrayId: number,
+): Promise<ArrayMergeSuggestion[]> {
+  const res = await request<{ ok: true; suggestions: ArrayMergeSuggestion[] }>(
+    `/v1/account/arrays/${arrayId}/merge-suggestions`,
+  );
+  return res.suggestions;
+}
+
+export interface MergedArrayResult {
+  id: number;
+  name: string;
+  client_id: number | null;
+  nepool_gis_id: string | null;
+  bill_offset_months: number;
+  excluded: boolean;
+  utility_accounts_count: number;
+}
+
+export async function mergeArrayInto(
+  srcId: number,
+  dstId: number,
+): Promise<{ dst_array: MergedArrayResult; merged_from_id: number; reparented_utility_accounts: number }> {
+  return request(
+    `/v1/account/arrays/${srcId}/merge-into`,
+    { method: "POST", body: { dst_array_id: dstId } },
+  );
+}
+
+export async function dismissArrayMergeSuggestion(
+  arrayId: number,
+  otherId: number,
+): Promise<void> {
+  await request(
+    `/v1/account/arrays/${arrayId}/dismiss-merge/${otherId}`,
+    { method: "POST" },
+  );
+}
+
 /** Re-read a client's GMP auto-populate freshness (does not poll GMP). */
 export async function refreshCapture(id: number): Promise<ClientRow> {
   const res = await request<{ client: ClientRow }>(

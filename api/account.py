@@ -39,7 +39,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
 
 from .db import SessionLocal
-from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, now
+from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity
@@ -1250,6 +1250,272 @@ def dismiss_merge_suggestion(client_id: int, other_id: int,
         if not existing:
             db.add(ClientMergeDismissal(
                 tenant_id=t.id, client_a_id=a, client_b_id=b,
+            ))
+            db.commit()
+        return {"ok": True}
+
+
+# ── Array merge-suggestion + merge endpoints ────────────────────────────
+# Same pattern as the client variant, scoped to arrays. Common scenario:
+# an auto-created array from a fresh capture (named after the GMP account
+# number) duplicates an operator-imported array with the same NEPOOL ID
+# and a friendly name like "Tannery Brook". Operator should merge with
+# one click instead of deleting one side and losing the linked UAs.
+
+
+def _normalize_array_name(name: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace. Lighter touch
+    than the client normalization — array names don't carry business
+    suffixes, they're just site names or account numbers."""
+    import re
+    s = (name or "").lower()
+    s = re.sub(r"[,.\-_/]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _array_merge_candidates_for(db, tenant_id: str, target: Array) -> list[dict]:
+    """Score plausible array merge candidates within tenant. Same shape
+    as the client variant but with array-specific signals:
+        same NEPOOL-GIS ID         +80  (very strong — it's an asset ID)
+        same normalized name       +50
+        shared utility account     +60  (per shared account, capped)
+        same client + close name   +20
+    Returns top 3 with score >= 30. Skips dismissed pairs."""
+    others = db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant_id,
+            Array.deleted_at.is_(None),
+            Array.id != target.id,
+        )
+    ).scalars().all()
+    if not others:
+        return []
+
+    dismissed_pairs: set[tuple[int, int]] = set()
+    for d in db.execute(
+        select(ArrayMergeDismissal).where(
+            ArrayMergeDismissal.tenant_id == tenant_id,
+        )
+    ).scalars().all():
+        dismissed_pairs.add((d.array_a_id, d.array_b_id))
+
+    # UA account_numbers by array
+    uas_by_array: dict[int, set[str]] = {}
+    for ua in db.execute(
+        select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tenant_id,
+            UtilityAccount.deleted_at.is_(None),
+            UtilityAccount.array_id.is_not(None),
+        )
+    ).scalars().all():
+        uas_by_array.setdefault(ua.array_id, set()).add(ua.account_number)
+
+    target_uas = uas_by_array.get(target.id, set())
+    target_norm = _normalize_array_name(target.name)
+    target_nepool = (target.nepool_gis_id or "").strip()
+
+    candidates: list[tuple[int, dict]] = []
+    for other in others:
+        a, b = sorted([target.id, other.id])
+        if (a, b) in dismissed_pairs:
+            continue
+
+        score = 0
+        reasons: list[str] = []
+
+        # NEPOOL match — strongest signal. NEPOOL IDs are assigned per
+        # physical asset, so two arrays with the same one are almost
+        # certainly the same array.
+        other_nepool = (other.nepool_gis_id or "").strip()
+        if target_nepool and other_nepool and target_nepool == other_nepool:
+            score += 80
+            reasons.append(f"same NEPOOL-GIS ID {target_nepool}")
+
+        # Name match
+        other_norm = _normalize_array_name(other.name)
+        if target_norm and other_norm and target_norm == other_norm:
+            score += 50
+            reasons.append("same name")
+
+        # Shared utility account
+        other_uas = uas_by_array.get(other.id, set())
+        shared = target_uas & other_uas
+        if shared:
+            sample = next(iter(shared))
+            score += 60 * min(len(shared), 2)
+            reasons.append(
+                f"shared utility account {sample}" +
+                (f" (+{len(shared) - 1} more)" if len(shared) > 1 else "")
+            )
+
+        # Same client + similar name (close, not exact)
+        if (target.client_id is not None
+                and target.client_id == other.client_id
+                and target_norm and other_norm
+                and target_norm != other_norm
+                and (target_norm in other_norm or other_norm in target_norm)):
+            score += 20
+            reasons.append("same client, similar name")
+
+        if score >= 30:
+            candidates.append((score, {
+                "id": other.id,
+                "name": other.name,
+                "score": score,
+                "reasons": reasons,
+                "client_id": other.client_id,
+                "nepool_gis_id": other.nepool_gis_id,
+            }))
+
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return [c[1] for c in candidates[:3]]
+
+
+@router.get("/v1/account/arrays/{array_id}/merge-suggestions")
+def get_array_merge_suggestions(array_id: int,
+                                authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.id == array_id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if not arr:
+            raise HTTPException(404, "array not found")
+        return {"ok": True, "suggestions": _array_merge_candidates_for(db, t.id, arr)}
+
+
+class ArrayMergeIntoBody(BaseModel):
+    dst_array_id: int
+
+
+@router.post("/v1/account/arrays/{src_array_id}/merge-into")
+def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
+                     authorization: Optional[str] = Header(default=None)):
+    """Merge `src_array_id` INTO `body.dst_array_id`. Reparents utility
+    accounts to dst, merges metadata (dst wins on conflict), soft-deletes
+    src. Bills follow utility_accounts via account_id so no per-bill
+    reparent is needed.
+
+    Idempotent on already-soft-deleted src (returns noop:true)."""
+    t = tenant_from_session(authorization)
+    if src_array_id == body.dst_array_id:
+        raise HTTPException(400, "src and dst must differ")
+
+    with SessionLocal() as db:
+        src = db.execute(
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.id == src_array_id,
+            )
+        ).scalar_one_or_none()
+        dst = db.execute(
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.id == body.dst_array_id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if not src or not dst:
+            raise HTTPException(404, "array not found")
+        if src.deleted_at is not None:
+            return {"ok": True, "noop": True, "dst_array_id": dst.id}
+
+        # Reparent utility accounts to dst
+        n_uas = db.execute(
+            select(func.count()).select_from(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                UtilityAccount.array_id == src.id,
+            )
+        ).scalar() or 0
+        for ua in db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                UtilityAccount.array_id == src.id,
+            )
+        ).scalars().all():
+            ua.array_id = dst.id
+
+        # Merge metadata: dst keeps its values when set, otherwise inherit
+        for field in ("nepool_gis_id", "region", "first_connect_date",
+                      "solar_adder_cents", "notes"):
+            if getattr(dst, field) in (None, "") and getattr(src, field):
+                setattr(dst, field, getattr(src, field))
+        # bill_offset_months: dst wins (it's a per-array config the operator
+        # may have set deliberately, e.g. Starlake's 0 vs default 1)
+
+        # Excluded flag: AND semantics — only excluded if BOTH were
+        if not (src.excluded and dst.excluded):
+            dst.excluded = False
+
+        # Soft-delete src
+        src.deleted_at = now()
+
+        # Clear dismissals involving src
+        db.query(ArrayMergeDismissal).filter(
+            ArrayMergeDismissal.tenant_id == t.id,
+            or_(
+                ArrayMergeDismissal.array_a_id == src.id,
+                ArrayMergeDismissal.array_b_id == src.id,
+            ),
+        ).delete(synchronize_session=False)
+
+        db.commit()
+        db.refresh(dst)
+        return {
+            "ok": True,
+            "merged_from_id": src.id,
+            "dst_array": {
+                "id": dst.id,
+                "name": dst.name,
+                "client_id": dst.client_id,
+                "nepool_gis_id": dst.nepool_gis_id,
+                "bill_offset_months": dst.bill_offset_months,
+                "excluded": dst.excluded,
+                "utility_accounts_count": (
+                    db.execute(
+                        select(func.count()).select_from(UtilityAccount).where(
+                            UtilityAccount.array_id == dst.id,
+                            UtilityAccount.deleted_at.is_(None),
+                        )
+                    ).scalar() or 0
+                ),
+            },
+            "reparented_utility_accounts": n_uas,
+        }
+
+
+@router.post("/v1/account/arrays/{array_id}/dismiss-merge/{other_id}")
+def dismiss_array_merge_suggestion(array_id: int, other_id: int,
+                                   authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    if array_id == other_id:
+        raise HTTPException(400, "ids must differ")
+    a, b = sorted([array_id, other_id])
+    with SessionLocal() as db:
+        n = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id,
+                Array.id.in_([a, b]),
+                Array.deleted_at.is_(None),
+            )
+        ).scalar() or 0
+        if n != 2:
+            raise HTTPException(404, "one or both arrays not found")
+        existing = db.execute(
+            select(ArrayMergeDismissal).where(
+                ArrayMergeDismissal.tenant_id == t.id,
+                ArrayMergeDismissal.array_a_id == a,
+                ArrayMergeDismissal.array_b_id == b,
+            )
+        ).scalar_one_or_none()
+        if not existing:
+            db.add(ArrayMergeDismissal(
+                tenant_id=t.id, array_a_id=a, array_b_id=b,
             ))
             db.commit()
         return {"ok": True}
