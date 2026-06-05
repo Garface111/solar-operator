@@ -388,6 +388,67 @@ def send_cancellation_email(to: str, name: str) -> bool:
     )
 
 
+def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https://solaroperator.org/accounts") -> bool:
+    """Trial extended 3 more days — operator has no arrays yet."""
+    first = (name or "there").split()[0]
+    html = (
+        f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
+        f"<h2 style='color:#2e6b3a;'>Add your first array before your trial ends</h2>"
+        f"<p>Hi {first},</p>"
+        f"<p>You signed up for Solar Operator but haven't added any arrays yet. "
+        f"We've extended your trial by 3 more days so you have time to finish setup.</p>"
+        f"<p>Head to your <a href='{dashboard_url}'>dashboard</a>, install the Chrome extension, "
+        f"and log into your utility portal to pull your arrays automatically.</p>"
+        f"<p>Once your trial ends, we'll bill you based on the arrays that are there. "
+        f"If you still have zero, we'll charge the 1-array minimum.</p>"
+        f"<p>Questions? Just reply — we read every email.</p>"
+        f"<p>— Solar Operator</p></body></html>"
+    )
+    text = (
+        f"Hi {first},\n\n"
+        f"You signed up for Solar Operator but haven't added any arrays yet. "
+        f"We've extended your trial by 3 more days.\n\n"
+        f"Head to {dashboard_url} to finish setup.\n\n"
+        f"Questions? Just reply.\n\n— Solar Operator"
+    )
+    return _send_via_resend(
+        to=to,
+        subject="Add your first array — trial extended 3 days",
+        html=html, text=text,
+    )
+
+
+def send_trial_charged_email(to: str, name: str, array_count: int,
+                              amount_dollars: float) -> bool:
+    """Trial ended and subscription created — confirm what was charged."""
+    first = (name or "there").split()[0]
+    plural = "array" if array_count == 1 else "arrays"
+    html = (
+        f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
+        f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is active</h2>"
+        f"<p>Hi {first},</p>"
+        f"<p>Your 4-day trial just ended and your card was charged "
+        f"<strong>${amount_dollars:.2f}</strong> for {array_count} {plural}.</p>"
+        f"<p>You're all set — reports will continue running automatically on your schedule. "
+        f"As you add or remove arrays, your next invoice will update to match.</p>"
+        f"<p>Manage your account at <a href='https://solaroperator.org/accounts'>solaroperator.org/accounts</a>.</p>"
+        f"<p>Questions? Just reply.</p>"
+        f"<p>— Solar Operator</p></body></html>"
+    )
+    text = (
+        f"Hi {first},\n\n"
+        f"Your trial ended and your card was charged ${amount_dollars:.2f} "
+        f"for {array_count} {plural}.\n\n"
+        f"Manage your account at https://solaroperator.org/accounts\n\n"
+        f"Questions? Just reply.\n\n— Solar Operator"
+    )
+    return _send_via_resend(
+        to=to,
+        subject=f"Charged ${amount_dollars:.2f} — Solar Operator subscription active",
+        html=html, text=text,
+    )
+
+
 # ─── internal ───────────────────────────────────────────────────────────
 
 def send_internal_alert(subject: str, body: str) -> bool:
