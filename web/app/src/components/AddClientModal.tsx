@@ -21,7 +21,7 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
   const [email, setEmail] = useState("");
   const [autopop, setAutopop] = useState(true);
   const [gmpLogin, setGmpLogin] = useState("");
-  const [vecAutopop, setVecAutopop] = useState(false);
+  const [vecAutopop, setVecAutopop] = useState(true);
   const [vecLogin, setVecLogin] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -30,7 +30,7 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
     setEmail("");
     setAutopop(true);
     setGmpLogin("");
-    setVecAutopop(false);
+    setVecAutopop(true);
     setVecLogin("");
   }
 

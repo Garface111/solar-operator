@@ -136,7 +136,7 @@ class Client(Base):
     # VEC auto-populate (added June 2026 — mirrors GMP triple for the VEC provider).
     vec_email: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     vec_username: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
-    vec_autopopulate: Mapped[bool] = mapped_column(Boolean, default=False)
+    vec_autopopulate: Mapped[bool] = mapped_column(Boolean, default=True)
     vec_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Per-client email delivery health (W2-6, June 2026). Populated by the Resend
