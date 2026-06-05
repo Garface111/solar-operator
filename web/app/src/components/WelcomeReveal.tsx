@@ -78,8 +78,12 @@ export function WelcomeReveal({ clients, children }: Props) {
   // After all numbers have had time to settle, lock the reveal.
   useEffect(() => {
     if (phase !== "filling" || !clients) return;
-    // Longest expected delay = stagger * N + number anim duration (~720ms)
-    const totalMs = clients.length * CARD_STAGGER_MS + 1100;
+    // Longest expected delay = card stagger * N + number anim duration
+    // (~720ms) + array-row cascade (~1.2s for typical 5-row clients).
+    // Buffer is generous to ensure ArrayRow fade-ups complete before the
+    // reveal locks; otherwise reveal.active flips false mid-row-stagger
+    // and the prefetched data never gets to animate in.
+    const totalMs = clients.length * CARD_STAGGER_MS + 2400;
     const t = window.setTimeout(() => {
       setPhase("done");
       markRevealed();

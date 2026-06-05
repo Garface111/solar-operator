@@ -488,8 +488,17 @@ export function ClientCard({
         </div>
       </div>
 
-      {expanded && (
-        <div className="space-y-5 border-t border-zinc-100 px-4 py-4">
+      {/* During the welcome reveal we eagerly mount the drawer (hidden)
+          so ArrayList kicks off its listArrays() fetch in parallel with
+          the cascade — otherwise rows arrive 200-500ms after the
+          animation slot has passed and the "Loading arrays…" stub
+          dead-ends the wave. */}
+      {(expanded || reveal.active) && (
+        <div
+          className="space-y-5 border-t border-zinc-100 px-4 py-4"
+          style={!expanded ? { display: "none" } : undefined}
+          aria-hidden={!expanded}
+        >
           {/* Report section — pinned to top of drawer so it's the first thing you see */}
           <div className="rounded-xl border border-primary-100 bg-primary-50/50 px-4 py-3">
             <h4 className="text-xs font-semibold uppercase tracking-wide text-primary-700">
