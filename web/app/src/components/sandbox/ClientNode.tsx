@@ -123,13 +123,14 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
         if (srcClientId === id) return;
         actions.moveAccountToClient(srcClientId, accountId, id);
       } else if (loginRaw) {
-        const { srcClientId, utility, originClientId } = JSON.parse(loginRaw) as {
+        const { srcClientId, utility, originClientId, loginId } = JSON.parse(loginRaw) as {
           srcClientId: string;
           utility: 'GMP' | 'VEC' | 'WEC';
           originClientId?: number | null;
+          loginId?: string | null;
         };
         if (srcClientId === id) return;
-        actions.moveLoginToClient(srcClientId, utility, id, originClientId);
+        actions.moveLoginToClient(srcClientId, utility, id, originClientId, loginId);
       }
     } catch {
       /* malformed payload — ignore */
@@ -264,8 +265,9 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
                   : null
               }
               onDetach={(accountId) => actions.detachAccount(id, accountId)}
-              onDetachLogin={() => actions.detachLogin(id, group.utility, group.originClientId)}
+              onDetachLogin={() => actions.detachLogin(id, group.utility, group.originClientId, group.loginId)}
               originClientId={group.originClientId}
+              loginId={group.loginId}
             />
           ))}
         </div>
@@ -284,34 +286,42 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 function groupAccountsByLogin(
   accounts: UtilityAccount[],
   ownClientNumId: number | null,
-): { utility: Utility; originClientId: number | null; accounts: UtilityAccount[]; key: string }[] {
-  // Key by (utility, login_origin_client_id || own). When two accounts of the
-  // same utility have different origin tags, they land in DIFFERENT groups —
-  // so a moved login renders as its own collapsible card under the target
-  // client, separate from the target's native same-utility login.
-  const groups = new Map<string, { utility: Utility; originClientId: number | null; accounts: UtilityAccount[] }>();
+): { utility: Utility; originClientId: number | null; loginId: string; accounts: UtilityAccount[]; key: string }[] {
+  // Key by (utility, login_origin_client_id || own, customer_number || account_number).
+  // When two accounts of the same utility share an origin but have different
+  // customer_numbers (i.e. distinct utility logins), they land in DIFFERENT
+  // groups — each renders as its own collapsible login row. This lets a single
+  // client visibly hold multiple GMP logins (e.g. "GMP · Bruce" and "GMP ·
+  // gen.solar@…") with their own arrays underneath.
+  const groups = new Map<string, { utility: Utility; originClientId: number | null; loginId: string; accounts: UtilityAccount[] }>();
   for (const acc of accounts) {
     // origin === own client => account is at its home (or never moved)
     const origin =
       acc.login_origin_client_id != null && acc.login_origin_client_id !== ownClientNumId
         ? acc.login_origin_client_id
         : null;
-    const key = `${acc.utility}::${origin ?? 'home'}`;
-    const entry = groups.get(key) ?? { utility: acc.utility, originClientId: origin, accounts: [] };
+    // Each distinct utility login is identified by customer_number when
+    // available (GMP), else fall back to the account_number itself (so
+    // utilities without a customer concept still group sanely — one row per
+    // account, which matches the prior behavior for them).
+    const loginId = acc.customer_number || acc.account_number;
+    const key = `${acc.utility}::${origin ?? 'home'}::${loginId}`;
+    const entry = groups.get(key) ?? { utility: acc.utility, originClientId: origin, loginId, accounts: [] };
     entry.accounts.push(acc);
     groups.set(key, entry);
   }
-  // Stable order: GMP, VEC, WEC, with home groups before moved-in groups
+  // Stable order: GMP, VEC, WEC, home before moved-in, then by loginId asc
   return Array.from(groups.entries())
     .map(([key, v]) => ({ ...v, key }))
     .sort((a, b) => {
       const ord = (['GMP', 'VEC', 'WEC'] as Utility[]).indexOf(a.utility) -
                   (['GMP', 'VEC', 'WEC'] as Utility[]).indexOf(b.utility);
       if (ord !== 0) return ord;
-      // home first, then moved-in (by origin id for stability)
       if (a.originClientId == null && b.originClientId != null) return -1;
       if (a.originClientId != null && b.originClientId == null) return 1;
-      return (a.originClientId ?? 0) - (b.originClientId ?? 0);
+      const orig = (a.originClientId ?? 0) - (b.originClientId ?? 0);
+      if (orig !== 0) return orig;
+      return a.loginId.localeCompare(b.loginId);
     });
 }
 
@@ -322,6 +332,7 @@ function LoginGroupRow({
   loginCredential,
   originClient,
   originClientId,
+  loginId,
   onDetach,
   onDetachLogin,
 }: {
@@ -331,6 +342,7 @@ function LoginGroupRow({
   loginCredential: string | null;
   originClient: { id: number; name: string; deleted: boolean } | null;
   originClientId: number | null;
+  loginId: string;
   onDetach: (accountId: string) => void;
   onDetachLogin: () => void;
 }) {
@@ -345,7 +357,7 @@ function LoginGroupRow({
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData(
       'application/x-so-login',
-      JSON.stringify({ srcClientId: clientId, utility, originClientId }),
+      JSON.stringify({ srcClientId: clientId, utility, originClientId, loginId }),
     );
     e.dataTransfer.setData('text/plain', `${utility} login`);
     setDragging(true);
@@ -388,6 +400,9 @@ function LoginGroupRow({
           </span>
           <span className={`text-xs font-semibold ${th.rowText}`}>
             {utility}
+          </span>
+          <span className={`truncate font-mono text-[10px] opacity-50 ${th.rowText}`} title={`Login id: ${loginId}`}>
+            #{loginId}
           </span>
           {originClient && (
             <span

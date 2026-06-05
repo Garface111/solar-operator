@@ -68,6 +68,7 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
         id: `account_${acc.id}`,
         utility: normalizeProvider(acc.provider),
         account_number: acc.account_number,
+        customer_number: acc.customer_number ?? null,
         owner_name: (acc.service_address as Record<string, string> | null)?.street ?? '',
         login_origin_client_id: acc.login_origin_client_id ?? null,
         arrays: acc.array_name != null
@@ -566,7 +567,7 @@ export default function SandboxCanvas() {
   // ── Login-level (group) actions ──────────────────────────────────────────
 
   const detachLogin = useCallback(
-    (clientId: string, utility: 'GMP' | 'VEC' | 'WEC', originClientId?: number | null) => {
+    (clientId: string, utility: 'GMP' | 'VEC' | 'WEC', originClientId?: number | null, loginId?: string | null) => {
       const current = nodesRef.current;
       const clientNode = current.find((n) => n.id === clientId && n.type === 'client');
       if (!clientNode) return;
@@ -576,7 +577,7 @@ export default function SandboxCanvas() {
         return m ? parseInt(m[1], 10) : null;
       })();
       // Filter narrows to JUST this login group: same utility AND same origin
-      // (where origin == own id means "home" group).
+      // AND (when provided) same login id (customer_number || account_number).
       const detachedAccounts = d.client.accounts.filter((a) => {
         if (a.utility !== utility) return false;
         const aOrigin =
@@ -584,7 +585,12 @@ export default function SandboxCanvas() {
             ? a.login_origin_client_id
             : null;
         const want = originClientId ?? null;
-        return aOrigin === want;
+        if (aOrigin !== want) return false;
+        if (loginId != null) {
+          const aLoginId = a.customer_number || a.account_number;
+          if (aLoginId !== loginId) return false;
+        }
+        return true;
       });
       if (detachedAccounts.length === 0) return;
 
@@ -594,7 +600,10 @@ export default function SandboxCanvas() {
       setNodes((ns) => {
         const updatedClient: ClientData = {
           ...d.client,
-          accounts: d.client.accounts.filter((a) => a.utility !== utility),
+          // Strip only the accounts we actually detached, not every account of
+          // this utility (which would nuke a sibling login group sharing the
+          // same provider).
+          accounts: d.client.accounts.filter((a) => !detachedAccounts.includes(a)),
         };
         const baseX = clientNode.position.x + 360;
         const baseY = clientNode.position.y;
@@ -631,7 +640,7 @@ export default function SandboxCanvas() {
   );
 
   const moveLoginToClient = useCallback(
-    (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string, originClientId?: number | null) => {
+    (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string, originClientId?: number | null, loginId?: string | null) => {
       if (srcClientId === dstClientId) return;
       const current = nodesRef.current;
       const src = current.find((n) => n.id === srcClientId && n.type === 'client');
@@ -652,7 +661,12 @@ export default function SandboxCanvas() {
             ? a.login_origin_client_id
             : null;
         const want = originClientId ?? null;
-        return aOrigin === want;
+        if (aOrigin !== want) return false;
+        if (loginId != null) {
+          const aLoginId = a.customer_number || a.account_number;
+          if (aLoginId !== loginId) return false;
+        }
+        return true;
       });
       if (moved.length === 0) return;
 
@@ -666,7 +680,7 @@ export default function SandboxCanvas() {
                 ...srcData,
                 client: {
                   ...srcData.client,
-                  accounts: srcData.client.accounts.filter((a) => a.utility !== utility),
+                  accounts: srcData.client.accounts.filter((a) => !moved.includes(a)),
                 },
               },
             };

@@ -28,6 +28,7 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array]) -> dict:
         "id": acc.id,
         "provider": acc.provider,
         "account_number": acc.account_number,
+        "customer_number": getattr(acc, "customer_number", None),
         "service_address": acc.service_address,
         "canvas_x": getattr(acc, "canvas_x", None),
         "canvas_y": getattr(acc, "canvas_y", None),

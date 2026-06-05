@@ -9,12 +9,13 @@ export interface CanvasActions {
   deleteNode: (nodeId: string) => void;
   detachAccount: (clientId: string, accountId: string) => void;
   moveAccountToClient: (srcClientId: string, accountId: string, dstClientId: string) => void;
-  detachLogin: (clientId: string, utility: 'GMP' | 'VEC' | 'WEC', originClientId?: number | null) => void;
+  detachLogin: (clientId: string, utility: 'GMP' | 'VEC' | 'WEC', originClientId?: number | null, loginId?: string | null) => void;
   moveLoginToClient: (
     srcClientId: string,
     utility: 'GMP' | 'VEC' | 'WEC',
     dstClientId: string,
     originClientId?: number | null,
+    loginId?: string | null,
   ) => void;
   /** Look up an origin client by id — used to label moved logins
    *  ("from Marie's GMP login"). Returns null when the origin is unknown or

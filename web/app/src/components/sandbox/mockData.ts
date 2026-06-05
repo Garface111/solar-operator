@@ -11,6 +11,10 @@ export interface UtilityAccount {
   id: string;
   utility: Utility;
   account_number: string;
+  /** Per-utility customer id distinguishing two logins of the same provider
+   *  under the same client (e.g. two GMP accounts under separate web logins).
+   *  Used purely as a grouping discriminator in ClientNode. */
+  customer_number?: string | null;
   owner_name: string;
   arrays: SolarArray[];
   /** Numeric id of the client this account's login originated from. NULL

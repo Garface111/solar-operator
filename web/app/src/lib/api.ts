@@ -216,6 +216,7 @@ export interface UtilityAccount {
   provider: string;
   provider_label: string;
   account_number: string;
+  customer_number?: string | null;
   nickname: string | null;
 }
 
@@ -958,6 +959,7 @@ export interface CanvasAccountData {
   id: number;
   provider: string;
   account_number: string;
+  customer_number?: string | null;
   service_address: Record<string, unknown> | null;
   canvas_x: number | null;
   canvas_y: number | null;
