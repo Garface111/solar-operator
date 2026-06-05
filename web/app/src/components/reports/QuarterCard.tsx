@@ -23,10 +23,10 @@ export interface QuarterCardProps {
 
 const STATUS_CONFIG: Record<
   Status,
-  { label: string; chipVariant: "emerald" | "wood" | "muted" }
+  { label: string; chipVariant: "emerald" | "muted" }
 > = {
   sent:  { label: "Sent",        chipVariant: "emerald" },
-  ready: { label: "Ready",       chipVariant: "wood"    },
+  ready: { label: "Ready",       chipVariant: "emerald" },
   draft: { label: "In progress", chipVariant: "muted"   },
   empty: { label: "No data",     chipVariant: "muted"   },
 };

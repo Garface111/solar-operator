@@ -60,7 +60,7 @@ export function ReportsCard({ account: _account, onAccountChange: _onAccountChan
         {lastSent ? (
           <Chip variant="emerald">Sent</Chip>
         ) : anyPending ? (
-          <Chip variant="wood">Ready</Chip>
+          <Chip variant="emerald">Ready</Chip>
         ) : (
           <Chip variant="muted">Pending</Chip>
         )}
