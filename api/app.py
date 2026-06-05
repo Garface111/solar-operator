@@ -193,6 +193,18 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 )
                 db.add(row)
             else:
+                # Resurrect a soft-deleted UA on re-capture. Without this,
+                # a delete-then-re-sign-in flow leaves orphaned UAs marked
+                # deleted, the autopop loop sees "array_id is set" (to a
+                # soft-deleted Array), skips them, and the new Client gets
+                # created with ZERO arrays — looking like nothing happened.
+                if row.deleted_at is not None:
+                    row.deleted_at = None
+                    # Also clear array_id so the autopop branch below
+                    # re-creates a fresh Array under the new owner Client.
+                    # The old Array stays soft-deleted (will be hard-
+                    # deleted by the cleanup job at 30d).
+                    row.array_id = None
                 row.customer_number = a.get("customer_number") or row.customer_number
                 row.nickname = a.get("nickname") or row.nickname
                 row.service_address = a.get("service_address") or row.service_address
@@ -236,6 +248,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     select(Client)
                     .where(
                         Client.tenant_id == tenant.id,
+                        Client.deleted_at.is_(None),
                         or_(*match_terms),
                     )
                     .order_by(Client.id)
@@ -256,9 +269,20 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 UtilityAccount.account_number == acct_no,
                             )
                         ).scalar_one_or_none()
-                        if acct is None or acct.array_id is not None:
-                            # Already linked → idempotent: don't create a duplicate.
+                        if acct is None:
                             continue
+                        # Defensive: if array_id points at a soft-deleted
+                        # Array, treat the UA as detached and re-create
+                        # the array under the current owner. (Earlier UA
+                        # upsert clears array_id when it resurrects a
+                        # soft-deleted UA, but historical data from before
+                        # this fix may still have orphan pointers.)
+                        if acct.array_id is not None:
+                            existing_arr = db.get(Array, acct.array_id)
+                            if existing_arr is None or existing_arr.deleted_at is not None:
+                                acct.array_id = None
+                            else:
+                                continue
                         arr = Array(
                             tenant_id=tenant.id,
                             client_id=owner.id,
@@ -370,8 +394,17 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                     UtilityAccount.account_number == acct_no,
                                 )
                             ).scalar_one_or_none()
-                            if acct is None or acct.array_id is not None:
+                            if acct is None:
                                 continue
+                            # Same defensive check as the autopop branch:
+                            # array_id may point at a soft-deleted Array
+                            # from a prior captured-then-deleted cycle.
+                            if acct.array_id is not None:
+                                existing_arr = db.get(Array, acct.array_id)
+                                if existing_arr is None or existing_arr.deleted_at is not None:
+                                    acct.array_id = None
+                                else:
+                                    continue
                             arr = Array(
                                 tenant_id=tenant.id,
                                 client_id=target.id,
