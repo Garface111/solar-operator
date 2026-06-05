@@ -130,7 +130,7 @@ class Client(Base):
     # email address or a username, so we store whichever the operator gave us.
     gmp_email: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     gmp_username: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
-    gmp_autopopulate: Mapped[bool] = mapped_column(Boolean, default=False)
+    gmp_autopopulate: Mapped[bool] = mapped_column(Boolean, default=True)
     gmp_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # VEC auto-populate (added June 2026 — mirrors GMP triple for the VEC provider).

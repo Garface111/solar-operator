@@ -87,6 +87,9 @@ def ensure_placeholder_client(db, tenant_id: str) -> Optional[int]:
         name="Your first client",
         active=True,
         is_placeholder=True,
+        # GMP autopop on by default — the whole point of the placeholder
+        # is that the operator's first portal login auto-fills this client.
+        gmp_autopopulate=True,
     )
     db.add(placeholder)
     db.flush()
@@ -263,7 +266,9 @@ def checkout(req: CheckoutRequest):
                     tenant_id=tenant_id,
                     name=cname,
                     contact_email=ci.contact_email,
-                    gmp_autopopulate=False,
+                    # Default GMP autopop ON — operator's first portal login
+                    # populates arrays without an extra opt-in step.
+                    gmp_autopopulate=True,
                     active=True,
                 )
                 db.add(c)
