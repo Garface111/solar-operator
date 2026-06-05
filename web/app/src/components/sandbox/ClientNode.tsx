@@ -189,16 +189,40 @@ function AccountRow({
   account: UtilityAccount;
   onDetach: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const th = UTILITY_THEME[account.utility];
+  const arrayCount = account.arrays.length;
+  const hasArrays = arrayCount > 0;
   return (
     <div className={`group/acc rounded-xl border px-3 py-2.5 ${th.row}`}>
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          className="nodrag flex flex-1 items-center gap-1.5 text-left"
+          onClick={() => hasArrays && setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          aria-label={expanded ? 'Collapse arrays' : 'Expand arrays'}
+          disabled={!hasArrays}
+        >
+          {hasArrays && (
+            <svg
+              className={`h-3 w-3 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''} ${th.rowText}`}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2.5}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          )}
           <span className={`h-2 w-2 rounded-full ${th.rowDot}`} />
           <span className={`text-xs font-semibold ${th.rowText}`}>
             {account.utility} · {account.account_number}
           </span>
-        </div>
+          <span className={`text-[10px] font-medium opacity-60 ${th.rowText}`}>
+            {arrayCount} {arrayCount === 1 ? 'array' : 'arrays'}
+          </span>
+        </button>
         <button
           type="button"
           className={`nodrag invisible shrink-0 rounded p-0.5 text-sm opacity-60 transition-all hover:opacity-100 group-hover/acc:visible ${th.rowText}`}
@@ -209,17 +233,30 @@ function AccountRow({
           ×
         </button>
       </div>
-      <div className="mt-1.5 flex flex-wrap gap-1">
-        {account.arrays.map((arr) => (
-          <span
-            key={arr.id}
-            className="rounded bg-white/60 px-1.5 py-0.5 text-[10px] text-zinc-600"
-            title={arr.nepool_gis_id}
-          >
-            {arr.name}
-          </span>
-        ))}
-      </div>
+      {expanded && hasArrays && (
+        <div className="mt-2 space-y-1 border-t border-current/10 pt-2">
+          {account.arrays.map((arr) => (
+            <div
+              key={arr.id}
+              className="flex items-center justify-between gap-2 rounded-md bg-white/70 px-2 py-1"
+            >
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Array
+                </span>
+                <span className="truncate text-xs font-medium text-zinc-800" title={arr.name}>
+                  {arr.name}
+                </span>
+              </div>
+              {arr.nepool_gis_id && (
+                <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600">
+                  {arr.nepool_gis_id}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
