@@ -184,6 +184,26 @@ export default function SandboxCanvas() {
     return () => clearTimeout(t);
   }, [mergeUndo]);
 
+  // Keyboard: ⌘Z / Ctrl+Z fires undo; Esc closes context menu
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.target as Element)?.tagName === 'INPUT') return;
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        if (mergeUndo) {
+          e.preventDefault();
+          setNodes(mergeUndo.snapshot);
+          setMergeUndo(null);
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mergeUndo, setNodes]);
+
   // ── Data loading ──────────────────────────────────────────────────────────
 
   const loadCanvas = useCallback(async () => {
@@ -194,7 +214,18 @@ export default function SandboxCanvas() {
       const built = buildNodesFromApi(data);
       setNodes(built);
       setOriginLookup(data.clients_index ?? {});
-      if (built.length > 0) {
+      // Only fitView on fresh loads — if the operator has a saved viewport,
+      // don't stomp it. The defaultViewport prop already restores the position;
+      // calling fitView here would override it every time the canvas reloads.
+      const hasSavedViewport = (() => {
+        try {
+          const raw = localStorage.getItem('so:sandbox:viewport');
+          if (!raw) return false;
+          const v = JSON.parse(raw);
+          return typeof v?.x === 'number' && typeof v?.y === 'number' && typeof v?.zoom === 'number';
+        } catch { return false; }
+      })();
+      if (built.length > 0 && !hasSavedViewport) {
         setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
       }
     } catch (err) {
@@ -254,7 +285,7 @@ export default function SandboxCanvas() {
     (nodeId: string) => {
       setContextMenu(null);
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
-      toast.show('Removed from canvas.', 'info');
+      toast.show('Hidden from canvas — reload to restore.', 'info');
     },
     [setNodes, toast],
   );
@@ -588,12 +619,13 @@ export default function SandboxCanvas() {
       if (detachedAccounts.length === 0) return;
 
       const snapshot = current;
-      // Optimistic UI: strip the whole login from the client; pop accounts
-      // out as unclassified nodes fanned to the right of the client card.
+      const detachedIds = new Set(detachedAccounts.map((a) => a.id));
+      // Optimistic UI: strip ONLY this login group from the client; a client may
+      // have two same-utility groups (home + moved-in) — filter by id set, not utility.
       setNodes((ns) => {
         const updatedClient: ClientData = {
           ...d.client,
-          accounts: d.client.accounts.filter((a) => a.utility !== utility),
+          accounts: d.client.accounts.filter((a) => !detachedIds.has(a.id)),
         };
         const baseX = clientNode.position.x + 360;
         const baseY = clientNode.position.y;
@@ -656,6 +688,9 @@ export default function SandboxCanvas() {
       if (moved.length === 0) return;
 
       const snapshot = current;
+      const movedIds = new Set(moved.map((a) => a.id));
+      // Filter by id, not utility — a client can hold two same-utility groups
+      // (home + moved-in) and we must only strip the group being dragged.
       setNodes((ns) =>
         ns.map((n) => {
           if (n.id === srcClientId) {
@@ -665,7 +700,7 @@ export default function SandboxCanvas() {
                 ...srcData,
                 client: {
                   ...srcData.client,
-                  accounts: srcData.client.accounts.filter((a) => a.utility !== utility),
+                  accounts: srcData.client.accounts.filter((a) => !movedIds.has(a.id)),
                 },
               },
             };
@@ -737,7 +772,7 @@ export default function SandboxCanvas() {
           return { ...n, data: { ...d, client: { ...d.client, pinned: next } } };
         }),
       );
-      toast.show(next ? 'Pinned to top.' : 'Unpinned.', 'info');
+      toast.show(next ? 'Starred.' : 'Unstarred.', 'info');
       pinClient(numId, next).catch(() => {
         // Revert on failure
         setNodes((ns) =>
@@ -929,7 +964,6 @@ export default function SandboxCanvas() {
             menu={contextMenu}
             onStartRename={() => startRename(contextMenu.nodeId)}
             onDelete={() => deleteNode(contextMenu.nodeId)}
-            onClose={() => setContextMenu(null)}
           />
         )}
 
@@ -991,18 +1025,15 @@ function ContextMenuPopover({
   menu,
   onStartRename,
   onDelete,
-  onClose,
 }: {
   menu: ContextMenu;
   onStartRename: () => void;
   onDelete: () => void;
-  onClose: () => void;
 }) {
   return (
     <div
       style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 9999 }}
       className="min-w-[160px] overflow-hidden rounded-xl border border-zinc-200 bg-white py-1 shadow-xl"
-      onMouseLeave={onClose}
     >
       {menu.nodeType === 'client' && (
         <button

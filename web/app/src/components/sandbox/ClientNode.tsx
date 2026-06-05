@@ -192,9 +192,9 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
             />
           ) : (
             <p
-              className="nodrag cursor-text truncate text-sm font-semibold text-zinc-900 select-none"
+              className="nodrag cursor-text truncate text-sm font-semibold text-zinc-900 select-none hover:text-primary-700 hover:underline hover:underline-offset-2 decoration-primary-300"
               onDoubleClick={() => actions.startRename(id)}
-              title={client.name}
+              title={`${client.name} — double-click to rename`}
             >
               {client.name}
             </p>
