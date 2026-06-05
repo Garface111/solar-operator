@@ -447,6 +447,11 @@ function LoginGroupRow({
     e.dataTransfer.setData('text/plain', `${utility} login`);
     setDragging(true);
   };
+  // Stop React Flow from claiming the mousedown — it would start dragging
+  // the parent client node instead of letting native HTML5 fire on the row.
+  const onMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+  };
   const onDragEnd = () => setDragging(false);
 
   return (
@@ -460,6 +465,7 @@ function LoginGroupRow({
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
+      onMouseDown={onMouseDown}
       title="Drag to move all accounts under this login to another client"
     >
       {/* Login header — click to reveal individual accounts */}

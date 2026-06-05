@@ -817,7 +817,18 @@ export default function SandboxCanvas() {
   }, [flushPositions]);
 
   const savePosition = useCallback((nodeId: string, x: number, y: number) => {
-    pendingPosRef.current.set(nodeId, { x, y });
+    // Snap client positions to the canonical grid so they survive density
+    // tier changes + look tidy. Accounts (unclassified pile) save raw coords.
+    let finalX = x, finalY = y;
+    if (nodeId.startsWith('client_')) {
+      const CANON_W = GRID.full.COL_W;
+      const CANON_H = GRID.full.ROW_H;
+      const col = Math.max(0, Math.round((x - 40) / CANON_W));
+      const row = Math.max(0, Math.round((y - 40) / CANON_H));
+      finalX = col * CANON_W + 40;
+      finalY = row * CANON_H + 40;
+    }
+    pendingPosRef.current.set(nodeId, { x: finalX, y: finalY });
     const existing = posTimers.current.get(nodeId);
     if (existing) clearTimeout(existing);
     posTimers.current.set(nodeId, setTimeout(() => {
