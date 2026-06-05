@@ -1291,6 +1291,23 @@ export default function SandboxCanvas() {
         const m = srcClientId.match(/^client_(\d+)$/);
         return m ? parseInt(m[1], 10) : null;
       })();
+
+      // [MLT] Diagnostic logging — temporary, remove after root cause confirmed
+      console.log('[MLT] moveLoginToClient called', {
+        srcClientId,
+        dstClientId,
+        utility,
+        originClientId,
+        loginId,
+        srcOwnNumId,
+        accounts: srcData.client.accounts.map((a) => ({
+          utility: a.utility,
+          login_origin_client_id: a.login_origin_client_id,
+          customer_number: a.customer_number,
+          account_number: a.account_number,
+        })),
+      });
+
       const moved = srcData.client.accounts.filter((a) => {
         if (a.utility !== utility) return false;
         const aOrigin =
@@ -1298,13 +1315,24 @@ export default function SandboxCanvas() {
             ? a.login_origin_client_id
             : null;
         const want = originClientId ?? null;
+        const aLoginId = a.customer_number || a.account_number;
+        console.log('[MLT] account filter check', {
+          'a.utility': a.utility,
+          'a.login_origin_client_id': a.login_origin_client_id,
+          aOrigin,
+          want,
+          'aOrigin===want': aOrigin === want,
+          loginId,
+          aLoginId,
+          'aLoginId===loginId': aLoginId === loginId,
+        });
         if (aOrigin !== want) return false;
         if (loginId != null) {
-          const aLoginId = a.customer_number || a.account_number;
           if (aLoginId !== loginId) return false;
         }
         return true;
       });
+      console.log('[MLT] moved.length', moved.length);
       if (moved.length === 0) return;
 
       const snapshot = current;
