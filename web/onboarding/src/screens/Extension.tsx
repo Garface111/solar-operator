@@ -27,7 +27,7 @@ const PORTALS: { id: Provider; name: string; short: string; url: string }[] = [
   },
   {
     id: "vec",
-    name: "Vermont Electric Coop",
+    name: "Vermont Electric Co-op",
     short: "VEC",
     url: "https://vermontelectric.smarthub.coop/",
   },
@@ -329,7 +329,7 @@ export default function Extension() {
         {paymentActive && (
           <div className="mb-5 inline-flex items-center gap-2 rounded-lg border border-primary-200 bg-primary-50 px-3 py-1.5 text-sm font-medium text-primary-700">
             <span aria-hidden>✓</span>
-            Payment received — your subscription is active.
+            Trial started — your account is active.
           </div>
         )}
 

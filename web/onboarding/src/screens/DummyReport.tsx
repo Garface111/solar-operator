@@ -61,7 +61,7 @@ export default function DummyReport() {
         <p className="mt-2 text-base leading-relaxed text-zinc-500">
           This NEPOOL-format Excel report is what your clients receive every
           quarter. We build it automatically from your utility bills (Green
-          Mountain Power, Vermont Electric Coop, and more) — no spreadsheets,
+          Mountain Power, Vermont Electric Co-op, and more) — no spreadsheets,
           no manual data entry.
         </p>
       </div>
