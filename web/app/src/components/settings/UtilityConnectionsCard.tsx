@@ -6,7 +6,7 @@ import { openPortalTab } from "../../lib/openPortalTab";
 import { timeAgo } from "./utils";
 
 const PORTAL_URLS: Record<string, string> = {
-  gmp: "https://mypower.greenmountainpower.com/",
+  gmp: "https://greenmountainpower.com/account/",
   vec: "https://vermontelectric.smarthub.coop",
 };
 

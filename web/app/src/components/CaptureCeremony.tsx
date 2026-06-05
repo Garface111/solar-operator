@@ -126,7 +126,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
   function openPortal(provider: Provider) {
     const url =
       provider === "gmp"
-        ? "https://mypower.greenmountainpower.com/"
+        ? "https://greenmountainpower.com/account/"
         : "https://vermontelectric.smarthub.coop/";
     void openPortalTab(url);
   }
