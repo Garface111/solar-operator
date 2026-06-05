@@ -287,30 +287,35 @@ function groupAccountsByLogin(
   accounts: UtilityAccount[],
   ownClientNumId: number | null,
 ): { utility: Utility; originClientId: number | null; loginId: string; accounts: UtilityAccount[]; key: string }[] {
-  // Key by (utility, login_origin_client_id || own, customer_number || account_number).
-  // When two accounts of the same utility share an origin but have different
-  // customer_numbers (i.e. distinct utility logins), they land in DIFFERENT
-  // groups — each renders as its own collapsible login row. This lets a single
-  // client visibly hold multiple GMP logins (e.g. "GMP · Bruce" and "GMP ·
-  // gen.solar@…") with their own arrays underneath.
+  // A "login" = one credential at the utility portal (e.g. one GMP web
+  // account). The utility assigns DIFFERENT customer_numbers / account_numbers
+  // to each metered account under that login, so we MUST NOT split by them —
+  // doing so creates one row per array instead of one row per credential.
+  //
+  // Key by (utility, login_origin_client_id || own) only. Two same-utility
+  // logins under one client (a real but rare case — would require a separate
+  // Login table to model properly) currently collapse here; that's an
+  // intentional regression vs the customer_number split, because the user
+  // flow is "one capture = one login = one batch under the client", and a
+  // future PR can split when the data model supports it.
   const groups = new Map<string, { utility: Utility; originClientId: number | null; loginId: string; accounts: UtilityAccount[] }>();
   for (const acc of accounts) {
-    // origin === own client => account is at its home (or never moved)
     const origin =
       acc.login_origin_client_id != null && acc.login_origin_client_id !== ownClientNumId
         ? acc.login_origin_client_id
         : null;
-    // Each distinct utility login is identified by customer_number when
-    // available (GMP), else fall back to the account_number itself (so
-    // utilities without a customer concept still group sanely — one row per
-    // account, which matches the prior behavior for them).
-    const loginId = acc.customer_number || acc.account_number;
-    const key = `${acc.utility}::${origin ?? 'home'}::${loginId}`;
-    const entry = groups.get(key) ?? { utility: acc.utility, originClientId: origin, loginId, accounts: [] };
+    const key = `${acc.utility}::${origin ?? 'home'}`;
+    const entry = groups.get(key) ?? {
+      utility: acc.utility,
+      originClientId: origin,
+      // loginId is now a stable label for the group (utility + origin), used
+      // for drag payload narrowing. It's NOT a per-account discriminator.
+      loginId: `${acc.utility}-${origin ?? 'home'}`,
+      accounts: [],
+    };
     entry.accounts.push(acc);
     groups.set(key, entry);
   }
-  // Stable order: GMP, VEC, WEC, home before moved-in, then by loginId asc
   return Array.from(groups.entries())
     .map(([key, v]) => ({ ...v, key }))
     .sort((a, b) => {
@@ -319,9 +324,7 @@ function groupAccountsByLogin(
       if (ord !== 0) return ord;
       if (a.originClientId == null && b.originClientId != null) return -1;
       if (a.originClientId != null && b.originClientId == null) return 1;
-      const orig = (a.originClientId ?? 0) - (b.originClientId ?? 0);
-      if (orig !== 0) return orig;
-      return a.loginId.localeCompare(b.loginId);
+      return (a.originClientId ?? 0) - (b.originClientId ?? 0);
     });
 }
 
@@ -401,9 +404,6 @@ function LoginGroupRow({
           <span className={`text-xs font-semibold ${th.rowText}`}>
             {utility}
           </span>
-          <span className={`truncate font-mono text-[10px] opacity-50 ${th.rowText}`} title={`Login id: ${loginId}`}>
-            #{loginId}
-          </span>
           {originClient && (
             <span
               className={`rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700`}
@@ -427,7 +427,7 @@ function LoginGroupRow({
         </button>
       </div>
       {expanded && (
-        <div className="nowheel max-h-72 overflow-y-auto mt-2 space-y-2 border-t border-current/10 pt-2 overscroll-contain">
+        <div className="nowheel max-h-72 overflow-y-auto mt-2 space-y-1 border-t border-current/10 pt-2 overscroll-contain">
           {loginCredential && (
             <div className={`flex items-center gap-1.5 rounded-md bg-white/70 px-2 py-1 text-[11px] ${th.rowText}`}>
               <span className="text-[10px] font-semibold uppercase tracking-wider opacity-60">
@@ -438,128 +438,59 @@ function LoginGroupRow({
               </span>
             </div>
           )}
-          {accounts.map((acc) => (
-            <AccountRow
-              key={acc.id}
-              clientId={clientId}
-              account={acc}
-              onDetach={() => onDetach(acc.id)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AccountRow({
-  clientId,
-  account,
-  onDetach,
-}: {
-  clientId: string;
-  account: UtilityAccount;
-  onDetach: () => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const th = UTILITY_THEME[account.utility];
-  const arrayCount = account.arrays.length;
-  const hasArrays = arrayCount > 0;
-
-  const onDragStart = (e: React.DragEvent) => {
-    // Native HTML5 drag — escapes React Flow's drag system so we can
-    // drop on a different ReactFlow node (target client).
-    e.stopPropagation();
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData(
-      'application/x-so-account',
-      JSON.stringify({ srcClientId: clientId, accountId: account.id }),
-    );
-    // Plain-text fallback so other DnD listeners don't choke
-    e.dataTransfer.setData('text/plain', account.account_number);
-    setDragging(true);
-  };
-  const onDragEnd = () => setDragging(false);
-
-  return (
-    <div
-      className={[
-        'group/acc rounded-xl border px-3 py-2.5 transition-opacity',
-        th.row,
-        dragging ? 'opacity-40' : '',
-      ].join(' ')}
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      title="Drag to move to another client"
-    >
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          className="nodrag flex flex-1 items-center gap-1.5 text-left"
-          onClick={() => hasArrays && setExpanded((v) => !v)}
-          aria-expanded={expanded}
-          aria-label={expanded ? 'Collapse arrays' : 'Expand arrays'}
-          disabled={!hasArrays}
-        >
-          {hasArrays && (
-            <svg
-              className={`h-3 w-3 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''} ${th.rowText}`}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
+          {/* Flat list of arrays under this login — Client → Login → Arrays */}
+          {accounts.flatMap((acc) =>
+            acc.arrays.length > 0
+              ? acc.arrays.map((arr) => (
+                  <div
+                    key={`${acc.id}-${arr.id}`}
+                    className="group/arr flex items-center gap-2 rounded-md bg-white/70 px-2 py-1.5"
+                  >
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${th.rowDot} opacity-60`} />
+                    <span
+                      className="truncate text-xs font-medium text-zinc-800"
+                      title={arr.nepool_gis_id ? `${arr.name} · ${arr.nepool_gis_id}` : arr.name}
+                    >
+                      {arr.name}
+                    </span>
+                    <button
+                      type="button"
+                      className={`nodrag invisible ml-auto shrink-0 rounded p-0.5 text-xs opacity-60 transition-all hover:opacity-100 group-hover/arr:visible ${th.rowText}`}
+                      onClick={() => onDetach(acc.id)}
+                      title="Detach this account from the client"
+                      aria-label="Detach account"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))
+              : [
+                  <div
+                    key={`${acc.id}-empty`}
+                    className="group/arr flex items-center gap-2 rounded-md bg-white/50 px-2 py-1.5 text-zinc-500"
+                  >
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${th.rowDot} opacity-30`} />
+                    <span className="truncate text-xs italic">
+                      {acc.account_number} · no arrays yet
+                    </span>
+                    <button
+                      type="button"
+                      className={`nodrag invisible ml-auto shrink-0 rounded p-0.5 text-xs opacity-60 transition-all hover:opacity-100 group-hover/arr:visible ${th.rowText}`}
+                      onClick={() => onDetach(acc.id)}
+                      title="Detach this account from the client"
+                      aria-label="Detach account"
+                    >
+                      ×
+                    </button>
+                  </div>,
+                ],
           )}
-          <span className={`h-2 w-2 rounded-full ${th.rowDot}`} />
-          {hasArrays ? (
-            <span
-              className={`truncate text-xs font-semibold ${th.rowText}`}
-              title={`${account.utility} · ${account.account_number}`}
-            >
-              {account.arrays.map((a) => a.name).join(', ')}
-            </span>
-          ) : (
-            <span className={`text-xs font-semibold ${th.rowText}`}>
-              {account.utility} · {account.account_number}
-            </span>
-          )}
-          {!hasArrays && (
-            <span className={`text-[10px] font-medium opacity-60 ${th.rowText}`}>
-              no arrays
-            </span>
-          )}
-        </button>
-        <button
-          type="button"
-          className={`nodrag invisible shrink-0 rounded p-0.5 text-sm opacity-60 transition-all hover:opacity-100 group-hover/acc:visible ${th.rowText}`}
-          onClick={onDetach}
-          title="Detach account"
-          aria-label="Detach account"
-        >
-          ×
-        </button>
-      </div>
-      {expanded && hasArrays && (
-        <div className="nowheel max-h-48 overflow-y-auto mt-2 space-y-1 border-t border-current/10 pt-2 overscroll-contain">
-          {account.arrays.map((arr) => (
-            <div
-              key={arr.id}
-              className="flex items-center gap-2 rounded-md bg-white/70 px-2 py-1"
-            >
-              <span className="truncate text-xs font-medium text-zinc-800" title={arr.nepool_gis_id ?? arr.name}>
-                {arr.name}
-              </span>
-            </div>
-          ))}
-          <div className={`pt-1 text-[10px] font-mono opacity-50 ${th.rowText}`}>
-            {account.utility} · {account.account_number}
+          <div className={`pt-1 text-[10px] font-mono opacity-40 ${th.rowText}`}>
+            {accounts.map((a) => `${a.account_number}`).join(' · ')}
           </div>
         </div>
       )}
     </div>
   );
 }
+

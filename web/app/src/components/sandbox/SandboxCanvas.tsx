@@ -3,7 +3,6 @@ import {
   Background,
   BackgroundVariant,
   Controls,
-  MiniMap,
   Panel,
   ReactFlow,
   useNodesState,
@@ -56,9 +55,37 @@ function normalizeProvider(p: string): Utility {
 
 // ── API → React Flow nodes ──────────────────────────────────────────────────
 
-function buildNodesFromApi(data: CanvasResponse): Node[] {
+function buildNodesFromApi(data: CanvasResponse): { nodes: Node[]; autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] } {
   const nodes: Node[] = [];
-  let autoClientIdx = 0;
+  const autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] = [];
+
+  // First pass: collect grid slots already occupied by saved positions so
+  // newly-added (positionless) clients land in the NEXT FREE slot instead
+  // of stacking on top of existing cards.
+  const slotOccupied = new Set<string>();
+  const slotKey = (x: number, y: number) => {
+    const col = Math.round((x - 40) / COL_W);
+    const row = Math.round((y - 40) / ROW_H);
+    return `${col},${row}`;
+  };
+  data.clients.forEach((c) => {
+    if (c.canvas_x != null && c.canvas_y != null) {
+      slotOccupied.add(slotKey(c.canvas_x, c.canvas_y));
+    }
+  });
+  // Find next free slot (column-major, scanning row by row)
+  let nextSlotIdx = 0;
+  const findFreeSlot = (): { x: number; y: number } => {
+    while (true) {
+      const col = nextSlotIdx % COLS;
+      const row = Math.floor(nextSlotIdx / COLS);
+      nextSlotIdx++;
+      if (!slotOccupied.has(`${col},${row}`)) {
+        return { x: col * COL_W + 40, y: row * ROW_H + 40 };
+      }
+    }
+  };
+
   let autoAccIdx = 0;
 
   data.clients.forEach((client, i) => {
@@ -86,12 +113,11 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
     };
 
     const hasPos = client.canvas_x != null && client.canvas_y != null;
-    let position: { x: number; y: number };
-    if (hasPos) {
-      position = { x: client.canvas_x!, y: client.canvas_y! };
-    } else {
-      const idx = autoClientIdx++;
-      position = { x: (idx % COLS) * COL_W + 40, y: Math.floor(idx / COLS) * ROW_H + 40 };
+    const position = hasPos
+      ? { x: client.canvas_x!, y: client.canvas_y! }
+      : findFreeSlot();
+    if (!hasPos) {
+      autoPositioned.push({ node_type: 'client', node_id: client.id, x: position.x, y: position.y });
     }
 
     nodes.push({
@@ -125,6 +151,7 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
     } else {
       const idx = autoAccIdx++;
       position = { x: COLS * COL_W + 80, y: idx * 240 + 40 };
+      autoPositioned.push({ node_type: 'account', node_id: acc.id, x: position.x, y: position.y });
     }
 
     nodes.push({
@@ -135,7 +162,7 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
     });
   });
 
-  return nodes;
+  return { nodes, autoPositioned };
 }
 
 // ── State types ─────────────────────────────────────────────────────────────
@@ -199,6 +226,12 @@ export default function SandboxCanvas() {
 
   // Per-node debounce timers for position persistence
   const posTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Latest pending (x, y) per node — flushed on unload so a quick
+  // drag-then-reload sequence doesn't lose positions.
+  const pendingPosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  // Forward-ref to savePosition so callbacks defined above it (like
+  // centerOnClientId) can call it without circular hook deps.
+  const savePositionRef = useRef<((nodeId: string, x: number, y: number) => void) | null>(null);
 
   // Snapshot of client IDs before the portal-picker modal opens, used to
   // detect which clients were newly created so we can push undo entries.
@@ -221,8 +254,15 @@ export default function SandboxCanvas() {
     setLoading(true);
     try {
       const data = await getCanvasData();
-      const built = buildNodesFromApi(data);
+      const { nodes: built, autoPositioned } = buildNodesFromApi(data);
       setNodes(built);
+      // Persist any auto-assigned grid slots right away so the next reload
+      // sees them as saved positions and reuses the SAME slot instead of
+      // recomputing "free slots" against a different occupancy set (which
+      // is what made the layout look random across reloads).
+      if (autoPositioned.length > 0) {
+        patchCanvasPositions(autoPositioned).catch(() => { /* best effort */ });
+      }
       setOriginLookup(data.clients_index ?? {});
       // Only fitView on fresh loads — if the operator has a saved viewport,
       // don't stomp it. The defaultViewport prop already restores the position;
@@ -259,6 +299,10 @@ export default function SandboxCanvas() {
         // Select it so it visually pops + center it under the viewport
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })));
         setCenter(node.position.x + 144, node.position.y + 110, { zoom: 1, duration: 600 });
+        // Persist the auto-assigned grid slot so reloads land in the same
+        // place. Routed through a ref because savePosition is declared later
+        // in this component but we capture it at call time.
+        savePositionRef.current?.(nodeId, node.position.x, node.position.y);
         return;
       }
       if (attempt < 20) setTimeout(() => tryFocus(attempt + 1), 100);
@@ -591,11 +635,56 @@ export default function SandboxCanvas() {
 
   // ── Position persistence (debounced 800 ms per node) ─────────────────────
 
+  // Debounced position persistence. We used to wait 800ms but that meant a
+  // drag → quick reload sequence would lose the position (the timer never
+  // fired before the page tore down). Now we use a short 150ms debounce so
+  // rapid drag bursts coalesce but a normal "drop card, reload" sequence
+  // always lands the save, AND we flush every pending timer on unload.
+  const flushPositions = useCallback(() => {
+    const updates: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] = [];
+    for (const [nodeId, pending] of pendingPosRef.current.entries()) {
+      const isClient = nodeId.startsWith('client_');
+      const isAccount = nodeId.startsWith('account_');
+      if (!isClient && !isAccount) continue;
+      const numId = parseInt(nodeId.replace(isClient ? 'client_' : 'account_', ''), 10);
+      if (isNaN(numId)) continue;
+      updates.push({ node_type: isClient ? 'client' : 'account', node_id: numId, x: pending.x, y: pending.y });
+    }
+    if (updates.length === 0) return;
+    pendingPosRef.current.clear();
+    for (const t of posTimers.current.values()) clearTimeout(t);
+    posTimers.current.clear();
+    // Use sendBeacon for unload-time saves — fetch may be cancelled mid-flight.
+    try {
+      const blob = new Blob([JSON.stringify(updates)], { type: 'application/json' });
+      const ok = navigator.sendBeacon?.('/v1/sandbox/positions', blob);
+      if (ok) return;
+    } catch { /* fall through to regular save */ }
+    patchCanvasPositions(updates).catch(() => { /* best effort */ });
+  }, []);
+
+  // Persist any pending drag positions when the user navigates away.
+  useEffect(() => {
+    const handler = () => flushPositions();
+    window.addEventListener('beforeunload', handler);
+    window.addEventListener('pagehide', handler);
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+      window.removeEventListener('pagehide', handler);
+      // Also flush on component unmount (tab close inside SPA, route change)
+      flushPositions();
+    };
+  }, [flushPositions]);
+
   const savePosition = useCallback((nodeId: string, x: number, y: number) => {
+    pendingPosRef.current.set(nodeId, { x, y });
     const existing = posTimers.current.get(nodeId);
     if (existing) clearTimeout(existing);
     posTimers.current.set(nodeId, setTimeout(() => {
+      const pending = pendingPosRef.current.get(nodeId);
+      pendingPosRef.current.delete(nodeId);
       posTimers.current.delete(nodeId);
+      if (!pending) return;
       const isClient = nodeId.startsWith('client_');
       const isAccount = nodeId.startsWith('account_');
       if (!isClient && !isAccount) return;
@@ -604,11 +693,12 @@ export default function SandboxCanvas() {
       patchCanvasPositions([{
         node_type: isClient ? 'client' : 'account',
         node_id: numId,
-        x,
-        y,
+        x: pending.x,
+        y: pending.y,
       }]).catch(() => { /* position drift is acceptable; corrected on next reload */ });
-    }, 800));
+    }, 150));
   }, []);
+  savePositionRef.current = savePosition;
 
   // ── Drag: live merge-intent highlight ────────────────────────────────────
 
@@ -1117,16 +1207,6 @@ export default function SandboxCanvas() {
           proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} color="#d4d4d8" gap={22} size={1.5} />
-
-          <MiniMap
-            nodeColor={(n) => (n.type === 'client' ? '#047857' : '#a1a1aa')}
-            maskColor="rgba(250, 248, 245, 0.75)"
-            style={{
-              borderRadius: 12,
-              border: '1px solid #e8e2d9',
-              boxShadow: '0 1px 3px 0 rgb(0 0 0 / 0.06)',
-            }}
-          />
 
           <Controls showInteractive={false} />
 

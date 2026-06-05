@@ -103,16 +103,43 @@ def seed_clients(
     count = max(1, min(25, body.count))
     created = []
     with SessionLocal() as db:
+        # Find next free grid slot among existing tenant clients so seeded
+        # clients drop into a tidy row instead of random scatter.
+        from .models import Client as _C
+        existing = db.execute(
+            select(_C).where(
+                _C.tenant_id == tenant.id,
+                _C.deleted_at.is_(None),
+                _C.canvas_x.isnot(None),
+                _C.canvas_y.isnot(None),
+            )
+        ).scalars().all()
+        COLS, COL_W, ROW_H, ORIGIN = 4, 330, 295, 40
+        occupied = set()
+        for c in existing:
+            col = round((c.canvas_x - ORIGIN) / COL_W)
+            row = round((c.canvas_y - ORIGIN) / ROW_H)
+            occupied.add((col, row))
+
+        def next_slot():
+            idx = 0
+            while True:
+                col, row = idx % COLS, idx // COLS
+                idx += 1
+                if (col, row) not in occupied:
+                    occupied.add((col, row))
+                    return col * COL_W + ORIGIN, row * ROW_H + ORIGIN
+
         for _ in range(count):
             base = random.choice(_FAKE_CLIENT_NAMES)
             name = f"{DEV_PREFIX}{base} #{random.randint(100, 999)}"
+            x, y = next_slot()
             c = Client(
                 tenant_id=tenant.id,
                 name=name,
                 created_at=now(),
-                # Random nearby spot so they don't all pile on origin
-                canvas_x=random.uniform(-200, 1200),
-                canvas_y=random.uniform(-200, 800),
+                canvas_x=x,
+                canvas_y=y,
             )
             db.add(c)
             db.flush()
