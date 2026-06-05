@@ -225,9 +225,15 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
       )}
 
       {/* Expanded: account rows */}
-      {/* Expanded: one row per utility login (groups accounts by provider) */}
+      {/* Expanded: one row per utility login (groups accounts by provider).
+          `nowheel` tells React Flow to ignore wheel events targeting this
+          subtree — so the operator can scroll a long login list with the
+          wheel instead of the canvas zooming out underneath them. */}
       {expanded && (
-        <div className="space-y-2 px-3 pb-3">
+        <div
+          className="nowheel max-h-[420px] overflow-y-auto space-y-2 px-3 pb-3 overscroll-contain"
+          style={{ scrollbarGutter: 'stable' }}
+        >
           {groupAccountsByLogin(client.accounts, ownClientNumId).map((group) => (
             <LoginGroupRow
               key={group.key}
@@ -393,7 +399,7 @@ function LoginGroupRow({
         </button>
       </div>
       {expanded && (
-        <div className="mt-2 space-y-2 border-t border-current/10 pt-2">
+        <div className="nowheel max-h-72 overflow-y-auto mt-2 space-y-2 border-t border-current/10 pt-2 overscroll-contain">
           {loginCredential && (
             <div className={`flex items-center gap-1.5 rounded-md bg-white/70 px-2 py-1 text-[11px] ${th.rowText}`}>
               <span className="text-[10px] font-semibold uppercase tracking-wider opacity-60">
@@ -499,7 +505,7 @@ function AccountRow({
         </button>
       </div>
       {expanded && hasArrays && (
-        <div className="mt-2 space-y-1 border-t border-current/10 pt-2">
+        <div className="nowheel max-h-48 overflow-y-auto mt-2 space-y-1 border-t border-current/10 pt-2 overscroll-contain">
           {account.arrays.map((arr) => (
             <div
               key={arr.id}
