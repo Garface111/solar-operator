@@ -348,4 +348,22 @@ def start():
         CronTrigger(hour=3, minute=0),
         id="hard_delete_old", replace_existing=True,
     )
+    # Daily at 03:15 UTC: synthetic GMP health check
+    scheduler.add_job(
+        _run_synthetic_gmp_monitor,
+        CronTrigger(hour=3, minute=15),
+        id="synthetic_gmp_monitor", replace_existing=True,
+    )
     scheduler.start()
+
+
+def _run_synthetic_gmp_monitor() -> None:
+    """Wrapper so import errors don't crash the scheduler at start() time."""
+    try:
+        from scripts.synthetic_gmp_monitor import run as synthetic_run
+        synthetic_run()
+    except Exception as exc:
+        send_internal_alert(
+            "Synthetic GMP monitor: unhandled exception",
+            f"The synthetic_gmp_monitor job raised an unexpected error:\n{exc}",
+        )
