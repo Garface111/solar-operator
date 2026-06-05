@@ -500,12 +500,23 @@ function AccountRow({
             </svg>
           )}
           <span className={`h-2 w-2 rounded-full ${th.rowDot}`} />
-          <span className={`text-xs font-semibold ${th.rowText}`}>
-            {account.utility} · {account.account_number}
-          </span>
-          <span className={`text-[10px] font-medium opacity-60 ${th.rowText}`}>
-            {arrayCount} {arrayCount === 1 ? 'array' : 'arrays'}
-          </span>
+          {hasArrays ? (
+            <span
+              className={`truncate text-xs font-semibold ${th.rowText}`}
+              title={`${account.utility} · ${account.account_number}`}
+            >
+              {account.arrays.map((a) => a.name).join(', ')}
+            </span>
+          ) : (
+            <span className={`text-xs font-semibold ${th.rowText}`}>
+              {account.utility} · {account.account_number}
+            </span>
+          )}
+          {!hasArrays && (
+            <span className={`text-[10px] font-medium opacity-60 ${th.rowText}`}>
+              no arrays
+            </span>
+          )}
         </button>
         <button
           type="button"
@@ -522,23 +533,16 @@ function AccountRow({
           {account.arrays.map((arr) => (
             <div
               key={arr.id}
-              className="flex items-center justify-between gap-2 rounded-md bg-white/70 px-2 py-1"
+              className="flex items-center gap-2 rounded-md bg-white/70 px-2 py-1"
             >
-              <div className="flex min-w-0 items-center gap-1.5">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                  Array
-                </span>
-                <span className="truncate text-xs font-medium text-zinc-800" title={arr.name}>
-                  {arr.name}
-                </span>
-              </div>
-              {arr.nepool_gis_id && (
-                <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600">
-                  {arr.nepool_gis_id}
-                </span>
-              )}
+              <span className="truncate text-xs font-medium text-zinc-800" title={arr.nepool_gis_id ?? arr.name}>
+                {arr.name}
+              </span>
             </div>
           ))}
+          <div className={`pt-1 text-[10px] font-mono opacity-50 ${th.rowText}`}>
+            {account.utility} · {account.account_number}
+          </div>
         </div>
       )}
     </div>
