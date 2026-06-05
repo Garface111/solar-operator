@@ -20,7 +20,6 @@ import { ArrayList } from "./ArrayList";
 import { openPortalTab } from "../lib/openPortalTab";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
-import { ProductionChart } from "./clients/ProductionChart";
 import {
   type ClientRow,
   listClients,
@@ -540,14 +539,6 @@ export function ClientCard({
                 )}
               </button>
             </div>
-          </div>
-
-          {/* Solar production chart */}
-          <div className="rounded-xl border border-zinc-100 bg-white px-4 py-3">
-            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-              Production
-            </h4>
-            <ProductionChart clientId={client.id} />
           </div>
 
           {/* GMP auto-populate */}
