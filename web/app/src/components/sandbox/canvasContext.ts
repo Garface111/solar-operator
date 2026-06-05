@@ -25,6 +25,8 @@ export interface CanvasActions {
     deleted: boolean;
     logins: { GMP?: string | null; VEC?: string | null; WEC?: string | null };
   } | null;
+  /** Toggle the pinned/starred state of a client. */
+  togglePin: (clientId: string) => void;
 }
 
 export const CanvasActionsContext = createContext<CanvasActions | null>(null);

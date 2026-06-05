@@ -140,6 +140,9 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
     <div
       className={[
         'so-node-enter w-72 rounded-2xl border bg-white transition-all duration-150',
+        client.pinned && !isMergeTarget && !isMergeSource && !dropHover
+          ? 'ring-2 ring-amber-300/60 shadow-[0_0_0_2px_rgba(251,191,36,0.18)]'
+          : '',
         isMergeTarget
           ? 'scale-[1.03] border-amber-400 bg-amber-50 shadow-[0_0_0_4px_rgba(251,191,36,0.25),0_12px_32px_-8px_rgba(217,119,6,0.4)] ring-2 ring-amber-300'
           : isMergeSource
@@ -157,9 +160,19 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
     >
       {/* Header */}
       <div className="flex items-center gap-3 px-4 pt-4 pb-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-50 text-xs font-bold text-primary-700 select-none">
-          {getInitials(client.name)}
-        </div>
+        <button
+          type="button"
+          className={[
+            'nodrag nopan flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold select-none transition-colors',
+            client.pinned
+              ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+              : 'bg-primary-50 text-primary-700 hover:bg-amber-50 hover:text-amber-600',
+          ].join(' ')}
+          title={client.pinned ? 'Pinned — click to unpin' : 'Click to pin to top'}
+          onClick={(e) => { e.stopPropagation(); actions.togglePin(id); }}
+        >
+          {client.pinned ? '★' : getInitials(client.name)}
+        </button>
 
         <div className="min-w-0 flex-1">
           <span className="block text-[10px] font-semibold uppercase tracking-wider text-primary-600/80 select-none">

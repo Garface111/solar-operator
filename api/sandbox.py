@@ -183,6 +183,31 @@ def patch_positions(
     return {"ok": True}
 
 
+# ── POST /v1/sandbox/client/pin ───────────────────────────────────────────────
+
+class PinClientBody(BaseModel):
+    client_id: int
+    pinned: bool
+
+
+@router.post("/v1/sandbox/client/pin")
+def pin_client(
+    body: PinClientBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Toggle a client's pinned/starred state. Pinned clients sort to the top
+    of any list, render with a gold star, and survive bulk operations more
+    visibly. Reuses the existing clients.canvas_pinned column."""
+    tenant = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, body.client_id)
+        if not c or c.tenant_id != tenant.id or c.deleted_at is not None:
+            raise HTTPException(404, "client not found")
+        c.canvas_pinned = body.pinned
+        db.commit()
+    return {"ok": True, "client_id": body.client_id, "pinned": body.pinned}
+
+
 # ── POST /v1/sandbox/merge ────────────────────────────────────────────────────
 
 class SandboxMergeBody(BaseModel):

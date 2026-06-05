@@ -1013,6 +1013,13 @@ export async function patchCanvasPositions(
   await request("/v1/sandbox/positions", { method: "PATCH", body: updates });
 }
 
+/** Pin/star a client. Pinned clients sort to top and show a gold star. */
+export async function pinClient(client_id: number, pinned: boolean): Promise<{ ok: true; client_id: number; pinned: boolean }> {
+  return request("/v1/sandbox/client/pin", {
+    body: { client_id, pinned },
+  });
+}
+
 /** Move a utility account to a different client (or unclassify when client_id is null).
  *  Backend reuses an existing solo holder array or creates a new one under the target. */
 export async function reassignAccount(

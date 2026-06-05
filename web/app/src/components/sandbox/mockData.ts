@@ -25,6 +25,8 @@ export interface ClientData {
   accounts: UtilityAccount[];
   /** Per-utility login credential surface (optional; populated from API). */
   logins?: Partial<Record<Utility, string | null>>;
+  /** Pinned/starred — sorts to top of any list, renders with a gold star. */
+  pinned?: boolean;
 }
 
 export function clientTotalMwh(c: ClientData): number {

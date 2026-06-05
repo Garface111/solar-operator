@@ -20,6 +20,7 @@ import {
   getCanvasData,
   mergeClientInto,
   patchCanvasPositions,
+  pinClient,
   reassignAccount,
   type CanvasResponse,
 } from '../../lib/api';
@@ -61,6 +62,7 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
       id: `client_${client.id}`,
       name: client.name,
       logins: client.logins as Partial<Record<Utility, string | null>> | undefined,
+      pinned: client.canvas_pinned ?? false,
       accounts: client.accounts.map((acc) => ({
         id: `account_${acc.id}`,
         utility: normalizeProvider(acc.provider),
@@ -719,6 +721,35 @@ export default function SandboxCanvas() {
     detachLogin,
     moveLoginToClient,
     getOriginClient: (cid: number) => originLookup[cid] ?? null,
+    togglePin: (clientId: string) => {
+      const numId = parseInt(clientId.replace('client_', ''), 10);
+      if (isNaN(numId)) return;
+      const current = nodesRef.current;
+      const node = current.find((n) => n.id === clientId && n.type === 'client');
+      if (!node) return;
+      const wasPinned = !!(node.data as ClientNodeData).client.pinned;
+      const next = !wasPinned;
+      // Optimistic UI
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.id !== clientId) return n;
+          const d = n.data as ClientNodeData;
+          return { ...n, data: { ...d, client: { ...d.client, pinned: next } } };
+        }),
+      );
+      toast.show(next ? 'Pinned to top.' : 'Unpinned.', 'info');
+      pinClient(numId, next).catch(() => {
+        // Revert on failure
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id !== clientId) return n;
+            const d = n.data as ClientNodeData;
+            return { ...n, data: { ...d, client: { ...d.client, pinned: wasPinned } } };
+          }),
+        );
+        toast.show('Pin failed — reverted.', 'error');
+      });
+    },
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -736,8 +767,22 @@ export default function SandboxCanvas() {
           onNodeDragStop={onNodeDragStop}
           nodeTypes={NODE_TYPES}
           nodesConnectable={false}
-          fitView={nodes.length > 0}
-          fitViewOptions={{ padding: 0.35, maxZoom: 0.85 }}
+          {...(() => {
+            // Restore viewport from localStorage if present; otherwise fitView once.
+            try {
+              const raw = localStorage.getItem('so:sandbox:viewport');
+              if (raw) {
+                const v = JSON.parse(raw);
+                if (typeof v?.x === 'number' && typeof v?.y === 'number' && typeof v?.zoom === 'number') {
+                  return { defaultViewport: v };
+                }
+              }
+            } catch {}
+            return { fitView: nodes.length > 0, fitViewOptions: { padding: 0.35, maxZoom: 0.85 } };
+          })()}
+          onMoveEnd={(_e, v) => {
+            try { localStorage.setItem('so:sandbox:viewport', JSON.stringify(v)); } catch {}
+          }}
           deleteKeyCode={null}
           onPaneClick={() => setContextMenu(null)}
           onNodeClick={() => setContextMenu(null)}
@@ -770,6 +815,20 @@ export default function SandboxCanvas() {
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
                 </ToolbarButton>
+                <button
+                  type="button"
+                  disabled={!mergeUndo}
+                  onClick={() => { if (mergeUndo) { setNodes(mergeUndo.snapshot); setMergeUndo(null); } }}
+                  className={[
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
+                    mergeUndo
+                      ? 'bg-amber-50 text-amber-800 hover:bg-amber-100 ring-1 ring-amber-300'
+                      : 'bg-cream-bg text-zinc-400 ring-1 ring-cream-border cursor-not-allowed',
+                  ].join(' ')}
+                  title={mergeUndo ? mergeUndo.label + ' (⌘Z)' : 'Nothing to undo'}
+                >
+                  ↶ Undo
+                </button>
               </div>
             </Panel>
           )}
