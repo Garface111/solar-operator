@@ -37,6 +37,21 @@ export function ClientsSection({ expandClientId }: Props) {
   const [importing, setImporting] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
   const [missingNepoolCount, setMissingNepoolCount] = useState(0);
+  // One-shot autoscroll: when the missing-NEPOOL count transitions from
+  // 0 → positive (e.g. operator just captured a login with un-mapped arrays),
+  // gently bring the amber "Step 2" banner into view so they see the next
+  // action instead of staring at a populated canvas wondering what to do.
+  const prevMissingRef = useRef<number>(0);
+  const nepoolBannerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (prevMissingRef.current === 0 && missingNepoolCount > 0) {
+      // Tiny delay so the banner has rendered after the count update.
+      setTimeout(() => {
+        nepoolBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 250);
+    }
+    prevMissingRef.current = missingNepoolCount;
+  }, [missingNepoolCount]);
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
@@ -266,22 +281,43 @@ export function ClientsSection({ expandClientId }: Props) {
       )}
 
       {missingNepoolCount > 0 && (
-        <div className="mb-4 flex items-center justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-          <div>
-            <p className="text-sm font-semibold text-amber-900">
-              {missingNepoolCount} array{missingNepoolCount === 1 ? " is" : "s are"} missing NEPOOL IDs.
-            </p>
-            <p className="mt-0.5 text-xs text-amber-800">
-              Reports for those clients won&apos;t ship without them.
-            </p>
+        <div
+          ref={nepoolBannerRef}
+          data-walkthrough="nepool-banner"
+          className="mb-4 rounded-2xl border-2 border-amber-300 bg-gradient-to-br from-amber-50 via-amber-50/80 to-white px-5 py-4 shadow-sm"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-medium uppercase tracking-wider text-amber-700">
+                Step 2 · Add NEPOOL-GIS IDs
+              </p>
+              <p className="mt-1 text-base font-semibold text-zinc-900">
+                {missingNepoolCount} array{missingNepoolCount === 1 ? "" : "s"} need{missingNepoolCount === 1 ? "s" : ""} a NEPOOL ID to ship
+              </p>
+              <p className="mt-1.5 text-sm leading-relaxed text-zinc-700">
+                The NEPOOL-GIS ID is the 4–6 digit code (sometimes labeled <em>NEPOOL</em>, <em>GIS</em>, or <em>Asset ID</em>) that
+                identifies each array in Vermont&apos;s REC market. We need it to attribute the right RECs
+                to the right client.
+              </p>
+              <ul className="mt-3 space-y-1 text-xs text-zinc-600">
+                <li className="flex items-start gap-1.5">
+                  <span className="text-amber-600">▸</span>
+                  <span><strong className="text-zinc-800">Have a spreadsheet?</strong> Drop it below — we&apos;ll match NEPOOL IDs to your arrays automatically.</span>
+                </li>
+                <li className="flex items-start gap-1.5">
+                  <span className="text-amber-600">▸</span>
+                  <span><strong className="text-zinc-800">Don&apos;t have one?</strong> Click any array name in the canvas above to edit its NEPOOL ID inline.</span>
+                </li>
+              </ul>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAssigningNepool(true)}
+              className="shrink-0 rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700 active:bg-amber-800"
+            >
+              Import NEPOOL IDs from spreadsheet →
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setAssigningNepool(true)}
-            className="shrink-0 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100 focus:outline-none"
-          >
-            Find them in a spreadsheet
-          </button>
         </div>
       )}
 
