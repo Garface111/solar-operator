@@ -1,36 +1,64 @@
 import { useCallback, useEffect, useState } from "react";
-import { ReportsCard } from "../components/ReportsCard";
-import { EmailCustomizationCard } from "../components/EmailCustomizationCard";
+import { Link } from "react-router-dom";
 import { QuarterCard } from "../components/reports/QuarterCard";
 import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
+import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
+import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
+import { NextRunCard } from "../components/reports/NextRunCard";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { ScreenLayout } from "../ui/ScreenLayout";
-import { useToast } from "../ui/Toast";
 import { useDashboardContext } from "./DashboardLayout";
 import {
   type ClientRow,
   type QuarterReport,
   listClients,
-  downloadClientReport,
   getReports,
-  regenerateReport,
 } from "../lib/api";
 
-// ─── Skeleton card ────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
-function QuarterCardSkeleton() {
+/** Derive the one-glance status from the most recent COMPLETE quarter. */
+function computeStatus(reports: QuarterReport[]): ShipStatus {
+  const complete = reports.find((r) => r.status !== "draft");
+  if (!complete) return "in_progress";
+  if (complete.status === "sent") return "all_shipped";
+  if (complete.status === "ready") return "not_yet";
+  return "in_progress";
+}
+
+/** Build failure list from clients that have bounced and not recovered. */
+function computeFailures(clients: ClientRow[]): DeliveryFailure[] {
+  return clients
+    .filter((c) => {
+      if (!c.last_bounced_at) return false;
+      const bouncedMs = new Date(c.last_bounced_at).getTime();
+      const deliveredMs = c.last_delivered_at
+        ? new Date(c.last_delivered_at).getTime()
+        : 0;
+      return bouncedMs > deliveredMs;
+    })
+    .map((c) => ({
+      clientName: c.name,
+      reason: c.last_bounce_reason,
+      bouncedAt: c.last_bounced_at as string,
+    }));
+}
+
+function quarterLabel(r: QuarterReport): string {
+  return `Q${r.quarter_num} ${r.year}`;
+}
+
+// ─── Skeleton ────────────────────────────────────────────────────────────────
+
+function RowSkeleton() {
   return (
-    <div className="rounded-xl border border-cream-border bg-cream p-5 shadow-sm">
-      <div className="flex items-center justify-between gap-2">
-        <div className="h-5 w-20 animate-pulse rounded bg-zinc-200" />
-        <div className="h-5 w-12 animate-pulse rounded-full bg-zinc-200" />
+    <div className="flex items-center justify-between rounded-xl border border-cream-border bg-cream px-5 py-3.5 shadow-sm">
+      <div>
+        <div className="h-4 w-20 animate-pulse rounded bg-zinc-200" />
+        <div className="mt-1.5 h-3 w-52 animate-pulse rounded bg-zinc-100" />
       </div>
-      <div className="mt-2 h-3.5 w-44 animate-pulse rounded bg-zinc-100" />
-      <div className="mt-4 flex gap-2">
-        <div className="h-8 w-28 animate-pulse rounded-xl bg-zinc-200" />
-        <div className="h-8 w-24 animate-pulse rounded-xl bg-zinc-100" />
-      </div>
+      <div className="h-5 w-12 animate-pulse rounded-full bg-zinc-200" />
     </div>
   );
 }
@@ -38,15 +66,14 @@ function QuarterCardSkeleton() {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function ReportsTab() {
-  const { account, failed, patchAccount, retryLoad } = useDashboardContext();
-  const toast = useToast();
+  const { account, failed, retryLoad } = useDashboardContext();
 
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [reports, setReports] = useState<QuarterReport[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  function loadData() {
+  const loadData = useCallback(() => {
     setLoading(true);
     setLoadError(null);
     Promise.all([listClients(), getReports(6)])
@@ -55,39 +82,16 @@ export default function ReportsTab() {
         setReports(reps);
       })
       .catch((err) => {
-        setLoadError(err instanceof Error ? err.message : "Couldn't load report data");
+        setLoadError(
+          err instanceof Error ? err.message : "Couldn't load reports",
+        );
       })
       .finally(() => setLoading(false));
-  }
+  }, []);
 
   useEffect(() => {
     loadData();
-  }, []);
-
-  const handleDownload = useCallback(
-    async (client: ClientRow, quarter?: string) => {
-      try {
-        await downloadClientReport(client.id, client.name, quarter);
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Couldn't download report");
-      }
-    },
-    [toast],
-  );
-
-  const handleRegenerate = useCallback(
-    async (quarter?: string) => {
-      try {
-        await regenerateReport(quarter);
-        toast.success("Report regenerated.");
-        // Refresh report statuses so the cards reflect the updated state
-        getReports(6).then(setReports).catch(() => {});
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Regeneration failed");
-      }
-    },
-    [toast],
-  );
+  }, [loadData]);
 
   // ── Account loading guard ─────────────────────────────────────────────────
   if (account === null) {
@@ -95,7 +99,7 @@ export default function ReportsTab() {
       <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-400">
         {failed ? (
           <>
-            <p className="text-sm">Couldn&apos;t load your account.</p>
+            <p className="text-sm">Couldn't load your account.</p>
             <Button variant="secondary" onClick={retryLoad}>
               Retry
             </Button>
@@ -108,27 +112,52 @@ export default function ReportsTab() {
   }
 
   const activeClients = clients?.filter((c) => c.active) ?? [];
-  const hasData = activeClients.length > 0;
+  const hasArrays = (reports?.[0]?.array_count ?? 0) > 0 || activeClients.length > 0;
+
+  const failures: DeliveryFailure[] = computeFailures(activeClients);
+
+  // Most recent complete quarter (not the in-progress current one)
+  const completeReports = (reports ?? []).filter((r) => r.status !== "draft");
+  const inProgressReports = (reports ?? []).filter((r) => r.status === "draft");
+  // The last complete quarter is expanded by default; older ones collapsed.
+  const [mostRecent, ...olderReports] = completeReports;
+
+  const overallStatus: ShipStatus = reports
+    ? computeStatus(reports)
+    : "in_progress";
+
+  const mostRecentLabel = mostRecent ? quarterLabel(mostRecent) : undefined;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <ScreenLayout>
-      <ReportsCard account={account} onAccountChange={patchAccount} />
+      {/* 1. Failure strip — always first if any delivery bounced */}
+      {failures.length > 0 && <FailureStrip failures={failures} />}
 
-      {/* Quarter history section */}
+      {/* 2. One-glance status */}
+      <div className="flex items-center justify-between gap-3">
+        <StatusPill status={overallStatus} quarter={mostRecentLabel} />
+        <Link
+          to="/account"
+          className="text-xs text-zinc-400 hover:text-zinc-600"
+        >
+          Schedule &amp; email settings ↗
+        </Link>
+      </div>
+
+      {/* 3. Next run countdown + send-now */}
+      <NextRunCard onSent={loadData} />
+
+      {/* 4. Report history */}
       <div>
-        <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-          Report History
+        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+          History
         </h2>
 
         {loading ? (
-          <div
-            className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
-            aria-label="Loading report history"
-            aria-busy="true"
-          >
-            {Array.from({ length: 6 }).map((_, i) => (
-              <QuarterCardSkeleton key={i} />
+          <div className="space-y-2" aria-label="Loading history" aria-busy>
+            {Array.from({ length: 4 }).map((_, i) => (
+              <RowSkeleton key={i} />
             ))}
           </div>
         ) : loadError ? (
@@ -138,29 +167,58 @@ export default function ReportsTab() {
               Retry
             </Button>
           </div>
-        ) : !hasData ? (
+        ) : !hasArrays ? (
           <ReportsEmptyState />
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {(reports ?? []).map((rep) => (
+          <div className="space-y-2">
+            {/* Most recent complete quarter — expanded */}
+            {mostRecent && (
+              <QuarterCard
+                key={mostRecent.quarter}
+                label={quarterLabel(mostRecent)}
+                quarter={mostRecent.quarter}
+                status={mostRecent.status}
+                arrayCount={mostRecent.array_count}
+                lastDeliveredAt={mostRecent.last_delivered_at}
+                mwhTotal={mostRecent.mwh_total}
+                clients={activeClients}
+                defaultExpanded
+                onRefresh={loadData}
+              />
+            )}
+
+            {/* Older complete quarters — collapsed */}
+            {olderReports.map((rep) => (
               <QuarterCard
                 key={rep.quarter}
-                label={`Q${rep.quarter_num} ${rep.year}`}
+                label={quarterLabel(rep)}
+                quarter={rep.quarter}
                 status={rep.status}
                 arrayCount={rep.array_count}
-                clientCount={activeClients.length}
-                lastGeneratedAt={rep.last_delivered_at}
+                lastDeliveredAt={rep.last_delivered_at}
                 mwhTotal={rep.mwh_total}
                 clients={activeClients}
-                onDownload={(client) => handleDownload(client, rep.quarter)}
-                onRegenerate={() => handleRegenerate(rep.quarter)}
+                onRefresh={loadData}
+              />
+            ))}
+
+            {/* In-progress current quarter(s) — collapsed at bottom */}
+            {inProgressReports.map((rep) => (
+              <QuarterCard
+                key={rep.quarter}
+                label={`${quarterLabel(rep)} (current)`}
+                quarter={rep.quarter}
+                status={rep.status}
+                arrayCount={rep.array_count}
+                lastDeliveredAt={rep.last_delivered_at}
+                mwhTotal={rep.mwh_total}
+                clients={activeClients}
+                onRefresh={loadData}
               />
             ))}
           </div>
         )}
       </div>
-
-      <EmailCustomizationCard account={account} onAccountChange={patchAccount} />
     </ScreenLayout>
   );
 }
