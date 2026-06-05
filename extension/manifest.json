@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Solar Operator Sync",
   "short_name": "Solar Operator",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Solar Operator updates your community solar reporting spreadsheet every month with fresh Green Mountain Power data — automatically.",
   "author": "Solar Operator",
   "homepage_url": "https://solaroperator.com",

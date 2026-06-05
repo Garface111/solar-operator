@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
-import { openPortalTab } from "../lib/openPortalTab";
 import {
   useExtensionStatus,
   type ExtensionStatus,
@@ -69,36 +68,61 @@ export function AddClientByLoginModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  async function pick(provider: Provider) {
-    // Snapshot the clients list BEFORE we hand off so the global listener
-    // can detect "extension re-scraped the same client" cases (no new
-    // ID appeared after capture).
+  // Fire-and-forget cookie wipe via the extension. We don't await it —
+  // window.open MUST be called synchronously inside the click handler
+  // or Chrome's popup blocker treats it as programmatic and refuses
+  // to open a foregrounded tab. Cookies usually finish wiping in <50ms,
+  // which beats the portal page's auth-check round-trip on the new tab.
+  function wipeCookiesAsync(domain: string) {
     try {
-      const before = await onCaptured();
-      try {
-        sessionStorage.setItem(
-          "so_capture_pending",
-          JSON.stringify({
-            provider,
-            startedAt: Date.now(),
-            knownIds: before.map((c) => c.id),
-          }),
-        );
-      } catch { /* sessionStorage unavailable; non-fatal */ }
-    } catch { /* parent surfaces its own errors */ }
+      window.postMessage(
+        { type: "SO_WIPE_COOKIES", domain, reqId: `w-${Date.now()}` },
+        "*",
+      );
+    } catch { /* ignore */ }
+  }
 
-    // Close the modal FIRST so the new tab visibly takes focus without
-    // a stale "Add client" overlay in the operator's peripheral vision.
-    onClose();
-
-    const result = await openPortalTab(PORTAL_URLS[provider], { active: true });
-    if (result === "blocked") {
+  function pick(provider: Provider) {
+    // Open the portal IMMEDIATELY — synchronous, user-initiated click,
+    // foreground tab guaranteed. This is the entire user-facing job;
+    // everything else is bookkeeping.
+    const newTab = window.open(PORTAL_URLS[provider], "_blank", "noopener,noreferrer");
+    if (!newTab) {
       toast.error(
         "Your browser blocked the new tab. Allow pop-ups for this site and try again.",
       );
-    } else if (result !== "extension") {
-      // No extension — we still opened a foreground tab via window.open
-      // fallback, but the operator should know auto-capture won't fire.
+      return;
+    }
+
+    // Cookie wipe runs in parallel — best-effort. If the extension is
+    // installed it'll happen before the new tab finishes its first
+    // network call; if not, the operator just lands wherever they were
+    // last logged in (still functional, just less clean).
+    const host =
+      provider === "gmp" ? "greenmountainpower.com" : "smarthub.coop";
+    wipeCookiesAsync(host);
+
+    // Snapshot known clients + close modal. CaptureListener handles
+    // success notification when the extension POSTs /v1/sync.
+    (async () => {
+      try {
+        const before = await onCaptured();
+        try {
+          sessionStorage.setItem(
+            "so_capture_pending",
+            JSON.stringify({
+              provider,
+              startedAt: Date.now(),
+              knownIds: before.map((c) => c.id),
+            }),
+          );
+        } catch { /* non-fatal */ }
+      } catch { /* parent surfaces its own errors */ }
+    })();
+
+    onClose();
+
+    if (!extensionUsable) {
       toast.show(
         "Sign in at the portal, then add the client manually from the dashboard.",
         "info",

@@ -94,6 +94,22 @@
       });
       return;
     }
+
+    if (data.type === "SO_WIPE_COOKIES") {
+      const reqId = data.reqId || null;
+      const domain = String(data.domain || "");
+      chrome.runtime.sendMessage({ type: "SO_WIPE_COOKIES", domain }, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_WIPE_COOKIES_ACK",
+          reqId,
+          ok: !!(resp && resp.ok),
+          wiped: resp ? resp.wiped : undefined,
+          error: err,
+        }, "*");
+      });
+      return;
+    }
   });
 
   // ── Background → bridge → page broadcasts ────────────────────────────

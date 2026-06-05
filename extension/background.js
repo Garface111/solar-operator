@@ -237,6 +237,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true; // async sendResponse
   }
+  // v1.4.3: page asks us to wipe cookies for a portal domain BEFORE
+  // it calls window.open() directly. window.open() inside a user-
+  // initiated click handler always foregrounds (no extension involved,
+  // no popup blocker). We just handle the session-reset side here.
+  if (msg.type === "SO_WIPE_COOKIES") {
+    const domain = String(msg.domain || "");
+    const allowed = ["greenmountainpower.com", "smarthub.coop"];
+    if (!allowed.some((d) => domain.endsWith(d))) {
+      sendResponse({ ok: false, error: "domain-not-allowed" });
+      return;
+    }
+    (async () => {
+      try {
+        const cookies = await chrome.cookies.getAll({ domain });
+        await Promise.all(cookies.map((c) => {
+          const protocol = c.secure ? "https://" : "http://";
+          const cookieUrl = `${protocol}${c.domain.replace(/^\./, "")}${c.path}`;
+          return chrome.cookies.remove({
+            url: cookieUrl, name: c.name, storeId: c.storeId,
+          });
+        }));
+        sendResponse({ ok: true, wiped: cookies.length });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+
   // v1.3.0: SPA hands us a tenant key + endpoint (kills the copy-paste
   // activation-code step). We persist immediately and reply with the
   // resulting state so the SPA can show a "paired ✓" badge.
