@@ -999,6 +999,17 @@ export async function patchCanvasPositions(
   await request("/v1/sandbox/positions", { method: "PATCH", body: updates });
 }
 
+/** Move a utility account to a different client (or unclassify when client_id is null).
+ *  Backend reuses an existing solo holder array or creates a new one under the target. */
+export async function reassignAccount(
+  account_id: number,
+  client_id: number | null,
+): Promise<{ ok: true; account_id: number; client_id: number | null; array_id: number | null }> {
+  return request("/v1/sandbox/account/reassign", {
+    body: { account_id, client_id },
+  });
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 
 export async function nepoolCommit(

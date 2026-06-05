@@ -20,6 +20,7 @@ import {
   getCanvasData,
   mergeClientInto,
   patchCanvasPositions,
+  reassignAccount,
   type CanvasResponse,
 } from '../../lib/api';
 import { useToast } from '../../ui/Toast';
@@ -254,6 +255,8 @@ export default function SandboxCanvas() {
       const detached = d.client.accounts.find((a) => a.id === accountId);
       if (!detached) return;
 
+      // Optimistic UI: pop the account out as an unclassified node next to the client.
+      const snapshot = current;
       setNodes((ns) => {
         const updatedClient: ClientData = {
           ...d.client,
@@ -272,6 +275,15 @@ export default function SandboxCanvas() {
       });
 
       toast.show(`${detached.utility} · ${detached.account_number} detached.`, 'info');
+
+      // Persist if this is a real backend account
+      const numId = parseInt(accountId.replace('account_', ''), 10);
+      if (!isNaN(numId)) {
+        reassignAccount(numId, null).catch(() => {
+          setNodes(snapshot);
+          toast.show('Detach failed — reverted.', 'error');
+        });
+      }
     },
     [setNodes, toast],
   );
@@ -286,7 +298,8 @@ export default function SandboxCanvas() {
       const uData = unclNode.data as UnclassifiedNodeData;
       const cData = clientNode.data as ClientNodeData;
 
-      // TODO v2: persist the assignment backend-side (PATCH Array.client_id)
+      // Optimistic UI
+      const snapshot = current;
       setNodes((ns) => {
         const updatedClient: ClientData = {
           ...cData.client,
@@ -301,8 +314,20 @@ export default function SandboxCanvas() {
         `${uData.account.utility} · ${uData.account.account_number} added to ${cData.client.name}.`,
         'success',
       );
+
+      // Persist
+      const accNumId = parseInt(unclassifiedId.replace('account_', ''), 10);
+      const clientNumId = parseInt(targetClientId.replace('client_', ''), 10);
+      if (!isNaN(accNumId) && !isNaN(clientNumId)) {
+        reassignAccount(accNumId, clientNumId)
+          .then(() => { void loadCanvas(); })  // resync to get the new array_id
+          .catch(() => {
+            setNodes(snapshot);
+            toast.show('Move failed — reverted.', 'error');
+          });
+      }
     },
-    [setNodes, toast],
+    [setNodes, toast, loadCanvas],
   );
 
   const confirmMerge = useCallback(

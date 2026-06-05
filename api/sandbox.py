@@ -190,3 +190,104 @@ def sandbox_merge(
         db.commit()
 
     return {"ok": True, "dst_client_id": dst.id, "merged_from_id": src.id}
+
+
+# ── POST /v1/sandbox/account/reassign ────────────────────────────────────────
+
+class AccountReassignBody(BaseModel):
+    account_id: int
+    # When provided, attach to this client (auto-creates a holder array if the
+    # account has none yet). When null/absent, detach (unclassify) the account.
+    client_id: Optional[int] = None
+
+
+@router.post("/v1/sandbox/account/reassign")
+def sandbox_account_reassign(
+    body: AccountReassignBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Move a UtilityAccount between clients (or unclassify it).
+
+    Accounts hang off Arrays which hang off Clients. To "move an account to
+    another client" we re-point its Array to the target client; if the
+    account currently has no array (or shares one with siblings staying put)
+    we create a new holder Array under the target client.
+
+    Reassigning here always creates/uses a per-account array — the assumption
+    is the operator wants to organize at the account level. If multiple
+    accounts share one physical array (Bruce's Starlake = 3 sub-meters), they
+    stay grouped only if the operator drags the *array* not individual
+    accounts; v2 will expose array-level drag.
+    """
+    tenant = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, body.account_id)
+        if not acc or acc.tenant_id != tenant.id or acc.deleted_at is not None:
+            raise HTTPException(404, "account not found")
+
+        # Resolve target client (if any)
+        target_client: Optional[Client] = None
+        if body.client_id is not None:
+            target_client = db.execute(
+                select(Client).where(
+                    Client.tenant_id == tenant.id,
+                    Client.id == body.client_id,
+                    Client.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if not target_client:
+                raise HTTPException(404, "client not found")
+
+        # Detach path: clear the array link
+        if target_client is None:
+            acc.array_id = None
+            db.commit()
+            return {"ok": True, "account_id": acc.id, "client_id": None, "array_id": None}
+
+        # Attach path: ensure the account has an array owned by target_client.
+        # Strategy: if the account currently has its own array (1:1 holder),
+        # just re-point that array to the new client. Otherwise create a fresh
+        # holder array under target_client and re-point the account to it.
+        cur_array: Optional[Array] = None
+        if acc.array_id is not None:
+            cur_array = db.get(Array, acc.array_id)
+
+        if cur_array is not None:
+            sibling_count = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.tenant_id == tenant.id,
+                    UtilityAccount.array_id == cur_array.id,
+                    UtilityAccount.deleted_at.is_(None),
+                    UtilityAccount.id != acc.id,
+                )
+            ).scalars().all()
+        else:
+            sibling_count = []
+
+        if cur_array is not None and len(sibling_count) == 0:
+            # Solo holder array — reuse it, just reparent
+            cur_array.client_id = target_client.id
+            new_array_id = cur_array.id
+        else:
+            # Create new holder array under target client
+            display_name = acc.nickname or f"{acc.provider.upper()} {acc.account_number}"
+            new_array = Array(
+                tenant_id=tenant.id,
+                client_id=target_client.id,
+                name=display_name,
+                nepool_gis_id=None,
+                bill_offset_months=1,
+            )
+            db.add(new_array)
+            db.flush()
+            acc.array_id = new_array.id
+            new_array_id = new_array.id
+
+        db.commit()
+
+    return {
+        "ok": True,
+        "account_id": acc.id,
+        "client_id": target_client.id,
+        "array_id": new_array_id,
+    }
