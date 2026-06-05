@@ -39,6 +39,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .models import Client, Array, UtilityAccount
 from .account import tenant_from_session
+from .import_examples import EXAMPLE_GMCS_STYLE, EXAMPLE_RESIDENTIAL_PORTFOLIO
 
 logger = logging.getLogger(__name__)
 
@@ -50,19 +51,29 @@ MAX_TEXT_CHARS = 60_000
 # Cap rows committed in one shot (preview can show more, but refuse a runaway).
 MAX_COMMIT_ROWS = 500
 
-ANTHROPIC_MODEL = os.getenv("INGEST_LLM_MODEL", "claude-haiku-4-5-20251001")
+# Sonnet 4.5 for the richer hierarchical extraction (was Haiku for the flat one).
+ANTHROPIC_MODEL = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5-20250514")
 OPENAI_MODEL = os.getenv("INGEST_OPENAI_MODEL", "gpt-4o-mini")
 
+# Build few-shot examples to embed in the prompt (compact JSON — LLM reads it fine).
+_EX1 = json.dumps({"operators": [EXAMPLE_GMCS_STYLE]}, separators=(",", ":"))
+_EX2 = json.dumps({"operators": [EXAMPLE_RESIDENTIAL_PORTFOLIO]}, separators=(",", ":"))
+
 EXTRACTION_PROMPT = (
-    "You are given a tabular roster from a NEPOOL-GIS reporting consultant. "
-    "Each row likely represents one solar array. Extract every array you can "
-    "find. For each, return JSON with: operator_name (the company/person who "
-    "owns the array — this maps to a Client), array_name (the name of the "
-    "physical installation), nepool_gis_id (the 5-digit numeric ID, may be "
-    "labeled NEPOOL, NEPOOL-GIS, GIS ID, Asset ID, etc), gmp_account_number "
-    "(if present), notes (any free-text the row has). Return strictly: "
-    '{"arrays": [{...}, ...]}. If a column is unclear or missing, set the '
-    "field to null. Skip rows that are obviously headers or totals."
+    "You are a smart data extractor reading a solar operator's client roster spreadsheet.\n\n"
+    "TASK: Extract every client, their utility logins, accounts, and arrays into this EXACT nested JSON hierarchy:\n"
+    '{"operators":[{"name":"<operator>","clients":[{"name":"<client>","logins":[{"utility":"gmp|vec|null","login_email":"<email or null>","accounts":[{"account_number":"<# or null>","arrays":[{"name":"<array>","nepool_gis_id":"<digits or null>","notes":"<notes or null>"}]}]}]}]}]}\n\n'
+    "SCANNING RULES — follow every one:\n"
+    "- Scan EVERY sheet, every row, every column. Do not stop at the first sheet.\n"
+    "- NEPOOL-GIS IDs are 4-6 digit numbers. They may appear: inline as 'Array Name (12345)', in a separate column labeled NEPOOL/GIS/Asset ID, in footnotes, or in sheet titles.\n"
+    "- Account numbers may be labeled: Account #, GMP #, VEC #, Meter #, Acct, Account Number, etc.\n"
+    "- If data is split across sheets (array names on sheet 1, NEPOOL IDs on sheet 2), join them by array name.\n"
+    "- If no client/login structure is visible, group all arrays under one client using the operator name as client name, with login_email: null.\n"
+    "- If an array has no NEPOOL ID, set nepool_gis_id to null — do NOT skip the array.\n"
+    "- If a client has multiple utility logins (e.g. personal + spouse + business), list each as a separate login object.\n\n"
+    f"EXAMPLE 1 (community solar, multiple clients with multiple accounts):\n{_EX1}\n\n"
+    f"EXAMPLE 2 (residential portfolio, one client per login):\n{_EX2}\n\n"
+    "Return ONLY valid JSON. No markdown fences, no prose. Set unknown fields to null."
 )
 
 FIELDS = ("operator_name", "array_name", "nepool_gis_id", "gmp_account_number", "notes")
@@ -227,7 +238,8 @@ def _extract_json_block(raw: str) -> dict:
     raise ValueError("no JSON object in LLM response")
 
 
-def _call_anthropic(text: str, api_key: str) -> list[dict]:
+def _call_anthropic(text: str, api_key: str) -> dict:
+    """Call Anthropic and return the full {operators: [...]} hierarchy dict."""
     resp = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -237,14 +249,14 @@ def _call_anthropic(text: str, api_key: str) -> list[dict]:
         },
         json={
             "model": ANTHROPIC_MODEL,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "messages": [
                 {
                     "role": "user",
                     "content": f"{EXTRACTION_PROMPT}\n\nHere is the roster:\n\n{text}",
                 },
                 # Prefill forces the model straight into JSON.
-                {"role": "assistant", "content": '{"arrays":'},
+                {"role": "assistant", "content": '{"operators":'},
             ],
         },
         timeout=60.0,
@@ -252,11 +264,11 @@ def _call_anthropic(text: str, api_key: str) -> list[dict]:
     resp.raise_for_status()
     body = resp.json()
     content = "".join(b.get("text", "") for b in body.get("content", []))
-    parsed = _extract_json_block('{"arrays":' + content)
-    return parsed.get("arrays", [])
+    return _extract_json_block('{"operators":' + content)
 
 
-def _call_openai(text: str, api_key: str) -> list[dict]:
+def _call_openai(text: str, api_key: str) -> dict:
+    """Call OpenAI and return the full {operators: [...]} hierarchy dict."""
     resp = httpx.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
@@ -273,25 +285,94 @@ def _call_openai(text: str, api_key: str) -> list[dict]:
     resp.raise_for_status()
     body = resp.json()
     content = body["choices"][0]["message"]["content"]
-    return _extract_json_block(content).get("arrays", [])
+    return _extract_json_block(content)
 
 
-def _llm_extract(text: str) -> Optional[list[dict]]:
-    """Try Anthropic, then OpenAI. Return None if no key configured or both
-    fail — the caller falls back to the heuristic parser."""
+def _llm_extract_hierarchical(text: str) -> Optional[dict]:
+    """Try Anthropic then OpenAI; return the full {operators: [...]} dict or None.
+
+    Exported so nepool_assign can reuse the same hierarchical extraction."""
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
     if anthropic_key:
         try:
             return _call_anthropic(text, anthropic_key)
         except Exception as e:  # noqa: BLE001
-            logger.warning("Anthropic ingest extraction failed: %s", e)
+            logger.warning("Anthropic hierarchical extraction failed: %s", e)
     if openai_key:
         try:
             return _call_openai(text, openai_key)
         except Exception as e:  # noqa: BLE001
-            logger.warning("OpenAI ingest extraction failed: %s", e)
+            logger.warning("OpenAI hierarchical extraction failed: %s", e)
     return None
+
+
+def _flatten_hierarchy_to_rows(data: dict) -> list[dict]:
+    """Flatten {operators: [...]} hierarchy to IngestRow-compatible flat dicts."""
+    rows: list[dict] = []
+    for operator in data.get("operators", []):
+        for client in operator.get("clients", []):
+            client_name = (client.get("name") or "").strip() or None
+            for login in client.get("logins", []):
+                utility = (login.get("utility") or "").strip().lower() or None
+                for account in login.get("accounts", []):
+                    acct_raw = (account.get("account_number") or "").strip() or None
+                    # gmp_account_number is only meaningful for GMP logins.
+                    gmp_acct = acct_raw if utility in ("gmp", None) else None
+                    for array in account.get("arrays", []):
+                        array_name = (array.get("name") or "").strip() or None
+                        if not array_name:
+                            continue
+                        rows.append({
+                            "operator_name": client_name,
+                            "array_name": array_name,
+                            "nepool_gis_id": (array.get("nepool_gis_id") or None),
+                            "gmp_account_number": gmp_acct,
+                            "notes": (array.get("notes") or None),
+                        })
+    return rows
+
+
+def _flatten_hierarchy_to_pairs(data: dict) -> list[dict]:
+    """Flatten {operators: [...]} hierarchy to (array_name, nepool_gis_id) pairs.
+
+    Exported for nepool_assign to reuse."""
+    pairs: list[dict] = []
+    for operator in data.get("operators", []):
+        for client in operator.get("clients", []):
+            for login in client.get("logins", []):
+                for account in login.get("accounts", []):
+                    for array in account.get("arrays", []):
+                        name = (array.get("name") or "").strip()
+                        gis = (array.get("nepool_gis_id") or "").strip()
+                        if name and gis:
+                            pairs.append({"array_name": name, "nepool_gis_id": gis})
+    return pairs
+
+
+def _count_logins(data: dict) -> int:
+    """Count total utility logins across all clients in the hierarchy."""
+    count = 0
+    for operator in data.get("operators", []):
+        for client in operator.get("clients", []):
+            count += len(client.get("logins", []))
+    return count
+
+
+def _count_clients(data: dict) -> int:
+    """Count total clients across all operators in the hierarchy."""
+    count = 0
+    for operator in data.get("operators", []):
+        count += len(operator.get("clients", []))
+    return count
+
+
+def _llm_extract(text: str) -> Optional[list[dict]]:
+    """Thin wrapper used by older callers: hierarchical extract → flat rows."""
+    result = _llm_extract_hierarchical(text)
+    if result is None:
+        return None
+    return _flatten_hierarchy_to_rows(result)
 
 
 # ─── heuristic fallback parser ─────────────────────────────────────────────
@@ -386,6 +467,8 @@ async def ingest_preview(
 
     source = "llm"
     rows: Optional[list[dict]] = None
+    imported_logins = 0
+    imported_clients = 0
 
     # GMCS-shape detection: load the workbook once and check before falling
     # back to the text/LLM path.  Only applicable for .xlsx.
@@ -409,9 +492,11 @@ async def ingest_preview(
         text = _file_to_text(file.filename or "", data)
         if not text.strip():
             raise HTTPException(400, "Couldn't read any rows from that file")
-        llm_rows = _llm_extract(text)
-        if llm_rows is not None:
-            rows = llm_rows
+        hierarchy = _llm_extract_hierarchical(text)
+        if hierarchy is not None:
+            rows = _flatten_hierarchy_to_rows(hierarchy)
+            imported_logins = _count_logins(hierarchy)
+            imported_clients = _count_clients(hierarchy)
             source = "llm"
         else:
             rows = _heuristic_extract(text)
@@ -464,6 +549,8 @@ async def ingest_preview(
         "source": source,
         "count": len(arrays),
         "arrays": arrays,
+        "imported_logins": imported_logins,
+        "imported_clients": imported_clients,
     }
 
 

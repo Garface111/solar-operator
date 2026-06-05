@@ -14,13 +14,11 @@ from __future__ import annotations
 
 import io
 import os
-import json
 import logging
 import re
 from difflib import SequenceMatcher
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -31,31 +29,24 @@ from .models import Array, Client
 from .account import tenant_from_session
 from .ingest import (
     _file_to_text,
-    _extract_json_block,
     _detect_gmcs_shape,
     _extract_from_gmcs,
+    _llm_extract_hierarchical,
+    _flatten_hierarchy_to_pairs,
+    EXTRACTION_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-ANTHROPIC_MODEL = os.getenv("INGEST_LLM_MODEL", "claude-haiku-4-5-20251001")
-OPENAI_MODEL = os.getenv("INGEST_OPENAI_MODEL", "gpt-4o-mini")
-MAX_TEXT_CHARS = 60_000
-
 # Minimum fuzzy score to include a pair in proposals at all.
 # High (>=0.95): checked by default; Likely (0.85-0.95): checked; Possible (0.70-0.85): unchecked.
 FUZZY_INCLUDE_THRESHOLD = 0.70
 
-NEPOOL_EXTRACTION_PROMPT = (
-    "You are looking at a Vermont solar operator's records. Find every pair of "
-    "(array_name, nepool_gis_id) you can. The NEPOOL-GIS ID is a 5-digit "
-    "numeric (sometimes 4-6 digits) often labeled NEPOOL, NEPOOL-GIS, GIS, Asset ID, "
-    "or appearing in parentheses next to the array name like 'Tannery Brook (12345)'. "
-    "Return strictly: {\"pairs\": [{\"array_name\": \"...\", \"nepool_gis_id\": \"...\"}, ...]}. "
-    "Skip pairs where either field is missing. Skip totals/headers/footnotes."
-)
+# NEPOOL extraction reuses the same hierarchical prompt as ingest so the LLM
+# scans across all sheets — NEPOOL IDs may live on a different sheet than array names.
+NEPOOL_EXTRACTION_PROMPT = EXTRACTION_PROMPT
 
 # Regex fallback: matches "Array Name (12345)" or "Array Name: 12345" etc.
 _NEPOOL_INLINE_RE = re.compile(
@@ -90,69 +81,16 @@ def _extract_pairs_from_gmcs(wb) -> list[dict]:
 
 # ─── LLM pair extraction ───────────────────────────────────────────────────
 
-def _call_anthropic_pairs(text: str, api_key: str) -> list[dict]:
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": ANTHROPIC_MODEL,
-            "max_tokens": 2048,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": f"{NEPOOL_EXTRACTION_PROMPT}\n\nHere is the document:\n\n{text}",
-                },
-                {"role": "assistant", "content": '{"pairs":'},
-            ],
-        },
-        timeout=60.0,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    content = "".join(b.get("text", "") for b in body.get("content", []))
-    parsed = _extract_json_block('{"pairs":' + content)
-    return parsed.get("pairs", [])
-
-
-def _call_openai_pairs(text: str, api_key: str) -> list[dict]:
-    resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-        json={
-            "model": OPENAI_MODEL,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": NEPOOL_EXTRACTION_PROMPT},
-                {"role": "user", "content": f"Here is the document:\n\n{text}"},
-            ],
-        },
-        timeout=60.0,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    content = body["choices"][0]["message"]["content"]
-    return _extract_json_block(content).get("pairs", [])
-
-
 def _llm_extract_pairs(text: str) -> Optional[list[dict]]:
-    """Try Anthropic, then OpenAI. Return None if no key or both fail."""
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if anthropic_key:
-        try:
-            return _call_anthropic_pairs(text, anthropic_key)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Anthropic nepool extraction failed: %s", e)
-    if openai_key:
-        try:
-            return _call_openai_pairs(text, openai_key)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("OpenAI nepool extraction failed: %s", e)
-    return None
+    """Use the shared hierarchical extraction then flatten to (name, id) pairs.
+
+    This lets the LLM consider NEPOOL IDs across ALL sheets — e.g. array names
+    on sheet 1 and NEPOOL IDs in a separate column on sheet 2 are joined by
+    array name inside the hierarchical response."""
+    hierarchy = _llm_extract_hierarchical(text)
+    if hierarchy is None:
+        return None
+    return _flatten_hierarchy_to_pairs(hierarchy)
 
 
 # ─── heuristic fallback ────────────────────────────────────────────────────

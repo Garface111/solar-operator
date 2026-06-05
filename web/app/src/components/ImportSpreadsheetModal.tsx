@@ -39,6 +39,8 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
+  const [importedLogins, setImportedLogins] = useState(0);
+  const [importedClients, setImportedClients] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -52,6 +54,8 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
       setError(null);
       setDragOver(false);
       setCommitting(false);
+      setImportedLogins(0);
+      setImportedClients(0);
     }
   }, [open]);
 
@@ -84,6 +88,8 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
       }
       setSource(res.source);
       setRows(res.arrays.map((r) => ({ ...r, include: true })));
+      setImportedLogins(res.imported_logins ?? 0);
+      setImportedClients(res.imported_clients ?? 0);
       setStage("preview");
     } catch (err) {
       if (controller.signal.aborted) {
@@ -190,8 +196,9 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
         {stage === "upload" && (
           <div className="mt-4">
             <p className="mb-3 text-sm text-zinc-600">
-              Drop your roster of operators, arrays, and NEPOOL-GIS IDs. We&apos;ll
-              read it and let you review everything before anything is saved.
+              Drop any spreadsheet. We&apos;ll scan every sheet for clients,
+              utility logins, accounts, arrays, and NEPOOL-GIS IDs — and link
+              them automatically. Review everything before anything is saved.
             </p>
             <p className="mb-4 text-xs text-zinc-400">
               File contents are sent to an AI model to extract the row data. No data
@@ -291,6 +298,13 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
               <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
                 We couldn&apos;t use AI to parse this file — guessed at column
                 meanings. Double-check every row before saving.
+              </div>
+            )}
+
+            {/* Detected logins / clients from hierarchical extraction */}
+            {importedLogins > 0 && (
+              <div className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm text-zinc-700">
+                Found {importedLogins} utility login{importedLogins === 1 ? "" : "s"} across {importedClients} client{importedClients === 1 ? "" : "s"}.
               </div>
             )}
 
