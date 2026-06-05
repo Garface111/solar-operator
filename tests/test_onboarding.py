@@ -196,7 +196,12 @@ def test_complete_sends_magic_link_and_finishes(client, mocks):
 
 def test_clients_reconciles_stripe_quantity(client, mocks, monkeypatch):
     """2 clients × 3 arrays = 6 arrays → Stripe per-array item bumped to qty 6."""
+    # The constant lives in stripe_helpers (where reconcile_subscription_quantity
+    # reads it). Patch both onboarding (used at checkout creation) and
+    # stripe_helpers (used inside the reconcile call) for correctness.
     monkeypatch.setattr(onboarding, "STRIPE_ARRAY_PRICE_ID", "price_array_test")
+    from api import stripe_helpers as _sh
+    monkeypatch.setattr(_sh, "STRIPE_ARRAY_PRICE_ID", "price_array_test")
 
     # Stripe subscription has two items: the one-time setup and the recurring
     # per-array line. Only the latter (matching STRIPE_ARRAY_PRICE_ID) is touched.

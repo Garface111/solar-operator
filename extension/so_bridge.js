@@ -1,46 +1,107 @@
 // so_bridge.js — page ↔ extension bridge for the Solar Operator SPA.
 //
 // Runs on solaroperator.org + the Railway origin. The SPA cannot call
-// chrome.tabs.create directly (no chrome.* in page context), so it
-// window.postMessage's an intent and we forward it via chrome.runtime.
+// chrome.* directly (no chrome.* in page context), so it window.postMessage's
+// intents and we forward via chrome.runtime; broadcasts coming back from
+// background.js are reposted to the page so React effects can react live.
 //
-// Protocol — page → bridge:
-//   window.postMessage({ type: "SO_OPEN_PORTAL", url: "https://...", reqId: "..." }, "*")
-// Bridge → page (ack):
-//   window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: true|false }, "*")
+// ──────────────────────────────────────────────────────────────────────
+// PROTOCOL (see extension/BRIDGE_PROTOCOL.md for the canonical spec)
+// ──────────────────────────────────────────────────────────────────────
 //
-// The SPA uses the ack to decide between "extension opened it in a
-// background tab" and "fall back to window.open in a foreground tab".
+// Page → bridge (request, ack-driven):
+//   SO_OPEN_PORTAL      { url, reqId }              → SO_OPEN_PORTAL_ACK { reqId, ok, error? }
+//   SO_PAIR             { tenantKey, endpoint?, reqId } → SO_PAIR_ACK   { reqId, ok, version, lastSyncAt?, error? }
+//   SO_STATUS_REQUEST   { reqId }                   → SO_STATUS_ACK     { reqId, ok, version, tenantKeySet, lastSyncAt?, lastPayload?, loginState? }
 //
-// We also broadcast a one-shot SO_EXTENSION_PRESENT on load so the SPA
-// can detect the extension synchronously (used by the onboarding banner).
+// Bridge → page (one-shot broadcasts, no reqId):
+//   SO_EXTENSION_PRESENT  { version }
+//   SO_LOGIN_STATE        { provider, state, url, at }
+//   SO_CAPTURE_LANDED     { ok, provider, accountCount, at, error? }
+
 (() => {
+  // ── Announce presence so the SPA can detect us synchronously. ───────
   try {
-    window.postMessage({ type: "SO_EXTENSION_PRESENT", version: chrome.runtime.getManifest().version }, "*");
+    window.postMessage({
+      type: "SO_EXTENSION_PRESENT",
+      version: chrome.runtime.getManifest().version,
+    }, "*");
   } catch (_) { /* manifest unavailable in odd contexts — non-fatal */ }
 
+  // ── Page → bridge → background ──────────────────────────────────────
   window.addEventListener("message", (event) => {
-    // Only accept messages from the same window (page → bridge).
     if (event.source !== window) return;
     const data = event.data;
     if (!data || typeof data !== "object") return;
-    if (data.type !== "SO_OPEN_PORTAL") return;
 
-    const reqId = data.reqId || null;
-    const url = String(data.url || "").trim();
-    if (!url || !/^https:\/\//i.test(url)) {
-      window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, "*");
+    if (data.type === "SO_OPEN_PORTAL") {
+      const reqId = data.reqId || null;
+      const url = String(data.url || "").trim();
+      if (!url || !/^https:\/\//i.test(url)) {
+        window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, "*");
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url }, (resp) => {
+        const ok = !chrome.runtime.lastError && resp && resp.ok;
+        window.postMessage({
+          type: "SO_OPEN_PORTAL_ACK",
+          reqId,
+          ok: !!ok,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, "*");
+      });
       return;
     }
 
-    chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url }, (resp) => {
-      const ok = !chrome.runtime.lastError && resp && resp.ok;
-      window.postMessage({
-        type: "SO_OPEN_PORTAL_ACK",
-        reqId,
-        ok: !!ok,
-        error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
-      }, "*");
-    });
+    if (data.type === "SO_PAIR") {
+      const reqId = data.reqId || null;
+      const tenantKey = String(data.tenantKey || "").trim();
+      const endpoint = typeof data.endpoint === "string" ? data.endpoint : undefined;
+      if (!tenantKey) {
+        window.postMessage({ type: "SO_PAIR_ACK", reqId, ok: false, error: "missing-tenant-key" }, "*");
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "SO_PAIR", tenantKey, endpoint }, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_PAIR_ACK",
+          reqId,
+          ok: !!(resp && resp.ok),
+          version: resp ? resp.version : undefined,
+          lastSyncAt: resp ? resp.lastSyncAt : undefined,
+          error: err,
+        }, "*");
+      });
+      return;
+    }
+
+    if (data.type === "SO_STATUS_REQUEST") {
+      const reqId = data.reqId || null;
+      chrome.runtime.sendMessage({ type: "SO_STATUS_REQUEST" }, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_STATUS_ACK",
+          reqId,
+          ok: !!(resp && resp.ok),
+          version: resp ? resp.version : undefined,
+          tenantKeySet: resp ? resp.tenantKeySet : undefined,
+          lastSyncAt: resp ? resp.lastSyncAt : undefined,
+          lastPayload: resp ? resp.lastPayload : undefined,
+          loginState: resp ? resp.loginState : undefined,
+          error: err,
+        }, "*");
+      });
+      return;
+    }
+  });
+
+  // ── Background → bridge → page broadcasts ────────────────────────────
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.type === "SO_LOGIN_STATE" || msg.type === "SO_CAPTURE_LANDED") {
+      window.postMessage(msg, "*");
+    }
+    // We don't need to keep the channel open for an async response —
+    // background broadcasts are fire-and-forget.
   });
 })();

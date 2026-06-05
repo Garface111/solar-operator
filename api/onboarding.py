@@ -546,6 +546,22 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
                                         if ai.bill_offset_months is not None else 1),
                 ))
 
+        # ── Drop the seed placeholder Client(s) (Path A activation) ─────
+        # When the operator went through Path A and manually entered real
+        # clients here, the "Your first client" placeholder Client (seeded
+        # at Stripe webhook time) is now redundant. Delete it cleanly so
+        # the dashboard doesn't show a phantom row alongside the real
+        # clients. The placeholder by construction has no Arrays, so it's
+        # safe to delete without orphaning.
+        placeholders = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.is_placeholder.is_(True),
+            )
+        ).scalars().all()
+        for ph in placeholders:
+            db.delete(ph)
+
         if t.onboarding_stage in ("extension", "clients"):
             t.onboarding_stage = "clients"
         db.commit()

@@ -223,8 +223,48 @@
       lastUrl = now;
       pollCount = 0;
       tryScrape();
+      broadcastLoginState();
     }
   }, 2000);
+
+  // ── Login-state detection (v1.3.0) ─────────────────────────────────────
+  // SmartHub uses cookie auth + an Angular SPA. We detect:
+  //   - login_required: URL contains /login OR a password input is on the page
+  //   - signed_in:      we successfully scraped any billing/usage data so far,
+  //                     OR we're on a /services/secured/ URL path
+  //   - unknown:        page is mid-load
+  let lastLoginState = null;
+  function detectLoginState() {
+    const url = location.href.toLowerCase();
+    if (url.includes("/services/secured/") || url.includes("/dashboard")) {
+      return "signed_in";
+    }
+    if (url.includes("/login") || url.includes("signin") || url.includes("sign-in")) {
+      return "login_required";
+    }
+    if (document.querySelector('input[type="password"]')) {
+      return "login_required";
+    }
+    // If we have either bill or usage rows in the DOM we're signed in.
+    if (document.querySelector("table") && /usage|billing|history/i.test(document.body.innerText || "")) {
+      return "signed_in";
+    }
+    return "unknown";
+  }
+  function broadcastLoginState() {
+    const state = detectLoginState();
+    if (state === lastLoginState) return;
+    lastLoginState = state;
+    chrome.runtime.sendMessage({
+      type: "LOGIN_STATE_DETECTED",
+      provider: "vec",
+      state,
+      url: location.href,
+      at: new Date().toISOString(),
+    }, () => { void chrome.runtime.lastError; });
+  }
+  setInterval(broadcastLoginState, 2500);
+  broadcastLoginState();
 
   tryScrape();
 })();

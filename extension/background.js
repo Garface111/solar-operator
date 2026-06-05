@@ -2,6 +2,11 @@
 // Receives captured tokens from content.js (GMP) and vec_content.js (VEC),
 // persists locally, and POSTs to the Solar Operator API.
 
+// v1.3.0: SO_PAIR / SO_STATUS_REQUEST handlers + SO_CAPTURE_LANDED +
+//         SO_LOGIN_STATE broadcasts to every solaroperator.org tab so the
+//         onboarding wizard can mirror live state without polling.
+// v1.2.0: OPEN_UTILITY_PORTAL background-tab handler + so_bridge.js content
+//         script for SPA ↔ extension postMessage.
 // v1.1.0: added VEC / NISC SmartHub support (VEC_DATA_CAPTURED)
 // v1.0.2: primary endpoint on api.solaroperator.org with Railway fallback
 // during the CNAME transition window.
@@ -13,7 +18,34 @@ const STORAGE_KEYS = {
   LAST_SYNC: "last_sync",
   LAST_PAYLOAD: "last_payload",
   LAST_ERROR: "last_error",
+  LAST_LOGIN_STATE: "last_login_state",  // v1.3.0 — most recent per-provider login state
 };
+
+// v1.3.0: broadcast a payload to every open solaroperator.org tab so the
+// SPA can react without polling. The so_bridge.js content script picks
+// these up via chrome.runtime.onMessage and re-posts to its window.
+const SO_TAB_URLS = [
+  "https://solaroperator.org/*",
+  "https://*.solaroperator.org/*",
+  "https://web-production-49c83.up.railway.app/*",
+];
+function broadcastToSoTabs(message) {
+  try {
+    chrome.tabs.query({ url: SO_TAB_URLS }, (tabs) => {
+      if (chrome.runtime.lastError) { void chrome.runtime.lastError; return; }
+      for (const t of tabs || []) {
+        if (typeof t.id !== "number") continue;
+        chrome.tabs.sendMessage(t.id, message, () => {
+          // Tab may not have so_bridge.js loaded yet (race on document_start) —
+          // swallow the "Receiving end does not exist" error.
+          void chrome.runtime.lastError;
+        });
+      }
+    });
+  } catch (e) {
+    console.warn("[Solar Operator] broadcastToSoTabs failed:", e);
+  }
+}
 
 async function getSettings() {
   const s = await chrome.storage.local.get([
@@ -90,10 +122,11 @@ async function _handleSync(payload, tokenHash, sendResponse) {
     }
 
     const result = await postSync(payload);
+    const at = new Date().toISOString();
     await chrome.storage.local.set({
       [STORAGE_KEYS.LAST_SYNC]: {
         ok: true,
-        at: new Date().toISOString(),
+        at,
         endpoint: settings.endpoint,
         result,
       },
@@ -101,13 +134,31 @@ async function _handleSync(payload, tokenHash, sendResponse) {
     });
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#2e6b3a" });
+    // v1.3.0: tell every open solaroperator.org tab so the onboarding wizard
+    // can auto-advance the moment a capture lands.
+    broadcastToSoTabs({
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: payload.provider || "gmp",
+      accountCount: (payload.accounts || []).length,
+      at,
+    });
     sendResponse({ ok: true, endpoint: settings.endpoint });
   } catch (e) {
+    const at = new Date().toISOString();
     await chrome.storage.local.set({
-      [STORAGE_KEYS.LAST_ERROR]: { at: new Date().toISOString(), message: String(e) },
+      [STORAGE_KEYS.LAST_ERROR]: { at, message: String(e) },
     });
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#c97a3d" });
+    broadcastToSoTabs({
+      type: "SO_CAPTURE_LANDED",
+      ok: false,
+      provider: (payload && payload.provider) || "gmp",
+      accountCount: 0,
+      at,
+      error: String(e),
+    });
     sendResponse({ ok: false, error: String(e) });
   }
 }
@@ -134,6 +185,85 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     });
     return true; // chrome.tabs.create callback is async
+  }
+  // v1.3.0: SPA hands us a tenant key + endpoint (kills the copy-paste
+  // activation-code step). We persist immediately and reply with the
+  // resulting state so the SPA can show a "paired ✓" badge.
+  if (msg.type === "SO_PAIR") {
+    (async () => {
+      try {
+        const tenantKey = String(msg.tenantKey || "").trim();
+        if (!tenantKey) {
+          sendResponse({ ok: false, error: "missing-tenant-key" });
+          return;
+        }
+        const update = { [STORAGE_KEYS.TENANT_KEY]: tenantKey };
+        if (msg.endpoint && typeof msg.endpoint === "string") {
+          update[STORAGE_KEYS.ENDPOINT] = msg.endpoint;
+        }
+        await chrome.storage.local.set(update);
+        const s = await chrome.storage.local.get([STORAGE_KEYS.LAST_SYNC]);
+        const lastSyncAt = s[STORAGE_KEYS.LAST_SYNC]
+          ? s[STORAGE_KEYS.LAST_SYNC].at || null
+          : null;
+        sendResponse({
+          ok: true,
+          version: chrome.runtime.getManifest().version,
+          lastSyncAt,
+        });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  // v1.3.0: SPA wants current extension state synchronously on mount.
+  if (msg.type === "SO_STATUS_REQUEST") {
+    (async () => {
+      try {
+        const s = await chrome.storage.local.get([
+          STORAGE_KEYS.TENANT_KEY,
+          STORAGE_KEYS.LAST_SYNC,
+          STORAGE_KEYS.LAST_PAYLOAD,
+          STORAGE_KEYS.LAST_LOGIN_STATE,
+        ]);
+        sendResponse({
+          ok: true,
+          version: chrome.runtime.getManifest().version,
+          tenantKeySet: !!s[STORAGE_KEYS.TENANT_KEY],
+          lastSyncAt: s[STORAGE_KEYS.LAST_SYNC]
+            ? s[STORAGE_KEYS.LAST_SYNC].at || null
+            : null,
+          lastPayload: s[STORAGE_KEYS.LAST_PAYLOAD] || null,
+          loginState: s[STORAGE_KEYS.LAST_LOGIN_STATE] || null,
+        });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  // v1.3.0: content.js / vec_content.js classified the current utility
+  // tab. Persist the latest per-provider state and rebroadcast to every
+  // solaroperator.org tab so the onboarding wizard mirrors it live.
+  if (msg.type === "LOGIN_STATE_DETECTED") {
+    (async () => {
+      try {
+        const payload = {
+          provider: msg.provider,
+          state: msg.state,
+          url: msg.url,
+          at: msg.at || new Date().toISOString(),
+        };
+        const s = await chrome.storage.local.get([STORAGE_KEYS.LAST_LOGIN_STATE]);
+        const merged = { ...(s[STORAGE_KEYS.LAST_LOGIN_STATE] || {}), [payload.provider]: payload };
+        await chrome.storage.local.set({ [STORAGE_KEYS.LAST_LOGIN_STATE]: merged });
+        broadcastToSoTabs({ type: "SO_LOGIN_STATE", ...payload });
+      } catch (e) {
+        console.warn("[Solar Operator] LOGIN_STATE_DETECTED handling failed:", e);
+      }
+    })();
+    return false;
   }
 });
 

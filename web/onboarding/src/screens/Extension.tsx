@@ -9,134 +9,181 @@ import { useToast } from "../ui/Toast";
 import { openPortalTab } from "../lib/openPortalTab";
 import {
   getToken,
-  pingExtension,
-  markExtensionInstalled,
   fetchStatus,
   reconcileCheckout,
 } from "../lib/onboarding";
 
-const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
-// Listing verified live 2026-06-03 (HTTP 200, real "Solar Operator Sync" product
-// page). This explicit flag drives the "pending publication" warning instead of
-// the old `CHROME_STORE_URL.startsWith("#")` heuristic, which could never fire
-// once the URL became a real store path. Flip to false if the listing is ever
-// unpublished and the warning needs to render again.
-const CHROME_STORE_PUBLISHED = true;
+const CHROME_STORE_URL =
+  "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
 
-// Where to send the tenant to trigger their first capture. We list the
-// utilities Solar Operator currently scrapes; the operator clicks whichever
-// one their client uses. Add new entries here as new adapters ship.
-const UTILITY_PORTALS: { name: string; url: string }[] = [
-  { name: "Green Mountain Power", url: "https://www.greenmountainpower.com/account/" },
-  { name: "Vermont Electric Coop", url: "https://vermontelectric.smarthub.coop/" },
+type Provider = "gmp" | "vec";
+
+const PORTALS: { id: Provider; name: string; short: string; url: string }[] = [
+  {
+    id: "gmp",
+    name: "Green Mountain Power",
+    short: "GMP",
+    url: "https://www.greenmountainpower.com/account/",
+  },
+  {
+    id: "vec",
+    name: "Vermont Electric Coop",
+    short: "VEC",
+    url: "https://vermontelectric.smarthub.coop/",
+  },
 ];
 
-const POLL_MS = 3000;
-// After this many consecutive ping failures we surface a "having trouble" hint
-// and stop nagging the operator with toasts.
-const FAIL_THRESHOLD = 5;
-// After this many poll ticks with no capture (~30s at POLL_MS) we offer the
-// troubleshooting modal. This counts *waiting*, not network failures — the
-// common bounce is "reachable server, tenant never logged into GMP".
-const HELP_THRESHOLD = 10;
+// How long to wait (silently) before surfacing the "Having trouble?" affordance.
+const HELP_TIMEOUT_MS = 45_000;
+
+// How often to retry fetching the activation_code from /v1/onboarding/status
+// while the Stripe webhook is still in flight. The happy path resolves on the
+// first try; we keep trying quietly behind the scenes for slower webhooks.
+const STATUS_RETRY_MS = 3_000;
+const STATUS_MAX_RETRIES = 20;
+
+function uuid(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const c: any = typeof crypto !== "undefined" ? crypto : null;
+    if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  } catch {
+    /* fall through */
+  }
+  return `r-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+interface LoginState {
+  provider: Provider;
+  state: "login_required" | "signed_in" | "unknown";
+  at: string;
+}
 
 export default function Extension() {
   const navigate = useNavigate();
   const toast = useToast();
-  const [installed, setInstalled] = useState(false);
-  const [advancing, setAdvancing] = useState(false);
-  const [pollFailures, setPollFailures] = useState(0);
-  const [waitTicks, setWaitTicks] = useState(0);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [sessionError, setSessionError] = useState<string | null>(null);
-  const [activationCode, setActivationCode] = useState<string | null>(null);
-  const [paymentActive, setPaymentActive] = useState(false);
-  const [codeFailed, setCodeFailed] = useState(false);
-  // Bumping this re-runs the activation-code retry loop (manual "Refresh").
-  const [codeReload, setCodeReload] = useState(0);
-  const [copied, setCopied] = useState(false);
-  const [extensionActive, setExtensionActive] = useState(false);
-  /** Per-portal "visited" flag — set when the operator clicks Open <Portal>.
-   *  Drives the "log into both" UX: even if a capture lands from one portal,
-   *  we don't auto-advance until every visited portal has been captured (or
-   *  the operator explicitly clicks "I've installed it →"). Persisted to
-   *  sessionStorage so a refresh during onboarding doesn't lose state. */
-  const [portalsVisited, setPortalsVisited] = useState<Record<string, boolean>>(
-    () => {
-      try {
-        const raw = sessionStorage.getItem("so_portals_visited");
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-        return {};
-      }
-    },
-  );
-  function markPortalVisited(url: string) {
-    setPortalsVisited((prev) => {
-      const next = { ...prev, [url]: true };
-      try {
-        sessionStorage.setItem("so_portals_visited", JSON.stringify(next));
-      } catch {
-        /* noop */
-      }
-      return next;
-    });
-  }
-  const visitedCount = Object.values(portalsVisited).filter(Boolean).length;
-  // Paid-but-inactive self-heal: when we return from Stripe with a session_id
-  // but the webhook hasn't activated us yet, we reassure + reconcile rather
-  // than letting the operator hit a 402 "pay again".
-  const [paymentState, setPaymentState] =
-    useState<"none" | "confirming" | "processing">("none");
+
   const tokenRef = useRef<string | null>(getToken());
   const sessionIdRef = useRef<string | null>(
     new URLSearchParams(window.location.search).get("session_id"),
   );
 
-  // Fetch the activation code (tenant_key) the moment the tenant is active.
-  // The user needs to paste this into the extension's options page so its
-  // posts to /v1/sync are authenticated against their tenant.
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [paymentActive, setPaymentActive] = useState(false);
+  const [paymentState, setPaymentState] =
+    useState<"none" | "confirming" | "processing">("none");
+
+  // Bridge state
+  const [extensionPresent, setExtensionPresent] = useState(false);
+  const [paired, setPaired] = useState(false);
+  const [activationCode, setActivationCode] = useState<string | null>(null);
+  const pairAttemptedRef = useRef(false);
+
+  // The portal the user most recently opened from this screen.
+  const [openingProvider, setOpeningProvider] = useState<Provider | null>(null);
+  const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
+  const [loginState, setLoginState] = useState<LoginState | null>(null);
+
+  // Capture / advance
+  const [landed, setLanded] = useState<{ accountCount: number; provider: Provider } | null>(null);
+  const navigatingRef = useRef(false);
+
+  // Safety net — surface troubleshooting only after a long silent wait.
+  const [showHelpLink, setShowHelpLink] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  // -------- 1. Listen to the bridge --------
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+
+      if (data.type === "SO_EXTENSION_PRESENT") {
+        setExtensionPresent(true);
+        return;
+      }
+
+      if (data.type === "SO_LOGIN_STATE") {
+        const p = data.provider as Provider;
+        setLoginState({ provider: p, state: data.state, at: data.at });
+        return;
+      }
+
+      if (data.type === "SO_CAPTURE_LANDED") {
+        if (!data.ok) return;
+        if (navigatingRef.current) return;
+        navigatingRef.current = true;
+        setLanded({
+          accountCount: Number(data.accountCount ?? 0),
+          provider: data.provider as Provider,
+        });
+        window.setTimeout(() => navigate("/done"), 1100);
+        return;
+      }
+
+      if (data.type === "SO_PAIR_ACK" && data.ok) {
+        setPaired(true);
+        return;
+      }
+
+      if (data.type === "SO_STATUS_ACK" && data.ok) {
+        if (data.tenantKeySet) setPaired(true);
+        if (data.loginState) {
+          setLoginState({
+            provider: data.loginState.provider,
+            state: data.loginState.state,
+            at: data.loginState.at,
+          });
+        }
+        return;
+      }
+    }
+    window.addEventListener("message", onMessage);
+
+    // Ask the bridge for current state in case SO_EXTENSION_PRESENT already fired
+    // before this listener mounted (race on fast page loads).
+    window.postMessage({ type: "SO_STATUS_REQUEST", reqId: uuid() }, "*");
+
+    return () => window.removeEventListener("message", onMessage);
+  }, [navigate]);
+
+  // -------- 2. Fetch activation_code quietly --------
   useEffect(() => {
     const token = tokenRef.current;
-    if (!token) return;
+    if (!token) {
+      setSessionError(
+        "We couldn't find your onboarding session. Please restart from the welcome screen.",
+      );
+      return;
+    }
     let cancelled = false;
     let retries = 0;
-    const MAX_RETRIES = 20; // ~60s of retries at 3s intervals
-    setCodeFailed(false);
-    async function loadCode() {
+    async function loop() {
       if (cancelled) return;
       try {
         const status = await fetchStatus(token!);
         if (cancelled) return;
         if (status.active) setPaymentActive(true);
-        if (status.extension_active) setExtensionActive(true);
         if (status.activation_code) {
           setActivationCode(status.activation_code);
-          return; // got it — stop retrying
+          return;
         }
       } catch {
-        /* non-fatal — fall through to retry */
+        /* non-fatal; retry */
       }
-      // No code yet (webhook hasn't fired or tenant not active) — try again
       retries += 1;
-      if (retries < MAX_RETRIES && !cancelled) {
-        window.setTimeout(loadCode, 3000);
-      } else if (!cancelled) {
-        // Retries exhausted — stop the silent permanent "Loading…" and offer
-        // a real error + manual refresh instead.
-        setCodeFailed(true);
+      if (retries < STATUS_MAX_RETRIES && !cancelled) {
+        window.setTimeout(loop, STATUS_RETRY_MS);
       }
     }
-    void loadCode();
+    void loop();
     return () => {
       cancelled = true;
     };
-  }, [codeReload]);
+  }, []);
 
-  // Paid-but-inactive self-heal. On mount, if we returned from Stripe with a
-  // session_id but we're still pending_payment (webhook lag), verify the
-  // Checkout session server-side and poll until active — up to ~30s — instead
-  // of stranding a paying customer.
+  // -------- 3. Paid-but-inactive self-heal (unchanged behavior) --------
   useEffect(() => {
     const token = tokenRef.current;
     const sessionId = sessionIdRef.current;
@@ -145,19 +192,16 @@ export default function Extension() {
     let cancelled = false;
     let timer: number | undefined;
     let ticks = 0;
-    const MAX_TICKS = 10; // ~30s at POLL_MS
+    const MAX_TICKS = 10;
 
-    async function loop(first: boolean) {
+    async function step(first: boolean) {
       if (cancelled) return;
       try {
         let st = await fetchStatus(token!);
         if (cancelled) return;
         if (first) {
-          if (st.active || st.stage !== "pending_payment") {
-            return; // nothing to heal — webhook already landed
-          }
+          if (st.active || st.stage !== "pending_payment") return;
           setPaymentState("confirming");
-          // Kick the server-side self-heal once, then poll for the result.
           st = await reconcileCheckout(token!, sessionId!);
           if (cancelled) return;
         }
@@ -168,7 +212,6 @@ export default function Extension() {
         }
       } catch {
         if (cancelled) return;
-        // Network/Stripe hiccup — keep the reassuring state and keep polling.
         setPaymentState((s) => (s === "none" ? "confirming" : s));
       }
       ticks += 1;
@@ -176,98 +219,96 @@ export default function Extension() {
         if (!cancelled) setPaymentState("processing");
         return;
       }
-      timer = window.setTimeout(() => void loop(false), POLL_MS);
+      timer = window.setTimeout(() => void step(false), 3000);
     }
 
-    void loop(true);
+    void step(true);
     return () => {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
   }, []);
 
-  async function handleCopy() {
-    if (!activationCode) return;
-    try {
-      await navigator.clipboard.writeText(activationCode);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      toast.error("Couldn't copy automatically — please select and copy manually.");
-    }
-  }
-
-  // Poll extension-ping every 3s; auto-advance to /clients when installed.
+  // -------- 4. AUTO-PAIR --------
   useEffect(() => {
-    const token = tokenRef.current;
-    if (!token) {
-      setSessionError(
-        "We couldn't find your onboarding session. Please restart from the welcome screen.",
-      );
-      return;
+    if (pairAttemptedRef.current) return;
+    if (!extensionPresent || !activationCode) return;
+    pairAttemptedRef.current = true;
+    const endpoint = `${window.location.origin}/v1/sync`;
+    window.postMessage(
+      {
+        type: "SO_PAIR",
+        tenantKey: activationCode,
+        endpoint,
+        reqId: uuid(),
+      },
+      "*",
+    );
+  }, [extensionPresent, activationCode]);
+
+  // -------- 5. Help-link safety net --------
+  useEffect(() => {
+    const id = window.setTimeout(() => setShowHelpLink(true), HELP_TIMEOUT_MS);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  // -------- Status line copy --------
+  function statusLine(): { text: string; tone: "waiting" | "active" | "success" } {
+    if (landed) {
+      return {
+        text: `Your first client landed: ${landed.accountCount} account${landed.accountCount === 1 ? "" : "s"} captured ✓`,
+        tone: "success",
+      };
     }
-
-    let cancelled = false;
-    let failures = 0;
-    let waits = 0;
-
-    async function tick() {
-      try {
-        const { installed: ok } = await pingExtension(token!);
-        if (cancelled) return;
-        failures = 0;
-        setPollFailures(0);
-        if (ok) {
-          setInstalled(true);
-          // Hold on the "Captured ✓" state. Do NOT auto-advance: the operator
-          // may have multiple utilities (GMP + VEC) to log into, and we don't
-          // want to whisk them off to /clients after the first capture.
-          // They'll click "I've installed it →" when they're done.
-          return;
-        }
-      } catch {
-        if (cancelled) return;
-        failures += 1;
-        setPollFailures(failures);
-        // One toast exactly when we cross the threshold — not on every tick.
-        if (failures === FAIL_THRESHOLD) {
-          toast.error(
-            "We're having trouble reaching the server to detect your extension.",
-          );
+    // Prefer the live broadcast if it matches the portal the user just opened.
+    const ls = loginState;
+    if (ls) {
+      const portal = PORTALS.find((p) => p.id === ls.provider);
+      const name = portal?.name ?? "your utility";
+      if (ls.state === "signed_in") {
+        return { text: "Signed in — capturing your data…", tone: "active" };
+      }
+      if (ls.state === "login_required") {
+        // Only narrate this for a portal we know the user opened from here;
+        // otherwise fall back to the gentler "waiting" copy.
+        if (activeProvider === ls.provider || openingProvider === ls.provider) {
+          return { text: `Sign in at ${name}`, tone: "active" };
         }
       }
-      // Reached only while still waiting (no capture yet, success or failure).
-      // After ~30s we offer the troubleshooting modal.
-      waits += 1;
-      setWaitTicks(waits);
     }
-
-    void tick();
-    const id = window.setInterval(tick, POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
+    if (openingProvider) {
+      const portal = PORTALS.find((p) => p.id === openingProvider);
+      return {
+        text: `Opening ${portal?.name ?? "your utility"}…`,
+        tone: "active",
+      };
+    }
+    return {
+      text: "Waiting for you to open a utility portal…",
+      tone: "waiting",
     };
-  }, [navigate, toast]);
+  }
 
-  async function handleManual() {
-    const token = tokenRef.current;
-    if (!token || advancing) return;
-    setAdvancing(true);
+  async function openPortal(p: Provider, url: string) {
+    setOpeningProvider(p);
     try {
-      await markExtensionInstalled(token, sessionIdRef.current);
-      navigate("/clients");
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Couldn't continue. Please try again.",
-      );
-      setAdvancing(false);
+      await openPortalTab(url);
+      setActiveProvider(p);
+    } catch {
+      toast.error("Couldn't open that portal — try clicking again.");
+    } finally {
+      // Clear "Opening…" once the call settles; live state takes over from here.
+      setOpeningProvider((cur) => (cur === p ? null : cur));
     }
   }
 
-  const storeUnpublished = !CHROME_STORE_PUBLISHED;
-  const havingTrouble = pollFailures >= FAIL_THRESHOLD;
-  const showHelp = waitTicks >= HELP_THRESHOLD && !installed;
+  async function handleManualContinue() {
+    if (navigatingRef.current) return;
+    navigatingRef.current = true;
+    navigate("/done");
+  }
+
+  const status = statusLine();
 
   return (
     <ScreenLayout current={4}>
@@ -278,13 +319,13 @@ export default function Extension() {
             Payment received — your subscription is active.
           </div>
         )}
+
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
-          Copy your activation code, then install the extension.
+          Connect your utility.
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          You&apos;ll paste this code into the Solar Operator Sync Chrome extension
-          right after installing it — then log into your utility account once and we&apos;ll detect
-          it automatically.
+          Open the portal you use, sign in once, and we&apos;ll do the rest from
+          here. No codes to copy, no settings to fiddle with.
         </p>
 
         {paymentState === "confirming" && (
@@ -296,7 +337,6 @@ export default function Extension() {
               </p>
               <p className="text-xs text-zinc-500">
                 Hang tight — we&apos;re verifying your subscription with Stripe.
-                This only takes a moment.
               </p>
             </div>
           </div>
@@ -309,229 +349,93 @@ export default function Extension() {
             </p>
             <p className="mt-1 text-xs leading-relaxed text-amber-800">
               This usually takes a minute. We&apos;ll email you the moment it
-              clears, and you can pick up right where you left off — no need to
-              pay again.
+              clears — no need to pay again.
             </p>
-            <a
-              href="/onboarding/?recover=1"
-              className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-800 transition-colors duration-150 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 focus-visible:ring-offset-2"
-            >
-              I&apos;ll check back later
-            </a>
           </div>
         )}
 
-        {/* Step 1 — Copy activation code (FIRST so it's the first thing they do) */}
-        <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50/40 px-4 py-4">
-          <div className="text-sm font-semibold text-zinc-900">
-            Step 1 — Copy your activation code
+        {/* Pair badge (tiny, calm). Only after the extension is paired. */}
+        {paired && (
+          <div className="mt-6 inline-flex items-center gap-2 rounded-full border border-primary-200 bg-primary-50 px-3 py-1 text-xs font-medium text-primary-700">
+            <span aria-hidden>✓</span>
+            Extension paired
           </div>
-          <p className="mt-1 text-xs text-zinc-600">
-            Keep this somewhere safe for a minute — you&apos;ll paste it into the
-            extension in Step 3. Treat it like a password.
-          </p>
-          {codeFailed && !activationCode ? (
-            <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-3">
-              <p className="text-xs leading-relaxed text-amber-800">
-                We&apos;re still confirming your activation code — this can take
-                up to a minute after payment.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setCodeFailed(false);
-                  setCodeReload((n) => n + 1);
-                }}
-                className="mt-2 inline-flex items-center justify-center rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors duration-150 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 focus-visible:ring-offset-2"
-              >
-                Refresh
-              </button>
-            </div>
-          ) : (
-            <div className="mt-3 flex items-stretch gap-2">
-              <code className="flex-1 select-all rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-sm text-zinc-800 break-all">
-                {activationCode ?? "Loading…"}
-              </code>
-              <button
-                type="button"
-                onClick={handleCopy}
-                disabled={!activationCode}
-                className="inline-flex items-center justify-center rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors duration-150 hover:bg-zinc-50 active:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-                aria-label="Copy activation code"
-              >
-                {copied ? "Copied ✓" : "Copy"}
-              </button>
-            </div>
-          )}
-        </div>
+        )}
 
-        {/* Step 2 — Install the extension */}
-        <div className="mt-4 rounded-xl border border-zinc-200 bg-white px-4 py-4">
-          <div className="text-sm font-semibold text-zinc-900">
-            Step 2 — Install Solar Operator Sync
-          </div>
-          <p className="mt-1 text-xs text-zinc-600">
-            Then pin it to your toolbar so it&apos;s always one click away.
-          </p>
-          <a
-            href={CHROME_STORE_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-          >
-            Install Solar Operator Sync from the Chrome Web Store ↗
-          </a>
-          {storeUnpublished && (
-            <p className="mt-2 text-xs text-amber-600">
-              Heads up: the Chrome Web Store listing is still pending publication
-              — this link is a placeholder for now.
+        {/* If the extension isn't here yet, point them at the store — quietly. */}
+        {!extensionPresent && (
+          <div className="mt-6 rounded-xl border border-zinc-200 bg-white px-4 py-4">
+            <p className="text-sm text-zinc-700">
+              First, add Solar Operator Sync to Chrome — it&apos;s the little
+              helper that watches your utility tab for bills.
             </p>
-          )}
-          <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs leading-relaxed text-zinc-700">
-            <span className="font-semibold text-zinc-900">Pin the extension:</span>{" "}
-            click the puzzle-piece <span aria-hidden>🧩</span> icon in the top-right
-            of Chrome → find <strong>Solar Operator Sync</strong> → click the pin
-            icon next to it. Now its icon sits in your toolbar for one-click access.
+            <a
+              href={CHROME_STORE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+            >
+              Add Solar Operator Sync to Chrome ↗
+            </a>
+            <p className="mt-2 text-xs text-zinc-500">
+              We&apos;ll notice it the moment it&apos;s installed — no need to
+              refresh.
+            </p>
           </div>
-        </div>
+        )}
 
-        {/* Step 3 — Paste activation code */}
-        <div className="mt-4 rounded-xl border border-zinc-200 bg-white px-4 py-4">
+        {/* Portal choice + live status — the heart of the screen. */}
+        <div className="mt-8 rounded-2xl border border-primary-200 bg-primary-50/40 px-5 py-5">
           <div className="text-sm font-semibold text-zinc-900">
-            Step 3 — Paste your code into the extension
+            Which utility does this client use?
           </div>
-          <p className="mt-1 text-xs text-zinc-600">
-            Click the Solar Operator Sync icon in your toolbar →{" "}
-            <strong>Options</strong>, paste the code from Step 1 into{" "}
-            <strong>Activation code</strong>, and click Save. That links the
-            extension to your account.
-          </p>
-        </div>
-
-        {/* Test connection card removed — the page already polls the server
-            every few seconds and the status line below ("Capture received ✓"
-            vs "We're waiting for your first utility capture…") tells the
-            operator exactly the same thing without an extra button to click. */}
-
-        {/* Activation guidance — the #1 onboarding bounce point is the tenant
-            not realizing they still have to log into GMP to trigger a capture. */}
-        <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 px-5 py-5">
-          <div className="text-base font-semibold tracking-tight text-zinc-900">
-            Almost there — activate by logging into your utility portal
-          </div>
-          <ol className="mt-4 flex flex-col gap-4">
-            {[
-              "Install the extension above",
-              "Paste your activation code into the extension's Options page",
-              "Log into your utility portal (e.g., GMP or VEC) in any tab — we'll detect your bills automatically",
-            ].map((step, i) => (
-              <li key={i} className="flex items-start gap-3">
-                <span
-                  aria-hidden
-                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary-500 text-xs font-semibold text-white"
-                >
-                  {i + 1}
-                </span>
-                <span className="text-sm leading-snug text-zinc-700">
-                  {step}
-                </span>
-              </li>
-            ))}
-          </ol>
-          <div className="mt-5 flex flex-wrap gap-2">
-            {UTILITY_PORTALS.map((p) => {
-              const visited = !!portalsVisited[p.url];
+          <div className="mt-4 flex flex-wrap gap-3">
+            {PORTALS.map((p) => {
+              const isOpening = openingProvider === p.id;
+              const isActive = activeProvider === p.id;
+              const baseStyle = isActive
+                ? "border border-primary-300 bg-white text-primary-700 hover:bg-primary-50"
+                : "bg-primary-500 text-white hover:bg-primary-600 active:bg-primary-700";
               return (
-                <a
-                  key={p.url}
-                  href={p.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => {
-                    // Prefer background-tab path so the operator keeps
-                    // watching the onboarding "waiting for capture" UI.
-                    // Falls back to a normal new tab if the extension
-                    // isn't installed/listening.
-                    e.preventDefault();
-                    markPortalVisited(p.url);
-                    void openPortalTab(p.url);
-                  }}
-                  className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-medium transition-colors duration-150 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 ${
-                    visited
-                      ? "border border-primary-200 bg-primary-50 text-primary-700 hover:bg-primary-100"
-                      : "bg-primary-500 text-white hover:bg-primary-600 active:bg-primary-700"
-                  }`}
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => void openPortal(p.id, p.url)}
+                  disabled={!!landed}
+                  className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-medium transition-colors duration-150 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 disabled:opacity-60 ${baseStyle}`}
                 >
-                  {visited ? "✓ " : ""}
-                  Open {p.name} →
-                </a>
+                  {isActive && <span aria-hidden>✓</span>}
+                  {isOpening ? `Opening ${p.short}…` : `Open ${p.name} →`}
+                </button>
               );
             })}
           </div>
-          <p className="mt-3 text-xs text-zinc-500">
-            If you manage clients on multiple utilities (e.g. GMP and VEC),
-            sign in to each portal so we can capture all of them. Click
-            &quot;I&apos;ve installed it&quot; below when you&apos;re done —
-            we won&apos;t advance automatically.
-          </p>
-          {installed && (
-            <p className="mt-2 text-xs font-medium text-primary-700">
-              ✓ Capture received. {visitedCount > 1
-                ? "Make sure you've signed into every portal you use, then continue below."
-                : "If you use another utility too, sign into it now before continuing."}
-            </p>
-          )}
-        </div>
 
-        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-4">
-          <div className="flex flex-wrap items-center gap-3">
+          {/* Live status line */}
+          <div className="mt-5 flex items-center gap-3" aria-live="polite">
             <span
               aria-hidden
               className={[
-                "h-2.5 w-2.5 rounded-full shrink-0",
-                installed ? "bg-primary-500" : "animate-pulse bg-amber-400",
+                "h-2.5 w-2.5 shrink-0 rounded-full",
+                status.tone === "success"
+                  ? "bg-primary-500"
+                  : status.tone === "active"
+                    ? "animate-pulse bg-primary-500"
+                    : "animate-pulse bg-amber-400",
               ].join(" ")}
             />
-            <span className="text-sm font-medium text-zinc-700" aria-live="polite">
-              {installed
-                ? "Capture received ✓"
-                : "We're waiting for your first utility capture…"}
+            <span className="text-sm font-medium text-zinc-700">
+              {status.text}
             </span>
-            {!installed && extensionActive && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-primary-100 px-2 py-0.5 text-xs font-medium text-primary-700">
-                <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-primary-500" />
-                Extension active
-              </span>
-            )}
           </div>
-          {!installed && !havingTrouble && (
-            <p className="mt-2 pl-5 text-xs text-zinc-500">
-              Checking every few seconds. Leave this tab open while you install
-              the extension and sign into your utility portal.
-            </p>
-          )}
-          {!installed && havingTrouble && (
-            <p className="mt-2 pl-5 text-xs text-amber-700">
-              Having trouble detecting the extension? Click &quot;I&apos;ve
-              installed it&quot; below.
-            </p>
-          )}
+          <p className="mt-3 text-xs text-zinc-500">
+            Manage clients on both GMP and VEC? Sign into each — we&apos;ll
+            stitch them together for you.
+          </p>
         </div>
 
-        {showHelp && (
-          <div className="mt-4 flex justify-center">
-            <button
-              type="button"
-              onClick={() => setHelpOpen(true)}
-              className="inline-flex animate-pulse items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-5 py-2.5 text-sm font-medium text-amber-800 transition-colors duration-150 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 focus-visible:ring-offset-2"
-            >
-              Having trouble?
-            </button>
-          </div>
-        )}
-
         {sessionError && (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+          <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
             <p className="text-sm text-red-700">{sessionError}</p>
             <Link
               to="/"
@@ -542,42 +446,44 @@ export default function Extension() {
           </div>
         )}
 
-        <div className="mt-8 flex flex-col items-end gap-1.5">
+        {/* Footer: troubleshooting fallback + manual continue. Quiet by design. */}
+        <div className="mt-8 flex items-center justify-between gap-4">
+          <div className="text-xs text-zinc-500">
+            {showHelpLink ? (
+              <button
+                type="button"
+                onClick={() => setHelpOpen(true)}
+                className="font-medium text-primary-700 underline underline-offset-2 hover:text-primary-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+              >
+                Having trouble?
+              </button>
+            ) : (
+              <span>&nbsp;</span>
+            )}
+          </div>
           <Button
             variant="secondary"
-            onClick={handleManual}
-            disabled={advancing || !!sessionError}
+            onClick={() => void handleManualContinue()}
+            disabled={!!sessionError}
           >
-            {advancing ? (
-              <>
-                <Spinner />
-                Continuing…
-              </>
-            ) : (
-              "I've installed it →"
-            )}
+            Continue →
           </Button>
-          {sessionError && (
-            <p className="text-xs text-zinc-400">
-              Session expired — restart above to continue.
-            </p>
-          )}
         </div>
       </Card>
 
       <Modal
         open={helpOpen}
         onClose={() => setHelpOpen(false)}
-        title="Not seeing a capture yet?"
+        title="Not seeing anything yet?"
       >
         <p className="text-sm text-zinc-600">
-          Run through this checklist — one of these is almost always the reason:
+          Run through this quick list — one of these is almost always it:
         </p>
         <ul className="mt-4 flex flex-col gap-3">
           {[
-            "You installed the extension from the Chrome Web Store (the Chrome toolbar should show its icon)",
-            "You pasted the activation code into the extension's Options page and clicked Save",
-            "You logged into your utility portal (greenmountainpower.com or vermontelectric.smarthub.coop) in any tab while the extension is active",
+            "Solar Operator Sync is installed in Chrome (puzzle-piece icon → pinned)",
+            "You opened your utility portal from one of the buttons above (not a bookmark in a different browser)",
+            "You actually signed in — capture only fires once your account page loads",
           ].map((item, i) => (
             <li key={i} className="flex items-start gap-3 text-sm text-zinc-700">
               <span aria-hidden className="mt-0.5 shrink-0 text-primary-600">
@@ -595,25 +501,17 @@ export default function Extension() {
           >
             admin@solaroperator.org
           </a>{" "}
-          and we&apos;ll personally walk you through it.
+          and we&apos;ll walk you through it ourselves.
         </p>
         <div className="mt-6 flex justify-end">
           <Button
             variant="secondary"
             onClick={() => {
               setHelpOpen(false);
-              void handleManual();
+              void handleManualContinue();
             }}
-            disabled={advancing}
           >
-            {advancing ? (
-              <>
-                <Spinner />
-                Continuing…
-              </>
-            ) : (
-              "I've installed it manually — continue →"
-            )}
+            Continue anyway →
           </Button>
         </div>
       </Modal>
