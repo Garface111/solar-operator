@@ -74,7 +74,13 @@ def test_email_beats_username_when_both_present(client):
 # NOTE: this behaviour is a naming gap — the code comment says "customer_name
 # (e.g. VEC)" is the top-priority label, but VEC never populates that field.
 
-def test_vec_customer_name_not_used_as_client_name(client):
+# ── (2) VEC: customerName IS the right client-level label ───────────────────
+# When the operator's name is "Bob's Electric LLC" but their login is
+# bob@example.com, the customerName from VEC is the human-friendly company
+# label and beats the email/username. The adapter populates both
+# customer_name (client-level) and nickname (array-level fallback).
+
+def test_vec_customer_name_used_as_client_name(client):
     tid, key = _tenant()
 
     payload = {
@@ -90,12 +96,12 @@ def test_vec_customer_name_not_used_as_client_name(client):
 
     with SessionLocal() as db:
         c = db.execute(select(Client).where(Client.tenant_id == tid)).scalar_one()
-        # Client name is the login email, NOT the VEC customerName.
-        assert c.name == "owner@farm.test", (
-            f"expected login email as client name, got {c.name!r}. "
-            "VEC customerName should go to the array name, not the client name."
+        # Client name is the VEC customerName — it's the company label, the
+        # most useful display string for the operator.
+        assert c.name == "West Glover Farm LLC", (
+            f"expected VEC customerName as client name, got {c.name!r}"
         )
-        # customerName flows to the Array name via the normalized nickname field.
+        # Same value flows to the Array name as a fallback nickname.
         arrays = db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all()
         assert len(arrays) == 1
         assert arrays[0].name == "West Glover Farm LLC"

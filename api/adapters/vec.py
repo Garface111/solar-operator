@@ -168,15 +168,17 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         seen.add(acct_no)
         svc_addr = a.get("serviceAddress")
+        customer_name = a.get("customerName") or a.get("customer_name")
         accounts.append(
             {
                 "account_number": acct_no,
                 "customer_number": None,
-                "nickname": a.get("customerName") or a.get("customer_name"),
+                "customer_name": customer_name,
+                "nickname": customer_name,
                 "service_address": (
                     {"line1": svc_addr} if isinstance(svc_addr, str) else svc_addr
                 ),
-                "extra": {"provider": PROVIDER},
+                "extra": {"provider": PROVIDER, "customerName": customer_name},
             }
         )
 
@@ -187,17 +189,19 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if not acct_no or acct_no in seen:
                 continue
             seen.add(acct_no)
+            customer_name = b.get("customer_name")
             accounts.append(
                 {
                     "account_number": acct_no,
                     "customer_number": None,
-                    "nickname": b.get("customer_name"),
+                    "customer_name": customer_name,
+                    "nickname": customer_name,
                     "service_address": (
                         {"line1": b["service_address"]}
                         if b.get("service_address")
                         else None
                     ),
-                    "extra": {"provider": PROVIDER},
+                    "extra": {"provider": PROVIDER, "customerName": customer_name},
                 }
             )
 
