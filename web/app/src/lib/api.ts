@@ -718,7 +718,7 @@ export async function bulkDeleteArrays(ids: number[]): Promise<BulkDeleteResult>
 }
 
 export async function bulkDeleteClients(ids: number[]): Promise<BulkDeleteResult> {
-  return request<BulkDeleteResult>("/v1/account/clients/bulk", {
+  return request<BulkDeleteResult>("/v1/account/clients-bulk", {
     method: "DELETE",
     body: { ids },
   });

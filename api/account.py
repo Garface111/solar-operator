@@ -2126,7 +2126,7 @@ def bulk_delete_arrays(
     return {"ok": True, "soft_deleted": len(array_ids), "undo_token": undo_token}
 
 
-@router.delete("/v1/account/clients/bulk")
+@router.delete("/v1/account/clients-bulk")
 def bulk_delete_clients(
     body: BulkDeleteBody,
     authorization: Optional[str] = Header(default=None),
