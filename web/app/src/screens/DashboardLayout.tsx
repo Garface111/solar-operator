@@ -8,6 +8,7 @@ import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
 import { hasSeenWalkthrough } from "../lib/walkthrough";
 import { openPortalTab } from "../lib/openPortalTab";
+import { useAutoPairExtension } from "../lib/useExtensionStatus";
 
 interface Props {
   onSignOut: () => void;
@@ -115,6 +116,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
   }, [visited]);
 
   const ctx: DashboardContext = { account, failed, patchAccount, retryLoad };
+
+  // Auto-pair the extension as soon as we know the operator's tenant_key.
+  // The activation-code UI was removed — pairing is fully zero-touch now.
+  useAutoPairExtension(account?.tenant_key ?? null);
 
   // Show a banner if the extension hasn't phoned home in 48+ hours. After 48h
   // without a heartbeat, new bill captures aren't flowing — the operator should

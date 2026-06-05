@@ -163,3 +163,78 @@ export function useExtensionStatus(autoProbe = true): ExtensionState {
     probe,
   };
 }
+
+const PAIR_TIMEOUT_MS = 1500;
+
+/** Send the operator's tenant_key to the extension via SO_PAIR. Resolves
+ *  with true on a successful ACK, false on timeout / error. Safe to call
+ *  any time the operator's account is loaded — the extension idempotently
+ *  stores the latest key, so re-pairing on every dashboard mount is fine. */
+export function pairExtension(tenantKey: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || !tenantKey) {
+      resolve(false);
+      return;
+    }
+    const reqId = genReqId();
+    let settled = false;
+    const handler = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      const d = event.data;
+      if (!d || d.type !== "SO_PAIR_ACK" || d.reqId !== reqId) return;
+      window.removeEventListener("message", handler);
+      if (settled) return;
+      settled = true;
+      if (d.ok) {
+        // Cache says we're paired now — refresh status without an
+        // extra round-trip.
+        setCache({
+          status: "present-paired",
+          version: d.version || cached.version,
+          lastSyncAt: d.lastSyncAt || cached.lastSyncAt,
+        });
+      }
+      resolve(!!d.ok);
+    };
+    window.addEventListener("message", handler);
+    window.postMessage({ type: "SO_PAIR", tenantKey, reqId }, "*");
+    window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", handler);
+      resolve(false);
+    }, PAIR_TIMEOUT_MS);
+  });
+}
+
+/** Automatically pair the extension when:
+ *    - the extension is present
+ *    - we have a tenant_key
+ *    - we haven't already paired in this session (sessionStorage guard)
+ *
+ * The activation-code card was removed from the UI; this is the
+ * zero-touch replacement. The extension SO_PAIR handler is idempotent
+ * so re-pairing across reloads is harmless. */
+export function useAutoPairExtension(tenantKey: string | null | undefined): void {
+  const ext = useExtensionStatus(true);
+  useEffect(() => {
+    if (!tenantKey) return;
+    if (ext.status !== "present-paired" && ext.status !== "present-unpaired") {
+      // Extension absent or status not yet known — nothing to do.
+      return;
+    }
+    // Already paired AND tenant_key hasn't changed since last attempt?
+    // Skip the network noise.
+    const lastKey = (() => {
+      try { return sessionStorage.getItem("so_auto_paired_with"); }
+      catch { return null; }
+    })();
+    if (ext.status === "present-paired" && lastKey === tenantKey) return;
+    void pairExtension(tenantKey).then((ok) => {
+      if (ok) {
+        try { sessionStorage.setItem("so_auto_paired_with", tenantKey); }
+        catch { /* ignore */ }
+      }
+    });
+  }, [tenantKey, ext.status]);
+}
