@@ -74,6 +74,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   // Action states
   const [saving, setSaving] = useState(false);
@@ -345,98 +346,11 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
           </button>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* ── Left: AI chat (40%) ── */}
-          <div className="flex w-[40%] flex-col border-r border-cream-border bg-white">
-            <div className="border-b border-zinc-100 px-5 py-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                AI Assistant
-              </p>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto space-y-3 p-4">
-              {messages.length === 0 && (
-                <p className="text-xs text-zinc-400">
-                  Describe how you'd like to customize your email template.
-                </p>
-              )}
-              {messages.map((m, i) => (
-                <div
-                  key={i}
-                  className={[
-                    "max-w-[88%] rounded-xl px-3 py-2 text-sm",
-                    m.role === "user"
-                      ? "ml-auto bg-zinc-100 text-zinc-900"
-                      : "mr-auto border border-zinc-200 bg-white text-zinc-800 shadow-sm",
-                  ].join(" ")}
-                >
-                  {m.content}
-                </div>
-              ))}
-              {chatLoading && (
-                <div className="mr-auto flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-500 shadow-sm">
-                  <Spinner className="h-3 w-3" />
-                  Drafting…
-                </div>
-              )}
-              <div ref={chatBottomRef} />
-            </div>
-
-            {/* Starter chips — only before first message */}
-            {messages.length === 0 && (
-              <div className="px-4 pb-2">
-                <p className="mb-2 text-[11px] font-medium text-zinc-400">
-                  Quick starts
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {STARTER_CHIPS.map((chip) => (
-                    <button
-                      key={chip}
-                      type="button"
-                      disabled={chatLoading}
-                      onClick={() => handleChatSubmit(chip)}
-                      className="rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700 disabled:opacity-50"
-                    >
-                      {chip}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Chat input */}
-            <div className="border-t border-zinc-100 p-3">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      void handleChatSubmit();
-                    }
-                  }}
-                  placeholder="Make it warmer…"
-                  disabled={chatLoading}
-                  className="flex-1 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30 disabled:opacity-60"
-                />
-                <Button
-                  onClick={() => void handleChatSubmit()}
-                  disabled={!chatInput.trim() || chatLoading}
-                  className="h-9 px-3 text-xs"
-                >
-                  Send
-                </Button>
-              </div>
-            </div>
-          </div>
-
-          {/* ── Right: editor + preview (60%) ── */}
-          <div className="flex w-[60%] flex-col bg-[#faf8f5] overflow-y-auto">
+        <div className="relative flex min-h-0 flex-1 overflow-hidden">
+          {/* ── Editor + preview (full width — chat is now floating) ── */}
+          <div className="flex flex-1 flex-col bg-[#faf8f5] overflow-hidden">
             {/* Preview header */}
-            <div className="border-b border-cream-border bg-[#faf8f5] px-5 py-3 sticky top-0 z-10">
+            <div className="border-b border-cream-border bg-[#faf8f5] px-5 py-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
                   Preview
@@ -460,46 +374,12 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               </div>
             </div>
 
-            <div className="flex-1 p-5 space-y-4">
-              {/* Token chips for subject */}
-              <div>
-                <p className="mb-1.5 text-[11px] font-medium text-zinc-400">
-                  Insert token into subject
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {TOKEN_CHIPS.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => insertToken(t)}
-                      className="rounded-full border border-zinc-200 bg-white px-2.5 py-0.5 font-mono text-[11px] text-zinc-500 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700"
-                    >
-                      {t}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Subject line */}
-              <div>
-                <label className="mb-1 block text-[11px] font-medium text-zinc-500">
-                  Subject line
-                </label>
-                <input
-                  ref={subjectInputRef}
-                  type="text"
-                  value={subjectDraft}
-                  onChange={(e) => {
-                    setSubjectDraft(e.target.value);
-                    setIsDirty(true);
-                  }}
-                  onBlur={() => void refreshPreview()}
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
-                />
-              </div>
-
-              {/* Email preview box — styled like a real inbox message */}
-              <div className="rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
+            {/* Two-column body: PREVIEW left (58%), EDITOR right (42%) */}
+            <div className="flex flex-1 min-h-0 overflow-hidden">
+              {/* ── LEFT: live email preview (what your client sees) ── */}
+              <div className="w-[58%] overflow-y-auto p-5 border-r border-cream-border">
+                {/* Email preview box — styled like a real inbox message */}
+                <div className="rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden sticky top-0">
                 {/* Inbox toolbar — visual fidelity cue that this is an email */}
                 <div className="flex items-center gap-2 border-b border-zinc-100 bg-zinc-50 px-4 py-2">
                   <div className="flex gap-1.5">
@@ -588,7 +468,47 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     <span className="text-zinc-400">· NEPOOL-GIS workbook</span>
                   </div>
                 </div>
-              </div>
+                </div> {/* /preview card */}
+              </div> {/* /LEFT column */}
+
+              {/* ── RIGHT: editor (subject + body + signoff) ── */}
+              <div className="w-[42%] overflow-y-auto p-5 space-y-4">
+                {/* Token chips for subject */}
+                <div>
+                  <p className="mb-1.5 text-[11px] font-medium text-zinc-400">
+                    Insert token into subject
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {TOKEN_CHIPS.map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => insertToken(t)}
+                        className="rounded-full border border-zinc-200 bg-white px-2.5 py-0.5 font-mono text-[11px] text-zinc-500 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700"
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Subject line */}
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium text-zinc-500">
+                    Subject line
+                  </label>
+                  <input
+                    ref={subjectInputRef}
+                    type="text"
+                    value={subjectDraft}
+                    onChange={(e) => {
+                      setSubjectDraft(e.target.value);
+                      setIsDirty(true);
+                    }}
+                    onBlur={() => void refreshPreview()}
+                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
+                  />
+                </div>
 
               {/* Body editor — editable HTML textarea */}
               <div>
@@ -699,7 +619,8 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   </Button>
                 </div>
               )}
-            </div>
+              </div> {/* /RIGHT column */}
+            </div> {/* /two-column body */}
 
             {/* Action bar — shown when anything is customized */}
             {!isAllDefault && (
@@ -741,6 +662,119 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               </div>
             )}
           </div>
+
+          {/* ── Floating AI assistant — bottom-right bubble / panel ── */}
+          {!chatOpen && (
+            <button
+              type="button"
+              onClick={() => setChatOpen(true)}
+              className="absolute bottom-5 right-5 z-20 flex items-center gap-2 rounded-full bg-primary-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-primary-700 transition-colors"
+              aria-label="Open AI assistant"
+            >
+              <span className="text-base leading-none">✦</span>
+              <span>Ask AI</span>
+              {messages.length > 0 && (
+                <span className="rounded-full bg-white/25 px-1.5 py-0.5 text-[10px]">
+                  {messages.length}
+                </span>
+              )}
+            </button>
+          )}
+          {chatOpen && (
+            <div className="absolute bottom-5 right-5 z-20 flex h-[440px] w-[340px] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden">
+              {/* Floating header */}
+              <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  AI assistant
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setChatOpen(false)}
+                  aria-label="Close AI assistant"
+                  className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+                >
+                  <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden>
+                    <path d="M3 3 L13 13 M13 3 L3 13" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Messages */}
+              <div className="flex-1 overflow-y-auto space-y-2 p-3">
+                {messages.length === 0 && (
+                  <p className="text-[11px] text-zinc-400">
+                    Describe how you'd like to customize your email.
+                  </p>
+                )}
+                {messages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={[
+                      "max-w-[88%] rounded-xl px-2.5 py-1.5 text-xs",
+                      m.role === "user"
+                        ? "ml-auto bg-zinc-100 text-zinc-900"
+                        : "mr-auto border border-zinc-200 bg-white text-zinc-800 shadow-sm",
+                    ].join(" ")}
+                  >
+                    {m.content}
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="mr-auto flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 py-1.5 text-[11px] text-zinc-500 shadow-sm">
+                    <Spinner className="h-3 w-3" />
+                    Drafting…
+                  </div>
+                )}
+                <div ref={chatBottomRef} />
+              </div>
+
+              {/* Starter chips — only before first message */}
+              {messages.length === 0 && (
+                <div className="px-3 pb-2">
+                  <div className="flex flex-wrap gap-1">
+                    {STARTER_CHIPS.map((chip) => (
+                      <button
+                        key={chip}
+                        type="button"
+                        disabled={chatLoading}
+                        onClick={() => handleChatSubmit(chip)}
+                        className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-600 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700 disabled:opacity-50"
+                      >
+                        {chip}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Chat input */}
+              <div className="border-t border-zinc-100 p-2">
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        void handleChatSubmit();
+                      }
+                    }}
+                    placeholder="Make it warmer…"
+                    disabled={chatLoading}
+                    className="flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30 disabled:opacity-60"
+                  />
+                  <Button
+                    onClick={() => void handleChatSubmit()}
+                    disabled={!chatInput.trim() || chatLoading}
+                    className="h-7 px-2 text-[11px]"
+                  >
+                    Send
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
