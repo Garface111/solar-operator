@@ -227,6 +227,15 @@ class UtilityAccount(Base):
     canvas_y: Mapped[float | None] = mapped_column(Float, nullable=True)
     canvas_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Original client this account's login belonged to before being manually
+    # moved in the sandbox. NULL while the account is still under its original
+    # owner. Used by the sandbox to keep moved logins visually separate from
+    # the target client's existing same-utility login (so the operator can
+    # tell two GMP logins apart and undo the move easily).
+    login_origin_client_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("clients.id"), nullable=True, index=True,
+    )
+
     tenant: Mapped[Tenant] = relationship(back_populates="accounts")
     array: Mapped[Array | None] = relationship(back_populates="accounts")
     bills: Mapped[list["Bill"]] = relationship(back_populates="account", cascade="all, delete-orphan")

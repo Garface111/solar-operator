@@ -9,8 +9,22 @@ export interface CanvasActions {
   deleteNode: (nodeId: string) => void;
   detachAccount: (clientId: string, accountId: string) => void;
   moveAccountToClient: (srcClientId: string, accountId: string, dstClientId: string) => void;
-  detachLogin: (clientId: string, utility: 'GMP' | 'VEC' | 'WEC') => void;
-  moveLoginToClient: (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string) => void;
+  detachLogin: (clientId: string, utility: 'GMP' | 'VEC' | 'WEC', originClientId?: number | null) => void;
+  moveLoginToClient: (
+    srcClientId: string,
+    utility: 'GMP' | 'VEC' | 'WEC',
+    dstClientId: string,
+    originClientId?: number | null,
+  ) => void;
+  /** Look up an origin client by id — used to label moved logins
+   *  ("from Marie's GMP login"). Returns null when the origin is unknown or
+   *  the lookup hasn't loaded yet. */
+  getOriginClient: (clientId: number) => {
+    id: number;
+    name: string;
+    deleted: boolean;
+    logins: { GMP?: string | null; VEC?: string | null; WEC?: string | null };
+  } | null;
 }
 
 export const CanvasActionsContext = createContext<CanvasActions | null>(null);

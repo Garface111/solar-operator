@@ -355,6 +355,8 @@ def main():
              "ALTER TABLE utility_accounts ADD COLUMN canvas_y FLOAT"),
             ("utility_accounts", "canvas_pinned",
              "ALTER TABLE utility_accounts ADD COLUMN canvas_pinned BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("utility_accounts", "login_origin_client_id",
+             "ALTER TABLE utility_accounts ADD COLUMN login_origin_client_id INTEGER REFERENCES clients(id)"),
         ]
         for table, col, sql in canvas_cols:
             if not column_exists(conn, table, col):

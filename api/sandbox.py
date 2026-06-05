@@ -35,6 +35,7 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array]) -> dict:
         "array_id": arr.id if arr else None,
         "array_name": arr.name if arr else None,
         "nepool_gis_id": arr.nepool_gis_id if arr else None,
+        "login_origin_client_id": getattr(acc, "login_origin_client_id", None),
     }
 
 
@@ -113,7 +114,41 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
             for acc in unclassified
         ]
 
-    return {"clients": clients_out, "unclassified": unclassified_out}
+        # Origin client lookup — any client referenced by a non-null
+        # login_origin_client_id, even if soft-deleted, so the sandbox can
+        # label a moved login with "from <origin client name>". Includes the
+        # currently-listed clients too for convenience.
+        origin_ids: set[int] = set()
+        for c in clients_out:
+            for a in c["accounts"]:
+                if a.get("login_origin_client_id") is not None:
+                    origin_ids.add(a["login_origin_client_id"])
+        for a in unclassified_out:
+            if a.get("login_origin_client_id") is not None:
+                origin_ids.add(a["login_origin_client_id"])
+        clients_index: dict[int, dict] = {}
+        if origin_ids:
+            for c in db.execute(
+                select(Client).where(
+                    Client.tenant_id == tenant.id,
+                    Client.id.in_(origin_ids),
+                )
+            ).scalars().all():
+                clients_index[c.id] = {
+                    "id": c.id,
+                    "name": c.name,
+                    "deleted": c.deleted_at is not None,
+                    "logins": {
+                        "GMP": c.gmp_email or c.gmp_username or None,
+                        "VEC": c.vec_email or c.vec_username or None,
+                    },
+                }
+
+    return {
+        "clients": clients_out,
+        "unclassified": unclassified_out,
+        "clients_index": clients_index,
+    }
 
 
 # ── PATCH /v1/sandbox/positions ──────────────────────────────────────────────
@@ -244,9 +279,20 @@ def sandbox_account_reassign(
             if not target_client:
                 raise HTTPException(404, "client not found")
 
-        # Detach path: clear the array link
+        # Capture the account's CURRENT client (before any reassignment) — used
+        # below to decide whether to stamp/clear login_origin_client_id so the
+        # sandbox can render a moved login as its own group.
+        prior_client_id: Optional[int] = None
+        if acc.array_id is not None:
+            prior_arr = db.get(Array, acc.array_id)
+            if prior_arr is not None and prior_arr.tenant_id == tenant.id:
+                prior_client_id = prior_arr.client_id
+
+        # Detach path: clear the array link AND the origin tag (a free-floating
+        # account isn't part of any login group yet).
         if target_client is None:
             acc.array_id = None
+            acc.login_origin_client_id = None
             db.commit()
             return {"ok": True, "account_id": acc.id, "client_id": None, "array_id": None}
 
@@ -308,6 +354,20 @@ def sandbox_account_reassign(
             db.flush()
             acc.array_id = new_array.id
             new_array_id = new_array.id
+
+        # Stamp the origin tag so the sandbox can render this account's login
+        # as a SEPARATE group from any same-utility login the target client
+        # already has. Rules:
+        # - First-ever move away from home → stamp prior_client_id
+        # - Move back to the tagged origin → clear the tag (it's home again)
+        # - Already-tagged account moving to a third client → keep the
+        #   ORIGINAL tag intact (so undo always returns it to its true home)
+        if acc.login_origin_client_id is None:
+            if prior_client_id is not None and prior_client_id != target_client.id:
+                acc.login_origin_client_id = prior_client_id
+        else:
+            if acc.login_origin_client_id == target_client.id:
+                acc.login_origin_client_id = None
 
         db.commit()
 

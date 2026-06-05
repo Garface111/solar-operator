@@ -965,6 +965,9 @@ export interface CanvasAccountData {
   array_id: number | null;
   array_name: string | null;
   nepool_gis_id: string | null;
+  /** Original client this account belonged to before being moved in the
+   *  sandbox. NULL while the account is still at its original home. */
+  login_origin_client_id?: number | null;
 }
 
 export interface CanvasClientData {
@@ -981,6 +984,15 @@ export interface CanvasClientData {
 export interface CanvasResponse {
   clients: CanvasClientData[];
   unclassified: CanvasAccountData[];
+  /** Lookup table of clients referenced by login_origin_client_id, including
+   *  soft-deleted ones, so the sandbox can render "from <name>" labels even
+   *  when the origin client has since been removed. */
+  clients_index?: Record<number, {
+    id: number;
+    name: string;
+    deleted: boolean;
+    logins: { GMP?: string | null; VEC?: string | null; WEC?: string | null };
+  }>;
 }
 
 export async function getCanvasData(): Promise<CanvasResponse> {

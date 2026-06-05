@@ -82,6 +82,13 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 
   const chips = utilityChips(client.accounts);
   const arrayCount = clientArrayCount(client);
+  // The numeric DB id of this client — used to tell groupAccountsByLogin
+  // which login_origin tags are "this is your home" (clear) vs. "moved in
+  // from elsewhere" (separate group).
+  const ownClientNumId = (() => {
+    const m = id.match(/^client_(\d+)$/);
+    return m ? parseInt(m[1], 10) : null;
+  })();
   const totalMwh = clientTotalMwh(client);
 
   const isMergeTarget = mergeIntent === 'target';
@@ -116,9 +123,13 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
         if (srcClientId === id) return;
         actions.moveAccountToClient(srcClientId, accountId, id);
       } else if (loginRaw) {
-        const { srcClientId, utility } = JSON.parse(loginRaw) as { srcClientId: string; utility: 'GMP' | 'VEC' | 'WEC' };
+        const { srcClientId, utility, originClientId } = JSON.parse(loginRaw) as {
+          srcClientId: string;
+          utility: 'GMP' | 'VEC' | 'WEC';
+          originClientId?: number | null;
+        };
         if (srcClientId === id) return;
-        actions.moveLoginToClient(srcClientId, utility, id);
+        actions.moveLoginToClient(srcClientId, utility, id, originClientId);
       }
     } catch {
       /* malformed payload — ignore */
@@ -217,15 +228,25 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
       {/* Expanded: one row per utility login (groups accounts by provider) */}
       {expanded && (
         <div className="space-y-2 px-3 pb-3">
-          {groupAccountsByLogin(client.accounts).map((group) => (
+          {groupAccountsByLogin(client.accounts, ownClientNumId).map((group) => (
             <LoginGroupRow
-              key={group.utility}
+              key={group.key}
               clientId={id}
               utility={group.utility}
               accounts={group.accounts}
-              loginCredential={client.logins?.[group.utility] ?? null}
+              loginCredential={
+                group.originClientId != null
+                  ? actions.getOriginClient(group.originClientId)?.logins?.[group.utility] ?? null
+                  : client.logins?.[group.utility] ?? null
+              }
+              originClient={
+                group.originClientId != null
+                  ? actions.getOriginClient(group.originClientId)
+                  : null
+              }
               onDetach={(accountId) => actions.detachAccount(id, accountId)}
-              onDetachLogin={() => actions.detachLogin(id, group.utility)}
+              onDetachLogin={() => actions.detachLogin(id, group.utility, group.originClientId)}
+              originClientId={group.originClientId}
             />
           ))}
         </div>
@@ -241,17 +262,38 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   );
 }
 
-function groupAccountsByLogin(accounts: UtilityAccount[]): { utility: Utility; accounts: UtilityAccount[] }[] {
-  const groups = new Map<Utility, UtilityAccount[]>();
+function groupAccountsByLogin(
+  accounts: UtilityAccount[],
+  ownClientNumId: number | null,
+): { utility: Utility; originClientId: number | null; accounts: UtilityAccount[]; key: string }[] {
+  // Key by (utility, login_origin_client_id || own). When two accounts of the
+  // same utility have different origin tags, they land in DIFFERENT groups —
+  // so a moved login renders as its own collapsible card under the target
+  // client, separate from the target's native same-utility login.
+  const groups = new Map<string, { utility: Utility; originClientId: number | null; accounts: UtilityAccount[] }>();
   for (const acc of accounts) {
-    const list = groups.get(acc.utility) ?? [];
-    list.push(acc);
-    groups.set(acc.utility, list);
+    // origin === own client => account is at its home (or never moved)
+    const origin =
+      acc.login_origin_client_id != null && acc.login_origin_client_id !== ownClientNumId
+        ? acc.login_origin_client_id
+        : null;
+    const key = `${acc.utility}::${origin ?? 'home'}`;
+    const entry = groups.get(key) ?? { utility: acc.utility, originClientId: origin, accounts: [] };
+    entry.accounts.push(acc);
+    groups.set(key, entry);
   }
-  // Stable order: GMP, VEC, WEC
-  return (['GMP', 'VEC', 'WEC'] as Utility[])
-    .filter((u) => groups.has(u))
-    .map((u) => ({ utility: u, accounts: groups.get(u)! }));
+  // Stable order: GMP, VEC, WEC, with home groups before moved-in groups
+  return Array.from(groups.entries())
+    .map(([key, v]) => ({ ...v, key }))
+    .sort((a, b) => {
+      const ord = (['GMP', 'VEC', 'WEC'] as Utility[]).indexOf(a.utility) -
+                  (['GMP', 'VEC', 'WEC'] as Utility[]).indexOf(b.utility);
+      if (ord !== 0) return ord;
+      // home first, then moved-in (by origin id for stability)
+      if (a.originClientId == null && b.originClientId != null) return -1;
+      if (a.originClientId != null && b.originClientId == null) return 1;
+      return (a.originClientId ?? 0) - (b.originClientId ?? 0);
+    });
 }
 
 function LoginGroupRow({
@@ -259,6 +301,8 @@ function LoginGroupRow({
   utility,
   accounts,
   loginCredential,
+  originClient,
+  originClientId,
   onDetach,
   onDetachLogin,
 }: {
@@ -266,6 +310,8 @@ function LoginGroupRow({
   utility: Utility;
   accounts: UtilityAccount[];
   loginCredential: string | null;
+  originClient: { id: number; name: string; deleted: boolean } | null;
+  originClientId: number | null;
   onDetach: (accountId: string) => void;
   onDetachLogin: () => void;
 }) {
@@ -280,7 +326,7 @@ function LoginGroupRow({
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData(
       'application/x-so-login',
-      JSON.stringify({ srcClientId: clientId, utility }),
+      JSON.stringify({ srcClientId: clientId, utility, originClientId }),
     );
     e.dataTransfer.setData('text/plain', `${utility} login`);
     setDragging(true);
@@ -324,6 +370,14 @@ function LoginGroupRow({
           <span className={`text-xs font-semibold ${th.rowText}`}>
             {utility}
           </span>
+          {originClient && (
+            <span
+              className={`rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700`}
+              title={`Moved here from ${originClient.name}${originClient.deleted ? ' (deleted)' : ''}`}
+            >
+              from {originClient.name}{originClient.deleted ? ' (deleted)' : ''}
+            </span>
+          )}
           <span className={`ml-auto text-[10px] font-medium opacity-60 ${th.rowText}`}>
             {accountCount} {accountCount === 1 ? 'account' : 'accounts'} · {arrayTotal} {arrayTotal === 1 ? 'array' : 'arrays'}
           </span>

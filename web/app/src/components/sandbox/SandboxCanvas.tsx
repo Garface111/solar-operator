@@ -66,6 +66,7 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
         utility: normalizeProvider(acc.provider),
         account_number: acc.account_number,
         owner_name: (acc.service_address as Record<string, string> | null)?.street ?? '',
+        login_origin_client_id: acc.login_origin_client_id ?? null,
         arrays: acc.array_name != null
           ? [{
               id: acc.array_id != null ? `arr_${acc.array_id}` : `arr_u_${acc.id}`,
@@ -161,6 +162,9 @@ export default function SandboxCanvas() {
   // The toolbar Add Client opens the portal-picker first (same flow as the
   // list view's primary CTA). Manual entry is the fallback.
   const [showAddByLogin, setShowAddByLogin] = useState(false);
+  // Lookup map for origin clients (populated from /v1/sandbox/canvas
+  // response.clients_index). Used by LoginGroupRow to label moved logins.
+  const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
 
   const { getIntersectingNodes, fitView } = useReactFlow();
 
@@ -187,6 +191,7 @@ export default function SandboxCanvas() {
       const data = await getCanvasData();
       const built = buildNodesFromApi(data);
       setNodes(built);
+      setOriginLookup(data.clients_index ?? {});
       if (built.length > 0) {
         setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
       }
@@ -558,12 +563,26 @@ export default function SandboxCanvas() {
   // ── Login-level (group) actions ──────────────────────────────────────────
 
   const detachLogin = useCallback(
-    (clientId: string, utility: 'GMP' | 'VEC' | 'WEC') => {
+    (clientId: string, utility: 'GMP' | 'VEC' | 'WEC', originClientId?: number | null) => {
       const current = nodesRef.current;
       const clientNode = current.find((n) => n.id === clientId && n.type === 'client');
       if (!clientNode) return;
       const d = clientNode.data as ClientNodeData;
-      const detachedAccounts = d.client.accounts.filter((a) => a.utility === utility);
+      const ownNumId = (() => {
+        const m = clientId.match(/^client_(\d+)$/);
+        return m ? parseInt(m[1], 10) : null;
+      })();
+      // Filter narrows to JUST this login group: same utility AND same origin
+      // (where origin == own id means "home" group).
+      const detachedAccounts = d.client.accounts.filter((a) => {
+        if (a.utility !== utility) return false;
+        const aOrigin =
+          a.login_origin_client_id != null && a.login_origin_client_id !== ownNumId
+            ? a.login_origin_client_id
+            : null;
+        const want = originClientId ?? null;
+        return aOrigin === want;
+      });
       if (detachedAccounts.length === 0) return;
 
       const snapshot = current;
@@ -609,7 +628,7 @@ export default function SandboxCanvas() {
   );
 
   const moveLoginToClient = useCallback(
-    (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string) => {
+    (srcClientId: string, utility: 'GMP' | 'VEC' | 'WEC', dstClientId: string, originClientId?: number | null) => {
       if (srcClientId === dstClientId) return;
       const current = nodesRef.current;
       const src = current.find((n) => n.id === srcClientId && n.type === 'client');
@@ -618,7 +637,20 @@ export default function SandboxCanvas() {
 
       const srcData = src.data as ClientNodeData;
       const dstData = dst.data as ClientNodeData;
-      const moved = srcData.client.accounts.filter((a) => a.utility === utility);
+      const srcOwnNumId = (() => {
+        const m = srcClientId.match(/^client_(\d+)$/);
+        return m ? parseInt(m[1], 10) : null;
+      })();
+      // Same narrowing as detachLogin: only THIS group's accounts move.
+      const moved = srcData.client.accounts.filter((a) => {
+        if (a.utility !== utility) return false;
+        const aOrigin =
+          a.login_origin_client_id != null && a.login_origin_client_id !== srcOwnNumId
+            ? a.login_origin_client_id
+            : null;
+        const want = originClientId ?? null;
+        return aOrigin === want;
+      });
       if (moved.length === 0) return;
 
       const snapshot = current;
@@ -686,6 +718,7 @@ export default function SandboxCanvas() {
     moveAccountToClient,
     detachLogin,
     moveLoginToClient,
+    getOriginClient: (cid: number) => originLookup[cid] ?? null,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────

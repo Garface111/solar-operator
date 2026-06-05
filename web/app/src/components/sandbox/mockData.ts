@@ -13,6 +13,10 @@ export interface UtilityAccount {
   account_number: string;
   owner_name: string;
   arrays: SolarArray[];
+  /** Numeric id of the client this account's login originated from. NULL
+   *  means it's currently at its original home. Used by the sandbox to
+   *  keep moved logins visually separate. */
+  login_origin_client_id?: number | null;
 }
 
 export interface ClientData {
