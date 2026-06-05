@@ -85,6 +85,10 @@ export function AddClientByLoginModal({
   const [openingTab, setOpeningTab] = useState(false);
   const [stillWaiting, setStillWaiting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // Countdown to auto-loop back to the portal picker after a successful
+  // capture. Chaining 5-50 clients in one sitting becomes muscle memory
+  // — operator never has to think about clicking "Add another".
+  const [autoLoopSecondsLeft, setAutoLoopSecondsLeft] = useState(0);
   const capturesThisSession = useRef(0);
 
   // Reset whenever the modal opens; re-probe to get a fresh status.
@@ -94,6 +98,7 @@ export function AddClientByLoginModal({
       setLastProvider(null);
       setCapturedClient(null);
       setStillWaiting(false);
+      setAutoLoopSecondsLeft(0);
       capturesThisSession.current = 0;
       void ext.probe();
     }
@@ -127,6 +132,9 @@ export function AddClientByLoginModal({
         "your account";
       setCapturedClient(label);
       setPhase("captured");
+      // Kick off the auto-loop countdown (3s) — the operator never
+      // has to click "Add another"; we just go back to the picker.
+      setAutoLoopSecondsLeft(3);
       onCaptured();
     }
     window.addEventListener("message", handler);
@@ -142,6 +150,33 @@ export function AddClientByLoginModal({
     const t = window.setTimeout(() => setStillWaiting(true), STILL_WAITING_MS);
     return () => window.clearTimeout(t);
   }, [phase]);
+
+  // Auto-loop countdown ticker. When a capture lands, autoLoopSecondsLeft
+  // is set to 3; we tick down every second and on hit-zero auto-reset
+  // to the picker. Operator gets a quiet visual confirmation, then we
+  // hand them the next "GMP / VEC" choice without a click.
+  useEffect(() => {
+    if (autoLoopSecondsLeft <= 0) return;
+    if (autoLoopSecondsLeft === 1) {
+      // Last tick → reset back to choose state.
+      const t = window.setTimeout(() => {
+        setAutoLoopSecondsLeft(0);
+        setCapturedClient(null);
+        setLastProvider(null);
+        setPhase("choose");
+      }, 1000);
+      return () => window.clearTimeout(t);
+    }
+    const t = window.setTimeout(
+      () => setAutoLoopSecondsLeft((n) => n - 1),
+      1000,
+    );
+    return () => window.clearTimeout(t);
+  }, [autoLoopSecondsLeft]);
+
+  function cancelAutoLoop() {
+    setAutoLoopSecondsLeft(0);
+  }
 
   async function pick(provider: Provider) {
     setLastProvider(provider);
@@ -166,6 +201,7 @@ export function AddClientByLoginModal({
     setLastProvider(null);
     setCapturedClient(null);
     setStillWaiting(false);
+    setAutoLoopSecondsLeft(0);
     onClose();
   }
 
@@ -202,10 +238,17 @@ export function AddClientByLoginModal({
         phase === "captured" ? (
           <>
             <Button variant="ghost" onClick={closeAndReset}>
-              Done for now
+              Done
             </Button>
-            <Button onClick={() => setPhase("choose")}>
-              Add another
+            <Button
+              onClick={() => {
+                cancelAutoLoop();
+                setCapturedClient(null);
+                setLastProvider(null);
+                setPhase("choose");
+              }}
+            >
+              {autoLoopSecondsLeft > 0 ? "Next now →" : "Add another"}
             </Button>
           </>
         ) : phase === "waiting" ? (
@@ -301,20 +344,27 @@ export function AddClientByLoginModal({
             <Spinner className="h-5 w-5" />
             <span className="text-sm font-medium">
               {extensionUsable
-                ? "Waiting for sign-in…"
+                ? capturesThisSession.current > 0
+                  ? "Watching for your next sign-in…"
+                  : "Watching for sign-in…"
                 : "Sign in at the portal, then come back"}
             </span>
           </div>
-          <div className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
-            <p className="font-medium text-zinc-800">
-              In the tab that just opened:
-            </p>
-            <ol className="mt-2 ml-5 list-decimal space-y-1">
-              <li>You&apos;ll be signed out of any previous session.</li>
-              <li>Sign in as the <b>new</b> client.</li>
-              <li>That&apos;s it — come back here.</li>
-            </ol>
-          </div>
+          {/* First-time-only instruction. After the first capture, the
+              operator knows the drill — we hide the steps and let the
+              spinner do the talking. */}
+          {capturesThisSession.current === 0 && (
+            <div className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+              <p className="font-medium text-zinc-800">
+                In the tab that just opened:
+              </p>
+              <ol className="mt-2 ml-5 list-decimal space-y-1">
+                <li>You&apos;ll be signed out of any previous session.</li>
+                <li>Sign in as the <b>new</b> client.</li>
+                <li>That&apos;s it — come back here.</li>
+              </ol>
+            </div>
+          )}
 
           {!extensionUsable && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -413,9 +463,23 @@ export function AddClientByLoginModal({
               ? "Their arrays are now on your dashboard."
               : `${capturesThisSession.current} clients captured this session.`}
           </p>
-          <p className="text-center text-xs text-zinc-400">
-            Have more to add? Pick another portal — we&apos;ll keep going.
-          </p>
+          {autoLoopSecondsLeft > 0 ? (
+            <div className="flex flex-col items-center gap-2">
+              <p className="text-center text-xs text-zinc-500">
+                Ready for the next one in {autoLoopSecondsLeft}s…
+              </p>
+              <div className="h-1 w-32 overflow-hidden rounded-full bg-zinc-200">
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-1000 ease-linear"
+                  style={{ width: `${(autoLoopSecondsLeft / 3) * 100}%` }}
+                />
+              </div>
+            </div>
+          ) : (
+            <p className="text-center text-xs text-zinc-400">
+              Have more to add? Pick another portal — we&apos;ll keep going.
+            </p>
+          )}
         </div>
       )}
     </Modal>
