@@ -267,10 +267,20 @@ def _process_invoice_payment_failed(invoice: dict) -> dict:
 # ─── webhook route ─────────────────────────────────────────────────────────
 
 @router.post("/v1/stripe/webhook")
-async def stripe_webhook(request: Request, stripe_signature: str = Header(default=None)):
+async def stripe_webhook(request: Request, stripe_signature: str | None = Header(default=None)):
     """Receives Stripe events. Handles full subscription lifecycle, idempotent
     via stripe_events table — replays are no-ops."""
     payload = await request.body()
+
+    # Temporary debug logging — remove once root cause of 400s is confirmed.
+    _runtime_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    logger.warning(
+        "webhook debug: secret_mod[:40]=%r secret_env[:40]=%r sig_header[:40]=%r body_len=%d",
+        STRIPE_WEBHOOK_SECRET[:40],
+        _runtime_secret[:40],
+        (stripe_signature or "")[:40],
+        len(payload),
+    )
 
     # Verify signature
     if not STRIPE_WEBHOOK_SECRET:
@@ -285,9 +295,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
             event = stripe.Webhook.construct_event(
                 payload, stripe_signature, STRIPE_WEBHOOK_SECRET
             )
-        except stripe.error.SignatureVerificationError:
+        except stripe.error.SignatureVerificationError as e:
+            logger.warning("webhook: signature verification failed: %s", e)
             raise HTTPException(400, "Invalid signature")
         except Exception as e:
+            logger.exception("webhook: construct_event raised unexpected exception")
             raise HTTPException(400, f"Invalid event: {e}")
 
     event_id = event["id"]
