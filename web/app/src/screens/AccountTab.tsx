@@ -2,6 +2,7 @@ import { AccountSummaryCard } from "../components/AccountSummaryCard";
 import { ActivationCodeCard } from "../components/ActivationCodeCard";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
+import { ScreenLayout } from "../ui/ScreenLayout";
 import { useDashboardContext } from "./DashboardLayout";
 
 export default function AccountTab() {
@@ -25,12 +26,12 @@ export default function AccountTab() {
   }
 
   return (
-    <div className="space-y-6">
+    <ScreenLayout>
       <AccountSummaryCard account={account} onAccountChange={patchAccount} />
       <ActivationCodeCard
         tenantKey={account.tenant_key}
         onKeyRegenerated={(newKey) => patchAccount({ tenant_key: newKey })}
       />
-    </div>
+    </ScreenLayout>
   );
 }

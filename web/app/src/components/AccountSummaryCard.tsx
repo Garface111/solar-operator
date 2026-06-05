@@ -83,12 +83,12 @@ function fmtMoney(cents: number, currency: string): string {
 
 
 const STATUS_STYLES: Record<string, string> = {
-  active: "bg-primary-100 text-primary-700",
-  trialing: "bg-blue-100 text-blue-700",
-  comped: "bg-violet-100 text-violet-700",
+  active:   "bg-primary-100 text-primary-700",
+  trialing: "bg-primary-50 text-primary-600 border border-primary-100",
+  comped:   "bg-wood-100 text-wood-600 border border-wood-border",
   past_due: "bg-amber-100 text-amber-800",
   canceled: "bg-zinc-200 text-zinc-600",
-  pending: "bg-zinc-100 text-zinc-500",
+  pending:  "bg-zinc-100 text-zinc-500",
 };
 
 /** Human-readable label for a subscription status value. DB values stay unchanged. */
@@ -266,8 +266,8 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
       </div>
 
       {billing && (
-        <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+        <div className="mt-4 rounded-xl border border-cream-border bg-cream px-4 py-3">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
             Billing
           </div>
           {billing.billable_arrays > 0 ? (
@@ -367,8 +367,8 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
         const latestAt = sortedAts.length > 0 ? sortedAts[sortedAts.length - 1] : undefined;
         const arrayNames = deduped.map((c) => c.array_name).join(", ");
         return (
-          <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+          <div className="mt-4 rounded-xl border border-cream-border bg-cream px-4 py-3">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
               Recent activity
             </div>
             <p className="mt-1.5 text-xs text-zinc-700">
@@ -393,8 +393,8 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
 
       {/* What happens next — forward-looking timeline so new operators know
           the system is running without them having to wonder. */}
-      <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+      <div className="mt-4 rounded-xl border border-cream-border bg-cream px-4 py-3">
+        <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
           What happens next
         </div>
         <ul className="mt-2 space-y-1.5 text-sm text-zinc-700">

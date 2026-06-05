@@ -2,6 +2,7 @@ import { ReportsCard } from "../components/ReportsCard";
 import { EmailCustomizationCard } from "../components/EmailCustomizationCard";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
+import { ScreenLayout } from "../ui/ScreenLayout";
 import { useDashboardContext } from "./DashboardLayout";
 
 export default function ReportsTab() {
@@ -25,9 +26,9 @@ export default function ReportsTab() {
   }
 
   return (
-    <div className="space-y-6">
+    <ScreenLayout>
       <ReportsCard account={account} onAccountChange={patchAccount} />
       <EmailCustomizationCard account={account} onAccountChange={patchAccount} />
-    </div>
+    </ScreenLayout>
   );
 }
