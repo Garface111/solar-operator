@@ -399,6 +399,78 @@ export default function SandboxCanvas() {
 
   useEffect(() => { void loadCanvas(); }, [loadCanvas]);
 
+  // Forward-refs to drag-target actions so the document-level rescue handler
+  // (declared below, before these callbacks) can call them. We bind these
+  // after their useCallbacks resolve.
+  const moveLoginRef = useRef<((src: string, util: 'GMP'|'VEC'|'WEC', dst: string, origin?: number|null, loginId?: string|null) => void) | null>(null);
+  const moveAccountRef = useRef<((src: string, accountId: string, dst: string) => void) | null>(null);
+
+  // ── Rescue handler: ReactFlow eats dragover/drop on its pane wrapper, so
+  // login row drops onto client cards silently fail despite the card having
+  // onDragOver/onDrop handlers. We attach our own listeners at the document
+  // level in capture phase, manually hit-test for a client card under the
+  // pointer, and call moveLoginToClient ourselves. This bypasses RF entirely.
+  useEffect(() => {
+    const findTargetClientId = (clientX: number, clientY: number): string | null => {
+      const stack = document.elementsFromPoint(clientX, clientY);
+      for (const el of stack) {
+        const card = (el as HTMLElement).closest?.('[data-walkthrough="client-card"]') as HTMLElement | null;
+        if (card) {
+          const id = card.getAttribute('data-walkthrough-client-id');
+          if (id) return id;
+        }
+      }
+      return null;
+    };
+
+    const onDragOver = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      const types = Array.from(e.dataTransfer.types);
+      if (!types.includes('application/x-so-login') && !types.includes('application/x-so-account')) return;
+      // Without preventDefault here, drop never fires (browser default is
+      // to refuse drops). React Flow's wrapper swallows the bubbled event
+      // from the card, so we have to do it ourselves at document level.
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    };
+
+    const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      const loginRaw = e.dataTransfer.getData('application/x-so-login');
+      const accountRaw = e.dataTransfer.getData('application/x-so-account');
+      if (!loginRaw && !accountRaw) return;
+      const targetClientId = findTargetClientId(e.clientX, e.clientY);
+      if (!targetClientId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        if (loginRaw) {
+          const { srcClientId, utility, originClientId, loginId } = JSON.parse(loginRaw) as {
+            srcClientId: string;
+            utility: 'GMP' | 'VEC' | 'WEC';
+            originClientId?: number | null;
+            loginId?: string | null;
+          };
+          if (srcClientId !== targetClientId) {
+            moveLoginRef.current?.(srcClientId, utility, targetClientId, originClientId, loginId);
+          }
+        } else if (accountRaw) {
+          const { srcClientId, accountId } = JSON.parse(accountRaw) as { srcClientId: string; accountId: string };
+          if (srcClientId !== targetClientId) {
+            moveAccountRef.current?.(srcClientId, accountId, targetClientId);
+          }
+        }
+      } catch { /* malformed payload */ }
+    };
+
+    document.addEventListener('dragover', onDragOver, true);
+    document.addEventListener('drop', onDrop, true);
+    return () => {
+      document.removeEventListener('dragover', onDragOver, true);
+      document.removeEventListener('drop', onDrop, true);
+    };
+  }, []);
+
   /** After a new client is created, select it and pan to it so the user
    *  sees the result. In sorted mode, uses fitView to show its grid slot;
    *  in free mode, setCenter to the exact position. */
@@ -1320,6 +1392,10 @@ export default function SandboxCanvas() {
     },
     [setNodes, toast, loadCanvas, pushUndo],
   );
+
+  // Bind drag-rescue forward-refs now that the callbacks exist.
+  moveLoginRef.current = moveLoginToClient;
+  moveAccountRef.current = moveAccountToClient;
 
   const togglePin = useCallback(
     (clientId: string) => {
