@@ -1670,20 +1670,25 @@ export default function SandboxCanvas() {
           </div>
         )}
 
-        {/* Empty state */}
+        {/* Empty state — guided first-touch for fresh users */}
         {isEmpty && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-zinc-50">
-            <div className="text-center">
-              <p className="mb-1 text-base font-semibold text-zinc-900">No clients yet</p>
-              <p className="text-sm text-zinc-500">
-                Log into a utility portal to capture accounts,
-                <br />
-                or add your first client manually.
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-5 bg-gradient-to-br from-amber-50/40 via-zinc-50 to-emerald-50/30 px-6">
+            <div className="max-w-md text-center">
+              <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-primary-600">
+                Step 1 of 3 · Welcome
+              </p>
+              <p className="mb-2 text-xl font-semibold tracking-tight text-zinc-900">
+                Let's add your first client
+              </p>
+              <p className="text-sm leading-relaxed text-zinc-600">
+                Click <strong className="text-zinc-800">+ Add Client</strong> and sign into their
+                utility portal. We'll capture their accounts and arrays automatically — no
+                copy-paste, no spreadsheets.
               </p>
             </div>
             <button
               type="button"
-              className="rounded-xl bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-primary-700 active:bg-primary-800"
+              className="rounded-xl bg-primary-600 px-6 py-3 text-sm font-semibold text-white shadow-md hover:bg-primary-700 active:bg-primary-800 transition-colors"
               onClick={() => {
                 clientIdsBeforeModal.current = new Set(
                   nodesRef.current
@@ -1696,6 +1701,17 @@ export default function SandboxCanvas() {
             >
               + Add Client
             </button>
+            <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+              <span>Already have a roster?</span>
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-zinc-600"
+                onClick={() => setShowAddModal(true)}
+              >
+                Add a placeholder client
+              </button>
+              <span>or scroll down to import from a spreadsheet</span>
+            </div>
           </div>
         )}
 
