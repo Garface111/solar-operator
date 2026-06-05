@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -8,10 +8,11 @@ import {
 } from "react-router-dom";
 import Login from "./screens/Login";
 import DashboardLayout from "./screens/DashboardLayout";
-import AccountTab from "./screens/AccountTab";
 import ClientsTab from "./screens/ClientsTab";
-import ReportsTab from "./screens/ReportsTab";
 import { Spinner } from "./ui/Spinner";
+
+const AccountTab = lazy(() => import("./screens/AccountTab"));
+const ReportsTab = lazy(() => import("./screens/ReportsTab"));
 import { useToast } from "./ui/Toast";
 import {
   getSession,
@@ -20,6 +21,14 @@ import {
   verifyLoginToken,
   UNAUTHORIZED_EVENT,
 } from "./lib/api";
+
+function TabSpinner() {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center text-zinc-400">
+      <Spinner className="h-6 w-6" />
+    </div>
+  );
+}
 
 // basename matches Vite's `base` and the public URL solaroperator.org/accounts
 // (Netlify proxies that to the FastAPI mount at /app/ on Railway).
@@ -144,11 +153,25 @@ function AuthGate() {
         {/* /accounts/ → Clients tab (the post-onboarding landing where the
             walkthrough anchors live). Account tab is one tab away. */}
         <Route index element={<Navigate to="/clients" replace />} />
-        <Route path="/account" element={<AccountTab />} />
+        <Route
+          path="/account"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <AccountTab />
+            </Suspense>
+          }
+        />
         <Route path="/clients" element={<ClientsTab />} />
         {/* Deep link that auto-expands a single client. */}
         <Route path="/clients/:clientId" element={<ClientsTab />} />
-        <Route path="/reports" element={<ReportsTab />} />
+        <Route
+          path="/reports"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <ReportsTab />
+            </Suspense>
+          }
+        />
         <Route path="/sandbox" element={<Navigate to="/clients" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
