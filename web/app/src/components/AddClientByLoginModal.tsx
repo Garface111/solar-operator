@@ -29,6 +29,12 @@ const FRIENDLY: Record<Provider, string> = {
   vec: "Vermont Electric Cooperative",
 };
 
+// After this long with no capture event, surface a "still waiting?" nudge
+// with a manual refresh button so the operator isn't stuck if the
+// extension never fires SO_CAPTURE_LANDED (not installed, paused,
+// pairing stale, etc.).
+const STILL_WAITING_MS = 30_000;
+
 /**
  * AddClientByLoginModal — the high-agency "just log in" flow.
  *
@@ -39,6 +45,15 @@ const FRIENDLY: Record<Provider, string> = {
  * 5. Backend auto-creates a Client for the captured login.
  * 6. We get SO_CAPTURE_LANDED → flip to "captured" state with a
  *    "log into another" CTA so they can chain 50 logins in one sitting.
+ *
+ * Failure mode: if the extension isn't paired/installed, the
+ * SO_CAPTURE_LANDED message never arrives and the modal sits in
+ * "waiting" forever. We handle that with:
+ *   - a 30s "still waiting?" nudge with a manual "I signed in" button
+ *     that calls onCaptured() (parent reloads clients from server)
+ *   - explicit "extension not detected" copy when openPortalTab returns
+ *     something other than "extension", so the operator knows the modal
+ *     can't auto-detect their sign-in
  */
 export function AddClientByLoginModal({
   open,
@@ -51,6 +66,9 @@ export function AddClientByLoginModal({
   const [lastProvider, setLastProvider] = useState<Provider | null>(null);
   const [capturedClient, setCapturedClient] = useState<string | null>(null);
   const [openingTab, setOpeningTab] = useState(false);
+  const [extensionDetected, setExtensionDetected] = useState(true);
+  const [stillWaiting, setStillWaiting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const capturesThisSession = useRef(0);
 
   // Reset whenever the modal opens.
@@ -59,6 +77,8 @@ export function AddClientByLoginModal({
       setPhase("choose");
       setLastProvider(null);
       setCapturedClient(null);
+      setExtensionDetected(true);
+      setStillWaiting(false);
       capturesThisSession.current = 0;
     }
   }, [open]);
@@ -79,31 +99,59 @@ export function AddClientByLoginModal({
     return () => window.removeEventListener("message", handler);
   }, [open, onCaptured]);
 
+  // "Still waiting?" nudge timer — fires after STILL_WAITING_MS in the
+  // waiting phase so a frozen modal can't trap an operator forever.
+  useEffect(() => {
+    if (phase !== "waiting") {
+      setStillWaiting(false);
+      return;
+    }
+    const t = window.setTimeout(() => setStillWaiting(true), STILL_WAITING_MS);
+    return () => window.clearTimeout(t);
+  }, [phase]);
+
   async function pick(provider: Provider) {
     setLastProvider(provider);
     setOpeningTab(true);
     const result = await openPortalTab(PORTAL_URLS[provider]);
     setOpeningTab(false);
-    if (result === "extension") {
-      setPhase("waiting");
-    } else if (result === "blocked") {
+    setExtensionDetected(result === "extension");
+    if (result === "blocked") {
       toast.error(
         "Pop-up was blocked. Click the link below to open the portal in a new tab.",
       );
       window.open(PORTAL_URLS[provider], "_blank");
-      setPhase("waiting");
-    } else {
+    } else if (result !== "extension") {
       // No extension — open in a new tab and ask them to come back
       window.open(PORTAL_URLS[provider], "_blank");
-      setPhase("waiting");
     }
+    setPhase("waiting");
   }
 
   function closeAndReset() {
     setPhase("choose");
     setLastProvider(null);
     setCapturedClient(null);
+    setStillWaiting(false);
     onClose();
+  }
+
+  // Manual escape hatch: "I signed in already" → tell parent to refresh
+  // clients from server. If a real capture landed via the extension we
+  // would've already flipped to "captured" via the message handler; this
+  // covers the case where the extension never POSTed (not installed,
+  // pairing stale, slow network).
+  async function handleManualRefresh() {
+    setRefreshing(true);
+    try {
+      onCaptured(); // parent reloads /v1/account/clients
+      toast.success(
+        "Refreshed — if your client showed up, you'll see them below.",
+      );
+      closeAndReset();
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   return (
@@ -185,7 +233,9 @@ export function AddClientByLoginModal({
           <div className="flex items-center justify-center gap-3 text-emerald-600">
             <Spinner className="h-5 w-5" />
             <span className="text-sm font-medium">
-              Waiting for sign-in&hellip;
+              {extensionDetected
+                ? "Waiting for sign-in…"
+                : "Sign in at the portal, then come back"}
             </span>
           </div>
           <div className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
@@ -197,6 +247,46 @@ export function AddClientByLoginModal({
               <li>That&apos;s it — come back here.</li>
             </ol>
           </div>
+
+          {!extensionDetected && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <p className="font-medium">Extension not detected.</p>
+              <p className="mt-1 text-xs">
+                Your client will still be added once you finish signing in —
+                tap{" "}
+                <span className="font-semibold">
+                  &ldquo;I signed in already&rdquo;
+                </span>{" "}
+                below when you&apos;re back.
+              </p>
+            </div>
+          )}
+
+          {(stillWaiting || !extensionDetected) && (
+            <div className="flex flex-col items-center gap-2">
+              <Button
+                onClick={handleManualRefresh}
+                disabled={refreshing}
+                className="w-full sm:w-auto"
+              >
+                {refreshing ? (
+                  <>
+                    <Spinner />
+                    Refreshing…
+                  </>
+                ) : (
+                  "I signed in already — check now"
+                )}
+              </Button>
+              {stillWaiting && extensionDetected && (
+                <p className="text-center text-xs text-amber-700">
+                  Still waiting? Click above to refresh — your client may have
+                  landed without the modal noticing.
+                </p>
+              )}
+            </div>
+          )}
+
           <p className="text-xs text-zinc-400">
             If you signed in but nothing happened, the extension may not be
             paired. Visit{" "}
