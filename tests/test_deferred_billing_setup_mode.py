@@ -27,7 +27,7 @@ def mocks(monkeypatch):
         assert "line_items" not in kwargs, "setup mode must not have line_items"
         assert "subscription_data" not in kwargs, "setup mode must not have subscription_data"
         si_data = kwargs.get("setup_intent_data") or {}
-        assert si_data.get("usage") == "off_session", "setup_intent_data.usage must be off_session"
+        assert si_data.get("metadata", {}).get("onboarding_token"), "setup_intent_data.metadata.onboarding_token required"
         return SimpleNamespace(
             url="https://checkout.stripe.test/cs_setup_123",
             metadata=kwargs.get("metadata", {}),

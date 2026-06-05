@@ -290,7 +290,6 @@ def checkout(req: CheckoutRequest):
             payment_method_types=["card"],
             customer_email=email,
             setup_intent_data={
-                "usage": "off_session",
                 "metadata": {
                     "onboarding_token": onboarding_token,
                     "tenant_id": tenant_id,
