@@ -198,6 +198,10 @@ export default function Extension() {
     let timer: number | undefined;
     let ticks = 0;
     const MAX_TICKS = 10;
+    // After MAX_TICKS exhausted we slow the poll cadence but DON'T stop —
+    // Stripe webhooks sometimes lag minutes when their infra is slow, and
+    // the operator should never be stranded with no recovery path.
+    const SLOW_POLL_MS = 10_000;
 
     async function step(first: boolean) {
       if (cancelled) return;
@@ -222,6 +226,10 @@ export default function Extension() {
       ticks += 1;
       if (ticks >= MAX_TICKS) {
         if (!cancelled) setPaymentState("processing");
+        // Keep polling in the background at a slower cadence so a delayed
+        // webhook still flips us to active. The operator also has the
+        // "Continue anyway" affordance on the processing card.
+        timer = window.setTimeout(() => void step(false), SLOW_POLL_MS);
         return;
       }
       timer = window.setTimeout(() => void step(false), 3000);
@@ -353,9 +361,17 @@ export default function Extension() {
               Your payment is processing
             </p>
             <p className="mt-1 text-xs leading-relaxed text-amber-800">
-              This usually takes a minute. We&apos;ll email you the moment it
-              clears — no need to pay again.
+              This usually takes a minute. We&apos;ll keep watching and flip
+              you to active the moment Stripe confirms — you don&apos;t need
+              to pay again. Feel free to keep going below; we&apos;ll catch up.
             </p>
+            <button
+              type="button"
+              onClick={() => setPaymentActive(true)}
+              className="mt-3 inline-flex items-center justify-center rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40"
+            >
+              Continue anyway →
+            </button>
           </div>
         )}
 
