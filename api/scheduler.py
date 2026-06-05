@@ -10,10 +10,13 @@ Schedule:
   - 1st of every month at 09:00 UTC: deliver to monthly clients
   - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly clients
 """
+import logging
 import os
 from datetime import datetime, timedelta
 
 import stripe as stripe
+
+logger = logging.getLogger(__name__)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, or_, func, text
