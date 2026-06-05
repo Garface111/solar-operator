@@ -27,6 +27,7 @@ const TABS: Tab[] = [
   { label: "Master account", to: "/account" },
   { label: "Clients", to: "/clients" },
   { label: "Automatic Reports", to: "/reports" },
+  { label: "Sandbox", to: "/sandbox" },
 ];
 
 /**

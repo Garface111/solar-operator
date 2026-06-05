@@ -340,6 +340,33 @@ def main():
                 conn.execute(text(sql))
                 print(f"  + utility_sessions.{col}")
 
+        # 2026-06-05 Sandbox canvas v1: persisted node positions.
+        # Nullable float pair = not yet placed (auto-arranged on first visit).
+        canvas_cols = [
+            ("clients", "canvas_x",
+             "ALTER TABLE clients ADD COLUMN canvas_x FLOAT"),
+            ("clients", "canvas_y",
+             "ALTER TABLE clients ADD COLUMN canvas_y FLOAT"),
+            ("clients", "canvas_pinned",
+             "ALTER TABLE clients ADD COLUMN canvas_pinned BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("utility_accounts", "canvas_x",
+             "ALTER TABLE utility_accounts ADD COLUMN canvas_x FLOAT"),
+            ("utility_accounts", "canvas_y",
+             "ALTER TABLE utility_accounts ADD COLUMN canvas_y FLOAT"),
+            ("utility_accounts", "canvas_pinned",
+             "ALTER TABLE utility_accounts ADD COLUMN canvas_pinned BOOLEAN NOT NULL DEFAULT FALSE"),
+        ]
+        for table, col, sql in canvas_cols:
+            if not column_exists(conn, table, col):
+                conn.execute(text(sql))
+                print(f"  + {table}.{col}")
+        conn.execute(text(
+            "UPDATE clients SET canvas_pinned = FALSE WHERE canvas_pinned IS NULL"
+        ))
+        conn.execute(text(
+            "UPDATE utility_accounts SET canvas_pinned = FALSE WHERE canvas_pinned IS NULL"
+        ))
+
     print("=== Migration complete ===")
 
 

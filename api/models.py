@@ -156,6 +156,13 @@ class Client(Base):
     # is_placeholder gets cleared.
     is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Canvas position (sandbox canvas v1, June 2026). null = not yet placed,
+    # auto-arranged on first visit. canvas_pinned reserves a future "lock
+    # position" toggle so the operator can anchor frequently-used clients.
+    canvas_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canvas_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canvas_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+
     tenant: Mapped[Tenant] = relationship(back_populates="clients")
     arrays: Mapped[list["Array"]] = relationship(back_populates="client")
 
@@ -213,6 +220,12 @@ class UtilityAccount(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=now)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+    # Canvas position (sandbox canvas v1, June 2026). Used for unclassified
+    # accounts floating outside any client node.
+    canvas_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canvas_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canvas_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
 
     tenant: Mapped[Tenant] = relationship(back_populates="accounts")
     array: Mapped[Array | None] = relationship(back_populates="accounts")
