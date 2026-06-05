@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
-import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
 import { openPortalTab } from "../lib/openPortalTab";
 import {
@@ -10,26 +9,21 @@ import {
 } from "../lib/useExtensionStatus";
 
 type Provider = "gmp" | "vec";
-type Phase = "choose" | "waiting" | "captured";
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  /** Reload the clients list from the server and return the fresh rows
-   *  so the modal can detect whether a brand-new client actually
-   *  appeared (vs the extension silently re-scraping the previous
-   *  client because the portal session wasn't cleared). */
+  /** Reload the clients list from the server. Called as a fire-and-forget
+   *  hook so the parent can refresh — the modal itself no longer cares
+   *  about confirmation (captures land ambiently via a global listener
+   *  mounted in ClientsSection). */
   onCaptured: () => Promise<{ id: number; name: string }[]>;
-  /** Switch into the legacy form (manual name + login) for the rare case
-   *  someone wants to add a placeholder upfront. */
+  /** Switch into the legacy manual form for the rare case someone wants
+   *  to add a placeholder without ever touching a portal. */
   onSwitchToManual: () => void;
 }
 
 const PORTAL_URLS: Record<Provider, string> = {
-  // Open the login page directly. The extension wipes portal session
-  // cookies before opening the tab (background.js OPEN_UTILITY_PORTAL
-  // handler), so the operator always lands on a fresh login screen
-  // even if they were signed in as a different client a moment ago.
   gmp: "https://greenmountainpower.com/account/login/",
   vec: "https://vermontelectric.smarthub.coop/Login.html",
 };
@@ -39,36 +33,25 @@ const FRIENDLY: Record<Provider, string> = {
   vec: "Vermont Electric Cooperative",
 };
 
-// After this long with no SO_CAPTURE_LANDED, surface a "still waiting?"
-// nudge so a hung modal can't trap the operator.
-const STILL_WAITING_MS = 30_000;
-
 /**
- * AddClientByLoginModal — the high-agency "just log in" flow.
+ * AddClientByLoginModal — the "click a portal, sign in, done" flow.
  *
- * Intelligence upgrades (June 2026):
- *   - Probes extension status BEFORE the operator picks a portal, so a
- *     flow that can't complete is never offered as the default.
- *   - When the extension is absent or unpaired, prominently steers the
- *     operator to the manual-entry flow instead of letting them fall
- *     into a frozen "waiting for capture" state.
- *   - "I signed in already — check now" escape hatch still appears as a
- *     safety net for slow networks / missed events.
- *   - Title falls back gracefully when SO_CAPTURE_LANDED carries no
- *     clientName/provider (was rendering "Got it — null").
- *   - Probes are cached at module level by useExtensionStatus, so
- *     re-opening the modal is instant.
+ * Earlier versions of this modal sat operators on a "Watching for sign-in…"
+ * babysitting page after picking a portal. That was its own friction
+ * surface — Ford called it "the live capture page" — and it added a
+ * cognitive layer the operator never needed.
  *
- * Flow:
- *   1. Operator opens modal → we probe extension status passively + actively.
- *   2. If extension absent/unpaired, top-of-modal banner says so AND the
- *      manual-entry CTA is promoted to primary.
- *   3. If extension is paired, the portal-picker is the primary path.
- *   4. Pick portal → background tab opens → user signs in → extension
- *      POSTs /v1/sync → backend creates Client → SO_CAPTURE_LANDED fires
- *      → modal flips to captured state.
- *   5. Safety nets (30s nudge + manual refresh + extension-absent banner)
- *      cover the "extension didn't fire" failure mode.
+ * New flow:
+ *   1. Operator picks GMP or VEC.
+ *   2. We close the modal immediately and open the portal in a fresh
+ *      foreground tab (extension wipes session cookies first).
+ *   3. Operator signs in. The extension POSTs /v1/sync. Backend creates
+ *      a Client. SO_CAPTURE_LANDED fires globally.
+ *   4. A separate <CaptureListener> mounted in ClientsSection toasts
+ *      "<Client name> added" and refreshes the list. The operator sees
+ *      that toast from the dashboard tab whenever they come back.
+ *   5. To add another, the operator clicks "+ Add client" again. Each
+ *      click is a discrete decision; no chained-countdown decision tree.
  */
 export function AddClientByLoginModal({
   open,
@@ -78,454 +61,137 @@ export function AddClientByLoginModal({
 }: Props) {
   const toast = useToast();
   const ext = useExtensionStatus(open);
-  const [phase, setPhase] = useState<Phase>("choose");
-  const [lastProvider, setLastProvider] = useState<Provider | null>(null);
-  const [capturedClient, setCapturedClient] = useState<string | null>(null);
-  const [openingTab, setOpeningTab] = useState(false);
-  const [stillWaiting, setStillWaiting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  // Countdown to auto-loop back to the portal picker after a successful
-  // capture. Chaining 5-50 clients in one sitting becomes muscle memory
-  // — operator never has to think about clicking "Add another".
-  const [autoLoopSecondsLeft, setAutoLoopSecondsLeft] = useState(0);
-  // Snapshot of client IDs known to exist when the operator picked a
-  // portal. After SO_CAPTURE_LANDED ok:true we ask the parent to reload
-  // and compare — if no NEW id appeared, the extension probably re-
-  // scraped the previously-signed-in account instead of capturing a
-  // new client. We surface that honestly instead of false-greening.
-  const knownClientIdsBeforePick = useRef<Set<number>>(new Set());
-  const capturesThisSession = useRef(0);
 
-  // Reset whenever the modal opens; re-probe to get a fresh status.
+  // Re-probe whenever the modal opens so a freshly-installed extension
+  // is detected without a page reload.
   useEffect(() => {
-    if (open) {
-      setPhase("choose");
-      setLastProvider(null);
-      setCapturedClient(null);
-      setStillWaiting(false);
-      setAutoLoopSecondsLeft(0);
-      capturesThisSession.current = 0;
-      void ext.probe();
-    }
+    if (open) void ext.probe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Listen for SO_CAPTURE_LANDED while the modal is open.
-  useEffect(() => {
-    if (!open) return;
-    async function handler(e: MessageEvent) {
-      if (e.source !== window) return;
-      const data = e.data;
-      if (!data || data.type !== "SO_CAPTURE_LANDED") return;
-
-      // Failed captures (network error, 4xx from /v1/sync, etc.) should
-      // NOT flip the modal to the success state. Surface the error and
-      // keep the user in waiting so they can retry or use manual.
-      if (data.ok === false) {
-        toast.error(
-          typeof data.error === "string"
-            ? `Capture failed: ${data.error}`
-            : "Capture failed — try again or add this client manually.",
-        );
-        return;
-      }
-
-      // Capture landed on the backend — but did a NEW client actually
-      // get created? If the operator opened the portal still signed in
-      // as their previous client (older extensions w/o cookie-wipe,
-      // SSO/SmartHub remember-me, etc.), the extension just re-scraped
-      // the same account. /v1/sync no-ops, SO_CAPTURE_LANDED fires
-      // ok:true, but no new client appears. Detect by diffing client
-      // IDs against the pre-pick snapshot.
-      let freshRows: { id: number; name: string }[] = [];
-      try {
-        freshRows = await onCaptured();
-      } catch {
-        /* parent surfaces its own errors */
-      }
-      const before = knownClientIdsBeforePick.current;
-      const newRows = freshRows.filter((c) => !before.has(c.id));
-      if (newRows.length === 0 && before.size > 0) {
-        // We had a snapshot AND no new client → almost certainly a
-        // re-scrape. Stay in waiting, tell the operator what happened.
-        toast.error(
-          "Looks like the extension re-captured a client you already " +
-          "have. Sign out of the portal in that tab first, then sign " +
-          "in as the new client.",
-        );
-        return;
-      }
-
-      capturesThisSession.current += 1;
-      // Prefer the newly-created client's name (server truth) over the
-      // postMessage payload — that's the row that actually landed.
-      const newRow = newRows[0];
-      const label = newRow?.name?.trim()
-        || (typeof data.clientName === "string" && data.clientName.trim())
-        || (typeof data.provider === "string" && FRIENDLY[data.provider as Provider])
-        || "your account";
-      setCapturedClient(label);
-      setPhase("captured");
-      // Kick off the auto-loop countdown (3s) — the operator never
-      // has to think about clicking "Add another"; we just go back
-      // to the picker.
-      setAutoLoopSecondsLeft(3);
-    }
-    window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
-  }, [open, onCaptured, toast]);
-
-  // "Still waiting?" nudge timer in waiting phase.
-  useEffect(() => {
-    if (phase !== "waiting") {
-      setStillWaiting(false);
-      return;
-    }
-    const t = window.setTimeout(() => setStillWaiting(true), STILL_WAITING_MS);
-    return () => window.clearTimeout(t);
-  }, [phase]);
-
-  // Auto-loop countdown ticker. When a capture lands, autoLoopSecondsLeft
-  // is set to 3; we tick down every second and on hit-zero auto-reset
-  // to the picker. Operator gets a quiet visual confirmation, then we
-  // hand them the next "GMP / VEC" choice without a click.
-  useEffect(() => {
-    if (!open) return;
-    if (autoLoopSecondsLeft <= 0) return;
-    if (autoLoopSecondsLeft === 1) {
-      // Last tick → reset back to choose state.
-      const t = window.setTimeout(() => {
-        setAutoLoopSecondsLeft(0);
-        setCapturedClient(null);
-        setLastProvider(null);
-        setPhase("choose");
-      }, 1000);
-      return () => window.clearTimeout(t);
-    }
-    const t = window.setTimeout(
-      () => setAutoLoopSecondsLeft((n) => n - 1),
-      1000,
-    );
-    return () => window.clearTimeout(t);
-  }, [autoLoopSecondsLeft, open]);
-
-  function cancelAutoLoop() {
-    setAutoLoopSecondsLeft(0);
-  }
-
   async function pick(provider: Provider) {
-    setLastProvider(provider);
-    setOpeningTab(true);
-    // Snapshot existing clients BEFORE the capture lands. We use this
-    // to detect "extension re-scraped previous client" failures by
-    // comparing IDs after onCaptured() reload.
+    // Snapshot the clients list BEFORE we hand off so the global listener
+    // can detect "extension re-scraped the same client" cases (no new
+    // ID appeared after capture).
     try {
       const before = await onCaptured();
-      knownClientIdsBeforePick.current = new Set(before.map((c) => c.id));
-    } catch {
-      knownClientIdsBeforePick.current = new Set();
-    }
+      try {
+        sessionStorage.setItem(
+          "so_capture_pending",
+          JSON.stringify({
+            provider,
+            startedAt: Date.now(),
+            knownIds: before.map((c) => c.id),
+          }),
+        );
+      } catch { /* sessionStorage unavailable; non-fatal */ }
+    } catch { /* parent surfaces its own errors */ }
+
+    // Close the modal FIRST so the new tab visibly takes focus without
+    // a stale "Add client" overlay in the operator's peripheral vision.
+    onClose();
+
     const result = await openPortalTab(PORTAL_URLS[provider], { active: true });
-    setOpeningTab(false);
     if (result === "blocked") {
       toast.error(
-        "Pop-up was blocked. Click the link in the next panel to open the portal.",
+        "Your browser blocked the new tab. Allow pop-ups for this site and try again.",
       );
-      window.open(PORTAL_URLS[provider], "_blank");
     } else if (result !== "extension") {
-      // No extension → open in a new tab; user finishes flow via the
-      // manual "I signed in already" refresh button.
-      window.open(PORTAL_URLS[provider], "_blank");
-    }
-    setPhase("waiting");
-  }
-
-  function closeAndReset() {
-    setPhase("choose");
-    setLastProvider(null);
-    setCapturedClient(null);
-    setStillWaiting(false);
-    setAutoLoopSecondsLeft(0);
-    onClose();
-  }
-
-  async function handleManualRefresh() {
-    setRefreshing(true);
-    try {
-      onCaptured(); // parent reloads /v1/account/clients
-      toast.success(
-        "Refreshed — if your client showed up, you'll see them below.",
+      // No extension — we still opened a foreground tab via window.open
+      // fallback, but the operator should know auto-capture won't fire.
+      toast.show(
+        "Sign in at the portal, then add the client manually from the dashboard.",
+        "info",
       );
-      closeAndReset();
-    } finally {
-      setRefreshing(false);
+    } else {
+      toast.success(
+        `Opened ${FRIENDLY[provider]}. Sign in as the new client — their arrays show up here automatically.`,
+      );
     }
   }
 
   const extensionUsable = ext.status === "present-paired";
-  const extensionPresentButUnpaired = ext.status === "present-unpaired";
+  const extensionUnpaired = ext.status === "present-unpaired";
   const extensionAbsent = ext.status === "absent";
   const extensionUnknown = ext.status === "unknown";
 
   return (
     <Modal
       open={open}
-      onClose={closeAndReset}
-      title={
-        phase === "captured"
-          ? `Got it${capturedClient ? ` — ${capturedClient}` : ""}`
-          : phase === "waiting"
-            ? `Sign in at ${lastProvider ? FRIENDLY[lastProvider] : "the portal"}`
-            : "Add a client"
-      }
+      onClose={onClose}
+      title="Add a client"
       footer={
-        phase === "captured" ? (
-          <>
-            <Button variant="ghost" onClick={closeAndReset}>
-              Done
-            </Button>
-            <Button
-              onClick={() => {
-                cancelAutoLoop();
-                setCapturedClient(null);
-                setLastProvider(null);
-                setPhase("choose");
-              }}
-            >
-              {autoLoopSecondsLeft > 0 ? "Next now →" : "Add another"}
-            </Button>
-          </>
-        ) : phase === "waiting" ? (
-          <>
-            <Button variant="ghost" onClick={() => setPhase("choose")}>
-              Pick a different portal
-            </Button>
-            <Button variant="ghost" onClick={closeAndReset}>
-              Close
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button
-              variant={extensionUsable ? "ghost" : "primary"}
-              onClick={onSwitchToManual}
-            >
-              {extensionUsable ? "Add manually instead" : "Add manually →"}
-            </Button>
-            <Button variant="ghost" onClick={closeAndReset}>
-              Cancel
-            </Button>
-          </>
-        )
+        <>
+          <Button
+            variant={extensionUsable ? "ghost" : "primary"}
+            onClick={onSwitchToManual}
+          >
+            {extensionUsable ? "Add manually instead" : "Add manually →"}
+          </Button>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+        </>
       }
     >
-      {phase === "choose" && (
-        <div className="space-y-4">
-          <ExtensionStatusBanner status={ext.status} version={ext.version} />
+      <div className="space-y-4">
+        <ExtensionStatusBanner status={ext.status} version={ext.version} />
 
-          {extensionUsable && (
-            <p className="text-sm text-zinc-600">
-              Pick the portal your client signs into. We&apos;ll open it in a
-              background tab — sign in there as them, and their arrays appear
-              here automatically.
-            </p>
-          )}
-          {extensionPresentButUnpaired && (
-            <p className="text-sm text-zinc-600">
-              Your extension is installed but not paired to this account
-              yet. You can still pick a portal — after sign-in we&apos;ll fall
-              back to a manual refresh.
-            </p>
-          )}
-          {extensionAbsent && (
-            <p className="text-sm text-zinc-600">
-              Without the extension, the auto-capture flow can&apos;t finish.
-              <b className="text-zinc-900"> Add manually instead</b> — it&apos;s
-              fast, and you can turn on auto-populate after the extension is
-              installed.
-            </p>
-          )}
-          {extensionUnknown && (
-            <p className="text-sm text-zinc-500">
-              Checking your extension&hellip;
-            </p>
-          )}
-
-          <div
-            className={[
-              "grid grid-cols-1 gap-3 sm:grid-cols-2",
-              extensionAbsent ? "opacity-50" : "",
-            ].join(" ")}
-          >
-            <PortalCard
-              provider="gmp"
-              label="Green Mountain Power"
-              hint="Most VT solar clients"
-              onClick={() => pick("gmp")}
-              disabled={openingTab || extensionUnknown}
-            />
-            <PortalCard
-              provider="vec"
-              label="Vermont Electric Co-op"
-              hint="Northeast Kingdom area"
-              onClick={() => pick("vec")}
-              disabled={openingTab || extensionUnknown}
-            />
-          </div>
-
-          {extensionUsable && (
-            <p className="text-xs text-zinc-400">
-              Tip: sign into as many clients as you want in one sitting — each
-              capture creates its own client here.
-            </p>
-          )}
-        </div>
-      )}
-
-      {phase === "waiting" && (
-        <div className="space-y-4 py-2">
-          <div className="flex items-center justify-center gap-3 text-emerald-600">
-            <Spinner className="h-5 w-5" />
-            <span className="text-sm font-medium">
-              {extensionUsable
-                ? capturesThisSession.current > 0
-                  ? "Watching for your next sign-in…"
-                  : "Watching for sign-in…"
-                : "Sign in at the portal, then come back"}
-            </span>
-          </div>
-          {/* First-time-only instruction. After the first capture, the
-              operator knows the drill — we hide the steps and let the
-              spinner do the talking. */}
-          {capturesThisSession.current === 0 && (
-            <div className="rounded-xl bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
-              <p className="font-medium text-zinc-800">
-                In the tab that just opened:
-              </p>
-              <ol className="mt-2 ml-5 list-decimal space-y-1">
-                <li>You&apos;ll be signed out of any previous session.</li>
-                <li>Sign in as the <b>new</b> client.</li>
-                <li>That&apos;s it — come back here.</li>
-              </ol>
-            </div>
-          )}
-
-          {!extensionUsable && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              <p className="font-medium">
-                {extensionAbsent
-                  ? "Extension not detected"
-                  : "Extension not paired"}
-                .
-              </p>
-              <p className="mt-1 text-xs">
-                Your client won&apos;t auto-add. Once you&apos;ve signed in,
-                tap{" "}
-                <span className="font-semibold">
-                  &ldquo;I signed in already&rdquo;
-                </span>{" "}
-                below to refresh — or close this and use{" "}
-                <button
-                  type="button"
-                  onClick={onSwitchToManual}
-                  className="font-semibold underline hover:text-amber-700"
-                >
-                  add manually
-                </button>{" "}
-                instead.
-              </p>
-            </div>
-          )}
-
-          {/* Escape hatches — always visible in waiting state. The
-              "I signed in already" button forces a clients reload from
-              the server in case SO_CAPTURE_LANDED never fires, and the
-              quieter underline link drops the user straight into the
-              manual form if auto-capture isn't going to happen. */}
-          <div className="flex flex-col items-center gap-2">
-              <Button
-                onClick={handleManualRefresh}
-                disabled={refreshing}
-                className="w-full sm:w-auto"
-              >
-                {refreshing ? (
-                  <>
-                    <Spinner />
-                    Refreshing…
-                  </>
-                ) : (
-                  "I signed in already — add now"
-                )}
-              </Button>
-              <button
-                type="button"
-                onClick={onSwitchToManual}
-                className="text-xs font-medium text-zinc-500 underline-offset-2 hover:text-zinc-700 hover:underline focus:outline-none"
-              >
-                or add this client manually
-              </button>
-              {stillWaiting && extensionUsable && (
-                <p className="mt-1 text-center text-xs text-amber-700">
-                  Capture is taking longer than expected — click above to
-                  refresh.
-                </p>
-              )}
-            </div>
-
-          <p className="text-xs text-zinc-400">
-            If you signed in but nothing happened, the extension may not be
-            paired. Try{" "}
-            <button
-              onClick={onSwitchToManual}
-              className="text-primary-600 underline hover:text-primary-700"
-            >
-              adding manually
-            </button>
-            .
+        {extensionUsable && (
+          <p className="text-sm text-zinc-600">
+            Pick the portal your client signs into. We&apos;ll open it in
+            a fresh tab — sign in there as the new client, and their
+            arrays appear in your dashboard automatically.
           </p>
-        </div>
-      )}
-
-      {phase === "captured" && (
-        <div className="space-y-4 py-2">
-          <div className="flex items-center justify-center gap-2 text-emerald-600">
-            <svg
-              className="h-6 w-6"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-            <span className="text-base font-medium">
-              {capturedClient || "Client"} added
-            </span>
-          </div>
-          <p className="text-center text-sm text-zinc-600">
-            {capturesThisSession.current === 1
-              ? "Their arrays are now on your dashboard."
-              : `${capturesThisSession.current} clients captured this session.`}
+        )}
+        {extensionUnpaired && (
+          <p className="text-sm text-zinc-600">
+            Your extension is installed but not paired to this account yet.
+            You can still pick a portal — after sign-in we&apos;ll fall back
+            to a manual refresh.
           </p>
-          {autoLoopSecondsLeft > 0 ? (
-            <div className="flex flex-col items-center gap-2">
-              <p className="text-center text-xs text-zinc-500">
-                Ready for the next one in {autoLoopSecondsLeft}s…
-              </p>
-              <div className="h-1 w-32 overflow-hidden rounded-full bg-zinc-200">
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-1000 ease-linear"
-                  style={{ width: `${(autoLoopSecondsLeft / 3) * 100}%` }}
-                />
-              </div>
-            </div>
-          ) : (
-            <p className="text-center text-xs text-zinc-400">
-              Have more to add? Pick another portal — we&apos;ll keep going.
-            </p>
-          )}
+        )}
+        {extensionAbsent && (
+          <p className="text-sm text-zinc-600">
+            Without the extension, auto-capture can&apos;t finish.{" "}
+            <b className="text-zinc-900">Add manually instead</b> — it&apos;s
+            quick, and you can re-enable auto-populate after installing the
+            extension.
+          </p>
+        )}
+        {extensionUnknown && (
+          <p className="text-sm text-zinc-500">
+            Checking your extension&hellip;
+          </p>
+        )}
+
+        <div
+          className={[
+            "grid grid-cols-1 gap-3 sm:grid-cols-2",
+            extensionAbsent ? "opacity-50" : "",
+          ].join(" ")}
+        >
+          <PortalCard
+            provider="gmp"
+            label="Green Mountain Power"
+            hint="Most VT solar clients"
+            onClick={() => pick("gmp")}
+            disabled={extensionUnknown}
+          />
+          <PortalCard
+            provider="vec"
+            label="Vermont Electric Co-op"
+            hint="Northeast Kingdom area"
+            onClick={() => pick("vec")}
+            disabled={extensionUnknown}
+          />
         </div>
-      )}
+
+        <p className="text-xs text-zinc-400">
+          Tip: to add another client, just click <b>+ Add client</b> again
+          after the first one lands.
+        </p>
+      </div>
     </Modal>
   );
 }
@@ -559,7 +225,6 @@ function ExtensionStatusBanner({
       </div>
     );
   }
-  // absent
   return (
     <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900">
       <span aria-hidden>✗</span>

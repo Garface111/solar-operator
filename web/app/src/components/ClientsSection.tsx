@@ -9,6 +9,7 @@ import { ClientCard } from "./ClientCard";
 import { WelcomeReveal } from "./WelcomeReveal";
 import { AddClientModal } from "./AddClientModal";
 import { AddClientByLoginModal } from "./AddClientByLoginModal";
+import { CaptureListener } from "./CaptureListener";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import { CaptureCeremony } from "./CaptureCeremony";
@@ -201,6 +202,12 @@ export function ClientsSection({ expandClientId }: Props) {
 
   return (
     <section className="relative">
+      {/* Global capture listener — turns SO_CAPTURE_LANDED postMessages
+          into toasts on whichever tab the operator is currently on.
+          Decoupled from the Add Client modal so success notifications
+          fire even after the modal has closed. */}
+      <CaptureListener onCaptureLanded={loadClients} />
+
       {/* Undo banner — fixed at top of viewport */}
       {undoPending && (
         <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-between gap-4 border-b border-amber-300 bg-amber-50 px-6 py-3 text-sm shadow-md">
