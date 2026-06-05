@@ -427,7 +427,7 @@ def send_trial_charged_email(to: str, name: str, array_count: int,
         f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
         f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is active</h2>"
         f"<p>Hi {first},</p>"
-        f"<p>Your 4-day trial just ended and your card was charged "
+        f"<p>Your 14-day trial just ended and your card was charged "
         f"<strong>${amount_dollars:.2f}</strong> for {array_count} {plural}.</p>"
         f"<p>You're all set — reports will continue running automatically on your schedule. "
         f"As you add or remove arrays, your next invoice will update to match.</p>"
