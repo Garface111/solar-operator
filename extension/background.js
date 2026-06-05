@@ -196,14 +196,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: "invalid-url" });
       return; // sync response, no need to return true
     }
-    chrome.tabs.create({ url, active: false }, (tab) => {
-      if (chrome.runtime.lastError) {
-        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-      } else {
-        sendResponse({ ok: true, tabId: tab && tab.id });
+    // v1.4.1: wipe portal session cookies BEFORE opening the tab so an
+    // operator who's already signed in as one client doesn't land in
+    // that dashboard and re-scrape the same account. Each click = a
+    // fresh, stateless visit to the portal login screen.
+    (async () => {
+      try {
+        const domains = ["greenmountainpower.com", "smarthub.coop"];
+        let host;
+        try { host = new URL(url).hostname; } catch (_) { host = ""; }
+        // Only wipe cookies for the portal we're opening — never touch
+        // the user's other browsing.
+        const matchDomain = domains.find((d) => host.endsWith(d));
+        if (matchDomain) {
+          const cookies = await chrome.cookies.getAll({ domain: matchDomain });
+          await Promise.all(cookies.map((c) => {
+            const protocol = c.secure ? "https://" : "http://";
+            const cookieUrl = `${protocol}${c.domain.replace(/^\./, "")}${c.path}`;
+            return chrome.cookies.remove({
+              url: cookieUrl, name: c.name, storeId: c.storeId,
+            });
+          }));
+        }
+      } catch (e) {
+        // Cookie wipe is best-effort; opening the tab still proceeds.
+        console.warn("[so] cookie wipe failed", e);
       }
-    });
-    return true; // chrome.tabs.create callback is async
+      chrome.tabs.create({ url, active: false }, (tab) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        } else {
+          sendResponse({ ok: true, tabId: tab && tab.id });
+        }
+      });
+    })();
+    return true; // async sendResponse
   }
   // v1.3.0: SPA hands us a tenant key + endpoint (kills the copy-paste
   // activation-code step). We persist immediately and reply with the

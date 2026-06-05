@@ -24,15 +24,12 @@ interface Props {
 }
 
 const PORTAL_URLS: Record<Provider, string> = {
-  // We send users to LOGOUT URLs (not login) so any existing session
-  // is cleared first. Otherwise an operator who's already signed in
-  // as one client lands in that client's dashboard and the extension
-  // just re-scrapes the same data we already have — wasting a sync
-  // round-trip and creating zero new clients. Logout pages redirect to
-  // the login form automatically, forcing the operator to enter the
-  // NEW client's credentials.
-  gmp: "https://greenmountainpower.com/account/logout/",
-  vec: "https://vermontelectric.smarthub.coop/Logout.html",
+  // Open the login page directly. The extension wipes portal session
+  // cookies before opening the tab (background.js OPEN_UTILITY_PORTAL
+  // handler), so the operator always lands on a fresh login screen
+  // even if they were signed in as a different client a moment ago.
+  gmp: "https://greenmountainpower.com/account/login/",
+  vec: "https://vermontelectric.smarthub.coop/Login.html",
 };
 
 const FRIENDLY: Record<Provider, string> = {
