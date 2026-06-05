@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { Stepper } from "./Stepper";
 
-// New flow: Welcome(0) → Info(1) → Clients(2) → Payment(3) → Install(4) → Done(5)
-export const STEPS = ["Welcome", "Your info", "Clients", "Payment", "Install", "Done"];
+// Flow: Welcome(0) → Info(1) → Clients(2, w/ Stripe handoff) → Install(3) → Done(4)
+export const STEPS = ["Welcome", "Your info", "Clients", "Install", "Done"];
 
 interface ScreenLayoutProps {
   /** Zero-based index of the active wizard step — drives the Stepper. */

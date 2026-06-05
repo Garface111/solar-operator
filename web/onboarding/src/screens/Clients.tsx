@@ -206,7 +206,7 @@ export default function Clients() {
   // Show a brief loading state while we check if clients are already set up.
   if (!statusChecked) {
     return (
-      <ScreenLayout current={5}>
+      <ScreenLayout current={4}>
         <Card active className="flex items-center justify-center py-16">
           <Spinner />
         </Card>
@@ -217,7 +217,7 @@ export default function Clients() {
   // Confirmation sub-screen shown after submitClients succeeds.
   if (confirmSummary) {
     return (
-      <ScreenLayout current={5}>
+      <ScreenLayout current={4}>
         <Card active>
           <div aria-hidden className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-primary-100 text-2xl text-primary-600">
             ✓
@@ -268,7 +268,7 @@ export default function Clients() {
   }
 
   return (
-    <ScreenLayout current={5}>
+    <ScreenLayout current={4}>
       <Card active>
         <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
           Add your reporting clients.

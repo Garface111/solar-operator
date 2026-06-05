@@ -324,7 +324,7 @@ export default function Extension() {
   const status = statusLine();
 
   return (
-    <ScreenLayout current={4}>
+    <ScreenLayout current={3}>
       <Card active>
         {paymentActive && (
           <div className="mb-5 inline-flex items-center gap-2 rounded-lg border border-primary-200 bg-primary-50 px-3 py-1.5 text-sm font-medium text-primary-700">

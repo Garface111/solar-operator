@@ -1,39 +1,38 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
+import { Spinner } from "../ui/Spinner";
+import { useToast } from "../ui/Toast";
+import { createCheckout, setToken } from "../lib/onboarding";
+import { SO_OPERATOR_KEY, type OperatorInfo } from "./Info";
 
 /**
- * Page 3 — Array count estimate.
+ * Page 3 — Array count estimate + checkout handoff.
  *
- * The previous version of this screen made the operator enter each client's
- * name, contact email, and per-array NEPOOL-GIS IDs BEFORE checkout. That's
- * 5-15 minutes of friction with zero payoff — every one of those fields
- * gets auto-populated by the extension or entered post-payment on the
- * dashboard, where the operator already has the context.
+ * Previously this page only collected the array-count estimate and then
+ * handed off to a separate "Plan" review screen. The review screen showed
+ * the same setup fee + monthly math already visible here, so it was
+ * redundant friction — we now call createCheckout() directly from this
+ * screen's Continue button.
  *
- * All we actually need from this page is a number to seed Stripe Checkout's
- * quantity: roughly how many arrays does this operator manage? The Plan
- * screen uses that for billing math, the post-payment dashboard reconciles
- * to the real count automatically as the extension captures land.
+ * The previous version of this screen also made the operator enter each
+ * client's name, contact email, and per-array NEPOOL-GIS IDs BEFORE
+ * checkout — 5-15 minutes of pointless friction. Every one of those
+ * fields gets auto-populated by the extension or entered post-payment on
+ * the dashboard, where the operator already has the context.
  *
- * If the operator literally doesn't know yet, defaulting to 1 keeps them
- * moving — the subscription reconciles upward later via
- * stripe_helpers.reconcile_subscription_quantity.
+ * All we actually need is a number to seed Stripe Checkout's quantity.
+ * The post-payment dashboard reconciles to the real count automatically
+ * as the extension captures land (see
+ * stripe_helpers.reconcile_subscription_quantity).
  */
 export const SO_ARRAY_ESTIMATE_KEY = "so_array_estimate";
 
-// Backward-compat: the Plan screen still reads SO_CLIENTS_DRAFT_KEY to decide
-// whether to send a seeded clients payload or just an array_count. We write
-// an empty draft here so Plan falls into the array_count path cleanly.
+// Back-compat key kept so older sessions don't blow up on read.
 export const SO_CLIENTS_DRAFT_KEY = "so_clients_draft";
 
-/**
- * Kept for back-compat with Plan.tsx's legacy seeded-clients path. Anyone
- * still reading SO_CLIENTS_DRAFT_KEY (e.g. a session that started before
- * this screen was simplified) will see this shape.
- */
 export interface ClientDraftEntry {
   name: string;
   contact_email?: string;
@@ -41,11 +40,34 @@ export interface ClientDraftEntry {
 }
 
 const ARRAY_PRICE = 45;
+const SETUP_FEE = 250;
 
 const QUICK_PICKS = [10, 25, 50, 100, 250, 500];
 
+function readOperatorInfo(locationState: unknown): OperatorInfo | null {
+  if (locationState && typeof (locationState as OperatorInfo).email === "string") {
+    return locationState as OperatorInfo;
+  }
+  try {
+    const raw = sessionStorage.getItem(SO_OPERATOR_KEY);
+    return raw ? (JSON.parse(raw) as OperatorInfo) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function ClientSetup() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const toast = useToast();
+
+  const info = readOperatorInfo(location.state);
+
+  useEffect(() => {
+    if (!info?.email) {
+      navigate("/info", { replace: true });
+    }
+  }, []);
 
   const initial = (() => {
     try {
@@ -58,16 +80,38 @@ export default function ClientSetup() {
   })();
 
   const [count, setCount] = useState<number>(initial);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (!info?.email) return null;
 
   const monthly = Math.max(0, count) * ARRAY_PRICE;
-  const canContinue = count >= 1;
+  const todayTotal = SETUP_FEE + monthly;
+  const canContinue = count >= 1 && !submitting;
 
-  function handleContinue() {
-    if (!canContinue) return;
+  async function handleContinue() {
+    if (!canContinue || !info) return;
     sessionStorage.setItem(SO_ARRAY_ESTIMATE_KEY, String(count));
-    // Clear any old per-client draft so Plan uses the estimate path.
+    // Clear any old per-client draft so backend uses the array_count path.
     sessionStorage.setItem(SO_CLIENTS_DRAFT_KEY, JSON.stringify([]));
-    navigate("/plan");
+
+    setSubmitting(true);
+    try {
+      const { checkout_url, onboarding_token } = await createCheckout({
+        full_name: info.fullName,
+        email: info.email,
+        company: info.company,
+        array_count: count,
+      });
+      setToken(onboarding_token);
+      window.location.href = checkout_url;
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Couldn't reach checkout. Check your connection and try again.",
+      );
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -137,28 +181,37 @@ export default function ClientSetup() {
           </div>
         </div>
 
-        {/* Pricing preview */}
-        <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 px-5 py-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-primary-800">
-              {count} {count === 1 ? "array" : "arrays"} × $45/month
-            </span>
-            <span className="text-lg font-semibold text-primary-900">
-              ${monthly}/month
-            </span>
+        {/* Billing breakdown — folded in from the deleted Plan screen */}
+        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-5 space-y-3">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-zinc-600">One-time setup</span>
+            <span className="font-medium text-zinc-900">${SETUP_FEE}</span>
           </div>
-          <p className="mt-1 text-[11px] text-primary-700">
-            Plus a one-time $250 setup fee. You&apos;ll see the full breakdown
-            on the next screen.
-          </p>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-zinc-600">
+              Monthly ({count} {count === 1 ? "array" : "arrays"} × ${ARRAY_PRICE})
+            </span>
+            <span className="font-medium text-zinc-900">${monthly}/month</span>
+          </div>
+          <div className="border-t border-zinc-200 pt-3 flex items-center justify-between text-sm font-medium">
+            <span className="text-zinc-700">Charged today</span>
+            <span className="text-zinc-900">${todayTotal}</span>
+          </div>
         </div>
 
         <div className="mt-8 flex items-center justify-between">
-          <Button variant="ghost" onClick={() => navigate("/info")}>
+          <Button variant="ghost" onClick={() => navigate("/info")} disabled={submitting}>
             ← Back
           </Button>
           <Button onClick={handleContinue} disabled={!canContinue}>
-            Review pricing →
+            {submitting ? (
+              <>
+                <Spinner />
+                Redirecting…
+              </>
+            ) : (
+              "Continue to payment →"
+            )}
           </Button>
         </div>
 
@@ -166,7 +219,7 @@ export default function ClientSetup() {
           Not sure yet? Pick the closest estimate — your subscription
           quantity is reconciled automatically once your real arrays are
           set up in the dashboard. You won&apos;t be charged extra without
-          notice.
+          notice. Secure checkout powered by Stripe.
         </p>
       </Card>
     </ScreenLayout>

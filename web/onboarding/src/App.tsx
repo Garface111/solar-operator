@@ -4,7 +4,6 @@ import DummyReport from "./screens/DummyReport";
 import Welcome from "./screens/Welcome";
 import Info from "./screens/Info";
 import ClientSetup from "./screens/ClientSetup";
-import Plan from "./screens/Plan";
 import Extension from "./screens/Extension";
 import Clients from "./screens/Clients";
 import Done from "./screens/Done";
@@ -18,11 +17,12 @@ export default function App() {
         {/* Pre-wizard explainer screens (no stepper) */}
         <Route path="/" element={<GetStarted />} />
         <Route path="/demo" element={<DummyReport />} />
-        {/* Wizard: Welcome → Info → ClientSetup → Plan → Extension → Clients → Done */}
+        {/* Wizard: Welcome → Info → ClientSetup (with checkout handoff) → Extension → Clients → Done */}
         <Route path="/welcome" element={<Welcome />} />
         <Route path="/info" element={<Info />} />
         <Route path="/client-setup" element={<ClientSetup />} />
-        <Route path="/plan" element={<Plan />} />
+        {/* Legacy /plan URL — redirect to /client-setup which now owns checkout */}
+        <Route path="/plan" element={<Navigate to="/client-setup" replace />} />
         <Route path="/extension" element={<Extension />} />
         <Route path="/clients" element={<Clients />} />
         <Route path="/done" element={<Done />} />

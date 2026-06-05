@@ -58,7 +58,7 @@ export default function Done() {
   }, []);
 
   return (
-    <ScreenLayout current={5}>
+    <ScreenLayout current={4}>
       <div className="flex flex-col items-center gap-4 py-12 text-center">
         {!error ? (
           <>
