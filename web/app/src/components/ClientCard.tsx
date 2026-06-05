@@ -707,6 +707,9 @@ export function ClientCard({
                 refreshSignal={arrayRefreshSignal}
                 onCountChange={(count) => onChange({ ...client, array_count: count })}
                 onUndo={onUndo}
+                revealStartDelayMs={
+                  reveal.active ? reveal.delayFor(revealIndex, 2) : undefined
+                }
               />
             </div>
           </div>

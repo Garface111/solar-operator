@@ -24,9 +24,15 @@ interface Props {
   refreshSignal?: number;
   onCountChange?: (count: number) => void;
   onUndo?: (token: string, message: string) => void;
+  /**
+   * When set (ms), array rows fade in with a staggered cascade starting
+   * at this offset — used so the welcome reveal flows through arrays
+   * instead of stopping at the card header.
+   */
+  revealStartDelayMs?: number;
 }
 
-export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo }: Props) {
+export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, revealStartDelayMs }: Props) {
   const toast = useToast();
   const [arrays, setArrays] = useState<ArrayRowT[] | null>(null);
   const [adding, setAdding] = useState(false);
@@ -166,21 +172,33 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo }: Pr
         </p>
       )}
 
-      {arrays.map((a) => (
-        <ArrayRow
-          key={a.id}
-          clientId={clientId}
-          array={a}
-          onChange={replaceArray}
-          onDelete={(id, token, name) => {
-            removeArrayLocal(id);
-            onUndo?.(token, `Deleted ${name}`);
-          }}
-          selectable={selectMode}
-          selected={selectedIds.has(a.id)}
-          onSelect={toggleSelect}
-        />
-      ))}
+      {arrays.map((a, idx) => {
+        const cascade =
+          revealStartDelayMs !== undefined
+            ? {
+                className: "so-reveal-card",
+                style: {
+                  animationDelay: `${revealStartDelayMs + idx * 110}ms`,
+                } as React.CSSProperties,
+              }
+            : null;
+        return (
+          <div key={a.id} {...(cascade ?? {})}>
+            <ArrayRow
+              clientId={clientId}
+              array={a}
+              onChange={replaceArray}
+              onDelete={(id, token, name) => {
+                removeArrayLocal(id);
+                onUndo?.(token, `Deleted ${name}`);
+              }}
+              selectable={selectMode}
+              selected={selectedIds.has(a.id)}
+              onSelect={toggleSelect}
+            />
+          </div>
+        );
+      })}
 
       {adding ? (
         <AddArrayRow
