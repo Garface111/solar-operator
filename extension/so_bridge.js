@@ -37,11 +37,12 @@
     if (data.type === "SO_OPEN_PORTAL") {
       const reqId = data.reqId || null;
       const url = String(data.url || "").trim();
+      const active = data.active === true;
       if (!url || !/^https:\/\//i.test(url)) {
         window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, "*");
         return;
       }
-      chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url }, (resp) => {
+      chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url, active }, (resp) => {
         const ok = !chrome.runtime.lastError && resp && resp.ok;
         window.postMessage({
           type: "SO_OPEN_PORTAL_ACK",

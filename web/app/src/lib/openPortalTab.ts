@@ -23,16 +23,20 @@ function uuid(): string {
 }
 
 /**
- * Try to open `url` in a background tab via the Solar Operator extension.
- * Falls back to window.open(url, "_blank") if the extension doesn't
- * acknowledge within {@link ACK_TIMEOUT_MS}.
+ * Try to open `url` in a tab via the Solar Operator extension. When
+ * `active` is true the new tab is foregrounded (use for flows where
+ * the operator is about to interact, like Add Client → sign-in).
+ * Defaults to background-tab for ambient captures.
  *
  * Returns a promise that resolves to:
- *   - "extension"  → background tab opened via the extension
+ *   - "extension"  → tab opened via the extension
  *   - "fallback"   → no extension; opened a normal foreground tab
  *   - "blocked"    → fallback was blocked by the popup blocker
  */
-export function openPortalTab(url: string): Promise<"extension" | "fallback" | "blocked"> {
+export function openPortalTab(
+  url: string,
+  opts: { active?: boolean } = {},
+): Promise<"extension" | "fallback" | "blocked"> {
   return new Promise((resolve) => {
     const reqId = uuid();
     let settled = false;
@@ -56,7 +60,10 @@ export function openPortalTab(url: string): Promise<"extension" | "fallback" | "
     };
 
     window.addEventListener("message", onMessage);
-    window.postMessage({ type: "SO_OPEN_PORTAL", url, reqId }, "*");
+    window.postMessage(
+      { type: "SO_OPEN_PORTAL", url, reqId, active: !!opts.active },
+      "*",
+    );
 
     window.setTimeout(() => {
       if (settled) return;

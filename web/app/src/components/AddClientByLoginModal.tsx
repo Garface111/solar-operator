@@ -224,7 +224,7 @@ export function AddClientByLoginModal({
     } catch {
       knownClientIdsBeforePick.current = new Set();
     }
-    const result = await openPortalTab(PORTAL_URLS[provider]);
+    const result = await openPortalTab(PORTAL_URLS[provider], { active: true });
     setOpeningTab(false);
     if (result === "blocked") {
       toast.error(

@@ -192,6 +192,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // stealing the operator's focus from solaroperator.org.
   if (msg.type === "OPEN_UTILITY_PORTAL") {
     const url = String(msg.url || "");
+    // v1.4.2: caller can opt into a foreground tab via msg.active=true.
+    // Default stays false (background tab) for ambient capture flows.
+    // The Add Client modal sets true because the operator is actively
+    // about to sign in — making them switch tabs manually is silly.
+    const active = msg.active === true;
     if (!/^https:\/\//i.test(url)) {
       sendResponse({ ok: false, error: "invalid-url" });
       return; // sync response, no need to return true
@@ -222,7 +227,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Cookie wipe is best-effort; opening the tab still proceeds.
         console.warn("[so] cookie wipe failed", e);
       }
-      chrome.tabs.create({ url, active: false }, (tab) => {
+      chrome.tabs.create({ url, active }, (tab) => {
         if (chrome.runtime.lastError) {
           sendResponse({ ok: false, error: chrome.runtime.lastError.message });
         } else {
