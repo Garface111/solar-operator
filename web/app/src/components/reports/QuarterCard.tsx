@@ -1,203 +1,290 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Chip } from "../../ui/Chip";
 import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
+import { useToast } from "../../ui/Toast";
 import type { ClientRow } from "../../lib/api";
+import { sendReportNow, downloadClientReport } from "../../lib/api";
 
 type Status = "draft" | "ready" | "sent" | "empty";
 
 export interface QuarterCardProps {
   label: string;
+  quarter: string;
   status: Status;
   arrayCount: number;
-  clientCount: number;
-  /** ISO timestamp of the most-recent delivery, shown as relative time. */
-  lastGeneratedAt: string | null;
-  /** Total MWh generated in this quarter across all arrays, or null if unknown. */
-  mwhTotal?: number | null;
+  lastDeliveredAt: string | null;
+  mwhTotal: number;
   clients: ClientRow[];
-  onDownload: (client: ClientRow) => Promise<void>;
-  onRegenerate: () => Promise<void>;
+  /** Start expanded (used for the most-recent complete quarter). */
+  defaultExpanded?: boolean;
+  onRefresh?: () => void;
 }
 
 const STATUS_CONFIG: Record<
   Status,
   { label: string; chipVariant: "emerald" | "wood" | "muted" }
 > = {
-  sent:  { label: "Sent",  chipVariant: "emerald" },
-  ready: { label: "Ready", chipVariant: "wood"    },
-  draft: { label: "Draft", chipVariant: "muted"   },
-  empty: { label: "Empty", chipVariant: "muted"   },
+  sent:  { label: "Sent",        chipVariant: "emerald" },
+  ready: { label: "Ready",       chipVariant: "wood"    },
+  draft: { label: "In progress", chipVariant: "muted"   },
+  empty: { label: "No data",     chipVariant: "muted"   },
 };
 
-function relativeTime(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 60_000) return "just now";
-  const min = Math.floor(ms / 60_000);
-  if (min < 60) return `${min} minute${min === 1 ? "" : "s"} ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
-  const days = Math.floor(hr / 24);
-  if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
-  const months = Math.floor(days / 30);
-  return `${months} month${months === 1 ? "" : "s"} ago`;
+function shortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year:
+      new Date(iso).getFullYear() !== new Date().getFullYear()
+        ? "numeric"
+        : undefined,
+  });
+}
+
+function clientDeliveryStatus(
+  c: ClientRow,
+): "bounced" | "sent" | "no_email" | "pending" {
+  if (!c.contact_email) return "no_email";
+  if (c.last_bounced_at) {
+    const bouncedMs = new Date(c.last_bounced_at).getTime();
+    const deliveredMs = c.last_delivered_at
+      ? new Date(c.last_delivered_at).getTime()
+      : 0;
+    if (bouncedMs > deliveredMs) return "bounced";
+  }
+  if (c.last_delivered_at) return "sent";
+  return "pending";
+}
+
+/** Collapsed one-line header. */
+function CollapsedRow({
+  label,
+  status,
+  arrayCount,
+  mwhTotal,
+  lastDeliveredAt,
+  onExpand,
+}: {
+  label: string;
+  status: Status;
+  arrayCount: number;
+  mwhTotal: number;
+  lastDeliveredAt: string | null;
+  onExpand: () => void;
+}) {
+  const { label: statusLabel, chipVariant } = STATUS_CONFIG[status];
+
+  const meta = [
+    arrayCount > 0
+      ? `${arrayCount} ${arrayCount === 1 ? "array" : "arrays"}`
+      : null,
+    mwhTotal > 0 ? `${mwhTotal.toFixed(2)} MWh` : null,
+    mwhTotal > 0 ? `${Math.floor(mwhTotal)} RECs` : null,
+    lastDeliveredAt ? `sent ${shortDate(lastDeliveredAt)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      className="flex w-full items-center justify-between gap-3 rounded-xl border border-cream-border bg-cream px-5 py-3.5 text-left shadow-sm transition-shadow hover:shadow-md"
+    >
+      <div className="min-w-0">
+        <span className="text-sm font-semibold text-zinc-900">{label}</span>
+        {meta && (
+          <span className="ml-2 text-xs text-zinc-400">{meta}</span>
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Chip variant={chipVariant}>{statusLabel}</Chip>
+        <span className="text-xs text-zinc-400" aria-hidden>
+          ▾
+        </span>
+      </div>
+    </button>
+  );
+}
+
+/** Per-client row inside the expanded view. */
+function ClientDeliveryRow({
+  client,
+  quarter,
+  onRefresh,
+}: {
+  client: ClientRow;
+  quarter: string;
+  onRefresh?: () => void;
+}) {
+  const toast = useToast();
+  const [sending, setSending] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const deliveryStatus = clientDeliveryStatus(client);
+
+  async function handleResend() {
+    setSending(true);
+    try {
+      const res = await sendReportNow([client.id]);
+      const ok = res.results.find((r) => r.client_id === client.id);
+      if (ok?.ok) {
+        toast.success(`Re-sent to ${client.name}.`);
+        onRefresh?.();
+      } else {
+        toast.error(ok?.reason ?? "Send failed.");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Send failed");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleDownload() {
+    setDownloading(true);
+    try {
+      await downloadClientReport(client.id, client.name, quarter);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const statusChip = {
+    sent:     <Chip variant="emerald">Sent</Chip>,
+    bounced:  <Chip variant="red">Bounced</Chip>,
+    no_email: <Chip variant="amber">No email</Chip>,
+    pending:  <Chip variant="muted">Pending</Chip>,
+  }[deliveryStatus];
+
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <div className="min-w-0 flex-1">
+        <span className="text-sm text-zinc-800">{client.name}</span>
+        {deliveryStatus === "bounced" && client.last_bounce_reason && (
+          <span className="ml-2 text-xs text-red-500">
+            {client.last_bounce_reason}
+          </span>
+        )}
+        {deliveryStatus === "sent" && client.last_delivered_at && (
+          <span className="ml-2 text-xs text-zinc-400">
+            {shortDate(client.last_delivered_at)}
+          </span>
+        )}
+        {deliveryStatus === "no_email" && (
+          <span className="ml-2 text-xs text-amber-600">
+            add contact email
+          </span>
+        )}
+      </div>
+      {statusChip}
+      <Button
+        variant="ghost"
+        disabled={downloading}
+        onClick={handleDownload}
+        className="h-7 px-2 text-xs text-zinc-500"
+      >
+        {downloading ? <Spinner className="h-3 w-3" /> : ".xlsx"}
+      </Button>
+      <Button
+        variant="ghost"
+        disabled={sending || deliveryStatus === "no_email"}
+        onClick={handleResend}
+        className="h-7 px-2 text-xs text-zinc-500"
+      >
+        {sending ? <Spinner className="h-3 w-3" /> : "Re-send"}
+      </Button>
+    </div>
+  );
 }
 
 export function QuarterCard({
   label,
+  quarter,
   status,
   arrayCount,
-  clientCount,
-  lastGeneratedAt,
+  lastDeliveredAt,
   mwhTotal,
   clients,
-  onDownload,
-  onRegenerate,
+  defaultExpanded = false,
+  onRefresh,
 }: QuarterCardProps) {
-  const [regenerating, setRegenerating] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const [dlOpen, setDlOpen] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
+
+  const collapse = useCallback(() => setExpanded(false), []);
+  const expand   = useCallback(() => setExpanded(true),  []);
+
+  if (!expanded) {
+    return (
+      <CollapsedRow
+        label={label}
+        status={status}
+        arrayCount={arrayCount}
+        mwhTotal={mwhTotal}
+        lastDeliveredAt={lastDeliveredAt}
+        onExpand={expand}
+      />
+    );
+  }
 
   const { label: statusLabel, chipVariant } = STATUS_CONFIG[status];
-  const hasClients = clients.length > 0;
 
-  async function handleRegenerate() {
-    setRegenerating(true);
-    try {
-      await onRegenerate();
-    } finally {
-      setRegenerating(false);
-    }
-  }
-
-  async function handleDownloadClient(client: ClientRow) {
-    setDownloading(true);
-    setDlOpen(false);
-    try {
-      await onDownload(client);
-    } finally {
-      setDownloading(false);
-    }
-  }
-
-  async function handleDownloadAll() {
-    setDownloading(true);
-    setDlOpen(false);
-    try {
-      for (const client of clients) {
-        await onDownload(client);
-      }
-    } finally {
-      setDownloading(false);
-    }
-  }
+  const metaParts = [
+    arrayCount > 0 ? `${arrayCount} ${arrayCount === 1 ? "array" : "arrays"}` : null,
+    mwhTotal > 0 ? `${mwhTotal.toFixed(2)} MWh` : null,
+    mwhTotal > 0 ? `${Math.floor(mwhTotal)} RECs` : null,
+    clients.length > 0
+      ? `${clients.length} ${clients.length === 1 ? "client" : "clients"}`
+      : null,
+    lastDeliveredAt ? `sent ${shortDate(lastDeliveredAt)}` : null,
+  ].filter(Boolean);
 
   return (
-    <div
-      aria-busy={regenerating}
-      className="rounded-xl border border-cream-border bg-cream p-5 shadow-sm transition-all duration-150 hover:-translate-y-px hover:shadow-md"
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-base font-semibold text-zinc-900">{label}</span>
-        <Chip variant={chipVariant}>{statusLabel}</Chip>
-      </div>
+    <div className="rounded-xl border border-cream-border bg-cream shadow-sm">
+      {/* Expanded header */}
+      <button
+        type="button"
+        onClick={collapse}
+        className="flex w-full items-start justify-between gap-3 px-5 py-4 text-left"
+      >
+        <div>
+          <span className="text-base font-semibold text-zinc-900">{label}</span>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            {metaParts.join(" · ")}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          <Chip variant={chipVariant}>{statusLabel}</Chip>
+          <span className="text-xs text-zinc-400" aria-hidden>
+            ▴
+          </span>
+        </div>
+      </button>
 
-      {/* Stats */}
-      <p className="mt-2 text-xs text-zinc-500">
-        {arrayCount > 0
-          ? `${arrayCount} array${arrayCount === 1 ? "" : "s"} · ${clientCount} client${clientCount === 1 ? "" : "s"}`
-          : "No arrays configured"}
-        {mwhTotal != null && mwhTotal > 0 && (
-          <> · {mwhTotal.toFixed(1)} MWh</>
-        )}
-        {lastGeneratedAt && (
-          <>
-            {" · "}
-            <span className="text-zinc-400">{relativeTime(lastGeneratedAt)}</span>
-          </>
-        )}
-      </p>
-
-      {/* Actions */}
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        {/* Download — single client: direct; multiple clients: inline dropdown */}
-        {clients.length <= 1 ? (
-          <Button
-            variant="secondary"
-            disabled={downloading || !hasClients}
-            onClick={() => clients[0] && handleDownloadClient(clients[0])}
-            className="h-8 px-3 text-xs"
-          >
-            {downloading && <Spinner className="h-3.5 w-3.5" />}
-            Download .xlsx
-          </Button>
-        ) : (
-          <div className="relative">
-            <Button
-              variant="secondary"
-              disabled={downloading}
-              onClick={() => setDlOpen((o) => !o)}
-              className="h-8 px-3 text-xs"
-            >
-              {downloading && <Spinner className="h-3.5 w-3.5" />}
-              Download .xlsx
-              <span
-                className={`transition-transform duration-150 ${dlOpen ? "-rotate-180" : ""}`}
-                aria-hidden
-              >
-                ▾
-              </span>
-            </Button>
-            {dlOpen && (
-              <>
-                {/* Backdrop closes the dropdown on outside click */}
-                <div
-                  className="fixed inset-0 z-[9]"
-                  onClick={() => setDlOpen(false)}
-                />
-                <div className="absolute left-0 top-full z-10 mt-1 min-w-[180px] overflow-hidden rounded-xl border border-cream-border bg-white shadow-md">
-                  {clients.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => handleDownloadClient(c)}
-                      className="block w-full px-4 py-2.5 text-left text-xs text-zinc-700 hover:bg-cream"
-                    >
-                      {c.name}
-                    </button>
-                  ))}
-                  <div className="border-t border-zinc-100" />
-                  <button
-                    type="button"
-                    onClick={handleDownloadAll}
-                    className="block w-full px-4 py-2.5 text-left text-xs font-medium text-primary-700 hover:bg-cream"
-                  >
-                    Download all ({clients.length})
-                  </button>
-                </div>
-              </>
-            )}
+      {/* Per-client delivery list */}
+      {clients.length > 0 ? (
+        <div className="border-t border-cream-border px-5 pb-4 pt-3">
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Delivery status
+          </p>
+          <div className="divide-y divide-zinc-100">
+            {clients.map((c) => (
+              <ClientDeliveryRow
+                key={c.id}
+                client={c}
+                quarter={quarter}
+                onRefresh={onRefresh}
+              />
+            ))}
           </div>
-        )}
-
-        {/* Regenerate — sends current reports to all clients */}
-        <Button
-          variant="ghost"
-          disabled={regenerating}
-          onClick={handleRegenerate}
-          className="h-8 px-3 text-xs text-zinc-600"
-        >
-          {regenerating ? (
-            <>
-              <Spinner className="h-3.5 w-3.5" />
-              Sending…
-            </>
-          ) : (
-            "Regenerate"
-          )}
-        </Button>
-      </div>
+        </div>
+      ) : (
+        <div className="border-t border-cream-border px-5 py-4">
+          <p className="text-xs text-zinc-400">No clients in this quarter.</p>
+        </div>
+      )}
     </div>
   );
 }
