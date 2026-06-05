@@ -286,28 +286,27 @@ def checkout(req: CheckoutRequest):
 
     try:
         session = stripe.checkout.Session.create(
-            mode="subscription",
+            mode="setup",
             payment_method_types=["card"],
             customer_email=email,
-            line_items=_line_items(quantity),
+            setup_intent_data={
+                "usage": "off_session",
+                "metadata": {
+                    "onboarding_token": onboarding_token,
+                    "tenant_id": tenant_id,
+                },
+            },
             success_url=(
                 f"{PUBLIC_ONBOARDING_URL}/extension"
                 f"?onboarding_token={onboarding_token}"
                 f"&session_id={{CHECKOUT_SESSION_ID}}"
             ),
             cancel_url=f"{PUBLIC_ONBOARDING_URL}/info?cancelled=1",
-            allow_promotion_codes=True,
             metadata={
                 "onboarding_token": onboarding_token,
                 "tenant_id": tenant_id,
                 "name": req.full_name,
                 "company": req.company or "",
-            },
-            subscription_data={
-                "metadata": {
-                    "onboarding_token": onboarding_token,
-                    "tenant_id": tenant_id,
-                },
             },
         )
     except stripe.error.StripeError as e:
@@ -437,16 +436,27 @@ def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
     if meta.get("onboarding_token") and meta.get("onboarding_token") != token_val:
         logger.warning("reconcile: session %s does not belong to token", session_id)
         return False
-    if sess.get("payment_status") != "paid":
-        return False
+    mode = sess.get("mode", "subscription")
+    if mode == "setup":
+        if sess.get("status") != "complete":
+            return False
+    else:
+        if sess.get("payment_status") != "paid":
+            return False
 
+    from datetime import timedelta
     customer = sess.get("customer")
     subscription = sess.get("subscription")
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
         if not t.active:
             t.active = True
-            t.subscription_status = "active"
+            if mode == "setup":
+                t.subscription_status = "trialing"
+                if t.trial_ends_at is None:
+                    t.trial_ends_at = now() + timedelta(days=4)
+            else:
+                t.subscription_status = "active"
             if t.onboarding_stage == "pending_payment":
                 t.onboarding_stage = "extension"
             if customer:
