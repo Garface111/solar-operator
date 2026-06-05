@@ -6,6 +6,7 @@ import { Modal } from "../ui/Modal";
 import { SectionTitle } from "../ui/SectionTitle";
 import { useToast } from "../ui/Toast";
 import { ClientCard } from "./ClientCard";
+import { WelcomeReveal } from "./WelcomeReveal";
 import { AddClientModal } from "./AddClientModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
@@ -319,25 +320,33 @@ export function ClientsSection({ expandClientId }: Props) {
           </div>
         </Card>
       ) : (
-        <div className="space-y-3">
-          {clients.map((c) => (
-            <ClientCard
-              key={c.id}
-              client={c}
-              operatorEmail={operatorEmail}
-              defaultExpanded={c.id === expandClientId}
-              onChange={replaceClient}
-              selectable={selectMode}
-              selected={selectedIds.has(c.id)}
-              onSelect={toggleSelect}
-              onDeleted={(token, msg) => {
-                removeClientLocal(c.id);
-                scheduleUndo(token, msg);
-              }}
-              onUndo={scheduleUndo}
-            />
-          ))}
-        </div>
+        <WelcomeReveal
+          clients={clients}
+          operatorName={account?.name ?? account?.email ?? null}
+        >
+          {(getItemProps) => (
+            <div className="space-y-3">
+              {clients.map((c, i) => (
+                <div key={c.id} {...getItemProps(i)}>
+                  <ClientCard
+                    client={c}
+                    operatorEmail={operatorEmail}
+                    defaultExpanded={c.id === expandClientId}
+                    onChange={replaceClient}
+                    selectable={selectMode}
+                    selected={selectedIds.has(c.id)}
+                    onSelect={toggleSelect}
+                    onDeleted={(token, msg) => {
+                      removeClientLocal(c.id);
+                      scheduleUndo(token, msg);
+                    }}
+                    onUndo={scheduleUndo}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </WelcomeReveal>
       )}
 
       {/* Sticky bulk-action bar */}
