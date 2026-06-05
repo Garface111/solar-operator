@@ -19,6 +19,8 @@ export interface ClientData {
   id: string;
   name: string;
   accounts: UtilityAccount[];
+  /** Per-utility login credential surface (optional; populated from API). */
+  logins?: Partial<Record<Utility, string | null>>;
 }
 
 export function clientTotalMwh(c: ClientData): number {

@@ -99,6 +99,12 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
                 "canvas_y": getattr(c, "canvas_y", None),
                 "canvas_pinned": getattr(c, "canvas_pinned", False) or False,
                 "accounts": c_accs,
+                # Per-utility login credentials so the sandbox can show
+                # "Login GMP · marie@…" when the operator expands the login row.
+                "logins": {
+                    "GMP": c.gmp_email or c.gmp_username or None,
+                    "VEC": c.vec_email or c.vec_username or None,
+                },
             })
 
         # Build unclassified output
@@ -245,12 +251,16 @@ def sandbox_account_reassign(
             return {"ok": True, "account_id": acc.id, "client_id": None, "array_id": None}
 
         # Attach path: ensure the account has an array owned by target_client.
-        # Strategy: if the account currently has its own array (1:1 holder),
-        # just re-point that array to the new client. Otherwise create a fresh
-        # holder array under target_client and re-point the account to it.
+        # Strategy: if the account currently has its own array (1:1 holder) that
+        # belongs to THIS tenant, just re-point it. Otherwise create a fresh
+        # holder array under target_client with a tenant-unique name (the
+        # arrays table has a UNIQUE (tenant_id, name) constraint, so we must
+        # avoid name collisions including with soft-deleted siblings).
         cur_array: Optional[Array] = None
         if acc.array_id is not None:
             cur_array = db.get(Array, acc.array_id)
+            if cur_array is not None and cur_array.tenant_id != tenant.id:
+                cur_array = None  # safety: never touch another tenant's array
 
         if cur_array is not None:
             sibling_count = db.execute(
@@ -269,12 +279,28 @@ def sandbox_account_reassign(
             cur_array.client_id = target_client.id
             new_array_id = cur_array.id
         else:
-            # Create new holder array under target client
-            display_name = acc.nickname or f"{acc.provider.upper()} {acc.account_number}"
+            # Create new holder array under target client. The arrays table
+            # has UNIQUE (tenant_id, name) — including soft-deleted rows — so
+            # we de-dupe the name against any existing array with the same
+            # base, suffixing " (2)", " (3)", etc. until we find a free slot.
+            base_name = acc.nickname or f"{acc.provider.upper()} {acc.account_number}"
+            candidate = base_name
+            attempt = 2
+            while db.execute(
+                select(Array).where(
+                    Array.tenant_id == tenant.id,
+                    Array.name == candidate,
+                )
+            ).scalar_one_or_none() is not None:
+                candidate = f"{base_name} ({attempt})"
+                attempt += 1
+                if attempt > 50:
+                    raise HTTPException(500, "could not allocate a unique array name")
+
             new_array = Array(
                 tenant_id=tenant.id,
                 client_id=target_client.id,
-                name=display_name,
+                name=candidate,
                 nepool_gis_id=None,
                 bill_offset_months=1,
             )

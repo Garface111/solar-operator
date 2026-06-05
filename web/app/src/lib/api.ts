@@ -974,6 +974,8 @@ export interface CanvasClientData {
   canvas_y: number | null;
   canvas_pinned: boolean;
   accounts: CanvasAccountData[];
+  /** Per-utility login credential (email or username) the operator gave us. */
+  logins?: { GMP?: string | null; VEC?: string | null; WEC?: string | null };
 }
 
 export interface CanvasResponse {

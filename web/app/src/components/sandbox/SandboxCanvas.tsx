@@ -26,6 +26,8 @@ import {
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
 import { AddClientModal } from '../AddClientModal';
+import { AddClientByLoginModal } from '../AddClientByLoginModal';
+import { listClients } from '../../lib/api';
 
 // ── Node type registry (stable reference — must live outside component) ────
 
@@ -58,6 +60,7 @@ function buildNodesFromApi(data: CanvasResponse): Node[] {
     const clientData: ClientData = {
       id: `client_${client.id}`,
       name: client.name,
+      logins: client.logins as Partial<Record<Utility, string | null>> | undefined,
       accounts: client.accounts.map((acc) => ({
         id: `account_${acc.id}`,
         utility: normalizeProvider(acc.provider),
@@ -155,6 +158,9 @@ export default function SandboxCanvas() {
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  // The toolbar Add Client opens the portal-picker first (same flow as the
+  // list view's primary CTA). Manual entry is the fallback.
+  const [showAddByLogin, setShowAddByLogin] = useState(false);
 
   const { getIntersectingNodes, fitView } = useReactFlow();
 
@@ -726,7 +732,7 @@ export default function SandboxCanvas() {
           {!loading && !isEmpty && (
             <Panel position="top-right">
               <div className="flex gap-2">
-                <ToolbarButton onClick={() => setShowAddModal(true)}>+ Add Client</ToolbarButton>
+                <ToolbarButton onClick={() => setShowAddByLogin(true)}>+ Add Client</ToolbarButton>
                 <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
@@ -787,7 +793,7 @@ export default function SandboxCanvas() {
             <button
               type="button"
               className="rounded-xl bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-primary-700 active:bg-primary-800"
-              onClick={() => setShowAddModal(true)}
+              onClick={() => setShowAddByLogin(true)}
             >
               + Add Client
             </button>
@@ -835,7 +841,24 @@ export default function SandboxCanvas() {
           />
         )}
 
-        {/* Add client modal */}
+        {/* Add client — portal-picker first, manual entry as fallback */}
+        <AddClientByLoginModal
+          open={showAddByLogin}
+          onClose={() => setShowAddByLogin(false)}
+          onCaptured={async () => {
+            void loadCanvas();
+            try {
+              const rows = await listClients();
+              return rows.map((r) => ({ id: r.id, name: r.name }));
+            } catch {
+              return [];
+            }
+          }}
+          onSwitchToManual={() => {
+            setShowAddByLogin(false);
+            setShowAddModal(true);
+          }}
+        />
         <AddClientModal
           open={showAddModal}
           onClose={() => setShowAddModal(false)}

@@ -223,6 +223,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
               clientId={id}
               utility={group.utility}
               accounts={group.accounts}
+              loginCredential={client.logins?.[group.utility] ?? null}
               onDetach={(accountId) => actions.detachAccount(id, accountId)}
               onDetachLogin={() => actions.detachLogin(id, group.utility)}
             />
@@ -257,12 +258,14 @@ function LoginGroupRow({
   clientId,
   utility,
   accounts,
+  loginCredential,
   onDetach,
   onDetachLogin,
 }: {
   clientId: string;
   utility: Utility;
   accounts: UtilityAccount[];
+  loginCredential: string | null;
   onDetach: (accountId: string) => void;
   onDetachLogin: () => void;
 }) {
@@ -337,6 +340,16 @@ function LoginGroupRow({
       </div>
       {expanded && (
         <div className="mt-2 space-y-2 border-t border-current/10 pt-2">
+          {loginCredential && (
+            <div className={`flex items-center gap-1.5 rounded-md bg-white/70 px-2 py-1 text-[11px] ${th.rowText}`}>
+              <span className="text-[10px] font-semibold uppercase tracking-wider opacity-60">
+                Signed in as
+              </span>
+              <span className="truncate font-medium text-zinc-800" title={loginCredential}>
+                {loginCredential}
+              </span>
+            </div>
+          )}
           {accounts.map((acc) => (
             <AccountRow
               key={acc.id}
