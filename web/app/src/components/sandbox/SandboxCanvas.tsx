@@ -1159,6 +1159,14 @@ export default function SandboxCanvas() {
       const moved = srcData.client.accounts.find((a) => a.id === accountId);
       if (!moved) return;
 
+      // Rewrite login_origin_client_id so the optimistic local copy renders
+      // as a "home" login under the destination instead of carrying the
+      // stale "from <previous client>" badge until the next loadCanvas.
+      const dstNumIdOptim = parseInt(dstClientId.replace('client_', ''), 10);
+      const movedRebased = !isNaN(dstNumIdOptim)
+        ? { ...moved, login_origin_client_id: dstNumIdOptim }
+        : moved;
+
       const snapshot = current;
 
       const applyMove = () =>
@@ -1183,7 +1191,7 @@ export default function SandboxCanvas() {
                   ...dstData,
                   client: {
                     ...dstData.client,
-                    accounts: [...dstData.client.accounts, moved],
+                    accounts: [...dstData.client.accounts, movedRebased],
                   },
                 },
               };
@@ -1358,6 +1366,16 @@ export default function SandboxCanvas() {
       });
       if (moved.length === 0) return;
 
+      // Numeric ID of the destination client — used both for the server
+      // reassign call AND to rewrite login_origin_client_id on the moved
+      // accounts so the optimistic local copy renders as a "home" login
+      // (no "from <previous client>" badge) instead of carrying the stale
+      // origin from before the move.
+      const dstNumIdEarly = parseInt(dstClientId.replace('client_', ''), 10);
+      const movedRebased = !isNaN(dstNumIdEarly)
+        ? moved.map((a) => ({ ...a, login_origin_client_id: dstNumIdEarly }))
+        : moved;
+
       const snapshot = current;
 
       const applyMove = () =>
@@ -1382,7 +1400,7 @@ export default function SandboxCanvas() {
                   ...dstData,
                   client: {
                     ...dstData.client,
-                    accounts: [...dstData.client.accounts, ...moved],
+                    accounts: [...dstData.client.accounts, ...movedRebased],
                   },
                 },
               };
@@ -1397,7 +1415,7 @@ export default function SandboxCanvas() {
         'success',
       );
 
-      const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
+      const dstNumId = dstNumIdEarly;
       if (isNaN(dstNumId)) return;
       Promise.all(
         moved.map((acc) => {
