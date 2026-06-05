@@ -24,8 +24,15 @@ interface Props {
 }
 
 const PORTAL_URLS: Record<Provider, string> = {
-  gmp: "https://greenmountainpower.com/account/login/",
-  vec: "https://vermontelectric.smarthub.coop/Login.html",
+  // We send users to LOGOUT URLs (not login) so any existing session
+  // is cleared first. Otherwise an operator who's already signed in
+  // as one client lands in that client's dashboard and the extension
+  // just re-scrapes the same data we already have — wasting a sync
+  // round-trip and creating zero new clients. Logout pages redirect to
+  // the login form automatically, forcing the operator to enter the
+  // NEW client's credentials.
+  gmp: "https://greenmountainpower.com/account/logout/",
+  vec: "https://vermontelectric.smarthub.coop/Logout.html",
 };
 
 const FRIENDLY: Record<Provider, string> = {
@@ -303,7 +310,8 @@ export function AddClientByLoginModal({
               In the tab that just opened:
             </p>
             <ol className="mt-2 ml-5 list-decimal space-y-1">
-              <li>Sign in as your client.</li>
+              <li>You&apos;ll be signed out of any previous session.</li>
+              <li>Sign in as the <b>new</b> client.</li>
               <li>That&apos;s it — come back here.</li>
             </ol>
           </div>
