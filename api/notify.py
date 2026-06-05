@@ -142,32 +142,34 @@ WELCOME_HTML = """\
 </td></tr>
 <tr><td style="padding:32px;font-size:15px;line-height:1.6;">
 <p>Your Solar Operator account is live on the <strong>{plan_label}</strong> plan.
-You're 5 minutes from automatic quarterly reporting.</p>
-
-<div style="background:#eef3ec;border-radius:8px;padding:18px 22px;margin:24px 0;">
-  <div style="font-size:12px;letter-spacing:0.5px;text-transform:uppercase;color:#557060;font-weight:600;">YOUR ACTIVATION CODE</div>
-  <div style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:15px;font-weight:700;color:#1f4e2a;margin-top:8px;word-break:break-all;">{tenant_key}</div>
-</div>
+You're a few minutes from automatic quarterly reporting.</p>
 
 <p><strong>Setup, in three steps:</strong></p>
 
 <ol style="padding-left:20px;margin:14px 0;">
   <li style="margin:10px 0;"><strong>Install the Chrome extension</strong> —
       <a href="{install_url}" style="color:#2e6b3a;">Add Solar Operator Sync to Chrome</a></li>
-  <li style="margin:10px 0;"><strong>Paste your activation code</strong> — click the
-      Solar Operator icon in Chrome's toolbar, paste the code above, hit Save.</li>
-  <li style="margin:10px 0;"><strong>Sign into Green Mountain Power</strong> — visit
-      <a href="https://greenmountainpower.com" style="color:#2e6b3a;">greenmountainpower.com</a>,
-      log in, check "Stay signed in". Close the tab. You're done.</li>
+  <li style="margin:10px 0;"><strong>The extension auto-pairs with your account</strong> —
+      open your <a href="https://solaroperator.org/accounts" style="color:#2e6b3a;">Solar Operator dashboard</a>
+      once after installing and the extension links itself automatically. No codes to copy.</li>
+  <li style="margin:10px 0;"><strong>Sign into your utility portal once</strong> — visit
+      <a href="https://greenmountainpower.com" style="color:#2e6b3a;">greenmountainpower.com</a>
+      (or Vermont Electric Co-op), log in with the extension active. We capture the rest.</li>
 </ol>
 
 <p style="margin-top:24px;background:#f4f9f5;border-radius:8px;padding:16px 20px;font-size:14px;color:#3a5a42;">
   <strong>What happens next:</strong><br>
-  Once you finish setup, the extension will pull your GMP bills automatically
+  Once you finish setup, the extension will pull your utility bills automatically
   every 6 hours in the background. Your first quarterly NEPOOL-GIS report goes
   out on <strong>{next_quarter_date}</strong> — you don't need to do anything
   between now and then. If you ever want to trigger a report early, there's a
   "Send a report now" button in your dashboard.
+</p>
+
+<p style="margin-top:24px;background:#fffbea;border-radius:8px;padding:14px 18px;font-size:13px;color:#6b5a1f;border:1px solid #f0e68c;">
+  <strong>Setting up on a new device later?</strong> If auto-pairing doesn't trigger,
+  you can pair manually: open the extension, click "Enter code manually," and paste
+  your activation code: <span style="font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;">{tenant_key}</span>
 </p>
 
 <p style="margin-top:24px;color:#667;font-size:14px;">
@@ -190,22 +192,23 @@ Welcome aboard, {name}.
 
 Your Solar Operator account is live on the {plan_label} plan.
 
-YOUR ACTIVATION CODE:
-  {tenant_key}
-
 Setup (3 steps):
 
   1. Install the Chrome extension: {install_url}
-  2. Click the Solar Operator icon in Chrome's toolbar, paste the activation
-     code above, hit Save.
-  3. Visit greenmountainpower.com, log in, check "Stay signed in." Close
-     the tab. That's it.
+  2. Open your Solar Operator dashboard (solaroperator.org/accounts) — the
+     extension auto-pairs with your account. No codes to copy.
+  3. Sign into your utility portal once (greenmountainpower.com or Vermont
+     Electric Co-op). The extension captures the rest.
 
 What happens next:
-  Once you finish setup, the extension pulls your GMP bills every 6 hours in the
+  Once set up, the extension pulls your utility bills every 6 hours in the
   background. Your first quarterly report goes out on {next_quarter_date}. You
   don't need to do anything between now and then. There's a "Send a report now"
   button on your dashboard if you ever want to trigger one early.
+
+Setting up on a new device later? If auto-pairing doesn't trigger, open the
+extension, click "Enter code manually," and paste your activation code:
+  {tenant_key}
 
 Questions? Just reply.
 
@@ -427,7 +430,7 @@ def send_trial_charged_email(to: str, name: str, array_count: int,
         f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
         f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is active</h2>"
         f"<p>Hi {first},</p>"
-        f"<p>Your 4-day trial just ended and your card was charged "
+        f"<p>Your 14-day trial just ended and your card was charged "
         f"<strong>${amount_dollars:.2f}</strong> for {array_count} {plural}.</p>"
         f"<p>You're all set — reports will continue running automatically on your schedule. "
         f"As you add or remove arrays, your next invoice will update to match.</p>"

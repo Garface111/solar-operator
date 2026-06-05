@@ -6,7 +6,7 @@
 
 - **We never sell your data.** Your information is used only to run the reporting service.
 - **We only read your utility billing data (Green Mountain Power and Vermont Electric Co-op)** — nothing else from your browser.
-- **You can delete everything** by emailing support@solaroperator.org. We purge your data within 24 hours.
+- **You can delete everything** by emailing admin@solaroperator.org. We purge your data within 24 hours.
 - **Your login session expires automatically** (~21 days) and is replaced each time you log in to your utility portal with the extension active.
 - **Our only email provider is Resend.com**, which delivers your reports and sign-in links. No other third party sees your data.
 
@@ -65,7 +65,7 @@ emailed to the address you specified.
 ## Deleting your data
 
 You can delete all of your data at any time by emailing
-**support@solaroperator.org** from the address on your account. We will
+**admin@solaroperator.org** from the address on your account. We will
 remove your sessions, account data, and billing data from our servers
 within 24 hours and confirm by email.
 
@@ -110,5 +110,5 @@ and post the new version at solaroperator.org/privacy.
 
 ## Contact
 
-Email **support@solaroperator.org** with any privacy questions or to
+Email **admin@solaroperator.org** with any privacy questions or to
 request deletion of your data.

@@ -207,7 +207,7 @@ export default function Login(_props: LoginProps) {
       </Card>
 
       <p className="mt-6 text-center text-xs text-zinc-400">
-        Need help? Email support@solaroperator.org
+        Need help? Email admin@solaroperator.org
       </p>
     </div>
   );

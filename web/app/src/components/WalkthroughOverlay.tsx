@@ -23,11 +23,14 @@ interface StepDef {
   cta?: { label: string; href: string };
 }
 
-const STEPS: StepDef[] = [
+function makeSteps(hasCaptures: boolean): StepDef[] {
+  return [
   {
     anchor: null,
     title: "Welcome to your dashboard",
-    body: "Your first utility login is already captured — we auto-created a client for it and attached its arrays. From here you'll manage clients, add NEPOOL IDs, and watch reports queue up. 60-second tour?",
+    body: hasCaptures
+      ? "Your first utility login is already captured — we auto-created a client for it and attached its arrays. From here you'll manage clients, add NEPOOL IDs, and watch reports queue up. 60-second tour?"
+      : "Your dashboard is ready. Sign into your utility portal to capture your first client — we'll show you how. 60-second tour?",
   },
   {
     anchor: "2",
@@ -59,13 +62,16 @@ const STEPS: StepDef[] = [
     title: "You're set",
     body: "From here it runs itself. Reports auto-generate on your selected cadence. We email you a sample after the first quarter so you can review the format. Holler if anything looks off.",
   },
-];
+  ];
+}
 
 interface Props {
   onClose: () => void;
+  hasCaptures: boolean;
 }
 
-export function WalkthroughOverlay({ onClose }: Props) {
+export function WalkthroughOverlay({ onClose, hasCaptures }: Props) {
+  const STEPS = makeSteps(hasCaptures);
   const [step, setStep] = useState(0);
   const [spot, setSpot] = useState<SpotRect | null>(null);
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
