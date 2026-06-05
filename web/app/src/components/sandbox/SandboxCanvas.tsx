@@ -379,6 +379,9 @@ export default function SandboxCanvas() {
         : built;
       setNodes(finalNodes);
       setOriginLookup(data.clients_index ?? {});
+      // Notify peers (e.g. the ClientsTable below) that canvas state changed
+      // so they can refetch without polling. Fires AFTER nodes are committed.
+      window.dispatchEvent(new CustomEvent('so:sandbox:mutated'));
       const hasSavedViewport = (() => {
         try {
           const raw = localStorage.getItem('so:sandbox:viewport');

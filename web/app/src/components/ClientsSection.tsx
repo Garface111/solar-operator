@@ -137,11 +137,31 @@ export function ClientsSection({ expandClientId }: Props) {
           setClients([]);
         }
       });
+
+    // Live-refresh whenever the sandbox above mutates its state (reparent,
+    // merge, detach, delete, etc.). Coalesce rapid bursts with a short debounce
+    // so dragging across multiple cards doesn't N+1 the backend.
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const onSandboxMutated = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        if (cancelled) return;
+        listClients()
+          .then((rows) => { if (!cancelled) setClients(rows); })
+          .catch(() => { /* leave stale rather than wiping */ });
+        getNepoolStats()
+          .then((s) => { if (!cancelled) setMissingNepoolCount(s.arrays_missing_nepool); })
+          .catch(() => { /* non-critical */ });
+      }, 150);
+    };
+    window.addEventListener('so:sandbox:mutated', onSandboxMutated);
     getNepoolStats()
       .then((s) => { if (!cancelled) setMissingNepoolCount(s.arrays_missing_nepool); })
       .catch(() => { /* non-critical */ });
     return () => {
       cancelled = true;
+      if (debounce) clearTimeout(debounce);
+      window.removeEventListener('so:sandbox:mutated', onSandboxMutated);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
