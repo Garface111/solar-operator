@@ -8,6 +8,7 @@ import {
   getEmailTemplate,
   previewEmailTemplate,
   saveEmailTemplate,
+  saveEmailSignoff,
   resetEmailTemplate,
   testSendEmailTemplate,
   chatEmailTemplate,
@@ -33,16 +34,34 @@ const TOKEN_CHIPS = [
   "{{tenant_name}}",
 ];
 
+const SIGNOFF_STARTER_CHIPS: { label: string; value: string }[] = [
+  {
+    label: "Just my name",
+    value: "<p>Thank you,<br>{{tenant_name}}</p>",
+  },
+  {
+    label: "Name + email",
+    value: "<p>Thank you,<br>{{tenant_name}}<br>{{tenant_email}}</p>",
+  },
+  {
+    label: "Full signature",
+    value:
+      "<p>Thank you,<br><strong>{{tenant_name}}</strong><br>Solar consultant<br>{{tenant_email}}</p>",
+  },
+];
+
 export function EmailTemplateStudio({ open, onClose }: Props) {
   const toast = useToast();
 
   const [templateData, setTemplateData] = useState<EmailTemplateData | null>(null);
   const [loadingTemplate, setLoadingTemplate] = useState(false);
 
-  // Editable draft (null = not yet loaded)
+  // Editable drafts
   const [subjectDraft, setSubjectDraft] = useState("");
   const [bodyDraft, setBodyDraft] = useState("");
+  const [signoffDraft, setSignoffDraft] = useState("");
   const [isDirty, setIsDirty] = useState(false);
+  const [signoffDirty, setSignoffDirty] = useState(false);
 
   // Preview state
   const [previewSubject, setPreviewSubject] = useState("");
@@ -58,8 +77,12 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
 
   // Action states
   const [saving, setSaving] = useState(false);
+  const [savingSignoff, setSavingSignoff] = useState(false);
   const [testing, setTesting] = useState(false);
   const [resetting, setResetting] = useState(false);
+
+  // Debounce timer for body edits → preview
+  const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const subjectInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
@@ -73,10 +96,12 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     getEmailTemplate()
       .then((data) => {
         setTemplateData(data);
-        setSubjectDraft(data.subject_template ?? "");
-        setBodyDraft(data.body_template ?? "");
+        setSubjectDraft(data.subject_template);
+        setBodyDraft(data.body_template);
+        setSignoffDraft(data.signoff);
         setIsDirty(false);
-        return refreshPreview(data.subject_template ?? "", data.body_template ?? "");
+        setSignoffDirty(false);
+        return refreshPreview(data.subject_template, data.body_template, data.signoff);
       })
       .catch(() => toast.error("Couldn't load email template"))
       .finally(() => setLoadingTemplate(false));
@@ -98,12 +123,13 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  async function refreshPreview(subject?: string, body?: string) {
+  async function refreshPreview(subject?: string, body?: string, signoff?: string) {
     setPreviewLoading(true);
     try {
       const result = await previewEmailTemplate({
         subject_template: subject ?? subjectDraft,
         body_template: body ?? bodyDraft,
+        signoff: signoff ?? signoffDraft,
       });
       setPreviewSubject(result.subject_rendered);
       setPreviewBody(result.body_rendered);
@@ -113,6 +139,14 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     } finally {
       setPreviewLoading(false);
     }
+  }
+
+  function schedulePreviewRefresh(subject?: string, body?: string, signoff?: string) {
+    if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+    previewDebounceRef.current = setTimeout(
+      () => void refreshPreview(subject, body, signoff),
+      300,
+    );
   }
 
   async function handleChatSubmit(instruction?: string) {
@@ -147,7 +181,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       setIsDirty(true);
       setAiGenerated(true);
 
-      await refreshPreview(newSubject, newBody);
+      await refreshPreview(newSubject, newBody, signoffDraft);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "AI request failed");
     } finally {
@@ -190,12 +224,33 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     }
   }
 
+  async function handleSaveSignoff() {
+    setSavingSignoff(true);
+    try {
+      await saveEmailSignoff(signoffDraft || null);
+      setSignoffDirty(false);
+      toast.success("Sign-off saved.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSavingSignoff(false);
+    }
+  }
+
+  async function handleResetSignoff() {
+    if (!templateData) return;
+    setSignoffDraft(templateData.signoff);
+    setSignoffDirty(false);
+    await refreshPreview(subjectDraft, bodyDraft, templateData.signoff);
+  }
+
   async function handleTestSend() {
     setTesting(true);
     try {
       const r = await testSendEmailTemplate({
         subject_template: subjectDraft || null,
         body_template: bodyDraft || null,
+        signoff: signoffDraft || null,
       });
       toast.success(`Test email sent to ${r.sent_to}`);
     } catch (err) {
@@ -211,11 +266,13 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       await resetEmailTemplate();
       const data = await getEmailTemplate();
       setTemplateData(data);
-      setSubjectDraft(data.subject_template ?? "");
-      setBodyDraft(data.body_template ?? "");
+      setSubjectDraft(data.subject_template);
+      setBodyDraft(data.body_template);
+      setSignoffDraft(data.signoff);
       setIsDirty(false);
+      setSignoffDirty(false);
       setAiGenerated(false);
-      await refreshPreview(data.subject_template ?? "", data.body_template ?? "");
+      await refreshPreview(data.subject_template, data.body_template, data.signoff);
       toast.success("Template reset to system default.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Reset failed");
@@ -227,6 +284,16 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   if (!open) return null;
 
   const noClientEmail = templateData && !templateData.has_client_with_email;
+
+  // C4: "looks great" CTA is shown when all three are still default and operator hasn't
+  // made any in-session edits.
+  const isAllDefault =
+    templateData != null &&
+    templateData.is_default_subject &&
+    templateData.is_default_body &&
+    templateData.is_default_signoff &&
+    !isDirty &&
+    !signoffDirty;
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#faf8f5]">
@@ -367,9 +434,10 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
             </div>
           </div>
 
-          {/* ── Right: preview (60%) ── */}
-          <div className="flex w-[60%] flex-col bg-[#faf8f5]">
-            <div className="border-b border-cream-border px-5 py-3">
+          {/* ── Right: editor + preview (60%) ── */}
+          <div className="flex w-[60%] flex-col bg-[#faf8f5] overflow-y-auto">
+            {/* Preview header */}
+            <div className="border-b border-cream-border bg-[#faf8f5] px-5 py-3 sticky top-0 z-10">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
                   Preview
@@ -393,7 +461,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+            <div className="flex-1 p-5 space-y-4">
               {/* Token chips for subject */}
               <div>
                 <p className="mb-1.5 text-[11px] font-medium text-zinc-400">
@@ -427,13 +495,29 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     setIsDirty(true);
                   }}
                   onBlur={() => void refreshPreview()}
-                  placeholder="(using system default)"
-                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                 />
               </div>
 
-              {/* Email preview pane */}
+              {/* Email preview box */}
               <div className="rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
+                {/* From → To row */}
+                {templateData && (
+                  <div className="border-b border-zinc-100 px-4 py-2.5 bg-zinc-50 space-y-0.5">
+                    <p className="text-[11px] text-zinc-500">
+                      <span className="font-medium text-zinc-600">From:</span>{" "}
+                      {templateData.from_email ?? "admin@solaroperator.org"}
+                      <span className="ml-1 text-zinc-400">(replies go here)</span>
+                    </p>
+                    <p className="text-[11px] text-zinc-500">
+                      <span className="font-medium text-zinc-600">To:</span>{" "}
+                      {templateData.sample_client_email ?? sampleClient}
+                      {sampleClient && (
+                        <span className="ml-1 text-zinc-400">(sample client)</span>
+                      )}
+                    </p>
+                  </div>
+                )}
                 {/* Subject header */}
                 <div className="border-b border-zinc-100 px-4 py-3">
                   <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
@@ -461,51 +545,161 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                       dangerouslySetInnerHTML={{ __html: previewBody }}
                     />
                   ) : (
-                    <p className="text-sm text-zinc-400">
-                      Preview will appear here.
-                    </p>
+                    <p className="text-sm text-zinc-400">Preview will appear here.</p>
                   )}
                 </div>
               </div>
+
+              {/* Body editor — editable HTML textarea */}
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-zinc-500">
+                  Body (HTML)
+                </label>
+                <textarea
+                  value={bodyDraft}
+                  onChange={(e) => {
+                    setBodyDraft(e.target.value);
+                    setIsDirty(true);
+                    schedulePreviewRefresh(subjectDraft, e.target.value, signoffDraft);
+                  }}
+                  rows={8}
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-800 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
+                />
+                <p className="mt-1 text-[11px] text-zinc-400">
+                  HTML allowed. Tokens like{" "}
+                  <span className="font-mono">{"{{client_name}}"}</span>,{" "}
+                  <span className="font-mono">{"{{quarter}}"}</span>,{" "}
+                  <span className="font-mono">{"{{signoff}}"}</span> are inserted automatically.
+                </p>
+              </div>
+
+              {/* ── Sign-off section (C3) ── */}
+              <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm space-y-3">
+                <div>
+                  <p className="text-sm font-semibold text-zinc-800">Sign-off</p>
+                  <p className="text-[11px] text-zinc-500 mt-0.5">
+                    Appears at the bottom of every report email. Paste your name, title,
+                    phone, and anything else here.
+                  </p>
+                </div>
+
+                {/* Starter chips */}
+                <div className="flex flex-wrap gap-1.5">
+                  {SIGNOFF_STARTER_CHIPS.map((chip) => (
+                    <button
+                      key={chip.label}
+                      type="button"
+                      onClick={() => {
+                        setSignoffDraft(chip.value);
+                        setSignoffDirty(true);
+                        schedulePreviewRefresh(subjectDraft, bodyDraft, chip.value);
+                      }}
+                      className="rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700"
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Signoff textarea */}
+                <textarea
+                  value={signoffDraft}
+                  onChange={(e) => {
+                    setSignoffDraft(e.target.value);
+                    setSignoffDirty(true);
+                    schedulePreviewRefresh(subjectDraft, bodyDraft, e.target.value);
+                  }}
+                  rows={4}
+                  placeholder="Paste your sign-off here…"
+                  className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
+                />
+
+                {/* Signoff action buttons */}
+                <div className="flex items-center gap-2">
+                  <Button
+                    onClick={handleSaveSignoff}
+                    disabled={savingSignoff}
+                    className="text-xs"
+                  >
+                    {savingSignoff ? (
+                      <>
+                        <Spinner />
+                        Saving…
+                      </>
+                    ) : (
+                      "Save sign-off"
+                    )}
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => void handleResetSignoff()}
+                    className="text-[11px] font-medium text-zinc-400 underline underline-offset-2 hover:text-zinc-600"
+                  >
+                    Reset to default sign-off
+                  </button>
+                </div>
+              </div>
+
+              {/* ── C4: "Looks great" CTA ── shown only when all defaults, nothing dirty */}
+              {isAllDefault && (
+                <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
+                  <p className="text-sm font-semibold text-emerald-800 mb-3">
+                    👍 Looks great as-is — use the default for all my client emails
+                  </p>
+                  <Button
+                    onClick={() => {
+                      toast.success(
+                        "Using the default template — your clients will get the standard email.",
+                      );
+                      onClose();
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-xs"
+                  >
+                    Looks great, use this
+                  </Button>
+                </div>
+              )}
             </div>
 
-            {/* Action bar */}
-            <div className="border-t border-cream-border bg-white px-5 py-3 flex items-center justify-between gap-3">
-              <Button
-                variant="secondary"
-                onClick={handleTestSend}
-                disabled={testing}
-                className="text-xs"
-              >
-                {testing ? (
-                  <>
-                    <Spinner />
-                    Sending…
-                  </>
-                ) : (
-                  "Send myself a test"
-                )}
-              </Button>
-              <div className="flex items-center gap-2">
-                {isDirty && (
-                  <span className="text-[11px] text-zinc-400">Unsaved draft</span>
-                )}
+            {/* Action bar — shown when anything is customized */}
+            {!isAllDefault && (
+              <div className="border-t border-cream-border bg-white px-5 py-3 flex items-center justify-between gap-3 sticky bottom-0">
                 <Button
-                  onClick={handleSave}
-                  disabled={saving}
+                  variant="secondary"
+                  onClick={handleTestSend}
+                  disabled={testing}
                   className="text-xs"
                 >
-                  {saving ? (
+                  {testing ? (
                     <>
                       <Spinner />
-                      Saving…
+                      Sending…
                     </>
                   ) : (
-                    "Save as my default"
+                    "Send myself a test"
                   )}
                 </Button>
+                <div className="flex items-center gap-2">
+                  {isDirty && (
+                    <span className="text-[11px] text-zinc-400">Unsaved draft</span>
+                  )}
+                  <Button
+                    onClick={handleSave}
+                    disabled={saving}
+                    className="text-xs"
+                  >
+                    {saving ? (
+                      <>
+                        <Spinner />
+                        Saving…
+                      </>
+                    ) : (
+                      "Save as my default"
+                    )}
+                  </Button>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}

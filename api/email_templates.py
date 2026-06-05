@@ -41,11 +41,15 @@ DEFAULT_SUBJECT_TEMPLATE = (
     "{{client_name}} — generation report ({{period_start}} to {{period_end}})"
 )
 
+DEFAULT_SIGNOFF = (
+    "<p>Thank you,<br>{{tenant_name}}{{tenant_email_line}}</p>"
+)
+
 DEFAULT_BODY_TEMPLATE = (
     "<p>Dear {{client_name}},</p>"
     "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
     " {{period_end}}. Please reach out with any questions.</p>"
-    "<p>Thank you,<br>{{tenant_name}}{{tenant_email_line}}</p>"
+    "{{signoff}}"
     "<p style='margin-top:24px;font-size:12px;color:#6b7280;'>"
     "<em>Manage at <a href='{{dashboard_url}}'>your dashboard</a>.</em></p>"
 )
@@ -117,10 +121,21 @@ def _fmt_date(d: date) -> str:
 def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
                   tenant_email: str = "",
                   dashboard_url: str = DEFAULT_DASHBOARD_URL,
-                  ref: Optional[date] = None) -> dict:
+                  ref: Optional[date] = None,
+                  signoff_template: Optional[str] = None) -> dict:
     """Assemble the merge-tag context for one client's email."""
     qc = quarter_context(ref)
     email = tenant_email.strip()
+    tenant_email_line = f"<br>{email}" if email else ""
+    # Resolve {{signoff}}: render the signoff template's own merge tags first
+    # (tenant_name, tenant_email_line) so the body can use {{signoff}} as a
+    # fully-rendered block. Two-pass: signoff → ctx → body.
+    signoff_t = (signoff_template or "").strip() or DEFAULT_SIGNOFF
+    rendered_signoff = render_merge(signoff_t, {
+        "tenant_name": tenant_name,
+        "tenant_email": email,
+        "tenant_email_line": tenant_email_line,
+    })
     return {
         "client_name": client_name,
         "tenant_name": tenant_name,
@@ -130,9 +145,8 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
         "period_end": qc["period_end"],
         "dashboard_url": dashboard_url,
         "tenant_email": email,
-        # {{tenant_email_line}} renders as "<br>email" when set, else "".
-        # Avoids a dangling <br> in the default body when email is blank.
-        "tenant_email_line": f"<br>{email}" if email else "",
+        "tenant_email_line": tenant_email_line,
+        "signoff": rendered_signoff,
     }
 
 

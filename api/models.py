@@ -63,6 +63,7 @@ class Tenant(Base):
     # Friendly From display name. null → tenant.name.
     email_subject_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     email_body_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_signoff: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Merge-tag templates ({{client_name}}, {{tenant_name}}, {{quarter}}, …).
     # null → built-in default template.
     send_mode: Mapped[str] = mapped_column(String(20), default="to_client")
