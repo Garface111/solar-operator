@@ -449,6 +449,40 @@ def send_trial_charged_email(to: str, name: str, array_count: int,
     )
 
 
+def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
+    """Notify an operator that we can't auto-refresh their GMP session and
+    they need to log in once to reconnect."""
+    first = (name or "there").split()[0]
+    html = (
+        f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;"
+        f"max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
+        f"<h2 style='color:#a64a1f;'>GMP session needs reconnecting</h2>"
+        f"<p>Hi {first},</p>"
+        f"<p>We're having trouble automatically refreshing your Green Mountain Power "
+        f"session. This usually means the session was revoked (e.g. a password change).</p>"
+        f"<p>Please log into "
+        f"<a href='https://mypower.greenmountainpower.com/'>greenmountainpower.com</a> "
+        f"once — the extension will capture a fresh session and automatic bill pulls "
+        f"will resume immediately.</p>"
+        f"<p>Questions? Just reply.</p>"
+        f"<p>— Solar Operator</p></body></html>"
+    )
+    text = (
+        f"Hi {first},\n\n"
+        f"We're having trouble automatically refreshing your Green Mountain Power session. "
+        f"This usually means the session was revoked (e.g. a password change).\n\n"
+        f"Please log into https://mypower.greenmountainpower.com/ once — the extension "
+        f"will capture a fresh session and automatic bill pulls will resume.\n\n"
+        f"Questions? Just reply.\n\n— Solar Operator"
+    )
+    return _send_via_resend(
+        to=to,
+        subject="Action needed: reconnect your Green Mountain Power account",
+        html=html,
+        text=text,
+    )
+
+
 # ─── internal ───────────────────────────────────────────────────────────
 
 def send_internal_alert(subject: str, body: str) -> bool:

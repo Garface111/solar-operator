@@ -118,6 +118,13 @@ export async function verifyLoginToken(token: string): Promise<string> {
 
 // ─── types ───────────────────────────────────────────────────────────────
 
+export interface UtilitySessionStatus {
+  captured_at: string | null;
+  expires_at: string | null;
+  last_refresh_at: string | null;
+  refresh_failures: number;
+}
+
 export interface Account {
   tenant_id: string;
   tenant_key: string | null;
@@ -145,6 +152,7 @@ export interface Account {
   accounts_count: number;
   bills_count: number;
   clients_count: number;
+  session: UtilitySessionStatus | null;
 }
 
 export interface EmailSettingsInput {

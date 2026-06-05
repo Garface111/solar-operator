@@ -236,6 +236,8 @@ class UtilitySession(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    refresh_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="sessions")
 
