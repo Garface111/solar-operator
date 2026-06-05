@@ -5,7 +5,9 @@ import { useToast } from "../ui/Toast";
 import {
   ingestPreview,
   ingestCommit,
+  listClients,
   type IngestRow,
+  type ClientRow,
 } from "../lib/api";
 
 interface Props {
@@ -41,8 +43,17 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
   const [committing, setCommitting] = useState(false);
   const [importedLogins, setImportedLogins] = useState(0);
   const [importedClients, setImportedClients] = useState(0);
+  const [existingClients, setExistingClients] = useState<ClientRow[]>([]);
+  const [autoFilledCount, setAutoFilledCount] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Load existing clients once when modal opens — used for auto-matching
+  // blank client-name cells against arrays the operator already has.
+  useEffect(() => {
+    if (!open) return;
+    listClients().then(setExistingClients).catch(() => setExistingClients([]));
+  }, [open]);
 
   // Reset to a clean slate whenever the modal is (re)opened.
   useEffect(() => {
@@ -56,6 +67,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
       setCommitting(false);
       setImportedLogins(0);
       setImportedClients(0);
+      setAutoFilledCount(0);
     }
   }, [open]);
 
@@ -87,7 +99,24 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
         return;
       }
       setSource(res.source);
-      setRows(res.arrays.map((r) => ({ ...r, include: true })));
+
+      // Smart-fill blank client names BEFORE first paint:
+      //  1. If row collides with an existing array, suggest the closest-named client.
+      //  2. If still blank, fall back to a name derived from the filename stem.
+      const fileStem = deriveClientNameFromFilename(file.name);
+      let filled = 0;
+      const smartRows = res.arrays.map((r): EditableRow => {
+        if ((r.operator_name ?? "").trim()) {
+          return { ...r, include: true };
+        }
+        // Try fuzzy match against existing client names using array name.
+        const guess = guessClientFromArray(r.array_name ?? "", existingClients);
+        if (guess) { filled += 1; return { ...r, operator_name: guess, include: true }; }
+        if (fileStem) { filled += 1; return { ...r, operator_name: fileStem, include: true }; }
+        return { ...r, include: true };
+      });
+      setRows(smartRows);
+      setAutoFilledCount(filled);
       setImportedLogins(res.imported_logins ?? 0);
       setImportedClients(res.imported_clients ?? 0);
       setStage("preview");
@@ -276,11 +305,11 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                 <p className="font-medium">Detected GMCS-format workbook</p>
                 <p className="mt-0.5 text-primary-800">
                   Pulled one row per sheet, with the array name and NEPOOL-GIS ID
-                  from the sheet title. Set the owner below — it applies to all rows.
+                  from the sheet title. Set the client below — it applies to all rows.
                 </p>
                 <div className="mt-3">
                   <label className="block text-xs font-medium text-primary-800 mb-1">
-                    Owner / operator (all arrays belong to:)
+                    Client (all arrays belong to:)
                   </label>
                   <input
                     type="text"
@@ -308,6 +337,13 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
               </div>
             )}
 
+            {/* Auto-fill banner */}
+            {autoFilledCount > 0 && (
+              <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800">
+                ✨ Auto-matched {autoFilledCount} row{autoFilledCount === 1 ? "" : "s"} to a client (existing match or derived from filename). Override below if any are wrong.
+              </div>
+            )}
+
             {/* Preview-is-not-saved note */}
             <details className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50">
               <summary className="cursor-pointer px-4 py-2.5 text-xs font-medium text-zinc-500 hover:text-zinc-700">
@@ -328,7 +364,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                 <thead className="sticky top-0 bg-zinc-50 text-left text-xs font-medium text-zinc-500">
                   <tr>
                     <th className="w-8 px-2 py-2"></th>
-                    <th className="px-2 py-2">Operator</th>
+                    <th className="px-2 py-2">Client</th>
                     <th className="px-2 py-2">Array</th>
                     <th className="px-2 py-2">NEPOOL ID</th>
                     <th className="px-2 py-2">Utility account</th>
@@ -357,14 +393,17 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                       <td className="px-1 py-1">
                         <div className="relative">
                           <input
+                            list="import-client-suggestions"
                             value={r.operator_name ?? ""}
-                            placeholder="(blank — will create Unassigned client)"
+                            placeholder="(blank — will create new client)"
                             onChange={(e) => editRow(i, "operator_name", e.target.value)}
                             className={[
                               "w-full rounded-md border bg-transparent px-1.5 py-1 text-sm placeholder:text-zinc-300 hover:border-zinc-200 focus:bg-white focus:outline-none focus:ring-1",
                               !r.operator_name
                                 ? "border-amber-300 text-amber-800 focus:border-amber-400 focus:ring-amber-400/40"
-                                : "border-transparent text-zinc-800 focus:border-primary-400 focus:ring-primary-400/40",
+                                : isExistingClient(r.operator_name, existingClients)
+                                  ? "border-emerald-300 text-emerald-900 focus:border-emerald-400 focus:ring-emerald-400/40"
+                                  : "border-transparent text-zinc-800 focus:border-primary-400 focus:ring-primary-400/40",
                             ].join(" ")}
                           />
                         </div>
@@ -394,9 +433,9 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                           <span
                             title={
                               r.collision === "both"
-                                ? "Operator and array name already exist — will be merged"
+                                ? "Client and array name already exist — will be merged"
                                 : r.collision === "client"
-                                  ? "Operator name already exists — will be merged"
+                                  ? "Client name already exists — will be merged"
                                   : "Array name already exists — will be merged"
                             }
                             className="whitespace-nowrap text-amber-700"
@@ -410,6 +449,14 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                 </tbody>
               </table>
             </div>
+            {/* Datalist suggestions for the Client column inputs — sourced
+                from the operator's existing clients so they get a real picker
+                without us re-skinning the native input. */}
+            <datalist id="import-client-suggestions">
+              {existingClients.map((c) => (
+                <option key={c.id} value={c.name} />
+              ))}
+            </datalist>
             <div className="mt-6 flex items-center justify-between gap-2">
               <span className="text-xs text-zinc-500">
                 {selected.length} array{selected.length === 1 ? "" : "s"} selected
@@ -442,6 +489,44 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
       </div>
     </div>
   );
+}
+
+/** Lowercase substring containment for the "did this row's client name
+ *  already exist in our roster?" cell-color signal. */
+function isExistingClient(name: string | null | undefined, clients: ClientRow[]): boolean {
+  const n = (name ?? "").trim().toLowerCase();
+  if (!n) return false;
+  return clients.some((c) => c.name.trim().toLowerCase() === n);
+}
+
+/** Derive a client name from an uploaded filename. "Bruce Genereaux 2026.xlsx"
+ *  → "Bruce Genereaux". Strips extension, common year/quarter suffixes, and
+ *  the words "report"/"roster"/"arrays" that operators title spreadsheets with. */
+function deriveClientNameFromFilename(filename: string): string {
+  let stem = filename.replace(/\.[^.]+$/, "");
+  // Strip trailing year (2020-2099), quarter (Q1-Q4), and common report words
+  stem = stem.replace(/[_\-\s]*(20\d{2}|q[1-4]|quarterly|annual|report|roster|arrays?|nepool|gmcs)[_\-\s]*/gi, " ");
+  stem = stem.replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+  // Title-case naive
+  if (!stem) return "";
+  return stem.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Fuzzy match an array name against existing client names. Useful when
+ *  the spreadsheet labels rows by array but doesn't name the client — if
+ *  a client's name appears as a substring of the array (e.g. "Bruce
+ *  Genereaux - Maple Ridge"), we can confidently auto-fill. */
+function guessClientFromArray(arrayName: string, clients: ClientRow[]): string | null {
+  const a = arrayName.toLowerCase();
+  if (!a) return null;
+  // Prefer longer client names (more specific) over short ones.
+  const sorted = [...clients].sort((x, y) => y.name.length - x.name.length);
+  for (const c of sorted) {
+    const n = c.name.trim().toLowerCase();
+    if (n.length < 3) continue; // too short to be a confident match
+    if (a.includes(n)) return c.name;
+  }
+  return null;
 }
 
 /** A borderless, inline-editable table cell. */
