@@ -473,6 +473,10 @@ function LoginGroupRow({
   const accountCount = accounts.length;
   const arrayTotal = accounts.reduce((n, a) => n + a.arrays.length, 0);
 
+  // Ref to the row body so we can use it as the drag image (so the whole
+  // login row drags visually, not just the six-dot handle).
+  const rowRef = useRef<HTMLDivElement | null>(null);
+
   const onDragStart = (e: React.DragEvent) => {
     e.stopPropagation();
     _activeDragLoginUtility = utility;
@@ -482,6 +486,12 @@ function LoginGroupRow({
       JSON.stringify({ srcClientId: clientId, utility, originClientId, loginId }),
     );
     e.dataTransfer.setData('text/plain', `${utility} login`);
+    // Use the row body as the drag image so the user sees the whole login
+    // following the cursor, not just the tiny handle icon.
+    if (rowRef.current) {
+      const rect = rowRef.current.getBoundingClientRect();
+      e.dataTransfer.setDragImage(rowRef.current, e.clientX - rect.left, e.clientY - rect.top);
+    }
     setDragging(true);
   };
 
@@ -498,6 +508,7 @@ function LoginGroupRow({
   return (
     <div
       data-walkthrough="login-row"
+      ref={rowRef}
       className={[
         'nodrag group/login rounded-xl border transition-opacity',
         th.row,
