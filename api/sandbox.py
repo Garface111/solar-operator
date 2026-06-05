@@ -97,6 +97,7 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
             clients_out.append({
                 "id": c.id,
                 "name": c.name,
+                "contact_email": c.contact_email,
                 "canvas_x": getattr(c, "canvas_x", None),
                 "canvas_y": getattr(c, "canvas_y", None),
                 "canvas_pinned": getattr(c, "canvas_pinned", False) or False,

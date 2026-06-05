@@ -1525,6 +1525,56 @@ export default function SandboxCanvas() {
     [setNodes, toast, pushUndo],
   );
 
+  // Generic client field patch — used by the inline-editable Name / email
+  // spots in the sandbox header. Optimistic local update + PATCH; rolls back
+  // on server error. Skips no-op patches so blur-with-no-change is free.
+  const updateClientField = useCallback(
+    async (clientId: string, patch: { name?: string; contact_email?: string | null }) => {
+      const numId = parseInt(clientId.replace('client_', ''), 10);
+      if (isNaN(numId)) return;
+      const before = nodesRef.current.find((n) => n.id === clientId);
+      if (!before) return;
+      const beforeData = before.data as ClientNodeData;
+      // No-op guard.
+      const sameName = patch.name === undefined || patch.name === beforeData.client.name;
+      const beforeEmail = (beforeData.client as { contact_email?: string | null }).contact_email ?? null;
+      const nextEmail = patch.contact_email === undefined ? undefined : (patch.contact_email || null);
+      const sameEmail = nextEmail === undefined || nextEmail === beforeEmail;
+      if (sameName && sameEmail) return;
+      // Optimistic apply.
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.id !== clientId) return n;
+          const d = n.data as ClientNodeData;
+          return {
+            ...n,
+            data: {
+              ...d,
+              client: {
+                ...d.client,
+                ...(patch.name !== undefined ? { name: patch.name } : {}),
+                ...(patch.contact_email !== undefined ? { contact_email: patch.contact_email || null } : {}),
+              },
+            },
+          };
+        }),
+      );
+      try {
+        const apiPatch: { name?: string; contact_email?: string | null } = {};
+        if (patch.name !== undefined) apiPatch.name = patch.name;
+        if (patch.contact_email !== undefined) apiPatch.contact_email = patch.contact_email || null;
+        await updateClient(numId, apiPatch);
+      } catch (err) {
+        // Roll back on failure.
+        setNodes((ns) =>
+          ns.map((n) => (n.id === clientId ? before : n)),
+        );
+        toast.show(err instanceof Error ? err.message : 'Update failed', 'error');
+      }
+    },
+    [setNodes, toast],
+  );
+
   // ── Context ───────────────────────────────────────────────────────────────
 
   const actions: CanvasActions = {
@@ -1539,6 +1589,7 @@ export default function SandboxCanvas() {
     detachLogin,
     moveLoginToClient,
     getOriginClient: (cid: number) => originLookup[cid] ?? null,
+    updateClient: updateClientField,
     togglePin,
     density,
   };

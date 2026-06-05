@@ -29,6 +29,10 @@ export interface CanvasActions {
     deleted: boolean;
     logins: { GMP?: string | null; VEC?: string | null; WEC?: string | null };
   } | null;
+  /** Patch any client field — name, contact_email, etc. The sandbox
+   *  optimistically applies the change and PATCHes the server. Used by
+   *  the inline-editable text spots on the client card. */
+  updateClient: (clientId: string, patch: { name?: string; contact_email?: string | null }) => Promise<void>;
   /** Toggle the pinned/starred state of a client. */
   togglePin: (clientId: string) => void;
 }

@@ -327,12 +327,19 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
           ) : (
             <p
               className={`nodrag cursor-text truncate ${nameText} font-semibold text-zinc-900 select-none hover:text-primary-700 hover:underline hover:underline-offset-2 decoration-primary-300`}
-              onDoubleClick={() => actions.startRename(id)}
-              title={`${client.name} — double-click to rename`}
+              onClick={(e) => { e.stopPropagation(); actions.startRename(id); }}
+              title={`${client.name} — click to rename`}
             >
               {client.name}
             </p>
           )}
+          {/* Contact email — click to edit inline. Always rendered so it
+              shows as a tappable placeholder when empty. */}
+          <ClientEmailInline
+            value={(client as { contact_email?: string | null }).contact_email ?? null}
+            onSave={(v) => void actions.updateClient(id, { contact_email: v })}
+            isCompact={isCompact}
+          />
         </div>
 
         <button
@@ -652,5 +659,78 @@ function LoginGroupRow({
         </div>
       )}
     </div>
+  );
+}
+
+
+/** Inline-editable contact email shown in the client card header.
+ *  Click to edit; Enter or blur commits; Escape cancels. Empty state
+ *  reads as a soft amber "+ add email" prompt. */
+function ClientEmailInline({
+  value,
+  onSave,
+  isCompact,
+}: {
+  value: string | null;
+  onSave: (v: string) => void;
+  isCompact: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value ?? "");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(value ?? "");
+  }, [value, editing]);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.focus();
+  }, [editing]);
+
+  const sizeText = isCompact ? "text-[10px]" : "text-[11px]";
+
+  function commit() {
+    const v = draft.trim();
+    setEditing(false);
+    if (v === (value ?? "")) return; // no-op
+    onSave(v);
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        type="email"
+        className={`nodrag nopan mt-0.5 w-full rounded border border-primary-300 bg-primary-50 px-1.5 py-0.5 ${sizeText} text-zinc-800 outline-none focus:ring-2 focus:ring-primary-400/40`}
+        value={draft}
+        placeholder="client@example.com"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Escape") { setDraft(value ?? ""); setEditing(false); }
+        }}
+        onBlur={commit}
+      />
+    );
+  }
+
+  return value ? (
+    <button
+      type="button"
+      className={`nodrag mt-0.5 block max-w-full truncate text-left ${sizeText} text-zinc-500 hover:text-primary-700 hover:underline hover:underline-offset-2`}
+      onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+      title={`${value} — click to edit`}
+    >
+      {value}
+    </button>
+  ) : (
+    <button
+      type="button"
+      className={`nodrag mt-0.5 block text-left ${sizeText} font-medium text-amber-600 hover:text-amber-700 hover:underline hover:underline-offset-2`}
+      onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+      title="Click to add a contact email"
+    >
+      + add email
+    </button>
   );
 }

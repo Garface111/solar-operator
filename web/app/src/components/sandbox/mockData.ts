@@ -26,6 +26,8 @@ export interface UtilityAccount {
 export interface ClientData {
   id: string;
   name: string;
+  /** Contact email — surfaced in the sandbox header for inline edit. */
+  contact_email?: string | null;
   accounts: UtilityAccount[];
   /** Per-utility login credential surface (optional; populated from API). */
   logins?: Partial<Record<Utility, string | null>>;
