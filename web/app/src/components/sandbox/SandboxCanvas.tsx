@@ -194,25 +194,15 @@ export default function SandboxCanvas() {
   // detect which clients were newly created so we can push undo entries.
   const clientIdsBeforeModal = useRef<Set<number>>(new Set());
 
-  // Keyboard: ⌘Z / Ctrl+Z fires undo; Esc closes context menu
+  // Esc closes the context menu (Cmd+Z / Cmd+Shift+Z are handled by the
+  // deep undo/redo stack below)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.target as Element)?.tagName === 'INPUT') return;
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
-        if (mergeUndo) {
-          e.preventDefault();
-          setNodes(mergeUndo.snapshot);
-          setMergeUndo(null);
-        }
-        return;
-      }
-      if (e.key === 'Escape') {
-        setContextMenu(null);
-      }
+      if (e.key === 'Escape') setContextMenu(null);
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [mergeUndo, setNodes]);
+  }, []);
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
