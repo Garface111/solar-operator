@@ -498,54 +498,95 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                 />
               </div>
 
-              {/* Email preview box */}
+              {/* Email preview box — styled like a real inbox message */}
               <div className="rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden">
-                {/* From → To row */}
-                {templateData && (
-                  <div className="border-b border-zinc-100 px-4 py-2.5 bg-zinc-50 space-y-0.5">
-                    <p className="text-[11px] text-zinc-500">
-                      <span className="font-medium text-zinc-600">From:</span>{" "}
-                      {templateData.from_email ?? "admin@solaroperator.org"}
-                      <span className="ml-1 text-zinc-400">(replies go here)</span>
-                    </p>
-                    <p className="text-[11px] text-zinc-500">
-                      <span className="font-medium text-zinc-600">To:</span>{" "}
-                      {templateData.sample_client_email ?? sampleClient}
-                      {sampleClient && (
-                        <span className="ml-1 text-zinc-400">(sample client)</span>
-                      )}
-                    </p>
+                {/* Inbox toolbar — visual fidelity cue that this is an email */}
+                <div className="flex items-center gap-2 border-b border-zinc-100 bg-zinc-50 px-4 py-2">
+                  <div className="flex gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-full bg-red-300" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
                   </div>
-                )}
-                {/* Subject header */}
-                <div className="border-b border-zinc-100 px-4 py-3">
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
-                    Subject
-                  </p>
+                  <span className="ml-2 text-[10px] uppercase tracking-wider text-zinc-400">
+                    Inbox preview
+                  </span>
+                </div>
+
+                {/* Subject line — top of message like in a mail client */}
+                <div className="border-b border-zinc-100 px-5 pt-4 pb-3">
                   {previewLoading ? (
-                    <div className="mt-1 h-4 w-64 animate-pulse rounded bg-zinc-100" />
+                    <div className="h-5 w-3/4 animate-pulse rounded bg-zinc-100" />
                   ) : (
-                    <p className="mt-0.5 text-sm font-medium text-zinc-900">
-                      {previewSubject || "(preview will appear here)"}
-                    </p>
+                    <h3 className="text-lg font-semibold tracking-tight text-zinc-900">
+                      {previewSubject || "(subject will appear here)"}
+                    </h3>
                   )}
                 </div>
-                {/* Body */}
-                <div className="px-4 py-4">
+
+                {/* From / To header — avatar + names like Gmail */}
+                {templateData && (
+                  <div className="flex items-start gap-3 border-b border-zinc-100 px-5 py-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-100 text-sm font-semibold text-primary-700">
+                      {initialsOf(templateData.from_email ?? "SO")}
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <p className="truncate text-sm text-zinc-900">
+                        <span className="font-medium">
+                          {templateData.from_email ?? "admin@solaroperator.org"}
+                        </span>
+                        <span className="ml-1.5 text-xs text-zinc-400">
+                          via Solar Operator
+                        </span>
+                      </p>
+                      <p className="truncate text-xs text-zinc-500">
+                        to{" "}
+                        <span className="text-zinc-700">
+                          {templateData.sample_client_email ?? sampleClient ?? "your client"}
+                        </span>
+                        {sampleClient && (
+                          <span className="ml-1 text-zinc-400">· sample client</span>
+                        )}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-[11px] text-zinc-400">
+                      just now
+                    </span>
+                  </div>
+                )}
+
+                {/* Body — rendered HTML email content */}
+                <div className="bg-white px-6 py-6">
                   {previewLoading ? (
-                    <div className="space-y-2">
+                    <div className="space-y-2.5">
                       <div className="h-3 w-full animate-pulse rounded bg-zinc-100" />
                       <div className="h-3 w-5/6 animate-pulse rounded bg-zinc-100" />
                       <div className="h-3 w-4/6 animate-pulse rounded bg-zinc-100" />
+                      <div className="h-3 w-3/4 animate-pulse rounded bg-zinc-100 mt-4" />
                     </div>
                   ) : previewBody ? (
                     <div
-                      className="text-sm leading-relaxed text-zinc-800 [&_a]:text-primary-600 [&_a]:underline [&_p]:mb-3 [&_p:last-child]:mb-0"
+                      className="text-[15px] leading-[1.65] text-zinc-800 font-serif [&_a]:text-primary-600 [&_a]:underline [&_p]:mb-4 [&_p:last-child]:mb-0 [&_strong]:font-semibold [&_em]:italic"
+                      style={{ fontFamily: "Georgia, 'Times New Roman', ui-serif, serif" }}
                       dangerouslySetInnerHTML={{ __html: previewBody }}
                     />
                   ) : (
                     <p className="text-sm text-zinc-400">Preview will appear here.</p>
                   )}
+                </div>
+
+                {/* Attachment chip — the GMCS workbook that actually goes out */}
+                <div className="border-t border-zinc-100 bg-zinc-50 px-5 py-3">
+                  <div className="inline-flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs">
+                    <svg viewBox="0 0 16 16" width="14" height="14" className="text-emerald-600" fill="currentColor" aria-hidden>
+                      <path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5.379a1.5 1.5 0 0 1 1.06.44l2.122 2.12A1.5 1.5 0 0 1 13.5 3.62V14.5A1.5 1.5 0 0 1 12 16H4.5A1.5 1.5 0 0 1 3 14.5v-13Z" opacity="0.2" />
+                      <path d="M9.5 0v3a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="0.8" fill="none" />
+                      <text x="8" y="11.5" textAnchor="middle" fontSize="3.5" fontWeight="bold" fill="currentColor">XLSX</text>
+                    </svg>
+                    <span className="font-medium text-zinc-700">
+                      {sampleClient ? `${sampleClient.split(" ")[0]}-Q-Report.xlsx` : "Q-Report.xlsx"}
+                    </span>
+                    <span className="text-zinc-400">· NEPOOL-GIS workbook</span>
+                  </div>
                 </div>
               </div>
 
@@ -704,4 +745,17 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       )}
     </div>
   );
+}
+
+/** Initials from an email address or name — for the inbox preview avatar.
+ *  "ford@example.com" → "FO". "Bruce Genereaux" → "BG". Falls back to "SO". */
+function initialsOf(input: string): string {
+  const s = (input || "").trim();
+  if (!s) return "SO";
+  const local = s.includes("@") ? s.split("@")[0] : s;
+  const tokens = local.split(/[._\s-]+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    return (tokens[0][0] + tokens[1][0]).toUpperCase();
+  }
+  return local.slice(0, 2).toUpperCase();
 }
