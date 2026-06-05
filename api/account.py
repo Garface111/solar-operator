@@ -36,7 +36,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 
 from .db import SessionLocal
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, now
@@ -896,11 +896,61 @@ def create_client(body: ClientCreate,
         raise HTTPException(400,
             "report_frequency must be monthly, quarterly, or null")
     with SessionLocal() as db:
+        # Name dedup
         existing = db.execute(
-            select(Client).where(Client.tenant_id == t.id, Client.name == name)
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.name == name,
+                Client.deleted_at.is_(None),
+            )
         ).scalar_one_or_none()
         if existing:
             raise HTTPException(409, "A client with that name already exists")
+
+        # Login dedup — if the operator's already added a client (manually
+        # OR via portal autopop) with the same GMP/VEC email or username,
+        # don't silently create a duplicate human. The conflict response
+        # carries the existing client's id+name so the UI can offer
+        # "open existing" instead of creating a dupe.
+        gmp_email_norm = body.gmp_email.lower().strip() if body.gmp_email else None
+        gmp_user_norm = (
+            body.gmp_username.strip().lower() if body.gmp_username and body.gmp_username.strip() else None
+        )
+        vec_email_norm = body.vec_email.lower().strip() if body.vec_email else None
+        vec_user_norm = (
+            body.vec_username.strip().lower() if body.vec_username and body.vec_username.strip() else None
+        )
+        login_conflicts = []
+        if gmp_email_norm:
+            login_conflicts.append(func.lower(Client.gmp_email) == gmp_email_norm)
+        if gmp_user_norm:
+            login_conflicts.append(func.lower(Client.gmp_username) == gmp_user_norm)
+        if vec_email_norm:
+            login_conflicts.append(func.lower(Client.vec_email) == vec_email_norm)
+        if vec_user_norm:
+            login_conflicts.append(func.lower(Client.vec_username) == vec_user_norm)
+        if login_conflicts:
+            dup = db.execute(
+                select(Client).where(
+                    Client.tenant_id == t.id,
+                    Client.deleted_at.is_(None),
+                    or_(*login_conflicts),
+                ).order_by(Client.id).limit(1)
+            ).scalar_one_or_none()
+            if dup:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "login-already-claimed",
+                        "message": (
+                            f"That utility login is already on \"{dup.name}\". "
+                            "Open that client instead of adding a duplicate."
+                        ),
+                        "existing_client_id": dup.id,
+                        "existing_client_name": dup.name,
+                    },
+                )
+
         c = Client(
             tenant_id=t.id, name=name,
             contact_email=body.contact_email,

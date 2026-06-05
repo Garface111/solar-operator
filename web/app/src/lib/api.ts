@@ -31,12 +31,29 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/** Raised on a structured 409 conflict so callers can react (e.g. offer
+ *  "Open existing client" instead of a generic error toast). */
+export class ConflictError extends Error {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  detail: any;
+  constructor(message: string, detail: unknown) {
+    super(message);
+    this.name = "ConflictError";
+    this.detail = detail;
+  }
+}
+
 async function parseError(res: Response): Promise<string> {
   try {
     const body = await res.json();
     if (typeof body?.detail === "string") return body.detail;
     if (Array.isArray(body?.detail))
       return body.detail.map((d: any) => d.msg).join("; ");
+    if (body?.detail && typeof body.detail === "object") {
+      // Structured 409 — surface the human-readable .message but stash the
+      // whole detail on a ConflictError below so callers can read it.
+      return body.detail.message || JSON.stringify(body.detail);
+    }
   } catch {
     /* fall through */
   }
@@ -96,8 +113,22 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     throw new UnauthorizedError();
   }
-  if (!res.ok) throw new Error(await parseError(res));
-  // Some endpoints (DELETE) may return an empty body.
+  if (!res.ok) {
+    // Structured 409 (e.g. login-already-claimed) — surface the detail
+    // object so the UI can offer "Open existing client" instead of a
+    // dead-end error toast.
+    if (res.status === 409) {
+      let body: any = null;
+      try { body = await res.clone().json(); } catch { /* ignore */ }
+      if (body?.detail && typeof body.detail === "object") {
+        throw new ConflictError(
+          body.detail.message || "Conflict",
+          body.detail,
+        );
+      }
+    }
+    throw new Error(await parseError(res));
+  }
   const text = await res.text();
   return (text ? JSON.parse(text) : {}) as T;
 }

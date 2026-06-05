@@ -5,7 +5,7 @@ import { Input } from "../ui/Input";
 import { Toggle } from "../ui/Toggle";
 import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
-import { createClient, type ClientRow } from "../lib/api";
+import { createClient, ConflictError, type ClientRow } from "../lib/api";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -63,9 +63,30 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
       onClose();
       toast.success(`Added ${client.name}`);
     } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Couldn't add the client",
-      );
+      if (err instanceof ConflictError && err.detail?.existing_client_id) {
+        // Login already on file — jump the operator to the existing client
+        // instead of creating a dupe. Sublime: zero second-guessing.
+        const existingName = err.detail.existing_client_name || "this client";
+        toast.success(
+          `Already on file as "${existingName}" — opening it.`,
+        );
+        reset();
+        onClose();
+        // Hash anchor lets ClientsSection expand the matching card on load.
+        // (Falls back to plain navigation if the section isn't watching.)
+        window.location.hash = `#client-${err.detail.existing_client_id}`;
+        // Best-effort scroll if the card is already mounted.
+        window.setTimeout(() => {
+          const el = document.getElementById(
+            `client-${err.detail.existing_client_id}`,
+          );
+          if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 150);
+      } else {
+        toast.error(
+          err instanceof Error ? err.message : "Couldn't add the client",
+        );
+      }
     } finally {
       setSaving(false);
     }
