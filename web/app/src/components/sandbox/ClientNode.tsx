@@ -14,6 +14,10 @@ export interface ClientNodeData extends Record<string, unknown> {
   client: ClientData;
   expanded: boolean;
   entryDelay: number;
+  // Transient drag state — set during onNodeDrag when this node is hovering
+  // over another client (source) or being hovered (target). Used purely for
+  // styling; never persisted.
+  mergeIntent?: 'source' | 'target' | null;
 }
 
 const UTILITY_THEME: Record<Utility, { pill: string; dot: string; row: string; rowText: string; rowDot: string }> = {
@@ -59,7 +63,7 @@ function utilityChips(accounts: UtilityAccount[]): Array<{ util: Utility; count:
 
 export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) {
   const data = rawData as unknown as ClientNodeData;
-  const { client, expanded, entryDelay } = data;
+  const { client, expanded, entryDelay, mergeIntent } = data;
   const actions = useCanvasActions();
   const [localName, setLocalName] = useState(client.name);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -80,13 +84,20 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   const arrayCount = clientArrayCount(client);
   const totalMwh = clientTotalMwh(client);
 
+  const isMergeTarget = mergeIntent === 'target';
+  const isMergeSource = mergeIntent === 'source';
+
   return (
     <div
       className={[
-        'so-node-enter w-72 rounded-2xl border bg-white transition-shadow',
-        selected
-          ? 'border-primary-400 shadow-md ring-2 ring-primary-300/40'
-          : 'border-cream-border shadow hover:shadow-md',
+        'so-node-enter w-72 rounded-2xl border bg-white transition-all duration-150',
+        isMergeTarget
+          ? 'scale-[1.03] border-amber-400 bg-amber-50 shadow-[0_0_0_4px_rgba(251,191,36,0.25),0_12px_32px_-8px_rgba(217,119,6,0.4)] ring-2 ring-amber-300'
+          : isMergeSource
+            ? 'border-amber-300 opacity-90 shadow-[0_0_0_3px_rgba(251,191,36,0.2)]'
+            : selected
+              ? 'border-primary-400 shadow-md ring-2 ring-primary-300/40'
+              : 'border-cream-border shadow hover:shadow-md',
       ].join(' ')}
       style={{ animationDelay: `${entryDelay}ms` }}
     >

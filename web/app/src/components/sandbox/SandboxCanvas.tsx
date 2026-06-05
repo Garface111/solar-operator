@@ -397,10 +397,45 @@ export default function SandboxCanvas() {
     }, 800));
   }, []);
 
+  // ── Drag: live merge-intent highlight ────────────────────────────────────
+
+  const onNodeDrag = useCallback(
+    (_event: MouseEvent | TouchEvent, node: Node) => {
+      if (node.type !== 'client') return;
+      const hits = getIntersectingNodes(node)
+        .filter((n) => n.id !== node.id && n.type === 'client');
+      const targetId = hits[0]?.id ?? null;
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.type !== 'client') return n;
+          const d = n.data as ClientNodeData;
+          let nextIntent: 'source' | 'target' | null = null;
+          if (n.id === node.id && targetId) nextIntent = 'source';
+          else if (n.id === targetId) nextIntent = 'target';
+          if (d.mergeIntent === nextIntent) return n;
+          return { ...n, data: { ...d, mergeIntent: nextIntent } };
+        }),
+      );
+    },
+    [getIntersectingNodes, setNodes],
+  );
+
+  const clearMergeIntent = useCallback(() => {
+    setNodes((ns) =>
+      ns.map((n) => {
+        if (n.type !== 'client') return n;
+        const d = n.data as ClientNodeData;
+        if (!d.mergeIntent) return n;
+        return { ...n, data: { ...d, mergeIntent: null } };
+      }),
+    );
+  }, [setNodes]);
+
   // ── Drag stop: detect attach / merge, then persist position ──────────────
 
   const onNodeDragStop = useCallback(
     (_event: MouseEvent | TouchEvent, node: Node) => {
+      clearMergeIntent();
       const hits = getIntersectingNodes(node).filter((n) => n.id !== node.id);
 
       if (node.type === 'unclassified') {
@@ -423,7 +458,7 @@ export default function SandboxCanvas() {
 
       savePosition(node.id, node.position.x, node.position.y);
     },
-    [getIntersectingNodes, attachToClient, savePosition],
+    [getIntersectingNodes, attachToClient, savePosition, clearMergeIntent],
   );
 
   // ── Auto-arrange ──────────────────────────────────────────────────────────
@@ -469,6 +504,7 @@ export default function SandboxCanvas() {
           nodes={nodes}
           edges={[]}
           onNodesChange={onNodesChange}
+          onNodeDrag={onNodeDrag}
           onNodeDragStop={onNodeDragStop}
           nodeTypes={NODE_TYPES}
           nodesConnectable={false}
