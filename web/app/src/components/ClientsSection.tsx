@@ -5,8 +5,7 @@ import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
 import { SectionTitle } from "../ui/SectionTitle";
 import { useToast } from "../ui/Toast";
-import { ClientCard } from "./ClientCard";
-import { WelcomeReveal } from "./WelcomeReveal";
+import { ClientsTable } from "./ClientsTable";
 import { AddClientModal } from "./AddClientModal";
 import { AddClientByLoginModal } from "./AddClientByLoginModal";
 import { CaptureListener } from "./CaptureListener";
@@ -341,34 +340,21 @@ export function ClientsSection({ expandClientId }: Props) {
           </div>
         </Card>
       ) : (
-        <WelcomeReveal
+        <ClientsTable
           clients={clients}
-          operatorName={account?.name ?? account?.email ?? null}
-        >
-          {(getItemProps) => (
-            <div className="space-y-3">
-              {clients.map((c, i) => (
-                <div key={c.id} {...getItemProps(i)}>
-                  <ClientCard
-                    client={c}
-                    operatorEmail={operatorEmail}
-                    defaultExpanded={c.id === expandClientId}
-                    onChange={replaceClient}
-                    selectable={selectMode}
-                    selected={selectedIds.has(c.id)}
-                    onSelect={toggleSelect}
-                    revealIndex={i}
-                    onDeleted={(token, msg) => {
-                      removeClientLocal(c.id);
-                      scheduleUndo(token, msg);
-                    }}
-                    onUndo={scheduleUndo}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-        </WelcomeReveal>
+          operatorEmail={operatorEmail}
+          expandClientId={expandClientId}
+          selectMode={selectMode}
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
+          onChange={replaceClient}
+          onDeleted={(id, token, msg) => {
+            removeClientLocal(id);
+            scheduleUndo(token, msg);
+          }}
+          onUndo={scheduleUndo}
+          onOpenAddByLogin={() => setAddingByLogin(true)}
+        />
       )}
 
       {/* Sticky bulk-action bar */}
