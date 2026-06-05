@@ -284,7 +284,7 @@ export function SandboxWalkthrough({
                 <button
                   type="button"
                   className="mb-2 w-full rounded-lg bg-primary-500 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-600 active:bg-primary-700"
-                  onClick={onOpenByLogin}
+                  onClick={() => { onOpenByLogin(); markDone(); }}
                   style={{ pointerEvents: 'auto' }}
                 >
                   Connect a GMP login
@@ -292,7 +292,7 @@ export function SandboxWalkthrough({
                 <button
                   type="button"
                   className="w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-50"
-                  onClick={onOpenManual}
+                  onClick={() => { onOpenManual(); markDone(); }}
                   style={{ pointerEvents: 'auto' }}
                 >
                   + Add empty client
@@ -352,14 +352,14 @@ export function SandboxWalkthrough({
               <button
                 type="button"
                 className="rounded-xl bg-primary-500 px-4 py-2.5 text-sm font-semibold text-white shadow-md transition-colors hover:bg-primary-600 active:bg-primary-700"
-                onClick={onOpenByLogin}
+                onClick={() => { onOpenByLogin(); markDone(); }}
               >
                 + Add another client
               </button>
               <button
                 type="button"
                 className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-medium text-zinc-600 shadow-sm transition-colors hover:bg-zinc-50"
-                onClick={onOpenManual}
+                onClick={() => { onOpenManual(); markDone(); }}
               >
                 + Add empty client
               </button>
