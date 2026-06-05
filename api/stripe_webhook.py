@@ -354,7 +354,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
         return {"ok": True, "event": event_type, "handled": False}
 
     try:
-        result = handler(event["data"]["object"])
+        raw_obj = event["data"]["object"]
+        # Stripe SDK v15 removed .get() from StripeObject. Convert to a plain
+        # dict so all handler functions can safely use dict.get().
+        data_obj = raw_obj.to_dict() if hasattr(raw_obj, "to_dict") else dict(raw_obj)
+        result = handler(data_obj)
         with SessionLocal() as db:
             ev = db.get(StripeEvent, event_id)
             if ev:

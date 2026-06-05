@@ -13,11 +13,17 @@ Schedule:
 import os
 from datetime import datetime, timedelta
 
+import stripe as stripe
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, or_, func, text
 from .db import SessionLocal, engine
 from .models import Tenant, Client, Array, Job, now
+from .notify import (
+    send_add_first_array_email,
+    send_trial_charged_email,
+    send_internal_alert,
+)
 
 scheduler = BackgroundScheduler(timezone="UTC")
 
@@ -102,9 +108,6 @@ def finalize_expired_trials():
       - Otherwise: create the Stripe subscription on the stored payment method
         (quantity = actual array count, minimum 1), mark active, clear trial.
     """
-    import stripe
-    from .notify import send_add_first_array_email, send_trial_charged_email, send_internal_alert
-
     stripe_secret = os.getenv("STRIPE_SECRET_KEY", "")
     setup_price_id = os.getenv("STRIPE_SETUP_PRICE_ID", "")
     array_price_id = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
@@ -161,18 +164,24 @@ def finalize_expired_trials():
                     items=items if items else None,
                     default_payment_method=t.stripe_payment_method_id,
                 )
-                sub_id = sub["id"]
+                # Stripe SDK v15 returns StripeObjects without .get(); use [] with `in`.
+                sub_dict = sub.to_dict() if hasattr(sub, "to_dict") else sub
+                sub_id = sub_dict["id"]
                 t.stripe_subscription_id = sub_id
                 t.subscription_status = "active"
                 t.trial_ends_at = None
                 db.commit()
 
-                # Estimate the charge for the confirmation email. Pull the
-                # latest invoice amount from Stripe rather than guessing.
+                # Estimate the charge for the confirmation email.
                 amount_dollars = 0.0
+                latest_inv_id = sub_dict.get("latest_invoice") if hasattr(sub_dict, "get") else (
+                    sub_dict["latest_invoice"] if "latest_invoice" in sub_dict else None
+                )
                 try:
-                    inv = stripe.Invoice.retrieve(sub.get("latest_invoice") or "")
-                    amount_dollars = (inv.get("amount_due") or 0) / 100
+                    if latest_inv_id:
+                        inv = stripe.Invoice.retrieve(latest_inv_id)
+                        inv_dict = inv.to_dict() if hasattr(inv, "to_dict") else inv
+                        amount_dollars = (inv_dict.get("amount_due") or 0) / 100
                 except Exception:
                     pass
 
