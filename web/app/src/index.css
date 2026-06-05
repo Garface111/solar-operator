@@ -29,6 +29,40 @@ body {
   }
 }
 
+/* CaptureCeremony — cascading row entrance for newly-captured clients. */
+@keyframes so-cascade-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.so-cascade-row {
+  animation: so-cascade-row-in 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* CaptureCeremony — per-array chip pop. Slight overshoot for delight. */
+@keyframes so-cascade-chip-in {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.85);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(0) scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.so-cascade-chip {
+  animation: so-cascade-chip-in 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 /* Respect users who prefer reduced motion. */
 @media (prefers-reduced-motion: reduce) {
   *,

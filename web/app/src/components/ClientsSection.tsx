@@ -8,6 +8,7 @@ import { ClientCard } from "./ClientCard";
 import { AddClientModal } from "./AddClientModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
+import { CaptureCeremony } from "./CaptureCeremony";
 import {
   type ClientRow,
   listClients,
@@ -241,6 +242,16 @@ export function ClientsSection({ expandClientId }: Props) {
           </button>
         </div>
       )}
+
+      {/* Sublime moment — capture ceremony. Listens for SO_CAPTURE_LANDED
+          broadcasts from the extension; renders cascading client+array
+          chips and prompts "log into another portal" so the operator
+          rides the dopamine loop on every new login. freshVisit=true
+          surfaces it pre-emptively for post-onboarding arrivals. */}
+      <CaptureCeremony
+        freshVisit={new URLSearchParams(window.location.search).get("fresh") === "1"}
+        onCaptureLanded={loadClients}
+      />
 
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
