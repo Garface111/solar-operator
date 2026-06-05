@@ -137,14 +137,23 @@ export default function ReportsTab() {
       {failures.length > 0 && <FailureStrip failures={failures} />}
 
       {/* 2. One-glance status */}
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <StatusPill status={overallStatus} quarter={mostRecentLabel} />
-        <Link
-          to="/account"
-          className="text-xs text-zinc-400 hover:text-zinc-600"
-        >
-          Schedule &amp; email settings ↗
-        </Link>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => setStudioOpen(true)}
+            className="text-xs"
+          >
+            Customize email template
+          </Button>
+          <Link
+            to="/account"
+            className="text-xs text-zinc-400 hover:text-zinc-600"
+          >
+            Schedule &amp; email settings ↗
+          </Link>
+        </div>
       </div>
 
       {/* 3. Next run countdown + send-now */}
@@ -220,17 +229,6 @@ export default function ReportsTab() {
             ))}
           </div>
         )}
-      </div>
-
-      {/* ── Email template studio ── */}
-      <div className="pt-2 flex justify-center">
-        <button
-          type="button"
-          onClick={() => setStudioOpen(true)}
-          className="text-xs font-medium text-zinc-400 hover:text-zinc-600 underline underline-offset-2 transition-colors"
-        >
-          Customize email template ✨
-        </button>
       </div>
 
       <EmailTemplateStudio

@@ -301,9 +301,8 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-cream-border bg-white px-6 shadow-sm">
         <div className="flex items-center gap-2">
           <span className="text-base font-semibold text-zinc-900">
-            Email Template Studio
+            Customize report email
           </span>
-          <span className="text-base">✨</span>
         </div>
         <button
           type="button"
@@ -447,7 +446,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     </span>
                   )}
                   {aiGenerated && (
-                    <span className="ml-2 text-primary-600">✨ AI draft</span>
+                    <span className="ml-2 text-primary-600">AI draft</span>
                   )}
                 </p>
                 <button
@@ -644,7 +643,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               {isAllDefault && (
                 <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
                   <p className="text-sm font-semibold text-emerald-800 mb-3">
-                    👍 Looks great as-is — use the default for all my client emails
+                    Looks good as-is — use the default for all my client emails
                   </p>
                   <Button
                     onClick={() => {
