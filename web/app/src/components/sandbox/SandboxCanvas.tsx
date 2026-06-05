@@ -23,6 +23,7 @@ import {
   reassignAccount,
   updateClient,
   deleteClient,
+  undoDelete,
   listClients,
   type CanvasResponse,
 } from '../../lib/api';
@@ -439,10 +440,71 @@ export default function SandboxCanvas() {
   const deleteNode = useCallback(
     (nodeId: string) => {
       setContextMenu(null);
+      const isClient = nodeId.startsWith('client_');
+      const isAccount = nodeId.startsWith('account_');
+      const numId = parseInt(nodeId.replace(isClient ? 'client_' : 'account_', ''), 10);
+      const snapshot = nodesRef.current;
+      const removedNode = snapshot.find((n) => n.id === nodeId);
+      if (!removedNode) return;
+      const removedName = isClient
+        ? (removedNode.data as ClientNodeData).client.name
+        : (removedNode.data as UnclassifiedNodeData).account?.account_number ?? 'item';
+
+      // Optimistic UI: strip it now
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
-      toast.show('Hidden from canvas — reload to restore.', 'info');
+
+      const applyDelete = () => setNodes((ns) => ns.filter((n) => n.id !== nodeId));
+      const applyRestoreVisually = () => setNodes(snapshot);
+
+      if (isClient && !isNaN(numId)) {
+        // Backend DELETE returns an undo_token good for 5 minutes; we feed
+        // that into the undo stack so Cmd+Z fully restores the client + its
+        // arrays + utility accounts in one call.
+        deleteClient(numId)
+          .then((res) => {
+            toast.show(`Deleted ${removedName}. Cmd+Z to undo.`, 'info');
+            pushUndo({
+              label: `Delete client "${removedName}"`,
+              timestamp: Date.now(),
+              undo: () => {
+                applyRestoreVisually();
+                undoDelete(res.undo_token)
+                  .then(() => void loadCanvas())
+                  .catch(() => {
+                    toast.show('Undo failed — 5-minute window may have expired.', 'error');
+                    void loadCanvas();
+                  });
+              },
+              redo: () => {
+                // Redo just re-issues a delete on the (now restored) client.
+                applyDelete();
+                deleteClient(numId).catch(() => {
+                  toast.show('Redo delete failed.', 'error');
+                  void loadCanvas();
+                });
+              },
+            });
+          })
+          .catch(() => {
+            applyRestoreVisually();
+            toast.show('Delete failed — reverted.', 'error');
+          });
+      } else if (isAccount && !isNaN(numId)) {
+        // Unclassified accounts: we don't have a hard-delete endpoint, so
+        // this is a visual-only hide that undo restores from snapshot. The
+        // backend row still exists; reload will re-surface it.
+        toast.show(`Hidden ${removedName}. Cmd+Z to restore.`, 'info');
+        pushUndo({
+          label: `Hide account ${removedName}`,
+          timestamp: Date.now(),
+          undo: () => applyRestoreVisually(),
+          redo: () => applyDelete(),
+        });
+      } else {
+        toast.show('Hidden from canvas — reload to restore.', 'info');
+      }
     },
-    [setNodes, toast],
+    [setNodes, toast, pushUndo, loadCanvas],
   );
 
   const detachAccount = useCallback(
@@ -1198,6 +1260,10 @@ export default function SandboxCanvas() {
           onNodeDragStop={onNodeDragStop}
           nodeTypes={NODE_TYPES}
           nodesConnectable={false}
+          // Shift-click adds the node to the selection; Shift-drag draws a box-select
+          multiSelectionKeyCode="Shift"
+          selectionKeyCode="Shift"
+          selectNodesOnDrag={false}
           {...(() => {
             try {
               const raw = localStorage.getItem('so:sandbox:viewport');
@@ -1247,6 +1313,31 @@ export default function SandboxCanvas() {
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
                 </ToolbarButton>
+                {(() => {
+                  const selectedClients = nodes.filter((n) => n.selected && n.type === 'client');
+                  const n = selectedClients.length;
+                  if (n === 0) return null;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const names = selectedClients
+                          .map((s) => (s.data as ClientNodeData).client.name)
+                          .slice(0, 3)
+                          .join(', ');
+                        const more = n > 3 ? ` and ${n - 3} more` : '';
+                        if (!confirm(`Delete ${n} client${n === 1 ? '' : 's'}? (${names}${more})\n\nCmd+Z undoes within 5 minutes.`)) return;
+                        // Fire deletes sequentially so each gets its own
+                        // undo stack entry (so Cmd+Z peels them off one by one).
+                        for (const s of selectedClients) deleteNode(s.id);
+                      }}
+                      className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 ring-1 ring-red-300 transition-colors hover:bg-red-100"
+                      title={`Delete ${n} selected client${n === 1 ? '' : 's'}`}
+                    >
+                      🗑 Delete {n}
+                    </button>
+                  );
+                })()}
                 <button
                   type="button"
                   disabled={!topUndo}
