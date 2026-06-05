@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -7,11 +7,22 @@ import { SectionTitle } from "../ui/SectionTitle";
 import { useToast } from "../ui/Toast";
 import { ClientsTable } from "./ClientsTable";
 import { AddClientModal } from "./AddClientModal";
-import { AddClientByLoginModal } from "./AddClientByLoginModal";
 import { CaptureListener } from "./CaptureListener";
-import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
-import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
-import { CaptureCeremony } from "./CaptureCeremony";
+
+const AddClientByLoginModal = lazy(() =>
+  import("./AddClientByLoginModal").then((m) => ({ default: m.AddClientByLoginModal })),
+);
+const ImportSpreadsheetModal = lazy(() =>
+  import("./ImportSpreadsheetModal").then((m) => ({ default: m.ImportSpreadsheetModal })),
+);
+const AssignNepoolFromSpreadsheetModal = lazy(() =>
+  import("./AssignNepoolFromSpreadsheetModal").then((m) => ({
+    default: m.AssignNepoolFromSpreadsheetModal,
+  })),
+);
+const CaptureCeremony = lazy(() =>
+  import("./CaptureCeremony").then((m) => ({ default: m.CaptureCeremony })),
+);
 import {
   type ClientRow,
   listClients,
@@ -326,10 +337,12 @@ export function ClientsSection({ expandClientId }: Props) {
           chips and prompts "log into another portal" so the operator
           rides the dopamine loop on every new login. freshVisit=true
           surfaces it pre-emptively for post-onboarding arrivals. */}
-      <CaptureCeremony
-        freshVisit={new URLSearchParams(window.location.search).get("fresh") === "1"}
-        onCaptureLanded={loadClients}
-      />
+      <Suspense fallback={null}>
+        <CaptureCeremony
+          freshVisit={new URLSearchParams(window.location.search).get("fresh") === "1"}
+          onCaptureLanded={loadClients}
+        />
+      </Suspense>
 
       <div className="mb-3 flex items-center justify-between">
         <SectionTitle title="Clients" count={clients?.length} />
@@ -463,30 +476,42 @@ export function ClientsSection({ expandClientId }: Props) {
         onCreated={addClientLocal}
       />
 
-      <AddClientByLoginModal
-        open={addingByLogin}
-        onClose={() => setAddingByLogin(false)}
-        onCaptured={loadClients}
-        onSwitchToManual={() => {
-          setAddingByLogin(false);
-          setAdding(true);
-        }}
-      />
+      {addingByLogin && (
+        <Suspense fallback={null}>
+          <AddClientByLoginModal
+            open={addingByLogin}
+            onClose={() => setAddingByLogin(false)}
+            onCaptured={loadClients}
+            onSwitchToManual={() => {
+              setAddingByLogin(false);
+              setAdding(true);
+            }}
+          />
+        </Suspense>
+      )}
 
-      <ImportSpreadsheetModal
-        open={importing}
-        onClose={() => setImporting(false)}
-        onImported={handleImported}
-      />
+      {importing && (
+        <Suspense fallback={null}>
+          <ImportSpreadsheetModal
+            open={importing}
+            onClose={() => setImporting(false)}
+            onImported={handleImported}
+          />
+        </Suspense>
+      )}
 
-      <AssignNepoolFromSpreadsheetModal
-        open={assigningNepool}
-        onClose={() => setAssigningNepool(false)}
-        onAssigned={() => {
-          loadClients();
-          loadNepoolStats();
-        }}
-      />
+      {assigningNepool && (
+        <Suspense fallback={null}>
+          <AssignNepoolFromSpreadsheetModal
+            open={assigningNepool}
+            onClose={() => setAssigningNepool(false)}
+            onAssigned={() => {
+              loadClients();
+              loadNepoolStats();
+            }}
+          />
+        </Suspense>
+      )}
     </section>
   );
 }

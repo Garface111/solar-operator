@@ -15,6 +15,16 @@ const API_PROXY = (globalThis as any)?.process?.env?.VITE_API_PROXY ?? "https://
 export default defineConfig({
   base: "/accounts/",
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ["react", "react-dom", "react-router-dom"],
+          reactflow: ["@xyflow/react"],
+        },
+      },
+    },
+  },
   server: {
     port: 5174,
     proxy: API_PROXY

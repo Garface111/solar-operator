@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -7,8 +7,15 @@ import { Toggle } from "../ui/Toggle";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
-import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
-import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
+
+const AssignNepoolFromSpreadsheetModal = lazy(() =>
+  import("./AssignNepoolFromSpreadsheetModal").then((m) => ({
+    default: m.AssignNepoolFromSpreadsheetModal,
+  })),
+);
+const ImportSpreadsheetModal = lazy(() =>
+  import("./ImportSpreadsheetModal").then((m) => ({ default: m.ImportSpreadsheetModal })),
+);
 import {
   type ClientRow,
   type ArrayRow,
@@ -1099,26 +1106,34 @@ function ExpandedPanel({
       </div>
 
       {/* Modals */}
-      <AssignNepoolFromSpreadsheetModal
-        open={assigningNepool}
-        onClose={() => setAssigningNepool(false)}
-        onAssigned={() => {
-          setArrayRefreshSignal((n) => n + 1);
-          onArraysCacheInvalidate();
-        }}
-        clientId={client.id}
-        clientName={client.name}
-      />
-      <ImportSpreadsheetModal
-        open={importingArrays}
-        onClose={() => setImportingArrays(false)}
-        onImported={() => {
-          setArrayRefreshSignal((n) => n + 1);
-          onArraysCacheInvalidate();
-        }}
-        forceClientId={client.id}
-        forceClientName={client.name}
-      />
+      {assigningNepool && (
+        <Suspense fallback={null}>
+          <AssignNepoolFromSpreadsheetModal
+            open={assigningNepool}
+            onClose={() => setAssigningNepool(false)}
+            onAssigned={() => {
+              setArrayRefreshSignal((n) => n + 1);
+              onArraysCacheInvalidate();
+            }}
+            clientId={client.id}
+            clientName={client.name}
+          />
+        </Suspense>
+      )}
+      {importingArrays && (
+        <Suspense fallback={null}>
+          <ImportSpreadsheetModal
+            open={importingArrays}
+            onClose={() => setImportingArrays(false)}
+            onImported={() => {
+              setArrayRefreshSignal((n) => n + 1);
+              onArraysCacheInvalidate();
+            }}
+            forceClientId={client.id}
+            forceClientName={client.name}
+          />
+        </Suspense>
+      )}
       <Modal
         open={confirmDelete}
         onClose={() => !deleting && setConfirmDelete(false)}
