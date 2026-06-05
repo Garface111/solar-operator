@@ -94,6 +94,7 @@ export function ClientCard({
   revealIndex = 0,
 }: Props) {
   const toast = useToast();
+  const reveal = useReveal();
   const revealDelay = useRevealDelay();
   // Placeholder clients (the "Your first client" row dropped in by the
   // array-count-only onboarding path) auto-expand by default and get a
@@ -102,6 +103,26 @@ export function ClientCard({
   // is exactly the one we want — rename, paste utility email, toggle autopop.
   const isPlaceholder = !!client.is_placeholder;
   const [expanded, setExpanded] = useState(!!defaultExpanded || isPlaceholder);
+
+  // Welcome-reveal choreography: when the number-fill wave reaches THIS
+  // card (per-index stagger from WelcomeReveal), pop the arrays section
+  // open so the cascade flows down into the array list instead of
+  // dead-ending at the collapsed header. Only auto-expands once per
+  // reveal — manual toggling afterward is preserved.
+  const autoExpandedByReveal = useRef(false);
+  useEffect(() => {
+    if (!reveal.active) return;
+    if (autoExpandedByReveal.current) return;
+    // Fire just after the number-fill begins for this card so the
+    // expansion lands in the middle of the wave, not before it.
+    const delay = reveal.delayFor(revealIndex, 1);
+    const t = window.setTimeout(() => {
+      autoExpandedByReveal.current = true;
+      setExpanded(true);
+    }, delay);
+    return () => window.clearTimeout(t);
+  }, [reveal.active, reveal, revealIndex]);
+
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
