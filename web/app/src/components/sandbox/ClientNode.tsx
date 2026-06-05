@@ -464,10 +464,15 @@ function LoginGroupRow({
     >
       {/* Login header — click to reveal individual accounts */}
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="nodrag flex flex-1 items-center gap-1.5 text-left"
+        {/* Click anywhere on this row to toggle expand; drag is captured by
+            the parent div (HTML5 draggable). Avoid using a <button> here —
+            buttons are not draggable and would swallow the row's drag. */}
+        <div
+          role="button"
+          tabIndex={0}
+          className="flex flex-1 items-center gap-1.5 text-left cursor-pointer"
           onClick={() => setExpanded((v) => !v)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v); } }}
           aria-expanded={expanded}
           aria-label={expanded ? 'Collapse login' : 'Expand login'}
         >
@@ -498,7 +503,7 @@ function LoginGroupRow({
           <span className={`ml-auto text-[10px] font-medium opacity-60 ${th.rowText}`}>
             {accountCount} {accountCount === 1 ? 'account' : 'accounts'} · {arrayTotal} {arrayTotal === 1 ? 'array' : 'arrays'}
           </span>
-        </button>
+        </div>
         <button
           type="button"
           className={`nodrag invisible shrink-0 rounded p-0.5 text-sm opacity-60 transition-all hover:opacity-100 group-hover/login:visible ${th.rowText}`}

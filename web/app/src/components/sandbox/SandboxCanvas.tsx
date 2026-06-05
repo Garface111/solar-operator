@@ -79,13 +79,20 @@ function buildNodesFromApi(
   const nodes: Node[] = [];
   const autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] = [];
 
-  // First pass: collect grid slots already occupied by saved positions so
-  // newly-added (positionless) clients land in the NEXT FREE slot instead
-  // of stacking on top of existing cards.
+  // CANONICAL grid for slot bookkeeping: always use the 'full' density grid
+  // when deciding which slots are occupied and which are free. If we keyed
+  // by the current colW/rowH, switching density tiers (e.g. 5→6 clients
+  // flipping auto from 'full' to 'compact') would re-bucket the same saved
+  // coords into different slot keys, making `findFreeSlot` think populated
+  // spots were free and landing new clients on top of existing ones every
+  // reload. The visual layout still uses colW/rowH for NEW slot
+  // assignments, but the occupancy set is invariant.
+  const CANON_W = GRID.full.COL_W;
+  const CANON_H = GRID.full.ROW_H;
   const slotOccupied = new Set<string>();
   const slotKey = (x: number, y: number) => {
-    const col = Math.round((x - 40) / colW);
-    const row = Math.round((y - 40) / rowH);
+    const col = Math.round((x - 40) / CANON_W);
+    const row = Math.round((y - 40) / CANON_H);
     return `${col},${row}`;
   };
   data.clients.forEach((c) => {
@@ -93,7 +100,9 @@ function buildNodesFromApi(
       slotOccupied.add(slotKey(c.canvas_x, c.canvas_y));
     }
   });
-  // Find next free slot (column-major, scanning row by row)
+  // Find next free slot (column-major, scanning row by row) — emits coords
+  // in the CANONICAL grid so the next reload at any density resolves them
+  // back to the same slot key.
   let nextSlotIdx = 0;
   const findFreeSlot = (): { x: number; y: number } => {
     while (true) {
@@ -101,10 +110,15 @@ function buildNodesFromApi(
       const row = Math.floor(nextSlotIdx / COLS);
       nextSlotIdx++;
       if (!slotOccupied.has(`${col},${row}`)) {
-        return { x: col * colW + 40, y: row * rowH + 40 };
+        slotOccupied.add(`${col},${row}`);
+        return { x: col * CANON_W + 40, y: row * CANON_H + 40 };
       }
     }
   };
+
+  // Suppress unused-var lint while preserving the signature so callers can
+  // still pass colW/rowH for future use (e.g. unclassified pile spacing).
+  void colW; void rowH;
 
   let autoAccIdx = 0;
 
