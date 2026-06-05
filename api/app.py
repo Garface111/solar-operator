@@ -364,13 +364,34 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 target.name = display_name
                         # ── (b) New-client auto-create ───────────────────────
                         else:
-                            target = Client(
-                                tenant_id=tenant.id,
-                                name=display_name or "New client",
-                                active=True,
-                            )
-                            db.add(target)
-                            db.flush()
+                            # Before INSERT, check for a soft-deleted Client
+                            # with the same name on this tenant. The
+                            # uq_client_per_tenant unique constraint does NOT
+                            # exclude soft-deleted rows, so a delete-then-
+                            # re-sign-in cycle would throw IntegrityError
+                            # when the new auto-create tries to use the same
+                            # display_name. Resurrect the soft-deleted row
+                            # instead — preserves history, no duplicates.
+                            chosen_name = (display_name or "New client")[:200]
+                            ghost = db.execute(
+                                select(Client).where(
+                                    Client.tenant_id == tenant.id,
+                                    Client.name == chosen_name,
+                                    Client.deleted_at.is_not(None),
+                                ).limit(1)
+                            ).scalar_one_or_none()
+                            if ghost is not None:
+                                ghost.deleted_at = None
+                                ghost.active = True
+                                target = ghost
+                            else:
+                                target = Client(
+                                    tenant_id=tenant.id,
+                                    name=chosen_name,
+                                    active=True,
+                                )
+                                db.add(target)
+                                db.flush()
 
                         # Backfill the login fields + autopop flag so the NEXT
                         # capture from the same login goes through the normal
