@@ -7,7 +7,7 @@ import { Checkbox } from "../ui/Checkbox";
 import { MarkdownDoc } from "../ui/MarkdownDoc";
 
 const SERVICES = [
-  "Auto-pull GMP bills",
+  "Auto-pull GMP and VEC bills",
   "NEPOOL-format Excel reports",
   "Email delivery to your clients",
   "Multi-client portal",
@@ -17,7 +17,7 @@ const SERVICES = [
 // and tos.md (Quick summary sections). If you edit those files, update here.
 const PP_BULLETS = [
   "We never sell your data — it's only used to run the reporting service.",
-  "We only read your utility billing data (Green Mountain Power, Vermont Electric Coop) — nothing else from your browser.",
+  "We only read your utility billing data (Green Mountain Power, Vermont Electric Co-op) — nothing else from your browser.",
   "You can delete everything by emailing support@solaroperator.org. We purge your data within 24 hours.",
   "Your utility login session expires automatically (~21 days) and is refreshed each time you log in with the extension active.",
   "Our only email provider is Resend.com — it delivers your reports and sign-in links. No other third party sees your data.",

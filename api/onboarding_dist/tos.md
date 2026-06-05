@@ -4,7 +4,8 @@
 
 ## Quick summary
 
-- **Pricing:** $250 one-time setup fee plus $15 per solar array per month, billed monthly.
+- **14-day free trial:** we collect your card when you sign up, but nothing is charged until the trial ends. We email you before the charge.
+- **Pricing:** $250 one-time setup fee plus $15 per solar array per month, billed monthly, starting after the trial.
 - **Cancel anytime:** no penalty. Your access continues until the end of the period you already paid for.
 - **You own your data.** We use it only to run the service. We never sell it.
 - **You are responsible for entering correct NEPOOL-GIS IDs.** We don't verify them — an incorrect ID could cause a wrong report.
@@ -48,9 +49,12 @@ right away.
 Payments are processed through Stripe, a third-party payment service. The
 fees are:
 
-- **One-time setup fee:** $250, charged when you complete onboarding.
+- **Free trial:** 14 days from the date you save your payment method.
+  Nothing is charged during the trial. We email you before the trial ends.
+- **One-time setup fee:** $250, charged when your trial ends.
 - **Monthly subscription:** $15 per solar array per month, billed monthly
-  in advance based on the number of active arrays in your account.
+  in advance based on the number of active arrays in your account,
+  starting after the trial.
 
 Your array count can change as you add or remove arrays; your subscription
 adjusts automatically and takes effect on the next billing cycle. All
@@ -91,8 +95,8 @@ how you use the Service, including:
   these IDs independently. An incorrect ID can cause an inaccurate or
   misattributed report — that is your responsibility to catch and correct.
 - **Permission to access utility data.** You confirm that you have the
-  right to access the GMP accounts you connect to the Service, including
-  consent from your clients where their accounts are involved.
+  right to access the utility accounts you connect to the Service (GMP or
+  VEC), including consent from your clients where their accounts are involved.
 - **Report review.** The Service automates report preparation, but you
   are responsible for reviewing each report for accuracy before relying
   on it or sending it to clients or regulators.
@@ -102,9 +106,10 @@ how you use the Service, including:
 ## 7. Third-party services
 
 The Service relies on third parties, including Green Mountain Power,
-Stripe, and our email and hosting providers. We are not responsible for
-their availability or accuracy. If GMP changes its portal or data formats,
-we may need to update or temporarily suspend features in response.
+Vermont Electric Co-op, Stripe, and our email and hosting providers. We
+are not responsible for their availability or accuracy. If GMP or VEC
+changes its portal or data formats, we may need to update or temporarily
+suspend features in response.
 
 ## 8. No warranties
 

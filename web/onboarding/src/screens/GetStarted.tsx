@@ -14,7 +14,7 @@ const PANELS = [
   {
     icon: "⚡",
     heading: "Tell us how many arrays you manage. We handle the rest.",
-    body: "Solar Operator connects to your utility account (Green Mountain Power, Vermont Electric Coop, and more), pulls your bills automatically, and generates NEPOOL-format reports for every client — every quarter, without you touching a spreadsheet.",
+    body: "Solar Operator connects to your utility account (Green Mountain Power, Vermont Electric Co-op, and more), pulls your bills automatically, and generates NEPOOL-format reports for every client — every quarter, without you touching a spreadsheet.",
   },
   {
     icon: "🌐",

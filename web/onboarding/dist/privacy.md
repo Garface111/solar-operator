@@ -5,9 +5,9 @@
 ## Quick summary
 
 - **We never sell your data.** Your information is used only to run the reporting service.
-- **We only read your Green Mountain Power billing data** — nothing else from your browser.
+- **We only read your utility billing data (Green Mountain Power and Vermont Electric Co-op)** — nothing else from your browser.
 - **You can delete everything** by emailing support@solaroperator.org. We purge your data within 24 hours.
-- **Your login session expires automatically** (~21 days) and is replaced each time you log in to Green Mountain Power with the extension active.
+- **Your login session expires automatically** (~21 days) and is replaced each time you log in to your utility portal with the extension active.
 - **Our only email provider is Resend.com**, which delivers your reports and sign-in links. No other third party sees your data.
 
 ---
@@ -18,37 +18,38 @@ describes what we collect, why, and how we protect it.
 
 ## What we collect
 
-When you visit greenmountainpower.com while signed in, the extension reads
-the following from your browser's session for that site and sends it to
-Solar Operator's servers:
+When you visit your utility portal (greenmountainpower.com or
+vermontelectric.smarthub.coop) while signed in, the extension reads the
+following from your browser's session for that site and sends it to Solar
+Operator's servers:
 
-- Your Green Mountain Power account name, username, and email address
-- The sign-in session your browser holds with Green Mountain Power. We
-  use this to read your bill data the same way you would by clicking around
+- Your utility account name, username, and email address
+- The sign-in session your browser holds with your utility portal. We use
+  this to read your bill data the same way you would by clicking around
   the site yourself — we never see your password.
-- A list of utility accounts (meters) attached to your Green Mountain Power
-  login, including account number, nickname, and a link to the current bill
+- A list of utility accounts (meters) attached to your login, including
+  account number, nickname, and a link to the current bill
 - The activation code you paste into the extension's settings page
 
 The extension does **not** collect:
 
-- Your Green Mountain Power password or any other password
-- Your browsing history outside greenmountainpower.com
+- Your utility password or any other password
+- Your browsing history outside your connected utility portals
 - Any data from other websites, tabs, or apps
 - Payment information
 
 ## How we use it
 
 We use your sign-in session to fetch your bill PDFs and billing history
-from Green Mountain Power on a regular schedule. The production figures we
+from your utility portals on a regular schedule. The production figures we
 extract are written into the quarterly report spreadsheet, which is then
 emailed to the address you specified.
 
 ## How long we keep it
 
-- **Sign-in session:** kept only while it is valid. Green Mountain Power
-  sessions expire after about 21 days; the extension replaces the session
-  each time you log in fresh.
+- **Sign-in session:** kept only while it is valid. Utility portal sessions
+  expire after about 21 days; the extension captures a fresh session each
+  time you log in.
 - **Account information and billing data:** kept for as long as your Solar
   Operator account is active, so that your historical reports stay available.
 - **Activation code:** kept until you disconnect or close your account.
@@ -58,8 +59,8 @@ emailed to the address you specified.
 - We never sell, rent, or share your data with third parties.
 - We never use your data for advertising or any purpose other than
   running the reporting service.
-- We never read or send data from any website other than
-  greenmountainpower.com.
+- We never read or send data from any website other than your connected
+  utility portals (greenmountainpower.com and vermontelectric.smarthub.coop).
 
 ## Deleting your data
 
@@ -70,7 +71,7 @@ within 24 hours and confirm by email.
 
 You can also click **Disconnect** in the extension's settings to remove
 the local copy of your session immediately. The extension will capture a
-new session next time you log in to Green Mountain Power, unless you
+new session next time you log in to your utility portal, unless you
 uninstall it first.
 
 ## Security
@@ -89,11 +90,12 @@ each one does in plain English:
 | Permission | What it's for |
 |---|---|
 | Store data locally | To remember your activation code and the most recent captured session on your device, so you don't have to re-enter them. |
-| Run a background check (alarms) | To check every 12 hours whether your Green Mountain Power session is close to expiring, so we can remind you before it does. |
-| Show desktop notifications | To display a reminder when your session will expire within 3 days, so you can log into Green Mountain Power and refresh it. |
+| Run a background check (alarms) | To check every 12 hours whether your utility session is close to expiring, so we can remind you before it does. |
+| Show desktop notifications | To display a reminder when your session will expire within 3 days, so you can log into your utility portal and refresh it. |
 | Access greenmountainpower.com | So the extension can read your Green Mountain Power sign-in data after you log in. |
+| Access vermontelectric.smarthub.coop | So the extension can read your Vermont Electric Co-op sign-in data after you log in. |
 | Access api.greenmountainpower.com | Reserved for future use. The extension does not currently make any requests to this address. |
-| Access api.solaroperator.com | So the extension can send the captured data to your Solar Operator account. |
+| Access api.solaroperator.org | So the extension can send the captured data to your Solar Operator account. |
 
 ## Email delivery
 
