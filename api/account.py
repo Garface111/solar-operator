@@ -44,8 +44,9 @@ from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity
 from .email_templates import (
-    DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_DASHBOARD_URL,
-    MERGE_TAGS, build_context, render_email, resolve_from_header,
+    DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_SIGNOFF,
+    DEFAULT_DASHBOARD_URL, MERGE_TAGS, build_context, render_email,
+    resolve_from_header,
 )
 
 logger = logging.getLogger(__name__)
@@ -817,7 +818,8 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
 # built-in default" (see api/email_templates.py).
 
 def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
-                             tenant_email: str) -> tuple[dict, str]:
+                             tenant_email: str,
+                             signoff_template: Optional[str] = None) -> tuple[dict, str]:
     """Return (merge_ctx, sample_client_name) using first client with email or fallback."""
     client = db.execute(
         select(Client)
@@ -845,6 +847,7 @@ def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
         arrays_count=n_arrays,
         tenant_email=tenant_email,
         dashboard_url=DEFAULT_DASHBOARD_URL,
+        signoff_template=signoff_template,
     )
     return ctx, client_name
 
@@ -852,28 +855,45 @@ def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
 class _TemplateBody(BaseModel):
     subject_template: Optional[str] = None
     body_template: Optional[str] = None
+    signoff: Optional[str] = None
 
 
 @router.get("/v1/account/reports/email-template")
 def get_email_template(authorization: Optional[str] = Header(default=None)):
-    """Return the tenant's current email template (null fields = built-in default)."""
+    """Return the tenant's current email template with resolved defaults."""
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
-        has_client_email = bool(db.execute(
-            select(func.count()).select_from(Client).where(
+        sample_client = db.execute(
+            select(Client)
+            .where(
                 Client.tenant_id == t.id,
                 Client.active == True,  # noqa: E712
                 Client.contact_email.is_not(None),
                 Client.deleted_at.is_(None),
             )
-        ).scalar() or 0)
+            .order_by(Client.name.asc())
+            .limit(1)
+        ).scalars().first()
+        has_client_email = sample_client is not None
+        resolved_subject = t.email_subject_template or DEFAULT_SUBJECT_TEMPLATE
+        resolved_body = t.email_body_template or DEFAULT_BODY_TEMPLATE
+        resolved_signoff = t.email_signoff or DEFAULT_SIGNOFF
         return {
-            "subject_template": t.email_subject_template,
-            "body_template": t.email_body_template,
-            "is_default": (t.email_subject_template is None and t.email_body_template is None),
-            "available_tokens": list(MERGE_TAGS),
+            "subject_template": resolved_subject,
+            "body_template": resolved_body,
+            "signoff": resolved_signoff,
+            "is_default_subject": t.email_subject_template is None,
+            "is_default_body": t.email_body_template is None,
+            "is_default_signoff": t.email_signoff is None,
+            # Legacy field — kept for backward-compat with any callers that check it.
+            "is_default": (t.email_subject_template is None
+                           and t.email_body_template is None
+                           and t.email_signoff is None),
+            "from_email": t.contact_email,
+            "available_tokens": list(MERGE_TAGS) + ["signoff"],
             "has_client_with_email": has_client_email,
+            "sample_client_email": sample_client.contact_email if sample_client else None,
         }
 
 
@@ -888,7 +908,11 @@ def preview_email_template(body: _TemplateBody,
         tenant_email = (t.contact_email or "").strip()
         stored_subject = t.email_subject_template
         stored_body = t.email_body_template
-        ctx, sample_client = _query_sample_client_ctx(db, t.id, tenant_name, tenant_email)
+        stored_signoff = t.email_signoff
+        # Resolve signoff: request body overrides stored, stored overrides default.
+        signoff_t = (body.signoff or "").strip() or stored_signoff or DEFAULT_SIGNOFF
+        ctx, sample_client = _query_sample_client_ctx(
+            db, t.id, tenant_name, tenant_email, signoff_template=signoff_t)
     subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
     body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
     return {
@@ -973,7 +997,10 @@ def test_send_email_template(body: _TemplateBody,
         )
         stored_subject = t.email_subject_template
         stored_body = t.email_body_template
-        ctx, _ = _query_sample_client_ctx(db, t.id, tenant_name, tenant_email)
+        stored_signoff = t.email_signoff
+        signoff_t = (body.signoff or "").strip() or stored_signoff or DEFAULT_SIGNOFF
+        ctx, _ = _query_sample_client_ctx(
+            db, t.id, tenant_name, tenant_email, signoff_template=signoff_t)
     subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
     body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
     subject, html, text = render_email(
@@ -993,14 +1020,31 @@ def test_send_email_template(body: _TemplateBody,
 
 @router.post("/v1/account/reports/email-template/reset")
 def reset_email_template(authorization: Optional[str] = Header(default=None)):
-    """Clear the tenant's template overrides — reverts to the system built-in default."""
+    """Clear the tenant's template overrides — reverts all three to the system built-in defaults."""
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.email_subject_template = None
         t.email_body_template = None
+        t.email_signoff = None
         db.commit()
     return {"ok": True}
+
+
+class _SignoffBody(BaseModel):
+    signoff: Optional[str] = None
+
+
+@router.put("/v1/account/reports/email-template/signoff")
+def save_email_signoff(body: _SignoffBody,
+                       authorization: Optional[str] = Header(default=None)):
+    """Persist the operator's custom sign-off. Pass signoff=null to revert to default."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.email_signoff = _blank_to_none(body.signoff or "")
+        db.commit()
+        return {"ok": True, "signoff": t.email_signoff}
 
 
 @router.get("/v1/account/billing-summary")

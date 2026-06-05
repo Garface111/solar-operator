@@ -187,6 +187,13 @@ def main():
             "UPDATE tenants SET send_mode = 'to_client' WHERE send_mode IS NULL"
         ))
 
+        # 2026-06-05 Email sign-off: per-tenant custom sign-off block.
+        if not column_exists(conn, "tenants", "email_signoff"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN email_signoff TEXT"
+            ))
+            print("  + tenants.email_signoff")
+
         # 2026-06 W2-6: per-client email delivery health (Resend webhook).
         delivery_health_cols = [
             ("last_delivered_at",

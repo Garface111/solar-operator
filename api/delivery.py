@@ -91,6 +91,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             effective_from_email, tenant.send_from_name, tenant_name)
         subject_template = tenant.email_subject_template
         body_template = tenant.email_body_template
+        signoff_template = tenant.email_signoff
         arrays_count = db.execute(
             select(func.count()).select_from(Array)
             .where(Array.client_id == client_id)
@@ -152,6 +153,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         ctx = build_context(
             client_name=client_name, tenant_name=tenant_name,
             arrays_count=arrays_count, tenant_email=tenant_email,
+            signoff_template=signoff_template,
         )
         subject, html, text = render_email(
             subject_template=subject_template,
