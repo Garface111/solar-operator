@@ -3,10 +3,9 @@ import { Button } from "../ui/Button";
 interface TopNavProps {
   email: string | null;
   onSignOut: () => void;
-  onShowWalkthrough?: () => void;
 }
 
-export function TopNav({ email, onSignOut, onShowWalkthrough }: TopNavProps) {
+export function TopNav({ email, onSignOut }: TopNavProps) {
   return (
     <header className="sticky top-0 z-30 border-b border-cream-border bg-cream/90 backdrop-blur">
       <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3.5">
@@ -21,15 +20,6 @@ export function TopNav({ email, onSignOut, onShowWalkthrough }: TopNavProps) {
             <span className="hidden text-sm text-zinc-500 sm:inline">
               {email}
             </span>
-          )}
-          {onShowWalkthrough && (
-            <button
-              type="button"
-              onClick={onShowWalkthrough}
-              className="hidden text-xs text-zinc-400 transition-colors hover:text-zinc-600 sm:inline"
-            >
-              Show walkthrough
-            </button>
           )}
           <Button variant="secondary" onClick={onSignOut} className="px-3 py-1.5">
             Sign out

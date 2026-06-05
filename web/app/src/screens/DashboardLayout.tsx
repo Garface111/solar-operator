@@ -141,7 +141,6 @@ export default function DashboardLayout({ onSignOut }: Props) {
       <TopNav
         email={account?.email ?? null}
         onSignOut={onSignOut}
-        onShowWalkthrough={() => setShowWalkthrough(true)}
       />
       <TabBar tabs={TABS} unvisited={unvisited} />
 
