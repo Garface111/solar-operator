@@ -28,8 +28,8 @@ export function useReveal(): RevealCtx {
 
 const THROTTLE_KEY = "so_last_reveal";
 const THROTTLE_MS = 5 * 60 * 1000;
-const CARD_STAGGER_MS = 90;
-const NUMBER_BASE_DELAY_MS = 120;
+const CARD_STAGGER_MS = 220;
+const NUMBER_BASE_DELAY_MS = 200;
 
 function checkThrottle(): boolean {
   try {
