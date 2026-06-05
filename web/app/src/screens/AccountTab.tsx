@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { AccountSummaryCard } from "../components/AccountSummaryCard";
-import { ActivationCodeCard } from "../components/ActivationCodeCard";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { ScreenLayout } from "../ui/ScreenLayout";
@@ -98,10 +97,6 @@ export default function AccountTab() {
   return (
     <ScreenLayout>
       <AccountSummaryCard account={account} onAccountChange={patchAccount} />
-      <ActivationCodeCard
-        tenantKey={account.tenant_key}
-        onKeyRegenerated={(newKey) => patchAccount({ tenant_key: newKey })}
-      />
       {account.subscription_status === "trialing" && (
         <CancelTrialCard onCancelled={() => setCancelled(true)} />
       )}
