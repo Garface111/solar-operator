@@ -128,6 +128,11 @@ export default function Extension() {
       }
 
       if (data.type === "SO_STATUS_ACK" && data.ok) {
+        // SO_STATUS_ACK is itself proof the bridge is alive — the SO_EXTENSION_PRESENT
+        // broadcast fires at document_start which is BEFORE this React effect mounts,
+        // so we'd otherwise miss it and never auto-pair. Treat a successful status
+        // response as equivalent to an extension-present signal.
+        setExtensionPresent(true);
         if (data.tenantKeySet) setPaired(true);
         if (data.loginState) {
           setLoginState({
