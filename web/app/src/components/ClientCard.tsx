@@ -463,16 +463,16 @@ export function ClientCard({
                     )}
                   </span>
                   <a
-                    href="https://www.greenmountainpower.com/account/"
+                    href="https://mypower.greenmountainpower.com/"
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={(e) => {
                       e.preventDefault();
-                      void openPortalTab("https://www.greenmountainpower.com/account/");
+                      void openPortalTab("https://mypower.greenmountainpower.com/");
                     }}
                     className="shrink-0 font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
                   >
-                    Open greenmountainpower.com ↗
+                    Open mypower.greenmountainpower.com ↗
                   </a>
                 </>
               ) : (
