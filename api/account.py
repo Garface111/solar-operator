@@ -14,6 +14,7 @@ Tokens expire after 15 minutes (login link) or 30 days (session).
 """
 from __future__ import annotations
 
+import calendar
 import os
 import re
 import secrets
@@ -24,9 +25,10 @@ import base64
 import json
 import shutil
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import stripe
@@ -37,7 +39,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func
 
 from .db import SessionLocal
-from .models import Tenant, Client, Array, LoginToken, UtilityAccount, DeleteHistory, now
+from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity
@@ -1070,28 +1072,44 @@ def send_one_client_report(client_id: int,
 
 
 @router.get("/v1/account/clients/{client_id}/report.xlsx")
-def download_client_report(client_id: int,
-                           authorization: Optional[str] = Header(default=None)):
-    """Stream the latest workbook for a client as a downloadable .xlsx attachment."""
+def download_client_report(
+    client_id: int,
+    quarter: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Stream a workbook for a client as a downloadable .xlsx attachment.
+
+    If `quarter` is omitted, returns the current rolling-6-quarter workbook.
+    If `quarter` is provided (e.g. 'Q1-2026'), the rolling window ends at that
+    quarter so Q1-2026 is the most recent sheet."""
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
             raise HTTPException(404, "Client not found")
         client_name = c.name
+
+    reference_date: Optional[date] = None
+    if quarter:
+        try:
+            qy, qq = _parse_quarter_str(quarter)
+            reference_date = _quarter_to_reference_date(qy, qq)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
     from .writers import build_workbook
     tmpdir = tempfile.mkdtemp(prefix=f"so-dl-c{client_id}-")
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", client_name)
-    out_path = Path(tmpdir) / f"{safe_name}-latest.xlsx"
+    label = re.sub(r"[^A-Za-z0-9]", "-", quarter) if quarter else "latest"
+    out_path = Path(tmpdir) / f"{safe_name}-{label}.xlsx"
     try:
-        build_workbook(client_id=client_id, out_path=out_path)
+        build_workbook(client_id=client_id, out_path=out_path, reference_date=reference_date)
     except HTTPException:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise
     except Exception as e:
         shutil.rmtree(tmpdir, ignore_errors=True)
-        import logging
-        logging.getLogger(__name__).exception(
+        logger.exception(
             "download_client_report: build_workbook failed for client_id=%s", client_id)
         raise HTTPException(
             500,
@@ -1100,7 +1118,7 @@ def download_client_report(client_id: int,
     return FileResponse(
         str(out_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=f"{safe_name}-latest.xlsx",
+        filename=f"{safe_name}-{label}.xlsx",
         background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
     )
 
@@ -1562,6 +1580,230 @@ def remove_utility_account(client_id: int, array_id: int, acct_id: int,
             raise HTTPException(404, "Utility account not found")
         db.delete(ac); db.commit()
     return {"ok": True, "account_id": acct_id, "deleted": True}
+
+
+# ─── Quarter helpers ─────────────────────────────────────────────────────
+
+def _quarter_of(month: int) -> int:
+    return (month - 1) // 3 + 1
+
+
+def _quarter_end_date(year: int, q: int) -> date:
+    end_month = q * 3
+    _, last = calendar.monthrange(year, end_month)
+    return date(year, end_month, last)
+
+
+def _parse_quarter_str(s: str) -> tuple[int, int]:
+    """Parse 'Q1-2026' or 'Q1 2026' → (year, quarter_num). Raises ValueError."""
+    m = re.match(r'^[Qq]([1-4])[-\s](\d{4})$', s.strip())
+    if not m:
+        raise ValueError(f"Invalid quarter format: {s!r}. Expected Q1-2026.")
+    return int(m.group(2)), int(m.group(1))
+
+
+def _quarter_to_reference_date(year: int, q: int) -> date:
+    """Return the first date of the quarter AFTER (year, q).
+
+    Passing this as reference_date to build_workbook makes (year, q) the
+    last complete quarter in the rolling window."""
+    end_month = q * 3
+    if end_month == 12:
+        return date(year + 1, 1, 1)
+    return date(year, end_month + 1, 1)
+
+
+# ─── Reports history ─────────────────────────────────────────────────────
+
+@router.get("/v1/account/reports")
+def get_reports(
+    quarters: int = 6,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Return per-quarter snapshots for the last N quarters (default 6).
+
+    Status derivation (no ReportRun table — derived from Bill + delivery):
+      sent   — mwh_total > 0 and a client delivery was recorded after quarter end
+      ready  — mwh_total > 0 but no qualifying delivery
+      draft  — arrays exist but no bill data for this quarter (incl. in-progress)
+      empty  — no arrays configured under this tenant
+    """
+    t = tenant_from_session(authorization)
+    if quarters < 1:
+        quarters = 1
+    elif quarters > 12:
+        quarters = 12
+
+    today = date.today()
+    cy, cq = today.year, _quarter_of(today.month)
+
+    # Build quarter list: most-recent first, including the current in-progress one
+    qlist: list[tuple[int, int]] = []
+    y, q = cy, cq
+    for _ in range(quarters):
+        qlist.append((y, q))
+        q -= 1
+        if q == 0:
+            y, q = y - 1, 4
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
+        ).scalars().all()
+        array_ids = [a.id for a in arrays]
+
+        if array_ids:
+            accounts = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id.in_(array_ids),
+                )
+            ).scalars().all()
+            account_ids = [a.id for a in accounts]
+            account_to_array: dict[int, int] = {a.id: a.array_id for a in accounts}
+        else:
+            account_ids = []
+            account_to_array = {}
+
+        bills: list[Bill] = (
+            db.execute(
+                select(Bill).where(Bill.account_id.in_(account_ids))
+            ).scalars().all()
+            if account_ids else []
+        )
+
+        last_delivered: Optional[datetime] = db.execute(
+            select(func.max(Client.last_delivery_at)).where(
+                Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalar()
+
+    # Group bills: (year, quarter) → {array_id: kwh_total}
+    bill_data: dict[tuple[int, int], dict[int, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    for b in bills:
+        if not b.kwh_generated or b.kwh_generated <= 0:
+            continue
+        src = b.period_start or b.bill_date
+        if not src:
+            continue
+        key = (src.year, _quarter_of(src.month))
+        arr_id = account_to_array.get(b.account_id)
+        if arr_id is None:
+            continue
+        bill_data[key][arr_id] += b.kwh_generated
+
+    has_arrays = bool(array_ids)
+    result = []
+    for (qy, qq) in qlist:
+        is_current = (qy == cy and qq == cq)
+        qdata = bill_data.get((qy, qq), {})
+        array_count = len(qdata)
+        mwh_total = round(sum(qdata.values()) / 1000.0, 3)
+
+        if not has_arrays:
+            status = "empty"
+        elif is_current or mwh_total <= 0:
+            status = "draft"
+        elif last_delivered and last_delivered.date() >= _quarter_end_date(qy, qq):
+            status = "sent"
+        else:
+            status = "ready"
+
+        result.append({
+            "quarter": f"Q{qq}-{qy}",
+            "year": qy,
+            "quarter_num": qq,
+            "status": status,
+            "array_count": array_count,
+            "last_generated_at": None,
+            "last_delivered_at": (
+                last_delivered.isoformat() if last_delivered and status == "sent" else None
+            ),
+            "mwh_total": mwh_total,
+        })
+
+    return {"reports": result}
+
+
+# ─── Regenerate ──────────────────────────────────────────────────────────
+
+class RegenerateBody(BaseModel):
+    quarter: Optional[str] = None
+    client_id: Optional[int] = None
+
+
+@router.post("/v1/account/regenerate")
+def regenerate_report(
+    body: RegenerateBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Rebuild workbook(s) for the given scope without sending email.
+
+    If client_id provided: regenerate only that client.
+    If omitted: regenerate all active clients under the tenant.
+    If quarter provided (e.g. 'Q1-2026'): target that quarter's rolling window.
+    Returns {status, generated_at}."""
+    t = tenant_from_session(authorization)
+
+    reference_date: Optional[date] = None
+    if body.quarter:
+        try:
+            qy, qq = _parse_quarter_str(body.quarter)
+            reference_date = _quarter_to_reference_date(qy, qq)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    generated_at = datetime.utcnow()
+
+    from .writers import build_workbook
+
+    if body.client_id is not None:
+        with SessionLocal() as db:
+            c = db.get(Client, body.client_id)
+            if not c or c.tenant_id != t.id:
+                raise HTTPException(404, "Client not found")
+        tmpdir = tempfile.mkdtemp(prefix=f"so-regen-c{body.client_id}-")
+        try:
+            build_workbook(
+                client_id=body.client_id,
+                out_path=Path(tmpdir) / "report.xlsx",
+                reference_date=reference_date,
+            )
+        except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise HTTPException(500, f"Regeneration failed: {e}")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    else:
+        with SessionLocal() as db:
+            client_rows = db.execute(
+                select(Client).where(
+                    Client.tenant_id == t.id,
+                    Client.deleted_at.is_(None),
+                    Client.active.is_(True),
+                )
+            ).scalars().all()
+            client_ids = [c.id for c in client_rows]
+
+        for cid in client_ids:
+            tmpdir = tempfile.mkdtemp(prefix=f"so-regen-c{cid}-")
+            try:
+                build_workbook(
+                    client_id=cid,
+                    out_path=Path(tmpdir) / "report.xlsx",
+                    reference_date=reference_date,
+                )
+            except Exception:
+                pass
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return {"status": "regenerated", "generated_at": generated_at.isoformat() + "Z"}
 
 
 # ─── Recent captures feed ────────────────────────────────────────────────

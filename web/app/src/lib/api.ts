@@ -455,16 +455,20 @@ export async function sendClientReportToMe(
   );
 }
 
-/** Fetch the latest .xlsx workbook for a client and trigger a browser download.
- *  Uses the session token (a plain <a download> can't send Authorization headers). */
+/** Fetch a .xlsx workbook for a client and trigger a browser download.
+ *  If `quarter` is provided (e.g. 'Q1-2026'), the rolling window ends at that
+ *  quarter. Omit for the current rolling window. */
 export async function downloadClientReport(
   clientId: number,
   clientName: string,
+  quarter?: string,
 ): Promise<void> {
   const token = getSession();
-  const res = await fetchWithTimeout(`/v1/account/clients/${clientId}/report.xlsx`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
+  const res = await fetchWithTimeout(
+    `/v1/account/clients/${clientId}/report.xlsx${qs}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
   if (res.status === 401) {
     clearSession();
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
@@ -482,7 +486,9 @@ export async function downloadClientReport(
   const blob = await res.blob();
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `${clientName.replace(/[^A-Za-z0-9_.-]+/g, "_")}-latest.xlsx`;
+  const safeName = clientName.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  const label = quarter ? quarter.replace(/[^A-Za-z0-9]/g, "-") : "latest";
+  link.download = `${safeName}-${label}.xlsx`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -600,6 +606,39 @@ export async function listProviders(): Promise<Provider[]> {
     noAuth: true,
   });
   return res.providers;
+}
+
+// ─── reports history ─────────────────────────────────────────────────────
+
+export interface QuarterReport {
+  quarter: string;
+  year: number;
+  quarter_num: number;
+  status: "sent" | "ready" | "draft" | "empty";
+  array_count: number;
+  last_generated_at: string | null;
+  last_delivered_at: string | null;
+  mwh_total: number;
+}
+
+export async function getReports(quarters = 6): Promise<QuarterReport[]> {
+  const res = await request<{ reports: QuarterReport[] }>(
+    `/v1/account/reports?quarters=${quarters}`,
+  );
+  return res.reports;
+}
+
+export async function regenerateReport(
+  quarter?: string,
+  clientId?: number,
+): Promise<{ status: string; generated_at: string }> {
+  const body: { quarter?: string; client_id?: number } = {};
+  if (quarter) body.quarter = quarter;
+  if (clientId !== undefined) body.client_id = clientId;
+  return request<{ status: string; generated_at: string }>(
+    "/v1/account/regenerate",
+    { method: "POST", body },
+  );
 }
 
 // ─── spreadsheet ingest (V4) ─────────────────────────────────────────────
