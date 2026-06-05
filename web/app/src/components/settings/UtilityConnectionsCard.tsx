@@ -167,7 +167,7 @@ export function UtilityConnectionsCard({ account }: Props) {
             Make sure you&apos;re signed into a utility portal account with community solar
             billing. If nothing appears,{" "}
             <a
-              href="mailto:support@solaroperator.org"
+              href="mailto:admin@solaroperator.org"
               className="underline underline-offset-2 hover:text-amber-700"
             >
               contact support

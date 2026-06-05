@@ -182,7 +182,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
       )}
 
       <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
-        Solar Operator · support@solaroperator.org ·{" "}
+        Solar Operator · admin@solaroperator.org ·{" "}
         <a
           href="https://solaroperator.org/privacy"
           target="_blank"

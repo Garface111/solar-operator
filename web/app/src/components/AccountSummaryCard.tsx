@@ -343,7 +343,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             Make sure you&apos;re signed into your utility portal (GMP, VEC) with an account that has community
             solar. If your account isn&apos;t showing community solar billing,{" "}
             <a
-              href="mailto:support@solaroperator.org"
+              href="mailto:admin@solaroperator.org"
               className="underline underline-offset-2 hover:text-amber-700"
             >
               contact support

@@ -56,7 +56,7 @@ you specified.
 ## Deletion
 
 You can delete all of your data at any time by emailing
-**support@solaroperator.org** from the address associated with your
+**admin@solaroperator.org** from the address associated with your
 account. We will purge your captured sessions, account metadata, and
 billing data from our servers within 24 hours and confirm by email.
 
@@ -107,5 +107,5 @@ customers and post the updated version at
 
 ## Contact
 
-Email **support@solaroperator.org** for any privacy questions or to
+Email **admin@solaroperator.org** for any privacy questions or to
 exercise your data-deletion rights.

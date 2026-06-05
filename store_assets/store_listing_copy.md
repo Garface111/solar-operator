@@ -61,11 +61,11 @@ PRIVACY
 Full privacy policy: https://solaroperator.org/privacy
 
 You can delete your data at any time by emailing
-support@solaroperator.org.
+admin@solaroperator.org.
 
 QUESTIONS
 
-support@solaroperator.org — we reply same business day.
+admin@solaroperator.org — we reply same business day.
 ```
 
 ## Category

@@ -82,7 +82,7 @@ export function ActivationCodeCard({ tenantKey, onKeyRegenerated }: Props) {
             </div>
           ) : (
             <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-              No activation code on file. Email support@solaroperator.org and
+              No activation code on file. Email admin@solaroperator.org and
               we&apos;ll sort it out.
             </p>
           )}
