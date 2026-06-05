@@ -432,11 +432,17 @@ export async function previewEmail(
 // ─── email template studio ────────────────────────────────────────────────
 
 export interface EmailTemplateData {
-  subject_template: string | null;
-  body_template: string | null;
+  subject_template: string;
+  body_template: string;
+  signoff: string;
   is_default: boolean;
+  is_default_subject: boolean;
+  is_default_body: boolean;
+  is_default_signoff: boolean;
+  from_email: string | null;
   available_tokens: string[];
   has_client_with_email: boolean;
+  sample_client_email: string | null;
 }
 
 export interface EmailTemplatePreviewResult {
@@ -463,6 +469,7 @@ export async function getEmailTemplate(): Promise<EmailTemplateData> {
 export async function previewEmailTemplate(input: {
   subject_template?: string | null;
   body_template?: string | null;
+  signoff?: string | null;
 }): Promise<EmailTemplatePreviewResult> {
   return request<EmailTemplatePreviewResult>(
     "/v1/account/reports/email-template/preview",
@@ -480,6 +487,13 @@ export async function saveEmailTemplate(input: {
   );
 }
 
+export async function saveEmailSignoff(signoff: string | null): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/v1/account/reports/email-template/signoff",
+    { method: "PUT", body: { signoff } },
+  );
+}
+
 export async function resetEmailTemplate(): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(
     "/v1/account/reports/email-template/reset",
@@ -490,6 +504,7 @@ export async function resetEmailTemplate(): Promise<{ ok: boolean }> {
 export async function testSendEmailTemplate(input: {
   subject_template?: string | null;
   body_template?: string | null;
+  signoff?: string | null;
 }): Promise<{ ok: boolean; sent_to: string }> {
   return request<{ ok: boolean; sent_to: string }>(
     "/v1/account/reports/email-template/test-send",
