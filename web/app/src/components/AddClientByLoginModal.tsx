@@ -100,9 +100,20 @@ export function AddClientByLoginModal({
       if (e.source !== window) return;
       const data = e.data;
       if (!data || data.type !== "SO_CAPTURE_LANDED") return;
+
+      // Failed captures (network error, 4xx from /v1/sync, etc.) should
+      // NOT flip the modal to the success state. Surface the error and
+      // keep the user in waiting so they can retry or use manual.
+      if (data.ok === false) {
+        toast.error(
+          typeof data.error === "string"
+            ? `Capture failed: ${data.error}`
+            : "Capture failed — try again or add this client manually.",
+        );
+        return;
+      }
+
       capturesThisSession.current += 1;
-      // Prefer real client name, then provider, then "your account" —
-      // never let the user see "Got it — null".
       const label =
         (typeof data.clientName === "string" && data.clientName.trim()) ||
         (typeof data.provider === "string" && FRIENDLY[data.provider as Provider]) ||
@@ -113,7 +124,7 @@ export function AddClientByLoginModal({
     }
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
-  }, [open, onCaptured]);
+  }, [open, onCaptured, toast]);
 
   // "Still waiting?" nudge timer in waiting phase.
   useEffect(() => {
@@ -324,8 +335,12 @@ export function AddClientByLoginModal({
             </div>
           )}
 
-          {(stillWaiting || !extensionUsable) && (
-            <div className="flex flex-col items-center gap-2">
+          {/* Escape hatches — always visible in waiting state. The
+              "I signed in already" button forces a clients reload from
+              the server in case SO_CAPTURE_LANDED never fires, and the
+              quieter underline link drops the user straight into the
+              manual form if auto-capture isn't going to happen. */}
+          <div className="flex flex-col items-center gap-2">
               <Button
                 onClick={handleManualRefresh}
                 disabled={refreshing}
@@ -337,17 +352,23 @@ export function AddClientByLoginModal({
                     Refreshing…
                   </>
                 ) : (
-                  "I signed in already — check now"
+                  "I signed in already — add now"
                 )}
               </Button>
+              <button
+                type="button"
+                onClick={onSwitchToManual}
+                className="text-xs font-medium text-zinc-500 underline-offset-2 hover:text-zinc-700 hover:underline focus:outline-none"
+              >
+                or add this client manually
+              </button>
               {stillWaiting && extensionUsable && (
-                <p className="text-center text-xs text-amber-700">
-                  Still waiting? Click above to refresh — your client may have
-                  landed without the modal noticing.
+                <p className="mt-1 text-center text-xs text-amber-700">
+                  Capture is taking longer than expected — click above to
+                  refresh.
                 </p>
               )}
             </div>
-          )}
 
           <p className="text-xs text-zinc-400">
             If you signed in but nothing happened, the extension may not be
