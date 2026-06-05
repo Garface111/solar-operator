@@ -1123,6 +1123,149 @@ def download_client_report(
     )
 
 
+# ─── Production data ────────────────────────────────────────────────────
+
+@router.get("/v1/account/clients/{client_id}/production")
+def client_production(
+    client_id: int,
+    months: int = Query(12, ge=1, le=36),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Monthly solar production totals for a client's arrays.
+
+    Returns the last `months` unique production months, aggregated across all
+    non-excluded, non-deleted arrays. Respects per-array bill_offset_months so
+    same-month and prior-month billing schemes are handled correctly.
+
+    Response shape:
+      {ok, months: [{month, mwh, by_array: [{array_id, array_name, mwh}]}],
+       stats: {last_30_days: {mwh, vs_prev_year_pct},
+               last_12_months: {mwh, vs_prev_ttm_pct},
+               ytd: {mwh}}}
+    """
+    from .models import Bill
+    from collections import defaultdict
+
+    t = tenant_from_session(authorization)
+
+    _empty_stats = {
+        "last_30_days": {"mwh": 0.0, "vs_prev_year_pct": None},
+        "last_12_months": {"mwh": 0.0, "vs_prev_ttm_pct": None},
+        "ytd": {"mwh": 0.0},
+    }
+
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+
+        # account_id → (array_id, bill_offset_months, array_name)
+        acct_rows = db.execute(
+            select(
+                UtilityAccount.id.label("acct_id"),
+                Array.id.label("array_id"),
+                Array.bill_offset_months,
+                Array.name.label("array_name"),
+            )
+            .join(Array, UtilityAccount.array_id == Array.id)
+            .where(
+                Array.client_id == client_id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).all()
+
+        if not acct_rows:
+            return {"ok": True, "months": [], "stats": _empty_stats}
+
+        acct_to_array: dict[int, int] = {r.acct_id: r.array_id for r in acct_rows}
+        array_offset: dict[int, int] = {r.array_id: r.bill_offset_months for r in acct_rows}
+        array_names: dict[int, str] = {r.array_id: r.array_name for r in acct_rows}
+
+        bills = db.execute(
+            select(Bill).where(
+                Bill.account_id.in_(list(acct_to_array.keys())),
+                Bill.kwh_generated.isnot(None),
+                Bill.period_end.isnot(None),
+            )
+        ).scalars().all()
+
+        # monthly_data[(year, month)][array_id] += mwh
+        monthly_data: dict[tuple[int, int], dict[int, float]] = defaultdict(lambda: defaultdict(float))
+        for bill in bills:
+            aid = acct_to_array[bill.account_id]
+            offset = array_offset[aid]
+            pe = bill.period_end
+            m, y = pe.month - offset, pe.year
+            if m < 1:
+                m += 12
+                y -= 1
+            monthly_data[(y, m)][aid] += (bill.kwh_generated or 0) / 1000.0
+
+    all_months = sorted(monthly_data.keys())
+    if not all_months:
+        return {"ok": True, "months": [], "stats": _empty_stats}
+
+    # Chart: last `months` production months, oldest→newest
+    chart_months_yms = all_months[-months:]
+    result_months = []
+    for ym in chart_months_yms:
+        arr_data = monthly_data[ym]
+        total_mwh = sum(arr_data.values())
+        by_array = sorted(
+            [{"array_id": aid, "array_name": array_names[aid], "mwh": round(mwh, 3)}
+             for aid, mwh in arr_data.items()],
+            key=lambda x: x["array_name"],
+        )
+        result_months.append({
+            "month": f"{ym[0]:04d}-{ym[1]:02d}",
+            "mwh": round(total_mwh, 3),
+            "by_array": by_array,
+        })
+
+    # Flat total per month for stats
+    flat: dict[tuple[int, int], float] = {ym: sum(monthly_data[ym].values()) for ym in all_months}
+
+    today = datetime.utcnow()
+    cur_year, cur_month = today.year, today.month
+
+    # Last 30 days = most recent production month we have data for
+    last_ym = all_months[-1]
+    last_30_mwh = flat[last_ym]
+    prev_yr_ym = (last_ym[0] - 1, last_ym[1])
+    prev_yr_mwh = flat.get(prev_yr_ym)
+    if prev_yr_mwh is not None and prev_yr_mwh > 0:
+        vs_prev_year_pct: float | None = round((last_30_mwh - prev_yr_mwh) / prev_yr_mwh * 100, 1)
+    else:
+        vs_prev_year_pct = None
+
+    # Last 12 months vs prior TTM (requires ≥24 production months)
+    ttm = all_months[-12:]
+    ttm_mwh = sum(flat.get(ym, 0.0) for ym in ttm)
+    prev_ttm = all_months[-24:-12] if len(all_months) >= 24 else []
+    if len(prev_ttm) == 12:
+        prev_ttm_mwh = sum(flat.get(ym, 0.0) for ym in prev_ttm)
+        vs_prev_ttm_pct: float | None = (
+            round((ttm_mwh - prev_ttm_mwh) / prev_ttm_mwh * 100, 1) if prev_ttm_mwh > 0 else None
+        )
+    else:
+        vs_prev_ttm_pct = None
+
+    # YTD: calendar year to current month
+    ytd_mwh = sum(flat.get((cur_year, m), 0.0) for m in range(1, cur_month + 1))
+
+    return {
+        "ok": True,
+        "months": result_months,
+        "stats": {
+            "last_30_days": {"mwh": round(last_30_mwh, 3), "vs_prev_year_pct": vs_prev_year_pct},
+            "last_12_months": {"mwh": round(ttm_mwh, 1), "vs_prev_ttm_pct": vs_prev_ttm_pct},
+            "ytd": {"mwh": round(ytd_mwh, 1)},
+        },
+    }
+
+
 # ─── Utility provider catalog (UI dropdown source) ─────────────────────
 
 @router.get("/v1/providers")

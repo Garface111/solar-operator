@@ -495,6 +495,35 @@ export async function downloadClientReport(
   URL.revokeObjectURL(link.href);
 }
 
+// ─── production ──────────────────────────────────────────────────────────
+
+export interface ProductionMonthEntry {
+  month: string; // "YYYY-MM"
+  mwh: number;
+  by_array: { array_id: number; array_name: string; mwh: number }[];
+}
+
+export interface ProductionStats {
+  last_30_days: { mwh: number; vs_prev_year_pct: number | null };
+  last_12_months: { mwh: number; vs_prev_ttm_pct: number | null };
+  ytd: { mwh: number };
+}
+
+export interface ProductionData {
+  months: ProductionMonthEntry[];
+  stats: ProductionStats;
+}
+
+export async function getClientProduction(
+  clientId: number,
+  months = 12,
+): Promise<ProductionData> {
+  const res = await request<ProductionData & { ok: boolean }>(
+    `/v1/account/clients/${clientId}/production?months=${months}`,
+  );
+  return res;
+}
+
 // ─── arrays ──────────────────────────────────────────────────────────────
 
 export async function listArrays(clientId: number): Promise<ArrayRow[]> {
