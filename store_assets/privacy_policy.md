@@ -1,6 +1,6 @@
 # Privacy Policy — Solar Operator Sync
 
-*Last updated: June 1, 2026*
+*Last updated: June 4, 2026*
 
 Solar Operator Sync ("we," "the extension") is a Chrome extension that helps
 community solar operators automate their utility-data reporting. This policy
@@ -8,27 +8,27 @@ describes what we collect, why, and how we protect it.
 
 ## What we collect
 
-When you visit greenmountainpower.com while signed in, the extension reads
-the following from your browser's local storage for that site and sends it
-to the Solar Operator backend (`https://api.solaroperator.com`):
+When you visit greenmountainpower.com or smarthub.coop while signed in,
+the extension reads the following from your browser's local storage for
+those sites and sends it to the Solar Operator backend
+(`https://api.solaroperator.org`):
 
-- Your Green Mountain Power account identifier, username, email, and full
-  name (as shown on your GMP profile)
+- Your utility account identifier, username, email, and full name (as
+  shown on your GMP or VEC profile)
 - The temporary session token (JWT) your browser uses to authenticate to
-  Green Mountain Power
-- A list of utility accounts (meters) attached to your GMP login,
-  including account number, customer number, nickname, and the URL of the
-  current bill PDF
-- The "activation code" you paste into the extension's options page
+  the utility portal
+- A list of utility accounts (meters) attached to your login, including
+  account number, customer number, nickname, and the URL of the current
+  bill PDF
 
 The extension does **not** collect:
 
-- Your Green Mountain Power password or any other password
-- Browsing history outside greenmountainpower.com
+- Your utility portal password or any other password
+- Browsing history outside greenmountainpower.com and smarthub.coop
 - Any data from other websites, tabs, or apps
 - Payment information
-- Personally identifiable information beyond what GMP already shows on your
-  account profile
+- Personally identifiable information beyond what the utility already
+  shows on your account profile
 
 ## How we use it
 
@@ -44,20 +44,19 @@ you specified.
   approximately 21 days). Replaced on each fresh capture.
 - **Account metadata + billing data:** retained for as long as your Solar
   Operator account is active, so that historical reports remain available.
-- **Activation code:** retained until you disconnect or close your account.
 
 ## What we never do
 
 - We never sell, rent, or share your data with third parties.
 - We never use your data for advertising, profiling, or any purpose other
   than operating the reporting service.
-- We never read or transmit anything from websites other than
-  greenmountainpower.com.
+- We never read or transmit anything from websites other than the utility
+  portals you've connected (greenmountainpower.com and smarthub.coop).
 
 ## Deletion
 
 You can delete all of your data at any time by emailing
-**support@solaroperator.com** from the address associated with your
+**support@solaroperator.org** from the address associated with your
 account. We will purge your captured sessions, account metadata, and
 billing data from our servers within 24 hours and confirm by email.
 
@@ -79,20 +78,34 @@ The extension requests these Chrome permissions:
 
 | Permission     | Why                                                    |
 |----------------|--------------------------------------------------------|
-| `storage`      | To remember your activation code and the latest captured session locally on your device. |
+| `storage`      | To remember your paired account identity and the latest captured utility session locally on your device. |
 | `alarms`       | To run a periodic check (every 12 hours) for whether your GMP token is close to expiring, so we can remind you to refresh it. |
 | `notifications`| To display the expiry reminder as a desktop notification when your token is within 3 days of expiring. |
+| `cookies`      | To clear existing utility portal session cookies when you open the portal for a new client, ensuring a clean sign-in. We never read cookie values. |
 | `host_permissions` for `greenmountainpower.com` | So the content script can read GMP's local storage after you sign in. |
 | `host_permissions` for `api.greenmountainpower.com` | Future use only — currently the extension makes no API calls to this host. |
-| `host_permissions` for `api.solaroperator.com` | So we can deliver captured data to your Solar Operator workspace. |
+| `host_permissions` for `smarthub.coop` | So the content script can read Vermont Electric Co-op session data the same way it does for GMP. |
+| `host_permissions` for `solaroperator.org` | So the bridge script can auto-pair your account when you open the Solar Operator dashboard, and so captured data can be delivered to our backend. |
+| `host_permissions` for `web-production-49c83.up.railway.app` | Fallback backend URL used during initial deployment; accepts the same requests as api.solaroperator.org. |
+
+## Third-party services
+
+Solar Operator uses the following third-party services:
+
+- **Resend** (resend.com) — we use Resend to send you the monthly
+  reporting spreadsheet and account notifications by email. Your email
+  address is transmitted to Resend solely to deliver messages to you.
+- **Stripe** (stripe.com) — we use Stripe to process subscription
+  payments. Your payment information is entered directly on Stripe's
+  hosted checkout page; we never receive or store your card details.
 
 ## Changes to this policy
 
 If we change this policy, we will email registered Solar Operator
 customers and post the updated version at
-[https://solaroperator.com/privacy](https://solaroperator.com/privacy).
+[https://solaroperator.org/privacy](https://solaroperator.org/privacy).
 
 ## Contact
 
-Email **support@solaroperator.com** for any privacy questions or to
+Email **support@solaroperator.org** for any privacy questions or to
 exercise your data-deletion rights.

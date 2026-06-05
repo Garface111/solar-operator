@@ -23,7 +23,7 @@ You produce solar. We do the paperwork.
 HOW IT WORKS
 
 1. Install the extension.
-2. Paste your activation code from your Solar Operator welcome email.
+2. Open your Solar Operator dashboard — the extension pairs to your account automatically.
 3. Sign into greenmountainpower.com once.
 
 That's it. Every month, around the 20th, we email you your reporting
@@ -48,23 +48,24 @@ WHAT WE NEVER DO
 
 • We never see your GMP password
 • We never share your data with third parties
-• We never read anything outside greenmountainpower.com
+• We never read anything outside the utility portals you've connected (greenmountainpower.com and smarthub.coop)
 
 PRICING
 
-Visit solaroperator.com to see plans. Most operators recoup the cost in
-the first month from time saved on quarterly reporting.
+$250 one-time setup. $45/array/month after that. Most operators recoup
+the setup cost in the first month from time saved on quarterly reporting.
+Details at solaroperator.org.
 
 PRIVACY
 
-Full privacy policy: https://solaroperator.com/privacy
+Full privacy policy: https://solaroperator.org/privacy
 
 You can delete your data at any time by emailing
-support@solaroperator.com.
+support@solaroperator.org.
 
 QUESTIONS
 
-support@solaroperator.com — we reply same business day.
+support@solaroperator.org — we reply same business day.
 ```
 
 ## Category
@@ -81,15 +82,23 @@ support@solaroperator.com — we reply same business day.
 
 ### `storage`
 
-"We use chrome.storage.local to remember the user's activation code and the
-most recent captured GMP session payload (account list + JWT) so the
-extension knows who to sync to and doesn't re-send identical data."
+"We use chrome.storage.local to remember the user's paired account identity
+and the most recent captured utility session payload (account list + JWT) so
+the extension knows who to sync to and doesn't re-send identical data."
 
 ### `alarms`
 
 "We schedule a recurring alarm (every 12 hours) to check whether the
 user's GMP session token is within 3 days of expiring. This lets us notify
 them in time to refresh."
+
+### `cookies`
+
+"When an operator adds a new client from the Solar Operator dashboard,
+the extension clears the existing greenmountainpower.com or smarthub.coop
+session cookies so the portal opens to a clean sign-in page for that
+client's credentials. We never read cookie values — the permission is used
+only to delete them on explicit user-initiated portal-open actions."
 
 ### `notifications`
 
@@ -110,11 +119,30 @@ the extension."
 this host; all GMP API calls happen server-side from our backend using
 the captured token."
 
-### Host permission: `https://api.solaroperator.com/*`
+### Host permission: `https://vermontelectric.smarthub.coop/*` and `https://*.smarthub.coop/*`
 
-"The background service worker POSTs the captured GMP session payload to
-our backend at this host so the user's account can be synced and their
+"A content script reads authenticated session data from Vermont Electric
+Co-op's SmartHub portal the same way it does for GMP — to capture billing
+data for operators whose accounts are on VEC rather than GMP."
+
+### Host permission: `https://solaroperator.org/*` and `https://*.solaroperator.org/*`
+
+"A lightweight bridge script runs on the Solar Operator dashboard to
+enable automatic account pairing when the operator signs in. The
+background service worker also POSTs captured utility session payloads to
+api.solaroperator.org so the user's spreadsheet can be updated."
+
+### Host permission: `https://api.solaroperator.org/*`
+
+"The background service worker POSTs captured session payloads to our
+backend at this host so the user's account can be synced and their
 spreadsheet updated."
+
+### Host permission: `https://web-production-49c83.up.railway.app/*`
+
+"This is the Railway-hosted backend URL used during initial deployment.
+It accepts the same requests as api.solaroperator.org and is retained as
+a fallback endpoint."
 
 ### Remote code: **NO**
 
