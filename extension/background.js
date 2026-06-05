@@ -19,6 +19,7 @@ const STORAGE_KEYS = {
   LAST_PAYLOAD: "last_payload",
   LAST_ERROR: "last_error",
   LAST_LOGIN_STATE: "last_login_state",  // v1.3.0 — most recent per-provider login state
+  CAPTURES_TODAY: "captures_today",      // v1.4.0 — { date: "YYYY-MM-DD", count: N }
 };
 
 // v1.3.0: broadcast a payload to every open solaroperator.org tab so the
@@ -89,6 +90,17 @@ async function postSync(payload) {
   }
 }
 
+// v1.4.0: increment the captures-today counter (resets each calendar day).
+async function _incrementCapturesToday() {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const s = await chrome.storage.local.get(STORAGE_KEYS.CAPTURES_TODAY);
+  const prev = s[STORAGE_KEYS.CAPTURES_TODAY];
+  const count = (prev && prev.date === todayStr) ? prev.count + 1 : 1;
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.CAPTURES_TODAY]: { date: todayStr, count },
+  });
+}
+
 // Shared sync handler — used by both GMP and VEC message types.
 // Stores capture metadata, POSTs to /v1/sync, updates badge.
 async function _handleSync(payload, tokenHash, sendResponse) {
@@ -132,17 +144,21 @@ async function _handleSync(payload, tokenHash, sendResponse) {
       },
       [STORAGE_KEYS.LAST_ERROR]: null,
     });
+    await _incrementCapturesToday();
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#2e6b3a" });
     // v1.3.0: tell every open solaroperator.org tab so the onboarding wizard
     // can auto-advance the moment a capture lands.
-    broadcastToSoTabs({
+    const capturedMsg = {
       type: "SO_CAPTURE_LANDED",
       ok: true,
       provider: payload.provider || "gmp",
       accountCount: (payload.accounts || []).length,
       at,
-    });
+    };
+    broadcastToSoTabs(capturedMsg);
+    // v1.4.0: also notify the popup if it is open.
+    chrome.runtime.sendMessage(capturedMsg, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true, endpoint: settings.endpoint });
   } catch (e) {
     const at = new Date().toISOString();
@@ -151,14 +167,17 @@ async function _handleSync(payload, tokenHash, sendResponse) {
     });
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#c97a3d" });
-    broadcastToSoTabs({
+    const failedMsg = {
       type: "SO_CAPTURE_LANDED",
       ok: false,
       provider: (payload && payload.provider) || "gmp",
       accountCount: 0,
       at,
       error: String(e),
-    });
+    };
+    broadcastToSoTabs(failedMsg);
+    // v1.4.0: also notify the popup if it is open.
+    chrome.runtime.sendMessage(failedMsg, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: false, error: String(e) });
   }
 }
