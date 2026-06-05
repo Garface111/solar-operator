@@ -186,7 +186,11 @@ export default function ReportsTab() {
         </h2>
 
         {clientsLoading ? (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div
+            className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
+            aria-label="Loading report history"
+            aria-busy="true"
+          >
             {Array.from({ length: 6 }).map((_, i) => (
               <QuarterCardSkeleton key={i} />
             ))}

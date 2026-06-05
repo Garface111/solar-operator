@@ -89,7 +89,10 @@ export function QuarterCard({
   }
 
   return (
-    <div className="rounded-xl border border-cream-border bg-cream p-5 shadow-sm transition-all duration-150 hover:-translate-y-px hover:shadow-md">
+    <div
+      aria-busy={regenerating}
+      className="rounded-xl border border-cream-border bg-cream p-5 shadow-sm transition-all duration-150 hover:-translate-y-px hover:shadow-md"
+    >
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <span className="text-base font-semibold text-zinc-900">{label}</span>
