@@ -235,6 +235,8 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 
   return (
     <div
+      data-walkthrough="client-card"
+      data-walkthrough-client-id={id}
       className={baseCardClass}
       style={{ animationDelay: `${entryDelay}ms` }}
       onDragOver={onDragOver}
@@ -449,6 +451,7 @@ function LoginGroupRow({
 
   return (
     <div
+      data-walkthrough="login-row"
       className={[
         'group/login rounded-xl border px-3 py-2.5 transition-opacity',
         th.row,
