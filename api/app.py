@@ -420,6 +420,17 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         setattr(target, _autopop_cfg["autopop_attr"], True)
                         setattr(target, _autopop_cfg["last_sync_attr"], now())
 
+                        # Auto-populate contact_email from the captured login
+                        # email — the address the customer uses to log into
+                        # their utility portal is almost certainly the address
+                        # they want reports sent to. Operator can override
+                        # later from the client card. We only set this when:
+                        #   (a) we have a real email (not a username), and
+                        #   (b) contact_email isn't already set (don't stomp
+                        #       an operator-curated value)
+                        if user_email and not target.contact_email:
+                            target.contact_email = user_email
+
                         # Attach the captured arrays.
                         for a in normalized["accounts"]:
                             acct_no = a.get("account_number")
