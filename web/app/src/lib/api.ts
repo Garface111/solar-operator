@@ -819,6 +819,10 @@ export interface IngestPreview {
   source: "llm" | "heuristic" | "gmcs_shape";
   count: number;
   arrays: IngestRow[];
+  /** Number of distinct utility logins detected in the hierarchical extraction. */
+  imported_logins: number;
+  /** Number of distinct clients detected in the hierarchical extraction. */
+  imported_clients: number;
 }
 
 export interface IngestCommitResult {
