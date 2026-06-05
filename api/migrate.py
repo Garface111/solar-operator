@@ -296,6 +296,27 @@ def main():
         ]:
             conn.execute(text(idx_sql))
 
+        # 2026-06-04 Deferred billing: trial columns on tenants.
+        deferred_billing_cols = [
+            ("trial_ends_at",
+             "ALTER TABLE tenants ADD COLUMN trial_ends_at TIMESTAMP NULL"),
+            ("stripe_payment_method_id",
+             "ALTER TABLE tenants ADD COLUMN stripe_payment_method_id TEXT NULL"),
+            ("trial_extended",
+             "ALTER TABLE tenants ADD COLUMN trial_extended BOOLEAN NOT NULL DEFAULT FALSE"),
+        ]
+        for col, sql in deferred_billing_cols:
+            if not column_exists(conn, "tenants", col):
+                conn.execute(text(sql))
+                print(f"  + tenants.{col}")
+        conn.execute(text(
+            "UPDATE tenants SET trial_extended = FALSE WHERE trial_extended IS NULL"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_tenants_stripe_payment_method_id "
+            "ON tenants (stripe_payment_method_id)"
+        ))
+
         # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
         # signups (last 7 days) that still carry the old 'monthly' engineer-default
         # over to 'quarterly'. We deliberately bound this to created_at > now-7d so
