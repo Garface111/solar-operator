@@ -23,7 +23,7 @@ interface TabBarProps {
  */
 export function TabBar({ tabs, unvisited }: TabBarProps) {
   return (
-    <nav className="sticky top-[57px] z-20 border-b border-zinc-200 bg-white/80 backdrop-blur">
+    <nav className="sticky top-[57px] z-20 border-b border-cream-border bg-cream/90 backdrop-blur">
       <div className="mx-auto max-w-4xl px-4">
         <div className="flex gap-6 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {tabs.map((tab) => {
