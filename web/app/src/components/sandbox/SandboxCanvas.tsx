@@ -194,6 +194,26 @@ export default function SandboxCanvas() {
   // detect which clients were newly created so we can push undo entries.
   const clientIdsBeforeModal = useRef<Set<number>>(new Set());
 
+  // Keyboard: ⌘Z / Ctrl+Z fires undo; Esc closes context menu
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.target as Element)?.tagName === 'INPUT') return;
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        if (mergeUndo) {
+          e.preventDefault();
+          setNodes(mergeUndo.snapshot);
+          setMergeUndo(null);
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [mergeUndo, setNodes]);
+
   // ── Data loading ──────────────────────────────────────────────────────────
 
   const loadCanvas = useCallback(async () => {
@@ -204,7 +224,18 @@ export default function SandboxCanvas() {
       const built = buildNodesFromApi(data);
       setNodes(built);
       setOriginLookup(data.clients_index ?? {});
-      if (built.length > 0) {
+      // Only fitView on fresh loads — if the operator has a saved viewport,
+      // don't stomp it. The defaultViewport prop already restores the position;
+      // calling fitView here would override it every time the canvas reloads.
+      const hasSavedViewport = (() => {
+        try {
+          const raw = localStorage.getItem('so:sandbox:viewport');
+          if (!raw) return false;
+          const v = JSON.parse(raw);
+          return typeof v?.x === 'number' && typeof v?.y === 'number' && typeof v?.zoom === 'number';
+        } catch { return false; }
+      })();
+      if (built.length > 0 && !hasSavedViewport) {
         setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
       }
     } catch (err) {
@@ -346,7 +377,7 @@ export default function SandboxCanvas() {
     (nodeId: string) => {
       setContextMenu(null);
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
-      toast.show('Removed from canvas.', 'info');
+      toast.show('Hidden from canvas — reload to restore.', 'info');
     },
     [setNodes, toast],
   );
@@ -954,7 +985,7 @@ export default function SandboxCanvas() {
         );
 
       applyPin(next);
-      toast.show(next ? 'Pinned to top.' : 'Unpinned.', 'info');
+      toast.show(next ? 'Starred.' : 'Unstarred.', 'info');
       pinClient(numId, next).catch(() => {
         applyPin(wasPinned);
         toast.show('Pin failed — reverted.', 'error');
@@ -1193,7 +1224,6 @@ export default function SandboxCanvas() {
             menu={contextMenu}
             onStartRename={() => startRename(contextMenu.nodeId)}
             onDelete={() => deleteNode(contextMenu.nodeId)}
-            onClose={() => setContextMenu(null)}
           />
         )}
 
@@ -1293,18 +1323,15 @@ function ContextMenuPopover({
   menu,
   onStartRename,
   onDelete,
-  onClose,
 }: {
   menu: ContextMenu;
   onStartRename: () => void;
   onDelete: () => void;
-  onClose: () => void;
 }) {
   return (
     <div
       style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 9999 }}
       className="min-w-[160px] overflow-hidden rounded-xl border border-zinc-200 bg-white py-1 shadow-xl"
-      onMouseLeave={onClose}
     >
       {menu.nodeType === 'client' && (
         <button

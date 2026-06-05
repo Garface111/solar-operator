@@ -75,7 +75,7 @@ export function UnclassifiedNodeComponent({ data: rawData, selected }: NodeProps
       {/* Drag hint */}
       <div className="border-t border-dashed border-zinc-100 px-3 py-2">
         <p className="text-center text-[10px] leading-snug text-zinc-400">
-          ↓ Drag onto a client to attach
+          Drag onto a client card to attach
         </p>
       </div>
     </div>
