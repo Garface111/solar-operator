@@ -178,7 +178,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
       </main>
 
       {showWalkthrough && (
-        <WalkthroughOverlay onClose={() => setShowWalkthrough(false)} />
+        <WalkthroughOverlay
+          onClose={() => setShowWalkthrough(false)}
+          hasCaptures={(account?.accounts_count ?? 0) > 0}
+        />
       )}
 
       <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
