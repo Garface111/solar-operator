@@ -1201,7 +1201,7 @@ export default function SandboxCanvas() {
         const want = originClientId ?? null;
         if (aOrigin !== want) return false;
         if (loginId != null) {
-          const aLoginId = a.customer_number || a.account_number;
+          const aLoginId = `${a.utility}-${aOrigin ?? 'home'}`;
           if (aLoginId !== loginId) return false;
         }
         return true;
@@ -1300,7 +1300,7 @@ export default function SandboxCanvas() {
         const want = originClientId ?? null;
         if (aOrigin !== want) return false;
         if (loginId != null) {
-          const aLoginId = a.customer_number || a.account_number;
+          const aLoginId = `${a.utility}-${aOrigin ?? 'home'}`;
           if (aLoginId !== loginId) return false;
         }
         return true;
