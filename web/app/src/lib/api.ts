@@ -1022,6 +1022,35 @@ export async function pinClient(client_id: number, pinned: boolean): Promise<{ o
   });
 }
 
+// ── Dev-only sandbox helpers (gated server-side by SO_DEV_ENABLED) ──────────
+
+export interface DevStatus {
+  enabled: boolean;
+  tenant_id: string;
+  dev_clients: number;
+  dev_prefix: string;
+}
+
+export async function devStatus(): Promise<DevStatus> {
+  return request("/v1/dev/status", { method: "GET" });
+}
+
+export async function devSeedClients(count = 3): Promise<{ ok: true; created: { id: number; name: string }[] }> {
+  return request("/v1/dev/seed/clients", { body: { count } });
+}
+
+export async function devSeedLogin(client_id: number, utility: "GMP" | "VEC" | "WEC", arrays = 3): Promise<{ ok: true; client_id: number; customer_number: string; arrays: { id: number; name: string }[]; accounts: { id: number; account_number: string; customer_number: string; array_id: number }[] }> {
+  return request("/v1/dev/seed/login", { body: { client_id, utility, arrays } });
+}
+
+export async function devSeedUnclassified(count = 2, utility: "GMP" | "VEC" | "WEC" = "GMP"): Promise<{ ok: true; created: { id: number; account_number: string }[] }> {
+  return request("/v1/dev/seed/unclassified", { body: { count, utility } });
+}
+
+export async function devWipe(): Promise<{ ok: true; clients_removed: number; arrays_removed: number; accounts_removed: number }> {
+  return request("/v1/dev/wipe", { body: {} });
+}
+
 /** Move a utility account to a different client (or unclassify when client_id is null).
  *  Backend reuses an existing solo holder array or creates a new one under the target. */
 export async function reassignAccount(

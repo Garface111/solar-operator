@@ -32,6 +32,7 @@ import { Spinner } from '../../ui/Spinner';
 import { AddClientModal } from '../AddClientModal';
 import { AddClientByLoginModal } from '../AddClientByLoginModal';
 import { CommandPalette } from './CommandPalette';
+import { DevPanel } from './DevPanel';
 
 // ── Node type registry (stable reference — must live outside component) ────
 
@@ -1182,6 +1183,20 @@ export default function SandboxCanvas() {
             </Panel>
           )}
         </ReactFlow>
+
+        {/* Dev-only sandbox tools — renders nothing in prod (gated by /v1/dev/status) */}
+        <DevPanel
+          onChange={() => void loadCanvas()}
+          clients={nodes
+            .filter((n) => n.type === 'client')
+            .map((n) => {
+              const m = n.id.match(/^client_(\d+)$/);
+              const id = m ? parseInt(m[1], 10) : -1;
+              const name = (n.data as ClientNodeData).client.name;
+              return { id, name };
+            })
+            .filter((c) => c.id > 0)}
+        />
 
         {/* Loading overlay */}
         {loading && (

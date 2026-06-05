@@ -38,6 +38,7 @@ from .ingest import router as ingest_router
 from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
+from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -100,6 +101,14 @@ app.include_router(nepool_router)
 app.include_router(resend_webhook_router)
 # Sandbox canvas: client graph visualization + position persistence.
 app.include_router(sandbox_router)
+# Dev-only sandbox helpers. Mounted but each route guards on SO_DEV_ENABLED;
+# the /status route is always reachable so the SPA can decide what to render.
+app.include_router(dev_sandbox_router)
+if _SO_DEV_ENABLED:
+    import logging
+    logging.getLogger("uvicorn.error").warning(
+        "SO_DEV_ENABLED=1 — /v1/dev/* seed/wipe endpoints are LIVE"
+    )
 
 
 @app.on_event("startup")
