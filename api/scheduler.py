@@ -18,11 +18,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select, or_, func, text
 from .db import SessionLocal, engine
-from .models import Tenant, Client, Array, Job, now
+from .models import Tenant, Client, Array, Job, UtilitySession, now
 from .notify import (
     send_add_first_array_email,
     send_trial_charged_email,
     send_internal_alert,
+    send_gmp_reauth_needed_email,
 )
 
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -206,6 +207,78 @@ def finalize_expired_trials():
                 )
 
 
+def refresh_expiring_gmp_tokens() -> dict:
+    """Refresh GMP sessions expiring within 7 days.
+
+    Runs hourly. Safe to call more frequently — refresh is idempotent.
+    After 3 consecutive failures, sends the operator a re-auth email and
+    logs an internal alert.
+    """
+    from .gmp_refresh import refresh_gmp_token, GmpRefreshError
+
+    refreshed: list[int] = []
+    failed: list[int] = []
+    skipped: int = 0
+    cutoff = datetime.utcnow() + timedelta(days=7)
+
+    with SessionLocal() as db:
+        sessions = db.execute(
+            select(UtilitySession).where(
+                UtilitySession.provider == "gmp",
+                UtilitySession.refresh_token.isnot(None),
+                UtilitySession.expires_at <= cutoff,
+            )
+        ).scalars().all()
+
+        for sess in sessions:
+            tenant = db.get(Tenant, sess.tenant_id)
+            token_prefix = sess.refresh_token[:8] if sess.refresh_token else "?"
+            try:
+                new_jwt, new_expires_at = refresh_gmp_token(sess.refresh_token)
+                sess.api_token = new_jwt
+                sess.expires_at = new_expires_at
+                sess.captured_at = datetime.utcnow()
+                sess.last_refresh_at = datetime.utcnow()
+                sess.refresh_failures = 0
+                db.commit()
+                logger.info(
+                    "GMP session refreshed: tenant=%s sess=%d token_prefix=%s...",
+                    sess.tenant_id, sess.id, token_prefix,
+                )
+                refreshed.append(sess.id)
+            except GmpRefreshError as exc:
+                sess.refresh_failures = (sess.refresh_failures or 0) + 1
+                db.commit()
+                logger.warning(
+                    "GMP refresh failed: tenant=%s sess=%d failures=%d err=%s",
+                    sess.tenant_id, sess.id, sess.refresh_failures, exc,
+                )
+                failed.append(sess.id)
+                if sess.refresh_failures >= 3 and tenant:
+                    try:
+                        send_gmp_reauth_needed_email(
+                            to=tenant.contact_email,
+                            name=tenant.name,
+                        )
+                    except Exception as notify_exc:
+                        logger.error(
+                            "Failed to send reauth email to %s: %s",
+                            tenant.contact_email, notify_exc,
+                        )
+                    send_internal_alert(
+                        f"GMP refresh: 3 failures for tenant {sess.tenant_id}",
+                        f"Tenant: {sess.tenant_id} ({getattr(tenant, 'contact_email', '?')})\n"
+                        f"Session: {sess.id}\nToken prefix: {token_prefix}...\n"
+                        f"Operator notified to re-login.",
+                    )
+
+    logger.info(
+        "refresh_expiring_gmp_tokens: refreshed=%d failed=%d skipped=%d",
+        len(refreshed), len(failed), skipped,
+    )
+    return {"refreshed": refreshed, "failed": failed, "skipped": skipped}
+
+
 def hard_delete_old_soft_deleted():
     """Purge rows whose deleted_at is older than 30 days.
 
@@ -237,6 +310,11 @@ def start():
     scheduler.add_job(
         finalize_expired_trials,
         "interval", hours=1, id="finalize_expired_trials", replace_existing=True,
+    )
+    # Hourly: refresh GMP sessions expiring within 7 days
+    scheduler.add_job(
+        refresh_expiring_gmp_tokens,
+        "interval", hours=1, id="refresh_gmp_tokens", replace_existing=True,
     )
     # Drain the queue every minute
     from .worker import run_pending_jobs
