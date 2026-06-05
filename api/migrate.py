@@ -329,6 +329,17 @@ def main():
         flipped = res.rowcount if res.rowcount is not None else 0
         print(f"  ↪ V1 quarterly-default backfill: {flipped} recent tenant(s) monthly→quarterly")
 
+        # 2026-06-05 GMP token refresh worker: failure counter + last-refreshed timestamp.
+        for col, sql in [
+            ("refresh_failures",
+             "ALTER TABLE utility_sessions ADD COLUMN IF NOT EXISTS refresh_failures INTEGER NOT NULL DEFAULT 0"),
+            ("last_refresh_at",
+             "ALTER TABLE utility_sessions ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMP NULL"),
+        ]:
+            if not column_exists(conn, "utility_sessions", col):
+                conn.execute(text(sql))
+                print(f"  + utility_sessions.{col}")
+
     print("=== Migration complete ===")
 
 
