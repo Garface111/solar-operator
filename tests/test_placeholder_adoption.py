@@ -121,16 +121,24 @@ def test_adopted_placeholder_handles_second_capture_via_autopop(client):
         assert len(arrays) == 2, [a.name for a in arrays]
 
 
-# ─── (3) no placeholder + no match → no arrays (existing behavior preserved)
+# ─── (3) no placeholder + no match → auto-create new client (multi-login) ──
 
 def test_no_placeholder_no_match_creates_no_arrays(client):
+    """Under multi-login autopop, no placeholder + no match auto-CREATES a
+    fresh Client + Arrays. (Pre-multi-login this was a no-op; renamed
+    test kept for historical traceability.)"""
     tid, key, _ = _seed(with_placeholder=False)
     resp = _sync(client, key, _gmp_payload("nobody@gmp.test", [_account("4001", "X")]))
     assert resp.status_code == 200, resp.text
 
     with SessionLocal() as db:
+        clients = db.execute(select(Client).where(Client.tenant_id == tid)).scalars().all()
         arrays = db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all()
-        assert arrays == []
+        assert len(clients) == 1
+        assert clients[0].gmp_email == "nobody@gmp.test"
+        assert clients[0].gmp_autopopulate is True
+        assert len(arrays) == 1
+        assert arrays[0].client_id == clients[0].id
 
 
 # ─── (4) real matching client wins — placeholder is left alone ────────────

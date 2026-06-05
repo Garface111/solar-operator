@@ -225,15 +225,22 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     match_terms.append(func.lower(_autopop_cfg["email_col"]) == user_email)
                 if user_username:
                     match_terms.append(func.lower(_autopop_cfg["username_col"]) == user_username)
-                clients = db.execute(
+                # Find ALL clients with a matching email/username, autopop or not.
+                # We need to distinguish three cases:
+                #   (1) at least one matching client has autopop=True  → normal autopop
+                #   (2) match exists but autopop=False everywhere      → operator explicitly
+                #       opted out for this login; respect it, do nothing
+                #   (3) no match at all                                → adopt placeholder
+                #       or auto-create a new Client for this login
+                all_matches = db.execute(
                     select(Client)
                     .where(
                         Client.tenant_id == tenant.id,
-                        _autopop_cfg["autopop_col"].is_(True),
                         or_(*match_terms),
                     )
                     .order_by(Client.id)
                 ).scalars().all()
+                clients = [c for c in all_matches if getattr(c, _autopop_cfg["autopop_attr"])]
                 if clients:
                     # If more than one matches (misconfiguration), the lowest-id
                     # Client owns the arrays; the rest just get their sync timestamp bumped.
@@ -266,15 +273,28 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             owner.is_placeholder = False
                     for c in clients:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
+                elif all_matches:
+                    # Case (2): a Client matches this email/username but the
+                    # operator explicitly set autopop=False on every match.
+                    # Respect the choice — do NOT create new Clients or
+                    # Arrays behind their back. Bump last_sync so they can
+                    # see the extension reached us even though nothing was
+                    # auto-imported.
+                    for c in all_matches:
+                        setattr(c, _autopop_cfg["last_sync_attr"], now())
                 else:
-                    # ── Placeholder adoption (Note4) ──────────────────────────
+                    # ── Placeholder adoption OR new-client auto-create ─────────
                     # No Client matched on (email|username) for this provider.
-                    # If this tenant has a placeholder Client (seeded at signup
-                    # when they didn't pre-enter clients), adopt it: rename
-                    # using the captured customer_name, backfill the login
-                    # fields + autopopulate flag, attach the captured arrays,
-                    # and clear is_placeholder. This is the "no manual entry"
-                    # path — the operator literally never types a client name.
+                    # Two sub-paths:
+                    #   (a) tenant has a placeholder Client (seeded at signup
+                    #       when no real clients pre-entered) → ADOPT it: rename,
+                    #       backfill, attach arrays, clear is_placeholder.
+                    #   (b) no placeholder → AUTO-CREATE a brand-new Client for
+                    #       this login and attach arrays. This is the multi-
+                    #       account path: 50 logins → 50 Clients, no manual
+                    #       client entry ever required.
+                    # Both share the same "what to name it / how to wire it"
+                    # logic; the only difference is whether we insert a new row.
                     placeholder = db.execute(
                         select(Client).where(
                             Client.tenant_id == tenant.id,
@@ -284,11 +304,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         .order_by(Client.id)
                         .limit(1)
                     ).scalar_one_or_none()
-                    if placeholder is not None and (user_email or user_username):
-                        # Pick the best display name from the captured payload.
-                        # accounts[].nickname is per-array; customer_name (if
-                        # the adapter exposes it via extra/raw) is per-account
-                        # and usually the LLC / community-solar entity name.
+
+                    if user_email or user_username:
+                        # ── Pick the display name ────────────────────────────
+                        # Priority: customer_name > account nickname > login
+                        # email > login username. customer_name/nickname carry
+                        # the "Spencer LLC" wow when the adapter exposes them;
+                        # email/username is the user-requested DEFAULT for the
+                        # 50-account case where nothing better is available.
                         inferred_name = None
                         for a in normalized["accounts"]:
                             extra = a.get("extra") or {}
@@ -300,17 +323,39 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             )
                             if inferred_name:
                                 break
-                        if inferred_name:
-                            placeholder.name = str(inferred_name).strip()[:200]
+                        display_name = (
+                            (inferred_name and str(inferred_name).strip())
+                            or user_email
+                            or user_username
+                        )
+                        if display_name:
+                            display_name = display_name[:200]
+
+                        # ── (a) Placeholder adoption ─────────────────────────
+                        if placeholder is not None:
+                            target = placeholder
+                            if display_name:
+                                target.name = display_name
+                        # ── (b) New-client auto-create ───────────────────────
+                        else:
+                            target = Client(
+                                tenant_id=tenant.id,
+                                name=display_name or "New client",
+                                active=True,
+                            )
+                            db.add(target)
+                            db.flush()
+
                         # Backfill the login fields + autopop flag so the NEXT
                         # capture from the same login goes through the normal
                         # autopop branch above.
-                        if user_email and not getattr(placeholder, _autopop_cfg["email_attr"]):
-                            setattr(placeholder, _autopop_cfg["email_attr"], user_email)
-                        if user_username and not getattr(placeholder, _autopop_cfg["username_attr"]):
-                            setattr(placeholder, _autopop_cfg["username_attr"], user_username)
-                        setattr(placeholder, _autopop_cfg["autopop_attr"], True)
-                        setattr(placeholder, _autopop_cfg["last_sync_attr"], now())
+                        if user_email and not getattr(target, _autopop_cfg["email_attr"]):
+                            setattr(target, _autopop_cfg["email_attr"], user_email)
+                        if user_username and not getattr(target, _autopop_cfg["username_attr"]):
+                            setattr(target, _autopop_cfg["username_attr"], user_username)
+                        setattr(target, _autopop_cfg["autopop_attr"], True)
+                        setattr(target, _autopop_cfg["last_sync_attr"], now())
+
                         # Attach the captured arrays.
                         for a in normalized["accounts"]:
                             acct_no = a.get("account_number")
@@ -327,14 +372,15 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 continue
                             arr = Array(
                                 tenant_id=tenant.id,
-                                client_id=placeholder.id,
+                                client_id=target.id,
                                 name=a.get("nickname") or acct_no,
                                 bill_offset_months=_autopop_cfg["bill_offset_months"],
                             )
                             db.add(arr)
                             db.flush()
                             acct.array_id = arr.id
-                        placeholder.is_placeholder = False
+                        if target.is_placeholder:
+                            target.is_placeholder = False
 
         # ── VEC bill/usage persistence (extension-scraped) ──────────────
         # GMP has a separate worker that pulls bill PDFs server-side and

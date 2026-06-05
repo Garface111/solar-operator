@@ -131,21 +131,49 @@ def test_autopop_false_creates_no_arrays(client):
         assert all(u.array_id is None for u in uaccts)
 
         c = db.get(Client, cid)
-        assert c.gmp_last_sync_at is None
+        # Under multi-login autopop (Jun 2026+) we still bump last_sync_at
+        # for clients with autopop=False whose email matches — operator can
+        # see "the capture reached us" even though we deliberately didn't
+        # import arrays.
+        assert c.gmp_last_sync_at is not None
+        # And no new auto-created client either — the existing match (even
+        # with autopop=False) prevents the auto-create branch from firing.
+        all_clients = db.execute(select(Client).where(Client.tenant_id == tid)).scalars().all()
+        assert len(all_clients) == 1
 
 
-# ─── (3) autopop on but email mismatch → no arrays ───────────────────────────
+# ─── (3) autopop on but email mismatch → auto-create a NEW client ────────────
 
 def test_autopop_email_mismatch_creates_no_arrays(client):
+    """Under multi-login autopop (Jun 2026+), a capture whose login does NOT
+    match any existing Client auto-creates a brand-new Client + Arrays for
+    that login. The original Client is left alone."""
     tid, key, cid = _make_tenant_with_client(autopop=True, gmp_email="client@gmp.test")
 
     resp = _sync(client, key, _payload("someone-else@gmp.test", [_account("3001", "Z")]))
     assert resp.status_code == 200, resp.text
 
     with SessionLocal() as db:
-        assert db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all() == []
-        c = db.get(Client, cid)
-        assert c.gmp_last_sync_at is None
+        # Original client untouched (no arrays attached to it).
+        orig = db.get(Client, cid)
+        orig_arrays = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.client_id == cid)
+        ).scalars().all()
+        assert orig_arrays == []
+        assert orig.gmp_email == "client@gmp.test"
+        # A new auto-created Client now owns the captured array.
+        all_clients = db.execute(
+            select(Client).where(Client.tenant_id == tid).order_by(Client.id)
+        ).scalars().all()
+        assert len(all_clients) == 2
+        new_c = all_clients[1]
+        assert new_c.id != cid
+        assert new_c.gmp_email == "someone-else@gmp.test"
+        assert new_c.gmp_autopopulate is True
+        new_arrays = db.execute(
+            select(Array).where(Array.client_id == new_c.id)
+        ).scalars().all()
+        assert len(new_arrays) == 1
 
 
 # ─── (4) idempotency → second identical sync adds nothing ────────────────────
@@ -194,8 +222,10 @@ def test_autopop_matches_on_username(client):
 
 def test_autopop_username_client_ignores_email(client):
     # Client keyed only on username "jdoe"; a capture whose email happens to be
-    # "jdoe@gmp.test" (and a different username) must NOT match — we compare
-    # username-to-username and email-to-email, never across.
+    # "jdoe@gmp.test" (and a different username) must NOT match the existing
+    # client — we compare username-to-username and email-to-email, never across.
+    # Under the multi-login feature, the unmatched capture auto-creates a new
+    # Client (keyed on the captured email + username).
     tid, key, cid = _make_tenant_with_client(autopop=True, gmp_username="jdoe")
 
     resp = _sync(client, key, _payload(
@@ -203,6 +233,18 @@ def test_autopop_username_client_ignores_email(client):
     assert resp.status_code == 200, resp.text
 
     with SessionLocal() as db:
-        assert db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all() == []
-        c = db.get(Client, cid)
-        assert c.gmp_last_sync_at is None
+        orig = db.get(Client, cid)
+        # Original client got no arrays and no sync timestamp bump.
+        assert orig.gmp_last_sync_at is None
+        orig_arrays = db.execute(
+            select(Array).where(Array.client_id == cid)
+        ).scalars().all()
+        assert orig_arrays == []
+        # New Client auto-created for the unmatched login.
+        all_clients = db.execute(
+            select(Client).where(Client.tenant_id == tid).order_by(Client.id)
+        ).scalars().all()
+        assert len(all_clients) == 2
+        new_c = all_clients[1]
+        assert new_c.gmp_email == "jdoe@gmp.test"
+        assert new_c.gmp_username == "someone-else"

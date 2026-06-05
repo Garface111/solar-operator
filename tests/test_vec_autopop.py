@@ -142,21 +142,41 @@ def test_vec_autopop_false_creates_no_arrays(client):
         assert all(u.array_id is None for u in uaccts)
 
         c = db.get(Client, cid)
-        assert c.vec_last_sync_at is None
+        # Under multi-login autopop, the matching-email-but-autopop-False client
+        # still gets its sync timestamp bumped so the operator knows the capture
+        # reached us. Arrays are NOT imported — autopop=False is respected.
+        assert c.vec_last_sync_at is not None
+        # No auto-created client either — existing match (even autopop=False)
+        # blocks the auto-create branch.
+        assert len(db.execute(select(Client).where(Client.tenant_id == tid)).scalars().all()) == 1
 
 
-# ─── (3) VEC autopop on but email mismatch → no arrays ───────────────────────
+# ─── (3) VEC autopop on but email mismatch → auto-create new client ──────────
 
 def test_vec_autopop_email_mismatch_creates_no_arrays(client):
+    """Under multi-login autopop, an unmatched VEC capture auto-creates a
+    brand-new Client + Arrays. The original Client is left alone."""
     tid, key, cid = _make_tenant_with_client(vec_autopop=True, vec_email="real-client@vec.test")
 
     resp = _sync(client, key, _vec_payload("different@vec.test", [_vec_account("V201", "Z")]))
     assert resp.status_code == 200, resp.text
 
     with SessionLocal() as db:
-        assert db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all() == []
-        c = db.get(Client, cid)
-        assert c.vec_last_sync_at is None
+        orig = db.get(Client, cid)
+        # Original untouched.
+        assert orig.vec_last_sync_at is None
+        orig_arrays = db.execute(
+            select(Array).where(Array.client_id == cid)
+        ).scalars().all()
+        assert orig_arrays == []
+        # New auto-created Client owns the captured array.
+        all_clients = db.execute(
+            select(Client).where(Client.tenant_id == tid).order_by(Client.id)
+        ).scalars().all()
+        assert len(all_clients) == 2
+        new_c = all_clients[1]
+        assert new_c.vec_email == "different@vec.test"
+        assert new_c.vec_autopopulate is True
 
 
 # ─── (4) VEC idempotency → second identical sync adds nothing ─────────────────
@@ -201,6 +221,8 @@ def test_vec_autopop_matches_on_username(client):
 # ─── (6) VEC username-keyed client doesn't match a stray email ───────────────
 
 def test_vec_autopop_username_client_ignores_email(client):
+    """Username-keyed Client doesn't cross-match on email. Under multi-login
+    autopop, the unmatched capture spawns a fresh Client instead."""
     tid, key, cid = _make_tenant_with_client(vec_autopop=True, vec_username="vecuser2")
 
     resp = _sync(client, key, _vec_payload(
@@ -208,9 +230,18 @@ def test_vec_autopop_username_client_ignores_email(client):
     assert resp.status_code == 200, resp.text
 
     with SessionLocal() as db:
-        assert db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all() == []
-        c = db.get(Client, cid)
-        assert c.vec_last_sync_at is None
+        orig = db.get(Client, cid)
+        assert orig.vec_last_sync_at is None
+        orig_arrays = db.execute(select(Array).where(Array.client_id == cid)).scalars().all()
+        assert orig_arrays == []
+        # New Client auto-created for the unmatched login.
+        all_clients = db.execute(
+            select(Client).where(Client.tenant_id == tid).order_by(Client.id)
+        ).scalars().all()
+        assert len(all_clients) == 2
+        new_c = all_clients[1]
+        assert new_c.vec_email == "vecuser2@vec.test"
+        assert new_c.vec_username == "someone-else"
 
 
 # ─── (7) GMP capture doesn't trigger VEC autopop ─────────────────────────────
@@ -218,6 +249,8 @@ def test_vec_autopop_username_client_ignores_email(client):
 def test_gmp_capture_does_not_trigger_vec_autopop(client):
     # Client has vec_autopopulate=True with vec_email matching the GMP capture email.
     # A GMP sync must NOT trigger VEC autopop — providers are isolated.
+    # Under multi-login autopop, the GMP capture with no matching GMP client
+    # will auto-create a NEW gmp-keyed Client; the VEC client is untouched.
     email = "shared@test.test"
     tid, key, cid = _make_tenant_with_client(vec_autopop=True, vec_email=email)
 
@@ -225,8 +258,15 @@ def test_gmp_capture_does_not_trigger_vec_autopop(client):
     assert resp.status_code == 200, resp.text
 
     with SessionLocal() as db:
-        # GMP sync with no GMP autopop → no arrays
-        assert db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all() == []
         c = db.get(Client, cid)
-        # VEC sync_at must NOT be stamped by a GMP capture
+        # The VEC client is unchanged — provider isolation holds.
         assert c.vec_last_sync_at is None
+        assert c.gmp_email is None
+        # The auto-created Client lives separately under gmp_email.
+        all_clients = db.execute(
+            select(Client).where(Client.tenant_id == tid).order_by(Client.id)
+        ).scalars().all()
+        assert len(all_clients) == 2
+        new_c = all_clients[1]
+        assert new_c.gmp_email == email
+        assert new_c.vec_email is None
