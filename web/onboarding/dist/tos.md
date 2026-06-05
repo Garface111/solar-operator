@@ -54,7 +54,8 @@ fees are:
 - **One-time setup fee:** $250, charged when your trial ends.
 - **Monthly subscription:** $15 per solar array per month, billed monthly
   in advance based on the number of active arrays in your account,
-  starting after the trial.
+  starting after the trial. If you have zero solar arrays at trial end,
+  we charge a one-array minimum ($15) so your subscription stays active.
 
 Your array count can change as you add or remove arrays; your subscription
 adjusts automatically and takes effect on the next billing cycle. All

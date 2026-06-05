@@ -205,6 +205,9 @@ export default function ClientSetup() {
               </span>
               <span>${monthly}/month</span>
             </div>
+            <p className="text-xs text-primary-700 pt-1">
+              If you have zero arrays at trial end, a one-array minimum ($15) applies so your subscription stays active.
+            </p>
           </div>
         </div>
 
