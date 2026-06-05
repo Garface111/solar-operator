@@ -94,12 +94,16 @@ export function ClientsSection({ expandClientId }: Props) {
       .catch(() => { /* non-critical, ignore */ });
   }
 
-  function loadClients() {
-    listClients()
-      .then(setClients)
+  function loadClients(): Promise<ClientRow[]> {
+    return listClients()
+      .then((rows) => {
+        setClients(rows);
+        return rows;
+      })
       .catch((err) => {
         toast.error(err instanceof Error ? err.message : "Couldn't load clients");
         setClients([]);
+        return [] as ClientRow[];
       });
   }
 

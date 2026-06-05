@@ -15,9 +15,11 @@ type Phase = "choose" | "waiting" | "captured";
 interface Props {
   open: boolean;
   onClose: () => void;
-  /** Fired when at least one new capture has been registered while this
-   *  modal was open — used by the parent to reload the clients list. */
-  onCaptured: () => void;
+  /** Reload the clients list from the server and return the fresh rows
+   *  so the modal can detect whether a brand-new client actually
+   *  appeared (vs the extension silently re-scraping the previous
+   *  client because the portal session wasn't cleared). */
+  onCaptured: () => Promise<{ id: number; name: string }[]>;
   /** Switch into the legacy form (manual name + login) for the rare case
    *  someone wants to add a placeholder upfront. */
   onSwitchToManual: () => void;
@@ -86,6 +88,12 @@ export function AddClientByLoginModal({
   // capture. Chaining 5-50 clients in one sitting becomes muscle memory
   // — operator never has to think about clicking "Add another".
   const [autoLoopSecondsLeft, setAutoLoopSecondsLeft] = useState(0);
+  // Snapshot of client IDs known to exist when the operator picked a
+  // portal. After SO_CAPTURE_LANDED ok:true we ask the parent to reload
+  // and compare — if no NEW id appeared, the extension probably re-
+  // scraped the previously-signed-in account instead of capturing a
+  // new client. We surface that honestly instead of false-greening.
+  const knownClientIdsBeforePick = useRef<Set<number>>(new Set());
   const capturesThisSession = useRef(0);
 
   // Reset whenever the modal opens; re-probe to get a fresh status.
@@ -105,7 +113,7 @@ export function AddClientByLoginModal({
   // Listen for SO_CAPTURE_LANDED while the modal is open.
   useEffect(() => {
     if (!open) return;
-    function handler(e: MessageEvent) {
+    async function handler(e: MessageEvent) {
       if (e.source !== window) return;
       const data = e.data;
       if (!data || data.type !== "SO_CAPTURE_LANDED") return;
@@ -122,17 +130,46 @@ export function AddClientByLoginModal({
         return;
       }
 
+      // Capture landed on the backend — but did a NEW client actually
+      // get created? If the operator opened the portal still signed in
+      // as their previous client (older extensions w/o cookie-wipe,
+      // SSO/SmartHub remember-me, etc.), the extension just re-scraped
+      // the same account. /v1/sync no-ops, SO_CAPTURE_LANDED fires
+      // ok:true, but no new client appears. Detect by diffing client
+      // IDs against the pre-pick snapshot.
+      let freshRows: { id: number; name: string }[] = [];
+      try {
+        freshRows = await onCaptured();
+      } catch {
+        /* parent surfaces its own errors */
+      }
+      const before = knownClientIdsBeforePick.current;
+      const newRows = freshRows.filter((c) => !before.has(c.id));
+      if (newRows.length === 0 && before.size > 0) {
+        // We had a snapshot AND no new client → almost certainly a
+        // re-scrape. Stay in waiting, tell the operator what happened.
+        toast.error(
+          "Looks like the extension re-captured a client you already " +
+          "have. Sign out of the portal in that tab first, then sign " +
+          "in as the new client.",
+        );
+        return;
+      }
+
       capturesThisSession.current += 1;
-      const label =
-        (typeof data.clientName === "string" && data.clientName.trim()) ||
-        (typeof data.provider === "string" && FRIENDLY[data.provider as Provider]) ||
-        "your account";
+      // Prefer the newly-created client's name (server truth) over the
+      // postMessage payload — that's the row that actually landed.
+      const newRow = newRows[0];
+      const label = newRow?.name?.trim()
+        || (typeof data.clientName === "string" && data.clientName.trim())
+        || (typeof data.provider === "string" && FRIENDLY[data.provider as Provider])
+        || "your account";
       setCapturedClient(label);
       setPhase("captured");
       // Kick off the auto-loop countdown (3s) — the operator never
-      // has to click "Add another"; we just go back to the picker.
+      // has to think about clicking "Add another"; we just go back
+      // to the picker.
       setAutoLoopSecondsLeft(3);
-      onCaptured();
     }
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
@@ -178,6 +215,15 @@ export function AddClientByLoginModal({
   async function pick(provider: Provider) {
     setLastProvider(provider);
     setOpeningTab(true);
+    // Snapshot existing clients BEFORE the capture lands. We use this
+    // to detect "extension re-scraped previous client" failures by
+    // comparing IDs after onCaptured() reload.
+    try {
+      const before = await onCaptured();
+      knownClientIdsBeforePick.current = new Set(before.map((c) => c.id));
+    } catch {
+      knownClientIdsBeforePick.current = new Set();
+    }
     const result = await openPortalTab(PORTAL_URLS[provider]);
     setOpeningTab(false);
     if (result === "blocked") {
