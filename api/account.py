@@ -844,7 +844,7 @@ def billing_portal(authorization: Optional[str] = Header(default=None)):
     download invoices, or cancel."""
     t = tenant_from_session(authorization)
     if not t.stripe_customer_id:
-        raise HTTPException(404, "No Stripe customer linked — contact support@solaroperator.org")
+        raise HTTPException(404, "No Stripe customer linked — contact admin@solaroperator.org")
     if not os.getenv("STRIPE_SECRET_KEY"):
         raise HTTPException(500, "Stripe not configured")
     try:

@@ -116,7 +116,7 @@ def signup(req: SignupRequest):
         if existing:
             raise HTTPException(409,
                 "An account already exists for this email. "
-                "Email support@solaroperator.org if you've lost access.")
+                "Email admin@solaroperator.org if you've lost access.")
 
         t = Tenant(
             id=tenant_id, name=display_name, contact_email=req.email,
