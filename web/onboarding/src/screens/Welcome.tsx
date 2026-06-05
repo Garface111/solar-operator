@@ -26,7 +26,7 @@ const PP_BULLETS = [
 const TOS_BULLETS = [
   "Free for 14 days — we collect your card to start the trial, but you aren't charged until the trial ends.",
   "After trial: $250 one-time setup, then $15 per solar array per month, billed monthly.",
-  "Cancel anytime — no penalty. Access continues until the period you already paid for.",
+  "Cancel anytime — no penalty. Your data stays accessible for 30 days after cancellation.",
   "You own your data. We use it only to run the service. We never sell it.",
   "You're responsible for entering correct NEPOOL-GIS IDs — we don't verify them.",
   "Currently supports Green Mountain Power and Vermont Electric Cooperative. More utilities coming.",

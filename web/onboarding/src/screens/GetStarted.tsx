@@ -119,6 +119,10 @@ export default function GetStarted() {
           />
         </div>
       )}
+
+      <p className="mt-6 text-xs text-zinc-500">
+        Chrome desktop required — extension scrapes utility portals
+      </p>
     </div>
   );
 }

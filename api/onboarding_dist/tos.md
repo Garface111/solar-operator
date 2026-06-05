@@ -6,7 +6,7 @@
 
 - **14-day free trial:** we collect your card when you sign up, but nothing is charged until the trial ends. We email you before the charge.
 - **Pricing:** $250 one-time setup fee plus $15 per solar array per month, billed monthly, starting after the trial.
-- **Cancel anytime:** no penalty. Your access continues until the end of the period you already paid for.
+- **Cancel anytime:** no penalty. Your data stays accessible for 30 days after cancellation.
 - **You own your data.** We use it only to run the service. We never sell it.
 - **You are responsible for entering correct NEPOOL-GIS IDs.** We don't verify them — an incorrect ID could cause a wrong report.
 - **This service currently works with Green Mountain Power (GMP) and Vermont Electric Co-op (VEC, via SmartHub) accounts. Other Vermont utilities are in development.**
@@ -65,8 +65,9 @@ prices are in U.S. dollars, not including any taxes you may owe.
 
 You can cancel at any time from your dashboard or by emailing
 **admin@solaroperator.org**. Cancellation takes effect at the end of your
-current billing period. You'll keep access through the end of the period
-you've already paid for, and you won't be charged for periods after that.
+current billing period. You'll keep access to your account and data for
+30 days after the cancellation date, and you won't be charged for periods
+after your billing period ends.
 **Monthly fees already paid are not refundable, and the setup fee is
 non-refundable**, except where required by law.
 
