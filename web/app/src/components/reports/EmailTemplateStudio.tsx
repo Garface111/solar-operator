@@ -135,8 +135,15 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       setPreviewSubject(result.subject_rendered);
       setPreviewBody(result.body_rendered);
       setSampleClient(result.sample_client);
-    } catch {
-      // Silently fail — preview is non-critical
+    } catch (err) {
+      // Surface the failure so the operator knows something's wrong instead
+      // of staring at the placeholder "Preview will appear here" forever.
+      console.error("Preview render failed:", err);
+      toast.error(
+        err instanceof Error
+          ? `Preview render failed: ${err.message}`
+          : "Preview render failed — check your template syntax.",
+      );
     } finally {
       setPreviewLoading(false);
     }
