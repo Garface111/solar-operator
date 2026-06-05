@@ -20,7 +20,7 @@ interface Props {
 }
 
 const PORTAL_URLS: Record<Provider, string> = {
-  gmp: "https://mypower.greenmountainpower.com/",
+  gmp: "https://greenmountainpower.com/account/login/",
   vec: "https://vermontelectric.smarthub.coop/Login.html",
 };
 
