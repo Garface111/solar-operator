@@ -250,24 +250,28 @@ export default function SandboxCanvas() {
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
-  const loadCanvas = useCallback(async () => {
+  const loadCanvas = useCallback(async (opts: { silent?: boolean } = {}) => {
     setLoadError(null);
-    setLoading(true);
+    if (!opts.silent) setLoading(true);
     try {
       const data = await getCanvasData();
       const { nodes: built, autoPositioned } = buildNodesFromApi(data);
-      setNodes(built);
-      // Persist any auto-assigned grid slots right away so the next reload
-      // sees them as saved positions and reuses the SAME slot instead of
-      // recomputing "free slots" against a different occupancy set (which
-      // is what made the layout look random across reloads).
+      // On silent reloads (e.g. delete-undo) zero out entryDelay so cards
+      // don't stagger-fade in every time the user undoes/redoes.
+      const finalNodes = opts.silent
+        ? built.map((n) => (
+            n.data && typeof n.data === 'object'
+              ? { ...n, data: { ...n.data, entryDelay: 0 } as typeof n.data }
+              : n
+          ))
+        : built;
+      setNodes(finalNodes);
       if (autoPositioned.length > 0) {
         patchCanvasPositions(autoPositioned).catch(() => { /* best effort */ });
       }
       setOriginLookup(data.clients_index ?? {});
-      // Only fitView on fresh loads — if the operator has a saved viewport,
-      // don't stomp it. The defaultViewport prop already restores the position;
-      // calling fitView here would override it every time the canvas reloads.
+      // Skip fitView on silent reloads — viewport must stay exactly where
+      // the user had it. (Also skip when a saved viewport is restoring.)
       const hasSavedViewport = (() => {
         try {
           const raw = localStorage.getItem('so:sandbox:viewport');
@@ -276,13 +280,13 @@ export default function SandboxCanvas() {
           return typeof v?.x === 'number' && typeof v?.y === 'number' && typeof v?.zoom === 'number';
         } catch { return false; }
       })();
-      if (built.length > 0 && !hasSavedViewport) {
+      if (built.length > 0 && !hasSavedViewport && !opts.silent) {
         setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to load canvas');
     } finally {
-      setLoading(false);
+      if (!opts.silent) setLoading(false);
     }
   }, [setNodes, fitView]);
 
@@ -453,40 +457,53 @@ export default function SandboxCanvas() {
       // Optimistic UI: strip it now
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
 
-      const applyDelete = () => setNodes((ns) => ns.filter((n) => n.id !== nodeId));
-      const applyRestoreVisually = () => setNodes(snapshot);
-
       if (isClient && !isNaN(numId)) {
-        // Backend DELETE returns an undo_token good for 5 minutes; we feed
-        // that into the undo stack so Cmd+Z fully restores the client + its
-        // arrays + utility accounts in one call.
+        // Backend DELETE returns an undo_token good for 5 minutes; we keep a
+        // mutable ref to it because each undo→redo cycle consumes the old
+        // token and the redo's new DELETE produces a fresh one. Without this,
+        // the second Cmd+Z after a Cmd+Shift+Z would silently fail.
+        let currentToken: string | null = null;
+        // Suppress entry animation on the restored card so the canvas doesn't
+        // flash the staggered pop-in every time the user hits undo.
+        const restoreViaReload = () => {
+          // Silent reload: no loading spinner, no viewport jump, no entry
+          // animation re-fire. Just swap the data underneath.
+          void loadCanvas({ silent: true });
+        };
+
         deleteClient(numId)
           .then((res) => {
+            currentToken = res.undo_token;
             toast.show(`Deleted ${removedName}. Cmd+Z to undo.`, 'info');
             pushUndo({
               label: `Delete client "${removedName}"`,
               timestamp: Date.now(),
               undo: () => {
-                applyRestoreVisually();
-                undoDelete(res.undo_token)
-                  .then(() => void loadCanvas())
+                if (!currentToken) { restoreViaReload(); return; }
+                const tok = currentToken;
+                currentToken = null;
+                undoDelete(tok)
+                  .then(() => restoreViaReload())
                   .catch(() => {
                     toast.show('Undo failed — 5-minute window may have expired.', 'error');
-                    void loadCanvas();
+                    restoreViaReload();
                   });
               },
               redo: () => {
-                // Redo just re-issues a delete on the (now restored) client.
-                applyDelete();
-                deleteClient(numId).catch(() => {
-                  toast.show('Redo delete failed.', 'error');
-                  void loadCanvas();
-                });
+                // Strip from canvas immediately, then re-delete on backend
+                // and capture the FRESH undo_token so the next Cmd+Z works.
+                setNodes((ns) => ns.filter((n) => n.id !== nodeId));
+                deleteClient(numId)
+                  .then((res2) => { currentToken = res2.undo_token; })
+                  .catch(() => {
+                    toast.show('Redo delete failed.', 'error');
+                    restoreViaReload();
+                  });
               },
             });
           })
           .catch(() => {
-            applyRestoreVisually();
+            setNodes(snapshot);
             toast.show('Delete failed — reverted.', 'error');
           });
       } else if (isAccount && !isNaN(numId)) {
@@ -497,8 +514,18 @@ export default function SandboxCanvas() {
         pushUndo({
           label: `Hide account ${removedName}`,
           timestamp: Date.now(),
-          undo: () => applyRestoreVisually(),
-          redo: () => applyDelete(),
+          undo: () => {
+            // Strip the entry-animation delay from the restored node so it
+            // doesn't pop in fresh; user just hit undo, they want it back
+            // exactly where it was.
+            const frozen = snapshot.map((n) =>
+              n.id === nodeId && n.data && typeof n.data === 'object'
+                ? { ...n, data: { ...n.data, entryDelay: 0 } as typeof n.data }
+                : n,
+            );
+            setNodes(frozen);
+          },
+          redo: () => setNodes((ns) => ns.filter((n) => n.id !== nodeId)),
         });
       } else {
         toast.show('Hidden from canvas — reload to restore.', 'info');
