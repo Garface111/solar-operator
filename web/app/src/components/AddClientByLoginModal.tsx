@@ -190,6 +190,7 @@ export function AddClientByLoginModal({
   // to the picker. Operator gets a quiet visual confirmation, then we
   // hand them the next "GMP / VEC" choice without a click.
   useEffect(() => {
+    if (!open) return;
     if (autoLoopSecondsLeft <= 0) return;
     if (autoLoopSecondsLeft === 1) {
       // Last tick → reset back to choose state.
@@ -206,7 +207,7 @@ export function AddClientByLoginModal({
       1000,
     );
     return () => window.clearTimeout(t);
-  }, [autoLoopSecondsLeft]);
+  }, [autoLoopSecondsLeft, open]);
 
   function cancelAutoLoop() {
     setAutoLoopSecondsLeft(0);

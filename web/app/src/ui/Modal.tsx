@@ -7,10 +7,14 @@ interface ModalProps {
   children: ReactNode;
   /** Footer actions (buttons). Rendered right-aligned. */
   footer?: ReactNode;
+  /** Hide the top-right ✕ close button (e.g. when the modal must be
+   *  confirmed/denied explicitly). Defaults to false. */
+  hideCloseButton?: boolean;
 }
 
-/** Centered dialog with a dimmed backdrop. Closes on Escape or backdrop click. */
-export function Modal({ open, onClose, title, children, footer }: ModalProps) {
+/** Centered dialog with a dimmed backdrop. Closes on Escape, backdrop
+ *  click, or the ✕ button in the top-right corner. */
+export function Modal({ open, onClose, title, children, footer, hideCloseButton }: ModalProps) {
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
@@ -33,9 +37,26 @@ export function Modal({ open, onClose, title, children, footer }: ModalProps) {
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-6 shadow-xl"
+        className="relative w-full max-w-md rounded-xl border border-zinc-200 bg-white p-6 shadow-xl"
       >
-        <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
+        {!hideCloseButton && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close dialog"
+            className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+              <path
+                d="M3 3 L13 13 M13 3 L3 13"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        )}
+        <h2 className="pr-10 text-lg font-semibold tracking-tight text-zinc-900">
           {title}
         </h2>
         <div className="mt-4 text-sm text-zinc-600">{children}</div>
