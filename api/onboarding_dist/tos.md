@@ -8,7 +8,7 @@
 - **Cancel anytime:** no penalty. Your access continues until the end of the period you already paid for.
 - **You own your data.** We use it only to run the service. We never sell it.
 - **You are responsible for entering correct NEPOOL-GIS IDs.** We don't verify them — an incorrect ID could cause a wrong report.
-- **This service currently works with Green Mountain Power (GMP) accounts only.**
+- **This service currently works with Green Mountain Power (GMP) and Vermont Electric Co-op (VEC, via SmartHub) accounts. Other Vermont utilities are in development.**
 
 ---
 
@@ -23,11 +23,12 @@ agree to these Terms. If you do not agree, do not use the Service.
 
 Solar Operator automates quarterly net-metering credit reporting for
 community solar operators in Vermont. The Service pulls billing and
-production data from your Green Mountain Power ("GMP") accounts — through
-the Solar Operator Sync browser extension and your own GMP login — and
+production data from your Green Mountain Power ("GMP") and Vermont Electric
+Co-op ("VEC") accounts — through the Solar Operator Sync browser extension
+and your own utility logins — and
 uses it to generate NEPOOL-format Excel reports. We deliver those reports
 by email to the recipients you designate for each of your clients. The
-Service currently works with GMP data only.
+Service currently works with GMP and VEC data; other utilities are in development.
 
 We may add, change, or remove features over time. We will make reasonable
 efforts to keep the Service available, but we do not guarantee it will be
