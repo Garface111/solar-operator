@@ -14,7 +14,7 @@ Competition isn't other SaaS. It's the human consultant who answered the phone, 
 - **Array** (owned by client) = a physical solar installation
 - **UtilityAccount** (linked to array) = the GMP/etc account that bills it
 
-Pricing: $250 setup + $45/array/month. The tenant's value prop: replace the manual quarterly grind across all their operator clients.
+Pricing: $250 setup + $15/array/month. The tenant's value prop: replace the manual quarterly grind across all their operator clients.
 
 ## Visual Identity Shift
 **Old:** Stripe/Linear minimalism (correct but soulless)

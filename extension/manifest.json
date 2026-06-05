@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Solar Operator Sync",
   "short_name": "Solar Operator",
-  "version": "1.4.4",
-  "description": "Solar Operator Sync auto-captures your Green Mountain Power and Vermont Electric Co-op billing data so Solar Operator can email NEPOOL-format quarterly reports to your community solar clients.",
+  "version": "1.4.5",
+  "description": "Auto-captures Green Mountain Power and VEC billing data so Solar Operator can email NEPOOL-format quarterly solar reports.",
   "author": "Solar Operator",
   "homepage_url": "https://solaroperator.org",
   "permissions": [

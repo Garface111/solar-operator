@@ -4,7 +4,7 @@
 
 ## Quick summary
 
-- **Pricing:** $250 one-time setup fee plus $45 per solar array per month, billed monthly.
+- **Pricing:** $250 one-time setup fee plus $15 per solar array per month, billed monthly.
 - **Cancel anytime:** no penalty. Your access continues until the end of the period you already paid for.
 - **You own your data.** We use it only to run the service. We never sell it.
 - **You are responsible for entering correct NEPOOL-GIS IDs.** We don't verify them — an incorrect ID could cause a wrong report.
@@ -49,7 +49,7 @@ Payments are processed through Stripe, a third-party payment service. The
 fees are:
 
 - **One-time setup fee:** $250, charged when you complete onboarding.
-- **Monthly subscription:** $45 per solar array per month, billed monthly
+- **Monthly subscription:** $15 per solar array per month, billed monthly
   in advance based on the number of active arrays in your account.
 
 Your array count can change as you add or remove arrays; your subscription

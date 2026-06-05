@@ -24,7 +24,7 @@ const PP_BULLETS = [
 ];
 
 const TOS_BULLETS = [
-  "$250 one-time setup, then $45 per solar array per month, billed monthly.",
+  "$250 one-time setup, then $15 per solar array per month, billed monthly.",
   "Cancel anytime — no penalty. Access continues until the period you already paid for.",
   "You own your data. We use it only to run the service. We never sell it.",
   "You're responsible for entering correct NEPOOL-GIS IDs — we don't verify them.",
@@ -55,7 +55,7 @@ export default function Welcome() {
 
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 p-5">
           <p className="text-sm font-semibold text-primary-800">
-            $250 one-time setup · $45/array/month · cancel anytime
+            $250 one-time setup · $15/array/month · cancel anytime
           </p>
           <p className="mt-1 text-xs text-primary-700">
             Billed monthly. Each array you manage is one billing unit — the

@@ -61,9 +61,9 @@ LOGIN_LINK_TTL_SECONDS = 15 * 60  # 15 minutes
 
 # Per-array monthly price for the dashboard billing summary. Sourced from the
 # live Stripe price (STRIPE_ARRAY_PRICE_ID) when configured, falling back to the
-# same $45 default used by the onboarding checkout (ONBOARDING_ARRAY_CENTS).
+# same $15 default used by the onboarding checkout (ONBOARDING_ARRAY_CENTS).
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
-ARRAY_PRICE_CENTS = int(os.getenv("ONBOARDING_ARRAY_CENTS", "4500"))  # $45/array/mo
+ARRAY_PRICE_CENTS = int(os.getenv("ONBOARDING_ARRAY_CENTS", "1500"))  # $15/array/mo
 _array_price_cache: dict = {}
 
 
@@ -71,7 +71,7 @@ def _array_price_cents() -> tuple[int, str]:
     """Monthly per-array price in (cents, currency).
 
     Prefers the live Stripe price referenced by STRIPE_ARRAY_PRICE_ID and caches
-    the result for the process lifetime; falls back to the hardcoded $45 default
+    the result for the process lifetime; falls back to the hardcoded $15 default
     when Stripe is unconfigured or unreachable. Only successful lookups (and the
     stable no-Stripe fallback) are cached, so a transient Stripe error doesn't
     pin us to the fallback forever."""

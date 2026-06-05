@@ -39,7 +39,7 @@ export interface ClientDraftEntry {
   arrays?: { name: string; nepool_gis_id?: string }[];
 }
 
-const ARRAY_PRICE = 45;
+const ARRAY_PRICE = 15;
 const SETUP_FEE = 250;
 
 const QUICK_PICKS = [10, 25, 50, 100, 250, 500];

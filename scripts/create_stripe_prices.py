@@ -31,10 +31,10 @@ print("Setup product ($250 one-time):")
 setup_prod = get_or_create_product("Solar Operator — Setup", "One-time onboarding setup fee")
 setup_price = get_or_create_price(setup_prod.id, unit_amount=25000)
 
-print("Array subscription ($45/array/month):")
+print("Array subscription ($15/array/month):")
 array_prod = get_or_create_product("Solar Operator — Array Reporting", "Monthly per-array net-metering reporting")
 array_price = get_or_create_price(
-    array_prod.id, unit_amount=4500,
+    array_prod.id, unit_amount=1500,
     recurring={"interval": "month", "usage_type": "licensed"},
 )
 

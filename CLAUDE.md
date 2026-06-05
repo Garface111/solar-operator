@@ -1,6 +1,6 @@
 # Solar Operator
 
-SaaS that automates quarterly net-metering credit reports for VT community solar operators. Replaces a ~$135/array/quarter human consultant with $250 setup + $45/array/month software.
+SaaS that automates quarterly net-metering credit reports for VT community solar operators. Replaces a ~$135/array/quarter human consultant with $250 setup + $15/array/month software.
 
 ## Stack
 - **Backend:** Python (FastAPI-style app in `api/`), Postgres on Railway

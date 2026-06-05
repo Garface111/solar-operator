@@ -52,8 +52,8 @@ WHAT WE NEVER DO
 
 PRICING
 
-$250 one-time setup. $45/array/month after that. Most operators recoup
-the setup cost in the first month from time saved on quarterly reporting.
+$250 one-time setup. $15/array/month after that. Most operators recoup
+the setup cost in the first quarter from time saved on quarterly reporting.
 Details at solaroperator.org.
 
 PRIVACY
