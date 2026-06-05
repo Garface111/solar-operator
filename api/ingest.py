@@ -80,6 +80,12 @@ class IngestRow(BaseModel):
 
 class CommitBody(BaseModel):
     arrays: list[IngestRow]
+    # When set, ALL rows are pinned to this Client regardless of the
+    # row's operator_name. Used by the per-client "Import arrays into
+    # this client" button on the dashboard: the operator already picked
+    # the client, so we don't need to do any name-matching/auto-create
+    # on the operator_name column.
+    force_client_id: Optional[int] = None
 
 
 # ─── file → plain text ─────────────────────────────────────────────────────
@@ -485,8 +491,26 @@ def ingest_commit(
     client_cache: dict[str, Client] = {}
 
     with SessionLocal() as db:
+        # If force_client_id is set, pre-load and validate the target Client
+        # once; every row will pin to it instead of routing on operator_name.
+        forced_client: Optional[Client] = None
+        if body.force_client_id is not None:
+            forced_client = db.execute(
+                select(Client).where(
+                    Client.tenant_id == t.id,
+                    Client.id == body.force_client_id,
+                    Client.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if forced_client is None:
+                raise HTTPException(404, f"Client {body.force_client_id} not found")
+
         def find_or_create_client(name: str) -> Client:
             nonlocal clients_created
+            # force_client_id short-circuit: ignore the row's operator_name,
+            # everything lands on the pre-selected Client.
+            if forced_client is not None:
+                return forced_client
             key = name.lower()
             if key in client_cache:
                 return client_cache[key]

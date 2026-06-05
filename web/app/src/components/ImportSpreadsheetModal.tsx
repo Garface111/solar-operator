@@ -13,6 +13,12 @@ interface Props {
   onClose: () => void;
   /** Called after a successful commit so the parent can refresh its list. */
   onImported: () => void;
+  /** When set, pin every imported row to this Client (operator_name in
+   *  the spreadsheet is ignored on the backend). Used by the per-client
+   *  "Import arrays into this client" button. */
+  forceClientId?: number;
+  /** Optional display name for the pinned client, surfaced in copy. */
+  forceClientName?: string;
 }
 
 /** An editable preview row plus whether it's selected for import. */
@@ -24,7 +30,7 @@ type Stage = "upload" | "parsing" | "preview";
 
 const ACCEPT = ".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv";
 
-export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
+export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientId, forceClientName }: Props) {
   const toast = useToast();
   const [stage, setStage] = useState<Stage>("upload");
   const [rows, setRows] = useState<EditableRow[]>([]);
@@ -142,12 +148,16 @@ export function ImportSpreadsheetModal({ open, onClose, onImported }: Props) {
     try {
       const res = await ingestCommit(
         selected.map(({ include: _include, ...r }) => r),
+        forceClientId,
       );
       toast.success(
-        `Imported ${res.arrays_created} array${res.arrays_created === 1 ? "" : "s"}` +
-          (res.clients_created
-            ? ` under ${res.clients_created} new client${res.clients_created === 1 ? "" : "s"}`
-            : ""),
+        forceClientId
+          ? `Imported ${res.arrays_created} array${res.arrays_created === 1 ? "" : "s"}` +
+            (forceClientName ? ` into ${forceClientName}` : "")
+          : `Imported ${res.arrays_created} array${res.arrays_created === 1 ? "" : "s"}` +
+            (res.clients_created
+              ? ` under ${res.clients_created} new client${res.clients_created === 1 ? "" : "s"}`
+              : ""),
       );
       onImported();
       onClose();

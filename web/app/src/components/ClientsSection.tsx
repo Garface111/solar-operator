@@ -270,10 +270,15 @@ export function ClientsSection({ expandClientId }: Props) {
             variant="secondary"
             onClick={() => setImporting(true)}
             className="px-4 py-2"
+            data-tour-step="6-import"
           >
             Import spreadsheet
           </Button>
-          <Button onClick={() => setAdding(true)} className="px-4 py-2">
+          <Button
+            onClick={() => setAdding(true)}
+            className="px-4 py-2"
+            data-tour-step="6-add"
+          >
             + Add client
           </Button>
         </div>

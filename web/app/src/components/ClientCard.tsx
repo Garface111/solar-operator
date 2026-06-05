@@ -8,6 +8,7 @@ import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
 import { openPortalTab } from "../lib/openPortalTab";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
+import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import {
   type ClientRow,
   listClients,
@@ -91,6 +92,10 @@ export function ClientCard({
   const [sendingToMe, setSendingToMe] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
+  // Per-client array-import modal — the spreadsheet's operator_name column
+  // is ignored; every row lands under THIS client. Complements the global
+  // "Import spreadsheet" at the top of the page, which creates new clients.
+  const [importingArrays, setImportingArrays] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
   const pollerRef = useRef<PollerHandle | null>(null);
 
@@ -635,21 +640,33 @@ export function ClientCard({
               <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
                 Arrays
               </h4>
-              <button
-                type="button"
-                data-tour-step="5"
-                onClick={() => setAssigningNepool(true)}
-                className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-              >
-                Import NEPOOL IDs
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setImportingArrays(true)}
+                  className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  title="Upload a spreadsheet of arrays under this client"
+                >
+                  Import arrays
+                </button>
+                <button
+                  type="button"
+                  data-tour-step="5"
+                  onClick={() => setAssigningNepool(true)}
+                  className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                >
+                  Import NEPOOL IDs
+                </button>
+              </div>
             </div>
-            <ArrayList
-              clientId={client.id}
-              refreshSignal={arrayRefreshSignal}
-              onCountChange={(count) => onChange({ ...client, array_count: count })}
-              onUndo={onUndo}
-            />
+            <div data-tour-step="7">
+              <ArrayList
+                clientId={client.id}
+                refreshSignal={arrayRefreshSignal}
+                onCountChange={(count) => onChange({ ...client, array_count: count })}
+                onUndo={onUndo}
+              />
+            </div>
           </div>
 
 
@@ -681,6 +698,14 @@ export function ClientCard({
         onAssigned={() => setArrayRefreshSignal((s) => s + 1)}
         clientId={client.id}
         clientName={client.name}
+      />
+
+      <ImportSpreadsheetModal
+        open={importingArrays}
+        onClose={() => setImportingArrays(false)}
+        onImported={() => setArrayRefreshSignal((s) => s + 1)}
+        forceClientId={client.id}
+        forceClientName={client.name}
       />
 
       <Modal

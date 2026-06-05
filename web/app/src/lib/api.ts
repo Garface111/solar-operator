@@ -652,10 +652,15 @@ export async function ingestPreview(
 /** Commit the (user-confirmed, possibly edited) rows. */
 export async function ingestCommit(
   arrays: IngestRow[],
+  forceClientId?: number,
 ): Promise<IngestCommitResult> {
-  return request<IngestCommitResult>("/v1/ingest/commit", {
-    body: { arrays },
-  });
+  // When forceClientId is set, every row is pinned to that Client on the
+  // backend — operator_name is ignored. Used by the per-client "Import
+  // arrays into this client" button so the user doesn't have to scrub
+  // the operator_name column to match the target.
+  const body: { arrays: IngestRow[]; force_client_id?: number } = { arrays };
+  if (forceClientId !== undefined) body.force_client_id = forceClientId;
+  return request<IngestCommitResult>("/v1/ingest/commit", { body });
 }
 
 // ─── NEPOOL ID assignment ─────────────────────────────────────────────────

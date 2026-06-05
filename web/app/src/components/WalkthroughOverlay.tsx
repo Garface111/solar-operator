@@ -26,45 +26,38 @@ interface StepDef {
 const STEPS: StepDef[] = [
   {
     anchor: null,
-    title: "Quick 60-second tour",
-    body: "We'll walk you through the magic — name your first client, paste their utility-login email, and watch their arrays auto-populate live on this page.",
+    title: "Welcome to your dashboard",
+    body: "Your first utility login is already captured — we auto-created a client for it and attached its arrays. From here you'll manage clients, add NEPOOL IDs, and watch reports queue up. 60-second tour?",
   },
   {
     anchor: "2",
-    title: "Meet your first client",
-    body: "We dropped this placeholder card here so you have somewhere to start. Click the name field to rename it to your real client — \"Maple Ridge HOA\" or whatever fits. The amber styling goes away as soon as you do.",
-    waitForClick: true,
+    title: "Each card is a client",
+    body: "We named this one from the utility account we just captured. Click the name to rename it to whatever you'd put on a report — your operator name, the LLC, whatever you'd say to Bruce over coffee.",
   },
   {
-    anchor: "3",
-    title: "Enter the utility login",
-    body: "Paste the email or username this client uses to log into their utility portal (GMP, VEC, and others). Click into the field to start typing.",
-    waitForClick: true,
-  },
-  {
-    anchor: "4",
-    title: "Toggle auto-populate ON",
-    body: "Flip this on so we automatically pull this client's arrays the next time you log into their utility portal — no manual array entry. Click the toggle.",
-    waitForClick: true,
-  },
-  {
-    anchor: null,
-    title: "Go log in — watch the magic",
-    body: "Now open your utility portal (Green Mountain Power, Vermont Electric Coop, and more) and sign in with that account. The extension captures your arrays in the background and they'll appear under this client automatically — no manual entry, nothing to refresh.",
-    cta: {
-      label: "Open Green Mountain Power →",
-      href: "https://www.greenmountainpower.com/account/",
-    },
+    anchor: "7",
+    title: "Arrays live under each client",
+    body: "These are the meters we pulled from the utility portal. Each row is one billable array. The bill cycle, kWh, and NEPOOL ID columns fill in as data lands — nothing for you to type.",
   },
   {
     anchor: "5",
-    title: "Now: attach NEPOOL IDs in one shot",
-    body: "Your arrays are populated. If your client already has a spreadsheet with their array names and NEPOOL-GIS IDs, click this Import button and drop the file in — we'll fuzzy-match the rows to the arrays we just pulled and attach the IDs automatically. There's also a master Import at the top of the page for a sheet covering multiple clients.",
+    title: "Add NEPOOL IDs in one shot",
+    body: "When you have a spreadsheet of array names + NEPOOL-GIS IDs, drop it here. We fuzzy-match rows to the arrays we already pulled and stamp the IDs in. There's also a per-client version inside each card.",
+  },
+  {
+    anchor: "6-add",
+    title: "Add more clients later",
+    body: "Two ways to grow: (1) sign into another utility account from your portal — we'll auto-create a client for that login too. (2) Click + Add client to type one in by hand. Whichever's faster.",
+  },
+  {
+    anchor: "6-import",
+    title: "Or import a roster spreadsheet",
+    body: "If you already have a spreadsheet of clients + their arrays + NEPOOL IDs, drop the whole file here and we'll seed everything in one shot. Useful when you're inheriting an existing book of business.",
   },
   {
     anchor: null,
-    title: "You're all set",
-    body: "From here on it runs itself. Add more clients with the + button at the top, or just come back when you want to check on your reports. Pricing reconciles to your real array count automatically.",
+    title: "You're set",
+    body: "From here it runs itself. Reports auto-generate on your selected cadence. We email you a sample after the first quarter so you can show Bruce. Holler if anything looks off.",
   },
 ];
 
