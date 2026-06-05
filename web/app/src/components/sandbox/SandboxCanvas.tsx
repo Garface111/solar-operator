@@ -14,7 +14,7 @@ import '@xyflow/react/dist/style.css';
 import { CanvasActionsContext, type CanvasActions, type Density } from './canvasContext';
 import { ClientNodeComponent, type ClientNodeData } from './ClientNode';
 import { UnclassifiedNodeComponent, type UnclassifiedNodeData } from './UnclassifiedAccountNode';
-import { type ClientData, type UtilityAccount, type Utility } from './mockData';
+import { type ClientData, type UtilityAccount, type Utility, clientArrayCount } from './mockData';
 import {
   getCanvasData,
   mergeClientInto,
@@ -42,9 +42,12 @@ const NODE_TYPES: NodeTypes = {
   unclassified: UnclassifiedNodeComponent,
 };
 
-// ── Layout constants ────────────────────────────────────────────────────────
+// ── Layout types ────────────────────────────────────────────────────────────
 
-const COLS = 4;
+export type LayoutMode = 'sorted' | 'free';
+export type SortKey = 'name' | 'recent' | 'arrays' | 'pinned';
+
+// ── Layout constants ────────────────────────────────────────────────────────
 
 type DensityOverride = 'auto' | Density;
 
@@ -53,6 +56,10 @@ const GRID: Record<Density, { COL_W: number; ROW_H: number }> = {
   compact: { COL_W: 250, ROW_H: 200 },
   dense:   { COL_W: 190, ROW_H:  90 },
 };
+
+// Columns per density tier — more cols at higher density retightens the grid
+// without reshuffling card order.
+const DENSITY_COLS: Record<Density, number> = { full: 4, compact: 5, dense: 7 };
 
 const DENSITY_THRESH = { compact: 6, dense: 16 };
 
@@ -69,57 +76,88 @@ function normalizeProvider(p: string): Utility {
   return (['GMP', 'VEC', 'WEC'] as Utility[]).includes(u) ? u : 'GMP';
 }
 
+// ── Sorted position computation ─────────────────────────────────────────────
+// These are PURE functions — positions are computed from sort rank, never
+// stored. This makes position randomization architecturally impossible in
+// sorted mode: the DB's canvas_x/canvas_y become irrelevant.
+
+function computeSortedPositionsFromApiClients(
+  clients: CanvasResponse['clients'],
+  sortKey: SortKey,
+  density: Density,
+): Map<number, { x: number; y: number }> {
+  const cols = DENSITY_COLS[density];
+  const { COL_W, ROW_H } = GRID[density];
+  const sorted = [...clients].sort((a, b) => {
+    switch (sortKey) {
+      case 'name': return a.name.localeCompare(b.name);
+      case 'recent': return b.id - a.id;
+      case 'arrays': {
+        const ca = a.accounts.filter((acc) => acc.array_name != null).length;
+        const cb = b.accounts.filter((acc) => acc.array_name != null).length;
+        return cb - ca;
+      }
+      case 'pinned':
+        if (a.canvas_pinned !== b.canvas_pinned) return a.canvas_pinned ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      default: return 0;
+    }
+  });
+  const map = new Map<number, { x: number; y: number }>();
+  sorted.forEach((client, rank) => {
+    map.set(client.id, {
+      x: (rank % cols) * COL_W + 40,
+      y: Math.floor(rank / cols) * ROW_H + 40,
+    });
+  });
+  return map;
+}
+
+function computeSortedPositionsFromNodes(
+  clientNodes: Node[],
+  sortKey: SortKey,
+  density: Density,
+): Map<string, { x: number; y: number }> {
+  const cols = DENSITY_COLS[density];
+  const { COL_W, ROW_H } = GRID[density];
+  const sorted = [...clientNodes].sort((a, b) => {
+    const ad = (a.data as ClientNodeData).client;
+    const bd = (b.data as ClientNodeData).client;
+    switch (sortKey) {
+      case 'name': return ad.name.localeCompare(bd.name);
+      case 'recent': {
+        const an = parseInt(a.id.replace('client_', ''), 10);
+        const bn = parseInt(b.id.replace('client_', ''), 10);
+        return bn - an;
+      }
+      case 'arrays': return clientArrayCount(bd) - clientArrayCount(ad);
+      case 'pinned':
+        if (!!ad.pinned !== !!bd.pinned) return ad.pinned ? -1 : 1;
+        return ad.name.localeCompare(bd.name);
+      default: return 0;
+    }
+  });
+  const map = new Map<string, { x: number; y: number }>();
+  sorted.forEach((node, rank) => {
+    map.set(node.id, {
+      x: (rank % cols) * COL_W + 40,
+      y: Math.floor(rank / cols) * ROW_H + 40,
+    });
+  });
+  return map;
+}
+
 // ── API → React Flow nodes ──────────────────────────────────────────────────
 
 function buildNodesFromApi(
   data: CanvasResponse,
-  colW: number,
-  rowH: number,
-): { nodes: Node[]; autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] } {
+  layoutMode: LayoutMode,
+  sortedPositions: Map<number, { x: number; y: number }>,
+  density: Density,
+): Node[] {
   const nodes: Node[] = [];
-  const autoPositioned: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] = [];
-
-  // CANONICAL grid for slot bookkeeping: always use the 'full' density grid
-  // when deciding which slots are occupied and which are free. If we keyed
-  // by the current colW/rowH, switching density tiers (e.g. 5→6 clients
-  // flipping auto from 'full' to 'compact') would re-bucket the same saved
-  // coords into different slot keys, making `findFreeSlot` think populated
-  // spots were free and landing new clients on top of existing ones every
-  // reload. The visual layout still uses colW/rowH for NEW slot
-  // assignments, but the occupancy set is invariant.
-  const CANON_W = GRID.full.COL_W;
-  const CANON_H = GRID.full.ROW_H;
-  const slotOccupied = new Set<string>();
-  const slotKey = (x: number, y: number) => {
-    const col = Math.round((x - 40) / CANON_W);
-    const row = Math.round((y - 40) / CANON_H);
-    return `${col},${row}`;
-  };
-  data.clients.forEach((c) => {
-    if (c.canvas_x != null && c.canvas_y != null) {
-      slotOccupied.add(slotKey(c.canvas_x, c.canvas_y));
-    }
-  });
-  // Find next free slot (column-major, scanning row by row) — emits coords
-  // in the CANONICAL grid so the next reload at any density resolves them
-  // back to the same slot key.
-  let nextSlotIdx = 0;
-  const findFreeSlot = (): { x: number; y: number } => {
-    while (true) {
-      const col = nextSlotIdx % COLS;
-      const row = Math.floor(nextSlotIdx / COLS);
-      nextSlotIdx++;
-      if (!slotOccupied.has(`${col},${row}`)) {
-        slotOccupied.add(`${col},${row}`);
-        return { x: col * CANON_W + 40, y: row * CANON_H + 40 };
-      }
-    }
-  };
-
-  // Suppress unused-var lint while preserving the signature so callers can
-  // still pass colW/rowH for future use (e.g. unclassified pile spacing).
-  void colW; void rowH;
-
+  const { COL_W } = GRID[density];
+  const cols = DENSITY_COLS[density];
   let autoAccIdx = 0;
 
   data.clients.forEach((client, i) => {
@@ -146,18 +184,24 @@ function buildNodesFromApi(
       })),
     };
 
-    const hasPos = client.canvas_x != null && client.canvas_y != null;
-    const position = hasPos
-      ? { x: client.canvas_x!, y: client.canvas_y! }
-      : findFreeSlot();
-    if (!hasPos) {
-      autoPositioned.push({ node_type: 'client', node_id: client.id, x: position.x, y: position.y });
+    // Sorted mode: position is ALWAYS computed from sort rank — DB coords ignored.
+    // Free mode: use saved backend coords if present, else fall back to sorted slot.
+    let position: { x: number; y: number };
+    if (layoutMode === 'sorted') {
+      position = sortedPositions.get(client.id) ?? { x: 40, y: 40 };
+    } else {
+      if (client.canvas_x != null && client.canvas_y != null) {
+        position = { x: client.canvas_x, y: client.canvas_y };
+      } else {
+        position = sortedPositions.get(client.id) ?? { x: 40, y: 40 };
+      }
     }
 
     nodes.push({
       id: `client_${client.id}`,
       type: 'client',
       position,
+      draggable: layoutMode === 'free',
       data: { client: clientData, expanded: false, entryDelay: i * 30 } as ClientNodeData,
     });
   });
@@ -184,8 +228,7 @@ function buildNodesFromApi(
       position = { x: acc.canvas_x!, y: acc.canvas_y! };
     } else {
       const idx = autoAccIdx++;
-      position = { x: COLS * colW + 80, y: idx * 240 + 40 };
-      autoPositioned.push({ node_type: 'account', node_id: acc.id, x: position.x, y: position.y });
+      position = { x: cols * COL_W + 80, y: idx * 240 + 40 };
     }
 
     nodes.push({
@@ -196,7 +239,7 @@ function buildNodesFromApi(
     });
   });
 
-  return { nodes, autoPositioned };
+  return nodes;
 }
 
 // ── State types ─────────────────────────────────────────────────────────────
@@ -250,20 +293,42 @@ export default function SandboxCanvas() {
     } catch { /* ignore */ }
     return 'auto';
   });
-  const densityOverrideRef = useRef<DensityOverride>(densityOverride);
-  densityOverrideRef.current = densityOverride;
+
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(() => {
+    try {
+      const saved = localStorage.getItem('so:sandbox:layout-mode');
+      if (saved === 'sorted' || saved === 'free') return saved as LayoutMode;
+    } catch { /* ignore */ }
+    return 'sorted';
+  });
+
+  const [sortKey, setSortKey] = useState<SortKey>(() => {
+    try {
+      const saved = localStorage.getItem('so:sandbox:sort');
+      if (['name', 'recent', 'arrays', 'pinned'].includes(saved ?? '')) return saved as SortKey;
+    } catch { /* ignore */ }
+    return 'name';
+  });
 
   const clientCount = nodes.filter((n) => n.type === 'client').length;
   const density: Density = densityOverride === 'auto' ? deriveDensity(clientCount) : densityOverride;
 
   const { getIntersectingNodes, fitView, setCenter } = useReactFlow();
 
+  // Always-fresh refs used in callbacks to avoid stale closures
+  const densityOverrideRef = useRef<DensityOverride>(densityOverride);
+  densityOverrideRef.current = densityOverride;
+  const densityRef = useRef<Density>(density);
+  densityRef.current = density;
+  const layoutModeRef = useRef<LayoutMode>(layoutMode);
+  layoutModeRef.current = layoutMode;
+  const sortKeyRef = useRef<SortKey>(sortKey);
+  sortKeyRef.current = sortKey;
+
   // Pre-drag node positions captured at drag start so we can snap a node
-  // back if a merge dialog gets cancelled (otherwise the dragged card stays
-  // overlapping the target).
+  // back if a merge dialog gets cancelled.
   const dragOriginRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
-  // Always-fresh refs used in callbacks to avoid stale closures
   const nodesRef = useRef<Node[]>(nodes);
   nodesRef.current = nodes;
 
@@ -272,21 +337,14 @@ export default function SandboxCanvas() {
   const redoStackRef = useRef<UndoEntry[]>(redoStack);
   redoStackRef.current = redoStack;
 
-  // Per-node debounce timers for position persistence
+  // Per-node debounce timers for position persistence (free mode only)
   const posTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  // Latest pending (x, y) per node — flushed on unload so a quick
-  // drag-then-reload sequence doesn't lose positions.
   const pendingPosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-  // Forward-ref to savePosition so callbacks defined above it (like
-  // centerOnClientId) can call it without circular hook deps.
-  const savePositionRef = useRef<((nodeId: string, x: number, y: number) => void) | null>(null);
 
-  // Snapshot of client IDs before the portal-picker modal opens, used to
-  // detect which clients were newly created so we can push undo entries.
+  // Snapshot of client IDs before the portal-picker modal opens
   const clientIdsBeforeModal = useRef<Set<number>>(new Set());
 
-  // Esc closes the context menu (Cmd+Z / Cmd+Shift+Z are handled by the
-  // deep undo/redo stack below)
+  // Esc closes the context menu
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setContextMenu(null);
@@ -305,10 +363,13 @@ export default function SandboxCanvas() {
       const loadedCount = data.clients.length;
       const effectiveDensity: Density =
         densityOverrideRef.current === 'auto' ? deriveDensity(loadedCount) : densityOverrideRef.current;
-      const { COL_W: colW, ROW_H: rowH } = GRID[effectiveDensity];
-      const { nodes: built, autoPositioned } = buildNodesFromApi(data, colW, rowH);
-      // On silent reloads (e.g. delete-undo) zero out entryDelay so cards
-      // don't stagger-fade in every time the user undoes/redoes.
+      // Positions are computed from sort rank — never rely on DB canvas_x/canvas_y in sorted mode
+      const sortedPositions = computeSortedPositionsFromApiClients(
+        data.clients,
+        sortKeyRef.current,
+        effectiveDensity,
+      );
+      const built = buildNodesFromApi(data, layoutModeRef.current, sortedPositions, effectiveDensity);
       const finalNodes = opts.silent
         ? built.map((n) => (
             n.data && typeof n.data === 'object'
@@ -317,12 +378,7 @@ export default function SandboxCanvas() {
           ))
         : built;
       setNodes(finalNodes);
-      if (autoPositioned.length > 0) {
-        patchCanvasPositions(autoPositioned).catch(() => { /* best effort */ });
-      }
       setOriginLookup(data.clients_index ?? {});
-      // Skip fitView on silent reloads — viewport must stay exactly where
-      // the user had it. (Also skip when a saved viewport is restoring.)
       const hasSavedViewport = (() => {
         try {
           const raw = localStorage.getItem('so:sandbox:viewport');
@@ -343,28 +399,26 @@ export default function SandboxCanvas() {
 
   useEffect(() => { void loadCanvas(); }, [loadCanvas]);
 
-  /** After a new client is created, scroll/zoom the canvas to focus on it
-   *  so the user sees the result of their action instead of an unrelated
-   *  area of the graph. Polls briefly because the node may not exist in
-   *  state yet when loadCanvas is still in flight. */
+  /** After a new client is created, select it and pan to it so the user
+   *  sees the result. In sorted mode, uses fitView to show its grid slot;
+   *  in free mode, setCenter to the exact position. */
   const centerOnClientId = useCallback((numericId: number) => {
     const nodeId = `client_${numericId}`;
     const tryFocus = (attempt = 0) => {
       const node = nodesRef.current.find((n) => n.id === nodeId);
       if (node) {
-        // Select it so it visually pops + center it under the viewport
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })));
-        setCenter(node.position.x + 144, node.position.y + 110, { zoom: 1, duration: 600 });
-        // Persist the auto-assigned grid slot so reloads land in the same
-        // place. Routed through a ref because savePosition is declared later
-        // in this component but we capture it at call time.
-        savePositionRef.current?.(nodeId, node.position.x, node.position.y);
+        if (layoutModeRef.current === 'free') {
+          setCenter(node.position.x + 144, node.position.y + 110, { zoom: 1, duration: 600 });
+        } else {
+          fitView({ nodes: [{ id: nodeId }], padding: 0.8, duration: 400, maxZoom: 1.0 });
+        }
         return;
       }
       if (attempt < 20) setTimeout(() => tryFocus(attempt + 1), 100);
     };
     tryFocus();
-  }, [setCenter, setNodes]);
+  }, [setCenter, setNodes, fitView]);
 
   // Refresh the canvas when a new capture completes
   useEffect(() => {
@@ -385,7 +439,6 @@ export default function SandboxCanvas() {
     if (stack.length === 0) return;
     const [top, ...rest] = stack;
     setUndoStack(rest);
-    // Only entries with a redo fn go to the redo stack
     if (top.redo) setRedoStack(prev => [top, ...prev]);
     top.undo();
     toast.show(`Undid: ${top.label}`, 'info');
@@ -402,7 +455,6 @@ export default function SandboxCanvas() {
     toast.show(`Redid: ${top.label}`, 'info');
   }, [toast]);
 
-  // Global Cmd/Ctrl+Z (undo) and Cmd/Ctrl+Shift+Z (redo); skip when focus is in an input
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement) {
@@ -505,22 +557,11 @@ export default function SandboxCanvas() {
         ? (removedNode.data as ClientNodeData).client.name
         : (removedNode.data as UnclassifiedNodeData).account?.account_number ?? 'item';
 
-      // Optimistic UI: strip it now
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
 
       if (isClient && !isNaN(numId)) {
-        // Backend DELETE returns an undo_token good for 5 minutes; we keep a
-        // mutable ref to it because each undo→redo cycle consumes the old
-        // token and the redo's new DELETE produces a fresh one. Without this,
-        // the second Cmd+Z after a Cmd+Shift+Z would silently fail.
         let currentToken: string | null = null;
-        // Suppress entry animation on the restored card so the canvas doesn't
-        // flash the staggered pop-in every time the user hits undo.
-        const restoreViaReload = () => {
-          // Silent reload: no loading spinner, no viewport jump, no entry
-          // animation re-fire. Just swap the data underneath.
-          void loadCanvas({ silent: true });
-        };
+        const restoreViaReload = () => { void loadCanvas({ silent: true }); };
 
         deleteClient(numId)
           .then((res) => {
@@ -541,8 +582,6 @@ export default function SandboxCanvas() {
                   });
               },
               redo: () => {
-                // Strip from canvas immediately, then re-delete on backend
-                // and capture the FRESH undo_token so the next Cmd+Z works.
                 setNodes((ns) => ns.filter((n) => n.id !== nodeId));
                 deleteClient(numId)
                   .then((res2) => { currentToken = res2.undo_token; })
@@ -558,17 +597,11 @@ export default function SandboxCanvas() {
             toast.show('Delete failed — reverted.', 'error');
           });
       } else if (isAccount && !isNaN(numId)) {
-        // Unclassified accounts: we don't have a hard-delete endpoint, so
-        // this is a visual-only hide that undo restores from snapshot. The
-        // backend row still exists; reload will re-surface it.
         toast.show(`Hidden ${removedName}. Cmd+Z to restore.`, 'info');
         pushUndo({
           label: `Hide account ${removedName}`,
           timestamp: Date.now(),
           undo: () => {
-            // Strip the entry-animation delay from the restored node so it
-            // doesn't pop in fresh; user just hit undo, they want it back
-            // exactly where it was.
             const frozen = snapshot.map((n) =>
               n.id === nodeId && n.data && typeof n.data === 'object'
                 ? { ...n, data: { ...n.data, entryDelay: 0 } as typeof n.data }
@@ -730,15 +763,14 @@ export default function SandboxCanvas() {
       );
       setMergeDialog(null);
 
-      // Undo is UI-only — no unmerge API exists; reload will show merged server state
       pushUndo({
         label: `Merge "${oData.client.name}" into "${sData.client.name}"`,
         timestamp: Date.now(),
         undo: () => {
           setNodes(snapshot);
-          // NOTE: server state is still merged — this is a view-only revert
+          // NOTE: server state is still merged — this is a view-only revert.
+          // TODO: add /v1/account/clients/unmerge endpoint for true server-side undo.
         },
-        // No redo: can't reliably re-merge after a UI-only undo
       });
 
       if (survivorId.startsWith('client_') && otherId.startsWith('client_')) {
@@ -759,10 +791,6 @@ export default function SandboxCanvas() {
   const cancelMerge = useCallback(() => {
     setMergeDialog((dlg) => {
       if (dlg) {
-        // Snap the dragged card back to where it was before the drag started
-        // so it doesn't sit on top of the target after the user bails. The
-        // backend position never changed (we don't savePosition on a merge
-        // drop), so visual-only restore is enough.
         const { sourceId, sourceOrigin } = dlg;
         setNodes((ns) =>
           ns.map((n) => (n.id === sourceId ? { ...n, position: sourceOrigin } : n)),
@@ -773,13 +801,8 @@ export default function SandboxCanvas() {
     });
   }, [setNodes]);
 
-  // ── Position persistence (debounced 800 ms per node) ─────────────────────
+  // ── Position persistence (debounced, free mode only) ──────────────────────
 
-  // Debounced position persistence. We used to wait 800ms but that meant a
-  // drag → quick reload sequence would lose the position (the timer never
-  // fired before the page tore down). Now we use a short 150ms debounce so
-  // rapid drag bursts coalesce but a normal "drop card, reload" sequence
-  // always lands the save, AND we flush every pending timer on unload.
   const flushPositions = useCallback(() => {
     const updates: { node_type: 'client' | 'account'; node_id: number; x: number; y: number }[] = [];
     for (const [nodeId, pending] of pendingPosRef.current.entries()) {
@@ -794,7 +817,6 @@ export default function SandboxCanvas() {
     pendingPosRef.current.clear();
     for (const t of posTimers.current.values()) clearTimeout(t);
     posTimers.current.clear();
-    // Use sendBeacon for unload-time saves — fetch may be cancelled mid-flight.
     try {
       const blob = new Blob([JSON.stringify(updates)], { type: 'application/json' });
       const ok = navigator.sendBeacon?.('/v1/sandbox/positions', blob);
@@ -803,7 +825,6 @@ export default function SandboxCanvas() {
     patchCanvasPositions(updates).catch(() => { /* best effort */ });
   }, []);
 
-  // Persist any pending drag positions when the user navigates away.
   useEffect(() => {
     const handler = () => flushPositions();
     window.addEventListener('beforeunload', handler);
@@ -811,24 +832,14 @@ export default function SandboxCanvas() {
     return () => {
       window.removeEventListener('beforeunload', handler);
       window.removeEventListener('pagehide', handler);
-      // Also flush on component unmount (tab close inside SPA, route change)
       flushPositions();
     };
   }, [flushPositions]);
 
   const savePosition = useCallback((nodeId: string, x: number, y: number) => {
-    // Snap client positions to the canonical grid so they survive density
-    // tier changes + look tidy. Accounts (unclassified pile) save raw coords.
-    let finalX = x, finalY = y;
-    if (nodeId.startsWith('client_')) {
-      const CANON_W = GRID.full.COL_W;
-      const CANON_H = GRID.full.ROW_H;
-      const col = Math.max(0, Math.round((x - 40) / CANON_W));
-      const row = Math.max(0, Math.round((y - 40) / CANON_H));
-      finalX = col * CANON_W + 40;
-      finalY = row * CANON_H + 40;
-    }
-    pendingPosRef.current.set(nodeId, { x: finalX, y: finalY });
+    // Only save positions in free mode — sorted mode positions are computed, not stored.
+    if (layoutModeRef.current === 'sorted') return;
+    pendingPosRef.current.set(nodeId, { x, y });
     const existing = posTimers.current.get(nodeId);
     if (existing) clearTimeout(existing);
     posTimers.current.set(nodeId, setTimeout(() => {
@@ -846,12 +857,11 @@ export default function SandboxCanvas() {
         node_id: numId,
         x: pending.x,
         y: pending.y,
-      }]).catch(() => { /* position drift is acceptable; corrected on next reload */ });
+      }]).catch(() => { /* position drift is acceptable */ });
     }, 150));
   }, []);
-  savePositionRef.current = savePosition;
 
-  // ── Drag: live merge-intent highlight ────────────────────────────────────
+  // ── Drag: live merge-intent highlight (free mode only) ────────────────────
 
   const onNodeDragStart = useCallback(
     (_event: MouseEvent | TouchEvent, node: Node) => {
@@ -893,8 +903,6 @@ export default function SandboxCanvas() {
     );
   }, [setNodes]);
 
-  // ── Drag stop: detect attach / merge, then persist position ──────────────
-
   const onNodeDragStop = useCallback(
     (_event: MouseEvent | TouchEvent, node: Node) => {
       clearMergeIntent();
@@ -920,52 +928,98 @@ export default function SandboxCanvas() {
         }
       }
 
-      // Not a merge / attach drop — clear any cached origin and persist.
       dragOriginRef.current.delete(node.id);
       savePosition(node.id, node.position.x, node.position.y);
     },
     [getIntersectingNodes, attachToClient, savePosition, clearMergeIntent],
   );
 
-  // ── Auto-arrange ──────────────────────────────────────────────────────────
+  // ── Layout mode / sort key controls ──────────────────────────────────────
+
+  const handleLayoutModeChange = useCallback((mode: LayoutMode) => {
+    setLayoutMode(mode);
+    try { localStorage.setItem('so:sandbox:layout-mode', mode); } catch { /* ignore */ }
+
+    if (mode === 'sorted') {
+      // Recompute positions from sort key and disable client node dragging
+      setNodes((ns) => {
+        const clientNodes = ns.filter((n) => n.type === 'client');
+        const positions = computeSortedPositionsFromNodes(clientNodes, sortKeyRef.current, densityRef.current);
+        return ns.map((n) => {
+          if (n.type !== 'client') return n;
+          const pos = positions.get(n.id);
+          return { ...n, draggable: false, ...(pos ? { position: pos } : {}) };
+        });
+      });
+      setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
+    } else {
+      // Free mode — re-enable client node dragging
+      setNodes((ns) =>
+        ns.map((n) => (n.type === 'client' ? { ...n, draggable: true } : n)),
+      );
+    }
+  }, [fitView, setNodes]);
+
+  const handleSortKeyChange = useCallback((key: SortKey) => {
+    setSortKey(key);
+    try { localStorage.setItem('so:sandbox:sort', key); } catch { /* ignore */ }
+
+    if (layoutModeRef.current === 'sorted') {
+      setNodes((ns) => {
+        const clientNodes = ns.filter((n) => n.type === 'client');
+        const positions = computeSortedPositionsFromNodes(clientNodes, key, densityRef.current);
+        return ns.map((n) => {
+          if (n.type !== 'client') return n;
+          const pos = positions.get(n.id);
+          return pos ? { ...n, position: pos } : n;
+        });
+      });
+    }
+  }, [setNodes]);
+
+  // ── Auto-arrange (free mode) ──────────────────────────────────────────────
 
   const autoArrange = useCallback(() => {
-    const { COL_W: colW, ROW_H: rowH } = GRID[density];
+    const { COL_W: colW } = GRID[densityRef.current];
+    const cols = DENSITY_COLS[densityRef.current];
     setNodes((ns) => {
       const clientNodes = ns.filter((n) => n.type === 'client');
+      const positions = computeSortedPositionsFromNodes(clientNodes, sortKeyRef.current, densityRef.current);
       const uncNodes = ns.filter((n) => n.type === 'unclassified');
       return [
-        ...clientNodes.map((n, i) => ({
-          ...n,
-          position: { x: (i % COLS) * colW + 40, y: Math.floor(i / COLS) * rowH + 40 },
-        })),
+        ...clientNodes.map((n) => {
+          const pos = positions.get(n.id);
+          return pos ? { ...n, position: pos } : n;
+        }),
         ...uncNodes.map((n, i) => ({
           ...n,
-          position: { x: COLS * colW + 80, y: i * 240 + 40 },
+          position: { x: cols * colW + 80, y: i * 240 + 40 },
         })),
       ];
     });
     setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
-  }, [density, setNodes, fitView]);
+  }, [setNodes, fitView]);
 
   // ── Density change ────────────────────────────────────────────────────────
 
-  // Flag is set only on explicit user toolbar action so auto-arrange fires
-  // after the state update settles with the new density constants, but NOT
-  // on initial load (which would stomp saved card positions).
-  const userDensityActionRef = useRef(false);
-
   const handleDensityChange = useCallback((override: DensityOverride) => {
-    userDensityActionRef.current = true;
     setDensityOverride(override);
     try { localStorage.setItem('so:sandbox:density', override); } catch { /* ignore */ }
-  }, []);
 
-  useEffect(() => {
-    if (!userDensityActionRef.current) return;
-    userDensityActionRef.current = false;
-    autoArrange();
-  }, [density, autoArrange]);
+    if (layoutModeRef.current === 'sorted') {
+      const count = nodesRef.current.filter((n) => n.type === 'client').length;
+      const newDensity: Density = override === 'auto' ? deriveDensity(count) : override;
+      setNodes((ns) => {
+        const clientNodes = ns.filter((n) => n.type === 'client');
+        const positions = computeSortedPositionsFromNodes(clientNodes, sortKeyRef.current, newDensity);
+        return ns.map((n) => {
+          if (n.type !== 'client') return n;
+          const pos = positions.get(n.id);
+          return pos ? { ...n, position: pos } : n;
+        });
+      });
+    }
+  }, [setNodes]);
 
   // ── Cross-client account drag (HTML5 dnd) ────────────────────────────────
 
@@ -1066,8 +1120,6 @@ export default function SandboxCanvas() {
         const m = clientId.match(/^client_(\d+)$/);
         return m ? parseInt(m[1], 10) : null;
       })();
-      // Filter narrows to JUST this login group: same utility AND same origin
-      // AND (when provided) same login id (customer_number || account_number).
       const detachedAccounts = d.client.accounts.filter((a) => {
         if (a.utility !== utility) return false;
         const aOrigin =
@@ -1090,9 +1142,6 @@ export default function SandboxCanvas() {
         setNodes((ns) => {
           const updatedClient: ClientData = {
             ...d.client,
-            // Strip only the accounts we actually detached, not every account
-            // of this utility (which would nuke a sibling login group sharing
-            // the same provider).
             accounts: d.client.accounts.filter((a) => !detachedAccounts.includes(a)),
           };
           const baseX = clientNode.position.x + 360;
@@ -1297,6 +1346,20 @@ export default function SandboxCanvas() {
         applyPin(wasPinned);
         toast.show('Pin failed — reverted.', 'error');
       });
+
+      // In sorted mode with "pinned" sort key, recompute positions after pin change
+      if (layoutModeRef.current === 'sorted') {
+        setNodes((ns) => {
+          const clientNodes = ns.filter((n) => n.type === 'client');
+          const positions = computeSortedPositionsFromNodes(clientNodes, sortKeyRef.current, densityRef.current);
+          return ns.map((n) => {
+            if (n.type !== 'client') return n;
+            const pos = positions.get(n.id);
+            return pos ? { ...n, position: pos } : n;
+          });
+        });
+      }
+
       pushUndo({
         label: next ? `Pin "${(node.data as ClientNodeData).client.name}"` : `Unpin "${(node.data as ClientNodeData).client.name}"`,
         timestamp: Date.now(),
@@ -1338,7 +1401,6 @@ export default function SandboxCanvas() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   const isEmpty = !loading && !loadError && nodes.length === 0;
-
   const topUndo = undoStack[0] ?? null;
   const topRedo = redoStack[0] ?? null;
 
@@ -1370,7 +1432,6 @@ export default function SandboxCanvas() {
           onNodeDragStop={onNodeDragStop}
           nodeTypes={NODE_TYPES}
           nodesConnectable={false}
-          // Shift-click adds the node to the selection; Shift-drag draws a box-select
           multiSelectionKeyCode="Shift"
           selectionKeyCode="Shift"
           selectNodesOnDrag={false}
@@ -1399,13 +1460,12 @@ export default function SandboxCanvas() {
           proOptions={{ hideAttribution: true }}
         >
           <Background variant={BackgroundVariant.Dots} color="#9caf88" gap={22} size={1.6} />
-
           <Controls showInteractive={false} />
 
           {/* Toolbar — top-right */}
           {!loading && !isEmpty && (
             <Panel position="top-right">
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap justify-end">
                 <button
                   type="button"
                   data-walkthrough="add-client-btn"
@@ -1423,14 +1483,20 @@ export default function SandboxCanvas() {
                   + Add Client
                 </button>
                 <ToolbarButton onClick={() => setShowAddModal(true)}>
-                  + Add empty
+                  + Add client manually
                 </ToolbarButton>
                 <DensityControl
                   override={densityOverride}
                   derived={density}
                   onChange={handleDensityChange}
                 />
-                <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
+                <LayoutModeControl layoutMode={layoutMode} onChange={handleLayoutModeChange} />
+                {layoutMode === 'sorted' && (
+                  <SortKeyControl sortKey={sortKey} onChange={handleSortKeyChange} />
+                )}
+                {layoutMode === 'free' && (
+                  <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
+                )}
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
                 </ToolbarButton>
@@ -1448,8 +1514,6 @@ export default function SandboxCanvas() {
                           .join(', ');
                         const more = n > 3 ? ` and ${n - 3} more` : '';
                         if (!confirm(`Delete ${n} client${n === 1 ? '' : 's'}? (${names}${more})\n\nCmd+Z undoes within 5 minutes.`)) return;
-                        // Fire deletes sequentially so each gets its own
-                        // undo stack entry (so Cmd+Z peels them off one by one).
                         for (const s of selectedClients) deleteNode(s.id);
                       }}
                       className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 ring-1 ring-red-300 transition-colors hover:bg-red-100"
@@ -1492,7 +1556,7 @@ export default function SandboxCanvas() {
           )}
         </ReactFlow>
 
-        {/* Dev-only sandbox tools — renders nothing in prod (gated by /v1/dev/status) */}
+        {/* Dev-only sandbox tools */}
         <DevPanel
           onChange={() => void loadCanvas()}
           clients={nodes
@@ -1619,14 +1683,10 @@ export default function SandboxCanvas() {
                   },
                 });
               }
-              // Center on the last newly created client so the user actually
-              // sees what they just added.
               const focus = newClients[newClients.length - 1];
               if (focus) {
                 centerOnClientId(focus.id);
                 setLastCapturedClientId(focus.id);
-                // Auto-expand the new card so the login row is visible for
-                // the walkthrough "captured" pointer.
                 setNodes((ns) =>
                   ns.map((n) =>
                     n.id === `client_${focus.id}`
@@ -1666,7 +1726,7 @@ export default function SandboxCanvas() {
           }}
         />
 
-        {/* Walkthrough — only once canvas is loaded and has at least one client */}
+        {/* Walkthrough */}
         {!loading && !loadError && nodes.filter((n) => n.type === 'client').length > 0 && (
           <SandboxWalkthrough
             clientCount={nodes.filter((n) => n.type === 'client').length}
@@ -1698,6 +1758,61 @@ export default function SandboxCanvas() {
 }
 
 // ── Small presentational sub-components ────────────────────────────────────
+
+function LayoutModeControl({
+  layoutMode,
+  onChange,
+}: {
+  layoutMode: LayoutMode;
+  onChange: (v: LayoutMode) => void;
+}) {
+  return (
+    <div className="flex overflow-hidden rounded-lg border border-cream-border divide-x divide-cream-border">
+      <button
+        type="button"
+        className={[
+          'px-2.5 py-1.5 text-xs font-medium transition-colors',
+          layoutMode === 'sorted'
+            ? 'bg-primary-50 text-primary-800'
+            : 'bg-white text-zinc-600 hover:bg-zinc-50 active:bg-zinc-100',
+        ].join(' ')}
+        onClick={() => onChange('sorted')}
+        title="Sorted layout — positions computed from sort key, no randomization"
+      >
+        ≡ Sorted
+      </button>
+      <button
+        type="button"
+        className={[
+          'px-2.5 py-1.5 text-xs font-medium transition-colors',
+          layoutMode === 'free'
+            ? 'bg-primary-50 text-primary-800'
+            : 'bg-white text-zinc-600 hover:bg-zinc-50 active:bg-zinc-100',
+        ].join(' ')}
+        onClick={() => onChange('free')}
+        title="Free layout — drag cards to any position"
+      >
+        ✦ Free
+      </button>
+    </div>
+  );
+}
+
+function SortKeyControl({ sortKey, onChange }: { sortKey: SortKey; onChange: (v: SortKey) => void }) {
+  return (
+    <select
+      value={sortKey}
+      onChange={(e) => onChange(e.target.value as SortKey)}
+      className="rounded-lg border border-cream-border bg-white px-2 py-1.5 text-xs font-medium text-zinc-700 shadow-sm hover:border-zinc-300 cursor-pointer"
+      title="Sort key for card layout"
+    >
+      <option value="name">Name (A→Z)</option>
+      <option value="recent">Recently captured</option>
+      <option value="arrays">Most arrays</option>
+      <option value="pinned">Pinned first</option>
+    </select>
+  );
+}
 
 function DensityControl({
   override,
