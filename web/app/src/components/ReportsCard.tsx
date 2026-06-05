@@ -195,11 +195,11 @@ export function ReportsCard({ account, onAccountChange }: Props) {
 
       {/* Frequency selector — segmented control */}
       <div className="mt-6">
-        <span className="text-sm font-medium text-zinc-700">Schedule</span>
+        <span className="block text-sm font-medium text-zinc-700">Schedule</span>
         <div
           role="radiogroup"
           aria-label="Report schedule"
-          className="mt-2 inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1"
+          className="mt-3 inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-1"
         >
           {FREQUENCIES.map((f) => {
             const selected = freq === f.value;
