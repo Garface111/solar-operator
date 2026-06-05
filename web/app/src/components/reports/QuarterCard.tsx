@@ -4,7 +4,7 @@ import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
 import type { ClientRow } from "../../lib/api";
-import { sendReportNow, downloadClientReport } from "../../lib/api";
+import { sendReportNow, downloadClientReport, updateClient } from "../../lib/api";
 
 type Status = "draft" | "ready" | "sent" | "empty";
 
@@ -152,6 +152,30 @@ function ClientDeliveryRow({
     }
   }
 
+  const [emailDraft, setEmailDraft] = useState("");
+  const [savingEmail, setSavingEmail] = useState(false);
+
+  async function saveEmail() {
+    const v = emailDraft.trim();
+    if (!v || savingEmail) return;
+    // Soft email shape check — backend validates definitively.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
+      toast.error("That doesn't look like an email address.");
+      return;
+    }
+    setSavingEmail(true);
+    try {
+      await updateClient(client.id, { contact_email: v });
+      toast.success(`Saved email for ${client.name}.`);
+      setEmailDraft("");
+      onRefresh?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't save email");
+    } finally {
+      setSavingEmail(false);
+    }
+  }
+
   const statusChip = {
     sent:     <Chip variant="emerald">Sent</Chip>,
     bounced:  <Chip variant="red">Bounced</Chip>,
@@ -174,8 +198,29 @@ function ClientDeliveryRow({
           </span>
         )}
         {deliveryStatus === "no_email" && (
-          <span className="ml-2 text-xs text-amber-600">
-            add contact email
+          <span className="ml-2 inline-flex items-center gap-1.5 align-middle">
+            <input
+              type="email"
+              value={emailDraft}
+              onChange={(e) => setEmailDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); void saveEmail(); }
+              }}
+              placeholder="add contact email…"
+              disabled={savingEmail}
+              className="w-48 rounded-md border border-amber-300 bg-amber-50/40 px-2 py-0.5 text-xs text-amber-900 placeholder:text-amber-500/70 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-400/40"
+              aria-label={`Contact email for ${client.name}`}
+            />
+            {emailDraft.trim() && (
+              <button
+                type="button"
+                onClick={() => void saveEmail()}
+                disabled={savingEmail}
+                className="rounded-md bg-amber-500 px-2 py-0.5 text-xs font-medium text-white shadow-sm hover:bg-amber-600 disabled:opacity-50"
+              >
+                {savingEmail ? <Spinner className="h-3 w-3" /> : "Save"}
+              </button>
+            )}
           </span>
         )}
       </div>

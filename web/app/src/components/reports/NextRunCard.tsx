@@ -9,6 +9,7 @@ import {
   getNextRun,
   listClients,
   sendReportNow,
+  updateClient,
 } from "../../lib/api";
 
 interface Props {
@@ -227,9 +228,16 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
                       />
                       <span className="text-sm text-zinc-800">{c.name}</span>
                       {!c.contact_email && (
-                        <span className="ml-auto text-[11px] text-amber-600">
-                          no email
-                        </span>
+                        <InlineEmailFill
+                          clientId={c.id}
+                          clientName={c.name}
+                          onSaved={() => {
+                            // Refetch active clients so the row hydrates and checkbox enables.
+                            listClients()
+                              .then((all) => setClientList(all.filter((cl) => cl.active)))
+                              .catch(() => {});
+                          }}
+                        />
                       )}
                     </label>
                   </li>
@@ -240,5 +248,70 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
         )}
       </Modal>
     </>
+  );
+}
+
+/** Inline "fill in this client's email" input. Appears in NextRunCard's
+ *  per-client picker rows when contact_email is null. Stops checkbox
+ *  toggle propagation so typing doesn't re-fire the parent <label>. */
+function InlineEmailFill({
+  clientId,
+  clientName,
+  onSaved,
+}: {
+  clientId: number;
+  clientName: string;
+  onSaved: () => void;
+}) {
+  const toast = useToast();
+  const [v, setV] = useState("");
+  const [saving, setSaving] = useState(false);
+  async function save() {
+    const val = v.trim();
+    if (!val || saving) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) {
+      toast.error("That doesn't look like an email.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateClient(clientId, { contact_email: val });
+      toast.success(`Saved email for ${clientName}.`);
+      setV("");
+      onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't save");
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <span
+      className="ml-auto inline-flex items-center gap-1"
+      onClick={(e) => e.preventDefault()}
+    >
+      <input
+        type="email"
+        value={v}
+        onChange={(e) => setV(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); void save(); }
+        }}
+        placeholder="add email…"
+        disabled={saving}
+        className="w-40 rounded-md border border-amber-300 bg-amber-50/40 px-1.5 py-0.5 text-[11px] text-amber-900 placeholder:text-amber-500/70 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-400/40"
+        aria-label={`Contact email for ${clientName}`}
+      />
+      {v.trim() && (
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving}
+          className="rounded-md bg-amber-500 px-1.5 py-0.5 text-[11px] font-medium text-white shadow-sm hover:bg-amber-600 disabled:opacity-50"
+        >
+          {saving ? <Spinner className="h-3 w-3" /> : "Save"}
+        </button>
+      )}
+    </span>
   );
 }
