@@ -52,7 +52,7 @@ MAX_TEXT_CHARS = 60_000
 MAX_COMMIT_ROWS = 500
 
 # Sonnet 4.5 for the richer hierarchical extraction (was Haiku for the flat one).
-ANTHROPIC_MODEL = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5-20250514")
+ANTHROPIC_MODEL = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5")
 OPENAI_MODEL = os.getenv("INGEST_OPENAI_MODEL", "gpt-4o-mini")
 
 # Build few-shot examples to embed in the prompt (compact JSON — LLM reads it fine).

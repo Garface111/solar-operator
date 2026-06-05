@@ -192,7 +192,7 @@ def regenerate_template_via_ai(
     Returns {'reply': str, 'body': str, 'subject': str | None}.
     Raises httpx.HTTPStatusError on API failure, ValueError on bad JSON.
     """
-    model = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5-20250514")
+    model = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5")
     system = (
         f"{_TEMPLATE_SYSTEM_PROMPT}\n\n"
         f"Current subject template:\n{current_subject}\n\n"
