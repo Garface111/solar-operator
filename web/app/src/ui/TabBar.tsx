@@ -25,7 +25,7 @@ export function TabBar({ tabs, unvisited }: TabBarProps) {
   return (
     <nav className="sticky top-[57px] z-20 border-b border-cream-border bg-cream/90 backdrop-blur">
       <div className="mx-auto max-w-4xl px-4">
-        <div className="flex gap-6 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="flex w-full">
           {tabs.map((tab) => {
             const isUnvisited = unvisited?.has(tab.to) ?? false;
             return (
@@ -34,7 +34,7 @@ export function TabBar({ tabs, unvisited }: TabBarProps) {
                 to={tab.to}
                 className={({ isActive }) =>
                   [
-                    "relative -mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 text-sm",
+                    "relative -mb-px inline-flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap border-b-2 py-4 text-base",
                     "transition-colors duration-150 ease-in-out",
                     isActive
                       ? "border-primary-500 font-semibold text-zinc-900"
