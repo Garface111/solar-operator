@@ -21,6 +21,7 @@ import {
   patchCanvasPositions,
   pinClient,
   reassignAccount,
+  reassignArray,
   updateClient,
   deleteClient,
   undoDelete,
@@ -182,6 +183,7 @@ function buildNodesFromApi(
               name: acc.array_name,
               nepool_gis_id: acc.nepool_gis_id ?? '',
               mwh_per_qtr: 0,
+              reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
             }]
           : [],
       })),
@@ -221,6 +223,7 @@ function buildNodesFromApi(
             name: acc.array_name,
             nepool_gis_id: acc.nepool_gis_id ?? '',
             mwh_per_qtr: 0,
+            reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
           }]
         : [],
     };
@@ -458,6 +461,9 @@ export default function SandboxCanvas() {
   // after their useCallbacks resolve.
   const moveLoginRef = useRef<((src: string, util: 'GMP'|'VEC'|'WEC', dst: string, origin?: number|null, loginId?: string|null) => void) | null>(null);
   const moveAccountRef = useRef<((src: string, accountId: string, dst: string) => void) | null>(null);
+  const moveArrayRef = useRef<((src: string, arrayId: string, dst: string, subMeterCount: number) => void) | null>(null);
+  // Ref kept fresh on every render so the stale-closure onDrop handler can call toast.
+  const toastRef = useRef(toast);
 
   // ── Rescue handler: ReactFlow eats dragover/drop on its pane wrapper, so
   // login row drops onto client cards silently fail despite the card having
@@ -480,7 +486,11 @@ export default function SandboxCanvas() {
     const onDragOver = (e: DragEvent) => {
       if (!e.dataTransfer) return;
       const types = Array.from(e.dataTransfer.types);
-      if (!types.includes('application/x-so-login') && !types.includes('application/x-so-account')) return;
+      if (
+        !types.includes('application/x-so-login') &&
+        !types.includes('application/x-so-account') &&
+        !types.includes('application/x-so-array')
+      ) return;
       // Without preventDefault here, drop never fires (browser default is
       // to refuse drops). React Flow's wrapper swallows the bubbled event
       // from the card, so we have to do it ourselves at document level.
@@ -492,8 +502,14 @@ export default function SandboxCanvas() {
       if (!e.dataTransfer) return;
       const loginRaw = e.dataTransfer.getData('application/x-so-login');
       const accountRaw = e.dataTransfer.getData('application/x-so-account');
-      if (!loginRaw && !accountRaw) return;
+      const arrayRaw = e.dataTransfer.getData('application/x-so-array');
+      if (!loginRaw && !accountRaw && !arrayRaw) return;
       const targetClientId = findTargetClientId(e.clientX, e.clientY);
+      if (arrayRaw && !targetClientId) {
+        toastRef.current.show('Drop on a client card to move this array', 'info');
+        e.preventDefault();
+        return;
+      }
       if (!targetClientId) return;
       e.preventDefault();
       e.stopPropagation();
@@ -512,6 +528,18 @@ export default function SandboxCanvas() {
           const { srcClientId, accountId } = JSON.parse(accountRaw) as { srcClientId: string; accountId: string };
           if (srcClientId !== targetClientId) {
             moveAccountRef.current?.(srcClientId, accountId, targetClientId);
+          }
+        } else if (arrayRaw) {
+          const { srcClientId, arrayId, subMeterCount } = JSON.parse(arrayRaw) as {
+            srcClientId: string;
+            arrayId: string;
+            subMeterCount: number;
+            arrayName: string;
+            accountId: string;
+            accountNumber: string;
+          };
+          if (srcClientId !== targetClientId) {
+            moveArrayRef.current?.(srcClientId, arrayId, targetClientId, subMeterCount);
           }
         }
       } catch { /* malformed payload */ }
@@ -1465,9 +1493,105 @@ export default function SandboxCanvas() {
     [setNodes, toast, loadCanvas, pushUndo],
   );
 
+  // ── Array-level drag ──────────────────────────────────────────────────────
+
+  const moveArrayToClient = useCallback(
+    (srcClientId: string, arrayId: string, dstClientId: string, subMeterCount: number) => {
+      if (srcClientId === dstClientId) return;
+      if (subMeterCount > 1) {
+        if (!window.confirm(
+          `This array has ${subMeterCount} sub-meter accounts — they'll move together. Proceed?`,
+        )) return;
+      }
+      const current = nodesRef.current;
+      const src = current.find((n) => n.id === srcClientId && n.type === 'client');
+      const dst = current.find((n) => n.id === dstClientId && n.type === 'client');
+      if (!src || !dst) return;
+
+      const srcData = src.data as ClientNodeData;
+      const dstData = dst.data as ClientNodeData;
+
+      const movedAccounts = srcData.client.accounts.filter((a) =>
+        a.arrays.some((ar) => ar.id === arrayId),
+      );
+      if (movedAccounts.length === 0) return;
+
+      const arrayName = movedAccounts[0].arrays.find((ar) => ar.id === arrayId)?.name ?? arrayId;
+      const snapshot = current;
+
+      const applyMove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id === srcClientId) {
+              return {
+                ...n,
+                data: {
+                  ...srcData,
+                  client: {
+                    ...srcData.client,
+                    accounts: srcData.client.accounts.filter((a) => !movedAccounts.includes(a)),
+                  },
+                },
+              };
+            }
+            if (n.id === dstClientId) {
+              return {
+                ...n,
+                data: {
+                  ...dstData,
+                  client: {
+                    ...dstData.client,
+                    accounts: [...dstData.client.accounts, ...movedAccounts],
+                  },
+                },
+              };
+            }
+            return n;
+          }),
+        );
+
+      applyMove();
+      toast.show(`Array "${arrayName}" → ${dstData.client.name}.`, 'success');
+
+      const arrNumId = parseInt(arrayId.replace('arr_', ''), 10);
+      const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
+      const srcNumId = parseInt(srcClientId.replace('client_', ''), 10);
+
+      if (!isNaN(arrNumId) && !isNaN(dstNumId)) {
+        reassignArray(arrNumId, dstNumId)
+          .then(() => { void loadCanvas(); })
+          .catch(() => {
+            setNodes(snapshot);
+            toast.show('Move failed — reverted.', 'error');
+          });
+        if (!isNaN(srcNumId)) {
+          pushUndo({
+            label: `Move array "${arrayName}" to ${dstData.client.name}`,
+            timestamp: Date.now(),
+            undo: () => {
+              setNodes(snapshot);
+              reassignArray(arrNumId, srcNumId).catch(() =>
+                toast.show('Undo array move failed.', 'error'),
+              );
+            },
+            redo: () => {
+              applyMove();
+              reassignArray(arrNumId, dstNumId)
+                .then(() => { void loadCanvas(); })
+                .catch(() => toast.show('Redo array move failed.', 'error'));
+            },
+          });
+        }
+      }
+    },
+    [setNodes, toast, loadCanvas, pushUndo],
+  );
+
   // Bind drag-rescue forward-refs now that the callbacks exist.
   moveLoginRef.current = moveLoginToClient;
   moveAccountRef.current = moveAccountToClient;
+  moveArrayRef.current = moveArrayToClient;
+  toastRef.current = toast;
 
   const togglePin = useCallback(
     (clientId: string) => {
@@ -1614,6 +1738,7 @@ export default function SandboxCanvas() {
     moveAccountToClient,
     detachLogin,
     moveLoginToClient,
+    moveArrayToClient,
     getOriginClient: (cid: number) => originLookup[cid] ?? null,
     updateClient: updateClientField,
     togglePin,

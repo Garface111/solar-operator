@@ -37,6 +37,7 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array]) -> dict:
         "array_name": arr.name if arr else None,
         "nepool_gis_id": arr.nepool_gis_id if arr else None,
         "login_origin_client_id": getattr(acc, "login_origin_client_id", None),
+        "array_reassigned_at": arr.reassigned_at.isoformat() if arr and arr.reassigned_at else None,
     }
 
 
@@ -285,7 +286,8 @@ def sandbox_account_reassign(
     is the operator wants to organize at the account level. If multiple
     accounts share one physical array (Bruce's Starlake = 3 sub-meters), they
     stay grouped only if the operator drags the *array* not individual
-    accounts; v2 will expose array-level drag.
+    accounts; v2 (array-level drag) implemented in feat/array-drag — see
+    POST /v1/sandbox/array/reassign.
     """
     tenant = tenant_from_session(authorization)
     with SessionLocal() as db:
@@ -403,4 +405,78 @@ def sandbox_account_reassign(
         "account_id": acc.id,
         "client_id": target_client.id,
         "array_id": new_array_id,
+    }
+
+
+# ── POST /v1/sandbox/array/reassign ──────────────────────────────────────────
+
+class ArrayReassignBody(BaseModel):
+    array_id: int
+    client_id: Optional[int] = None
+
+
+@router.post("/v1/sandbox/array/reassign")
+def sandbox_array_reassign(
+    body: ArrayReassignBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Move an Array to a different client (or unclassify it when client_id is null).
+
+    Moving an array re-points Array.client_id to the target client. The array's
+    UtilityAccount rows are NOT touched — their array_id FK stays the same, so
+    the billing data link is preserved. Only the org-chart assignment changes.
+
+    Sub-meter arrays (Bruce's Starlake = 3 UtilityAccounts sharing one Array)
+    are handled naturally: since all sub-meter accounts already point at the
+    same Array, moving the Array via this endpoint moves all of them together.
+    The caller is responsible for confirming this with the operator when
+    sub-meter accounts are present (subMeterCount > 1 in the drag payload).
+
+    Stamps Array.reassigned_at server-side so the canvas can show a
+    'Moved just now' badge for ~10s after the move.
+    """
+    tenant = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id,
+                Array.id == body.array_id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if not arr:
+            raise HTTPException(404, "array not found")
+
+        prior_client_id: Optional[int] = arr.client_id
+
+        if body.client_id is None:
+            arr.client_id = None
+            arr.reassigned_at = now()
+            db.commit()
+            return {
+                "ok": True,
+                "array_id": arr.id,
+                "client_id": None,
+                "prior_client_id": prior_client_id,
+            }
+
+        target_client = db.execute(
+            select(Client).where(
+                Client.tenant_id == tenant.id,
+                Client.id == body.client_id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if not target_client:
+            raise HTTPException(404, "client not found")
+
+        arr.client_id = target_client.id
+        arr.reassigned_at = now()
+        db.commit()
+
+    return {
+        "ok": True,
+        "array_id": arr.id,
+        "client_id": target_client.id,
+        "prior_client_id": prior_client_id,
     }
