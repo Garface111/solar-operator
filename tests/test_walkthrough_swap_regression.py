@@ -87,12 +87,16 @@ def test_sandbox_walkthrough_exports_symbol() -> None:
 # ── 4. LS_KEY matches the documented value (invariant for localStorage compat) ─
 
 def test_sandbox_walkthrough_ls_key_value() -> None:
-    expected_key = "so:walkthrough:sandbox-v2:done"
+    # Bumped sandbox-v2 → sandbox-v3 on Jun 6 2026 to re-fire the walkthrough
+    # for returning operators whose v2 flag was set under the old "auto-done
+    # at 3+ clients" rule. The bump is intentional, not a regression.
+    expected_key = "so:walkthrough:sandbox-v3:done"
     path = SRC_ROOT / "components" / "sandbox" / "SandboxWalkthrough.tsx"
     src = path.read_text(encoding="utf-8")
     assert expected_key in src, (
         f"LS_KEY '{expected_key}' not found in SandboxWalkthrough.tsx — "
-        "if the key changed, existing users' walkthrough state would be lost."
+        "if the key changed again, update this test AND consider whether "
+        "the bump was intentional (re-fires walkthrough for all users)."
     )
 
 
