@@ -250,8 +250,9 @@ def _process_subscription_deleted(sub: dict) -> dict:
         db.commit()
         tid, email, name = t.id, t.contact_email, t.name
 
+    from datetime import datetime as _dt
     try:
-        send_cancellation_email(to=email, name=name)
+        send_cancellation_email(to=email, name=name, cancel_date=_dt.utcnow())
     except Exception as e:
         logger.warning("cancellation email failed: %s", e)
 

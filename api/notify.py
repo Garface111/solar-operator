@@ -467,15 +467,23 @@ def send_trial_welcome_email(
     )
 
 
-def send_cancellation_email(to: str, name: str) -> bool:
+def send_cancellation_email(to: str, name: str,
+                             cancel_date: "datetime | None" = None) -> bool:
+    from datetime import datetime, timedelta
     first = (name or "there").split()[0]
+    base = cancel_date if cancel_date is not None else datetime.utcnow()
+    purge_date = base + timedelta(days=30)
+    purge_str = purge_date.strftime(f"%B {purge_date.day}, {purge_date.year}")
     html = (f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
             f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is canceled</h2>"
             f"<p>Hi {first},</p>"
             f"<p>Your Solar Operator subscription has been canceled. "
             f"You won't be charged again, and we'll stop sending automatic reports.</p>"
-            f"<p>Your historical data is still in our system. If you change your "
-            f"mind, sign up again any time at "
+            f"<p>Your historical data is still in our system. "
+            f"You'll have access to your account and reports for 30 days — download "
+            f"anything you need before <strong>{purge_str}</strong>. After that, your "
+            f"data is permanently deleted.</p>"
+            f"<p>If you change your mind, sign up again any time at "
             f"<a href='https://solaroperator.org/signup.html'>solaroperator.org/signup</a> — "
             f"we'll restore your existing meters automatically.</p>"
             f"<p>If this cancellation was a mistake, or you'd like to share why "
@@ -484,6 +492,9 @@ def send_cancellation_email(to: str, name: str) -> bool:
             f"<p>— Solar Operator</p></body></html>")
     text = (f"Hi {first},\n\nYour Solar Operator subscription is canceled. "
             f"We'll stop sending reports and won't charge you again.\n\n"
+            f"Your historical data is still in our system. You'll have access to your "
+            f"account and reports for 30 days — download anything you need before "
+            f"{purge_str}. After that, your data is permanently deleted.\n\n"
             f"If you change your mind, sign up at https://solaroperator.org/signup.html — "
             f"we'll restore your meters automatically.\n\n"
             f"Questions or feedback? Just reply.\n\n— Solar Operator")
