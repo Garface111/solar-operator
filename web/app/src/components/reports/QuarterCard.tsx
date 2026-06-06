@@ -4,7 +4,7 @@ import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
 import type { ClientRow } from "../../lib/api";
-import { sendReportNow, downloadClientReport, updateClient } from "../../lib/api";
+import { resendClientReport, downloadClientReport, updateClient } from "../../lib/api";
 
 type Status = "draft" | "ready" | "sent" | "empty";
 
@@ -126,16 +126,15 @@ function ClientDeliveryRow({
   async function handleResend() {
     setSending(true);
     try {
-      const res = await sendReportNow([client.id]);
-      const ok = res.results.find((r) => r.client_id === client.id);
-      if (ok?.ok) {
-        toast.success(`Re-sent to ${client.name}.`);
-        onRefresh?.();
-      } else {
-        toast.error(ok?.reason ?? "Send failed.");
-      }
+      const res = await resendClientReport(client.id);
+      toast.success(`Sent to ${res.recipient}.`);
+      onRefresh?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Send failed");
+      toast.error(
+        err instanceof Error
+          ? `Couldn't resend — ${err.message}`
+          : "Couldn't resend.",
+      );
     } finally {
       setSending(false);
     }

@@ -376,6 +376,13 @@ def main():
             "UPDATE utility_accounts SET canvas_pinned = FALSE WHERE canvas_pinned IS NULL"
         ))
 
+        # 2026-06-05 Password auth: nullable bcrypt hash on Tenant.
+        if not column_exists(conn, "tenants", "password_hash"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN password_hash VARCHAR(200)"
+            ))
+            print("  + tenants.password_hash")
+
     print("=== Migration complete ===")
 
 

@@ -139,6 +139,29 @@ export async function requestLoginLink(email: string, persist = true): Promise<v
   await request("/v1/auth/request", { body: { email, persist }, noAuth: true });
 }
 
+/** Sign in with email + password. Returns session token on success. */
+export async function passwordLogin(
+  email: string,
+  password: string,
+): Promise<string> {
+  const res = await request<{ session_token: string }>(
+    "/v1/auth/password-login",
+    { body: { email, password }, noAuth: true },
+  );
+  return res.session_token;
+}
+
+/** Set or change the signed-in operator's password.
+ *  currentPassword is required when changing an existing password. */
+export async function setPassword(
+  password: string,
+  currentPassword?: string,
+): Promise<void> {
+  await request<{ ok: boolean }>("/v1/auth/set-password", {
+    body: { password, ...(currentPassword ? { current_password: currentPassword } : {}) },
+  });
+}
+
 export async function verifyLoginToken(token: string): Promise<string> {
   const res = await request<{ session_token: string }>("/v1/auth/verify", {
     body: { token },
@@ -166,6 +189,7 @@ export interface Account {
   subscription_status: string | null;
   report_frequency: string | null;
   cc_on_reports: boolean;
+  has_password: boolean;
   // V2 email customization. null template fields mean "use the built-in default".
   send_from_email: string | null;
   send_from_name: string | null;
@@ -386,6 +410,25 @@ export async function sendReportNow(
     method: "POST",
     ...(hasPayload ? { body: payload } : {}),
   });
+}
+
+export interface ResendReportResult {
+  ok: boolean;
+  recipient: string;
+  client_id: number;
+  client_name: string;
+}
+
+/** Re-send the current report for a specific client.
+ *  Returns {ok, recipient} on success.
+ *  Throws with the Resend error message on delivery failure (502). */
+export async function resendClientReport(
+  clientId: number,
+): Promise<ResendReportResult> {
+  return request<ResendReportResult>(
+    `/v1/account/clients/${clientId}/resend-report`,
+    { method: "POST" },
+  );
 }
 
 /** Quick-save the recipient routing mode (from the NextRunCard slider). */

@@ -1,7 +1,11 @@
+import { useState } from "react";
 import { Card } from "../../ui/Card";
 import { EditableField } from "../../ui/EditableField";
+import { Input } from "../../ui/Input";
+import { Button } from "../../ui/Button";
+import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
-import { type Account, updateAccountEmail } from "../../lib/api";
+import { type Account, updateAccountEmail, setPassword } from "../../lib/api";
 import { timeAgo } from "./utils";
 
 const STATUS_STYLES: Record<string, string> = {
@@ -46,6 +50,108 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <div className="flex items-center justify-between gap-4 py-2.5">
       <span className="text-sm text-zinc-500">{label}</span>
       <div className="text-right text-sm font-medium text-zinc-800">{children}</div>
+    </div>
+  );
+}
+
+function SecuritySection({
+  hasPassword,
+  onPasswordSet,
+}: {
+  hasPassword: boolean;
+  onPasswordSet: () => void;
+}) {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newPw || saving) return;
+    setSaving(true);
+    try {
+      await setPassword(newPw, hasPassword ? currentPw : undefined);
+      toast.success(hasPassword ? "Password updated." : "Password set.");
+      setOpen(false);
+      setCurrentPw("");
+      setNewPw("");
+      onPasswordSet();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't save password.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="border-t border-zinc-100 pt-4">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+        Sign-in &amp; security
+      </div>
+      {!open ? (
+        <div className="flex items-center justify-between gap-4 py-1">
+          <span className="text-sm text-zinc-500">
+            {hasPassword
+              ? "Password is set."
+              : "Your account uses email sign-in links."}
+          </span>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="shrink-0 rounded text-sm font-medium text-primary-600 hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+          >
+            {hasPassword ? "Change password" : "Set password"}
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+          {hasPassword && (
+            <Input
+              id="sec-current-pw"
+              label="Current password"
+              type="password"
+              autoComplete="current-password"
+              value={currentPw}
+              onChange={(e) => setCurrentPw(e.target.value)}
+              autoFocus
+            />
+          )}
+          <Input
+            id="sec-new-pw"
+            label="New password"
+            type="password"
+            autoComplete="new-password"
+            value={newPw}
+            onChange={(e) => setNewPw(e.target.value)}
+            autoFocus={!hasPassword}
+          />
+          <p className="text-xs text-zinc-400">
+            Min 10 characters, include a letter and a digit.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              type="submit"
+              disabled={saving || !newPw || (hasPassword && !currentPw)}
+              className="flex-1"
+            >
+              {saving ? <Spinner className="h-4 w-4" /> : "Save"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setOpen(false);
+                setCurrentPw("");
+                setNewPw("");
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
     </div>
   );
 }
@@ -116,6 +222,11 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
           </Row>
         )}
       </div>
+
+      <SecuritySection
+        hasPassword={account.has_password}
+        onPasswordSet={() => onAccountChange({ has_password: true })}
+      />
     </Card>
   );
 }

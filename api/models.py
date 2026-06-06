@@ -84,6 +84,10 @@ class Tenant(Base):
     stripe_payment_method_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     trial_extended: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Password-based login (June 2026). Nullable — null means magic-link only.
+    # bcrypt hash (passlib, cost 12). Never expose this field in API responses.
+    password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
     # onboarding_token is a 32-char random string handed to the SPA + passed as
     # Stripe metadata so the post-payment return path can find the pending tenant.
