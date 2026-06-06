@@ -4,10 +4,14 @@ import { Spinner } from "../ui/Spinner";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { useDashboardContext } from "./DashboardLayout";
 import { AccountProfileCard } from "../components/settings/AccountProfileCard";
-import { EmailPrefsCard } from "../components/settings/EmailPrefsCard";
 import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
 import { DangerZoneCard } from "../components/settings/DangerZoneCard";
+
+// Bruce Jun 6: Email + schedule prefs moved to /reports ("Automatic reports")
+// where they semantically belong. AccountTab now owns only operator identity
+// (profile, utility logins, plan/billing, danger zone) — the things that
+// describe *who you are*, not *how reports go out*.
 
 export default function AccountTab() {
   const { account, failed, patchAccount, retryLoad } = useDashboardContext();
@@ -49,7 +53,6 @@ export default function AccountTab() {
         </p>
       </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
-      <EmailPrefsCard account={account} onAccountChange={patchAccount} />
       <UtilityConnectionsCard account={account} />
       <PlanBillingCard account={account} />
       {account.subscription_status === "trialing" && (

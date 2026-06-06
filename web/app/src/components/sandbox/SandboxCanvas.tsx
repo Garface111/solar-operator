@@ -390,17 +390,25 @@ export default function SandboxCanvas() {
         sortKeyRef.current,
         effectiveDensity,
       );
-      // First-visit-on-this-browser = no saved viewport in localStorage.
-      // When that's the case, render every client card pre-expanded so the
-      // operator immediately sees Client → arrays without having to click
-      // anything. Bruce June 6 note: 'sandbox client card should be fully
-      // unfolded so you can see the arrays immediately, also centered.'
-      // Centering already runs below via fitView when hasSavedViewport=false.
-      const isFirstVisit = (() => {
-        try { return !localStorage.getItem('so:sandbox:viewport'); }
-        catch { return true; }
-      })();
-      const built = buildNodesFromApi(data, layoutModeRef.current, sortedPositions, effectiveDensity, isFirstVisit);
+      // Bruce Jun 6: sandbox client cards land fully unfolded so arrays are
+      // immediately visible (the whole point of the canvas). Operators can
+      // collapse individual cards via the chevron; we preserve those choices
+      // across SSE refreshes by reading the prior expanded state from the
+      // in-memory node graph keyed by node id. Brand-new cards default true.
+      const priorExpanded = new Map<string, boolean>();
+      for (const n of nodesRef.current) {
+        if (n.type === 'client' && n.data && typeof n.data === 'object') {
+          const d = n.data as ClientNodeData;
+          if (typeof d.expanded === 'boolean') priorExpanded.set(n.id, d.expanded);
+        }
+      }
+      const built = buildNodesFromApi(data, layoutModeRef.current, sortedPositions, effectiveDensity, true)
+        .map((n) => {
+          if (n.type !== 'client' || !n.data || typeof n.data !== 'object') return n;
+          const prior = priorExpanded.get(n.id);
+          if (prior === undefined) return n; // brand-new → keep default (true)
+          return { ...n, data: { ...(n.data as ClientNodeData), expanded: prior } };
+        });
       const finalNodes = (opts.silent || opts.sseReveal)
         ? built.map((n) => {
             if (!n.data || typeof n.data !== 'object') return n;
@@ -417,15 +425,13 @@ export default function SandboxCanvas() {
       // Notify peers (e.g. the ClientsTable below) that canvas state changed
       // so they can refetch without polling. Fires AFTER nodes are committed.
       window.dispatchEvent(new CustomEvent('so:sandbox:mutated'));
-      const hasSavedViewport = (() => {
-        try {
-          const raw = localStorage.getItem('so:sandbox:viewport');
-          if (!raw) return false;
-          const v = JSON.parse(raw);
-          return typeof v?.x === 'number' && typeof v?.y === 'number' && typeof v?.zoom === 'number';
-        } catch { return false; }
-      })();
-      if (built.length > 0 && !hasSavedViewport && !opts.silent) {
+      // Bruce Jun 6: always center cards on the initial load (non-silent),
+      // regardless of any previously persisted viewport. The "Fit to view"
+      // toolbar button is one click away if the operator wants to recenter
+      // again after panning. Silent SSE refreshes still respect the user's
+      // current viewport — we only re-center on the first paint of this
+      // canvas instance.
+      if (built.length > 0 && !opts.silent) {
         setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
       }
     } catch (err) {
