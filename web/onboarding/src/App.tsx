@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import DummyReport from "./screens/DummyReport";
+import GetStarted from "./screens/GetStarted";
 import Welcome from "./screens/Welcome";
 import Info from "./screens/Info";
 import ClientSetup from "./screens/ClientSetup";
@@ -13,13 +14,13 @@ export default function App() {
   return (
     <BrowserRouter basename="/onboarding">
       <Routes>
-        {/* Landing = the sample report. The legacy auto-cycling 3-panel
-            "GetStarted" intro was deleted — it shoved 12s of why-we-built-this
-            in front of "what am I buying". Operators see the actual NEPOOL
-            workbook layout first; the wizard takes over from there. */}
+        {/* Landing = sample report (no mandatory intro). /intro is the opt-in
+            "what you'll get" explainer — reachable via a subtle footer link on
+            DummyReport. Operators who want the pitch can find it; first-visit
+            defaults to "what am I buying" (the NEPOOL workbook). */}
         <Route path="/" element={<DummyReport />} />
         <Route path="/demo" element={<Navigate to="/" replace />} />
-        <Route path="/intro" element={<Navigate to="/" replace />} />
+        <Route path="/intro" element={<GetStarted />} />
         {/* Wizard: Welcome → Info → ClientSetup (with checkout handoff) → Extension → Clients → Done */}
         <Route path="/welcome" element={<Welcome />} />
         <Route path="/info" element={<Info />} />

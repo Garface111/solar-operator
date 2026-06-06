@@ -147,6 +147,15 @@ export default function DummyReport() {
       <p className="mt-6 text-center text-xs text-zinc-400">
         $15/array/month &middot; $250 one-time setup &middot; 14-day free trial &middot; cancel anytime
       </p>
+      <p className="mt-3 text-center text-xs">
+        <button
+          type="button"
+          onClick={() => navigate("/intro")}
+          className="text-zinc-400 underline underline-offset-2 transition-colors hover:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+        >
+          What you&apos;ll get →
+        </button>
+      </p>
     </div>
   );
 }

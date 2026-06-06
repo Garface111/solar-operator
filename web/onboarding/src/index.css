@@ -50,7 +50,21 @@ body {
   }
 }
 
-/* (Legacy GetStarted intro animations removed with the intro itself.) */
+/* Fade-up reveal for /intro stacked panels (IntersectionObserver-triggered). */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.6s ease-out both;
+}
 
 /* Confetti burst for Done screen. */
 @keyframes confetti-burst {
