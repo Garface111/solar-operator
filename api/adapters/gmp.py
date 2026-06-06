@@ -24,6 +24,7 @@ import re, html as htmllib, urllib.parse, pathlib
 from datetime import datetime
 from typing import Any
 import httpx, pdfplumber
+from ._gmp_clean import clean_gmp_nickname
 
 PROVIDER = "gmp"
 GMP_API_BASE = "https://api.greenmountainpower.com"
@@ -41,7 +42,7 @@ def parse_extension_payload(payload: dict) -> dict:
             {
                 "account_number":  a.get("accountNumber"),
                 "customer_number": a.get("customerNumber"),
-                "nickname":        a.get("nickname"),
+                "nickname":        clean_gmp_nickname(a.get("nickname")),
                 "current_bill_url": a.get("currentBillUrl"),
                 "service_address": a.get("serviceAddress"),
                 "extra": {
