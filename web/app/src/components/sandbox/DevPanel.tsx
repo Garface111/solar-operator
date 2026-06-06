@@ -5,6 +5,7 @@
 // not production chrome.
 
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   devStatus,
   devSeedClients,
@@ -180,6 +181,13 @@ export function DevPanel({ onChange, clients }: Props) {
               ))}
             </div>
           )}
+
+          <Link
+            to="/dev/captures"
+            className="block rounded-md border border-zinc-700 px-3 py-1.5 text-center text-xs font-medium text-zinc-300 hover:border-amber-500/50 hover:text-zinc-100"
+          >
+            View capture timeline →
+          </Link>
 
           <div className="border-t border-zinc-700 pt-2 text-[10px] text-zinc-500">
             Tenant: <span className="font-mono">{status.tenant_id}</span>

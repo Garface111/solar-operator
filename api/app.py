@@ -93,6 +93,7 @@ from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
 from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
+from .dev_captures import router as dev_captures_router
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -158,6 +159,8 @@ app.include_router(sandbox_router)
 # Dev-only sandbox helpers. Mounted but each route guards on SO_DEV_ENABLED;
 # the /status route is always reachable so the SPA can decide what to render.
 app.include_router(dev_sandbox_router)
+# Dev-only capture timeline (gated by SO_DEV_ENABLED in each route).
+app.include_router(dev_captures_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(
@@ -214,6 +217,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
     payload = await request.json()
     adapter = get_adapter(payload.get("provider", "gmp"))
     normalized = adapter.parse_extension_payload(payload)
+
+    from .capture_events import CaptureContext
+    ctx = CaptureContext(tenant_id=tenant.id)
+    ctx.add(
+        "ingest_received",
+        decision=f"{len(normalized.get('accounts', []))} {normalized.get('provider', '?')} account(s)",
+        payload=payload,
+    )
 
     with SessionLocal() as db:
         # store the session
@@ -328,6 +339,8 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     # If more than one matches (misconfiguration), the lowest-id
                     # Client owns the arrays; the rest just get their sync timestamp bumped.
                     owner = clients[0]
+                    _match_field = _autopop_cfg["email_attr"] if user_email and getattr(owner, _autopop_cfg["email_attr"]) else _autopop_cfg["username_attr"]
+                    ctx.add("client_matched", decision=f"matched {owner.name!r} on {_match_field}")
                     for a in normalized["accounts"]:
                         acct_no = a.get("account_number")
                         if not acct_no:
@@ -352,6 +365,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             if existing_arr is None or existing_arr.deleted_at is not None:
                                 acct.array_id = None
                             else:
+                                ctx.add("array_skipped", decision=f"account {acct_no} already linked to array {acct.array_id}")
                                 continue
                         arr_name = (a.get("nickname") or acct_no)[:200]
                         # Resurrect a soft-deleted Array with the same
@@ -379,6 +393,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             db.add(arr)
                         db.flush()  # assign arr.id before linking
                         acct.array_id = arr.id
+                        ctx.add("array_created", decision=f"created array {arr_name!r} for account {acct_no}")
                         # Record the autopop name so re-captures can detect
                         # whether the operator has since manually edited it.
                         if not acct.captured_client_name:
@@ -398,6 +413,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     # Arrays behind their back. Bump last_sync so they can
                     # see the extension reached us even though nothing was
                     # auto-imported.
+                    ctx.add(
+                        "client_merged",
+                        decision=f"matched {all_matches[0].name!r} but autopop=False — skipped array creation",
+                    )
                     for c in all_matches:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
                     capture_result = "updated"
@@ -496,6 +515,12 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         if user_email and not target.contact_email:
                             target.contact_email = user_email
 
+                        _adopted = placeholder is not None
+                        ctx.add(
+                            "client_created",
+                            decision=f"{'adopted placeholder' if _adopted else 'created'} client {(display_name or 'New client')!r}",
+                        )
+
                         # Attach the captured arrays.
                         for a in normalized["accounts"]:
                             acct_no = a.get("account_number")
@@ -518,6 +543,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 if existing_arr is None or existing_arr.deleted_at is not None:
                                     acct.array_id = None
                                 else:
+                                    ctx.add("array_skipped", decision=f"account {acct_no} already linked to array {acct.array_id}")
                                     continue
                             arr_name = (a.get("nickname") or acct_no)[:200]
                             ghost_arr = db.execute(
@@ -542,6 +568,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 db.add(arr)
                             db.flush()
                             acct.array_id = arr.id
+                            ctx.add("array_created", decision=f"created array {arr_name!r} for account {acct_no}")
                             # Record the autopop name so re-captures can detect
                             # whether the operator has since manually edited it.
                             if not acct.captured_client_name:
@@ -614,6 +641,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     parse_status="parsed" if u else "partial",
                 ))
 
+        try:
+            ctx.flush(db)
+        except Exception:
+            log.warning("CaptureEvent flush failed for tenant %s", tenant.id, exc_info=True)
         db.commit()
 
     # Fire a bill-pull immediately so the operator sees data the moment they

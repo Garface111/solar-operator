@@ -11,6 +11,8 @@ import DashboardLayout from "./screens/DashboardLayout";
 import ClientsTab from "./screens/ClientsTab";
 import { Spinner } from "./ui/Spinner";
 
+const CaptureTimeline = lazy(() => import("./components/dev/CaptureTimeline"));
+
 const AccountTab = lazy(() => import("./screens/AccountTab"));
 const ReportsTab = lazy(() => import("./screens/ReportsTab"));
 import { useToast } from "./ui/Toast";
@@ -173,6 +175,14 @@ function AuthGate() {
           }
         />
         <Route path="/sandbox" element={<Navigate to="/clients" replace />} />
+        <Route
+          path="/dev/captures"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <CaptureTimeline />
+            </Suspense>
+          }
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

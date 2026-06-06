@@ -1254,6 +1254,56 @@ export async function reassignArray(
   });
 }
 
+// ─── capture timeline (dev-only) ─────────────────────────────────────────
+
+export interface CaptureEventRow {
+  id: number;
+  stage: string;
+  decision: string | null;
+  payload_excerpt: Record<string, unknown> | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export interface CaptureGroup {
+  capture_id: string;
+  started_at: string;
+  ended_at: string;
+  stage_count: number;
+  arrays_created: number;
+  total_ms: number;
+  has_error: boolean;
+  client_hint: string | null;
+  events: CaptureEventRow[];
+}
+
+export interface CaptureDetail {
+  ok: boolean;
+  capture_id: string;
+  started_at: string;
+  ended_at: string;
+  total_ms: number;
+  has_error: boolean;
+  client_hint: string | null;
+  events: CaptureEventRow[];
+}
+
+export async function listCaptures(
+  limit = 50,
+  since?: string,
+): Promise<CaptureGroup[]> {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (since) qs.set("since", since);
+  const res = await request<{ ok: boolean; captures: CaptureGroup[] }>(
+    `/v1/dev/captures?${qs}`,
+  );
+  return res.captures;
+}
+
+export async function getCapture(captureId: string): Promise<CaptureDetail> {
+  return request<CaptureDetail>(`/v1/dev/captures/${encodeURIComponent(captureId)}`);
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 
 export async function nepoolCommit(
