@@ -412,6 +412,44 @@ def main():
             ))
             print(f"  backfilled report_frequency=quarterly on {n} clients")
 
+        # 2026-06-06 signoff removal: null out stored email_body_template rows
+        # that contain only the OLD default (body + dashboard footer). Any tenant
+        # who stored exactly the old default should revert to the new one
+        # automatically. Custom templates (different body text) are left alone.
+        # Idempotent — rows already NULL are untouched; rows with custom text are
+        # untouched.
+        OLD_FOOTER_MARKER = "Manage at"
+        OLD_FOOTER_MARKER2 = "your dashboard"
+        from api.email_templates import DEFAULT_BODY_TEMPLATE as _NEW_DEFAULT
+        OLD_DEFAULT_BODY = (
+            "<p>Dear {{client_name}},</p>"
+            "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
+            " {{period_end}}. Please reach out with any questions.</p>"
+            "{{signoff}}"
+            "<p style='margin-top:24px;font-size:12px;color:#6b7280;'>"
+            "<em>Manage at <a href='{{dashboard_url}}'>your dashboard</a>.</em></p>"
+        )
+        candidates = conn.execute(text(
+            "SELECT id, email_body_template FROM tenants "
+            "WHERE email_body_template IS NOT NULL"
+        )).fetchall()
+        nulled = 0
+        for row_id, stored in candidates:
+            if stored is None:
+                continue
+            sl = stored.lower()
+            if OLD_FOOTER_MARKER.lower() in sl and OLD_FOOTER_MARKER2.lower() in sl:
+                if stored.strip() == OLD_DEFAULT_BODY.strip():
+                    conn.execute(text(
+                        "UPDATE tenants SET email_body_template = NULL WHERE id = :id"
+                    ), {"id": row_id})
+                    nulled += 1
+                    print(f"  ↪ tenant {row_id}: cleared old dashboard-footer template")
+        if nulled == 0:
+            print("  ↪ signoff footer cleanup: no tenants had the old default stored")
+        else:
+            print(f"  ↪ signoff footer cleanup: nulled {nulled} tenant(s)")
+
         # 2026-06-05 Password auth (feat/auth-and-reports): bcrypt hash for
         # operator-set passwords. Magic-link stays as fallback / first-time path.
         if not column_exists(conn, "tenants", "password_hash"):

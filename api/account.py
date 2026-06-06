@@ -45,8 +45,8 @@ from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_SIGNOFF,
-    DEFAULT_DASHBOARD_URL, MERGE_TAGS, build_context, render_email,
-    render_merge, resolve_from_header,
+    MERGE_TAGS, build_context, render_email,
+    render_merge, resolve_from_header, unknown_tags,
 )
 
 logger = logging.getLogger(__name__)
@@ -771,7 +771,6 @@ def preview_email(body: EmailSettings,
     ctx = build_context(
         client_name=_PREVIEW_CLIENT, tenant_name=tenant_name,
         arrays_count=3, tenant_email=tenant_email,
-        dashboard_url=DEFAULT_DASHBOARD_URL,
     )
     subject, html, text = render_email(
         subject_template=eff_subject, body_template=eff_body, ctx=ctx)
@@ -961,7 +960,6 @@ def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
         tenant_name=tenant_name,
         arrays_count=n_arrays,
         tenant_email=tenant_email,
-        dashboard_url=DEFAULT_DASHBOARD_URL,
         signoff_template=signoff_template,
     )
     return ctx, client_name
@@ -1080,6 +1078,13 @@ def save_email_template(body: _TemplateBody,
                         authorization: Optional[str] = Header(default=None)):
     """Persist the operator's custom template as their send-time default."""
     t = tenant_from_session(authorization)
+    for field, value in [("subject_template", body.subject_template),
+                         ("body_template", body.body_template)]:
+        if value:
+            bad = unknown_tags(value)
+            if bad:
+                listed = ", ".join("{{" + tag + "}}" for tag in sorted(bad))
+                raise HTTPException(422, f"Unknown merge tags in {field}: {listed}")
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         if body.subject_template is not None:

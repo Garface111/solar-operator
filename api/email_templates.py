@@ -29,11 +29,9 @@ import httpx
 # template is left verbatim (see render_merge).
 MERGE_TAGS = (
     "client_name", "tenant_name", "quarter", "arrays_count",
-    "period_start", "period_end", "dashboard_url", "tenant_email",
+    "period_start", "period_end", "tenant_email",
     "tenant_email_line",
 )
-
-DEFAULT_DASHBOARD_URL = "https://solaroperator.org/accounts/"
 
 # Built-in defaults. These mirror the original hard-coded delivery email so an
 # operator who never touches the settings gets exactly today's behavior.
@@ -50,8 +48,6 @@ DEFAULT_BODY_TEMPLATE = (
     "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
     " {{period_end}}. Please reach out with any questions.</p>"
     "{{signoff}}"
-    "<p style='margin-top:24px;font-size:12px;color:#6b7280;'>"
-    "<em>Manage at <a href='{{dashboard_url}}'>your dashboard</a>.</em></p>"
 )
 
 _TAG_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
@@ -74,7 +70,6 @@ ALLOWED_MERGE_TAGS = frozenset({
     "tenant_name",
     "tenant_email_line",
     "arrays_count",
-    "dashboard_url",
     "signoff",
 })
 
@@ -152,7 +147,6 @@ def _fmt_date(d: date) -> str:
 
 def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
                   tenant_email: str = "",
-                  dashboard_url: str = DEFAULT_DASHBOARD_URL,
                   ref: Optional[date] = None,
                   signoff_template: Optional[str] = None) -> dict:
     """Assemble the merge-tag context for one client's email."""
@@ -175,7 +169,6 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
         "arrays_count": arrays_count,
         "period_start": qc["period_start"],
         "period_end": qc["period_end"],
-        "dashboard_url": dashboard_url,
         "tenant_email": email,
         "tenant_email_line": tenant_email_line,
         "signoff": rendered_signoff,
@@ -214,7 +207,7 @@ _TEMPLATE_SYSTEM_PROMPT = (
     "THE ONLY MERGE TAGS THAT EXIST IN THE SYSTEM ARE:\n"
     "  {{client_name}}, {{quarter}}, {{period_start}}, {{period_end}},\n"
     "  {{tenant_name}}, {{tenant_email_line}}, {{arrays_count}},\n"
-    "  {{dashboard_url}}, {{signoff}}\n\n"
+    "  {{signoff}}\n\n"
     "CRITICAL RULES:\n"
     "- You may ONLY use the tags listed above. Do NOT invent new merge tags "
     "like {{quarter_total_mwh}}, {{operator_signature}}, {{client_address}}, "

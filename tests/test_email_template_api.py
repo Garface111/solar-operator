@@ -323,6 +323,26 @@ def test_test_send_dispatches_email(client, monkeypatch):
     assert "[TEST]" in sent_calls[0]["subject"]
 
 
+def test_default_body_has_no_dashboard_signoff(client):
+    _, auth = _make_tenant()
+    resp = client.get("/v1/account/reports/email-template",
+                      headers={"Authorization": auth})
+    assert resp.status_code == 200, resp.text
+    body_template = resp.json()["body_template"]
+    assert "your dashboard" not in body_template.lower()
+    assert "dashboard_url" not in body_template
+
+
+def test_put_rejects_dashboard_url_tag(client):
+    _, auth = _make_tenant()
+    resp = client.put(
+        "/v1/account/reports/email-template",
+        json={"body_template": "<p>Hi {{client_name}}, manage at {{dashboard_url}}.</p>"},
+        headers={"Authorization": auth},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 def test_test_send_422_without_tenant_email(client, monkeypatch):
     import api.account as account_mod
     monkeypatch.setattr(account_mod, "_send_via_resend", lambda **kw: True)
