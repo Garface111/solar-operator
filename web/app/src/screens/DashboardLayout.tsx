@@ -2,11 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
 import { TrialBanner } from "../components/TrialBanner";
-import { WalkthroughOverlay } from "../components/WalkthroughOverlay";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
-import { hasSeenWalkthrough } from "../lib/walkthrough";
 import { openPortalTab } from "../lib/openPortalTab";
 import { useAutoPairExtension } from "../lib/useExtensionStatus";
 
@@ -40,7 +38,6 @@ export default function DashboardLayout({ onSignOut }: Props) {
   const [account, setAccount] = useState<Account | null>(null);
   const [failed, setFailed] = useState(false);
   const [loadKey, setLoadKey] = useState(0);
-  const [showWalkthrough, setShowWalkthrough] = useState(() => !hasSeenWalkthrough());
 
   const retryLoad = useCallback(() => {
     setFailed(false);
@@ -175,13 +172,6 @@ export default function DashboardLayout({ onSignOut }: Props) {
       <main className="mx-auto max-w-4xl px-4 py-8">
         <Outlet context={ctx} />
       </main>
-
-      {showWalkthrough && (
-        <WalkthroughOverlay
-          onClose={() => setShowWalkthrough(false)}
-          hasCaptures={(account?.accounts_count ?? 0) > 0}
-        />
-      )}
 
       <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
         Solar Operator · admin@solaroperator.org ·{" "}
