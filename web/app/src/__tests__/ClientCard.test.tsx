@@ -30,6 +30,10 @@ vi.mock("../components/ArrayList", () => ({
   ArrayList: () => <div data-testid="array-list">arrays</div>,
 }));
 
+vi.mock("../components/CaptureFreshnessHeatmap", () => ({
+  CaptureFreshnessHeatmap: () => <div data-testid="freshness-heatmap">freshness</div>,
+}));
+
 vi.mock("../components/MergeSuggestionBanner", () => ({
   MergeSuggestionBanner: () => null,
 }));

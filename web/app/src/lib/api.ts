@@ -244,6 +244,10 @@ export interface UtilityAccount {
   account_number: string;
   customer_number?: string | null;
   nickname: string | null;
+  /** ISO timestamp of the last capture/sync that touched this account
+   *  (server-side `UtilityAccount.last_seen`). Null if never synced.
+   *  Powers the Capture Freshness Heatmap. */
+  last_synced_at?: string | null;
 }
 
 export interface ArrayRow {

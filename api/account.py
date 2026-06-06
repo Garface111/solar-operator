@@ -304,6 +304,12 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
                 "provider_label": (get_provider(ac.provider) or {}).get("label", ac.provider),
                 "account_number": ac.account_number,
                 "nickname": ac.nickname,
+                # Recency for the Capture Freshness Heatmap. `last_seen` is
+                # bumped to now() every time a capture/sync touches the account
+                # (see app.py /v1/sync), so it's the canonical "last captured"
+                # timestamp. Exposed here so the heatmap can reuse this fetch
+                # instead of hitting a separate endpoint.
+                "last_synced_at": ac.last_seen.isoformat() if ac.last_seen else None,
             }
             for ac in accounts
         ],
