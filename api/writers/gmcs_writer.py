@@ -254,10 +254,11 @@ def build_workbook(tenant_id: Optional[str] = None,
 
     TITLE_FONT = Font(bold=True, size=14, color="1F4E2A")
     HDR_FONT = Font(bold=True, size=14, color="FFFFFF")
-    HDR_FILL = PatternFill("solid", fgColor="2E6B3A")
+    HDR_FILL = PatternFill("solid", fgColor="064E3B")
     QUARTER_FONT = Font(bold=True, size=11, color="1F4E2A")
     FOOTNOTE_FONT = Font(italic=True, size=9, color="666666")
-    BORDER = Border(*[Side(style="thin", color="C8D4C4")] * 4)
+    BORDER = Border(*[Side(style="thin", color="E8E2D9")] * 4)
+    GOLD_SIDE = Side(style="medium", color="E6B470")
 
     used_names: set[str] = set()
 
@@ -292,6 +293,11 @@ def build_workbook(tenant_id: Optional[str] = None,
             c.fill = HDR_FILL
             c.alignment = Alignment(horizontal="center", vertical="center")
             c.border = BORDER
+
+        # Gold accent: single warm hairline under the header, carried into the
+        # gap row (row 6) between the header and the first quarter block.
+        for col in range(1, 5):
+            sh.cell(6, col).border = Border(bottom=GOLD_SIDE)
 
         # Data: 6 quarter blocks × 3 month rows
         # First block starts at row 7; gap row between blocks (row 6, 10, 14, ...)
