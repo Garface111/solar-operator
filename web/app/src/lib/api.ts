@@ -592,17 +592,36 @@ export async function getMergeSuggestions(
   return res.suggestions;
 }
 
+export interface MergeClientResult {
+  dst_client: ClientRow;
+  undo_token: string;
+  merged_client_id: number;
+}
+
 /** Merge `srcId` INTO `dstId`. Reparents arrays, merges login fields,
- *  soft-deletes src. Returns the updated dst client. */
+ *  soft-deletes src. Returns the updated dst client plus an undo token. */
 export async function mergeClientInto(
   srcId: number,
   dstId: number,
-): Promise<ClientRow> {
-  const res = await request<{ ok: true; dst_client: ClientRow }>(
+): Promise<MergeClientResult> {
+  const res = await request<{
+    ok: true;
+    dst_client: ClientRow;
+    undo_token: string;
+    merged_client_id: number;
+  }>(
     `/v1/account/clients/${srcId}/merge-into`,
     { method: "POST", body: { dst_client_id: dstId } },
   );
-  return res.dst_client;
+  return { dst_client: res.dst_client, undo_token: res.undo_token, merged_client_id: res.merged_client_id };
+}
+
+/** Reverse a previous merge within the 1-hour undo window. */
+export async function undoMerge(token: string): Promise<void> {
+  await request(`/v1/account/clients/merge-undo`, {
+    method: "POST",
+    body: { undo_token: token },
+  });
 }
 
 export async function dismissMergeSuggestion(

@@ -40,6 +40,14 @@ export default function AccountTab() {
 
   return (
     <ScreenLayout>
+      <div className="mb-6">
+        <h1 className="text-2xl font-semibold tracking-tight text-zinc-900">
+          Master account
+        </h1>
+        <p className="mt-1 text-sm text-zinc-500">
+          This is your operator workspace — billing, branding, and the email reports go out under.
+        </p>
+      </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
       <EmailPrefsCard account={account} onAccountChange={patchAccount} />
       <UtilityConnectionsCard account={account} />

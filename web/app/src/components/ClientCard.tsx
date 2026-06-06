@@ -526,7 +526,7 @@ export function ClientCard({
               merge or persistent "Keep separate". */}
           <MergeSuggestionBanner
             client={client}
-            onMerged={(dst, mergedFromId) => {
+            onMerged={(dst, mergedFromId, undoToken) => {
               onChange(dst);
               // Sibling-card cleanup: parent reloads clients, but we
               // also emit a lightweight event so the soft-deleted card
@@ -536,6 +536,8 @@ export function ClientCard({
                   detail: { src: mergedFromId, dst: dst.id },
                 }),
               );
+              // Bubble undo token up so ClientsSection can show the banner.
+              onUndo?.(undoToken, `Merged "${client.name}" into "${dst.name}"`);
             }}
           />
 

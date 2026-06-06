@@ -27,6 +27,7 @@ import {
   refreshCapture,
   sendClientReportToMe,
   downloadClientReport,
+  mergeClientInto,
 } from "../lib/api";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -62,11 +63,34 @@ function relativeTime(iso: string | null): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
-function loginLabels(c: ClientRow): string {
-  const labels: string[] = [];
-  if (c.gmp_autopopulate || c.gmp_email || c.gmp_username) labels.push("GMP");
-  if (c.vec_autopopulate || c.vec_email || c.vec_username) labels.push("VEC");
-  return labels.join(" · ") || "—";
+/** Returns [{ util, count, maskedAccounts }] for chip display in the table row. */
+function utilityChips(
+  c: ClientRow,
+  arrays: ArrayRow[] | undefined,
+): Array<{ util: string; count: number; maskedAccounts: string[] }> {
+  if (!arrays) {
+    // No arrays loaded yet — fall back to login presence only
+    const chips: Array<{ util: string; count: number; maskedAccounts: string[] }> = [];
+    if (c.gmp_autopopulate || c.gmp_email || c.gmp_username) chips.push({ util: "GMP", count: 0, maskedAccounts: [] });
+    if (c.vec_autopopulate || c.vec_email || c.vec_username) chips.push({ util: "VEC", count: 0, maskedAccounts: [] });
+    return chips;
+  }
+  const byUtil = new Map<string, { count: number; masked: string[] }>();
+  for (const arr of arrays) {
+    for (const acct of arr.accounts) {
+      const util = normalizeUtil(acct.provider, acct.provider_label);
+      if (!byUtil.has(util)) byUtil.set(util, { count: 0, masked: [] });
+      const entry = byUtil.get(util)!;
+      entry.count++;
+      const num = acct.account_number;
+      const masked = num.length > 4 ? "···" + num.slice(-4) : num;
+      if (!entry.masked.includes(masked)) entry.masked.push(masked);
+    }
+  }
+  const ORDER = ["GMP", "VEC", "WEC"];
+  return Array.from(byUtil.entries())
+    .sort(([a], [b]) => ORDER.indexOf(a) - ORDER.indexOf(b))
+    .map(([util, { count, masked }]) => ({ util, count, maskedAccounts: masked }));
 }
 
 function uniqueAccountCount(arrays: ArrayRow[]): number {
@@ -151,11 +175,13 @@ function MoreMenu({
   downloading,
   onDownload,
   onDelete,
+  onMerge,
 }: {
   client: ClientRow;
   downloading: boolean;
   onDownload: () => void;
   onDelete: () => void;
+  onMerge: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -188,10 +214,30 @@ function MoreMenu({
       </button>
       {open && (
         <div className="absolute right-0 top-7 z-30 min-w-[148px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
-          {/* Delete on top per Bruce's June 5 meeting note — the destructive
-              action is the most likely one operators reach for from the
-              collapsed row (oops, that's a dupe), so put it where the
-              cursor is already heading. Download stays available below. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+              onDownload();
+            }}
+            disabled={downloading}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+          >
+            {downloading && <Spinner className="h-3 w-3" />}
+            Download .xlsx
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+              onMerge();
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-50"
+          >
+            Merge into…
+          </button>
           {client.active && (
             <button
               type="button"
@@ -224,6 +270,118 @@ function MoreMenu({
   );
 }
 
+// ─── MergeIntoModal ──────────────────────────────────────────────────────────
+
+interface MergeIntoModalProps {
+  open: boolean;
+  onClose: () => void;
+  srcClient: ClientRow;
+  srcArrays: ArrayRow[] | undefined;
+  otherClients: ClientRow[];
+  onMerged: (dst: ClientRow, undoToken: string) => void;
+}
+
+function MergeIntoModal({
+  open,
+  onClose,
+  srcClient,
+  srcArrays,
+  otherClients,
+  onMerged,
+}: MergeIntoModalProps) {
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [selectedDst, setSelectedDst] = useState<ClientRow | null>(null);
+  const [merging, setMerging] = useState(false);
+
+  const srcArrayCount = srcArrays?.length ?? srcClient.array_count;
+  const srcAcctCount = srcArrays != null ? uniqueAccountCount(srcArrays) : null;
+
+  const filtered = otherClients.filter(
+    (c) =>
+      c.active &&
+      c.name.toLowerCase().includes(query.toLowerCase()),
+  );
+
+  async function handleConfirm() {
+    if (!selectedDst || merging) return;
+    setMerging(true);
+    try {
+      const result = await mergeClientInto(srcClient.id, selectedDst.id);
+      onMerged(result.dst_client, result.undo_token);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Merge failed");
+    } finally {
+      setMerging(false);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => !merging && onClose()}
+      title={`Merge "${srcClient.name}" into…`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={merging}>Cancel</Button>
+          <Button onClick={handleConfirm} disabled={!selectedDst || merging}>
+            {merging ? <><Spinner /> Merging…</> : "Merge"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-sm text-zinc-600">
+          This will move{" "}
+          <span className="font-medium text-zinc-800">
+            {srcArrayCount} array{srcArrayCount === 1 ? "" : "s"}
+            {srcAcctCount != null ? ` and ${srcAcctCount} utility account${srcAcctCount === 1 ? "" : "s"}` : ""}
+          </span>{" "}
+          from <span className="font-medium">{srcClient.name}</span> into the selected client.
+          The source client will be removed. You'll have 1 hour to undo.
+        </p>
+        <input
+          type="search"
+          placeholder="Search clients…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+          autoFocus
+        />
+        <ul className="max-h-56 overflow-y-auto divide-y divide-zinc-100 rounded-lg border border-zinc-200">
+          {filtered.length === 0 && (
+            <li className="px-3 py-3 text-sm text-zinc-400">No clients found</li>
+          )}
+          {filtered.map((c) => (
+            <li key={c.id}>
+              <button
+                type="button"
+                onClick={() => setSelectedDst(c)}
+                className={[
+                  "w-full px-3 py-2.5 text-left text-sm transition-colors hover:bg-zinc-50",
+                  selectedDst?.id === c.id ? "bg-primary-50 text-primary-700 font-medium" : "text-zinc-800",
+                ].join(" ")}
+              >
+                <span className="block truncate">{c.name}</span>
+                {c.contact_email && (
+                  <span className="block text-[11px] text-zinc-400 truncate">{c.contact_email}</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+        {selectedDst && (
+          <p className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+            Will move into <span className="font-semibold">{selectedDst.name}</span>.
+          </p>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 // ─── ClientsTable ─────────────────────────────────────────────────────────────
 
 // Always render 9 <td> columns; checkbox cell is width-0 when selectMode is off.
@@ -240,6 +398,10 @@ export interface ClientsTableProps {
   onDeleted: (id: number, token: string, msg: string) => void;
   onUndo: (token: string, msg: string) => void;
   onOpenAddByLogin: () => void;
+  /** All active clients in this tenant — used for the merge picker. */
+  allClients: ClientRow[];
+  /** Called after a successful merge with the undo token for the banner. */
+  onMerged: (dstClient: ClientRow, srcId: number, undoToken: string) => void;
 }
 
 export function ClientsTable({
@@ -253,6 +415,8 @@ export function ClientsTable({
   onDeleted,
   onUndo,
   onOpenAddByLogin,
+  allClients,
+  onMerged,
 }: ClientsTableProps) {
   // Start with EVERY client row expanded — operators arriving here for the
   // first time need to immediately see that their arrays actually propagated
@@ -366,6 +530,8 @@ export function ClientsTable({
                 arraysCacheRef.current.delete(client.id);
                 setTick((t) => t + 1);
               }}
+              allClients={allClients.filter((c) => c.id !== client.id)}
+              onMerged={onMerged}
             />
           ))}
         </tbody>
@@ -393,6 +559,8 @@ interface RowProps {
   onUndo: (token: string, msg: string) => void;
   onOpenAddByLogin: () => void;
   onArraysCacheInvalidate: () => void;
+  allClients: ClientRow[];
+  onMerged: (dstClient: ClientRow, srcId: number, undoToken: string) => void;
 }
 
 function ClientTableRow({
@@ -412,6 +580,8 @@ function ClientTableRow({
   onUndo,
   onOpenAddByLogin,
   onArraysCacheInvalidate,
+  allClients,
+  onMerged,
 }: RowProps) {
   const toast = useToast();
   const [refreshing, setRefreshing] = useState(false);
@@ -419,6 +589,7 @@ function ClientTableRow({
   const [downloading, setDownloading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
 
   const delivery = deliveryStatus(client);
   const captureIso = lastCaptureIso(client);
@@ -566,9 +737,30 @@ function ClientTableRow({
           )}
         </td>
 
-        {/* Logins */}
-        <td className="w-28 py-2.5 pr-3 text-[11px] text-zinc-500">
-          {loginLabels(client)}
+        {/* Logins — utility chips with per-utility account count */}
+        <td className="w-28 py-2.5 pr-3">
+          {(() => {
+            const chips = utilityChips(client, arrays);
+            if (chips.length === 0) return <span className="text-[11px] text-zinc-400">—</span>;
+            const tooltip = chips
+              .map((ch) => `${ch.util}: ${ch.maskedAccounts.join(", ") || "—"}`)
+              .join(" | ");
+            return (
+              <div className="flex flex-wrap gap-1" title={tooltip}>
+                {chips.map((ch) => {
+                  const th = UTIL_THEME[ch.util] ?? DEFAULT_UTIL_THEME;
+                  return (
+                    <span
+                      key={ch.util}
+                      className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${th.pill}`}
+                    >
+                      {ch.util}{ch.count > 0 ? `·${ch.count}` : ""}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </td>
 
         {/* Arrays */}
@@ -666,12 +858,13 @@ function ClientTableRow({
               )}
             </button>
 
-            {/* More menu (download + delete) */}
+            {/* More menu (download + merge + delete) */}
             <MoreMenu
               client={client}
               downloading={downloading}
               onDownload={handleDownload}
               onDelete={() => setConfirmDelete(true)}
+              onMerge={() => setMergeModalOpen(true)}
             />
           </div>
         </td>
@@ -725,6 +918,23 @@ function ClientTableRow({
           <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
         </p>
       </Modal>
+
+      {/* Merge-into modal */}
+      <MergeIntoModal
+        open={mergeModalOpen}
+        onClose={() => setMergeModalOpen(false)}
+        srcClient={client}
+        srcArrays={arrays}
+        otherClients={allClients}
+        onMerged={(dst, undoToken) => {
+          setMergeModalOpen(false);
+          onChange(dst);
+          window.dispatchEvent(
+            new CustomEvent("so:client-merged", { detail: { src: client.id, dst: dst.id } }),
+          );
+          onMerged(dst, client.id, undoToken);
+        }}
+      />
     </>
   );
 }
@@ -858,11 +1068,12 @@ function ExpandedPanel({
       {/* Merge suggestion banner */}
       <MergeSuggestionBanner
         client={client}
-        onMerged={(dst, mergedFromId) => {
+        onMerged={(dst, mergedFromId, undoToken) => {
           onChange(dst);
           window.dispatchEvent(
             new CustomEvent("so:client-merged", { detail: { src: mergedFromId, dst: dst.id } }),
           );
+          onUndo(undoToken, `Merged "${dst.name}"`);
         }}
       />
 

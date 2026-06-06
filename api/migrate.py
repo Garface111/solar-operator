@@ -376,6 +376,23 @@ def main():
             "UPDATE utility_accounts SET canvas_pinned = FALSE WHERE canvas_pinned IS NULL"
         ))
 
+        # 2026-06-05 Identity / smart-name split (feat/identity-and-master-account)
+        # clients.name_edited_at — stamped when operator edits client name so
+        # re-captures don't overwrite curated names.
+        if not column_exists(conn, "clients", "name_edited_at"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN name_edited_at TIMESTAMP"
+            ))
+            print("  + clients.name_edited_at")
+
+        # utility_accounts.captured_client_name — original autopop name guess,
+        # used to detect whether operator has since edited the client name.
+        if not column_exists(conn, "utility_accounts", "captured_client_name"):
+            conn.execute(text(
+                "ALTER TABLE utility_accounts ADD COLUMN captured_client_name VARCHAR(200)"
+            ))
+            print("  + utility_accounts.captured_client_name")
+
     print("=== Migration complete ===")
 
 

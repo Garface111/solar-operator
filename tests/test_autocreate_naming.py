@@ -39,12 +39,13 @@ def _sync(client, key: str, payload: dict):
 # ── (1) Email beats username when both are present ────────────────────────────
 
 def test_email_beats_username_when_both_present(client):
-    """When both email and username are captured, email is used as the client name."""
+    """When both email and username are captured (no fullName/customer_name),
+    the email local-part (de-dotted) is used rather than the raw username."""
     tid, key = _tenant()
 
     payload = {
         "provider": "gmp",
-        "user": {"email": "priority@gmp.test", "fullName": "P User", "username": "pri_username"},
+        "user": {"email": "priority.user@gmp.test", "username": "pri_username"},
         "auth": {"apiToken": "jwt_" + secrets.token_hex(6)},
         "accounts": [{
             "accountNumber": "PRI001",
@@ -59,8 +60,9 @@ def test_email_beats_username_when_both_present(client):
 
     with SessionLocal() as db:
         c = db.execute(select(Client).where(Client.tenant_id == tid)).scalar_one()
-        assert c.name == "priority@gmp.test", c.name
-        assert c.gmp_email == "priority@gmp.test"
+        # "priority.user" de-dotted and title-cased → "Priority User"
+        assert c.name == "Priority User", c.name
+        assert c.gmp_email == "priority.user@gmp.test"
         assert c.gmp_username == "pri_username"
         assert c.gmp_autopopulate is True
 
@@ -110,14 +112,14 @@ def test_vec_customer_name_used_as_client_name(client):
 # ── (3) Display name capped at 200 chars ─────────────────────────────────────
 
 def test_display_name_truncated_to_200_chars(client):
-    """A 201-char username is stored as exactly 200 chars."""
+    """A 201-char username (with no email or fullName) is stored as exactly 200 chars."""
     tid, key = _tenant()
 
     long_username = "u" * 201
 
     payload = {
         "provider": "gmp",
-        "user": {"email": "", "fullName": "U", "username": long_username},
+        "user": {"email": "", "username": long_username},
         "auth": {"apiToken": "jwt_" + secrets.token_hex(6)},
         "accounts": [{
             "accountNumber": "LONG001",

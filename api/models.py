@@ -157,6 +157,11 @@ class Client(Base):
     # is_placeholder gets cleared.
     is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Stamped when the operator explicitly edits client.name via the dashboard
+    # PATCH endpoint. Re-captures check this: if non-null, the operator curated
+    # the name — skip the autopop name override entirely.
+    name_edited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Canvas position (sandbox canvas v1, June 2026). null = not yet placed,
     # auto-arranged on first visit. canvas_pinned reserves a future "lock
     # position" toggle so the operator can anchor frequently-used clients.
@@ -236,6 +241,11 @@ class UtilityAccount(Base):
     login_origin_client_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("clients.id"), nullable=True, index=True,
     )
+
+    # The client name that was auto-populated at first capture for this account.
+    # Used to detect whether the operator has since manually edited the client
+    # name (if client.name != captured_client_name, respect the edit on re-capture).
+    captured_client_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="accounts")
     array: Mapped[Array | None] = relationship(back_populates="accounts")

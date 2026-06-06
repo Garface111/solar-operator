@@ -28,6 +28,60 @@ from sqlalchemy import select, func, or_
 from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
 from .adapters import get_adapter
+import re as _re
+
+_SYNC_EMAIL_RE = _re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+
+
+def _smart_client_name(
+    user_dict: dict,
+    accounts: list[dict],
+    user_email: str,
+    user_username: str,
+) -> str:
+    """Compute the best human-readable client name from captured portal data.
+
+    Priority:
+    1. Account-level customer_name / extra.customerName (entity name; VEC exposes this
+       as the company/farm the account is billed under — most reliable client label)
+    2. Account holder name from the portal user profile (user.name, user.fullName, etc.)
+    3. Local-part of login email, de-dotted + title-cased ("john.doe" → "John Doe")
+    4. Username as-is
+    5. "New client" fallback
+    """
+    # 1. Account-level entity name (e.g. VEC customerName)
+    for a in accounts:
+        extra = a.get("extra") or {}
+        cname = (
+            a.get("customer_name")
+            or extra.get("customerName")
+            or extra.get("customer_name")
+        )
+        if cname and str(cname).strip():
+            return str(cname).strip()[:200]
+
+    # 2. Portal user profile name (account holder display name)
+    holder = (
+        (user_dict.get("name") or "").strip()
+        or (user_dict.get("fullName") or "").strip()
+        or (user_dict.get("display_name") or "").strip()
+        or (user_dict.get("displayName") or "").strip()
+    )
+    if holder:
+        return holder[:200]
+
+    # 3. Local-part of email, de-dotted + title-cased
+    if user_email and "@" in user_email:
+        local = user_email.split("@")[0]
+        cleaned = local.replace(".", " ").replace("_", " ").replace("-", " ")
+        result = cleaned.strip().title()
+        return result[:200] if result else user_email[:200]
+
+    # 4. Username
+    if user_username:
+        return user_username[:200]
+
+    return "New client"
 from .worker import pull_bills_for_tenant, run_pending_jobs
 # v1.1.0: api/signup.py was renamed to api/_legacy_signup.py and unmounted.
 # Its Stripe webhook moved to api/stripe_webhook.py (still mounted below).
@@ -325,6 +379,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             db.add(arr)
                         db.flush()  # assign arr.id before linking
                         acct.array_id = arr.id
+                        # Record the autopop name so re-captures can detect
+                        # whether the operator has since manually edited it.
+                        if not acct.captured_client_name:
+                            acct.captured_client_name = (owner.name or "")[:200]
                         # Real arrays landed → this client is no longer a placeholder.
                         if owner.is_placeholder:
                             owner.is_placeholder = False
@@ -370,36 +428,21 @@ async def sync(request: Request, authorization: str | None = Header(default=None
 
                     if user_email or user_username:
                         # ── Pick the display name ────────────────────────────
-                        # Default to the captured login (email or username) —
-                        # the operator can rename via the dashboard. We
-                        # intentionally do NOT use the account nickname here
-                        # because nicknames are per-array (often "Roof",
-                        # "Barn", "Field") and make terrible client names.
-                        # customer_name (when the adapter exposes it — e.g.
-                        # VEC) IS a good client-level label, so we keep it
-                        # as the top preference.
-                        inferred_name = None
-                        for a in normalized["accounts"]:
-                            extra = a.get("extra") or {}
-                            inferred_name = (
-                                a.get("customer_name")
-                                or extra.get("customerName")
-                                or extra.get("customer_name")
-                            )
-                            if inferred_name:
-                                break
-                        display_name = (
-                            (inferred_name and str(inferred_name).strip())
-                            or user_email
-                            or user_username
+                        # Use smart name: holder name from portal profile >
+                        # customer_name from account metadata > local-part of
+                        # login email (de-dotted) > username. Never use raw
+                        # email as the client name.
+                        display_name = _smart_client_name(
+                            captured_user, normalized["accounts"],
+                            user_email, user_username,
                         )
-                        if display_name:
-                            display_name = display_name[:200]
 
                         # ── (a) Placeholder adoption ─────────────────────────
                         if placeholder is not None:
                             target = placeholder
-                            if display_name:
+                            # Respect operator edits: if name_edited_at is set,
+                            # the operator curated this name — leave it alone.
+                            if display_name and target.name_edited_at is None:
                                 target.name = display_name
                         # ── (b) New-client auto-create ───────────────────────
                         else:
@@ -499,6 +542,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 db.add(arr)
                             db.flush()
                             acct.array_id = arr.id
+                            # Record the autopop name so re-captures can detect
+                            # whether the operator has since manually edited it.
+                            if not acct.captured_client_name:
+                                acct.captured_client_name = (target.name or "")[:200]
                         if target.is_placeholder:
                             target.is_placeholder = False
                         db.flush()  # ensure target.id is populated before we read it
