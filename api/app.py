@@ -93,6 +93,7 @@ from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
 from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
+from .events import router as events_router, broadcast as _sse_broadcast
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -155,6 +156,8 @@ app.include_router(nepool_router)
 app.include_router(resend_webhook_router)
 # Sandbox canvas: client graph visualization + position persistence.
 app.include_router(sandbox_router)
+# SSE live-push: streams capture.landed events to the sandbox canvas.
+app.include_router(events_router)
 # Dev-only sandbox helpers. Mounted but each route guards on SO_DEV_ENABLED;
 # the /status route is always reachable so the SPA can decide what to render.
 app.include_router(dev_sandbox_router)
@@ -635,6 +638,18 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         # Never let pull-kickoff failures break the sync response.
         import logging
         logging.getLogger(__name__).exception("failed to kick off post-sync pull")
+
+    # Push a live event to any open SSE connections for this tenant so the
+    # sandbox canvas can materialize the new/updated client immediately.
+    if capture_result in ("created", "updated") and capture_client_id is not None:
+        try:
+            _sse_broadcast(tenant.id, "capture.landed", {
+                "client_id": capture_client_id,
+                "client_name": capture_client_name,
+                "is_new_client": capture_result == "created",
+            })
+        except Exception:
+            log.exception("SSE broadcast failed for tenant %s", tenant.id)
 
     return {
         "ok": True,
