@@ -2063,10 +2063,10 @@ export default function SandboxCanvas() {
               the actual user-visible signal. If you need it back for debug,
               wrap <LiveIndicator status={sseStatus} /> in a DevPanel toggle. */}
 
-          {/* Toolbar — top-right */}
+          {/* Toolbar — top-center (matches centered top tabs) */}
           {!loading && !isEmpty && (
-            <Panel position="top-right">
-              <div className="flex gap-2 flex-wrap justify-end">
+            <Panel position="top-center">
+              <div className="flex gap-2 flex-wrap justify-center">
                 <button
                   type="button"
                   data-walkthrough="add-client-btn"
