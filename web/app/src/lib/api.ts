@@ -207,6 +207,8 @@ export interface Account {
   accounts_count: number;
   bills_count: number;
   clients_count: number;
+  onboarding_array_estimate: number | null;
+  all_set: boolean;
   session: UtilitySessionStatus | null;
 }
 

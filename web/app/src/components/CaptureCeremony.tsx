@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openPortalTab } from "../lib/openPortalTab";
-import { listClients, listArrays, type ClientRow } from "../lib/api";
+import { listClients, listArrays, type ClientRow, type Account } from "../lib/api";
 import { useToast } from "../ui/Toast";
 
 type Provider = "gmp" | "vec";
@@ -36,11 +36,14 @@ interface Props {
   /** Bumped after each ceremony event so the parent ClientsSection can
    *  refresh its list and the new card appears in real-time. */
   onCaptureLanded: () => void;
+  /** When all_set is true, the "log into another portal" soft prompt is hidden
+   *  because the operator has already captured all their expected arrays. */
+  account?: Account | null;
 }
 
 const DISMISS_KEY = "so_capture_ceremony_dismissed";
 
-export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
+export function CaptureCeremony({ freshVisit, onCaptureLanded, account }: Props) {
   const toast = useToast();
   const [events, setEvents] = useState<CaptureEvent[]>([]);
   const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
@@ -456,39 +459,41 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
         </ol>
       )}
 
-      {/* Soft prompt */}
-      <div className="mt-5 border-t border-primary-100 bg-primary-50/40 px-5 py-4">
-        <p className="text-sm text-zinc-700">
-          {events.length === 0
-            ? "Once you log in, your client will appear here with all their arrays already attached. Want to start now?"
-            : "Log into another utility account to add the next client. Each login = one more client, automatically."}
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => openPortal("gmp")}
-            className="inline-flex items-center justify-center rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700"
-          >
-            Open Green Mountain Power →
-          </button>
-          <button
-            type="button"
-            onClick={() => openPortal("vec")}
-            className="inline-flex items-center justify-center rounded-xl border border-primary-300 bg-white px-4 py-2 text-sm font-semibold text-primary-700 transition-colors hover:bg-primary-50"
-          >
-            Open Vermont Electric Coop →
-          </button>
-          {events.length > 0 && (
+      {/* Soft prompt — hidden once operator has captured all expected arrays */}
+      {!account?.all_set && (
+        <div className="mt-5 border-t border-primary-100 bg-primary-50/40 px-5 py-4">
+          <p className="text-sm text-zinc-700">
+            {events.length === 0
+              ? "Once you log in, your client will appear here with all their arrays already attached. Want to start now?"
+              : "Log into another utility account to add the next client. Each login = one more client, automatically."}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={dismiss}
-              className="ml-auto text-sm text-zinc-500 underline-offset-2 hover:underline"
+              onClick={() => openPortal("gmp")}
+              className="inline-flex items-center justify-center rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700"
             >
-              I&apos;m done for now
+              Open Green Mountain Power →
             </button>
-          )}
+            <button
+              type="button"
+              onClick={() => openPortal("vec")}
+              className="inline-flex items-center justify-center rounded-xl border border-primary-300 bg-white px-4 py-2 text-sm font-semibold text-primary-700 transition-colors hover:bg-primary-50"
+            >
+              Open Vermont Electric Coop →
+            </button>
+            {events.length > 0 && (
+              <button
+                type="button"
+                onClick={dismiss}
+                className="ml-auto text-sm text-zinc-500 underline-offset-2 hover:underline"
+              >
+                I&apos;m done for now
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

@@ -472,6 +472,29 @@ def set_password(body: SetPasswordBody,
 
 # ─── account read ───────────────────────────────────────────────────────
 
+def _compute_all_set(db, tenant_id: str) -> bool:
+    """True when the tenant has reached their onboarding array estimate with
+    at least one client and enough arrays to meet it."""
+    t = db.get(Tenant, tenant_id)
+    if t is None or t.onboarding_array_estimate is None:
+        return False
+    clients_count = db.execute(
+        select(func.count()).select_from(Client).where(
+            Client.tenant_id == tenant_id,
+            Client.deleted_at.is_(None),
+        )
+    ).scalar() or 0
+    if clients_count < 1:
+        return False
+    arrays_count = db.execute(
+        select(func.count()).select_from(Array).where(
+            Array.tenant_id == tenant_id,
+            Array.deleted_at.is_(None),
+        )
+    ).scalar() or 0
+    return arrays_count >= t.onboarding_array_estimate
+
+
 @router.get("/v1/account")
 def account_me(authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
@@ -496,6 +519,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
                 Client.deleted_at.is_(None),
             )
         ).scalar() or 0
+        all_set = _compute_all_set(db, t.id)
         return {
             "tenant_id": t.id,
             # Activation code the customer pastes into the Chrome extension.
@@ -529,6 +553,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "accounts_count": int(accounts_count),
             "bills_count": int(bills_count),
             "clients_count": int(clients_count),
+            "onboarding_array_estimate": t.onboarding_array_estimate,
+            "all_set": all_set,
             "session": {
                 "captured_at": last_sess.captured_at.isoformat() if last_sess else None,
                 "expires_at": last_sess.expires_at.isoformat() if last_sess and last_sess.expires_at else None,

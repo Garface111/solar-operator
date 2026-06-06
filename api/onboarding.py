@@ -232,12 +232,17 @@ def checkout(req: CheckoutRequest):
 
     # N4: derive Stripe line-item quantity from pre-entered clients (Path A) or
     # operator estimate (Path B). Old SPA builds send neither → quantity=1.
+    # onboarding_estimate is persisted on the Tenant row for the "all set?" check.
     if req.clients is not None:
-        quantity = max(1, sum(len(c.arrays) for c in req.clients))
+        _raw_count = sum(len(c.arrays) for c in req.clients)
+        quantity = max(1, _raw_count)
+        onboarding_estimate: int | None = _raw_count
     elif req.array_count is not None:
         quantity = max(1, req.array_count)
+        onboarding_estimate = req.array_count
     else:
         quantity = 1
+        onboarding_estimate = None
 
     tenant_id = gen_tenant_id()
     tenant_key = gen_tenant_key()
@@ -258,6 +263,7 @@ def checkout(req: CheckoutRequest):
             subscription_status="pending",
             onboarding_token=onboarding_token,
             onboarding_stage="pending_payment",
+            onboarding_array_estimate=onboarding_estimate,
         )
         db.add(t)
 

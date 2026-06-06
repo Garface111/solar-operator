@@ -499,6 +499,7 @@ export function ClientsSection({ expandClientId }: Props) {
         <CaptureCeremony
           freshVisit={new URLSearchParams(window.location.search).get("fresh") === "1"}
           onCaptureLanded={loadClients}
+          account={account}
         />
       </Suspense>
 
