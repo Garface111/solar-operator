@@ -176,6 +176,10 @@ class UpdateEmail(BaseModel):
     email: EmailStr
 
 
+class UpdateName(BaseModel):
+    name: str
+
+
 class UpdateFrequency(BaseModel):
     frequency: str  # weekly | monthly | quarterly
 
@@ -566,6 +570,28 @@ def update_email(body: UpdateEmail, authorization: Optional[str] = Header(defaul
             logger.warning("Failed to sync email to Stripe: %s", e)
 
     return {"ok": True, "email": new_email}
+
+
+@router.post("/v1/account/name")
+def update_name(body: UpdateName, authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(400, "Name can't be empty")
+    if len(new_name) > 120:
+        raise HTTPException(400, "Name is too long")
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.name = new_name
+        db.commit()
+
+    if t.stripe_customer_id:
+        try:
+            stripe.Customer.modify(t.stripe_customer_id, name=new_name)
+        except Exception as e:
+            logger.warning("Failed to sync name to Stripe: %s", e)
+
+    return {"ok": True, "name": new_name}
 
 
 @router.post("/v1/account/regen-key")

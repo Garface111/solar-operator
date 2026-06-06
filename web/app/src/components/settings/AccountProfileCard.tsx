@@ -4,7 +4,7 @@ import { Input } from "../../ui/Input";
 import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
-import { type Account, updateAccountEmail, setPassword } from "../../lib/api";
+import { type Account, updateAccountEmail, updateAccountName, setPassword } from "../../lib/api";
 import { timeAgo } from "./utils";
 
 const STATUS_STYLES: Record<string, string> = {
@@ -160,6 +160,13 @@ interface Props {
 export function AccountProfileCard({ account, onAccountChange }: Props) {
   const toast = useToast();
 
+  async function saveName(next: string) {
+    if (!next) throw new Error("Name can't be empty");
+    const name = await updateAccountName(next);
+    onAccountChange({ name });
+    toast.success("Name updated");
+  }
+
   async function saveEmail(next: string) {
     if (!next) throw new Error("Email can't be empty");
     const email = await updateAccountEmail(next);
@@ -189,9 +196,12 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
         <div className="border-t border-cream-border px-5 py-1">
           <div className="divide-y divide-zinc-100">
             <Row label="Name">
-              <span className="text-zinc-700">
-                {account.name || <span className="text-zinc-400">—</span>}
-              </span>
+              <EditableField
+                value={account.name}
+                onSave={saveName}
+                label="name"
+                placeholder="Your name or company"
+              />
             </Row>
             <Row label="Email">
               <EditableField
