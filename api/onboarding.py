@@ -309,6 +309,14 @@ def checkout(req: CheckoutRequest):
             mode="setup",
             payment_method_types=["card"],
             customer_email=email,
+            custom_text={
+                "after_submit": {
+                    "message": (
+                        "You won't be charged today — Solar Operator will charge "
+                        f"$250 (one-time setup) + $15/array/month at trial end."
+                    ),
+                },
+            },
             setup_intent_data={
                 "metadata": {
                     "onboarding_token": onboarding_token,
