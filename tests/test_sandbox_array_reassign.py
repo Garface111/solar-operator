@@ -2,7 +2,8 @@
 Tests for POST /v1/sandbox/array/reassign — array-level drag in the sandbox canvas.
 
 Verifies: success path, cross-tenant rejection, missing target client, sub-meter
-array preserves UtilityAccount→Array linkage on move, and null target = unclassify.
+array preserves UtilityAccount→Array linkage on move, null target = unclassify,
+and login_origin_client_id stamp/clear logic for moved arrays.
 """
 from __future__ import annotations
 
@@ -161,3 +162,116 @@ def test_array_reassign_null_unclassifies(client):
         arr_row = db.get(Array, arr_id)
         assert arr_row.client_id is None
         assert arr_row.reassigned_at is not None
+
+
+# ── Login-origin stamp/clear tests ────────────────────────────────────────────
+
+def _setup_login_origin_fixture(tid: str) -> tuple[int, int, int, int]:
+    """Create clients A and B with one array+account under A. Return (arr_id, acc_id, ca_id, cb_id)."""
+    with SessionLocal() as db:
+        c_a = Client(tenant_id=tid, name="LO Client A", active=True)
+        c_b = Client(tenant_id=tid, name="LO Client B", active=True)
+        db.add_all([c_a, c_b])
+        db.flush()
+        arr = Array(tenant_id=tid, client_id=c_a.id, name="LO Array " + secrets.token_hex(4))
+        db.add(arr)
+        db.flush()
+        acc = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="LO-001")
+        db.add(acc)
+        db.commit()
+        return arr.id, acc.id, c_a.id, c_b.id
+
+
+def test_login_origin_stamped_on_first_move(client):
+    """Moving array A→B stamps login_origin_client_id = A on attached accounts."""
+    tid, auth = _make_tenant()
+    arr_id, acc_id, ca_id, cb_id = _setup_login_origin_fixture(tid)
+
+    resp = _post(client, auth, {"array_id": arr_id, "client_id": cb_id})
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, acc_id)
+        assert acc.login_origin_client_id == ca_id
+
+
+def test_login_origin_cleared_on_return_home(client):
+    """A→B then B→A round-trip ends with login_origin_client_id=None (home again)."""
+    tid, auth = _make_tenant()
+    arr_id, acc_id, ca_id, cb_id = _setup_login_origin_fixture(tid)
+
+    _post(client, auth, {"array_id": arr_id, "client_id": cb_id})  # A→B
+    resp = _post(client, auth, {"array_id": arr_id, "client_id": ca_id})  # B→A
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, acc_id)
+        assert acc.login_origin_client_id is None
+
+
+def test_login_origin_preserved_through_third_client(client):
+    """A→B→C: origin stays A (not overwritten to B)."""
+    tid, auth = _make_tenant()
+    arr_id, acc_id, ca_id, cb_id = _setup_login_origin_fixture(tid)
+
+    with SessionLocal() as db:
+        c_c = Client(tenant_id=tid, name="LO Client C", active=True)
+        db.add(c_c)
+        db.commit()
+        cc_id = c_c.id
+
+    _post(client, auth, {"array_id": arr_id, "client_id": cb_id})  # A→B
+    resp = _post(client, auth, {"array_id": arr_id, "client_id": cc_id})  # B→C
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, acc_id)
+        assert acc.login_origin_client_id == ca_id  # still A, not B
+
+
+def test_login_origin_cleared_on_detach(client):
+    """Detaching an array (client_id=None) clears login_origin on all attached accounts."""
+    tid, auth = _make_tenant()
+    arr_id, acc_id, ca_id, cb_id = _setup_login_origin_fixture(tid)
+
+    _post(client, auth, {"array_id": arr_id, "client_id": cb_id})  # stamp origin = A
+
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, acc_id)
+        assert acc.login_origin_client_id == ca_id  # sanity
+
+    resp = _post(client, auth, {"array_id": arr_id, "client_id": None})  # detach
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, acc_id)
+        assert acc.login_origin_client_id is None
+
+
+def test_login_origin_submeter_all_accounts_stamped(client):
+    """Sub-meter case: 3 accounts sharing one array all get the same stamp."""
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        c_a = Client(tenant_id=tid, name="SM Source", active=True)
+        c_b = Client(tenant_id=tid, name="SM Dest", active=True)
+        db.add_all([c_a, c_b])
+        db.flush()
+        arr = Array(tenant_id=tid, client_id=c_a.id, name="SM Array " + secrets.token_hex(4))
+        db.add(arr)
+        db.flush()
+        sub1 = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="SM-001")
+        sub2 = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="SM-002")
+        sub3 = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="SM-003")
+        db.add_all([sub1, sub2, sub3])
+        db.commit()
+        arr_id = arr.id
+        ca_id, cb_id = c_a.id, c_b.id
+        acc_ids = [sub1.id, sub2.id, sub3.id]
+
+    resp = _post(client, auth, {"array_id": arr_id, "client_id": cb_id})
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        for aid in acc_ids:
+            acc = db.get(UtilityAccount, aid)
+            assert acc.login_origin_client_id == ca_id, f"account {aid} missing origin stamp"

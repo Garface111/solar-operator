@@ -452,6 +452,16 @@ def sandbox_array_reassign(
         if body.client_id is None:
             arr.client_id = None
             arr.reassigned_at = now()
+            # Free-floating accounts aren't part of any login group — clear origin.
+            attached = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.tenant_id == tenant.id,
+                    UtilityAccount.array_id == arr.id,
+                    UtilityAccount.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            for acct in attached:
+                acct.login_origin_client_id = None
             db.commit()
             return {
                 "ok": True,
@@ -472,6 +482,24 @@ def sandbox_array_reassign(
 
         arr.client_id = target_client.id
         arr.reassigned_at = now()
+
+        # Propagate the same stamp/clear logic as sandbox_account_reassign so the
+        # canvas renders the moved array's login as its own group (not the target's).
+        attached = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tenant.id,
+                UtilityAccount.array_id == arr.id,
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        for acct in attached:
+            if acct.login_origin_client_id is None:
+                if prior_client_id is not None and prior_client_id != target_client.id:
+                    acct.login_origin_client_id = prior_client_id
+            else:
+                if acct.login_origin_client_id == target_client.id:
+                    acct.login_origin_client_id = None
+
         db.commit()
 
     return {
