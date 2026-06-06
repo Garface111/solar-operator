@@ -93,6 +93,7 @@ from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
 from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
+from .dev_captures import router as dev_captures_router
 from .events import router as events_router, broadcast as _sse_broadcast
 from . import scheduler
 
