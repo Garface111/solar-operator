@@ -53,6 +53,8 @@ const SIGNOFF_STARTER_CHIPS: { label: string; value: string }[] = [
   },
 ];
 
+type SaveStatus = "saved" | "saving" | "saved-moment" | "error";
+
 export function EmailTemplateStudio({ open, onClose }: Props) {
   const toast = useToast();
 
@@ -63,8 +65,11 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   const [subjectDraft, setSubjectDraft] = useState("");
   const [bodyDraft, setBodyDraft] = useState("");
   const [signoffDraft, setSignoffDraft] = useState("");
-  const [isDirty, setIsDirty] = useState(false);
-  const [signoffDirty, setSignoffDirty] = useState(false);
+  // Tracks whether the user has edited anything this session (for the C4 CTA).
+  const [hasUserEdited, setHasUserEdited] = useState(false);
+
+  // Autosave status indicator
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
 
   // Preview state
   const [previewSubject, setPreviewSubject] = useState("");
@@ -82,13 +87,22 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   const [hintShown, setHintShown] = useState(false);
 
   // Action states
-  const [saving, setSaving] = useState(false);
-  const [savingSignoff, setSavingSignoff] = useState(false);
   const [testing, setTesting] = useState(false);
   const [resetting, setResetting] = useState(false);
 
   // Debounce timer for body edits → preview
   const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Autosave machinery
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedMomentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latest draft values — read by the timer callback so it always sees fresh state.
+  const draftRef = useRef({ subject: "", body: "", signoff: "" });
+  // Which fields have unsaved changes.
+  const dirtyRef = useRef({ subject: false, body: false, signoff: false });
+  // Monotonically increasing counter — latest-only pattern avoids stale responses
+  // flashing "Saved" over a still-pending change.
+  const saveCounterRef = useRef(0);
 
   const subjectInputRef = useRef<HTMLInputElement>(null);
   const bodyTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -111,8 +125,14 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
         setSubjectDraft(data.subject_template);
         setBodyDraft(data.body_template);
         setSignoffDraft(data.signoff);
-        setIsDirty(false);
-        setSignoffDirty(false);
+        draftRef.current = {
+          subject: data.subject_template,
+          body: data.body_template,
+          signoff: data.signoff,
+        };
+        dirtyRef.current = { subject: false, body: false, signoff: false };
+        setHasUserEdited(false);
+        setSaveStatus("saved");
         return refreshPreview(data.subject_template, data.body_template, data.signoff);
       })
       .catch(() => toast.error("Couldn't load email template"))
@@ -129,6 +149,39 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Flush any pending autosave when the dialog closes or the component unmounts.
+  // Covers Escape-key close (which skips onBlur) and route-change unmount.
+  useEffect(() => {
+    if (!open) return;
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      if (savedMomentTimerRef.current) {
+        clearTimeout(savedMomentTimerRef.current);
+        savedMomentTimerRef.current = null;
+      }
+      const { subject, body, signoff } = dirtyRef.current;
+      if (subject || body || signoff) {
+        const draft = draftRef.current;
+        const promises: Promise<unknown>[] = [];
+        if (subject || body) {
+          promises.push(
+            saveEmailTemplate({
+              subject_template: draft.subject || null,
+              body_template: draft.body || null,
+            }),
+          );
+        }
+        if (signoff) {
+          promises.push(saveEmailSignoff(draft.signoff || null));
+        }
+        void Promise.all(promises);
+      }
+    };
+  }, [open]);
 
   // Scroll chat to bottom on new messages
   useEffect(() => {
@@ -167,6 +220,74 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       300,
     );
   }
+
+  // ── Autosave ──────────────────────────────────────────────────────────────
+
+  async function doSave() {
+    const counter = ++saveCounterRef.current;
+    // Snapshot + clear dirty bits atomically so keystrokes during the network
+    // call re-dirty the ref and get picked up by the next save.
+    const dirty = { ...dirtyRef.current };
+    dirtyRef.current = { subject: false, body: false, signoff: false };
+    const draft = { ...draftRef.current };
+
+    if (!dirty.subject && !dirty.body && !dirty.signoff) return;
+
+    setSaveStatus("saving");
+
+    try {
+      const promises: Promise<unknown>[] = [];
+      if (dirty.subject || dirty.body) {
+        promises.push(
+          saveEmailTemplate({
+            subject_template: draft.subject || null,
+            body_template: draft.body || null,
+          }),
+        );
+      }
+      if (dirty.signoff) {
+        promises.push(saveEmailSignoff(draft.signoff || null));
+      }
+      await Promise.all(promises);
+
+      if (counter === saveCounterRef.current) {
+        if (savedMomentTimerRef.current) clearTimeout(savedMomentTimerRef.current);
+        setSaveStatus("saved-moment");
+        savedMomentTimerRef.current = setTimeout(() => {
+          setSaveStatus((s) => (s === "saved-moment" ? "saved" : s));
+        }, 2000);
+      }
+    } catch (err) {
+      // Restore dirty bits so retry has something to send.
+      dirtyRef.current.subject = dirtyRef.current.subject || dirty.subject;
+      dirtyRef.current.body = dirtyRef.current.body || dirty.body;
+      dirtyRef.current.signoff = dirtyRef.current.signoff || dirty.signoff;
+
+      if (counter === saveCounterRef.current) {
+        setSaveStatus("error");
+        toast.error(err instanceof Error ? err.message : "Save failed");
+      }
+    }
+  }
+
+  function scheduleSave() {
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => void doSave(), 800);
+  }
+
+  function flushSave() {
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    void doSave();
+  }
+
+  function handleRetry() {
+    void doSave();
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   function handleOpenChat() {
     if (!hintShown) {
@@ -220,8 +341,13 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
 
       setBodyDraft(newBody);
       setSubjectDraft(newSubject);
-      setIsDirty(true);
+      draftRef.current.body = newBody;
+      draftRef.current.subject = newSubject;
+      dirtyRef.current.body = true;
+      dirtyRef.current.subject = true;
+      setHasUserEdited(true);
       setAiGenerated(true);
+      scheduleSave();
 
       await refreshPreview(newSubject, newBody, signoffDraft);
     } catch (err) {
@@ -235,17 +361,24 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     if (tokenTarget === "body") {
       const ta = bodyTextareaRef.current;
       if (!ta) {
-        setBodyDraft((s) => s + token);
-        setIsDirty(true);
-        schedulePreviewRefresh(subjectDraft, bodyDraft + token, signoffDraft);
+        const next = bodyDraft + token;
+        setBodyDraft(next);
+        draftRef.current.body = next;
+        dirtyRef.current.body = true;
+        setHasUserEdited(true);
+        schedulePreviewRefresh(subjectDraft, next, signoffDraft);
+        scheduleSave();
         return;
       }
       const start = ta.selectionStart ?? bodyDraft.length;
       const end = ta.selectionEnd ?? bodyDraft.length;
       const next = bodyDraft.slice(0, start) + token + bodyDraft.slice(end);
       setBodyDraft(next);
-      setIsDirty(true);
+      draftRef.current.body = next;
+      dirtyRef.current.body = true;
+      setHasUserEdited(true);
       schedulePreviewRefresh(subjectDraft, next, signoffDraft);
+      scheduleSave();
       setTimeout(() => {
         ta.setSelectionRange(start + token.length, start + token.length);
         ta.focus();
@@ -254,8 +387,12 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     }
     const input = subjectInputRef.current;
     if (!input) {
-      setSubjectDraft((s) => s + token);
-      setIsDirty(true);
+      const next = subjectDraft + token;
+      setSubjectDraft(next);
+      draftRef.current.subject = next;
+      dirtyRef.current.subject = true;
+      setHasUserEdited(true);
+      scheduleSave();
       return;
     }
     const start = input.selectionStart ?? subjectDraft.length;
@@ -263,47 +400,24 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     const next =
       subjectDraft.slice(0, start) + token + subjectDraft.slice(end);
     setSubjectDraft(next);
-    setIsDirty(true);
+    draftRef.current.subject = next;
+    dirtyRef.current.subject = true;
+    setHasUserEdited(true);
+    scheduleSave();
     setTimeout(() => {
       input.setSelectionRange(start + token.length, start + token.length);
       input.focus();
     }, 0);
   }
 
-  async function handleSave() {
-    setSaving(true);
-    try {
-      await saveEmailTemplate({
-        subject_template: subjectDraft || null,
-        body_template: bodyDraft || null,
-      });
-      setIsDirty(false);
-      toast.success("Email template saved as your default.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleSaveSignoff() {
-    setSavingSignoff(true);
-    try {
-      await saveEmailSignoff(signoffDraft || null);
-      setSignoffDirty(false);
-      toast.success("Sign-off saved.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Save failed");
-    } finally {
-      setSavingSignoff(false);
-    }
-  }
-
   async function handleResetSignoff() {
     if (!templateData) return;
-    setSignoffDraft(templateData.signoff);
-    setSignoffDirty(false);
-    await refreshPreview(subjectDraft, bodyDraft, templateData.signoff);
+    const defaultSignoff = templateData.signoff;
+    setSignoffDraft(defaultSignoff);
+    draftRef.current.signoff = defaultSignoff;
+    dirtyRef.current.signoff = true;
+    schedulePreviewRefresh(subjectDraft, bodyDraft, defaultSignoff);
+    flushSave();
   }
 
   async function handleTestSend() {
@@ -325,14 +439,25 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   async function handleReset() {
     setResetting(true);
     try {
+      // Cancel any pending autosave before resetting
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
       await resetEmailTemplate();
       const data = await getEmailTemplate();
       setTemplateData(data);
       setSubjectDraft(data.subject_template);
       setBodyDraft(data.body_template);
       setSignoffDraft(data.signoff);
-      setIsDirty(false);
-      setSignoffDirty(false);
+      draftRef.current = {
+        subject: data.subject_template,
+        body: data.body_template,
+        signoff: data.signoff,
+      };
+      dirtyRef.current = { subject: false, body: false, signoff: false };
+      setHasUserEdited(false);
+      setSaveStatus("saved");
       setAiGenerated(false);
       await refreshPreview(data.subject_template, data.body_template, data.signoff);
       toast.success("Template reset to system default.");
@@ -354,8 +479,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     templateData.is_default_subject &&
     templateData.is_default_body &&
     templateData.is_default_signoff &&
-    !isDirty &&
-    !signoffDirty;
+    !hasUserEdited;
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#faf8f5]">
@@ -564,10 +688,16 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     value={subjectDraft}
                     onChange={(e) => {
                       setSubjectDraft(e.target.value);
-                      setIsDirty(true);
+                      draftRef.current.subject = e.target.value;
+                      dirtyRef.current.subject = true;
+                      setHasUserEdited(true);
+                      scheduleSave();
                     }}
                     onFocus={() => setTokenTarget("subject")}
-                    onBlur={() => void refreshPreview()}
+                    onBlur={() => {
+                      void refreshPreview();
+                      flushSave();
+                    }}
                     className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                   />
                 </div>
@@ -582,10 +712,14 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   value={bodyDraft}
                   onChange={(e) => {
                     setBodyDraft(e.target.value);
-                    setIsDirty(true);
+                    draftRef.current.body = e.target.value;
+                    dirtyRef.current.body = true;
+                    setHasUserEdited(true);
                     schedulePreviewRefresh(subjectDraft, e.target.value, signoffDraft);
+                    scheduleSave();
                   }}
                   onFocus={() => setTokenTarget("body")}
+                  onBlur={() => flushSave()}
                   rows={8}
                   className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-800 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                 />
@@ -619,8 +753,11 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                       type="button"
                       onClick={() => {
                         setSignoffDraft(chip.value);
-                        setSignoffDirty(true);
+                        draftRef.current.signoff = chip.value;
+                        dirtyRef.current.signoff = true;
+                        setHasUserEdited(true);
                         schedulePreviewRefresh(subjectDraft, bodyDraft, chip.value);
+                        scheduleSave();
                       }}
                       className="rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700"
                     >
@@ -634,9 +771,13 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   value={signoffDraft}
                   onChange={(e) => {
                     setSignoffDraft(e.target.value);
-                    setSignoffDirty(true);
+                    draftRef.current.signoff = e.target.value;
+                    dirtyRef.current.signoff = true;
+                    setHasUserEdited(true);
                     schedulePreviewRefresh(subjectDraft, bodyDraft, e.target.value);
+                    scheduleSave();
                   }}
+                  onBlur={() => flushSave()}
                   rows={4}
                   placeholder="Paste your sign-off here…"
                   className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
@@ -652,30 +793,13 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   under <strong className="font-medium text-zinc-500">Master Account → Sign-as name</strong>.
                 </p>
 
-                {/* Signoff action buttons */}
-                <div className="flex items-center gap-2">
-                  <Button
-                    onClick={handleSaveSignoff}
-                    disabled={savingSignoff}
-                    className="text-xs"
-                  >
-                    {savingSignoff ? (
-                      <>
-                        <Spinner />
-                        Saving…
-                      </>
-                    ) : (
-                      "Save sign-off"
-                    )}
-                  </Button>
-                  <button
-                    type="button"
-                    onClick={() => void handleResetSignoff()}
-                    className="text-[11px] font-medium text-zinc-400 underline underline-offset-2 hover:text-zinc-600"
-                  >
-                    Reset to default sign-off
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleResetSignoff()}
+                  className="text-[11px] font-medium text-zinc-400 underline underline-offset-2 hover:text-zinc-600"
+                >
+                  Reset to default sign-off
+                </button>
               </div>
 
               {/* ── C4: "Looks great" CTA ── shown only when all defaults, nothing dirty */}
@@ -718,25 +842,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     "Send myself a test"
                   )}
                 </Button>
-                <div className="flex items-center gap-2">
-                  {isDirty && (
-                    <span className="text-[11px] text-zinc-400">Unsaved draft</span>
-                  )}
-                  <Button
-                    onClick={handleSave}
-                    disabled={saving}
-                    className="text-xs"
-                  >
-                    {saving ? (
-                      <>
-                        <Spinner />
-                        Saving…
-                      </>
-                    ) : (
-                      "Save as my default"
-                    )}
-                  </Button>
-                </div>
+                <SaveStatusIndicator status={saveStatus} onRetry={handleRetry} />
               </div>
             )}
           </div>
@@ -910,6 +1016,42 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       )}
     </div>
   );
+}
+
+function SaveStatusIndicator({
+  status,
+  onRetry,
+}: {
+  status: SaveStatus;
+  onRetry: () => void;
+}) {
+  if (status === "saving") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+        <Spinner className="h-3 w-3" />
+        <span>Saving…</span>
+      </div>
+    );
+  }
+  if (status === "saved-moment") {
+    return <span className="text-xs text-zinc-400">Saved a moment ago</span>;
+  }
+  if (status === "error") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs">
+        <span className="text-red-600">Couldn't save —</span>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="text-red-600 underline underline-offset-2 hover:text-red-700"
+        >
+          retry
+        </button>
+      </div>
+    );
+  }
+  // "saved" (default) — unobtrusive
+  return <span className="text-xs text-zinc-400">Saved</span>;
 }
 
 /** Initials from an email address or name — for the inbox preview avatar.
