@@ -56,6 +56,22 @@ export function ClientsSection({ expandClientId }: Props) {
   // and felt jarring.
   const nepoolBannerRef = useRef<HTMLDivElement | null>(null);
 
+  // Live polling indicator state.
+  const [pollingNewData, setPollingNewData] = useState(false);
+  // Refs for polling so closures always read the latest value without re-running effects.
+  const clientsRef = useRef<ClientRow[] | null>(null);
+  const modalOpenRef = useRef(false);
+  const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep clientsRef in sync so polling closures always read the latest value.
+  useEffect(() => { clientsRef.current = clients; }, [clients]);
+
+  // Track modal open state so polling yields while a modal is up.
+  useEffect(() => {
+    modalOpenRef.current = adding || addingByLogin || importing || assigningNepool;
+  }, [adding, addingByLogin, importing, assigningNepool]);
+
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -101,7 +117,72 @@ export function ClientsSection({ expandClientId }: Props) {
     return () => {
       if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
       importPollerRef.current?.cancel();
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+      if (pollingPulseTimerRef.current) clearTimeout(pollingPulseTimerRef.current);
       window.removeEventListener("so:client-merged", onMerged);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Background polling: refetch clients every 15s while the tab is visible.
+  // Yields to open modals or active input focus to avoid clobbering optimistic edits.
+  // Only updates state when the response actually differs from current state.
+  useEffect(() => {
+    const POLL_MS = 15_000;
+    let cancelled = false;
+
+    async function tick() {
+      if (cancelled || document.visibilityState !== "visible") return;
+
+      // Yield if a modal is open or user is typing in an editable field.
+      const isEditing =
+        modalOpenRef.current ||
+        document.activeElement instanceof HTMLInputElement ||
+        document.activeElement instanceof HTMLTextAreaElement;
+
+      if (!isEditing) {
+        try {
+          const fresh = await listClients();
+          if (!cancelled && clientsRef.current !== null) {
+            if (JSON.stringify(fresh) !== JSON.stringify(clientsRef.current)) {
+              setClients(fresh);
+              setPollingNewData(true);
+              if (pollingPulseTimerRef.current) clearTimeout(pollingPulseTimerRef.current);
+              pollingPulseTimerRef.current = setTimeout(
+                () => setPollingNewData(false),
+                1_000,
+              );
+            }
+          }
+        } catch { /* non-fatal — leave stale rather than wiping */ }
+      }
+
+      if (!cancelled && document.visibilityState === "visible") {
+        pollingTimerRef.current = setTimeout(tick, POLL_MS);
+      }
+    }
+
+    function onVisibility() {
+      if (cancelled) return;
+      if (document.visibilityState === "visible") {
+        // Return from background — refetch immediately then resume interval.
+        if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+        void tick();
+      } else {
+        // Tab hidden — pause the interval (tick won't reschedule while hidden).
+        if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+        pollingTimerRef.current = null;
+      }
+    }
+
+    document.addEventListener("visibilitychange", onVisibility);
+    // Start after initial load has had time to settle.
+    pollingTimerRef.current = setTimeout(tick, POLL_MS);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      // Timer refs cleaned up in the unmount effect above.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -337,7 +418,18 @@ export function ClientsSection({ expandClientId }: Props) {
       </Suspense>
 
       <div className="mb-3 flex items-center justify-between">
-        <SectionTitle title="Clients" count={clients?.length} />
+        <div className="flex items-center gap-2">
+          <SectionTitle title="Clients" count={clients?.length} />
+          {/* Live polling indicator: subtle at 50% opacity, pulses green for 1s on new data. */}
+          <span
+            aria-hidden
+            title="Live — auto-refreshes every 15s"
+            className={[
+              "h-2 w-2 rounded-full bg-green-500 transition-opacity duration-700",
+              pollingNewData ? "animate-pulse opacity-100" : "opacity-50",
+            ].join(" ")}
+          />
+        </div>
         <div className="flex items-center gap-2">
           {clients && clients.length > 0 && (
             <button
