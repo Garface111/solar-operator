@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openPortalTab } from "../lib/openPortalTab";
 import { listClients, listArrays, type ClientRow } from "../lib/api";
+import { useToast } from "../ui/Toast";
 
 type Provider = "gmp" | "vec";
 
@@ -21,6 +22,8 @@ interface CaptureEvent {
   provider: Provider;
   accountCount: number;
   at: string;
+  /** Set when backend signals result=updated — resolveEvent will toast instead of showing a row. */
+  isUpdate?: boolean;
   // Resolved after we refetch /v1/account/clients post-capture:
   client?: { id: number; name: string; arrays: string[] };
 }
@@ -38,6 +41,7 @@ interface Props {
 const DISMISS_KEY = "so_capture_ceremony_dismissed";
 
 export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
+  const toast = useToast();
   const [events, setEvents] = useState<CaptureEvent[]>([]);
   const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
   const [pendingSince, setPendingSince] = useState<number | null>(null);
@@ -48,13 +52,61 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
       return false;
     }
   });
+  const [fadingOut, setFadingOut] = useState(false);
   const nextIdRef = useRef(1);
   const knownClientIdsRef = useRef<Set<number>>(new Set());
   const pollAbortRef = useRef<{ canceled: boolean } | null>(null);
+  // Refs so timer callbacks can read current state without stale closures.
+  const pendingProviderRef = useRef<Provider | null>(null);
+  const autoDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => { pendingProviderRef.current = pendingProvider; }, [pendingProvider]);
+
+  // Clear only the raw timers (safe to call on unmount — no setState).
+  function clearAutoDismissTimers() {
+    if (autoDismissTimerRef.current) {
+      clearTimeout(autoDismissTimerRef.current);
+      autoDismissTimerRef.current = null;
+    }
+    if (fadingTimerRef.current) {
+      clearTimeout(fadingTimerRef.current);
+      fadingTimerRef.current = null;
+    }
+  }
+
+  // Cancel any in-progress auto-dismiss (timers + fade state).
+  // Only call while component is mounted.
+  function clearAutoDismiss() {
+    clearAutoDismissTimers();
+    setFadingOut(false);
+  }
+
+  // Start (or restart) the 30s inactivity auto-dismiss. Respects pending state.
+  function scheduleAutoDismiss() {
+    clearAutoDismissTimers();
+    autoDismissTimerRef.current = setTimeout(() => {
+      if (pendingProviderRef.current) {
+        // Still scraping — reschedule until the capture lands.
+        scheduleAutoDismiss();
+        return;
+      }
+      setFadingOut(true);
+      fadingTimerRef.current = setTimeout(() => {
+        setFadingOut(false);
+        setDismissed(true);
+        try { sessionStorage.setItem(DISMISS_KEY, "true"); } catch { /* ignore */ }
+      }, 350);
+    }, 30_000);
+  }
 
   // Resolve a capture event into a Client row so we can render names + arrays.
-  // /v1/sync runs synchronously before sending SO_CAPTURE_LANDED, so the
-  // tenant's clients list will already reflect the new state when we fetch.
+  // Also handles:
+  //   • Backward-compat update detection — if the resolved client was known
+  //     before the capture (knownClientIdsRef), treat as update: remove the
+  //     event row and show a quiet toast instead.
+  //   • Dedup — if another event already resolved to the same client, merge
+  //     accountCount/arrays into that row (preserving the latest at timestamp).
   const resolveEvent = useCallback(async (ev: CaptureEvent) => {
     try {
       const clients = await listClients();
@@ -69,14 +121,55 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
         });
       const top = candidates[0];
       if (!top) return;
-      // Fetch this client's arrays so we can render real names in the cascade.
       let arrayNames: string[] = [];
       try {
         const arrays = await listArrays(top.id);
         arrayNames = arrays.map((a) => a.name);
       } catch { /* non-fatal — chips just won't render */ }
-      setEvents((prev) =>
-        prev.map((p) =>
+
+      // Backward-compat update detection: we had a pre-capture snapshot AND the
+      // resolved client was already in it — this is a re-scrape, not a new client.
+      const isKnownClient =
+        knownClientIdsRef.current.size > 0 &&
+        knownClientIdsRef.current.has(top.id);
+      if (ev.isUpdate || isKnownClient) {
+        setEvents((prev) => prev.filter((p) => p.id !== ev.id));
+        toast.show(
+          `Updated ${top.name} — ${arrayNames.length} array${arrayNames.length === 1 ? "" : "s"} refreshed`,
+          "info",
+        );
+        return;
+      }
+
+      // Dedup: if another event already resolved to this client, merge into it.
+      setEvents((prev) => {
+        const existingIdx = prev.findIndex(
+          (p) => p.id !== ev.id && p.client?.id === top.id,
+        );
+        if (existingIdx >= 0) {
+          const existing = prev[existingIdx];
+          return prev
+            .map((p, i) =>
+              i === existingIdx
+                ? {
+                    ...p,
+                    accountCount: Math.max(existing.accountCount, ev.accountCount),
+                    at: existing.at > ev.at ? existing.at : ev.at,
+                    client: {
+                      id: top.id,
+                      name: top.name,
+                      arrays: arrayNames.slice(
+                        0,
+                        Math.max(existing.accountCount, ev.accountCount, arrayNames.length),
+                      ),
+                    },
+                  }
+                : p,
+            )
+            .filter((p) => p.id !== ev.id);
+        }
+        // Normal case: update this event in-place with resolved client data.
+        return prev.map((p) =>
           p.id === ev.id
             ? {
                 ...p,
@@ -87,12 +180,12 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
                 },
               }
             : p,
-        ),
-      );
+        );
+      });
     } catch {
       // Non-fatal — ceremony still renders the bare "N accounts captured" line.
     }
-  }, []);
+  }, [toast]);
 
   // Listen for SO_CAPTURE_LANDED broadcasts forwarded by so_bridge.js.
   useEffect(() => {
@@ -101,6 +194,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
       const data = e.data;
       if (!data || typeof data !== "object") return;
       if (data.type !== "SO_CAPTURE_LANDED") return;
+
       if (!data.ok) {
         // Capture failed → clear pending so we don't loop on it.
         setPendingProvider(null);
@@ -108,32 +202,58 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
         if (pollAbortRef.current) pollAbortRef.current.canceled = true;
         return;
       }
-      const isNew = data.is_new_client !== false; // default true for backward compat
-      if (isNew) {
-        const ev: CaptureEvent = {
-          id: nextIdRef.current++,
-          provider: (data.provider as Provider) || "gmp",
-          accountCount: Number(data.accountCount ?? 0),
-          at: String(data.at || new Date().toISOString()),
-        };
-        setEvents((prev) => [...prev, ev]);
-        setPendingProvider(null);
-        setPendingSince(null);
-        if (pollAbortRef.current) pollAbortRef.current.canceled = true;
-        setDismissed(false);
-        try { sessionStorage.removeItem(DISMISS_KEY); } catch { /* ignore */ }
-        void resolveEvent(ev);
-        onCaptureLanded();
-      } else {
-        // Re-capture: clear pending state but don't add a ceremony event
-        setPendingProvider(null);
-        setPendingSince(null);
-        if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+
+      const provider = (data.provider as Provider) || "gmp";
+
+      // Clear pending state (applies to both paths).
+      setPendingProvider(null);
+      setPendingSince(null);
+      if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+      clearAutoDismiss(); // abort any in-progress fade
+
+      if (data.result === "updated") {
+        // Backend explicitly says this was a re-capture — quiet toast, no ceremony row.
+        void (async () => {
+          try {
+            const freshClients = await listClients();
+            const syncedField: keyof ClientRow =
+              provider === "gmp" ? "gmp_last_sync_at" : "vec_last_sync_at";
+            const top = freshClients
+              .filter((c) => !!c[syncedField])
+              .sort((a, b) =>
+                String(b[syncedField] || "").localeCompare(String(a[syncedField] || "")),
+              )[0];
+            if (top) {
+              const arrays = await listArrays(top.id).catch(() => []);
+              toast.show(
+                `Updated ${top.name} — ${arrays.length} array${arrays.length === 1 ? "" : "s"} refreshed`,
+                "info",
+              );
+            }
+          } catch { /* non-fatal */ }
+        })();
+        return;
       }
+
+      const ev: CaptureEvent = {
+        id: nextIdRef.current++,
+        provider,
+        accountCount: Number(data.accountCount ?? 0),
+        at: String(data.at || new Date().toISOString()),
+      };
+      setEvents((prev) => [...prev, ev]);
+      setDismissed(false); // un-dismiss on new event so user sees the magic
+      try {
+        sessionStorage.removeItem(DISMISS_KEY);
+      } catch { /* ignore */ }
+      scheduleAutoDismiss(); // start/reset 30s auto-dismiss timer
+      void resolveEvent(ev);
+      onCaptureLanded();
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [resolveEvent, onCaptureLanded]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolveEvent, onCaptureLanded, toast]);
 
   // Listen for so:capture-pending — fired the moment the operator picks
   // GMP/VEC in the Add Client modal. Show a "Scraping…" pending row
@@ -145,6 +265,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
       setPendingProvider(provider);
       setPendingSince(Date.now());
       setDismissed(false);
+      clearAutoDismiss(); // scraping active — don't auto-dismiss while waiting
       try { sessionStorage.removeItem(DISMISS_KEY); } catch { /* ignore */ }
       // Snapshot known client IDs so we can detect the newcomer if the
       // postMessage gets lost in the tab handoff.
@@ -182,6 +303,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
             setPendingProvider(null);
             setPendingSince(null);
             abortToken.canceled = true;
+            scheduleAutoDismiss();
             void resolveEvent(synth);
             onCaptureLanded();
             return;
@@ -193,16 +315,20 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
     }
     window.addEventListener("so:capture-pending", onPending as EventListener);
     return () => window.removeEventListener("so:capture-pending", onPending as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolveEvent, onCaptureLanded]);
 
-  // Cleanup on unmount.
+  // Cleanup on unmount — clear raw timers only, no setState.
   useEffect(() => {
     return () => {
       if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+      clearAutoDismissTimers();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function dismiss() {
+    clearAutoDismiss();
     setDismissed(true);
     try {
       sessionStorage.setItem(DISMISS_KEY, "true");
@@ -217,16 +343,18 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
     void openPortalTab(url);
   }
 
-  // Render nothing if dismissed AND no live events; spare returning users.
-  // Render nothing if dismissed AND no live activity; spare returning users.
-  if (dismissed && events.length === 0 && !pendingProvider) return null;
-  if (!freshVisit && events.length === 0 && !pendingProvider) return null;
+  // While fading out: still render so the CSS transition plays.
+  if (!fadingOut && dismissed) return null;
+  if (!fadingOut && !freshVisit && events.length === 0 && !pendingProvider) return null;
 
   const totalClients = new Set(events.map((e) => e.client?.id).filter(Boolean)).size;
   const totalArrays = events.reduce((sum, e) => sum + (e.accountCount || 0), 0);
 
   return (
-    <div className="mb-6 overflow-hidden rounded-2xl border border-primary-200 bg-gradient-to-b from-primary-50 to-cream shadow-sm">
+    <div
+      className="mb-6 overflow-hidden rounded-2xl border border-primary-200 bg-gradient-to-b from-primary-50 to-cream shadow-sm transition-opacity duration-300"
+      style={fadingOut ? { opacity: 0 } : undefined}
+    >
       <div className="flex items-start justify-between gap-4 px-5 pt-5">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-primary-700">
