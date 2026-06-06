@@ -298,6 +298,40 @@ def _process_invoice_payment_failed(invoice: dict) -> dict:
     return {"tenant": tid, "payment_failed": True}
 
 
+def _process_payment_method_detached(pm: dict) -> dict:
+    """Clear our cached PM when an operator removes their card in Stripe.
+
+    Without this handler, a trialing tenant who detaches their card via the
+    billing portal would only be discovered at trial-end when
+    finalize_expired_trials() tries to create a subscription with a null PM.
+    """
+    pm_id = pm.get("id")
+    if not pm_id:
+        return {"ignored": "no pm id in event"}
+
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.stripe_payment_method_id == pm_id)
+        ).scalars().first()
+        if not t:
+            return {"ignored": f"no tenant with stripe_payment_method_id={pm_id}"}
+
+        t.stripe_payment_method_id = None
+        db.commit()
+        tid, email = t.id, t.contact_email
+
+    logger.warning(
+        "payment_method.detached: cleared pm_id=%s for tenant=%s", pm_id, tid
+    )
+    send_internal_alert(
+        f"⚠️ Payment method detached mid-trial: {tid}",
+        f"Tenant {tid} ({email}) had payment method {pm_id} detached.\n"
+        f"If they are still trialing, the trial-end charge will fail.\n"
+        f"Consider reaching out to prompt them to re-add a card."
+    )
+    return {"tenant": tid, "pm_cleared": True}
+
+
 # ─── webhook route ─────────────────────────────────────────────────────────
 
 @router.post("/v1/stripe/webhook")
@@ -353,6 +387,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         "customer.subscription.updated": _process_subscription_updated,
         "customer.subscription.deleted": _process_subscription_deleted,
         "invoice.payment_failed": _process_invoice_payment_failed,
+        "payment_method.detached": _process_payment_method_detached,
     }
     handler = handlers.get(event_type)
 
