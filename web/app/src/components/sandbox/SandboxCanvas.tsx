@@ -1919,24 +1919,29 @@ export default function SandboxCanvas() {
   // around as a defensive callable via prop if anyone wires it, but no UI
   // path opens it anymore.
   // Repeat clicks auto-increment: "Untitled client" → "Untitled client 2"
-  // → "Untitled client 3", reading current canvas state so the operator can
-  // spam the button and rename later.
+  // → "Untitled client 3". Spam-safe: concurrent invocations track
+  // in-flight names in a ref so they don't race to the same name (the
+  // Client table has UNIQUE (tenant_id, name) — 4 of 5 rapid clicks
+  // would otherwise 409 because loadCanvas hadn't resolved yet).
+  const pendingClientNamesRef = useRef<Set<string>>(new Set());
   const handleAddPlaceholderClient = useCallback(async () => {
+    // Compute next available name considering BOTH on-canvas labels and
+    // any names currently being created by an earlier in-flight click.
+    const names = new Set<string>(pendingClientNamesRef.current);
+    for (const n of nodesRef.current) {
+      if (n.type === 'client' && n.data && typeof n.data === 'object') {
+        const nm = (n.data as ClientNodeData).label;
+        if (typeof nm === 'string') names.add(nm);
+      }
+    }
+    let nextName = 'Untitled client';
+    if (names.has(nextName)) {
+      let i = 2;
+      while (names.has(`Untitled client ${i}`)) i++;
+      nextName = `Untitled client ${i}`;
+    }
+    pendingClientNamesRef.current.add(nextName);
     try {
-      // Find the next "Untitled client[ N]" suffix not already on canvas.
-      const names = new Set<string>();
-      for (const n of nodesRef.current) {
-        if (n.type === 'client' && n.data && typeof n.data === 'object') {
-          const nm = (n.data as ClientNodeData).label;
-          if (typeof nm === 'string') names.add(nm);
-        }
-      }
-      let nextName = 'Untitled client';
-      if (names.has(nextName)) {
-        let i = 2;
-        while (names.has(`Untitled client ${i}`)) i++;
-        nextName = `Untitled client ${i}`;
-      }
       const created = await createClient({
         name: nextName,
         contact_email: null,
@@ -1953,13 +1958,14 @@ export default function SandboxCanvas() {
         },
       });
       centerOnClientId(ncId);
-      // Drop into rename on the next tick so the rendered node exists.
       setTimeout(() => startRename(`client_${ncId}`), 50);
     } catch (err) {
       toast.show(
         err instanceof Error ? err.message : "Couldn't add client",
         'error',
       );
+    } finally {
+      pendingClientNamesRef.current.delete(nextName);
     }
   }, [centerOnClientId, loadCanvas, pushUndo, startRename, toast]);
 
