@@ -3,7 +3,7 @@
   "name": "Solar Operator Sync",
   "short_name": "Solar Operator",
   "version": "1.5.0",
-  "description": "Auto-captures Green Mountain Power and NISC SmartHub (VEC, WEC, Stowe, and more) billing data so Solar Operator can email NEPOOL-format quarterly solar reports.",
+  "description": "Captures Green Mountain Power and SmartHub utility bills for Solar Operator quarterly NEPOOL reports.",
   "author": "Solar Operator",
   "homepage_url": "https://solaroperator.org",
   "permissions": [
