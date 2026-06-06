@@ -180,6 +180,10 @@ class UpdateName(BaseModel):
     name: str
 
 
+class UpdateSendFromName(BaseModel):
+    send_from_name: Optional[str] = None
+
+
 class UpdateFrequency(BaseModel):
     frequency: str  # weekly | monthly | quarterly
 
@@ -620,6 +624,25 @@ def update_name(body: UpdateName, authorization: Optional[str] = Header(default=
     return {"ok": True, "name": new_name}
 
 
+@router.post("/v1/account/send-from-name")
+def update_send_from_name(body: UpdateSendFromName,
+                           authorization: Optional[str] = Header(default=None)):
+    """Set (or clear) the operator's sign-as name used in client report signoffs.
+
+    null / empty string → clear the override (signoff falls back to tenant.name).
+    Stored in Tenant.send_from_name, which also drives the email From display name."""
+    t = tenant_from_session(authorization)
+    raw = (body.send_from_name or "").strip()
+    if raw and len(raw) > 120:
+        raise HTTPException(400, "Sign-as name is too long (max 120 characters)")
+    new_value: Optional[str] = raw or None
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.send_from_name = new_value
+        db.commit()
+    return {"ok": True, "send_from_name": new_value}
+
+
 @router.post("/v1/account/regen-key")
 def regen_activation_key(authorization: Optional[str] = Header(default=None)):
     """Generate a new tenant_key (activation code), invalidating the old one.
@@ -797,6 +820,7 @@ def preview_email(body: EmailSettings,
     ctx = build_context(
         client_name=_PREVIEW_CLIENT, tenant_name=tenant_name,
         arrays_count=3, tenant_email=tenant_email,
+        tenant_signoff_name=eff_from_name,
     )
     subject, html, text = render_email(
         subject_template=eff_subject, body_template=eff_body, ctx=ctx)
@@ -959,7 +983,8 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
 
 def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
                              tenant_email: str,
-                             signoff_template: Optional[str] = None) -> tuple[dict, str]:
+                             signoff_template: Optional[str] = None,
+                             tenant_signoff_name: Optional[str] = None) -> tuple[dict, str]:
     """Return (merge_ctx, sample_client_name) using first client with email or fallback."""
     client = db.execute(
         select(Client)
@@ -987,6 +1012,7 @@ def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
         arrays_count=n_arrays,
         tenant_email=tenant_email,
         signoff_template=signoff_template,
+        tenant_signoff_name=tenant_signoff_name,
     )
     return ctx, client_name
 
@@ -1051,7 +1077,8 @@ def preview_email_template(body: _TemplateBody,
         # Resolve signoff: request body overrides stored, stored overrides default.
         signoff_t = (body.signoff or "").strip() or stored_signoff or DEFAULT_SIGNOFF
         ctx, sample_client = _query_sample_client_ctx(
-            db, t.id, tenant_name, tenant_email, signoff_template=signoff_t)
+            db, t.id, tenant_name, tenant_email, signoff_template=signoff_t,
+            tenant_signoff_name=t.send_from_name)
     subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
     body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
     return {
@@ -1146,7 +1173,8 @@ def test_send_email_template(body: _TemplateBody,
         stored_signoff = t.email_signoff
         signoff_t = (body.signoff or "").strip() or stored_signoff or DEFAULT_SIGNOFF
         ctx, _ = _query_sample_client_ctx(
-            db, t.id, tenant_name, tenant_email, signoff_template=signoff_t)
+            db, t.id, tenant_name, tenant_email, signoff_template=signoff_t,
+            tenant_signoff_name=t.send_from_name)
     subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
     body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
     subject, html, text = render_email(

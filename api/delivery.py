@@ -87,8 +87,9 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # not from admin@solaroperator.org.  send_workbook_email will retry with
         # the platform default + Reply-To if Resend rejects an unverified domain.
         effective_from_email = tenant.send_from_email or tenant.contact_email
+        send_from_name = tenant.send_from_name
         from_header = resolve_from_header(
-            effective_from_email, tenant.send_from_name, tenant_name)
+            effective_from_email, send_from_name, tenant_name)
         subject_template = tenant.email_subject_template
         body_template = tenant.email_body_template
         signoff_template = tenant.email_signoff
@@ -154,6 +155,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             client_name=client_name, tenant_name=tenant_name,
             arrays_count=arrays_count, tenant_email=tenant_email,
             signoff_template=signoff_template,
+            tenant_signoff_name=send_from_name,
         )
         subject, html, text = render_email(
             subject_template=subject_template,

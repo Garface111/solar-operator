@@ -304,6 +304,16 @@ export async function updateAccountName(name: string): Promise<string> {
   return res.name;
 }
 
+export async function updateAccountSendFromName(
+  sendFromName: string | null,
+): Promise<string | null> {
+  const res = await request<{ send_from_name: string | null }>(
+    "/v1/account/send-from-name",
+    { body: { send_from_name: sendFromName } },
+  );
+  return res.send_from_name;
+}
+
 export async function updateAccountFrequency(
   frequency: string,
 ): Promise<string> {
