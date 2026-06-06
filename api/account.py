@@ -290,6 +290,9 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
         "bill_offset_months": a.bill_offset_months,
         "notes": a.notes,
         "excluded": bool(a.excluded),
+        # SolarEdge: expose connected status + site_id, never the raw key.
+        "solaredge_connected": bool(a.solaredge_api_key),
+        "solaredge_site_id": a.solaredge_site_id,
         "accounts": [
             {
                 "id": ac.id,

@@ -492,6 +492,20 @@ def main():
             conn.execute(text(idx_sql))
         print("  ✓ daily_generation table + indexes ensured")
 
+        # 2026-06-06 SolarEdge Monitoring API integration (feat/solaredge-adapter).
+        # Stores operator-pasted API key (plain text — read-only scope) and the
+        # SolarEdge site ID this array maps to. Nullable; NULL means no SolarEdge.
+        solaredge_cols = [
+            ("solaredge_api_key",
+             "ALTER TABLE arrays ADD COLUMN solaredge_api_key TEXT"),
+            ("solaredge_site_id",
+             "ALTER TABLE arrays ADD COLUMN solaredge_site_id INTEGER"),
+        ]
+        for col, sql in solaredge_cols:
+            if not column_exists(conn, "arrays", col):
+                conn.execute(text(sql))
+                print(f"  + arrays.{col}")
+
     print("=== Migration complete ===")
 
 
