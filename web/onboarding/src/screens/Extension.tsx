@@ -11,6 +11,7 @@ import {
   getToken,
   fetchStatus,
   reconcileCheckout,
+  pingExtension,
 } from "../lib/onboarding";
 
 const CHROME_STORE_URL =
@@ -41,6 +42,9 @@ const HELP_TIMEOUT_MS = 45_000;
 // first try; we keep trying quietly behind the scenes for slower webhooks.
 const STATUS_RETRY_MS = 3_000;
 const STATUS_MAX_RETRIES = 20;
+
+const PING_INTERVAL_MS = 3_000;
+const PING_MAX_ATTEMPTS = 60;
 
 function uuid(): string {
   try {
@@ -268,9 +272,49 @@ export default function Extension() {
     return () => window.clearTimeout(id);
   }, []);
 
+  // -------- 6. Capture-ping fallback poll --------
+  // Guards against the SO_CAPTURE_LANDED postMessage never arriving (cross-tab
+  // timing race, old extension version, content script not injected here).
+  // First-to-fire wins via navigatingRef; both paths are safe to run concurrently.
+  useEffect(() => {
+    const token = tokenRef.current;
+    if (!token) return;
+    if (landed !== null) return;
+    if (navigatingRef.current) return;
+    const inFlight = loginState?.state === "signed_in" || openingProvider !== null;
+    if (!inFlight) return;
+
+    let attempts = 0;
+    const id = window.setInterval(() => {
+      if (navigatingRef.current) {
+        window.clearInterval(id);
+        return;
+      }
+      attempts += 1;
+      if (attempts > PING_MAX_ATTEMPTS) {
+        window.clearInterval(id);
+        return;
+      }
+      void pingExtension(token)
+        .then((ping) => {
+          if (ping.installed && !navigatingRef.current) {
+            navigatingRef.current = true;
+            setLanded({ accountCount: 0, provider: openingProvider ?? "gmp" });
+            window.setTimeout(() => navigate("/done"), 1100);
+          }
+        })
+        .catch(() => { /* swallow — keep polling */ });
+    }, PING_INTERVAL_MS);
+
+    return () => window.clearInterval(id);
+  }, [loginState?.state, openingProvider, landed, navigate]);
+
   // -------- Status line copy --------
   function statusLine(): { text: string; tone: "waiting" | "active" | "success" } {
     if (landed) {
+      if (landed.accountCount === 0) {
+        return { text: "Your first client landed ✓", tone: "success" };
+      }
       return {
         text: `Your first client landed: ${landed.accountCount} account${landed.accountCount === 1 ? "" : "s"} captured ✓`,
         tone: "success",
