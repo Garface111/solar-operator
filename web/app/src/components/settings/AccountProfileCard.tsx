@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Card } from "../../ui/Card";
 import { EditableField } from "../../ui/EditableField";
 import { Input } from "../../ui/Input";
 import { Button } from "../../ui/Button";
@@ -86,10 +85,7 @@ function SecuritySection({
   }
 
   return (
-    <div className="border-t border-zinc-100 pt-4">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-        Sign-in &amp; security
-      </div>
+    <>
       {!open ? (
         <div className="flex items-center justify-between gap-4 py-1">
           <span className="text-sm text-zinc-500">
@@ -152,7 +148,7 @@ function SecuritySection({
           </div>
         </form>
       )}
-    </div>
+    </>
   );
 }
 
@@ -172,61 +168,79 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
   }
 
   return (
-    <Card>
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold tracking-tight text-zinc-900">Master account</h2>
-          <p className="mt-0.5 text-sm text-zinc-500">
-            {account.name || "Your account"} · Solar Operator
-          </p>
+    <div>
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+        Operator profile
+      </h2>
+
+      <div className="rounded-2xl border border-cream-border bg-cream shadow-sm">
+        {/* Header: account name + status badge */}
+        <div className="flex items-start justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-sm font-medium text-zinc-800">
+              {account.name || "Your account"}
+            </p>
+            <p className="mt-0.5 text-xs text-zinc-400">Solar Operator</p>
+          </div>
+          <StatusBadge account={account} />
         </div>
-        <StatusBadge account={account} />
-      </div>
 
-      <div className="mt-4 divide-y divide-zinc-100 border-t border-zinc-100">
-        <Row label="Name">
-          <span className="text-zinc-700">{account.name || <span className="text-zinc-400">—</span>}</span>
-        </Row>
-        <Row label="Email">
-          <EditableField
-            value={account.email}
-            onSave={saveEmail}
-            label="email"
-            type="email"
-            placeholder="you@example.com"
-          />
-        </Row>
-        <Row label="Clients">
-          <span title="Reporting clients you manage — each gets their own workbook.">
-            {account.clients_count}
-          </span>
-        </Row>
-        <Row label="Utility accounts">
-          <span title="Utility account numbers detected by the extension.">
-            {account.accounts_count}
-          </span>
-        </Row>
-        <Row label="Bills on file">
-          <span title="Individual monthly bills pulled from utility accounts.">
-            {account.bills_count}
-          </span>
-        </Row>
-        {account.last_delivery_at && (
-          <Row label="Last delivery">
-            <span>
-              {new Date(account.last_delivery_at).toLocaleDateString()}{" "}
-              <span className="font-normal text-zinc-400">
-                ({timeAgo(new Date(account.last_delivery_at))})
+        {/* Data rows */}
+        <div className="border-t border-cream-border px-5 py-1">
+          <div className="divide-y divide-zinc-100">
+            <Row label="Name">
+              <span className="text-zinc-700">
+                {account.name || <span className="text-zinc-400">—</span>}
               </span>
-            </span>
-          </Row>
-        )}
-      </div>
+            </Row>
+            <Row label="Email">
+              <EditableField
+                value={account.email}
+                onSave={saveEmail}
+                label="email"
+                type="email"
+                placeholder="you@example.com"
+              />
+            </Row>
+            <Row label="Clients">
+              <span title="Reporting clients you manage — each gets their own workbook.">
+                {account.clients_count}
+              </span>
+            </Row>
+            <Row label="Utility accounts">
+              <span title="Utility account numbers detected by the extension.">
+                {account.accounts_count}
+              </span>
+            </Row>
+            <Row label="Bills on file">
+              <span title="Individual monthly bills pulled from utility accounts.">
+                {account.bills_count}
+              </span>
+            </Row>
+            {account.last_delivery_at && (
+              <Row label="Last delivery">
+                <span>
+                  {new Date(account.last_delivery_at).toLocaleDateString()}{" "}
+                  <span className="font-normal text-zinc-400">
+                    ({timeAgo(new Date(account.last_delivery_at))})
+                  </span>
+                </span>
+              </Row>
+            )}
+          </div>
+        </div>
 
-      <SecuritySection
-        hasPassword={account.has_password}
-        onPasswordSet={() => onAccountChange({ has_password: true })}
-      />
-    </Card>
+        {/* Security section */}
+        <div className="border-t border-cream-border px-5 py-4">
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            Sign-in &amp; security
+          </p>
+          <SecuritySection
+            hasPassword={account.has_password}
+            onPasswordSet={() => onAccountChange({ has_password: true })}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
