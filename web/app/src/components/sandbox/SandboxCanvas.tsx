@@ -1918,10 +1918,27 @@ export default function SandboxCanvas() {
   // toolbar + placeholder-CTA all route here. Existing AddClientModal kept
   // around as a defensive callable via prop if anyone wires it, but no UI
   // path opens it anymore.
+  // Repeat clicks auto-increment: "Untitled client" → "Untitled client 2"
+  // → "Untitled client 3", reading current canvas state so the operator can
+  // spam the button and rename later.
   const handleAddPlaceholderClient = useCallback(async () => {
     try {
+      // Find the next "Untitled client[ N]" suffix not already on canvas.
+      const names = new Set<string>();
+      for (const n of nodesRef.current) {
+        if (n.type === 'client' && n.data && typeof n.data === 'object') {
+          const nm = (n.data as ClientNodeData).label;
+          if (typeof nm === 'string') names.add(nm);
+        }
+      }
+      let nextName = 'Untitled client';
+      if (names.has(nextName)) {
+        let i = 2;
+        while (names.has(`Untitled client ${i}`)) i++;
+        nextName = `Untitled client ${i}`;
+      }
       const created = await createClient({
-        name: 'Untitled client',
+        name: nextName,
         contact_email: null,
       });
       await loadCanvas();
