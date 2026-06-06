@@ -513,15 +513,30 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             # when the new auto-create tries to use the same
                             # display_name. Resurrect the soft-deleted row
                             # instead — preserves history, no duplicates.
+                            # Also (Jun 6'26): if an ACTIVE client with the
+                            # exact same name already exists (re-onboarded
+                            # tenant manually re-creating the same name),
+                            # adopt it rather than 500-ing on UNIQUE.
                             chosen_name = (display_name or "New client")[:200]
-                            ghost = db.execute(
+                            existing_active = db.execute(
                                 select(Client).where(
                                     Client.tenant_id == tenant.id,
                                     Client.name == chosen_name,
-                                    Client.deleted_at.is_not(None),
+                                    Client.deleted_at.is_(None),
                                 ).limit(1)
                             ).scalar_one_or_none()
-                            if ghost is not None:
+                            ghost = None
+                            if existing_active is None:
+                                ghost = db.execute(
+                                    select(Client).where(
+                                        Client.tenant_id == tenant.id,
+                                        Client.name == chosen_name,
+                                        Client.deleted_at.is_not(None),
+                                    ).limit(1)
+                                ).scalar_one_or_none()
+                            if existing_active is not None:
+                                target = existing_active
+                            elif ghost is not None:
                                 ghost.deleted_at = None
                                 ghost.active = True
                                 target = ghost
