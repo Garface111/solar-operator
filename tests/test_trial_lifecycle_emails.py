@@ -123,13 +123,16 @@ def test_trial_welcome_body_contains_two_ctas(monkeypatch):
     assert "NEPOOL" in html or "Green Mountain Power" in html
 
 
-def test_trial_welcome_body_no_charge_if_no_arrays(monkeypatch):
+def test_trial_welcome_body_zero_array_grace_copy(monkeypatch):
+    """Copy must match ToS: 3-day grace extension, then one-array minimum + setup fee."""
     sent = _capture_resend(monkeypatch)
     from api.notify import send_trial_welcome_email
     send_trial_welcome_email(to="op@example.com", name="Bob Operator",
                              trial_end_iso_date="June 20, 2026")
     combined = sent[0]["html"] + sent[0]["text"]
-    assert "won't be charged" in combined
+    assert "$250 setup" in combined or "$250" in combined
+    assert "one-array minimum" in combined
+    assert "3 more days" in combined
 
 
 def test_trial_welcome_returns_true_on_success(monkeypatch):
