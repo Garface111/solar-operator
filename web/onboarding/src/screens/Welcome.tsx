@@ -39,6 +39,7 @@ const BASE = import.meta.env.BASE_URL;
 export default function Welcome() {
   const navigate = useNavigate();
   const [agreed, setAgreed] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
   const [legalOpen, setLegalOpen] = useState(false);
 
   return (
@@ -79,79 +80,101 @@ export default function Welcome() {
           ))}
         </ul>
 
-        {/* Plain-English trust bullets — prominently above the legal accordion */}
-        <div className="mt-8 rounded-xl border border-zinc-200 bg-zinc-50 p-5">
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-            Privacy &amp; Terms — the short version
-          </p>
-          <div className="mt-3 grid gap-5 sm:grid-cols-2">
-            <div>
-              <p className="mb-2 text-xs font-semibold text-zinc-700">Privacy</p>
-              <ul className="space-y-1.5">
-                {PP_BULLETS.map((b) => (
-                  <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
-                    <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
-                    {b}
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <p className="mb-2 text-xs font-semibold text-zinc-700">Terms</p>
-              <ul className="space-y-1.5">
-                {TOS_BULLETS.map((b) => (
-                  <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
-                    <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
-                    {b}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        {/* Full legal text — collapsible */}
-        <div className="mt-4 rounded-xl border border-zinc-200">
-          <button
-            type="button"
-            onClick={() => setLegalOpen((o) => !o)}
-            aria-expanded={legalOpen}
-            aria-controls="legal-panel"
-            className="flex w-full items-center justify-between rounded-xl px-4 py-3 text-left text-sm font-medium text-zinc-700 transition-colors duration-150 ease-in-out hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
-          >
-            Read full Terms &amp; Privacy Policy
-            <span aria-hidden className="text-zinc-400">
-              {legalOpen ? "−" : "+"}
-            </span>
-          </button>
-          {legalOpen && (
-            <div
-              id="legal-panel"
-              className="max-h-80 space-y-6 overflow-y-auto border-t border-zinc-200 px-4 py-4"
-            >
-              <section aria-label="Terms of Service">
-                <h2 className="mb-2 text-sm font-semibold text-zinc-700">
-                  Terms of Service
-                </h2>
-                <MarkdownDoc src={`${BASE}tos.md`} title="Terms of Service" />
-              </section>
-              <section aria-label="Privacy Policy">
-                <h2 className="mb-2 text-sm font-semibold text-zinc-700">
-                  Privacy Policy
-                </h2>
-                <MarkdownDoc src={`${BASE}privacy.md`} title="Privacy Policy" />
-              </section>
-            </div>
-          )}
-        </div>
-
-        <div className="mt-6">
+        {/* Checkbox sits above the collapsed Terms block so users can agree
+            without being forced to scroll through the full text first. */}
+        <div className="mt-8">
           <Checkbox
             id="agree"
             checked={agreed}
             onChange={(e) => setAgreed(e.target.checked)}
             label="I agree to the Terms of Service and Privacy Policy"
           />
+        </div>
+
+        {/* Terms & Privacy — collapsed by default. */}
+        <div className="mt-4 rounded-xl border border-zinc-200">
+          <button
+            type="button"
+            onClick={() => setTermsOpen((o) => !o)}
+            aria-expanded={termsOpen}
+            aria-controls="terms-panel"
+            className="flex w-full items-center justify-between rounded-xl px-4 py-3 text-left text-sm font-medium text-zinc-700 transition-colors duration-150 ease-in-out hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+          >
+            {termsOpen ? "Hide Terms" : "Read full Terms & Privacy"}
+            <span aria-hidden className="text-zinc-400">
+              {termsOpen ? "−" : "+"}
+            </span>
+          </button>
+
+          {termsOpen && (
+            <div id="terms-panel">
+              {/* Plain-English summary bullets */}
+              <div className="rounded-b-none rounded-t-none border-t border-zinc-200 bg-zinc-50 px-5 py-5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Privacy &amp; Terms — the short version
+                </p>
+                <div className="mt-3 grid gap-5 sm:grid-cols-2">
+                  <div>
+                    <p className="mb-2 text-xs font-semibold text-zinc-700">Privacy</p>
+                    <ul className="space-y-1.5">
+                      {PP_BULLETS.map((b) => (
+                        <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
+                          <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
+                          {b}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="mb-2 text-xs font-semibold text-zinc-700">Terms</p>
+                    <ul className="space-y-1.5">
+                      {TOS_BULLETS.map((b) => (
+                        <li key={b} className="flex items-start gap-2 text-xs text-zinc-600">
+                          <span aria-hidden className="mt-0.5 shrink-0 text-primary-500">✓</span>
+                          {b}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              {/* Full legal text — nested accordion */}
+              <div className="border-t border-zinc-200 px-4 py-3">
+                <button
+                  type="button"
+                  onClick={() => setLegalOpen((o) => !o)}
+                  aria-expanded={legalOpen}
+                  aria-controls="legal-panel"
+                  className="flex w-full items-center justify-between rounded-xl px-0 py-1 text-left text-sm font-medium text-zinc-700 transition-colors duration-150 ease-in-out hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
+                >
+                  Read full Terms &amp; Privacy Policy
+                  <span aria-hidden className="text-zinc-400">
+                    {legalOpen ? "−" : "+"}
+                  </span>
+                </button>
+                {legalOpen && (
+                  <div
+                    id="legal-panel"
+                    className="mt-3 max-h-80 space-y-6 overflow-y-auto border-t border-zinc-200 py-4"
+                  >
+                    <section aria-label="Terms of Service">
+                      <h2 className="mb-2 text-sm font-semibold text-zinc-700">
+                        Terms of Service
+                      </h2>
+                      <MarkdownDoc src={`${BASE}tos.md`} title="Terms of Service" />
+                    </section>
+                    <section aria-label="Privacy Policy">
+                      <h2 className="mb-2 text-sm font-semibold text-zinc-700">
+                        Privacy Policy
+                      </h2>
+                      <MarkdownDoc src={`${BASE}privacy.md`} title="Privacy Policy" />
+                    </section>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="mt-8 flex items-center justify-between">
