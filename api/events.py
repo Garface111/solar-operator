@@ -71,6 +71,11 @@ async def _event_stream(tenant_id: str) -> AsyncIterator[str]:
     q: asyncio.Queue = asyncio.Queue(maxsize=50)
     _subscribers.setdefault(tenant_id, []).append(q)
     try:
+        # Emit an immediate data chunk so Railway's reverse proxy flushes the
+        # response headers to the browser before the first heartbeat (20s).
+        # Without this, fetch() stays pending and the client is stuck in
+        # 'reconnecting' until the first real event or heartbeat arrives.
+        yield f"data: {json.dumps({'type': 'connected'})}\n\n"
         while True:
             try:
                 data = await asyncio.wait_for(q.get(), timeout=HEARTBEAT_SECS)

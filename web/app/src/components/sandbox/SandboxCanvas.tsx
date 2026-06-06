@@ -1967,8 +1967,8 @@ export default function SandboxCanvas() {
           <Background variant={BackgroundVariant.Dots} color="#9caf88" gap={22} size={1.6} />
           <Controls showInteractive={false} />
 
-          {/* SSE live indicator — top-left, always visible after initial load */}
-          {!loading && (
+          {/* SSE live indicator — top-left, only visible when not connected (silence = success) */}
+          {!loading && sseStatus !== 'connected' && (
             <Panel position="top-left">
               <LiveIndicator status={sseStatus} />
             </Panel>
