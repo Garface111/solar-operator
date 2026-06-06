@@ -127,6 +127,15 @@ body {
   background: transparent !important;
 }
 
+/* AI assistant pill — slow downward bob to draw eye toward chat input. */
+@keyframes so-ai-bob {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(4px); }
+}
+.so-ai-bob {
+  animation: so-ai-bob 2s ease-in-out infinite;
+}
+
 /* Respect users who prefer reduced motion. */
 @media (prefers-reduced-motion: reduce) {
   *,

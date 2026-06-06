@@ -19,11 +19,12 @@ interface Props {
   onClose: () => void;
 }
 
-const STARTER_CHIPS = [
-  "Make it warmer and more personal",
-  "Shorter — just the headline numbers",
-  "Add a 'questions? reply here' line",
-  "Emphasize NEPOOL compliance for their auditor",
+// Populate-only chips shown in the sticky banner above the chat input.
+// Clicking sets the textarea content; the operator reviews before sending.
+const BANNER_CHIPS = [
+  "Draft a friendly Q3 summary",
+  "Make this warmer",
+  "Add a thank-you line",
 ];
 
 const TOKEN_CHIPS = [
@@ -75,6 +76,8 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  // First-visit hint: show expanded tip until operator opens AI or dismisses it.
+  const [hintShown, setHintShown] = useState(false);
 
   // Action states
   const [saving, setSaving] = useState(false);
@@ -87,6 +90,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
 
   const subjectInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
 
   // Load template on open
   useEffect(() => {
@@ -94,6 +98,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     setLoadingTemplate(true);
     setMessages([]);
     setAiGenerated(false);
+    setHintShown(!!sessionStorage.getItem("so:studio:ai-hint-shown"));
     getEmailTemplate()
       .then((data) => {
         setTemplateData(data);
@@ -155,6 +160,24 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       () => void refreshPreview(subject, body, signoff),
       300,
     );
+  }
+
+  function handleOpenChat() {
+    if (!hintShown) {
+      sessionStorage.setItem("so:studio:ai-hint-shown", "1");
+      setHintShown(true);
+    }
+    setChatOpen(true);
+  }
+
+  function dismissHint() {
+    sessionStorage.setItem("so:studio:ai-hint-shown", "1");
+    setHintShown(true);
+  }
+
+  function populateChatInput(text: string) {
+    setChatInput(text);
+    setTimeout(() => chatInputRef.current?.focus(), 0);
   }
 
   async function handleChatSubmit(instruction?: string) {
@@ -670,25 +693,63 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
             )}
           </div>
 
-          {/* ── Floating AI assistant — bottom-right bubble / panel ── */}
+          {/* ── Floating AI assistant — middle-RIGHT bubble / panel ──
+              Vertically centered on the right edge so it never sits on top
+              of the right column's "Send myself a test" / "Save sign-off" /
+              "Save as my default" buttons at the bottom (Ford's explicit
+              no-overlap rule, June 5). */}
           {!chatOpen && (
-            <button
-              type="button"
-              onClick={() => setChatOpen(true)}
-              className="absolute bottom-5 right-5 z-20 flex items-center gap-2 rounded-full bg-primary-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg hover:bg-primary-700 transition-colors"
-              aria-label="Open AI assistant"
-            >
-              <span className="text-base leading-none">✦</span>
-              <span>Ask AI</span>
-              {messages.length > 0 && (
-                <span className="rounded-full bg-white/25 px-1.5 py-0.5 text-[10px]">
-                  {messages.length}
-                </span>
+            <div className="absolute right-5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-end gap-2">
+              {/* First-visit hint card — dismissed on open or explicit ✕ */}
+              {!hintShown && (
+                <div className="w-60 rounded-xl border border-primary-200 bg-primary-50 px-4 py-2.5 shadow-md">
+                  <div className="flex items-start gap-2">
+                    <span className="flex-1 text-xs font-medium text-primary-800 leading-snug">
+                      Tip — let AI tune this
+                      {sampleClient ? (
+                        <> for <strong className="font-semibold">{sampleClient}</strong></>
+                      ) : null}{" "}
+                      before you send
+                    </span>
+                    <button
+                      type="button"
+                      onClick={dismissHint}
+                      aria-label="Dismiss AI tip"
+                      className="mt-0.5 shrink-0 text-primary-300 hover:text-primary-600 transition-colors"
+                    >
+                      <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden>
+                        <path d="M3 3 L13 13 M13 3 L3 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
               )}
-            </button>
+
+              {/* The pill — larger padding, larger text, ring glow, bobbing arrow */}
+              <button
+                type="button"
+                onClick={handleOpenChat}
+                className="flex items-center gap-2.5 rounded-full bg-primary-600 px-5 py-3 text-base font-medium text-white shadow-lg ring-2 ring-primary-200 hover:bg-primary-700 transition-colors"
+                aria-label="Open AI assistant"
+              >
+                <span className="text-lg leading-none">✦</span>
+                <span>Ask AI</span>
+                {/* Bobbing chevron — teases the chat input below the panel */}
+                <span className="so-ai-bob" aria-hidden>
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                    <path d="M8 2 L8 12 M4 8 L8 12 L12 8" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+                {messages.length > 0 && (
+                  <span className="rounded-full bg-white/25 px-1.5 py-0.5 text-[10px]">
+                    {messages.length}
+                  </span>
+                )}
+              </button>
+            </div>
           )}
           {chatOpen && (
-            <div className="absolute bottom-5 right-5 z-20 flex h-[440px] w-[340px] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden">
+            <div className="absolute right-5 top-1/2 -translate-y-1/2 z-20 flex h-[440px] w-[340px] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden">
               {/* Floating header */}
               <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2">
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -735,29 +796,44 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                 <div ref={chatBottomRef} />
               </div>
 
-              {/* Starter chips — only before first message */}
-              {messages.length === 0 && (
-                <div className="px-3 pb-2">
-                  <div className="flex flex-wrap gap-1">
-                    {STARTER_CHIPS.map((chip) => (
-                      <button
-                        key={chip}
-                        type="button"
-                        disabled={chatLoading}
-                        onClick={() => handleChatSubmit(chip)}
-                        className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-600 hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700 disabled:opacity-50"
-                      >
-                        {chip}
-                      </button>
-                    ))}
+              {/* ── Ask AI sticky banner — pinned above chat input ── */}
+              <div className="border-t border-primary-100 bg-gradient-to-b from-primary-50/70 to-primary-50 px-3 py-2.5">
+                {messages.length === 0 ? (
+                  <>
+                    <p className="mb-2 text-[11px] font-semibold text-primary-700">
+                      ✦ Ask AI to draft something — try:
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {BANNER_CHIPS.map((chip) => (
+                        <button
+                          key={chip}
+                          type="button"
+                          disabled={chatLoading}
+                          onClick={() => populateChatInput(chip)}
+                          className="rounded-full border border-primary-200 bg-white px-2.5 py-1 text-[10px] font-medium text-primary-700 hover:border-primary-400 hover:bg-primary-50 disabled:opacity-50 transition-colors"
+                        >
+                          {chip}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex items-center justify-center gap-1 text-[11px] font-medium text-primary-600">
+                    <span>Ask AI</span>
+                    <span className="so-ai-bob" aria-hidden>
+                      <svg viewBox="0 0 16 16" width="11" height="11" fill="none">
+                        <path d="M8 2 L8 12 M4 8 L8 12 L12 8" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
               {/* Chat input */}
               <div className="border-t border-zinc-100 p-2">
                 <div className="flex gap-1.5">
                   <input
+                    ref={chatInputRef}
                     type="text"
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
