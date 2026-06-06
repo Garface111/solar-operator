@@ -18,7 +18,9 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { Spinner } from "../ui/Spinner";
 import { getToken, completeOnboarding } from "../lib/onboarding";
 
-const DASHBOARD_URL = "https://solaroperator.org/accounts/?fresh=1";
+// Point directly at /clients so React Router's index redirect doesn't
+// strip the ?fresh=1 query param before ClientsSection can read it.
+const DASHBOARD_URL = "https://solaroperator.org/accounts/clients?fresh=1";
 
 export default function Done() {
   const [error, setError] = useState<string | null>(null);
