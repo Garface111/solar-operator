@@ -24,6 +24,7 @@ import {
   reassignArray,
   updateClient,
   updateArray,
+  createClient,
   deleteClient,
   undoDelete,
   listClients,
@@ -34,7 +35,6 @@ import {
 } from '../../lib/api';
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
-import { AddClientModal } from '../AddClientModal';
 
 const AddClientByLoginModal = lazy(() =>
   import('../AddClientByLoginModal').then((m) => ({ default: m.AddClientByLoginModal })),
@@ -285,7 +285,6 @@ export default function SandboxCanvas() {
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
   const [showAddByLogin, setShowAddByLogin] = useState(false);
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
   const [lastCapturedClientId, setLastCapturedClientId] = useState<number | null>(null);
@@ -1913,6 +1912,40 @@ export default function SandboxCanvas() {
     [setNodes, toast],
   );
 
+  // ── Add placeholder client (no modal — spawn blank, drop into rename) ────
+  // Ford Jun6'26: cleaner than the modal. One-click → blank client appears,
+  // centered on canvas, name field active for inline edit. Walkthrough +
+  // toolbar + placeholder-CTA all route here. Existing AddClientModal kept
+  // around as a defensive callable via prop if anyone wires it, but no UI
+  // path opens it anymore.
+  const handleAddPlaceholderClient = useCallback(async () => {
+    try {
+      const created = await createClient({
+        name: 'Untitled client',
+        contact_email: null,
+      });
+      await loadCanvas();
+      const ncId = created.id;
+      pushUndo({
+        label: `Add client "${created.name}"`,
+        timestamp: Date.now(),
+        undo: () => {
+          deleteClient(ncId)
+            .then(() => void loadCanvas())
+            .catch(() => toast.show('Undo add client failed.', 'error'));
+        },
+      });
+      centerOnClientId(ncId);
+      // Drop into rename on the next tick so the rendered node exists.
+      setTimeout(() => startRename(`client_${ncId}`), 50);
+    } catch (err) {
+      toast.show(
+        err instanceof Error ? err.message : "Couldn't add client",
+        'error',
+      );
+    }
+  }, [centerOnClientId, loadCanvas, pushUndo, startRename, toast]);
+
   // ── Context ───────────────────────────────────────────────────────────────
 
   const actions: CanvasActions = {
@@ -2027,7 +2060,7 @@ export default function SandboxCanvas() {
                 >
                   + Add Client
                 </button>
-                <ToolbarButton onClick={() => setShowAddModal(true)}>
+                <ToolbarButton onClick={handleAddPlaceholderClient}>
                   + Add client manually
                 </ToolbarButton>
                 <LayoutModeControl layoutMode={layoutMode} onChange={handleLayoutModeChange} />
@@ -2175,7 +2208,7 @@ export default function SandboxCanvas() {
               <button
                 type="button"
                 className="underline underline-offset-2 hover:text-zinc-600"
-                onClick={() => setShowAddModal(true)}
+                onClick={handleAddPlaceholderClient}
               >
                 Add a placeholder client
               </button>
@@ -2268,31 +2301,11 @@ export default function SandboxCanvas() {
               }}
               onSwitchToManual={() => {
                 setShowAddByLogin(false);
-                setShowAddModal(true);
+                void handleAddPlaceholderClient();
               }}
             />
           </Suspense>
         )}
-        <AddClientModal
-          open={showAddModal}
-          onClose={() => setShowAddModal(false)}
-          onCreated={(client) => {
-            setShowAddModal(false);
-            void loadCanvas();
-            const ncId = client.id;
-            const ncName = client.name;
-            pushUndo({
-              label: `Add client "${ncName}"`,
-              timestamp: Date.now(),
-              undo: () => {
-                deleteClient(ncId)
-                  .then(() => void loadCanvas())
-                  .catch(() => toast.show('Undo add client failed.', 'error'));
-              },
-            });
-            centerOnClientId(ncId);
-          }}
-        />
 
         {/* Walkthrough */}
         {!loading && !loadError && nodes.filter((n) => n.type === 'client').length > 0 && (
@@ -2308,7 +2321,7 @@ export default function SandboxCanvas() {
               );
               setShowAddByLogin(true);
             }}
-            onOpenManual={() => setShowAddModal(true)}
+            onOpenManual={handleAddPlaceholderClient}
           />
         )}
 
