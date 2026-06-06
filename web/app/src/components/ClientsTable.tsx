@@ -250,17 +250,47 @@ export function ClientsTable({
   onUndo,
   onOpenAddByLogin,
 }: ClientsTableProps) {
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(
-    () => (expandClientId != null ? new Set([expandClientId]) : new Set()),
-  );
+  // Start with EVERY client row expanded — operators arriving here for the
+  // first time need to immediately see that their arrays actually propagated
+  // from the utility capture (the whole product promise hinges on "look,
+  // your data is here"). A specific expandClientId from the route still
+  // wins as a deep-link hint, but we never start collapsed.
+  const initialExpanded = () => {
+    const ids = new Set<number>(clients.map((c) => c.id));
+    if (expandClientId != null) ids.add(expandClientId);
+    return ids;
+  };
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(initialExpanded);
   // Track rows ever opened so their panels stay mounted during close animation.
-  const [everExpandedIds, setEverExpandedIds] = useState<Set<number>>(
-    () => (expandClientId != null ? new Set([expandClientId]) : new Set()),
-  );
+  const [everExpandedIds, setEverExpandedIds] = useState<Set<number>>(initialExpanded);
+
   const arraysCacheRef = useRef<Map<number, ArrayRow[]>>(new Map());
   const loadingIdsRef = useRef<Set<number>>(new Set());
   // Bump to force re-render after async cache writes.
   const [, setTick] = useState(0);
+
+  // Pre-warm the array cache for every client so the expanded panels fill in
+  // without a stagger of spinners. Fires once on mount; new clients added later
+  // load lazily via toggleExpand.
+  useEffect(() => {
+    clients.forEach((c) => {
+      if (arraysCacheRef.current.has(c.id) || loadingIdsRef.current.has(c.id)) return;
+      loadingIdsRef.current.add(c.id);
+      listArrays(c.id)
+        .then((rows) => {
+          arraysCacheRef.current.set(c.id, rows);
+          loadingIdsRef.current.delete(c.id);
+          setTick((t) => t + 1);
+        })
+        .catch(() => {
+          arraysCacheRef.current.set(c.id, []);
+          loadingIdsRef.current.delete(c.id);
+          setTick((t) => t + 1);
+        });
+    });
+    // Empty dep: we only want this once at mount. New clients fetch via toggleExpand.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function toggleExpand(id: number) {
     setExpandedIds((prev) => {
