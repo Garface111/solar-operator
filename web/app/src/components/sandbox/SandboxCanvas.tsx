@@ -297,7 +297,12 @@ export default function SandboxCanvas() {
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
   const [lastCapturedClientId, setLastCapturedClientId] = useState<number | null>(null);
 
-  const [sseStatus, setSseStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('disconnected');
+  // SSE status state kept for internal tracking — UI indicator removed
+  // Jun 6, but the setter is still called in 7+ places to record reconnect
+  // attempts (preserved so we can re-surface the pill in DevPanel later).
+  // Read side is intentionally unused; `_sseStatus` silences strict-tsc.
+  const [_sseStatus, setSseStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('disconnected');
+  void _sseStatus;
 
   const [densityOverride, setDensityOverride] = useState<DensityOverride>(() => {
     try {
@@ -1968,12 +1973,13 @@ export default function SandboxCanvas() {
           <Background variant={BackgroundVariant.Dots} color="#9caf88" gap={22} size={1.6} />
           <Controls showInteractive={false} />
 
-          {/* SSE live indicator — top-left, only visible when not connected (silence = success) */}
-          {!loading && sseStatus !== 'connected' && (
-            <Panel position="top-left">
-              <LiveIndicator status={sseStatus} />
-            </Panel>
-          )}
+          {/* SSE live indicator removed Jun 6 (Ford): the pill was confusing
+              operators ("what does Re mean?") even when working correctly,
+              and the upstream proxy buffering kept it stuck in
+              "Reconnecting" for many users. The connection state is internal
+              plumbing — the canvas re-renders when events arrive, which is
+              the actual user-visible signal. If you need it back for debug,
+              wrap <LiveIndicator status={sseStatus} /> in a DevPanel toggle. */}
 
           {/* Toolbar — top-right */}
           {!loading && !isEmpty && (
@@ -2414,29 +2420,6 @@ function MergeOption({ label, name, onClick }: { label: string; name: string; on
     >
       {label} <span className="font-semibold">&ldquo;{name}&rdquo;</span>
     </button>
-  );
-}
-
-function LiveIndicator({ status }: { status: 'connected' | 'reconnecting' | 'disconnected' }) {
-  const connected = status === 'connected';
-  return (
-    <div
-      title={connected ? 'Updates in real time' : 'Reconnecting…'}
-      className={[
-        'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors',
-        connected
-          ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-          : 'bg-zinc-100 text-zinc-400 ring-1 ring-zinc-200',
-      ].join(' ')}
-    >
-      <span
-        className={[
-          'h-1.5 w-1.5 rounded-full transition-colors',
-          connected ? 'bg-emerald-500' : 'bg-zinc-400',
-        ].join(' ')}
-      />
-      {connected ? 'Live' : 'Reconnecting'}
-    </div>
   );
 }
 
