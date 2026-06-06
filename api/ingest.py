@@ -81,6 +81,82 @@ EXTRACTION_PROMPT = (
 
 FIELDS = ("operator_name", "array_name", "nepool_gis_id", "gmp_account_number", "notes")
 
+# Sentinel strings that unambiguously mean "no NEPOOL ID supplied".
+_NEPOOL_SENTINELS = frozenset({'', '-', 'n/a', 'na', 'tbd', 'none', '0'})
+# 4–6 digit canonical form (extraction prompt says 4-6; CLAUDE.md says 5-6 in prod,
+# but 4-digit historical IDs exist in some exports).
+_NEPOOL_RE = re.compile(r'^\d{4,6}$')
+
+
+def clean_text(s: object) -> str:
+    """Normalise user-supplied cell text from real-world spreadsheets.
+
+    Handles the full zoo of encoding/typographic garbage that arrives when
+    operators copy-paste from PDFs, web portals, or decade-old Excel files:
+    smart quotes, NBSP, em/en dashes, zero-width spaces, BOM marks, in-cell
+    newlines, and Python byte-string repr leaking into cell values.
+
+    Called at the _normalize boundary so all three ingest paths (GMCS,
+    LLM, heuristic) are covered by a single implementation.
+    """
+    if not isinstance(s, str):
+        s = str(s)
+    # BOM (U+FEFF) — common at the start of cells in CSV→XLSX conversions
+    s = s.lstrip('﻿')
+    # Smart / curly quotes → plain ASCII
+    s = (s
+         .replace('‘', "'").replace('’', "'")
+         .replace('“', '"').replace('”', '"'))
+    # Em dash (U+2014) / en dash (U+2013) → hyphen
+    s = s.replace('—', '-').replace('–', '-')
+    # Non-breaking space (U+00A0) → regular space
+    s = s.replace(' ', ' ')
+    # Zero-width space (U+200B) → removed entirely
+    s = s.replace('​', '')
+    # Normalise in-cell newlines to a single space (CRLF first, then stragglers)
+    s = s.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
+    # Python byte-string repr that snuck into a cell: b'Chester' → Chester
+    if len(s) >= 4 and s[:2] == "b'" and s[-1] == "'":
+        s = s[2:-1]
+    elif len(s) >= 4 and s[:2] == 'b"' and s[-1] == '"':
+        s = s[2:-1]
+    return s.strip()
+
+
+def _coerce_nepool(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Coerce a raw cell value to a canonical NEPOOL GIS ID string.
+
+    Returns (canonical_id | None, error_message | None).
+    - (value, None)  → valid ID
+    - (None, None)   → legitimately blank/sentinel (no error to show)
+    - (None, error)  → parse failure; surface to operator as nepool_parse_error
+    """
+    if raw is None:
+        return None, None
+    s = clean_text(raw).lstrip("'")  # strip Excel text-coercion apostrophe
+    if s.lower() in _NEPOOL_SENTINELS:
+        return None, None
+    # Formula errors (#REF!, #VALUE!, …) and formula-injection strings
+    if s.startswith('=') or s.startswith('#'):
+        return None, f"invalid NEPOOL value {s!r} — fix the source cell"
+    # Strip thousands-separator commas only; keep semicolons so "53984; 53985"
+    # fails the digit-only check and surfaces a parse error instead of silently
+    # taking just the first number.
+    cleaned = s.replace(',', '')
+    # Numeric conversion handles "53984.0", "5.3984e4", etc.
+    try:
+        as_float = float(cleaned)
+        if as_float != int(as_float):
+            return None, f"NEPOOL value {raw!r} has a non-integer fractional part"
+        if as_float < 0:
+            return None, f"NEPOOL value {raw!r} is negative"
+        cleaned = str(int(as_float))
+    except ValueError:
+        pass  # not a float — fall through to digit-string check
+    if not _NEPOOL_RE.match(cleaned):
+        return None, f"NEPOOL value {raw!r} is not a 4–6 digit number after cleaning"
+    return cleaned, None
+
 
 # ─── schemas ──────────────────────────────────────────────────────────────
 
@@ -451,18 +527,30 @@ _PASSTHROUGH_KEYS = frozenset({"_confidence", "collision_action"})
 
 
 def _normalize(rows: list[dict]) -> list[dict]:
-    """Coerce LLM/heuristic output into clean {FIELDS} dicts."""
+    """Coerce LLM/heuristic output into clean {FIELDS} dicts.
+
+    Applies clean_text() to all string fields and _coerce_nepool() to the
+    nepool_gis_id field. If NEPOOL coercion fails, the row is kept (not
+    silently dropped) and a nepool_parse_error key is added so the preview
+    UI can surface it to the operator.
+    """
     clean: list[dict] = []
     for r in rows:
         if not isinstance(r, dict):
             continue
-        entry = {}
+        entry: dict = {}
         for f in FIELDS:
             v = r.get(f)
             if v is None:
                 entry[f] = None
+            elif f == "nepool_gis_id":
+                raw_str = v if isinstance(v, str) else str(v)
+                coerced, err = _coerce_nepool(raw_str)
+                entry[f] = coerced
+                if err:
+                    entry["nepool_parse_error"] = err
             else:
-                s = str(v).strip()
+                s = clean_text(v)
                 entry[f] = s or None
         # Preserve passthrough keys so callers can read them post-normalization.
         for key in _PASSTHROUGH_KEYS:
