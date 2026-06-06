@@ -36,6 +36,7 @@ from .db import SessionLocal
 from .models import Tenant, Client, Array, UtilitySession, now
 from .notify import (
     send_welcome_email, send_internal_alert, send_sample_workbook_email,
+    send_trial_welcome_email,
 )
 from .account import (
     issue_magic_link,
@@ -641,6 +642,7 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
         tenant_key = t.tenant_key
         plan = t.plan
         tenant_id = t.id
+        trial_ends_at = t.trial_ends_at
 
     # Deferred welcome email (NOT sent by the webhook for onboarding-flow tenants).
     try:
@@ -665,6 +667,26 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
     # Best-effort — already swallows its own exceptions, never blocks completion.
     sample_email_sent = send_sample_workbook_email(
         to=email, name=name, dashboard_url=f"{APP_URL}/accounts")
+
+    # Third email: trial welcome — explains the 14-day trial and primes them
+    # to add clients/arrays. trial_ends_at is set by the Stripe webhook;
+    # fall back to now+14 if it hasn't landed yet.
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        _trial_end = trial_ends_at if trial_ends_at else _dt.utcnow() + _td(days=14)
+        _trial_end_str = _trial_end.strftime("%B %-d, %Y")
+        trial_welcome_sent = send_trial_welcome_email(
+            to=email, name=name,
+            trial_end_iso_date=_trial_end_str,
+            dashboard_url=f"{APP_URL}/accounts",
+        )
+        if trial_welcome_sent:
+            logger.info("Trial welcome email sent to %s", email)
+        else:
+            logger.warning("Trial welcome email returned False for %s", email)
+    except Exception as e:
+        logger.warning("send_trial_welcome_email failed for %s: %s", email, e)
+        trial_welcome_sent = False
 
     send_internal_alert(
         "🌞 Onboarding complete",
