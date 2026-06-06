@@ -2,8 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { type NodeProps } from '@xyflow/react';
 import { useCanvasActions } from './canvasContext';
 import {
-  clientArrayCount,
-  clientTotalMwh,
   type ClientData,
   type Utility,
   type UtilityAccount,
@@ -106,12 +104,11 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   }, [isRenaming]);
 
   const chips = utilityChips(client.accounts);
-  const arrayCount = clientArrayCount(client);
   const ownClientNumId = (() => {
     const m = id.match(/^client_(\d+)$/);
     return m ? parseInt(m[1], 10) : null;
   })();
-  const totalMwh = clientTotalMwh(client);
+  // arrayCount + totalMwh were used by the footer indicator (removed Jun 6).
 
   const isMergeTarget = mergeIntent === 'target';
   const isMergeSource = mergeIntent === 'source';
@@ -404,14 +401,7 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
         </div>
       )}
 
-      {/* Footer — hidden in compact and dense modes */}
-      {density === 'full' && (
-        <div className="border-t border-cream-border px-4 py-2.5">
-          <p className="text-xs text-zinc-400">
-            {arrayCount} {arrayCount === 1 ? 'array' : 'arrays'} · {totalMwh} MWh/qtr
-          </p>
-        </div>
-      )}
+      {/* Footer removed (MWh/qtr indicator was visual noise — Jun 6) */}
     </div>
   );
 }
@@ -712,9 +702,7 @@ function LoginGroupRow({
                   </div>,
                 ],
           )}
-          <div className={`pt-1 text-[10px] font-mono opacity-40 ${th.rowText}`}>
-            {accounts.map((a) => `${a.account_number}`).join(' · ')}
-          </div>
+          {/* Account-number ID strip removed — visual noise (Jun 6) */}
         </div>
       )}
     </div>
