@@ -395,11 +395,6 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
                   ? actions.getOriginClient(group.originClientId)?.logins?.[group.utility] ?? null
                   : client.logins?.[group.utility] ?? null
               }
-              originClient={
-                group.originClientId != null
-                  ? actions.getOriginClient(group.originClientId)
-                  : null
-              }
               onDetach={(accountId) => actions.detachAccount(id, accountId)}
               onDetachLogin={() => actions.detachLogin(id, group.utility, group.originClientId, group.loginId)}
               originClientId={group.originClientId}
@@ -475,7 +470,6 @@ function LoginGroupRow({
   utility,
   accounts,
   loginCredential,
-  originClient,
   originClientId,
   loginId,
   onDetach,
@@ -485,7 +479,6 @@ function LoginGroupRow({
   utility: Utility;
   accounts: UtilityAccount[];
   loginCredential: string | null;
-  originClient: { id: number; name: string; deleted: boolean } | null;
   originClientId: number | null;
   loginId: string;
   onDetach: (accountId: string) => void;
@@ -623,14 +616,6 @@ function LoginGroupRow({
           <span className={`text-xs font-semibold ${th.rowText}`}>
             {utility}
           </span>
-          {originClient && (
-            <span
-              className={`rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700`}
-              title={`Moved here from ${originClient.name}${originClient.deleted ? ' (deleted)' : ''}`}
-            >
-              from {originClient.name}{originClient.deleted ? ' (deleted)' : ''}
-            </span>
-          )}
           <span className={`ml-auto text-[10px] font-medium opacity-60 ${th.rowText}`}>
             {accountCount} {accountCount === 1 ? 'account' : 'accounts'} · {arrayTotal} {arrayTotal === 1 ? 'array' : 'arrays'}
           </span>
