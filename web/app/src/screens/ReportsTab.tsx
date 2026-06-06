@@ -1,10 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { QuarterCard } from "../components/reports/QuarterCard";
 import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
 import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
 import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
 import { NextRunCard } from "../components/reports/NextRunCard";
+import { EmailPrefsCard } from "../components/settings/EmailPrefsCard";
 
 const EmailTemplateStudio = lazy(() =>
   import("../components/reports/EmailTemplateStudio").then((m) => ({
@@ -72,7 +72,7 @@ function RowSkeleton() {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function ReportsTab() {
-  const { account, failed, retryLoad } = useDashboardContext();
+  const { account, failed, patchAccount, retryLoad } = useDashboardContext();
 
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [reports, setReports] = useState<QuarterReport[] | null>(null);
@@ -152,16 +152,18 @@ export default function ReportsTab() {
           >
             Customize email template
           </Button>
-          <Link
-            to="/account"
-            className="text-xs text-zinc-400 hover:text-zinc-600"
-          >
-            Schedule &amp; email settings ↗
-          </Link>
+          {/* Bruce Jun 6: the "Schedule & email settings ↗" link to /account
+              went away — those controls now live on this page (EmailPrefsCard
+              below). One page, one job. */}
         </div>
       </div>
 
-      {/* 3. Next run countdown + send-now */}
+      {/* 3. Schedule + CC-me prefs — was on /account ("Email preferences"),
+            moved here Jun 6 so the "Automatic reports" page actually owns
+            every setting that controls automatic reports. */}
+      <EmailPrefsCard account={account} onAccountChange={patchAccount} />
+
+      {/* 4. Next run countdown + send-now */}
       <NextRunCard onSent={loadData} />
 
       {/* 4. Report history */}

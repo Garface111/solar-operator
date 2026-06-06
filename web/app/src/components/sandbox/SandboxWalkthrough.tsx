@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
 // TEST SEAM: exported so unit tests can assert on the key value directly.
-export const LS_KEY = 'so:walkthrough:sandbox-v2:done';
+// Bruce Jun 6: bumped v2→v3 so returning operators (Bruce specifically)
+// get the tour once more — initStep was previously locking it 'done' for
+// anyone with ≥3 clients, so several pilot operators never actually saw it.
+export const LS_KEY = 'so:walkthrough:sandbox-v3:done';
 
 type Step = 'welcome' | 'cta' | 'captured' | 'loop' | 'done';
 
@@ -22,12 +25,19 @@ interface Props {
 }
 
 // TEST SEAM: exported so unit tests can exercise the step-selection logic in isolation.
+//
+// Bruce Jun 6: the original rule treated >=3 clients as "they've figured it out,
+// done forever" and 0 clients as "nothing to point at, done forever". Both
+// were wrong for returning operators with a populated sandbox who still
+// wanted the spatial tour. New rule: the walkthrough fires whenever the
+// browser hasn't recorded it as completed AND there's at least one client
+// card on screen to anchor the callout to. Users dismiss it explicitly via
+// the "Got it" button on the loop step (which calls markDone).
 export function initStep(clientCount: number): Step {
   if (localStorage.getItem(LS_KEY) === 'true') return 'done';
-  if (clientCount >= 3) return 'done';
+  if (clientCount === 0) return 'done';
   if (clientCount >= 2) return 'loop';
-  if (clientCount === 1) return 'welcome';
-  return 'done';
+  return 'welcome';
 }
 
 // rAF loop tracks a DOM element's position relative to the overlay div.
@@ -178,11 +188,10 @@ export function SandboxWalkthrough({
     return () => clearTimeout(t);
   }, [step, go]);
 
-  // Auto-complete at 3+ clients
-  useEffect(() => {
-    if (step === 'done') return;
-    if (clientCount >= 3) markDone();
-  }, [clientCount, step, markDone]);
+  // Bruce Jun 6: removed the auto-complete @ 3+ clients. The walkthrough is
+  // now dismissed only by an explicit user gesture (the "Got it" button on
+  // the loop step, or closing the callout). Otherwise a returning operator
+  // who clears localStorage but already has many clients never sees it.
 
   // Selectors for DOM-tracked elements
   const capturedCardSel =
