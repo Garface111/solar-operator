@@ -168,6 +168,9 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
       setHintShown(true);
     }
     setChatOpen(true);
+    if (messages.length === 0) {
+      setTimeout(() => chatInputRef.current?.focus(), 0);
+    }
   }
 
   function dismissHint() {
@@ -765,7 +768,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               <div className="flex-1 overflow-y-auto space-y-2 p-3">
                 {messages.length === 0 && (
                   <p className="text-[11px] text-zinc-400">
-                    Describe how you'd like to customize your email.
+                    Describe how you'd like to customize below ↓
                   </p>
                 )}
                 {messages.map((m, i) => (
@@ -834,7 +837,12 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     }}
                     placeholder="Make it warmer…"
                     disabled={chatLoading}
-                    className="flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30 disabled:opacity-60"
+                    className={[
+                      "flex-1 rounded-lg border bg-zinc-50 px-2.5 py-1.5 text-xs placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30 disabled:opacity-60",
+                      messages.length === 0
+                        ? "border-primary-300 shadow-[0_0_0_3px_rgba(46,107,58,0.12)]"
+                        : "border-zinc-200",
+                    ].join(" ")}
                   />
                   <Button
                     onClick={() => void handleChatSubmit()}
