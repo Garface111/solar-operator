@@ -439,16 +439,22 @@ function ArrayRow({
                 placeholder="53984"
               />
             </div>
-            {!array.nepool_gis_id && (
+            {!array.nepool_gis_id ? (
               <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
                 Add NEPOOL ID
               </span>
+            ) : (
+              <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                Complete ✓
+              </span>
             )}
           </div>
-          <p className="mt-1 text-[11px] leading-snug text-zinc-400">
-            5-digit ISO-NE asset ID — required to ship reports. You can add it
-            later if you don&apos;t have it now.
-          </p>
+          {!array.nepool_gis_id && (
+            <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+              5-digit ISO-NE asset ID — required to ship reports. You can add it
+              later if you don&apos;t have it now.
+            </p>
+          )}
         </div>
         <div className="sm:col-span-6">
           <FieldLabel>Notes</FieldLabel>
