@@ -56,6 +56,38 @@ DEFAULT_BODY_TEMPLATE = (
 
 _TAG_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
+# Canonical allowlist of merge tags the email-render context provides.
+# Any {{tag}} the operator (or the AI assistant) tries to insert that is
+# NOT in this set will render as a verbatim {{whatever}} in the live email
+# preview — which then ships to the client. To prevent the AI from
+# inventing plausible-sounding but unsupported tags (e.g. {{quarter_total_mwh}},
+# {{operator_signature}}), regenerate_template_via_ai() validates against
+# this allowlist and rejects/strips unknown tags before the new template
+# replaces the operator's working copy. Keep in sync with quarter_context()
+# + the per-client/per-tenant fields stitched in at render time
+# (api/account.py preview_email_template + api/delivery.py build_ctx).
+ALLOWED_MERGE_TAGS = frozenset({
+    "client_name",
+    "quarter",
+    "period_start",
+    "period_end",
+    "tenant_name",
+    "tenant_email_line",
+    "arrays_count",
+    "dashboard_url",
+    "signoff",
+})
+
+
+def extract_tags(template: str) -> set[str]:
+    """Return the set of {{tag}} names referenced in a template string."""
+    return set(_TAG_RE.findall(template))
+
+
+def unknown_tags(template: str) -> set[str]:
+    """Tags used in `template` that are NOT in the canonical allowlist."""
+    return extract_tags(template) - ALLOWED_MERGE_TAGS
+
 
 def render_merge(template: str, ctx: dict) -> str:
     """Replace {{tag}} (with optional inner whitespace) using ctx.
@@ -178,11 +210,22 @@ def resolve_from_header(send_from_email: Optional[str],
 
 _TEMPLATE_SYSTEM_PROMPT = (
     "You are a writing assistant helping a solar energy consultant customize "
-    "their client report email. The template uses merge tags like {{client_name}}, "
-    "{{quarter}}, {{period_start}}, {{period_end}}, {{tenant_name}}, "
-    "{{tenant_email_line}}, {{arrays_count}}, {{dashboard_url}}.\n\n"
+    "their client report email.\n\n"
+    "THE ONLY MERGE TAGS THAT EXIST IN THE SYSTEM ARE:\n"
+    "  {{client_name}}, {{quarter}}, {{period_start}}, {{period_end}},\n"
+    "  {{tenant_name}}, {{tenant_email_line}}, {{arrays_count}},\n"
+    "  {{dashboard_url}}, {{signoff}}\n\n"
     "CRITICAL RULES:\n"
-    "- Preserve ALL {{...}} merge tags exactly — never remove, rename, or modify them.\n"
+    "- You may ONLY use the tags listed above. Do NOT invent new merge tags "
+    "like {{quarter_total_mwh}}, {{operator_signature}}, {{client_address}}, "
+    "{{rec_count}}, or anything else not in the list — they DO NOT EXIST in "
+    "this system and will render as raw broken text in the customer's inbox.\n"
+    "- If the operator asks for content backed by a value that isn't in the "
+    "allowlist, write the sentence in plain prose instead of using a merge "
+    "tag, OR tell them in your 'reply' field that the value isn't available "
+    "yet and suggest the closest supported tag.\n"
+    "- Preserve any allowlisted {{...}} merge tags exactly — never remove, "
+    "rename, or modify them.\n"
     "- The body is simple HTML: use only <p>, <br>, <a href='...'>, <b>, <em> tags.\n"
     "- Keep the professional tone appropriate for a regulated energy market.\n\n"
     "Respond ONLY with a JSON object, NO markdown fences, with this exact shape:\n"
@@ -243,7 +286,66 @@ def regenerate_template_via_ai(
         else:
             raise ValueError("LLM response did not contain valid JSON")
     return {
-        "reply": str(result.get("reply") or "Updated."),
-        "body": str(result.get("body") or current_body),
-        "subject": result.get("subject"),
+        "reply": _augment_reply_with_strip_notice(
+            str(result.get("reply") or "Updated."),
+            stripped_subject=_strip_unknown_tags_collect(
+                result.get("subject"), label="subject"
+            ),
+            stripped_body=_strip_unknown_tags_collect(
+                result.get("body"), label="body"
+            ),
+        ),
+        "body": _strip_unknown_tags(str(result.get("body") or current_body)),
+        "subject": (
+            _strip_unknown_tags(result["subject"])
+            if isinstance(result.get("subject"), str)
+            else result.get("subject")
+        ),
     }
+
+
+# ── Server-side guardrail: strip any merge tag the AI invented ────────────────
+
+def _strip_unknown_tags(template: str | None) -> str | None:
+    """Replace any non-allowlisted {{tag}} in `template` with neutral prose.
+
+    The system prompt tells the LLM not to invent tags, but we treat that as
+    a soft constraint — defense in depth turns any escaped {{whatever}} into
+    a blank placeholder so the operator never ships a broken email to a
+    client. The phrase we substitute ('[…]') is intentionally bland so it
+    surfaces visibly in the preview and the operator notices the gap.
+    """
+    if not isinstance(template, str):
+        return template
+
+    def replace(m: re.Match) -> str:
+        key = m.group(1)
+        if key in ALLOWED_MERGE_TAGS:
+            return m.group(0)
+        return "[…]"
+
+    return _TAG_RE.sub(replace, template)
+
+
+def _strip_unknown_tags_collect(template, *, label: str) -> list[str]:
+    if not isinstance(template, str):
+        return []
+    return sorted(unknown_tags(template))
+
+
+def _augment_reply_with_strip_notice(
+    reply: str, *, stripped_subject: list[str], stripped_body: list[str]
+) -> str:
+    """If the AI tried to insert tags that don't exist, tell the operator."""
+    bad = sorted(set(stripped_subject) | set(stripped_body))
+    if not bad:
+        return reply
+    listed = ", ".join("{{" + t + "}}" for t in bad[:4])
+    if len(bad) > 4:
+        listed += f", +{len(bad) - 4} more"
+    suffix = (
+        f"\n\nNote: I tried to use {listed} but those merge tags don't "
+        "exist in this system — I replaced them with [...] placeholders "
+        "you can edit by hand or rephrase."
+    )
+    return reply.rstrip() + suffix
