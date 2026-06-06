@@ -180,6 +180,7 @@ function buildNodesFromApi(
               nepool_gis_id: acc.nepool_gis_id ?? '',
               mwh_per_qtr: 0,
               reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
+              deleted_at: acc.array_deleted_at ?? null,
             }]
           : [],
       })),
@@ -220,6 +221,7 @@ function buildNodesFromApi(
             nepool_gis_id: acc.nepool_gis_id ?? '',
             mwh_per_qtr: 0,
             reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
+            deleted_at: acc.array_deleted_at ?? null,
           }]
         : [],
     };

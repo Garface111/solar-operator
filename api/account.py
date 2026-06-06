@@ -281,6 +281,9 @@ class ArrayUpdate(BaseModel):
     excluded: Optional[bool] = None
 
 
+HARD_DELETE_GRACE_DAYS = 30
+
+
 def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
     return {
         "id": a.id,
@@ -293,6 +296,7 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
         # SolarEdge: expose connected status + site_id, never the raw key.
         "solaredge_connected": bool(a.solaredge_api_key),
         "solaredge_site_id": a.solaredge_site_id,
+        "deleted_at": a.deleted_at.isoformat() if a.deleted_at else None,
         "accounts": [
             {
                 "id": ac.id,
@@ -2499,27 +2503,36 @@ def _resolve_client_for_tenant(db, tenant_id: str, client_id: int) -> Client:
 
 
 @router.get("/v1/account/clients/{client_id}/arrays")
-def list_client_arrays(client_id: int,
-                       authorization: Optional[str] = Header(default=None)):
+def list_client_arrays(
+    client_id: int,
+    include_deleted: bool = Query(default=False),
+    authorization: Optional[str] = Header(default=None),
+):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
-        arrays = db.execute(
-            select(Array).where(
-                Array.client_id == c.id,
-                Array.deleted_at.is_(None),
-            ).order_by(Array.name.asc())
-        ).scalars().all()
+        arr_query = select(Array).where(Array.client_id == c.id)
+        if not include_deleted:
+            arr_query = arr_query.where(Array.deleted_at.is_(None))
+        arrays = db.execute(arr_query.order_by(Array.name.asc())).scalars().all()
         array_ids = [a.id for a in arrays]
         # Fetch all utility accounts in one query rather than one per array.
-        all_accts = db.execute(
-            select(UtilityAccount)
-            .where(
-                UtilityAccount.array_id.in_(array_ids),
-                UtilityAccount.deleted_at.is_(None),
-            )
-            .order_by(UtilityAccount.account_number.asc())
-        ).scalars().all() if array_ids else []
+        # For soft-deleted arrays (include_deleted=True), also fetch their soft-deleted accounts.
+        if array_ids:
+            if include_deleted:
+                acct_filter = UtilityAccount.array_id.in_(array_ids)
+            else:
+                acct_filter = (
+                    UtilityAccount.array_id.in_(array_ids) &
+                    UtilityAccount.deleted_at.is_(None)
+                )
+            all_accts = db.execute(
+                select(UtilityAccount)
+                .where(acct_filter)
+                .order_by(UtilityAccount.account_number.asc())
+            ).scalars().all()
+        else:
+            all_accts = []
         accts_by_array: dict[int, list] = {aid: [] for aid in array_ids}
         for acc in all_accts:
             accts_by_array.setdefault(acc.array_id, []).append(acc)
@@ -2662,6 +2675,75 @@ def delete_array(client_id: int, array_id: int,
 
     reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
     return {"ok": True, "undo_token": undo_token}
+
+
+@router.post("/v1/account/clients/{client_id}/arrays/{array_id}/restore")
+def restore_array(client_id: int, array_id: int,
+                  authorization: Optional[str] = Header(default=None)):
+    """Restore a soft-deleted array within the 30-day grace window.
+
+    - 200 OK: array restored (or was already active — idempotent).
+    - 410 GONE: deleted_at is older than 30 days (purge window elapsed).
+    - 404: array not found or belongs to a different tenant/client.
+
+    Also un-deletes utility accounts that were soft-deleted at the same time
+    as the array (within a 5-second window), indicating they were part of the
+    same delete transaction. Accounts deleted independently are left alone,
+    and a note is included in the response.
+    """
+    t = tenant_from_session(authorization)
+    now_ts = datetime.utcnow()
+    cutoff = now_ts - timedelta(days=HARD_DELETE_GRACE_DAYS)
+
+    with SessionLocal() as db:
+        c = _resolve_client_for_tenant(db, t.id, client_id)
+        a = db.get(Array, array_id)
+        if not a or a.tenant_id != t.id or a.client_id != c.id:
+            raise HTTPException(404, "Array not found")
+
+        # Idempotent: already active
+        if a.deleted_at is None:
+            accts = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id == a.id,
+                    UtilityAccount.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            return {"ok": True, "array": _array_to_dict(a, accts)}
+
+        # Past the grace window — scheduler may have already purged UAs
+        if a.deleted_at < cutoff:
+            raise HTTPException(410, {"error": "purge-window-elapsed"})
+
+        # Restore utility accounts deleted in the same transaction (±5 s)
+        deletion_ts = a.deleted_at
+        ua_low = deletion_ts - timedelta(seconds=5)
+        ua_high = deletion_ts + timedelta(seconds=5)
+        co_deleted_uas = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.array_id == a.id,
+                UtilityAccount.deleted_at.isnot(None),
+                UtilityAccount.deleted_at >= ua_low,
+                UtilityAccount.deleted_at <= ua_high,
+            )
+        ).scalars().all()
+        for u in co_deleted_uas:
+            u.deleted_at = None
+
+        a.deleted_at = None
+        db.commit()
+
+        all_accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.array_id == a.id,
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all()
+
+        note = None if co_deleted_uas else (
+            "Utility accounts must be re-added manually if they were removed earlier."
+        )
+        return {"ok": True, "array": _array_to_dict(a, all_accts), "note": note}
 
 
 # ─── Bulk delete + undo ─────────────────────────────────────────────────

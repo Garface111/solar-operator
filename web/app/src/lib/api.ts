@@ -257,6 +257,8 @@ export interface ArrayRow {
   accounts: UtilityAccount[];
   solaredge_connected: boolean;
   solaredge_site_id: number | null;
+  /** ISO timestamp set when the array is soft-deleted. Null for active arrays. */
+  deleted_at?: string | null;
 }
 
 export interface ClientRow {
@@ -887,6 +889,24 @@ export async function deleteArray(
   );
 }
 
+export interface RestoreArrayResult {
+  ok: boolean;
+  array: ArrayRow;
+  note?: string | null;
+}
+
+/** Restore a soft-deleted array within the 30-day grace window.
+ *  Throws on 410 (purge-window-elapsed) or network errors — callers handle. */
+export async function restoreArray(
+  clientId: number,
+  arrayId: number,
+): Promise<RestoreArrayResult> {
+  return request<RestoreArrayResult>(
+    `/v1/account/clients/${clientId}/arrays/${arrayId}/restore`,
+    { method: "POST" },
+  );
+}
+
 export interface BulkDeleteResult {
   ok: boolean;
   soft_deleted: number;
@@ -1312,6 +1332,9 @@ export interface CanvasAccountData {
   /** Original client this account belonged to before being moved in the
    *  sandbox. NULL while the account is still at its original home. */
   login_origin_client_id?: number | null;
+  /** ISO timestamp when the array was soft-deleted. Non-null means the array
+   *  is in the 30-day purge grace window; the sandbox renders it as a ghost. */
+  array_deleted_at?: string | null;
 }
 
 export interface CanvasClientData {
