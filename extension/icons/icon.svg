@@ -1,20 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Solar Operator toolbar icon — v1.5.0 (thicker rays, deeper gold) -->
-  <rect x="0" y="0" width="128" height="128" rx="18" ry="18" fill="#059669"/>
-  <g fill="#F5B82E" transform="translate(64 64)">
-    <rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/>
-    <g transform="rotate(30)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(60)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(90)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(120)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(150)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(180)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(210)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(240)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(270)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(300)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
-    <g transform="rotate(330)"><rect x="-4.5" y="-50" width="9" height="16" rx="4.5"/></g>
+  <!-- Solar Operator toolbar icon — v1.5.0 (tournament-final Jun 6'26)
+       bg: emerald-500 #10B981 | sun: amber #F59E0B | highlight: cream #FEF3C7@55%
+       sun_r=36, ray_w=11, ray_len=24, ray_off=60 (rays reach near canvas edge) -->
+  <rect x="0" y="0" width="128" height="128" rx="18" ry="18" fill="#10B981"/>
+  <g fill="#F59E0B" transform="translate(64 64)">
+    <rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/>
+    <g transform="rotate(30)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(60)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(90)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(120)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(150)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(180)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(210)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(240)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(270)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(300)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
+    <g transform="rotate(330)"><rect x="-5.5" y="-60" width="11" height="24" rx="5.5"/></g>
   </g>
-  <circle cx="64" cy="64" r="28" fill="#F5B82E"/>
-  <circle cx="57" cy="57" r="11" fill="#FFD23F" opacity="0.45"/>
+  <circle cx="64" cy="64" r="36" fill="#F59E0B"/>
+  <circle cx="55" cy="55" r="14" fill="#FEF3C7" opacity="0.55"/>
 </svg>
