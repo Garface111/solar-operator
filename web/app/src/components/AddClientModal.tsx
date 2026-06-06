@@ -72,10 +72,7 @@ export function AddClientModal({ open, onClose, onCreated }: Props) {
         );
         reset();
         onClose();
-        // Hash anchor lets ClientsSection expand the matching card on load.
-        // (Falls back to plain navigation if the section isn't watching.)
-        window.location.hash = `#client-${err.detail.existing_client_id}`;
-        // Best-effort scroll if the card is already mounted.
+        // Best-effort scroll to the already-mounted card.
         window.setTimeout(() => {
           const el = document.getElementById(
             `client-${err.detail.existing_client_id}`,
