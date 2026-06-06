@@ -979,7 +979,7 @@ def get_email_template(authorization: Optional[str] = Header(default=None)):
             "is_default": (t.email_subject_template is None
                            and t.email_body_template is None
                            and t.email_signoff is None),
-            "from_email": t.contact_email,
+            "from_email": t.send_from_email or t.contact_email,
             "available_tokens": list(MERGE_TAGS) + ["signoff"],
             "has_client_with_email": has_client_email,
             "sample_client_email": sample_client.contact_email if sample_client else None,

@@ -93,7 +93,7 @@ export function AutoReportsSettingsCard({
   const currentFreq = account.report_frequency ?? "quarterly";
 
   const fromName = account.send_from_name || account.name || "Solar Operator";
-  const fromEmail = account.send_from_email || "admin@solaroperator.org";
+  const fromEmail = account.send_from_email || account.email || "admin@solaroperator.org";
 
   return (
     <div>
