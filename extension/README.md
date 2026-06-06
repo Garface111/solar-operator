@@ -1,9 +1,10 @@
 # Solar Operator Sync — Chrome Extension
 
-> **ACTION REQUIRED — Chrome Web Store submission:** manifest is at **1.4.5**
-> locally but the Store still serves an older version. New users who install
-> from the Store miss all fixes since the last submission. Push the packaged
-> extension to the Chrome Web Store before the next marketing push.
+> **ACTION REQUIRED — Chrome Web Store submission:** v1.4.6 is pending Store
+> review. Until it goes live, the SPA falls back to `https://greenmountainpower.com/`
+> (root) for users on v1.4.5, which redirects to the login screen instead of
+> hitting the broken `/account/` path that renders a JSON 404 page. Push v1.4.6
+> to the Store as soon as possible so users get the full localStorage-wipe fix.
 
 
 A Manifest V3 Chrome extension that captures the user's utility-portal session

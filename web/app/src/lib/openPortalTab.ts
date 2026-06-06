@@ -13,6 +13,44 @@
 
 const ACK_TIMEOUT_MS = 250;
 
+// ── GMP portal URL helper ─────────────────────────────────────────────
+//
+// v1.4.5 wipes cookies before opening the GMP tab but does NOT wipe
+// localStorage. GMP's Vue SPA caches an auth token in localStorage; when
+// the cookie is gone but localStorage is stale, the SPA boots at /account/,
+// hits its own backend with the dead token, gets a JSON {"detail":"Not Found"}
+// 404, and the browser renders that raw — a black JSON-viewer page.
+//
+// v1.4.6 added portal_cleaner.js (runs at document_start) which wipes both
+// localStorage and sessionStorage on the SO_WIPE_COOKIES event. Once the user
+// is on v1.4.6+ it is safe to send them straight to /account/.
+//
+// For v1.4.5 and earlier (or when version is unknown) we fall back to the
+// marketing root https://greenmountainpower.com/. That page does a
+// cookie-based auth check on load; with the cookie wiped it redirects to the
+// login screen rather than making a direct API call that returns 404.
+
+export const GMP_ACCOUNT_URL = "https://greenmountainpower.com/account/";
+export const GMP_SAFE_URL = "https://greenmountainpower.com/";
+
+function supportsLocalStorageWipe(version: string): boolean {
+  const parts = version.split(".").map(Number);
+  const ma = parts[0] ?? 0;
+  const mi = parts[1] ?? 0;
+  const pa = parts[2] ?? 0;
+  if (ma !== 1) return ma > 1;
+  if (mi !== 4) return mi > 4;
+  return pa >= 6;
+}
+
+/** Return the right GMP landing URL for the installed extension version.
+ *  v >= 1.4.6 → /account/ (localStorage wiped by portal_cleaner.js).
+ *  v <  1.4.6 or unknown → / (safe root, redirects to login on stale auth). */
+export function gmpPortalUrl(version: string | null): string {
+  if (version && supportsLocalStorageWipe(version)) return GMP_ACCOUNT_URL;
+  return GMP_SAFE_URL;
+}
+
 // ── Pattern-A cookie wipe ─────────────────────────────────────────────
 //
 // Used by AddClientByLoginModal when it needs a FOREGROUND tab with a
