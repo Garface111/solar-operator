@@ -554,9 +554,7 @@ export function ClientCard({
               <span className="text-zinc-500">
                 Auto-sends{" "}
                 <span className="font-medium text-zinc-700">
-                  {client.report_frequency
-                    ? labelForFrequency(client.report_frequency)
-                    : "on your account schedule"}
+                  {labelForFrequency(client.report_frequency ?? "quarterly")}
                 </span>
                 .
               </span>
@@ -699,14 +697,13 @@ export function ClientCard({
                 Report frequency
               </span>
               <select
-                value={client.report_frequency ?? ""}
+                value={client.report_frequency ?? "quarterly"}
                 onChange={(e) =>
-                  patch({ report_frequency: e.target.value || null })
+                  patch({ report_frequency: e.target.value || "quarterly" })
                 }
-                aria-label="Report frequency override"
+                aria-label="Report frequency"
                 className="w-full rounded-xl border border-zinc-300 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
               >
-                <option value="">Inherit from account</option>
                 <option value="monthly">Monthly</option>
                 <option value="quarterly">Quarterly</option>
               </select>

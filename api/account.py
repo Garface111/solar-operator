@@ -190,7 +190,7 @@ class ClientCreate(BaseModel):
     name: str
     contact_email: Optional[EmailStr] = None
     cc_emails: Optional[str] = None  # comma-separated
-    report_frequency: Optional[str] = None  # null = inherit tenant cadence
+    report_frequency: Optional[str] = None  # null → coerced to "quarterly" on write
     notes: Optional[str] = None
     # GMP auto-populate (mirrors onboarding Screen 4 — editable post-onboarding).
     # The operator logs into GMP with either an email or a username; we match on
@@ -1252,7 +1252,7 @@ def create_client(body: ClientCreate,
     if body.report_frequency and body.report_frequency not in (
             "monthly", "quarterly"):
         raise HTTPException(400,
-            "report_frequency must be monthly, quarterly, or null")
+            "report_frequency must be monthly or quarterly")
     with SessionLocal() as db:
         # Name dedup
         existing = db.execute(
@@ -1313,7 +1313,7 @@ def create_client(body: ClientCreate,
             tenant_id=t.id, name=name,
             contact_email=body.contact_email,
             cc_emails=body.cc_emails,
-            report_frequency=body.report_frequency,
+            report_frequency=body.report_frequency or "quarterly",
             notes=body.notes,
             gmp_email=(body.gmp_email.lower().strip() if body.gmp_email else None),
             gmp_username=(body.gmp_username.strip()
@@ -1992,7 +1992,7 @@ def update_client(client_id: int, body: ClientUpdate,
     if body.report_frequency and body.report_frequency not in (
             "monthly", "quarterly"):
         raise HTTPException(400,
-            "report_frequency must be monthly, quarterly, or null")
+            "report_frequency must be monthly or quarterly")
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2013,14 +2013,15 @@ def update_client(client_id: int, body: ClientUpdate,
                 c.name = new_name
                 # Stamp so re-captures know the operator curated this name.
                 c.name_edited_at = now()
-        # Use model_fields_set so an explicit null in the payload can clear a
-        # field (e.g. report_frequency=null → inherit from account). Fields
-        # absent from the request body are NOT in model_fields_set and are
-        # left unchanged — the standard PATCH semantic.
-        for field in ("contact_email", "cc_emails", "report_frequency",
-                      "active", "notes", "gmp_autopopulate", "vec_autopopulate"):
+        # Use model_fields_set so fields absent from the request body are NOT
+        # touched — the standard PATCH semantic. report_frequency=null coerces
+        # to "quarterly" (inherit option removed Jun 6 2026).
+        for field in ("contact_email", "cc_emails", "active", "notes",
+                      "gmp_autopopulate", "vec_autopopulate"):
             if field in body.model_fields_set:
                 setattr(c, field, getattr(body, field))
+        if "report_frequency" in body.model_fields_set:
+            c.report_frequency = body.report_frequency or "quarterly"
         if "gmp_email" in body.model_fields_set:
             c.gmp_email = (body.gmp_email or "").lower().strip() or None
         if "gmp_username" in body.model_fields_set:
