@@ -94,7 +94,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   // Defaults to "subject" so first-click behavior matches the old single-field flow.
   const [tokenTarget, setTokenTarget] = useState<"subject" | "body">("subject");
   const chatBottomRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLInputElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   // Load template on open
   useEffect(() => {
@@ -195,6 +195,8 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     setChatInput("");
+    // Collapse the auto-grown textarea back to one row.
+    if (chatInputRef.current) chatInputRef.current.style.height = "auto";
     setChatLoading(true);
 
     try {
@@ -850,12 +852,17 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
 
               {/* Chat input */}
               <div className="border-t border-zinc-100 p-2">
-                <div className="flex gap-1.5">
-                  <input
+                <div className="flex items-end gap-1.5">
+                  <textarea
                     ref={chatInputRef}
-                    type="text"
                     value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
+                    onChange={(e) => {
+                      setChatInput(e.target.value);
+                      // Auto-grow: reset height then size to scrollHeight, capped.
+                      const ta = e.currentTarget;
+                      ta.style.height = "auto";
+                      ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
@@ -864,8 +871,9 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     }}
                     placeholder="Make it warmer…"
                     disabled={chatLoading}
+                    rows={1}
                     className={[
-                      "flex-1 rounded-lg border bg-zinc-50 px-2.5 py-1.5 text-xs placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30 disabled:opacity-60",
+                      "flex-1 resize-none rounded-lg border bg-zinc-50 px-2.5 py-1.5 text-xs placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30 disabled:opacity-60 leading-5 max-h-40 overflow-y-auto",
                       messages.length === 0
                         ? "border-primary-300 shadow-[0_0_0_3px_rgba(46,107,58,0.12)]"
                         : "border-zinc-200",
