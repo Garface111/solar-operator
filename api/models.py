@@ -9,9 +9,9 @@ Multi-tenant from day one. Every row that belongs to a customer carries
 tenant_id and queries are scoped through helpers in db.py.
 """
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy import (
-    String, Integer, Float, Boolean, DateTime, ForeignKey, JSON, Text, UniqueConstraint, Index
+    String, Integer, Float, Boolean, DateTime, Date, ForeignKey, JSON, Text, UniqueConstraint, Index
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -412,6 +412,32 @@ class ArrayMergeDismissal(Base):
         UniqueConstraint("tenant_id", "array_a_id", "array_b_id",
                          name="uq_array_merge_dismissal_pair"),
     )
+
+
+class DailyGeneration(Base):
+    """One row per (array, calendar day) — authoritative source for monthly
+    generation totals when the operator uploads a daily CSV.
+
+    When a month has any DailyGeneration rows for an array, the writer uses
+    DailyGeneration EXCLUSIVELY for that month (no Bill data mixed in —
+    double-counting would be worse than either alone).
+    """
+    __tablename__ = "daily_generation"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    kwh: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(32), default="csv")
+    # csv | manual | gmp_portal_scrape | extension_pull | bill_prorate
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("array_id", "day", name="uq_daily_array_day"),
+    )
+
+    array: Mapped["Array"] = relationship()
+    tenant: Mapped["Tenant"] = relationship()
 
 
 class CaptureEvent(Base):

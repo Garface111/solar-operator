@@ -480,29 +480,17 @@ def main():
             ))
             print("  + tenants.onboarding_array_estimate")
 
-        # 2026-06-06 skip-residential: flag non-generation GMP accounts.
-        # Residential accounts (no solarNetMeter, no groupNetMetered) are
-        # persisted as UtilityAccount rows but never trigger Client/Array
-        # auto-creation. Backfill is safe for Bruce: all 47 of his accounts
-        # have solarNetMeter=true, so none get marked residential.
-        if not column_exists(conn, "utility_accounts", "is_residential"):
-            conn.execute(text(
-                "ALTER TABLE utility_accounts ADD COLUMN is_residential BOOLEAN NOT NULL DEFAULT FALSE"
-            ))
-            print("  + utility_accounts.is_residential")
-        res = conn.execute(text("""
-            UPDATE utility_accounts
-            SET is_residential = true
-            WHERE provider = 'GMP'
-              AND COALESCE((extra->>'solarNetMeter')::boolean, false) = false
-              AND COALESCE((extra->>'groupNetMetered')::boolean, false) = false
-              AND is_residential = false
-        """))
-        backfill_n = res.rowcount if res.rowcount is not None else 0
-        if backfill_n > 0:
-            print(f"  ↪ skip-residential backfill: {backfill_n} GMP account(s) marked is_residential=true")
-        else:
-            print("  ↪ skip-residential backfill: no GMP accounts needed marking")
+        # 2026-06-06 daily_generation: daily kWh per array per calendar day.
+        # Table is created by init_db() (create_all) above.
+        # Explicit index creation is idempotent via IF NOT EXISTS; covers
+        # environments where the table existed before these indexes were defined.
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_daily_gen_tenant_id ON daily_generation (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_daily_gen_array_id ON daily_generation (array_id)",
+            "CREATE INDEX IF NOT EXISTS ix_daily_gen_day ON daily_generation (day)",
+        ]:
+            conn.execute(text(idx_sql))
+        print("  ✓ daily_generation table + indexes ensured")
 
     print("=== Migration complete ===")
 

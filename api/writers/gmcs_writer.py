@@ -19,7 +19,7 @@ relative to the report-generation date (no in-progress quarters).
 from __future__ import annotations
 import pathlib
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from sqlalchemy import select
@@ -29,7 +29,7 @@ from openpyxl.utils import get_column_letter
 
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal, DATA_DIR
-from ..models import Tenant, Client, UtilityAccount, Array, Bill
+from ..models import Tenant, Client, UtilityAccount, Array, Bill, DailyGeneration
 
 
 REPORTS_DIR = DATA_DIR / "reports"
@@ -96,6 +96,25 @@ def _sheet_name_for_array(name: str, used: set[str]) -> str:
         i += 1
     used.add(final)
     return final
+
+
+def _daily_generation_by_month(
+    db, array_id: int, start: date, end: date
+) -> dict[tuple[int, int], float]:
+    """Return {(year, month): kwh_sum} from DailyGeneration rows in [start, end]."""
+    rows = db.execute(
+        select(DailyGeneration.day, DailyGeneration.kwh)
+        .where(
+            DailyGeneration.array_id == array_id,
+            DailyGeneration.day >= start,
+            DailyGeneration.day <= end,
+        )
+    ).all()
+    buckets: dict[tuple[int, int], float] = {}
+    for day, kwh in rows:
+        key = (day.year, day.month)
+        buckets[key] = buckets.get(key, 0.0) + float(kwh)
+    return buckets
 
 
 # ── main builder ─────────────────────────────────────────────────────
@@ -209,6 +228,25 @@ def build_workbook(tenant_id: Optional[str] = None,
 
         groups = sorted(per_group.keys()) or sorted(set(group_of.values()))
 
+        # Query DailyGeneration for each array in the report window.
+        # Results are stored outside the db session for use in workbook rendering.
+        start_year, start_q = qlist[0]
+        report_start = date(start_year, (start_q - 1) * 3 + 1, 1)
+        end_year, end_q = qlist[-1]
+        end_month = end_q * 3
+        if end_month == 12:
+            report_end = date(end_year, 12, 31)
+        else:
+            report_end = date(end_year, end_month + 1, 1) - timedelta(days=1)
+
+        # {group_name: {(year, month): kwh_sum}} — only groups backed by an Array
+        daily_gen_by_group: dict[str, dict[tuple[int, int], float]] = {}
+        for grp_name, arr in group_meta.items():
+            if arr is not None:
+                dg = _daily_generation_by_month(db, arr.id, report_start, report_end)
+                if dg:
+                    daily_gen_by_group[grp_name] = dg
+
     # ── Build workbook ──────────────────────────────────────────────
     wb = Workbook()
     # remove default sheet at end
@@ -258,7 +296,12 @@ def build_workbook(tenant_id: Optional[str] = None,
         # Data: 6 quarter blocks × 3 month rows
         # First block starts at row 7; gap row between blocks (row 6, 10, 14, ...)
         row = 7
-        gen_by_month = per_group.get(grp, {})
+        # DailyGeneration takes precedence per (year, month) bucket.
+        # For months covered by daily data, daily kWh is used exclusively.
+        # For months not covered, Bill-based kWh is the fallback.
+        bill_months = per_group.get(grp, {})
+        daily_months = daily_gen_by_group.get(grp, {})
+        gen_by_month: dict[tuple[int, int], float] = {**bill_months, **daily_months}
         for (qy, qq) in qlist:
             for i, (my, mm) in enumerate(_quarter_months(qy, qq)):
                 if i == 0:

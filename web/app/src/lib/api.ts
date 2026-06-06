@@ -909,6 +909,52 @@ export async function undoDelete(undoToken: string): Promise<{ ok: boolean; rest
   return request("/v1/account/undo-delete", { body: { undo_token: undoToken } });
 }
 
+// ─── daily generation CSV ─────────────────────────────────────────────────
+
+export interface DailyCsvUploadResult {
+  rows_inserted: number;
+  rows_updated: number;
+  rows_skipped: number;
+  date_range: { start: string; end: string } | null;
+  source: string;
+}
+
+export interface DailyCoverage {
+  day_count: number;
+  first_day: string | null;
+  last_day: string | null;
+  source_counts: Record<string, number>;
+}
+
+export async function uploadDailyCsv(
+  arrayId: number,
+  file: File,
+): Promise<DailyCsvUploadResult> {
+  const token = getSession();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetchWithTimeout(
+    `/v1/account/arrays/${arrayId}/daily-csv`,
+    { method: "POST", headers, body: form },
+  );
+
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json() as Promise<DailyCsvUploadResult>;
+}
+
+export async function getDailyCoverage(arrayId: number): Promise<DailyCoverage> {
+  return request<DailyCoverage>(`/v1/account/arrays/${arrayId}/daily-coverage`);
+}
+
 // ─── utility accounts (under an array) ───────────────────────────────────
 
 export async function addUtilityAccount(
