@@ -188,7 +188,11 @@ async function _handleSync(payload, tokenHash, sendResponse) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "GMP_TOKEN_CAPTURED" || msg.type === "VEC_DATA_CAPTURED") {
+  if (
+    msg.type === "GMP_TOKEN_CAPTURED" ||
+    msg.type === "VEC_DATA_CAPTURED" ||
+    msg.type === "SMARTHUB_DATA_CAPTURED"
+  ) {
     _handleSync(msg.payload, msg.tokenHash, sendResponse);
     return true; // keep channel open for async sendResponse
   }

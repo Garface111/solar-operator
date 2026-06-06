@@ -17,7 +17,15 @@ import {
 const CHROME_STORE_URL =
   "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
 
-type Provider = "gmp" | "vec";
+type Provider =
+  | "gmp"
+  | "vec"
+  | "wec"
+  | "stowe"
+  | "hyde_park"
+  | "ludlow"
+  | "enosburg"
+  | "nhec";
 
 const PORTALS: { id: Provider; name: string; short: string; url: string }[] = [
   {
@@ -31,6 +39,42 @@ const PORTALS: { id: Provider; name: string; short: string; url: string }[] = [
     name: "Vermont Electric Co-op",
     short: "VEC",
     url: "https://vermontelectric.smarthub.coop/",
+  },
+  {
+    id: "wec",
+    name: "Washington Electric Co-op",
+    short: "WEC",
+    url: "https://washingtonelectric.smarthub.coop/",
+  },
+  {
+    id: "stowe",
+    name: "Stowe Electric",
+    short: "Stowe",
+    url: "https://stoweelectric.smarthub.coop/",
+  },
+  {
+    id: "hyde_park",
+    name: "Village of Hyde Park",
+    short: "Hyde Park",
+    url: "https://villageofhydepark.smarthub.coop/",
+  },
+  {
+    id: "ludlow",
+    name: "Village of Ludlow Electric",
+    short: "Ludlow",
+    url: "https://ludlow.smarthub.coop/",
+  },
+  {
+    id: "enosburg",
+    name: "Village of Enosburg Falls",
+    short: "Enosburg",
+    url: "https://villageofenosburgfalls.smarthub.coop/",
+  },
+  {
+    id: "nhec",
+    name: "NH Electric Cooperative",
+    short: "NHEC",
+    url: "https://nhec.smarthub.coop/",
   },
 ];
 

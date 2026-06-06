@@ -8,7 +8,68 @@ import {
 } from "../lib/useExtensionStatus";
 import { wipeCookiesAndWait, gmpPortalUrl } from "../lib/openPortalTab";
 
-type Provider = "gmp" | "vec";
+type SmartHubProvider =
+  | "vec"
+  | "wec"
+  | "stowe"
+  | "hyde_park"
+  | "ludlow"
+  | "enosburg"
+  | "nhec";
+
+type Provider = "gmp" | SmartHubProvider;
+
+interface SmartHubEntry {
+  provider: SmartHubProvider;
+  name: string;
+  hint: string;
+  url: string;
+}
+
+const SMARTHUB_PORTALS: SmartHubEntry[] = [
+  {
+    provider: "vec",
+    name: "Vermont Electric Cooperative",
+    hint: "Northeast Kingdom (VEC)",
+    url: "https://vermontelectric.smarthub.coop/",
+  },
+  {
+    provider: "wec",
+    name: "Washington Electric Co-op",
+    hint: "Central Vermont (WEC)",
+    url: "https://washingtonelectric.smarthub.coop/",
+  },
+  {
+    provider: "stowe",
+    name: "Stowe Electric Department",
+    hint: "Stowe area",
+    url: "https://stoweelectric.smarthub.coop/",
+  },
+  {
+    provider: "hyde_park",
+    name: "Village of Hyde Park",
+    hint: "Hyde Park",
+    url: "https://villageofhydepark.smarthub.coop/",
+  },
+  {
+    provider: "ludlow",
+    name: "Village of Ludlow Electric",
+    hint: "Ludlow area",
+    url: "https://ludlow.smarthub.coop/",
+  },
+  {
+    provider: "enosburg",
+    name: "Village of Enosburg Falls",
+    hint: "Enosburg Falls",
+    url: "https://villageofenosburgfalls.smarthub.coop/",
+  },
+  {
+    provider: "nhec",
+    name: "NH Electric Cooperative",
+    hint: "New Hampshire (NHEC)",
+    url: "https://nhec.smarthub.coop/",
+  },
+];
 
 interface Props {
   open: boolean;
@@ -25,13 +86,13 @@ interface Props {
 
 const PORTAL_URLS: Record<Provider, string> = {
   gmp: "https://greenmountainpower.com/account/",
-  vec: "https://vermontelectric.smarthub.coop/Login.html",
-};
+  ...Object.fromEntries(SMARTHUB_PORTALS.map((p) => [p.provider, p.url])),
+} as Record<Provider, string>;
 
 const FRIENDLY: Record<Provider, string> = {
   gmp: "Green Mountain Power",
-  vec: "Vermont Electric Cooperative",
-};
+  ...Object.fromEntries(SMARTHUB_PORTALS.map((p) => [p.provider, p.name])),
+} as Record<Provider, string>;
 
 /**
  * AddClientByLoginModal — the "click a portal, sign in, done" flow.
@@ -194,12 +255,8 @@ export function AddClientByLoginModal({
           </p>
         )}
 
-        <div
-          className={[
-            "grid grid-cols-1 gap-3 sm:grid-cols-2",
-            extensionAbsent ? "opacity-50" : "",
-          ].join(" ")}
-        >
+        <div className={extensionAbsent ? "opacity-50" : ""}>
+          {/* GMP — its own button, not SmartHub */}
           <PortalCard
             provider="gmp"
             label="Green Mountain Power"
@@ -207,13 +264,25 @@ export function AddClientByLoginModal({
             onClick={() => pick("gmp")}
             disabled={extensionUnknown}
           />
-          <PortalCard
-            provider="vec"
-            label="Vermont Electric Co-op"
-            hint="Northeast Kingdom area"
-            onClick={() => pick("vec")}
-            disabled={extensionUnknown}
-          />
+
+          {/* SmartHub utilities group */}
+          <div className="mt-4">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+              SmartHub utilities
+            </p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {SMARTHUB_PORTALS.map((p) => (
+                <PortalCard
+                  key={p.provider}
+                  provider={p.provider}
+                  label={p.name}
+                  hint={p.hint}
+                  onClick={() => pick(p.provider)}
+                  disabled={extensionUnknown}
+                />
+              ))}
+            </div>
+          </div>
         </div>
 
         <p className="text-xs text-zinc-500">
