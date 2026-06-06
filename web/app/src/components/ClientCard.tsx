@@ -51,21 +51,21 @@ function deliveryStatus(
   };
 }
 
-function labelForFrequency(f: string): string {
-  switch (f) {
-    case "monthly":
-      return "every month";
-    case "quarterly":
-      return "every quarter";
-    case "annually":
-    case "yearly":
-      return "once a year";
-    case "manual":
-    case "off":
-      return "manually only — no auto-send";
-    default:
-      return `every ${f}`;
-  }
+/** Human "Last sent" line for the REPORT section. Relative for recent sends
+ *  (≤30 days), absolute date for anything older, explicit "Never sent" when
+ *  we've never delivered to this client. */
+function lastSentLabel(c: ClientRow): string {
+  if (!c.last_delivered_at) return "Never sent";
+  const then = new Date(c.last_delivered_at).getTime();
+  const days = Math.floor((Date.now() - then) / 86_400_000);
+  if (days <= 0) return "Last sent: today";
+  if (days === 1) return "Last sent: yesterday";
+  if (days <= 30) return `Last sent: ${days} days ago`;
+  return `Last sent: ${new Date(c.last_delivered_at).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  })}`;
 }
 
 interface Props {
@@ -380,42 +380,12 @@ export function ClientCard({
             }}
           />
 
-          {/* 2-column layout: left = identity + content, right = meta + actions */}
+          {/* 2-column layout: left = client status at a glance, right = the
+              redesigned report sidebar (Ford's boxed region). */}
           <div className="mt-4 grid grid-cols-1 gap-6 sm:grid-cols-[1fr_280px]">
-            {/* LEFT column — CC emails and notes */}
+            {/* LEFT column — client status (the bulk content, the arrays
+                table, lives full-width below this grid). */}
             <div className="space-y-4">
-              <div>
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  CC emails
-                </span>
-                <EditableField
-                  value={client.cc_emails}
-                  label="CC emails"
-                  onSave={(v) => patch({ cc_emails: v || null })}
-                  emptyText="none"
-                  placeholder="extra@example.com, other@example.com"
-                />
-                <p className="mt-1 text-[11px] text-zinc-400">
-                  Comma-separated. These addresses get a copy of every report.
-                </p>
-              </div>
-              <div>
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  Notes
-                </span>
-                <EditableField
-                  value={client.notes}
-                  label="notes"
-                  onSave={(v) => patch({ notes: v || null })}
-                  emptyText="—"
-                  placeholder="Internal notes — not sent to the client"
-                />
-              </div>
-            </div>
-
-            {/* RIGHT column — meta & quick actions */}
-            <div className="space-y-4">
-              {/* Status pills */}
               <div className="flex flex-wrap gap-1.5">
                 {client.active ? (
                   <Chip variant="emerald">Active</Chip>
@@ -428,36 +398,20 @@ export function ClientCard({
                   </Chip>
                 )}
               </div>
+            </div>
 
-              {/* Report frequency */}
-              <div>
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  Report frequency
-                </span>
-                <select
-                  value={client.report_frequency ?? "quarterly"}
-                  onChange={(e) =>
-                    patch({ report_frequency: e.target.value || "quarterly" })
-                  }
-                  aria-label="Report frequency"
-                  className="w-full rounded-xl border border-cream-border bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
-                >
-                  <option value="monthly">Monthly</option>
-                  <option value="quarterly">Quarterly</option>
-                </select>
-                <p className="mt-1 text-[11px] text-zinc-400">
-                  Override the account-wide schedule for this client only. Auto-sends{" "}
-                  <span className="font-medium text-zinc-500">
-                    {labelForFrequency(client.report_frequency ?? "quarterly")}
-                  </span>
-                  .
-                </p>
-              </div>
-
-              {/* Quick actions */}
-              <div className="flex flex-col gap-2">
+            {/* RIGHT column — the redesigned report sidebar. Three labelled
+                sub-sections (REPORT / DELIVERY / DATA) on a single 16px
+                vertical rhythm, separated by wood-300 gold hairlines. */}
+            <div className="rounded-xl border border-cream-border bg-cream p-4 sm:p-5">
+              {/* ── Section 1: REPORT — outgoing report actions ── */}
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Report
+              </h4>
+              <div className="mt-4 flex flex-col gap-2">
                 <Button
-                  variant="secondary"
+                  variant="primary"
+                  className="w-full"
                   onClick={handleSendToMe}
                   disabled={sendingToMe || !operatorEmail}
                 >
@@ -474,7 +428,7 @@ export function ClientCard({
                   type="button"
                   onClick={handleDownload}
                   disabled={downloading}
-                  className="inline-flex items-center justify-center rounded-lg border border-cream-border bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
                 >
                   {downloading ? (
                     <>
@@ -485,6 +439,72 @@ export function ClientCard({
                     "Download .xlsx"
                   )}
                 </button>
+              </div>
+              <p className="mt-2 text-[11px] text-zinc-500">{lastSentLabel(client)}</p>
+
+              {/* gold hairline */}
+              <div className="my-4 border-t border-wood-300/60" />
+
+              {/* ── Section 2: DELIVERY — who it goes to + how often ── */}
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Delivery
+              </h4>
+              <div className="mt-4 space-y-2">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                    To
+                  </span>
+                  <div className="min-w-0">
+                    <EditableField
+                      value={client.contact_email}
+                      label="contact email"
+                      type="email"
+                      onSave={(v) => patch({ contact_email: v || null })}
+                      emptyText="add email"
+                      placeholder="reports@client.org"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                    CC
+                  </span>
+                  <div className="min-w-0">
+                    <EditableField
+                      value={client.cc_emails}
+                      label="CC emails"
+                      onSave={(v) => patch({ cc_emails: v || null })}
+                      emptyText="—"
+                      placeholder="extra@example.com, other@example.com"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-x-2">
+                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                    Frequency
+                  </span>
+                  <select
+                    value={client.report_frequency ?? "quarterly"}
+                    onChange={(e) =>
+                      patch({ report_frequency: e.target.value || "quarterly" })
+                    }
+                    aria-label="Report frequency"
+                    className="min-w-0 flex-1 rounded-lg border border-cream-border bg-white px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+                  >
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* gold hairline */}
+              <div className="my-4 border-t border-wood-300/60" />
+
+              {/* ── Section 3: DATA — import + notes ── */}
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Data
+              </h4>
+              <div className="mt-4 space-y-3">
                 {/* Single "Import data" dropdown — replaces the old two separate buttons.
                     Dropdown approach: user intent (create vs. assign) stays clear in the menu
                     without changing the backend preview semantics yet. */}
@@ -542,28 +562,21 @@ export function ClientCard({
                     </div>
                   )}
                 </div>
-              </div>
-
-              {/* Delivery preview — only shown when we have real data */}
-              {(client.last_delivered_at || client.last_bounced_at) && (
-                <div className="space-y-0.5 rounded-lg border border-cream-border px-3 py-2 text-xs">
-                  {client.last_delivered_at && (
-                    <p className="text-zinc-400">
-                      Last delivered:{" "}
-                      {new Date(client.last_delivered_at).toLocaleDateString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                      })}
-                    </p>
-                  )}
-                  {client.last_bounced_at && (
-                    <p className="text-red-500">
-                      Bounce: {client.last_bounce_reason ?? "unknown reason"}
-                    </p>
-                  )}
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                    Notes
+                  </span>
+                  <div className="min-w-0">
+                    <EditableField
+                      value={client.notes}
+                      label="notes"
+                      onSave={(v) => patch({ notes: v || null })}
+                      emptyText="—"
+                      placeholder="Internal notes — not sent to the client"
+                    />
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
           </div>
 
