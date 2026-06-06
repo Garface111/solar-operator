@@ -48,29 +48,13 @@ export function ClientsSection({ expandClientId }: Props) {
   const [importing, setImporting] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
   const [missingNepoolCount, setMissingNepoolCount] = useState(0);
-  // One-shot autoscroll: when the missing-NEPOOL count transitions from
-  // 0 → positive AFTER the first data load (e.g. operator just captured a
-  // login with un-mapped arrays), gently bring the amber "Step 2" banner
-  // into view so they see the next action. Suppressed on initial mount so
-  // returning users land on their client list, not the NEPOOL banner.
-  const prevMissingRef = useRef<number>(0);
-  const hasInitializedRef = useRef<boolean>(false);
+  // The NEPOOL banner is loud enough (amber, full-width, top of section) to
+  // be discovered naturally. We intentionally do NOT autoscroll to it — fresh
+  // captures should let the user dwell on the new client cards in the canvas
+  // above (fill in emails, rename, group logins), THEN encounter NEPOOL when
+  // they scroll down. The previous autoscroll yanked the page mid-onboarding
+  // and felt jarring.
   const nepoolBannerRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!hasInitializedRef.current) {
-      // First arrival of a real count — seed the baseline, don't scroll.
-      hasInitializedRef.current = true;
-      prevMissingRef.current = missingNepoolCount;
-      return;
-    }
-    if (prevMissingRef.current === 0 && missingNepoolCount > 0) {
-      // Tiny delay so the banner has rendered after the count update.
-      setTimeout(() => {
-        nepoolBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 250);
-    }
-    prevMissingRef.current = missingNepoolCount;
-  }, [missingNepoolCount]);
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
