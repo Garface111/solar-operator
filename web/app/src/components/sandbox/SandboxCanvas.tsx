@@ -1967,9 +1967,6 @@ export default function SandboxCanvas() {
                 {layoutMode === 'free' && (
                   <ToolbarButton onClick={autoArrange}>Auto-arrange</ToolbarButton>
                 )}
-                <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
-                  Fit to view
-                </ToolbarButton>
                 {(() => {
                   const selectedClients = nodes.filter((n) => n.selected && n.type === 'client');
                   const n = selectedClients.length;
@@ -1993,6 +1990,17 @@ export default function SandboxCanvas() {
                     </button>
                   );
                 })()}
+              </div>
+            </Panel>
+          )}
+
+          {/* Toolbar — bottom-right: view + history actions */}
+          {!loading && !isEmpty && (
+            <Panel position="bottom-right">
+              <div className="flex gap-2 flex-wrap justify-end">
+                <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
+                  Fit to view
+                </ToolbarButton>
                 <button
                   type="button"
                   disabled={!topUndo}
