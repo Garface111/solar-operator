@@ -4,7 +4,7 @@ import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
 import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
 import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
 import { NextRunCard } from "../components/reports/NextRunCard";
-import { EmailPrefsCard } from "../components/settings/EmailPrefsCard";
+import { AutoReportsSettingsCard } from "../components/reports/AutoReportsSettingsCard";
 
 const EmailTemplateStudio = lazy(() =>
   import("../components/reports/EmailTemplateStudio").then((m) => ({
@@ -144,24 +144,14 @@ export default function ReportsTab() {
       {/* 2. One-glance status */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <StatusPill status={overallStatus} quarter={mostRecentLabel} />
-        <div className="flex items-center gap-2">
-          <Button
-            variant="secondary"
-            onClick={() => setStudioOpen(true)}
-            className="text-xs"
-          >
-            Customize email template
-          </Button>
-          {/* Bruce Jun 6: the "Schedule & email settings ↗" link to /account
-              went away — those controls now live on this page (EmailPrefsCard
-              below). One page, one job. */}
-        </div>
       </div>
 
-      {/* 3. Schedule + CC-me prefs — was on /account ("Email preferences"),
-            moved here Jun 6 so the "Automatic reports" page actually owns
-            every setting that controls automatic reports. */}
-      <EmailPrefsCard account={account} onAccountChange={patchAccount} />
+      {/* 3. Unified delivery settings — cadence, CC-me, and email template. */}
+      <AutoReportsSettingsCard
+        account={account}
+        onAccountChange={patchAccount}
+        onOpenStudio={() => setStudioOpen(true)}
+      />
 
       {/* 4. Next run countdown + send-now */}
       <NextRunCard onSent={loadData} />
