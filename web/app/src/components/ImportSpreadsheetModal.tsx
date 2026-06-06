@@ -7,6 +7,7 @@ import {
   ingestCommit,
   listClients,
   type IngestRow,
+  type IngestCommitResult,
   type ClientRow,
 } from "../lib/api";
 
@@ -23,12 +24,15 @@ interface Props {
   forceClientName?: string;
 }
 
-/** An editable preview row plus whether it's selected for import. */
+/** An editable preview row plus UI-only state. */
 interface EditableRow extends IngestRow {
   include: boolean;
+  collision_action: "skip" | "overwrite" | "new";
+  /** How the frontend filled a blank operator_name (not from server). */
+  _autofillKind?: "array_match" | "filename" | null;
 }
 
-type Stage = "upload" | "parsing" | "preview";
+type Stage = "upload" | "parsing" | "preview" | "result";
 
 const ACCEPT = ".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv";
 
@@ -45,6 +49,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
   const [importedClients, setImportedClients] = useState(0);
   const [existingClients, setExistingClients] = useState<ClientRow[]>([]);
   const [autoFilledCount, setAutoFilledCount] = useState(0);
+  const [commitResult, setCommitResult] = useState<IngestCommitResult | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -68,18 +73,26 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
       setImportedLogins(0);
       setImportedClients(0);
       setAutoFilledCount(0);
+      setCommitResult(null);
     }
   }, [open]);
+
+  // Auto-close the result step after 4 s.
+  useEffect(() => {
+    if (stage !== "result") return;
+    const timer = setTimeout(() => onClose(), 4000);
+    return () => clearTimeout(timer);
+  }, [stage, onClose]);
 
   // Close on Escape (matches the shared Modal behavior).
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !committing) onClose();
+      if (e.key === "Escape" && !committing && stage !== "result") onClose();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, committing, onClose]);
+  }, [open, committing, stage, onClose]);
 
   if (!open) return null;
 
@@ -91,13 +104,18 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
     try {
       const res = await ingestPreview(file, controller.signal);
       if (controller.signal.aborted) return;
-      if (!res.arrays.length) {
+
+      // If the server says the file is empty, stay on upload and show message.
+      const emptyWarn = (res.warnings ?? []).find((w) => w.kind === "empty_file");
+      if (emptyWarn || !res.arrays.length) {
         setError(
+          emptyWarn?.message ??
           "We couldn't find any arrays in that file. Try a different file, or add clients manually.",
         );
         setStage("upload");
         return;
       }
+
       setSource(res.source);
 
       // Smart-fill blank client names BEFORE first paint:
@@ -106,14 +124,23 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
       const fileStem = deriveClientNameFromFilename(file.name);
       let filled = 0;
       const smartRows = res.arrays.map((r): EditableRow => {
+        const hasNepolCollision = !!r.provenance?.nepool_collision;
+        const baseAction: "skip" | "overwrite" | "new" = hasNepolCollision ? "skip" : "new";
+
         if ((r.operator_name ?? "").trim()) {
-          return { ...r, include: true };
+          return { ...r, include: true, collision_action: baseAction, _autofillKind: null };
         }
         // Try fuzzy match against existing client names using array name.
         const guess = guessClientFromArray(r.array_name ?? "", existingClients);
-        if (guess) { filled += 1; return { ...r, operator_name: guess, include: true }; }
-        if (fileStem) { filled += 1; return { ...r, operator_name: fileStem, include: true }; }
-        return { ...r, include: true };
+        if (guess) {
+          filled += 1;
+          return { ...r, operator_name: guess, include: true, collision_action: baseAction, _autofillKind: "array_match" };
+        }
+        if (fileStem) {
+          filled += 1;
+          return { ...r, operator_name: fileStem, include: true, collision_action: baseAction, _autofillKind: "filename" };
+        }
+        return { ...r, include: true, collision_action: baseAction, _autofillKind: null };
       });
       setRows(smartRows);
       setAutoFilledCount(filled);
@@ -166,6 +193,16 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
     );
   }
 
+  function setCollisionAction(i: number, action: "skip" | "overwrite" | "new") {
+    setRows((rs) =>
+      rs.map((r, idx) => {
+        if (idx !== i) return r;
+        // When user picks "skip", auto-uncheck the row too.
+        return { ...r, collision_action: action, include: action !== "skip" };
+      }),
+    );
+  }
+
   // When the GMCS global operator name changes, apply it to all selected rows.
   function applyGmcsOperator(name: string) {
     setGmcsOperator(name);
@@ -181,21 +218,16 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
     if (!selected.length || committing) return;
     setCommitting(true);
     try {
-      const res = await ingestCommit(
-        selected.map(({ include: _include, ...r }) => r),
-        forceClientId,
-      );
-      toast.success(
-        forceClientId
-          ? `Imported ${res.arrays_created} array${res.arrays_created === 1 ? "" : "s"}` +
-            (forceClientName ? ` into ${forceClientName}` : "")
-          : `Imported ${res.arrays_created} array${res.arrays_created === 1 ? "" : "s"}` +
-            (res.clients_created
-              ? ` under ${res.clients_created} new client${res.clients_created === 1 ? "" : "s"}`
-              : ""),
-      );
-      onImported();
-      onClose();
+      // Strip UI-only fields before sending.
+      const payload: IngestRow[] = selected.map((r) => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { include: _i, _autofillKind: _ak, provenance: _p, ...rest } = r;
+        return rest as IngestRow;
+      });
+      const res = await ingestCommit(payload, forceClientId);
+      onImported(); // Refresh parent list before showing result step.
+      setCommitResult(res);
+      setStage("result");
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Couldn't import — try again",
@@ -205,23 +237,36 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
     }
   }
 
+  // Derived counts for warnings summary bar.
+  const nepoolCollisionRows = rows.filter((r) => r.provenance?.nepool_collision);
+  const fuzzyClientRows = rows.filter(
+    (r) => r.provenance?.client_match?.match_kind === "fuzzy",
+  );
+  const lowConfCount = source === "llm"
+    ? rows.filter((r) => {
+        const c = r.provenance?.confidence;
+        return c !== null && c !== undefined && c < 0.85;
+      }).length
+    : 0;
+
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-zinc-900/40 px-4 py-8"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget && !committing) onClose();
+        if (e.target === e.currentTarget && !committing && stage !== "result") onClose();
       }}
     >
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Import from spreadsheet"
+        aria-label="Import arrays from spreadsheet"
         className="flex max-h-full w-full max-w-3xl flex-col rounded-xl border border-zinc-200 bg-white p-6 shadow-xl"
       >
         <h2 className="text-lg font-semibold tracking-tight text-zinc-900">
-          Import from spreadsheet
+          Import arrays from spreadsheet — we&apos;ll review before saving
         </h2>
 
+        {/* ── Upload stage ─────────────────────────────────────────────── */}
         {stage === "upload" && (
           <div className="mt-4">
             <p className="mb-3 text-sm text-zinc-600">
@@ -284,6 +329,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
           </div>
         )}
 
+        {/* ── Parsing stage ─────────────────────────────────────────────── */}
         {stage === "parsing" && (
           <div className="mt-4 flex flex-col items-center justify-center gap-4 py-16 text-sm text-zinc-500">
             <Spinner className="h-6 w-6 text-primary-500" />
@@ -297,12 +343,32 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
           </div>
         )}
 
+        {/* ── Preview stage ─────────────────────────────────────────────── */}
         {stage === "preview" && (
           <div className="mt-4 flex min-h-0 flex-1 flex-col">
-            {/* GMCS-shape notice */}
+
+            {/* Parse-source banner */}
+            {source === "llm" && (
+              <div className="mb-3 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm">
+                <p className="font-medium text-zinc-800">
+                  Parsed by AI
+                  <span
+                    title="We use AI to parse free-form spreadsheets. Low confidence = the AI wasn't sure. Always review before saving."
+                    className="ml-1.5 cursor-help text-zinc-400"
+                  >ⓘ</span>
+                </p>
+                <p className="mt-0.5 text-zinc-600">
+                  {rows.length} row{rows.length !== 1 ? "s" : ""} extracted
+                  {lowConfCount > 0 && (
+                    <> · <span className="text-amber-700">{lowConfCount} had low confidence (highlighted)</span></>
+                  )}
+                </p>
+              </div>
+            )}
+
             {source === "gmcs_shape" && (
               <div className="mb-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-900">
-                <p className="font-medium">Detected GMCS-format workbook</p>
+                <p className="font-medium">Recognized GMCS-format workbook</p>
                 <p className="mt-0.5 text-primary-800">
                   Pulled one row per sheet, with the array name and NEPOOL-GIS ID
                   from the sheet title. Set the client below — it applies to all rows.
@@ -322,11 +388,22 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
               </div>
             )}
 
-            {/* Heuristic warning */}
             {source === "heuristic" && (
               <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                We couldn&apos;t use AI to parse this file — guessed at column
-                meanings. Double-check every row before saving.
+                Best-effort column parse — AI extraction wasn&apos;t available.
+                Double-check every row before saving.
+              </div>
+            )}
+
+            {/* Top-level collision summaries */}
+            {fuzzyClientRows.length > 0 && (
+              <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+                {fuzzyClientRows.length} row{fuzzyClientRows.length !== 1 ? "s" : ""} look like new clients but are similar to an existing one — review the highlighted rows.
+              </div>
+            )}
+            {nepoolCollisionRows.length > 0 && (
+              <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+                {nepoolCollisionRows.length} row{nepoolCollisionRows.length !== 1 ? "s" : ""} would create duplicate NEPOOL IDs — choose Skip / Overwrite / New per row.
               </div>
             )}
 
@@ -373,25 +450,30 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r, i) => (
-                    <tr
-                      key={i}
-                      className={[
-                        "border-t border-zinc-100",
-                        r.include ? "" : "opacity-40",
-                      ].join(" ")}
-                    >
-                      <td className="px-2 py-1 align-middle">
-                        <input
-                          type="checkbox"
-                          checked={r.include}
-                          onChange={() => toggleRow(i)}
-                          aria-label={`Include row ${i + 1}`}
-                          className="h-4 w-4 accent-primary-500"
-                        />
-                      </td>
-                      <td className="px-1 py-1">
-                        <div className="relative">
+                  {rows.map((r, i) => {
+                    const prov = r.provenance;
+                    const isLowConf = source === "llm" && prov?.confidence != null && prov.confidence < 0.85;
+                    const hasNepoolCollision = !!prov?.nepool_collision;
+                    return (
+                      <tr
+                        key={i}
+                        className={[
+                          "border-t border-zinc-100",
+                          r.include ? "" : "opacity-40",
+                          isLowConf ? "bg-yellow-50/50" : "",
+                          hasNepoolCollision ? "bg-amber-50" : "",
+                        ].join(" ")}
+                      >
+                        <td className="px-2 py-1 align-middle">
+                          <input
+                            type="checkbox"
+                            checked={r.include}
+                            onChange={() => toggleRow(i)}
+                            aria-label={`Include row ${i + 1}`}
+                            className="h-4 w-4 accent-primary-500"
+                          />
+                        </td>
+                        <td className="px-1 py-1">
                           <input
                             list="import-client-suggestions"
                             value={r.operator_name ?? ""}
@@ -406,52 +488,77 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                                   : "border-transparent text-zinc-800 focus:border-primary-400 focus:ring-primary-400/40",
                             ].join(" ")}
                           />
-                        </div>
-                      </td>
-                      <CellInput
-                        value={r.array_name}
-                        onChange={(v) => editRow(i, "array_name", v)}
-                        placeholder="(array name)"
-                      />
-                      <CellInput
-                        value={r.nepool_gis_id}
-                        onChange={(v) => editRow(i, "nepool_gis_id", v)}
-                        placeholder="—"
-                      />
-                      <CellInput
-                        value={r.gmp_account_number}
-                        onChange={(v) => editRow(i, "gmp_account_number", v)}
-                        placeholder="—"
-                      />
-                      <CellInput
-                        value={r.notes}
-                        onChange={(v) => editRow(i, "notes", v)}
-                        placeholder="—"
-                      />
-                      <td className="px-2 py-1 align-middle text-xs">
-                        {r.collision && (
-                          <span
-                            title={
-                              r.collision === "both"
-                                ? "Client and array name already exist — will be merged"
-                                : r.collision === "client"
-                                  ? "Client name already exists — will be merged"
-                                  : "Array name already exists — will be merged"
-                            }
-                            className="whitespace-nowrap text-amber-700"
-                          >
-                            ⚠ Collides — will merge
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                          {/* Per-row client provenance pill */}
+                          <ClientProvenancePill row={r} onUseExisting={(name) => editRow(i, "operator_name", name)} />
+                        </td>
+                        <CellInput
+                          value={r.array_name}
+                          onChange={(v) => editRow(i, "array_name", v)}
+                          placeholder="(array name)"
+                        />
+                        <CellInput
+                          value={r.nepool_gis_id}
+                          onChange={(v) => editRow(i, "nepool_gis_id", v)}
+                          placeholder="—"
+                        />
+                        <CellInput
+                          value={r.gmp_account_number}
+                          onChange={(v) => editRow(i, "gmp_account_number", v)}
+                          placeholder="—"
+                        />
+                        <CellInput
+                          value={r.notes}
+                          onChange={(v) => editRow(i, "notes", v)}
+                          placeholder="—"
+                        />
+                        <td className="px-2 py-1 align-top text-xs">
+                          {/* Source/confidence pill */}
+                          <SourcePill row={r} source={source} />
+                          {/* NEPOOL collision — dropdown + info */}
+                          {hasNepoolCollision && (
+                            <div className="mt-1">
+                              <p className="whitespace-nowrap text-amber-800">
+                                NEPOOL {r.nepool_gis_id} already on{" "}
+                                <span className="font-medium">
+                                  {prov!.nepool_collision!.existing_client_name} / {prov!.nepool_collision!.existing_array_name}
+                                </span>
+                              </p>
+                              <select
+                                value={r.collision_action ?? "skip"}
+                                onChange={(e) =>
+                                  setCollisionAction(i, e.target.value as "skip" | "overwrite" | "new")
+                                }
+                                className="mt-1 rounded border border-amber-300 bg-white px-1 py-0.5 text-xs text-amber-900 focus:outline-none"
+                              >
+                                <option value="skip">Skip this row</option>
+                                <option value="overwrite">Overwrite existing array</option>
+                                <option value="new">Create as new array</option>
+                              </select>
+                            </div>
+                          )}
+                          {/* Legacy name-collision indicator */}
+                          {r.collision && !hasNepoolCollision && (
+                            <span
+                              title={
+                                r.collision === "both"
+                                  ? "Client and array name already exist — will be merged"
+                                  : r.collision === "client"
+                                    ? "Client name already exists — will be merged"
+                                    : "Array name already exists — will be merged"
+                              }
+                              className="whitespace-nowrap text-amber-700"
+                            >
+                              ⚠ Collides — will merge
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
-            {/* Datalist suggestions for the Client column inputs — sourced
-                from the operator's existing clients so they get a real picker
-                without us re-skinning the native input. */}
+            {/* Datalist suggestions for the Client column inputs */}
             <datalist id="import-client-suggestions">
               {existingClients.map((c) => (
                 <option key={c.id} value={c.name} />
@@ -459,7 +566,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
             </datalist>
             <div className="mt-6 flex items-center justify-between gap-2">
               <span className="text-xs text-zinc-500">
-                {selected.length} array{selected.length === 1 ? "" : "s"} selected
+                {selected.length} array{selected.length === 1 ? "" : "s"} across {clientCount} client{clientCount === 1 ? "" : "s"} selected
               </span>
               <div className="flex gap-2">
                 <Button
@@ -479,16 +586,140 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                       Importing…
                     </>
                   ) : (
-                    `Import ${selected.length} array${selected.length === 1 ? "" : "s"} under ${clientCount} client${clientCount === 1 ? "" : "s"}`
+                    `Import ${selected.length} array${selected.length === 1 ? "" : "s"}`
                   )}
                 </Button>
               </div>
             </div>
           </div>
         )}
+
+        {/* ── Result stage ──────────────────────────────────────────────── */}
+        {stage === "result" && commitResult && (
+          <div className="mt-6 flex flex-col items-center gap-4 py-8 text-center">
+            <div className="text-4xl text-emerald-500">✓</div>
+            <p className="text-base font-medium text-zinc-900">
+              {forceClientId
+                ? `Imported ${commitResult.arrays_created} array${commitResult.arrays_created === 1 ? "" : "s"}${forceClientName ? ` into ${forceClientName}` : ""}.`
+                : `Imported ${commitResult.arrays_created} array${commitResult.arrays_created === 1 ? "" : "s"} across ${commitResult.clients_created} client${commitResult.clients_created === 1 ? "" : "s"}.`
+              }
+              {(commitResult.skipped_count ?? 0) > 0 && (
+                <span className="ml-1 text-zinc-500">
+                  {commitResult.skipped_count} skipped (you chose to).
+                </span>
+              )}
+            </p>
+            <div className="flex gap-3">
+              <Button onClick={onClose}>Done</Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  onClose();
+                  window.location.href = "/accounts";
+                }}
+              >
+                View arrays →
+              </Button>
+            </div>
+            <p className="text-xs text-zinc-400">Auto-closing in a few seconds…</p>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+// ─── helper sub-components ────────────────────────────────────────────────────
+
+/** Tiny pill showing per-row AI/GMCS/heuristic source + confidence signal. */
+function SourcePill({
+  row,
+  source,
+}: {
+  row: EditableRow;
+  source: "llm" | "heuristic" | "gmcs_shape" | null;
+}) {
+  const prov = row.provenance;
+  if (!prov && !source) return null;
+  const s = prov?.source ?? source;
+  if (s === "gmcs" || source === "gmcs_shape") {
+    return (
+      <span className="inline-block rounded bg-primary-100 px-1.5 py-0.5 text-xs text-primary-800 whitespace-nowrap">
+        📄 GMCS
+      </span>
+    );
+  }
+  if (s === "heuristic" || source === "heuristic") {
+    return (
+      <span className="inline-block rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 whitespace-nowrap">
+        🔍 column-guess
+      </span>
+    );
+  }
+  if (s === "llm" || source === "llm") {
+    const conf = prov?.confidence;
+    const isLow = conf !== null && conf !== undefined && conf < 0.85;
+    return (
+      <span
+        className={[
+          "inline-block rounded px-1.5 py-0.5 text-xs whitespace-nowrap",
+          isLow
+            ? "bg-yellow-100 text-yellow-800"
+            : "bg-zinc-100 text-zinc-600",
+        ].join(" ")}
+        title={conf != null ? `AI confidence: ${Math.round(conf * 100)}%` : undefined}
+      >
+        🤖 AI{isLow ? " · low" : ""}
+      </span>
+    );
+  }
+  return null;
+}
+
+/** Pill shown below the client name input indicating how the name was determined. */
+function ClientProvenancePill({
+  row,
+  onUseExisting,
+}: {
+  row: EditableRow;
+  onUseExisting: (name: string) => void;
+}) {
+  const prov = row.provenance;
+  const match = prov?.client_match;
+
+  if (match?.match_kind === "exact") {
+    return (
+      <p className="mt-0.5 text-xs text-emerald-700">
+        ✓ matches your client &lsquo;{match.client_name}&rsquo;
+      </p>
+    );
+  }
+  if (match?.match_kind === "fuzzy") {
+    return (
+      <p className="mt-0.5 text-xs text-amber-700">
+        ≈ similar to &lsquo;{match.client_name}&rsquo;{" "}
+        <button
+          type="button"
+          onClick={() => onUseExisting(match.client_name)}
+          className="underline hover:text-amber-900"
+        >
+          use existing
+        </button>
+      </p>
+    );
+  }
+  // Frontend autofill indicators (when server didn't report a server-side match).
+  if (row._autofillKind === "filename") {
+    return (
+      <p className="mt-0.5 text-xs text-zinc-400">✨ auto-filled from filename</p>
+    );
+  }
+  if (row._autofillKind === "array_match") {
+    return (
+      <p className="mt-0.5 text-xs text-zinc-400">✨ matched from array name</p>
+    );
+  }
+  return null;
 }
 
 /** Lowercase substring containment for the "did this row's client name

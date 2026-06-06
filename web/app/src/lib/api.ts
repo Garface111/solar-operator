@@ -988,6 +988,33 @@ export async function getNextRun(): Promise<NextRunPreview> {
 
 // ─── spreadsheet ingest (V4) ─────────────────────────────────────────────
 
+/** Per-row provenance from the server — how data was extracted and whether
+ *  it collides with existing records. Added in the smarter-import update. */
+export interface IngestRowProvenance {
+  source: "gmcs" | "llm" | "heuristic";
+  /** LLM confidence 0–1, or null for non-LLM sources. */
+  confidence: number | null;
+  /** Set when the row's operator_name matches an existing Client. */
+  client_match: {
+    client_id: number;
+    client_name: string;
+    match_kind: "exact" | "fuzzy" | "filename";
+  } | null;
+  /** Set when the row's nepool_gis_id matches an existing Array. */
+  nepool_collision: {
+    existing_array_id: number;
+    existing_array_name: string;
+    existing_client_name: string;
+  } | null;
+}
+
+/** Top-level soft warning returned alongside the preview. */
+export interface IngestWarning {
+  kind: "empty_file" | "low_confidence_rows" | "client_collision" | "nepool_collision";
+  count: number;
+  message: string;
+}
+
 /** One extracted array row from a roster upload — every field user-editable. */
 export interface IngestRow {
   operator_name: string | null;
@@ -998,6 +1025,11 @@ export interface IngestRow {
   /** Set by the server during preview if the name matches an existing record.
    *  "client" = operator name matches; "array" = array name matches; "both" = both. */
   collision?: "client" | "array" | "both" | null;
+  /** Per-row provenance — added by server in preview response. */
+  provenance?: IngestRowProvenance | null;
+  /** How to handle this row on commit when there's a NEPOOL collision.
+   *  "skip" = skip entirely; "overwrite"/"new" = proceed (default "new"). */
+  collision_action?: "skip" | "overwrite" | "new" | null;
 }
 
 export interface IngestPreview {
@@ -1008,12 +1040,16 @@ export interface IngestPreview {
   imported_logins: number;
   /** Number of distinct clients detected in the hierarchical extraction. */
   imported_clients: number;
+  /** Top-level soft warnings (empty file, low confidence, collisions). */
+  warnings: IngestWarning[];
 }
 
 export interface IngestCommitResult {
   clients_created: number;
   arrays_created: number;
   accounts_created: number;
+  /** Rows skipped because the user chose collision_action="skip". */
+  skipped_count?: number;
 }
 
 /** Upload a spreadsheet and get back parsed rows (nothing is saved yet). */
