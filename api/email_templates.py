@@ -28,7 +28,7 @@ import httpx
 # The merge tags we advertise in the dashboard help text. Anything else in a
 # template is left verbatim (see render_merge).
 MERGE_TAGS = (
-    "client_name", "tenant_name", "quarter", "arrays_count",
+    "client_name", "client_first_name", "tenant_name", "quarter", "arrays_count",
     "period_start", "period_end", "tenant_email",
     "tenant_email_line",
 )
@@ -44,7 +44,7 @@ DEFAULT_SIGNOFF = (
 )
 
 DEFAULT_BODY_TEMPLATE = (
-    "<p>Dear {{client_name}},</p>"
+    "<p>Hi {{client_first_name}},</p>"
     "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
     " {{period_end}}. Please reach out with any questions.</p>"
     "{{signoff}}"
@@ -64,6 +64,7 @@ _TAG_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 # (api/account.py preview_email_template + api/delivery.py build_ctx).
 ALLOWED_MERGE_TAGS = frozenset({
     "client_name",
+    "client_first_name",
     "quarter",
     "period_start",
     "period_end",
@@ -72,6 +73,26 @@ ALLOWED_MERGE_TAGS = frozenset({
     "arrays_count",
     "signoff",
 })
+
+
+def derive_client_first_name(client_name: str) -> str:
+    """Derive a first-name token from a full client name.
+
+    - "Bruce Genereaux"              → "Bruce"
+    - "Genereaux, Bruce"             → "Bruce"  (last, first format)
+    - "Green Mountain Community Solar" → "Green"
+    - "  Bruce  "                    → "Bruce"  (whitespace stripped)
+    - ""                             → ""       (build_context falls back to full name)
+    """
+    s = client_name.strip()
+    if not s:
+        return ""
+    if "," in s:
+        after_comma = s.split(",", 1)[1].strip()
+        tokens = after_comma.split()
+        return tokens[0] if tokens else s
+    tokens = s.split()
+    return tokens[0] if tokens else s
 
 
 def extract_tags(template: str) -> set[str]:
@@ -164,6 +185,7 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
     })
     return {
         "client_name": client_name,
+        "client_first_name": derive_client_first_name(client_name) or client_name,
         "tenant_name": tenant_name,
         "quarter": qc["quarter"],
         "arrays_count": arrays_count,
@@ -205,9 +227,29 @@ _TEMPLATE_SYSTEM_PROMPT = (
     "You are a writing assistant helping a solar energy consultant customize "
     "their client report email.\n\n"
     "THE ONLY MERGE TAGS THAT EXIST IN THE SYSTEM ARE:\n"
-    "  {{client_name}}, {{quarter}}, {{period_start}}, {{period_end}},\n"
+    "  {{client_name}}, {{client_first_name}}, {{quarter}}, {{period_start}}, {{period_end}},\n"
     "  {{tenant_name}}, {{tenant_email_line}}, {{arrays_count}},\n"
     "  {{signoff}}\n\n"
+    "WHEN TO USE WHICH NAME TAG:\n"
+    "- {{client_first_name}}: casual / personal-feeling openers — e.g. 'Hi Bruce,' "
+    "or 'Hi Green,'. Default to this for greetings unless the operator's tone is "
+    "clearly formal or professional-services. Note: for company names this yields "
+    "the first word (e.g. 'Green Mountain Community Solar' → 'Green') — if clients "
+    "are companies, {{client_name}} may be more appropriate.\n"
+    "- {{client_name}}: formal openers using the full stored name — e.g. "
+    "'Dear Bruce Genereaux,' or 'Dear Green Mountain Community Solar,'.\n\n"
+    "SMARTER CUSTOMIZATION — you can propose changes to:\n"
+    "- GREETING: switch between 'Hi {{client_first_name}},' (warm) and "
+    "'Dear {{client_name}},' (formal)\n"
+    "- TONE: more conversational, more professional, more concise\n"
+    "- SIGN-OFF wording: a custom closing sentence before {{signoff}}\n"
+    "- PARAGRAPH LENGTH: condense or expand the body as the operator requests\n"
+    "- CALL-TO-ACTION wording: e.g. the 'reach out with any questions' line\n"
+    "If the operator's request is ambiguous (e.g. 'make it more casual' could mean "
+    "switching to first name OR loosening the wording overall), ask ONE clarifying "
+    "question in your 'reply' field before applying the change — e.g. 'Should I "
+    "switch the greeting to Hi {{client_first_name}}, or keep the full name with a "
+    "friendlier tone throughout?'\n\n"
     "CRITICAL RULES:\n"
     "- You may ONLY use the tags listed above. Do NOT invent new merge tags "
     "like {{quarter_total_mwh}}, {{operator_signature}}, {{client_address}}, "

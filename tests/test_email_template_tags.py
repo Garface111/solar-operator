@@ -10,11 +10,82 @@ from __future__ import annotations
 
 from api.email_templates import (
     ALLOWED_MERGE_TAGS,
+    DEFAULT_BODY_TEMPLATE,
     _augment_reply_with_strip_notice,
     _strip_unknown_tags,
+    build_context,
+    derive_client_first_name,
     extract_tags,
+    render_email,
     unknown_tags,
 )
+
+
+def test_client_first_name_in_allowlist():
+    assert "client_first_name" in ALLOWED_MERGE_TAGS
+
+
+def test_derive_client_first_name_simple():
+    assert derive_client_first_name("Bruce Genereaux") == "Bruce"
+
+
+def test_derive_client_first_name_last_first_format():
+    assert derive_client_first_name("Genereaux, Bruce") == "Bruce"
+
+
+def test_derive_client_first_name_company():
+    assert derive_client_first_name("Green Mountain Community Solar") == "Green"
+
+
+def test_derive_client_first_name_trims_whitespace():
+    assert derive_client_first_name("  Bruce  ") == "Bruce"
+
+
+def test_derive_client_first_name_empty():
+    assert derive_client_first_name("") == ""
+
+
+def test_derive_client_first_name_single_word():
+    assert derive_client_first_name("Madonna") == "Madonna"
+
+
+def test_build_context_includes_first_name():
+    ctx = build_context(
+        client_name="Bruce Genereaux",
+        tenant_name="Solar Co",
+        arrays_count=2,
+    )
+    assert ctx["client_first_name"] == "Bruce"
+
+
+def test_build_context_first_name_fallback_for_empty():
+    """build_context falls back to full client_name when derive returns ''."""
+    ctx = build_context(
+        client_name="",
+        tenant_name="Solar Co",
+        arrays_count=1,
+    )
+    assert ctx["client_first_name"] == ""
+
+
+def test_render_email_substitutes_client_first_name():
+    ctx = build_context(
+        client_name="Bruce Genereaux",
+        tenant_name="Solar Co",
+        arrays_count=2,
+    )
+    subject, html, _ = render_email(
+        subject_template="Hi {{client_first_name}}",
+        body_template="<p>Hello {{client_first_name}},</p>{{signoff}}",
+        ctx=ctx,
+    )
+    assert subject == "Hi Bruce"
+    assert "Hello Bruce," in html
+
+
+def test_default_body_uses_client_first_name():
+    assert "{{client_first_name}}" in DEFAULT_BODY_TEMPLATE
+    assert "{{client_name}}" not in DEFAULT_BODY_TEMPLATE.split("{{signoff}}")[0].split("<p>")[1]
 
 
 def test_allowlist_contents_match_render_context():
