@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
-const LS_KEY = 'so:walkthrough:sandbox-v2:done';
+// TEST SEAM: exported so unit tests can assert on the key value directly.
+export const LS_KEY = 'so:walkthrough:sandbox-v2:done';
 
 type Step = 'welcome' | 'cta' | 'captured' | 'loop' | 'done';
 
@@ -20,7 +21,8 @@ interface Props {
   onOpenManual: () => void;
 }
 
-function initStep(clientCount: number): Step {
+// TEST SEAM: exported so unit tests can exercise the step-selection logic in isolation.
+export function initStep(clientCount: number): Step {
   if (localStorage.getItem(LS_KEY) === 'true') return 'done';
   if (clientCount >= 3) return 'done';
   if (clientCount >= 2) return 'loop';
