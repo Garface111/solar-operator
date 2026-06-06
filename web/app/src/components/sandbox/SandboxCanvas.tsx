@@ -172,6 +172,7 @@ function buildNodesFromApi(
     const clientData: ClientData = {
       id: `client_${client.id}`,
       name: client.name,
+      contact_email: client.contact_email ?? null,
       logins: client.logins as Partial<Record<Utility, string | null>> | undefined,
       pinned: client.canvas_pinned ?? false,
       accounts: client.accounts.map((acc) => ({
