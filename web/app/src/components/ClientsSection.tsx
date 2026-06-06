@@ -56,6 +56,9 @@ export function ClientsSection({ expandClientId }: Props) {
   // they scroll down. The previous autoscroll yanked the page mid-onboarding
   // and felt jarring.
   const nepoolBannerRef = useRef<HTMLDivElement | null>(null);
+  // Tracks which array the guided-fill button last scrolled to so each click
+  // advances to the NEXT empty field rather than always jumping to the first.
+  const lastFocusedNepoolArrayIdRef = useRef<number | null>(null);
 
   // Live polling indicator state.
   const [pollingNewData, setPollingNewData] = useState(false);
@@ -201,6 +204,62 @@ export function ClientsSection({ expandClientId }: Props) {
     getNepoolStats()
       .then((s) => setMissingNepoolCount(s.arrays_missing_nepool))
       .catch(() => { /* non-critical, ignore */ });
+  }
+
+  // Guided-fill: scroll + pulse + focus the next array row missing a NEPOOL ID.
+  // Uses a DOM walk over [data-nepool-array-id][data-nepool-empty] elements
+  // (stamped by ArrayItem in ArrayList) rather than a separate API call —
+  // simpler and always in sync with what's rendered. The canvas (ClientNode)
+  // renders NEPOOL as a read-only title attribute only, so we only target the
+  // list-view rows below.
+  function handleTakeToNextNepool() {
+    const empties = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-nepool-array-id][data-nepool-empty]"),
+    );
+    if (empties.length === 0) return;
+
+    // Find the first empty element after the last one we focused (wraps to 0).
+    let nextIdx = 0;
+    if (lastFocusedNepoolArrayIdRef.current != null) {
+      const lastIdx = empties.findIndex(
+        (el) => el.dataset.nepoolArrayId === String(lastFocusedNepoolArrayIdRef.current),
+      );
+      if (lastIdx !== -1 && lastIdx + 1 < empties.length) nextIdx = lastIdx + 1;
+    }
+
+    const target = empties[nextIdx];
+    const arrayId = Number(target.dataset.nepoolArrayId);
+    const clientId = Number(target.dataset.nepoolClientId);
+    lastFocusedNepoolArrayIdRef.current = arrayId;
+
+    // If the row is CSS-collapsed (height = 0), expand it first then retry
+    // after the CSS grid expand animation (~350ms) completes.
+    if (target.getBoundingClientRect().height === 0) {
+      window.dispatchEvent(
+        new CustomEvent("so:nepool:expand-client", { detail: { clientId } }),
+      );
+      setTimeout(() => handleTakeToNextNepool(), 450);
+      return;
+    }
+
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    // Wait for smooth-scroll (~500ms), then pulse ring + activate the field.
+    setTimeout(() => {
+      target.classList.add("ring-2", "ring-amber-400", "animate-pulse");
+      setTimeout(() => target.classList.remove("ring-2", "ring-amber-400", "animate-pulse"), 1500);
+
+      // EditableField renders as a <button> until clicked; click it to enter
+      // edit mode, then focus the resulting <input> after React re-renders.
+      const editBtn = target.querySelector<HTMLButtonElement>("[data-nepool-field] button");
+      if (editBtn) {
+        editBtn.click();
+        setTimeout(() => {
+          const input = target.querySelector<HTMLInputElement>("[data-nepool-field] input");
+          if (input) input.focus();
+        }, 50);
+      }
+    }, 600);
   }
 
   function loadClients(): Promise<ClientRow[]> {
@@ -411,13 +470,22 @@ export function ClientsSection({ expandClientId }: Props) {
                 </li>
               </ul>
             </div>
-            <button
-              type="button"
-              onClick={() => setAssigningNepool(true)}
-              className="shrink-0 rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700 active:bg-amber-800"
-            >
-              Import NEPOOL IDs from spreadsheet →
-            </button>
+            <div className="flex shrink-0 flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => setAssigningNepool(true)}
+                className="rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-amber-700 active:bg-amber-800"
+              >
+                Import NEPOOL IDs from spreadsheet →
+              </button>
+              <button
+                type="button"
+                onClick={handleTakeToNextNepool}
+                className="rounded-xl border border-amber-400 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 shadow-sm transition-colors hover:bg-amber-100 active:bg-amber-200"
+              >
+                Take me to the next NEPOOL ID →
+              </button>
+            </div>
           </div>
         </div>
       )}

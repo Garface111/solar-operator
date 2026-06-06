@@ -466,6 +466,44 @@ export function ClientsTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Listens for the guided-fill button in the NEPOOL banner. If a user manually
+  // collapsed a client row, "Take me to next NEPOOL ID" dispatches this event so
+  // we can re-expand it before the button tries to scroll to the hidden element.
+  useEffect(() => {
+    function handleExpandClient(e: Event) {
+      const id = (e as CustomEvent<{ clientId: number }>).detail.clientId;
+      setExpandedIds((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      setEverExpandedIds((prev) => {
+        if (prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      if (!arraysCacheRef.current.has(id) && !loadingIdsRef.current.has(id)) {
+        loadingIdsRef.current.add(id);
+        listArrays(id)
+          .then((rows) => {
+            arraysCacheRef.current.set(id, rows);
+            loadingIdsRef.current.delete(id);
+            setTick((t) => t + 1);
+          })
+          .catch(() => {
+            arraysCacheRef.current.set(id, []);
+            loadingIdsRef.current.delete(id);
+            setTick((t) => t + 1);
+          });
+      }
+    }
+    window.addEventListener("so:nepool:expand-client", handleExpandClient);
+    return () => window.removeEventListener("so:nepool:expand-client", handleExpandClient);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function toggleExpand(id: number) {
     setExpandedIds((prev) => {
       const next = new Set(prev);

@@ -300,7 +300,12 @@ function ArrayRow({
   }
 
   return (
-    <div className={`rounded-xl border ${array.excluded ? "border-zinc-200 opacity-60" : "border-zinc-200"}${selected ? " ring-2 ring-primary-400" : ""}`}>
+    <div
+      data-nepool-array-id={array.id}
+      data-nepool-client-id={clientId}
+      data-nepool-empty={!array.nepool_gis_id ? "true" : undefined}
+      className={`rounded-xl border ${array.excluded ? "border-zinc-200 opacity-60" : "border-zinc-200"}${selected ? " ring-2 ring-primary-400" : ""}`}
+    >
       <div className="grid grid-cols-1 gap-x-4 gap-y-2 p-3 sm:grid-cols-12 sm:items-center">
         {selectable && (
           <div className="sm:col-span-1 flex items-center">
@@ -326,12 +331,15 @@ function ArrayRow({
         <div className="sm:col-span-3">
           <FieldLabel>NEPOOL-GIS ID</FieldLabel>
           <div className="flex items-center gap-2">
-            <EditableField
-              value={array.nepool_gis_id}
-              label="NEPOOL-GIS ID"
-              onSave={(v) => save({ nepool_gis_id: v || null })}
-              placeholder="53984"
-            />
+            {/* data-nepool-field: stable hook for the "Take me to next NEPOOL ID" guided-fill button */}
+            <div data-nepool-field>
+              <EditableField
+                value={array.nepool_gis_id}
+                label="NEPOOL-GIS ID"
+                onSave={(v) => save({ nepool_gis_id: v || null })}
+                placeholder="53984"
+              />
+            </div>
             {!array.nepool_gis_id && (
               <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
                 Add NEPOOL ID
