@@ -11,39 +11,23 @@ function useRevealDelay() {
   return (cardIndex: number, slot = 0): number =>
     reveal.active ? reveal.delayFor(cardIndex, slot) : 0;
 }
-import { Toggle } from "../ui/Toggle";
 import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
-import { openPortalTab } from "../lib/openPortalTab";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
 import {
   type ClientRow,
-  listClients,
   updateClient,
   deleteClient,
-  refreshCapture,
   sendClientReportToMe,
   downloadClientReport,
 } from "../lib/api";
-import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 
 
-
-function captureFreshness(iso: string | null): string {
-  if (!iso) return "No captures yet";
-  return `Last capture: ${new Date(iso).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  })}`;
-}
 
 /** Most recent Resend-reported delivery outcome for this client, or null if
  *  we've never heard back about a send. Bounce wins ties (it's the alarming one). */
@@ -121,7 +105,7 @@ export function ClientCard({
   // array-count-only onboarding path) auto-expand by default and get a
   // visual nudge: amber ring + "Rename this to your real client" hint.
   // The walkthrough also anchors here so the operator's first interaction
-  // is exactly the one we want — rename, paste utility email, toggle autopop.
+  // is exactly the one we want — rename the client, watch arrays come in.
   const isPlaceholder = !!client.is_placeholder;
   const [expanded, setExpanded] = useState(!!defaultExpanded || isPlaceholder);
 
@@ -146,7 +130,6 @@ export function ClientCard({
 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [sendingToMe, setSendingToMe] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
@@ -155,101 +138,9 @@ export function ClientCard({
   // "Import spreadsheet" at the top of the page, which creates new clients.
   const [importingArrays, setImportingArrays] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
-  const pollerRef = useRef<PollerHandle | null>(null);
-
-  useEffect(() => {
-    return () => { pollerRef.current?.cancel(); };
-  }, []);
-
-  async function handleRefresh() {
-    if (refreshing) return;
-    setRefreshing(true);
-    try {
-      const updated = await refreshCapture(client.id);
-      onChange(updated);
-      toast.success(
-        updated.gmp_last_sync_at
-          ? "Capture status refreshed"
-          : "No captures received yet",
-      );
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't refresh");
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
   async function patch(p: Partial<ClientRow>) {
     const updated = await updateClient(client.id, p as any);
     onChange(updated);
-  }
-
-  async function toggleAutopop(v: boolean) {
-    try {
-      await patch({ gmp_autopopulate: v });
-      toast.success(v ? "GMP auto-populate on" : "GMP auto-populate off");
-      if (v) {
-        pollerRef.current?.cancel();
-        const clientId = client.id;
-        const [p, handle] = pollUntilChanged(
-          listClients,
-          (prev, next) => {
-            const a = prev.find((c) => c.id === clientId);
-            const b = next.find((c) => c.id === clientId);
-            if (!a || !b) return false;
-            return (
-              b.array_count > a.array_count ||
-              b.gmp_last_sync_at !== a.gmp_last_sync_at
-            );
-          },
-        );
-        pollerRef.current = handle;
-        p.then((newClients) => {
-          if (!newClients) return;
-          const updated = newClients.find((c) => c.id === clientId);
-          if (updated) {
-            onChange(updated);
-            setArrayRefreshSignal((s) => s + 1);
-          }
-        });
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't update");
-    }
-  }
-
-  async function toggleVecAutopop(v: boolean) {
-    try {
-      await patch({ vec_autopopulate: v });
-      toast.success(v ? "VEC auto-populate on" : "VEC auto-populate off");
-      if (v) {
-        pollerRef.current?.cancel();
-        const clientId = client.id;
-        const [p, handle] = pollUntilChanged(
-          listClients,
-          (prev, next) => {
-            const a = prev.find((c) => c.id === clientId);
-            const b = next.find((c) => c.id === clientId);
-            if (!a || !b) return false;
-            return (
-              b.array_count > a.array_count ||
-              b.vec_last_sync_at !== a.vec_last_sync_at
-            );
-          },
-        );
-        pollerRef.current = handle;
-        p.then((newClients) => {
-          if (!newClients) return;
-          const updated = newClients.find((c) => c.id === clientId);
-          if (updated) {
-            onChange(updated);
-            setArrayRefreshSignal((s) => s + 1);
-          }
-        });
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't update");
-    }
   }
 
   async function handleDelete() {
@@ -315,14 +206,7 @@ export function ClientCard({
     }
   }
 
-  const gmpLogin = client.gmp_email || client.gmp_username || "";
-  const vecLogin = client.vec_email || client.vec_username || "";
   const delivery = deliveryStatus(client);
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-  const captureStale =
-    client.gmp_autopopulate &&
-    (!client.gmp_last_sync_at ||
-      Date.now() - new Date(client.gmp_last_sync_at).getTime() > THIRTY_DAYS_MS);
 
   return (
     <div
@@ -446,61 +330,6 @@ export function ClientCard({
               </span>
             </div>
           )}
-          {client.gmp_autopopulate && (
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-              <span
-                className={
-                  client.gmp_last_sync_at ? "text-zinc-500" : "text-amber-600"
-                }
-              >
-                {captureFreshness(client.gmp_last_sync_at)}
-              </span>
-              <button
-                type="button"
-                onClick={handleRefresh}
-                disabled={refreshing}
-                className="rounded font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-              >
-                {refreshing ? "Checking…" : "Check status"}
-              </button>
-            </div>
-          )}
-          {captureStale && (
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
-              {gmpLogin ? (
-                <>
-                  <span>
-                    {!client.gmp_last_sync_at ? (
-                      <>
-                        First-time setup — sign in as{" "}
-                        <span className="font-medium">{gmpLogin}</span> at their utility portal so
-                        we can auto-detect their arrays
-                      </>
-                    ) : (
-                      <>
-                        Open portal signed in as{" "}
-                        <span className="font-medium">{gmpLogin}</span> to refresh
-                      </>
-                    )}
-                  </span>
-                  <a
-                    href="https://greenmountainpower.com/account/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      void openPortalTab("https://greenmountainpower.com/account/");
-                    }}
-                    className="shrink-0 font-medium text-amber-900 underline underline-offset-2 hover:text-amber-700"
-                  >
-                    Open greenmountainpower.com ↗
-                  </a>
-                </>
-              ) : (
-                <span>Sign into your utility portal to refresh this client&apos;s data</span>
-              )}
-            </div>
-          )}
         </div>
 
         <div className="hidden shrink-0 text-right text-xs text-zinc-400 sm:block">
@@ -590,89 +419,6 @@ export function ClientCard({
                 )}
               </button>
             </div>
-          </div>
-
-          {/* GMP auto-populate */}
-          <div data-tour-step="3" className="rounded-xl bg-zinc-50 px-4 py-3">
-            <div data-tour-step="4">
-            <Toggle
-              id={`autopop-${client.id}`}
-              checked={client.gmp_autopopulate}
-              onChange={toggleAutopop}
-              label="GMP — auto-populate arrays from portal"
-            />
-            </div>
-            {client.gmp_autopopulate && (
-              <div className="mt-3">
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  GMP login (email or username)
-                </span>
-                <EditableField
-                  value={gmpLogin}
-                  label="GMP login"
-                  onSave={(v) => {
-                    // Route to the right column: email-shaped → gmp_email.
-                    const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-                    return patch({
-                      gmp_email: v && looksLikeEmail ? v : null,
-                      gmp_username: v && !looksLikeEmail ? v : null,
-                    });
-                  }}
-                  emptyText="add GMP login"
-                  placeholder="client@gmail.com or jdoe"
-                />
-                <p className="mt-1.5 text-xs text-zinc-500">
-                  The credential the client uses to sign in at
-                  greenmountainpower.com. We use this to match captured bills to
-                  this client.
-                </p>
-                {client.gmp_last_sync_at && (
-                  <p className="mt-1 text-xs text-zinc-400">
-                    {captureFreshness(client.gmp_last_sync_at)}
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* VEC auto-populate */}
-          <div className="rounded-xl bg-zinc-50 px-4 py-3">
-            <Toggle
-              id={`vec-autopop-${client.id}`}
-              checked={client.vec_autopopulate}
-              onChange={toggleVecAutopop}
-              label="VEC — auto-populate arrays from portal"
-            />
-            {client.vec_autopopulate && (
-              <div className="mt-3">
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  VEC login (email or username)
-                </span>
-                <EditableField
-                  value={vecLogin}
-                  label="VEC login"
-                  onSave={(v) => {
-                    const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-                    return patch({
-                      vec_email: v && looksLikeEmail ? v : null,
-                      vec_username: v && !looksLikeEmail ? v : null,
-                    });
-                  }}
-                  emptyText="add VEC login"
-                  placeholder="client@gmail.com or jdoe"
-                />
-                <p className="mt-1.5 text-xs text-zinc-500">
-                  The credential the client uses to sign in at
-                  vermontelectric.coop. We use this to match captured bills to
-                  this client.
-                </p>
-                {client.vec_last_sync_at && (
-                  <p className="mt-1 text-xs text-zinc-400">
-                    {captureFreshness(client.vec_last_sync_at)}
-                  </p>
-                )}
-              </div>
-            )}
           </div>
 
           {/* Extra delivery fields — CC recipients, report cadence, notes */}

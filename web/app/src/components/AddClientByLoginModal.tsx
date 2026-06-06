@@ -245,8 +245,7 @@ export function AddClientByLoginModal({
           <p className="text-sm text-zinc-600">
             Without the extension, auto-capture can&apos;t finish.{" "}
             <b className="text-zinc-900">Add manually instead</b> — it&apos;s
-            quick, and you can re-enable auto-populate after installing the
-            extension.
+            quick, and the extension will continue capturing data on future logins.
           </p>
         )}
         {extensionUnknown && (
