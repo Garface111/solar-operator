@@ -94,6 +94,10 @@ class Tenant(Base):
     onboarding_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     onboarding_stage: Mapped[str] = mapped_column(String(20), default="pending_payment")
     # pending_payment | extension | clients | done
+    onboarding_array_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Array count entered at signup (Path A: sum of array entries; Path B:
+    # operator's numeric estimate). NULL for tenants who pre-date this field.
+    # Used only for the "You're all set!" dashboard milestone check.
 
     arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     clients: Mapped[list["Client"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")

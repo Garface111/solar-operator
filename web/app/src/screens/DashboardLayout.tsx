@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TopNav } from "../components/TopNav";
 import { TrialBanner } from "../components/TrialBanner";
+import { AllSetCelebration } from "../components/AllSetCelebration";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
@@ -168,6 +169,8 @@ export default function DashboardLayout({ onSignOut }: Props) {
           </div>
         </div>
       )}
+
+      <AllSetCelebration account={account} />
 
       <main className="mx-auto max-w-4xl px-4 py-8">
         <Outlet context={ctx} />

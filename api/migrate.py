@@ -471,6 +471,15 @@ def main():
             conn.execute(text(idx_sql))
         print("  ✓ capture_events indexes ensured")
 
+        # 2026-06-06 all-set event (feat/all-set-event): persist onboarding array
+        # estimate so the dashboard can fire a "You're all set!" milestone.
+        # NULL for tenants who signed up before this column existed (including Bruce).
+        if not column_exists(conn, "tenants", "onboarding_array_estimate"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN onboarding_array_estimate INTEGER"
+            ))
+            print("  + tenants.onboarding_array_estimate")
+
     print("=== Migration complete ===")
 
 
