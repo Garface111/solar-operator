@@ -6,6 +6,7 @@ import { Modal } from "../ui/Modal";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayMergeSuggestionBanner } from "./ArrayMergeSuggestionBanner";
+import { InlineNepoolField } from "./InlineNepoolField";
 import {
   type ArrayRow as ArrayRowT,
   type Provider,
@@ -48,6 +49,9 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
   const [lastClickedId, setLastClickedId] = useState<number | null>(null);
   const [bulkConfirm, setBulkConfirm] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  // "Show only missing NEPOOL" — lets an operator with 40+ arrays jump straight
+  // to the handful that still need an ID instead of scrolling the whole list.
+  const [onlyMissing, setOnlyMissing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,42 +198,50 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
     );
   }
 
+  const missingCount = arrays.filter((a) => !a.nepool_gis_id).length;
+  const visible = onlyMissing ? arrays.filter((a) => !a.nepool_gis_id) : arrays;
+
   return (
-    <div className="space-y-3">
-      {/* Select mode header */}
+    <div className="space-y-2">
+      {/* Action bar: Select-mode toggle + bulk-delete + "missing NEPOOL" filter. */}
       {arrays.length > 0 && (
-        <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
-            className={[
-              "rounded border px-2.5 py-1 text-xs font-medium transition-colors focus:outline-none",
-              selectMode
-                ? "border-primary-300 bg-primary-50 text-primary-700"
-                : "border-zinc-200 text-zinc-500 hover:border-zinc-300",
-            ].join(" ")}
-          >
-            {selectMode ? "Cancel" : "Select"}
-          </button>
-          {selectMode && (
-            <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+              className={[
+                "rounded border px-2.5 py-1 text-xs font-medium transition-colors focus:outline-none",
+                selectMode
+                  ? "border-primary-300 bg-primary-50 text-primary-700"
+                  : "border-zinc-200 text-zinc-500 hover:border-zinc-300",
+              ].join(" ")}
+            >
+              {selectMode ? "Cancel" : "Select"}
+            </button>
+            {selectMode && selectedIds.size > 0 && (
               <button
                 type="button"
-                onClick={() => (allVisibleSelected ? setSelectedIds(new Set()) : selectAllVisible())}
-                className="rounded border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-300 focus:outline-none"
+                onClick={() => setBulkConfirm(true)}
+                className="rounded border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus:outline-none"
               >
-                {allVisibleSelected ? "Select none" : `Select all (${visibleArrays.length})`}
+                Delete {selectedIds.size} array{selectedIds.size === 1 ? "" : "s"}
               </button>
-              {selectedIds.size > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setBulkConfirm(true)}
-                  className="rounded border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus:outline-none"
-                >
-                  Delete {selectedIds.size} array{selectedIds.size === 1 ? "" : "s"}
-                </button>
-              )}
-            </div>
+            )}
+          </div>
+          {missingCount > 0 && (
+            <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-zinc-500">
+              <input
+                type="checkbox"
+                checked={onlyMissing}
+                onChange={(e) => setOnlyMissing(e.target.checked)}
+                className="h-3.5 w-3.5 accent-amber-500"
+              />
+              <span className="inline-flex items-center gap-1.5">
+                <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-amber-500" />
+                Show only missing NEPOOL ({missingCount})
+              </span>
+            </label>
           )}
         </div>
       )}
@@ -241,33 +253,48 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
         </p>
       )}
 
-      {arrays.map((a, idx) => {
-        const cascade =
-          revealStartDelayMs !== undefined
-            ? {
-                className: "so-reveal-card",
-                style: {
-                  animationDelay: `${revealStartDelayMs + idx * 110}ms`,
-                } as React.CSSProperties,
-              }
-            : null;
-        return (
-          <div key={a.id} {...(cascade ?? {})}>
-            <ArrayRow
-              clientId={clientId}
-              array={a}
-              onChange={replaceArray}
-              onDelete={(id, token, name) => {
-                removeArrayLocal(id);
-                onUndo?.(token, `Deleted ${name}`);
-              }}
-              selectable={selectMode}
-              selected={selectedIds.has(a.id)}
-              onSelect={toggleSelect}
-            />
-          </div>
-        );
-      })}
+      {/* Compact table: rows butt against each other separated by a 1px rule. */}
+      {visible.length > 0 && (
+        <div className="overflow-hidden rounded-xl border border-cream-border">
+          {visible.map((a, idx) => {
+            const cascading = revealStartDelayMs !== undefined;
+            const cascadeStyle = cascading
+              ? ({ animationDelay: `${revealStartDelayMs + idx * 110}ms` } as React.CSSProperties)
+              : undefined;
+            return (
+              <div
+                key={a.id}
+                style={cascadeStyle}
+                className={[
+                  "border-b border-cream-border last:border-b-0",
+                  cascading ? "so-reveal-card" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              >
+                <ArrayRow
+                  clientId={clientId}
+                  array={a}
+                  onChange={replaceArray}
+                  onDelete={(id, token, name) => {
+                    removeArrayLocal(id);
+                    onUndo?.(token, `Deleted ${name}`);
+                  }}
+                  selectable={selectMode}
+                  selected={selectedIds.has(a.id)}
+                  onSelect={toggleSelect}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {onlyMissing && visible.length === 0 && (
+        <p className="px-1 py-2 text-sm text-zinc-400">
+          All arrays have a NEPOOL ID. 🎉
+        </p>
+      )}
 
       {adding ? (
         <AddArrayRow
@@ -502,154 +529,135 @@ function ArrayRow({
       data-nepool-array-id={array.id}
       data-nepool-client-id={clientId}
       data-nepool-empty={!array.nepool_gis_id ? "true" : undefined}
-      className={`rounded-xl border ${array.excluded ? "border-zinc-200 opacity-60" : "border-zinc-200"}${selected ? " ring-2 ring-primary-400" : ""}`}
+      className={[
+        "transition-colors",
+        array.excluded ? "opacity-60" : "",
+        selected ? "bg-primary-50 ring-1 ring-inset ring-primary-300" : "hover:bg-cream/60",
+      ]
+        .filter(Boolean)
+        .join(" ")}
     >
-      <div className="grid grid-cols-1 gap-x-4 gap-y-2 p-3 sm:grid-cols-12 sm:items-center">
+      {/* Compact collapsed row: checkbox (select-mode) · name · NEPOOL · chevron */}
+      <div className="flex h-10 items-center gap-2 px-2 sm:px-3">
         {selectable && (
-          <div className="sm:col-span-1 flex items-center">
-            <input
-              type="checkbox"
-              checked={!!selected}
-              // onClick (not onChange) carries shiftKey for range selection;
-              // onChange kept as a no-op so React stays happy with a controlled box.
-              onChange={() => {}}
-              onClick={(e) => onSelect?.(array.id, e)}
-              aria-label={`Select ${array.name}`}
-              className="h-4 w-4 accent-primary-500"
-            />
-          </div>
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={() => onSelect?.(array.id)}
+            aria-label={`Select ${array.name}`}
+            className="h-4 w-4 shrink-0 accent-primary-500"
+          />
         )}
-        <div className={selectable ? "sm:col-span-2" : "sm:col-span-3"}>
-          <FieldLabel>Name</FieldLabel>
+        <div className="min-w-0 flex-1 overflow-hidden">
           <EditableField
             value={array.name}
             label="array name"
             onSave={(v) => save({ name: v })}
             emptyText="Unnamed array"
-            className="font-medium"
+            className="max-w-full font-medium"
           />
         </div>
-        <div className="sm:col-span-3">
-          <FieldLabel>NEPOOL-GIS ID</FieldLabel>
-          <div className="flex items-center gap-2">
-            {/* data-nepool-field: stable hook for the "Take me to next NEPOOL ID" guided-fill button */}
-            <div data-nepool-field>
-              <EditableField
-                value={array.nepool_gis_id}
-                label="NEPOOL-GIS ID"
-                onSave={(v) => save({ nepool_gis_id: v || null })}
-                placeholder="53984"
-              />
-            </div>
-            {!array.nepool_gis_id ? (
-              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
-                Add NEPOOL ID
-              </span>
-            ) : (
-              <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                Complete ✓
-              </span>
-            )}
-          </div>
-          {!array.nepool_gis_id && (
-            <p className="mt-1 text-[11px] leading-snug text-zinc-400">
-              5-digit ISO-NE asset ID — required to ship reports. You can add it
-              later if you don&apos;t have it now.
-            </p>
-          )}
-        </div>
-        <div className="sm:col-span-6">
-          <FieldLabel>Notes</FieldLabel>
-          <EditableField
-            value={array.notes}
-            label="notes"
-            onSave={(v) => save({ notes: v || null })}
-            placeholder="—"
+        {/* data-nepool-field: stable hook for the "Take me to next NEPOOL ID" guided-fill button */}
+        <div data-nepool-field className="shrink-0">
+          <InlineNepoolField
+            value={array.nepool_gis_id}
+            onSave={(v) => save({ nepool_gis_id: v })}
           />
         </div>
-      </div>
-
-      <div className="flex items-center justify-between border-t border-zinc-100 px-3 py-2">
         <button
           type="button"
           onClick={() => setExpanded((e) => !e)}
-          className="inline-flex items-center gap-1.5 rounded text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+          aria-label={expanded ? "Collapse array details" : "Expand array details"}
+          aria-expanded={expanded}
+          className="shrink-0 rounded p-1 text-zinc-400 transition-colors hover:text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
         >
-          <span
-            aria-hidden
-            className={`transition-transform ${expanded ? "rotate-90" : ""}`}
-          >
+          <span aria-hidden className={`inline-block transition-transform ${expanded ? "rotate-90" : ""}`}>
             ▸
           </span>
-          {array.accounts.length} utility{" "}
-          {array.accounts.length === 1 ? "account" : "accounts"}
         </button>
-        <div className="flex items-center gap-3">
-          <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-zinc-500" title="Excluded arrays are hidden from reports and don't count toward billing (e.g. below the REC threshold)">
-            <input
-              type="checkbox"
-              checked={!!array.excluded}
-              onChange={(e) => save({ excluded: e.target.checked })}
-              className="h-3.5 w-3.5 accent-amber-500"
-            />
-            Hide from reports
-          </label>
-          <button
-            type="button"
-            disabled={uploading}
-            onClick={() => csvInputRef.current?.click()}
-            className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-            title="Upload a daily generation CSV from GMP"
-          >
-            {uploading ? "Uploading…" : uploadedDays !== null ? `📊 ${uploadedDays} days` : "Upload CSV"}
-          </button>
-          <input
-            ref={csvInputRef}
-            type="file"
-            accept=".csv"
-            className="hidden"
-            onChange={handleCsvUpload}
-          />
-          <button
-            type="button"
-            onClick={openSeModal}
-            className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-            title={seConnected ? "SolarEdge connected — manage connection" : "Connect SolarEdge for automatic daily data"}
-          >
-            {seConnected ? "📡 SolarEdge connected" : "Connect SolarEdge"}
-          </button>
-          <button
-            type="button"
-            onClick={() => setConfirmDelete(true)}
-            className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-          >
-            Delete
-          </button>
-        </div>
       </div>
 
       {expanded && (
-        <>
+        <div className="space-y-3 border-t border-cream-border bg-cream/40 px-3 py-3">
           {/* Possible-duplicate banner — surfaces another array on this
               tenant that shares NEPOOL ID, name, or utility accounts.
               One-click merge moves the duplicate's UAs under THIS array. */}
-          <div className="px-3 pt-3">
-            <ArrayMergeSuggestionBanner
-              arrayId={array.id}
-              arrayName={array.name}
-              onMerged={() => {
-                // Signal the list to refresh so the merged-away row
-                // disappears + UA counts update.
-                window.dispatchEvent(new CustomEvent("so:arrays-changed"));
-              }}
+          <ArrayMergeSuggestionBanner
+            arrayId={array.id}
+            arrayName={array.name}
+            onMerged={() => {
+              // Signal the list to refresh so the merged-away row
+              // disappears + UA counts update.
+              window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+            }}
+          />
+
+          <div>
+            <FieldLabel>Notes</FieldLabel>
+            <EditableField
+              value={array.notes}
+              label="notes"
+              onSave={(v) => save({ notes: v || null })}
+              placeholder="—"
             />
           </div>
-          <UtilityAccounts
-            clientId={clientId}
-            array={array}
-            onChange={onChange}
-          />
-        </>
+
+          <div>
+            <FieldLabel>
+              {array.accounts.length} utility{" "}
+              {array.accounts.length === 1 ? "account" : "accounts"}
+            </FieldLabel>
+            <UtilityAccountsPanel clientId={clientId} array={array} onChange={onChange} />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-cream-border pt-3">
+            <label
+              className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-zinc-500"
+              title="Excluded arrays are hidden from reports and don't count toward billing (e.g. below the REC threshold)"
+            >
+              <input
+                type="checkbox"
+                checked={!!array.excluded}
+                onChange={(e) => save({ excluded: e.target.checked })}
+                className="h-3.5 w-3.5 accent-amber-500"
+              />
+              Hide from reports
+            </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={uploading}
+                onClick={() => csvInputRef.current?.click()}
+                className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+                title="Upload a daily generation CSV from GMP"
+              >
+                {uploading ? "Uploading…" : uploadedDays !== null ? `📊 ${uploadedDays} days` : "Upload CSV"}
+              </button>
+              <input
+                ref={csvInputRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={handleCsvUpload}
+              />
+              <button
+                type="button"
+                onClick={openSeModal}
+                className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+                title={seConnected ? "SolarEdge connected — manage connection" : "Connect SolarEdge for automatic daily data"}
+              >
+                {seConnected ? "📡 SolarEdge connected" : "Connect SolarEdge"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <Modal
@@ -793,7 +801,7 @@ function ArrayRow({
 
 // ─── utility accounts under an array ───────────────────────────────────────
 
-function UtilityAccounts({
+function UtilityAccountsPanel({
   clientId,
   array,
   onChange,
@@ -818,7 +826,7 @@ function UtilityAccounts({
   }
 
   return (
-    <div className="space-y-2 border-t border-zinc-100 bg-zinc-50/60 px-3 py-3">
+    <div className="space-y-2">
       {array.accounts.length === 0 && !adding && (
         <p className="text-xs text-zinc-400">No utility accounts linked yet.</p>
       )}
