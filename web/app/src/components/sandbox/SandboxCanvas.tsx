@@ -158,6 +158,7 @@ function buildNodesFromApi(
   layoutMode: LayoutMode,
   sortedPositions: Map<number, { x: number; y: number }>,
   density: Density,
+  initiallyExpanded: boolean = false,
 ): Node[] {
   const nodes: Node[] = [];
   const { COL_W } = GRID[density];
@@ -207,7 +208,7 @@ function buildNodesFromApi(
       type: 'client',
       position,
       draggable: layoutMode === 'free',
-      data: { client: clientData, expanded: false, entryDelay: i * 30 } as ClientNodeData,
+      data: { client: clientData, expanded: initiallyExpanded, entryDelay: i * 30 } as ClientNodeData,
     });
   });
 
@@ -375,7 +376,17 @@ export default function SandboxCanvas() {
         sortKeyRef.current,
         effectiveDensity,
       );
-      const built = buildNodesFromApi(data, layoutModeRef.current, sortedPositions, effectiveDensity);
+      // First-visit-on-this-browser = no saved viewport in localStorage.
+      // When that's the case, render every client card pre-expanded so the
+      // operator immediately sees Client → arrays without having to click
+      // anything. Bruce June 6 note: 'sandbox client card should be fully
+      // unfolded so you can see the arrays immediately, also centered.'
+      // Centering already runs below via fitView when hasSavedViewport=false.
+      const isFirstVisit = (() => {
+        try { return !localStorage.getItem('so:sandbox:viewport'); }
+        catch { return true; }
+      })();
+      const built = buildNodesFromApi(data, layoutModeRef.current, sortedPositions, effectiveDensity, isFirstVisit);
       const finalNodes = opts.silent
         ? built.map((n) => (
             n.data && typeof n.data === 'object'
