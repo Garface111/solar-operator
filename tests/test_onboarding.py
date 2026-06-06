@@ -192,6 +192,73 @@ def test_complete_sends_magic_link_and_finishes(client, mocks):
     assert "/accounts/?token=" in mocks["magic_link"][0]["text"]
 
 
+# ─── /complete with operator-chosen password (June 6 2026) ────────────────────
+# Ford's note: "email me a link" delivery was too slow on second-device sign-in.
+# Onboarding now lets the operator set a password on /info; that password is
+# posted to /v1/onboarding/complete and bcrypt-hashed into tenants.password_hash.
+# Then password-login works the moment they leave the wizard.
+
+def test_complete_with_password_sets_hash_and_allows_password_login(client, mocks):
+    email = "pw@example.com"
+    token = _do_checkout(client, email=email)["onboarding_token"]
+    _fire_checkout_webhook(client, token, event_id="evt_pw")
+
+    assert client.post("/v1/onboarding/extension-installed",
+                       params={"token": token}).status_code == 200
+    client.post(
+        "/v1/onboarding/clients",
+        params={"token": token},
+        json=[{
+            "name": "Pine Acres",
+            "contact_email": "pine@example.com",
+            "gmp_autopopulate": False,
+            "arrays": [{"name": "Pine Roof", "nepool_gis_id": "12345"}],
+        }],
+    )
+
+    resp = client.post(
+        "/v1/onboarding/complete",
+        params={"token": token},
+        json={"password": "hunter2hunter2"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Password-login works immediately with the same email + password.
+    login = client.post(
+        "/v1/auth/password-login",
+        json={"email": email, "password": "hunter2hunter2"},
+    )
+    assert login.status_code == 200, login.text
+    assert "session_token" in login.json()
+
+
+def test_complete_with_weak_password_400s(client, mocks):
+    email = "weak@example.com"
+    token = _do_checkout(client, email=email)["onboarding_token"]
+    _fire_checkout_webhook(client, token, event_id="evt_weak")
+
+    assert client.post("/v1/onboarding/extension-installed",
+                       params={"token": token}).status_code == 200
+    client.post(
+        "/v1/onboarding/clients",
+        params={"token": token},
+        json=[{
+            "name": "Weak Acres",
+            "contact_email": "weak@example.com",
+            "gmp_autopopulate": False,
+            "arrays": [],
+        }],
+    )
+
+    # 7 chars, no digit → 400
+    resp = client.post(
+        "/v1/onboarding/complete",
+        params={"token": token},
+        json={"password": "abcdefg"},
+    )
+    assert resp.status_code == 400, resp.text
+
+
 # ─── (e) Screen 4 reconciles Stripe quantity to the real array count ──────
 
 def test_clients_reconciles_stripe_quantity(client, mocks, monkeypatch):

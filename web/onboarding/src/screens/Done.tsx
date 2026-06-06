@@ -17,6 +17,7 @@ import { useEffect, useRef, useState } from "react";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Spinner } from "../ui/Spinner";
 import { getToken, completeOnboarding } from "../lib/onboarding";
+import { SO_OPERATOR_PASSWORD_KEY } from "./Info";
 
 const DASHBOARD_URL = "https://solaroperator.org/accounts/?fresh=1";
 
@@ -31,7 +32,20 @@ export default function Done() {
 
     async function finish() {
       try {
-        const result = await completeOnboarding(token!);
+        // Pull the password the operator chose on /info (if any) so we
+        // can hash+store it server-side in the same /complete call that
+        // mints their session. Cleared from sessionStorage the moment
+        // the POST succeeds — never lingers.
+        const stashedPassword =
+          sessionStorage.getItem(SO_OPERATOR_PASSWORD_KEY) || undefined;
+        const result = await completeOnboarding(
+          token!,
+          stashedPassword ? { password: stashedPassword } : undefined,
+        );
+        // Wipe the stashed plaintext password — server has the hash now.
+        try {
+          sessionStorage.removeItem(SO_OPERATOR_PASSWORD_KEY);
+        } catch { /* sessionStorage can be locked down */ }
         if (result.session_token) {
           // Stash the freshly minted dashboard session so the redirect
           // below lands the operator already signed in — no magic-link

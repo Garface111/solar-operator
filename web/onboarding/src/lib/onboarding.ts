@@ -198,9 +198,15 @@ export interface CompleteResponse {
   sample_email_sent?: boolean;
 }
 
-export async function completeOnboarding(token: string): Promise<CompleteResponse> {
+export async function completeOnboarding(
+  token: string,
+  opts?: { password?: string },
+): Promise<CompleteResponse> {
+  const body = opts?.password ? { password: opts.password } : undefined;
   const res = await fetchWithTimeout(`/v1/onboarding/complete?token=${encodeURIComponent(token)}`, {
     method: "POST",
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();

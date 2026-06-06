@@ -37,7 +37,13 @@ from .models import Tenant, Client, Array, UtilitySession, now
 from .notify import (
     send_welcome_email, send_internal_alert, send_sample_workbook_email,
 )
-from .account import issue_magic_link, mint_session_for_tenant, tenant_from_session
+from .account import (
+    issue_magic_link,
+    mint_session_for_tenant,
+    tenant_from_session,
+    _hash_password,
+    _validate_password_strength,
+)
 from .stripe_helpers import reconcile_subscription_quantity
 
 logger = logging.getLogger(__name__)
@@ -602,8 +608,18 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
 
 # ─── 5. complete ─────────────────────────────────────────────────────────
 
+class CompleteBody(BaseModel):
+    # Optional password the operator chose on /onboarding/info. Set here at
+    # complete-time (rather than via a separate /v1/auth/set-password call
+    # after the dashboard loads) so the session_token we mint below isn't
+    # the operator's first chance to authenticate from another device —
+    # they can password-login immediately on their phone the moment they
+    # finish onboarding. Magic-link stays as the always-available fallback.
+    password: Optional[str] = None
+
+
 @router.post("/complete")
-def complete(token: str = Query(...)):
+def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
     """Finish onboarding: mark stage='done', send the deferred welcome email,
     and fire a magic-link sign-in email so the operator can reach the
     dashboard (reuses account.py's auth flow)."""
@@ -611,6 +627,13 @@ def complete(token: str = Query(...)):
         t = _tenant_by_token(db, token)
         if not t.active:
             raise HTTPException(402, "Payment not complete")
+        # Set the operator's password BEFORE we mark stage=done. If the
+        # password is malformed we want a 400 here, not silently dropping
+        # it and shipping the operator to the dashboard with no password.
+        # _validate_password_strength raises HTTPException(400, ...).
+        if body and body.password:
+            _validate_password_strength(body.password)
+            t.password_hash = _hash_password(body.password)
         t.onboarding_stage = "done"
         db.commit()
         email = t.contact_email
