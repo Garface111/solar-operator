@@ -70,7 +70,7 @@ def _gmp_sync(
             "provider": "gmp",
             "user": user,
             "auth": {"apiToken": "tok_test"},
-            "accounts": [{"accountNumber": account_number, "nickname": nickname}],
+            "accounts": [{"accountNumber": account_number, "nickname": nickname, "solarNetMeter": True}],
         },
         headers={"Authorization": f"Bearer {key}"},
     ).json()

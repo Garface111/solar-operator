@@ -28,6 +28,7 @@ from sqlalchemy import select, func, or_
 from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
 from .adapters import get_adapter
+from .sync_filter import classify_residential
 import re as _re
 
 _SYNC_EMAIL_RE = _re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
@@ -290,10 +291,28 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 row.service_address = a.get("service_address") or row.service_address
                 row.extra = {**(row.extra or {}), **extra}
                 row.last_seen = now()
+            row.is_residential = classify_residential(provider, a)
 
         # Flush so the accounts just upserted above have IDs and are findable
         # by the autopop query below (autoflush is off on this session).
         db.flush()
+
+        # Identify residential accounts (GMP-only; VEC/WEC always returns empty
+        # today — no per-account generation flag in those payloads yet).
+        # TODO(skip-residential): when VEC/WEC payloads carry a generation flag, apply the same filter here.
+        residential_acct_nos: set[str] = {
+            a["account_number"]
+            for a in normalized["accounts"]
+            if a.get("account_number") and classify_residential(provider, a)
+        }
+        residential_count = len(residential_acct_nos)
+        for _a in normalized["accounts"]:
+            _acct_no = _a.get("account_number")
+            if _acct_no and _acct_no in residential_acct_nos:
+                ctx.add(
+                    "account_skipped_residential",
+                    decision=f"skipped {_acct_no} (residential — no solar net-metering)",
+                )
 
         # ── auto-populate arrays from utility portal ─────────────────────
         # If this capture's login email/username matches a Client that opted
@@ -356,6 +375,8 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             )
                         ).scalar_one_or_none()
                         if acct is None:
+                            continue
+                        if acct_no in residential_acct_nos:
                             continue
                         # Defensive: if array_id points at a soft-deleted
                         # Array, treat the UA as detached and re-create
@@ -448,7 +469,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         .limit(1)
                     ).scalar_one_or_none()
 
-                    if user_email or user_username:
+                    if (user_email or user_username) and any(
+                        a.get("account_number") and a["account_number"] not in residential_acct_nos
+                        for a in normalized["accounts"]
+                    ):
                         # ── Pick the display name ────────────────────────────
                         # Use smart name: holder name from portal profile >
                         # customer_name from account metadata > local-part of
@@ -537,6 +561,8 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 )
                             ).scalar_one_or_none()
                             if acct is None:
+                                continue
+                            if acct_no in residential_acct_nos:
                                 continue
                             # Same defensive check as the autopop branch:
                             # array_id may point at a soft-deleted Array
@@ -678,6 +704,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 "client_id": capture_client_id,
                 "client_name": capture_client_name,
                 "is_new_client": capture_result == "created",
+                "residential_count": residential_count,
             })
         except Exception:
             log.exception("SSE broadcast failed for tenant %s", tenant.id)
@@ -686,6 +713,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         "ok": True,
         "tenant": tenant.id,
         "accounts": len(normalized["accounts"]),
+        "residential_count": residential_count,
         "token_expires_at": normalized["auth"].get("apiTokenExpires"),
         "result": capture_result,
         "is_new_client": capture_result == "created",

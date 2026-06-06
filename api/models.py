@@ -256,6 +256,12 @@ class UtilityAccount(Base):
     # name (if client.name != captured_client_name, respect the edit on re-capture).
     captured_client_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
+    # True when this account is a residential (non-generation) customer with no
+    # NEPOOL participation. Set during /v1/sync for GMP accounts that lack
+    # solarNetMeter=true and groupNetMetered=true. Residential accounts are
+    # persisted but never trigger Client/Array auto-creation.
+    is_residential: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+
     tenant: Mapped[Tenant] = relationship(back_populates="accounts")
     array: Mapped[Array | None] = relationship(back_populates="accounts")
     bills: Mapped[list["Bill"]] = relationship(back_populates="account", cascade="all, delete-orphan")
