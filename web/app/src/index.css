@@ -127,6 +127,26 @@ body {
   background: transparent !important;
 }
 
+/* Reports history — recipient table row entrance (stagger via animation-delay). */
+@keyframes so-row-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.so-row-in {
+  animation: so-row-in 120ms ease-out both;
+}
+
+/* Reports history — bounce-strip click highlights the matching bounced row. */
+@keyframes so-row-highlight {
+  0%   { background-color: transparent; }
+  15%  { background-color: rgb(254 226 226); }
+  85%  { background-color: rgb(254 226 226); }
+  100% { background-color: transparent; }
+}
+.so-row-highlight {
+  animation: so-row-highlight 1.5s ease-in-out;
+}
+
 /* Respect users who prefer reduced motion. */
 @media (prefers-reduced-motion: reduce) {
   *,
