@@ -38,6 +38,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
 
+from .bill_attribution import distribute_kwh_by_calendar_day
 from .db import SessionLocal
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
@@ -2362,17 +2363,17 @@ def client_production(
             )
         ).scalars().all()
 
-        # monthly_data[(year, month)][array_id] += mwh
+        # monthly_data[(year, month)][array_id] += mwh — pro-rated by calendar day.
         monthly_data: dict[tuple[int, int], dict[int, float]] = defaultdict(lambda: defaultdict(float))
         for bill in bills:
             aid = acct_to_array[bill.account_id]
             offset = array_offset[aid]
-            pe = bill.period_end
-            m, y = pe.month - offset, pe.year
-            if m < 1:
-                m += 12
-                y -= 1
-            monthly_data[(y, m)][aid] += (bill.kwh_generated or 0) / 1000.0
+            for (cy, cm), kwh in distribute_kwh_by_calendar_day(bill).items():
+                m, y = cm - offset, cy
+                if m < 1:
+                    m += 12
+                    y -= 1
+                monthly_data[(y, m)][aid] += kwh / 1000.0
 
     all_months = sorted(monthly_data.keys())
     if not all_months:
