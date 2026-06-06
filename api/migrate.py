@@ -385,6 +385,29 @@ def main():
             ))
             print("  + arrays.reassigned_at")
 
+        # 2026-06-05 Identity + Master account (feat/identity-and-master-account):
+        # captured_client_name on utility_accounts stores the original autopop
+        # client-name guess so re-capture can respect operator edits; name_edited_at
+        # on clients records when the operator last manually changed the name.
+        if not column_exists(conn, "utility_accounts", "captured_client_name"):
+            conn.execute(text(
+                "ALTER TABLE utility_accounts ADD COLUMN captured_client_name VARCHAR(200)"
+            ))
+            print("  + utility_accounts.captured_client_name")
+        if not column_exists(conn, "clients", "name_edited_at"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN name_edited_at TIMESTAMP"
+            ))
+            print("  + clients.name_edited_at")
+
+        # 2026-06-05 Password auth (feat/auth-and-reports): bcrypt hash for
+        # operator-set passwords. Magic-link stays as fallback / first-time path.
+        if not column_exists(conn, "tenants", "password_hash"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN password_hash VARCHAR(200)"
+            ))
+            print("  + tenants.password_hash")
+
     print("=== Migration complete ===")
 
 
