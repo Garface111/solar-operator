@@ -1,14 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="6" fill="#2e6b3a"/>
-  <circle cx="16" cy="16" r="6" fill="#fcd34d"/>
-  <g stroke="#fcd34d" stroke-width="2.4" stroke-linecap="round">
-    <line x1="16" y1="3" x2="16" y2="6.5"/>
-    <line x1="16" y1="25.5" x2="16" y2="29"/>
-    <line x1="3" y1="16" x2="6.5" y2="16"/>
-    <line x1="25.5" y1="16" x2="29" y2="16"/>
-    <line x1="6.8" y1="6.8" x2="9.2" y2="9.2"/>
-    <line x1="22.8" y1="22.8" x2="25.2" y2="25.2"/>
-    <line x1="25.2" y1="6.8" x2="22.8" y2="9.2"/>
-    <line x1="9.2" y1="22.8" x2="6.8" y2="25.2"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Solar Operator toolbar icon — v1.5.0 brighter sun -->
+  <rect x="0" y="0" width="128" height="128" rx="18" ry="18" fill="#059669"/>
+  <g fill="#F5D08A" transform="translate(64 64)">
+    <g><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(30)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(60)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(90)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(120)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(150)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(180)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(210)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(240)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(270)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(300)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(330)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
   </g>
+  <circle cx="64" cy="64" r="24" fill="#F5D08A"/>
+  <circle cx="58" cy="58" r="10" fill="#FAE2A8" opacity="0.6"/>
 </svg>
