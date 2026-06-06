@@ -14,8 +14,12 @@ export default function App() {
   return (
     <BrowserRouter basename="/onboarding">
       <Routes>
-        {/* Pre-wizard explainer screens (no stepper) */}
-        <Route path="/" element={<GetStarted />} />
+        {/* Pre-wizard explainer screens (no stepper).
+            Landing drops straight onto the sample report — the auto-cycling
+            3-panel intro felt like "watch this autoscroll then click Next"
+            instead of "see what you're buying". /intro keeps it reachable. */}
+        <Route path="/" element={<Navigate to="/demo" replace />} />
+        <Route path="/intro" element={<GetStarted />} />
         <Route path="/demo" element={<DummyReport />} />
         {/* Wizard: Welcome → Info → ClientSetup (with checkout handoff) → Extension → Clients → Done */}
         <Route path="/welcome" element={<Welcome />} />

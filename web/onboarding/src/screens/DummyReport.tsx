@@ -152,10 +152,10 @@ export default function DummyReport() {
       <div className="mt-4 flex justify-center">
         <button
           type="button"
-          onClick={() => navigate("/")}
+          onClick={() => navigate("/intro")}
           className="text-xs text-zinc-400 underline underline-offset-2 hover:text-zinc-600 focus:outline-none"
         >
-          ← Back to intro
+          ← Why we built this
         </button>
       </div>
     </div>
