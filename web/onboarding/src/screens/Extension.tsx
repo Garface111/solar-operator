@@ -27,56 +27,87 @@ type Provider =
   | "enosburg"
   | "nhec";
 
-const PORTALS: { id: Provider; name: string; short: string; url: string }[] = [
+interface PortalEntry {
+  id: Provider;
+  name: string;
+  short: string;
+  url: string;
+  /** Lower = higher priority. Sort by this at render; don't hardcode visual order. */
+  rank: number;
+  /** Displayed as the secondary chip on each row. */
+  members: string;
+}
+
+const PORTALS: PortalEntry[] = [
   {
     id: "gmp",
     name: "Green Mountain Power",
     short: "GMP",
     url: "https://www.greenmountainpower.com/account/",
+    rank: 1,
+    members: "~75% of Vermont",
   },
   {
     id: "vec",
     name: "Vermont Electric Co-op",
     short: "VEC",
     url: "https://vermontelectric.smarthub.coop/",
+    rank: 2,
+    members: "~33,000 members",
   },
   {
     id: "wec",
     name: "Washington Electric Co-op",
     short: "WEC",
     url: "https://washingtonelectric.smarthub.coop/",
+    rank: 3,
+    members: "~11,000 members",
   },
   {
     id: "stowe",
     name: "Stowe Electric",
     short: "Stowe",
     url: "https://stoweelectric.smarthub.coop/",
-  },
-  {
-    id: "hyde_park",
-    name: "Village of Hyde Park",
-    short: "Hyde Park",
-    url: "https://villageofhydepark.smarthub.coop/",
-  },
-  {
-    id: "ludlow",
-    name: "Village of Ludlow Electric",
-    short: "Ludlow",
-    url: "https://ludlow.smarthub.coop/",
-  },
-  {
-    id: "enosburg",
-    name: "Village of Enosburg Falls",
-    short: "Enosburg",
-    url: "https://villageofenosburgfalls.smarthub.coop/",
+    rank: 4,
+    members: "~4,500 members",
   },
   {
     id: "nhec",
     name: "NH Electric Cooperative",
     short: "NHEC",
     url: "https://nhec.smarthub.coop/",
+    rank: 5,
+    members: "~88,000 members (NH)",
+  },
+  {
+    id: "ludlow",
+    name: "Village of Ludlow Electric",
+    short: "Ludlow",
+    url: "https://ludlow.smarthub.coop/",
+    rank: 6,
+    members: "~1,500 members",
+  },
+  {
+    id: "hyde_park",
+    name: "Village of Hyde Park",
+    short: "Hyde Park",
+    url: "https://villageofhydepark.smarthub.coop/",
+    rank: 7,
+    members: "~1,400 members",
+  },
+  {
+    id: "enosburg",
+    name: "Village of Enosburg Falls",
+    short: "Enosburg",
+    url: "https://villageofenosburgfalls.smarthub.coop/",
+    rank: 8,
+    members: "~1,000 members",
   },
 ];
+
+const SORTED_PORTALS = [...PORTALS].sort((a, b) => a.rank - b.rank);
+const GMP_PORTAL = SORTED_PORTALS[0];
+const OTHER_PORTALS = SORTED_PORTALS.slice(1);
 
 // How long to wait (silently) before surfacing the "Having trouble?" affordance.
 const HELP_TIMEOUT_MS = 45_000;
@@ -106,6 +137,106 @@ interface LoginState {
   state: "login_required" | "signed_in" | "unknown";
   at: string;
 }
+
+// ---- Subcomponents ----
+
+interface GmpHeroCardProps {
+  portal: PortalEntry;
+  isOpening: boolean;
+  isActive: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+}
+
+function GmpHeroCard({ portal, isOpening, isActive, disabled, onOpen }: GmpHeroCardProps) {
+  return (
+    <div
+      className="rounded-2xl border p-5"
+      style={{ backgroundColor: "#FAF8F5", borderColor: "#E8E2D9" }}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-base font-semibold text-zinc-900">{portal.name}</h3>
+          {/* Gold hairline — solarpunk accent */}
+          <div
+            className="mt-1.5 h-px w-14"
+            style={{ backgroundColor: "#E6B470" }}
+            aria-hidden
+          />
+          <p className="mt-2 text-sm text-zinc-500">
+            Powers ~75% of Vermont — start here if your client uses GMP.
+          </p>
+        </div>
+        {isActive && !isOpening && (
+          <span className="mt-0.5 shrink-0 text-xs font-semibold text-emerald-600">
+            ✓ Opened
+          </span>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={disabled}
+        aria-label={`Open Green Mountain Power portal — ${portal.members}`}
+        className="mt-4 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors duration-150 ease-in-out hover:bg-emerald-700 active:bg-emerald-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#E6B470] focus-visible:ring-offset-2 disabled:opacity-60"
+      >
+        {isOpening ? "Opening GMP…" : "Open GMP portal →"}
+      </button>
+    </div>
+  );
+}
+
+interface UtilityRowProps {
+  portal: PortalEntry;
+  isOpening: boolean;
+  isActive: boolean;
+  disabled: boolean;
+  onOpen: () => void;
+}
+
+function UtilityRow({ portal, isOpening, isActive, disabled, onOpen }: UtilityRowProps) {
+  const engaged = isOpening || isActive;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      disabled={disabled}
+      aria-label={`Open ${portal.name} portal — ${portal.members}`}
+      className={[
+        "flex w-full items-center gap-3 border-b px-4 py-3 text-left last:border-b-0",
+        "transition-colors duration-150 ease-in-out",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#E6B470]",
+        "disabled:opacity-60",
+        engaged ? "bg-amber-50" : "bg-white hover:bg-zinc-50",
+      ].join(" ")}
+      style={{ borderColor: "#E8E2D9" }}
+    >
+      <span
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-semibold text-emerald-800"
+        aria-hidden
+      >
+        {portal.short.slice(0, 3)}
+      </span>
+      <span className="min-w-0 flex-1 text-sm font-medium text-zinc-900">
+        {isOpening ? `Opening ${portal.short}…` : portal.name}
+      </span>
+      <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-800">
+        {portal.members}
+      </span>
+      {isActive && !isOpening ? (
+        <span className="shrink-0 text-xs font-semibold text-emerald-600" aria-hidden>
+          ✓
+        </span>
+      ) : (
+        <span className="shrink-0 text-xs text-zinc-400" aria-hidden>
+          →
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ---- Main screen ----
 
 export default function Extension() {
   const navigate = useNavigate();
@@ -498,30 +629,46 @@ export default function Extension() {
         )}
 
         {/* Portal choice + live status — the heart of the screen. */}
-        <div className="mt-8 rounded-2xl border border-primary-200 bg-primary-50/40 px-5 py-5">
-          <div className="text-sm font-semibold text-zinc-900">
+        <div className="mt-8">
+          <p className="text-sm font-semibold text-zinc-900">
             Which utility does this client use?
+          </p>
+
+          {/* GMP hero card — always above the scrollable list */}
+          <div className="mt-4">
+            <GmpHeroCard
+              portal={GMP_PORTAL}
+              isOpening={openingProvider === "gmp"}
+              isActive={activeProvider === "gmp"}
+              disabled={!!landed}
+              onOpen={() => void openPortal("gmp", GMP_PORTAL.url)}
+            />
           </div>
-          <div className="mt-4 flex flex-wrap gap-3">
-            {PORTALS.map((p) => {
-              const isOpening = openingProvider === p.id;
-              const isActive = activeProvider === p.id;
-              const baseStyle = isActive
-                ? "border border-primary-300 bg-white text-primary-700 hover:bg-primary-50"
-                : "bg-primary-500 text-white hover:bg-primary-600 active:bg-primary-700";
-              return (
-                <button
+
+          {/* Scrollable secondary list */}
+          <div className="mt-5">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+              Other utilities
+            </p>
+            <div
+              className="overflow-y-auto rounded-xl border"
+              style={{ maxHeight: "360px", borderColor: "#E8E2D9" }}
+            >
+              {OTHER_PORTALS.map((p) => (
+                <UtilityRow
                   key={p.id}
-                  type="button"
-                  onClick={() => void openPortal(p.id, p.url)}
+                  portal={p}
+                  isOpening={openingProvider === p.id}
+                  isActive={activeProvider === p.id}
                   disabled={!!landed}
-                  className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-medium transition-colors duration-150 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 disabled:opacity-60 ${baseStyle}`}
-                >
-                  {isActive && <span aria-hidden>✓</span>}
-                  {isOpening ? `Opening ${p.short}…` : `Open ${p.name} →`}
-                </button>
-              );
-            })}
+                  onOpen={() => void openPortal(p.id, p.url)}
+                />
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-zinc-500">
+              Don&apos;t see your utility? Add manually — Solar Operator works
+              with any portal that emails or PDFs bills.
+            </p>
           </div>
 
           {/* Live status line */}
