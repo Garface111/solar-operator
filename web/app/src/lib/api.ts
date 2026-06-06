@@ -255,6 +255,8 @@ export interface ArrayRow {
   notes: string | null;
   excluded: boolean;
   accounts: UtilityAccount[];
+  solaredge_connected: boolean;
+  solaredge_site_id: number | null;
 }
 
 export interface ClientRow {
@@ -953,6 +955,65 @@ export async function uploadDailyCsv(
 
 export async function getDailyCoverage(arrayId: number): Promise<DailyCoverage> {
   return request<DailyCoverage>(`/v1/account/arrays/${arrayId}/daily-coverage`);
+}
+
+// ─── SolarEdge integration ───────────────────────────────────────────────
+
+export interface SolarEdgeSite {
+  site_id: number;
+  name: string;
+  address: string;
+  peak_kw: number;
+}
+
+export interface SolarEdgeSetupResult {
+  ok: boolean;
+  /** True when the account-level key covers multiple sites — UI should show a picker. */
+  needs_site_selection: boolean;
+  /** Only set when needs_site_selection is true. */
+  sites?: SolarEdgeSite[];
+  /** Only set when needs_site_selection is false. */
+  site_name?: string;
+  peak_kw?: number;
+  site_id?: number;
+  hint?: string;
+}
+
+export interface SolarEdgePreviewResult {
+  ok: boolean;
+  days_pulled: number;
+  sample: { day: string; kwh: number }[];
+}
+
+export async function setupSolarEdge(
+  clientId: number,
+  arrayId: number,
+  apiKey: string,
+  siteId?: number,
+): Promise<SolarEdgeSetupResult> {
+  return request<SolarEdgeSetupResult>(
+    `/v1/account/clients/${clientId}/arrays/${arrayId}/solaredge`,
+    { body: { api_key: apiKey, ...(siteId !== undefined ? { site_id: siteId } : {}) } },
+  );
+}
+
+export async function previewSolarEdge(
+  clientId: number,
+  arrayId: number,
+): Promise<SolarEdgePreviewResult> {
+  return request<SolarEdgePreviewResult>(
+    `/v1/account/clients/${clientId}/arrays/${arrayId}/solaredge/preview`,
+  );
+}
+
+export async function disconnectSolarEdge(
+  clientId: number,
+  arrayId: number,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `/v1/account/clients/${clientId}/arrays/${arrayId}/solaredge`,
+    { method: "DELETE" },
+  );
 }
 
 // ─── utility accounts (under an array) ───────────────────────────────────

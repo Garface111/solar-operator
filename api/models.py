@@ -213,6 +213,12 @@ class Array(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     reassigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # SolarEdge Monitoring API integration (feat/solaredge-adapter).
+    # Stored plain text — read-only scope, operator-controlled per-array key.
+    # Future hardening: encrypt at rest.
+    solaredge_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    solaredge_site_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     tenant: Mapped[Tenant] = relationship(back_populates="arrays")
     client: Mapped["Client | None"] = relationship(back_populates="arrays")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="array")

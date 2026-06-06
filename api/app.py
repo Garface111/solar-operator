@@ -91,6 +91,7 @@ from .account import router as account_router
 from .onboarding import router as onboarding_router
 from .ingest import router as ingest_router
 from .daily_generation import router as daily_generation_router
+from .solaredge import router as solaredge_router
 from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
@@ -155,6 +156,8 @@ app.include_router(onboarding_router)
 app.include_router(ingest_router)
 # Phase 2 daily generation CSV ingest + coverage.
 app.include_router(daily_generation_router)
+# SolarEdge Monitoring API integration (feat/solaredge-adapter).
+app.include_router(solaredge_router)
 # AI-assisted NEPOOL ID assignment from spreadsheet (pure assignment, no array creation).
 app.include_router(nepool_router)
 # W2-6: Resend delivery webhook → per-client delivery health.

@@ -361,7 +361,30 @@ def start():
         CronTrigger(hour=3, minute=15),
         id="synthetic_gmp_monitor", replace_existing=True,
     )
+    # Daily at 03:00 UTC: pull SolarEdge generation for all connected arrays.
+    # Rate-limit: 300 req/day per account token; N arrays = N requests, well inside.
+    # Errors per array are logged but don't crash the scheduler.
+    scheduler.add_job(
+        _run_solaredge_pull,
+        CronTrigger(hour=3, minute=0),
+        id="solaredge_daily_pull", replace_existing=True,
+    )
     scheduler.start()
+
+
+def _run_solaredge_pull() -> None:
+    """Pull SolarEdge daily generation for all arrays with api keys configured."""
+    try:
+        from .jobs.solaredge_pull import pull_all_solaredge_arrays
+        result = pull_all_solaredge_arrays()
+        logger.info(
+            "solaredge_daily_pull: processed=%d", result.get("arrays_processed", 0)
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "SolarEdge daily pull: unhandled exception",
+            f"The SolarEdge daily pull job raised an unexpected error:\n{exc}",
+        )
 
 
 def _run_synthetic_gmp_monitor() -> None:
