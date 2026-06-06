@@ -27,6 +27,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal, DATA_DIR
 from ..models import Tenant, Client, UtilityAccount, Array, Bill
 
@@ -46,13 +47,6 @@ FOOTNOTE_TEXT = (
 
 
 # ── helpers ──────────────────────────────────────────────────────────
-def _bill_target_month(bill: Bill) -> Optional[tuple[int, int]]:
-    src = bill.period_start or bill.bill_date
-    if not src:
-        return None
-    return src.year, src.month
-
-
 def _quarter_of(month: int) -> int:
     return (month - 1) // 3 + 1
 
@@ -203,19 +197,15 @@ def build_workbook(tenant_id: Optional[str] = None,
         else:
             bills = []
 
-        # Per-group kWh by (year, month)
+        # Per-group kWh by (year, month) — pro-rated by calendar day.
         per_group: dict[str, dict[tuple[int, int], float]] = defaultdict(
             lambda: defaultdict(float))
         for b in bills:
-            if not b.kwh_generated or b.kwh_generated <= 0:
-                continue
-            t = _bill_target_month(b)
-            if t is None:
-                continue
             grp = group_of.get(b.account_id)
             if not grp:
                 continue
-            per_group[grp][t] += b.kwh_generated
+            for (year, month), kwh in distribute_kwh_by_calendar_day(b).items():
+                per_group[grp][(year, month)] += kwh
 
         groups = sorted(per_group.keys()) or sorted(set(group_of.values()))
 
