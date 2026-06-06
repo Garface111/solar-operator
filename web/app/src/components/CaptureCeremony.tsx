@@ -11,7 +11,8 @@
 // doesn't reappear after manual refresh during the same session.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { openPortalTab } from "../lib/openPortalTab";
+import { openPortalTab, gmpPortalUrl } from "../lib/openPortalTab";
+import { useExtensionStatus } from "../lib/useExtensionStatus";
 import { listClients, listArrays, type ClientRow, type Account } from "../lib/api";
 import { useToast } from "../ui/Toast";
 
