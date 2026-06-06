@@ -264,6 +264,12 @@ export function ClientsSection({ expandClientId }: Props) {
       }, 150);
     };
     window.addEventListener('so:sandbox:mutated', onSandboxMutated);
+    // Bruce Jun 6: NEPOOL banner didn't clear after inline-edit assignment.
+    // ArrayList + AssignNepoolFromSpreadsheetModal both dispatch
+    // 'so:arrays-changed' on save/commit; that path was previously ignored
+    // here, so the banner kept its stale count until a full page reload.
+    // Reuse the same debounced refresh as sandbox mutations.
+    window.addEventListener('so:arrays-changed', onSandboxMutated);
     getNepoolStats()
       .then((s) => { if (!cancelled) setMissingNepoolCount(s.arrays_missing_nepool); })
       .catch(() => { /* non-critical */ });
@@ -271,6 +277,7 @@ export function ClientsSection({ expandClientId }: Props) {
       cancelled = true;
       if (debounce) clearTimeout(debounce);
       window.removeEventListener('so:sandbox:mutated', onSandboxMutated);
+      window.removeEventListener('so:arrays-changed', onSandboxMutated);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -506,6 +513,7 @@ export function ClientsSection({ expandClientId }: Props) {
         <ClientsTable
           clients={clients}
           operatorEmail={operatorEmail}
+          accountReportFrequency={account?.report_frequency ?? null}
           expandClientId={expandClientId}
           selectMode={selectMode}
           selectedIds={selectedIds}

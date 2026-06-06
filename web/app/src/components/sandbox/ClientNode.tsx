@@ -491,7 +491,15 @@ function LoginGroupRow({
   onDetach: (accountId: string) => void;
   onDetachLogin: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // Bruce Jun 6: keep login row expanded by default. Two pain points solved
+  // at once: (1) dragging sub-arrays to another client used to close the
+  // dropdown after each drop so he had to keep re-clicking LOGIN GMP;
+  // (2) clicking into a client card forced an extra "LOGIN GMP" click to
+  // even see the arrays. The login row is the *only* thing inside the card
+  // body, so defaulting to expanded is sublime — arrays are visible the
+  // instant the card opens, and dragging across multiple sub-arrays keeps
+  // them in view the whole time.
+  const [expanded, setExpanded] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [draggingArrayId, setDraggingArrayId] = useState<string | null>(null);
   const th = UTILITY_THEME[utility];
