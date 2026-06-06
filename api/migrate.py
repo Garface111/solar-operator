@@ -400,6 +400,18 @@ def main():
             ))
             print("  + clients.name_edited_at")
 
+        # 2026-06-06 freq-cleanup: backfill null → quarterly on clients
+        # No-op after first run (API coerces on write, so no new nulls appear).
+        n = conn.execute(text(
+            "SELECT COUNT(*) FROM clients WHERE report_frequency IS NULL"
+        )).scalar()
+        if n and n > 0:
+            conn.execute(text(
+                "UPDATE clients SET report_frequency = 'quarterly' "
+                "WHERE report_frequency IS NULL"
+            ))
+            print(f"  backfilled report_frequency=quarterly on {n} clients")
+
         # 2026-06-05 Password auth (feat/auth-and-reports): bcrypt hash for
         # operator-set passwords. Magic-link stays as fallback / first-time path.
         if not column_exists(conn, "tenants", "password_hash"):

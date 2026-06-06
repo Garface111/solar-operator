@@ -581,7 +581,6 @@ export function ClientsSection({ expandClientId }: Props) {
         <ClientsTable
           clients={clients}
           operatorEmail={operatorEmail}
-          accountReportFrequency={account?.report_frequency ?? null}
           expandClientId={expandClientId}
           selectMode={selectMode}
           selectedIds={selectedIds}
