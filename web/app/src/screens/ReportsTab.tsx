@@ -179,6 +179,22 @@ export default function ReportsTab() {
           <ReportsEmptyState />
         ) : (
           <div className="space-y-2">
+            {/* In-progress current quarter(s) — at top, collapsed (Ford Jun 6:
+                current should lead, oldest trail). */}
+            {inProgressReports.map((rep) => (
+              <QuarterCard
+                key={rep.quarter}
+                label={`${quarterLabel(rep)} (current)`}
+                quarter={rep.quarter}
+                status={rep.status}
+                arrayCount={rep.array_count}
+                lastDeliveredAt={rep.last_delivered_at}
+                mwhTotal={rep.mwh_total}
+                clients={activeClients}
+                onRefresh={loadData}
+              />
+            ))}
+
             {/* Most recent complete quarter — expanded */}
             {mostRecent && (
               <QuarterCard
@@ -195,26 +211,11 @@ export default function ReportsTab() {
               />
             )}
 
-            {/* Older complete quarters — collapsed */}
+            {/* Older complete quarters — collapsed, oldest at the bottom */}
             {olderReports.map((rep) => (
               <QuarterCard
                 key={rep.quarter}
                 label={quarterLabel(rep)}
-                quarter={rep.quarter}
-                status={rep.status}
-                arrayCount={rep.array_count}
-                lastDeliveredAt={rep.last_delivered_at}
-                mwhTotal={rep.mwh_total}
-                clients={activeClients}
-                onRefresh={loadData}
-              />
-            ))}
-
-            {/* In-progress current quarter(s) — collapsed at bottom */}
-            {inProgressReports.map((rep) => (
-              <QuarterCard
-                key={rep.quarter}
-                label={`${quarterLabel(rep)} (current)`}
                 quarter={rep.quarter}
                 status={rep.status}
                 arrayCount={rep.array_count}
