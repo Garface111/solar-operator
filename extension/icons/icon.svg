@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Single swept gold ray behind the disc (lower-left → upper-right) -->
+  <path d="M 20 96 C 36 60 88 48 108 24"
+        stroke="#e6b470" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <!-- Emerald-700 solar disc -->
+  <circle cx="64" cy="64" r="40" fill="#064e3b"/>
+</svg>
