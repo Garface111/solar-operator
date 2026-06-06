@@ -42,7 +42,7 @@ export interface ClientDraftEntry {
 const ARRAY_PRICE = 15;
 const SETUP_FEE = 250;
 
-const QUICK_PICKS = [10, 25, 50, 100, 250, 500];
+const QUICK_PICKS = [5, 10, 25, 50, 100, 250, 500];
 
 function readOperatorInfo(locationState: unknown): OperatorInfo | null {
   if (locationState && typeof (locationState as OperatorInfo).email === "string") {
