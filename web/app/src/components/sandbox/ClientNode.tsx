@@ -3,6 +3,7 @@ import { type NodeProps } from '@xyflow/react';
 import { useCanvasActions } from './canvasContext';
 import {
   type ClientData,
+  type SolarArray,
   type Utility,
   type UtilityAccount,
 } from './mockData';
@@ -663,12 +664,7 @@ function LoginGroupRow({
                       </svg>
                     </span>
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${th.rowDot} opacity-60`} />
-                    <span
-                      className="truncate text-xs font-medium text-zinc-800"
-                      title={arr.nepool_gis_id ? `${arr.name} · ${arr.nepool_gis_id}` : arr.name}
-                    >
-                      {arr.name}
-                    </span>
+                    <ArrayNameCell arr={arr} />
                     {arr.reassigned_at && <MovedBadge reassignedAt={arr.reassigned_at} />}
                     <button
                       type="button"
@@ -709,6 +705,53 @@ function LoginGroupRow({
   );
 }
 
+
+/** Inline-editable array name. Click to rename; Enter/blur commits; Escape cancels. */
+function ArrayNameCell({ arr }: { arr: SolarArray }) {
+  const actions = useCanvasActions();
+  const numericId = parseInt(arr.id.replace('arr_', ''), 10);
+  const isRenamingThis = !isNaN(numericId) && actions.renamingNodeId === `array_${numericId}`;
+  const [draft, setDraft] = useState(arr.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isRenamingThis) setDraft(arr.name);
+  }, [arr.name, isRenamingThis]);
+
+  useEffect(() => {
+    if (isRenamingThis && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [isRenamingThis]);
+
+  if (isRenamingThis) {
+    return (
+      <input
+        ref={inputRef}
+        className="nodrag nopan min-w-0 flex-1 truncate rounded border border-primary-300 bg-primary-50 px-1 py-0.5 text-xs font-medium text-zinc-800 outline-none focus:ring-2 focus:ring-primary-400/40"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); actions.finishRenameArray(numericId, draft.trim() || arr.name); }
+          if (e.key === 'Escape') actions.cancelRename();
+        }}
+        onBlur={() => actions.finishRenameArray(numericId, draft.trim() || arr.name)}
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="nodrag cursor-text min-w-0 flex-1 truncate text-left text-xs font-medium text-zinc-800 hover:text-primary-700 hover:underline hover:underline-offset-2 decoration-primary-300"
+      title={arr.nepool_gis_id ? `${arr.name} · ${arr.nepool_gis_id}` : arr.name}
+      onClick={(e) => { e.stopPropagation(); if (!isNaN(numericId)) actions.startRenameArray(numericId); }}
+    >
+      {arr.name}
+    </button>
+  );
+}
 
 /** Inline-editable contact email shown in the client card header.
  *  Click to edit; Enter or blur commits; Escape cancels. Empty state

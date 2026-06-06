@@ -9,6 +9,8 @@ export interface CanvasActions {
   finishRename: (nodeId: string, name: string) => void;
   cancelRename: () => void;
   renamingNodeId: string | null;
+  startRenameArray: (arrayId: number) => void;
+  finishRenameArray: (arrayId: number, name: string) => void;
   deleteNode: (nodeId: string) => void;
   detachAccount: (clientId: string, accountId: string) => void;
   moveAccountToClient: (srcClientId: string, accountId: string, dstClientId: string) => void;
