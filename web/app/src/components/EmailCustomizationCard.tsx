@@ -27,7 +27,7 @@ const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{tenant_email}}, {{qu
  *  set is flagged as a probable typo so it doesn't silently pass through. */
 const KNOWN_TAGS = new Set([
   "client_name", "tenant_name", "quarter", "arrays_count",
-  "period_start", "period_end", "dashboard_url", "tenant_email",
+  "period_start", "period_end", "tenant_email",
   "tenant_email_line",
 ]);
 
@@ -247,7 +247,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           />
           <p className="mt-1.5 text-xs text-zinc-400">
             HTML supported. {MERGE_HELP}, plus {"{{period_start}}"},{" "}
-            {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{dashboard_url}}"}.
+            {"{{period_end}}"}, {"{{arrays_count}}"}.
           </p>
           {findTypoTags(body).length > 0 && (
             <p className="mt-1 text-xs text-amber-700">

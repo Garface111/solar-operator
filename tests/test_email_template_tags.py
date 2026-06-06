@@ -36,6 +36,11 @@ def test_allowlist_contents_match_render_context():
     )
 
 
+def test_dashboard_url_not_in_allowlist():
+    """dashboard_url was removed from client-facing emails — must not be allowed."""
+    assert "dashboard_url" not in ALLOWED_MERGE_TAGS
+
+
 def test_extract_and_unknown_tags():
     body = (
         "<p>Hi {{client_name}}, your Q{{quarter}} bill total is "
