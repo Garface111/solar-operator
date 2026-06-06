@@ -108,22 +108,28 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
         if (pollAbortRef.current) pollAbortRef.current.canceled = true;
         return;
       }
-      const ev: CaptureEvent = {
-        id: nextIdRef.current++,
-        provider: (data.provider as Provider) || "gmp",
-        accountCount: Number(data.accountCount ?? 0),
-        at: String(data.at || new Date().toISOString()),
-      };
-      setEvents((prev) => [...prev, ev]);
-      setPendingProvider(null);
-      setPendingSince(null);
-      if (pollAbortRef.current) pollAbortRef.current.canceled = true;
-      setDismissed(false); // un-dismiss on new event so user sees the magic
-      try {
-        sessionStorage.removeItem(DISMISS_KEY);
-      } catch { /* ignore */ }
-      void resolveEvent(ev);
-      onCaptureLanded();
+      const isNew = data.is_new_client !== false; // default true for backward compat
+      if (isNew) {
+        const ev: CaptureEvent = {
+          id: nextIdRef.current++,
+          provider: (data.provider as Provider) || "gmp",
+          accountCount: Number(data.accountCount ?? 0),
+          at: String(data.at || new Date().toISOString()),
+        };
+        setEvents((prev) => [...prev, ev]);
+        setPendingProvider(null);
+        setPendingSince(null);
+        if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+        setDismissed(false);
+        try { sessionStorage.removeItem(DISMISS_KEY); } catch { /* ignore */ }
+        void resolveEvent(ev);
+        onCaptureLanded();
+      } else {
+        // Re-capture: clear pending state but don't add a ceremony event
+        setPendingProvider(null);
+        setPendingSince(null);
+        if (pollAbortRef.current) pollAbortRef.current.canceled = true;
+      }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
