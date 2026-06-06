@@ -56,25 +56,15 @@ export type SortKey = 'name' | 'recent' | 'arrays' | 'pinned';
 
 // ── Layout constants ────────────────────────────────────────────────────────
 
-type DensityOverride = 'auto' | Density;
-
 const GRID: Record<Density, { COL_W: number; ROW_H: number }> = {
   full:    { COL_W: 330, ROW_H: 295 },
   compact: { COL_W: 250, ROW_H: 200 },
   dense:   { COL_W: 190, ROW_H:  90 },
 };
 
-// Columns per density tier — more cols at higher density retightens the grid
-// without reshuffling card order.
+// Columns per density tier — used by layout functions even though density is
+// always 'full' at runtime.
 const DENSITY_COLS: Record<Density, number> = { full: 4, compact: 5, dense: 7 };
-
-const DENSITY_THRESH = { compact: 6, dense: 16 };
-
-function deriveDensity(clientCount: number): Density {
-  if (clientCount >= DENSITY_THRESH.dense) return 'dense';
-  if (clientCount >= DENSITY_THRESH.compact) return 'compact';
-  return 'full';
-}
 
 // ── Provider normalizer ─────────────────────────────────────────────────────
 
@@ -304,13 +294,7 @@ export default function SandboxCanvas() {
   const [_sseStatus, setSseStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('disconnected');
   void _sseStatus;
 
-  const [densityOverride, setDensityOverride] = useState<DensityOverride>(() => {
-    try {
-      const saved = localStorage.getItem('so:sandbox:density');
-      if (saved === 'auto' || saved === 'full' || saved === 'compact' || saved === 'dense') return saved;
-    } catch { /* ignore */ }
-    return 'auto';
-  });
+  const density: Density = 'full';
 
   const [layoutMode, setLayoutMode] = useState<LayoutMode>(() => {
     try {
@@ -328,14 +312,9 @@ export default function SandboxCanvas() {
     return 'name';
   });
 
-  const clientCount = nodes.filter((n) => n.type === 'client').length;
-  const density: Density = densityOverride === 'auto' ? deriveDensity(clientCount) : densityOverride;
-
   const { getIntersectingNodes, fitView, setCenter } = useReactFlow();
 
   // Always-fresh refs used in callbacks to avoid stale closures
-  const densityOverrideRef = useRef<DensityOverride>(densityOverride);
-  densityOverrideRef.current = densityOverride;
   const densityRef = useRef<Density>(density);
   densityRef.current = density;
   const layoutModeRef = useRef<LayoutMode>(layoutMode);
@@ -387,9 +366,7 @@ export default function SandboxCanvas() {
     const prevIds = opts.sseReveal ? new Set(nodesRef.current.map((n) => n.id)) : null;
     try {
       const data = await getCanvasData();
-      const loadedCount = data.clients.length;
-      const effectiveDensity: Density =
-        densityOverrideRef.current === 'auto' ? deriveDensity(loadedCount) : densityOverrideRef.current;
+      const effectiveDensity: Density = 'full';
       // Positions are computed from sort rank — never rely on DB canvas_x/canvas_y in sorted mode
       const sortedPositions = computeSortedPositionsFromApiClients(
         data.clients,
@@ -1318,27 +1295,6 @@ export default function SandboxCanvas() {
     setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
   }, [setNodes, fitView]);
 
-  // ── Density change ────────────────────────────────────────────────────────
-
-  const handleDensityChange = useCallback((override: DensityOverride) => {
-    setDensityOverride(override);
-    try { localStorage.setItem('so:sandbox:density', override); } catch { /* ignore */ }
-
-    if (layoutModeRef.current === 'sorted') {
-      const count = nodesRef.current.filter((n) => n.type === 'client').length;
-      const newDensity: Density = override === 'auto' ? deriveDensity(count) : override;
-      setNodes((ns) => {
-        const clientNodes = ns.filter((n) => n.type === 'client');
-        const positions = computeSortedPositionsFromNodes(clientNodes, sortKeyRef.current, newDensity);
-        return ns.map((n) => {
-          if (n.type !== 'client') return n;
-          const pos = positions.get(n.id);
-          return pos ? { ...n, position: pos } : n;
-        });
-      });
-    }
-  }, [setNodes]);
-
   // ── Cross-client account drag (HTML5 dnd) ────────────────────────────────
 
   const moveAccountToClient = useCallback(
@@ -2004,11 +1960,6 @@ export default function SandboxCanvas() {
                 <ToolbarButton onClick={() => setShowAddModal(true)}>
                   + Add client manually
                 </ToolbarButton>
-                <DensityControl
-                  override={densityOverride}
-                  derived={density}
-                  onChange={handleDensityChange}
-                />
                 <LayoutModeControl layoutMode={layoutMode} onChange={handleLayoutModeChange} />
                 {layoutMode === 'sorted' && (
                   <SortKeyControl sortKey={sortKey} onChange={handleSortKeyChange} />
@@ -2350,52 +2301,6 @@ function SortKeyControl({ sortKey, onChange }: { sortKey: SortKey; onChange: (v:
       <option value="arrays">Most arrays</option>
       <option value="pinned">Pinned first</option>
     </select>
-  );
-}
-
-function DensityControl({
-  override,
-  derived,
-  onChange,
-}: {
-  override: DensityOverride;
-  derived: Density;
-  onChange: (v: DensityOverride) => void;
-}) {
-  const opts: { key: DensityOverride; label: string }[] = [
-    {
-      key: 'auto',
-      label: override === 'auto'
-        ? `Auto · ${derived.charAt(0).toUpperCase() + derived.slice(1)}`
-        : 'Auto',
-    },
-    { key: 'full',    label: 'Full' },
-    { key: 'compact', label: 'Compact' },
-    { key: 'dense',   label: 'Dense' },
-  ];
-  return (
-    <div className="flex overflow-hidden rounded-lg border border-cream-border divide-x divide-cream-border">
-      {opts.map(({ key, label }) => (
-        <button
-          key={key}
-          type="button"
-          className={[
-            'px-2.5 py-1.5 text-xs font-medium transition-colors',
-            override === key
-              ? 'bg-primary-50 text-primary-800'
-              : 'bg-white text-zinc-600 hover:bg-zinc-50 active:bg-zinc-100',
-          ].join(' ')}
-          onClick={() => onChange(key)}
-          title={
-            key === 'auto'
-              ? `Auto-select density (currently ${derived})`
-              : `${key.charAt(0).toUpperCase() + key.slice(1)} cards`
-          }
-        >
-          {label}
-        </button>
-      ))}
-    </div>
   );
 }
 
