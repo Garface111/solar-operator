@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Spinner } from "../ui/Spinner";
@@ -17,6 +17,7 @@ import {
   addUtilityAccount,
   removeUtilityAccount,
   listProviders,
+  uploadDailyCsv,
 } from "../lib/api";
 
 interface Props {
@@ -279,10 +280,34 @@ function ArrayRow({
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedDays, setUploadedDays] = useState<number | null>(null);
+  const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   async function save(patch: Partial<ArrayRowT>) {
     const updated = await updateArray(clientId, array.id, patch as any);
     onChange(updated);
+  }
+
+  async function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || uploading) return;
+    // Reset so re-selecting the same file fires onChange again
+    e.target.value = "";
+    setUploading(true);
+    try {
+      const result = await uploadDailyCsv(array.id, file);
+      const total = result.rows_inserted + result.rows_updated;
+      setUploadedDays(total);
+      const range = result.date_range
+        ? ` (${result.date_range.start} → ${result.date_range.end})`
+        : "";
+      toast.success(`Uploaded ${total} days${range}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function handleDelete() {
@@ -387,6 +412,22 @@ function ArrayRow({
             />
             Hide from reports
           </label>
+          <button
+            type="button"
+            disabled={uploading}
+            onClick={() => csvInputRef.current?.click()}
+            className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+            title="Upload a daily generation CSV from GMP"
+          >
+            {uploading ? "Uploading…" : uploadedDays !== null ? `📊 ${uploadedDays} days` : "Upload CSV"}
+          </button>
+          <input
+            ref={csvInputRef}
+            type="file"
+            accept=".csv"
+            className="hidden"
+            onChange={handleCsvUpload}
+          />
           <button
             type="button"
             onClick={() => setConfirmDelete(true)}
