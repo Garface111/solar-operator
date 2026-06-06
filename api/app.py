@@ -27,7 +27,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select, func, or_
 from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
-from .adapters import get_adapter
+from .adapters import get_adapter, is_smarthub_provider
 from .sync_filter import classify_residential
 import re as _re
 
@@ -104,6 +104,17 @@ log = logging.getLogger("solar_operator.app")
 # Maps provider code → which Client columns drive auto-populate for that provider.
 # Using string attribute names for setattr (last_sync_attr) and column descriptors
 # for SQLAlchemy where-clause matching (email_col, username_col, autopop_col).
+_SMARTHUB_AUTOPOP = {
+    "email_col":          Client.vec_email,
+    "username_col":       Client.vec_username,
+    "autopop_col":        Client.vec_autopopulate,
+    "last_sync_attr":     "vec_last_sync_at",
+    "email_attr":         "vec_email",
+    "username_attr":      "vec_username",
+    "autopop_attr":       "vec_autopopulate",
+    "bill_offset_months": 0,  # SmartHub bills represent the same month
+}
+
 _PROVIDER_AUTOPOP_FIELDS: dict[str, dict] = {
     "gmp": {
         "email_col":          Client.gmp_email,
@@ -115,17 +126,13 @@ _PROVIDER_AUTOPOP_FIELDS: dict[str, dict] = {
         "autopop_attr":       "gmp_autopopulate",
         "bill_offset_months": 1,   # GMP bills represent the prior month
     },
-    "vec": {
-        "email_col":          Client.vec_email,
-        "username_col":       Client.vec_username,
-        "autopop_col":        Client.vec_autopopulate,
-        "last_sync_attr":     "vec_last_sync_at",
-        "email_attr":         "vec_email",
-        "username_attr":      "vec_username",
-        "autopop_attr":       "vec_autopopulate",
-        "bill_offset_months": 0,   # VEC bills represent the same month
-    },
 }
+
+# All SmartHub utilities share the vec_* Client columns — same portal type,
+# same credential shape, no new DB columns needed.
+from .adapters.smarthub import SMARTHUB_UTILITIES as _SMARTHUB_UTILITIES
+for _sh_code, _sh_info in _SMARTHUB_UTILITIES.items():
+    _PROVIDER_AUTOPOP_FIELDS[_sh_info["provider"]] = _SMARTHUB_AUTOPOP
 
 app = FastAPI(title="Solar Operator API", version="1.0.0")
 
@@ -612,13 +619,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         capture_client_id = target.id
                         capture_client_name = target.name
 
-        # ── VEC bill/usage persistence (extension-scraped) ──────────────
-        # GMP has a separate worker that pulls bill PDFs server-side and
-        # parses them. VEC's portal uses cookie-only auth, so the extension
-        # is the only path to data; the extension POSTs bills_raw + usage_raw
-        # in the payload and we persist them here.
-        if provider == "vec":
-            from .adapters.vec import parse_bill as _vec_parse_bill, parse_usage as _vec_parse_usage
+        # ── SmartHub bill/usage persistence (extension-scraped) ─────────
+        # GMP has a separate worker that pulls bill PDFs server-side.
+        # SmartHub portals use cookie-based auth for the DOM scrape, so the
+        # extension is the primary path for billing history; it POSTs
+        # bills_raw + usage_raw in the payload and we persist them here.
+        # Covers VEC, WEC, STOWE, and every other SmartHub utility.
+        if is_smarthub_provider(provider):
+            from .adapters.smarthub import parse_bill as _vec_parse_bill, parse_usage as _vec_parse_usage
             # Build an account-number → UtilityAccount.id map from this tenant's accounts
             acct_map = {
                 r.account_number: r.id

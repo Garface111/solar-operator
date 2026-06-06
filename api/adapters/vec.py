@@ -1,4 +1,12 @@
 """
+DEPRECATED — use api/adapters/smarthub.py. Will be removed Aug 2026.
+
+This module remains for in-flight VEC sessions during the cutover window.
+parse_usage / parse_bill / parse_extension_payload are re-exported from
+smarthub.py so direct importers continue to work without changes.
+
+Original docstring preserved below for history:
+
 Provider adapter for Vermont Electric Cooperative (NISC SmartHub).
 
 VEC's portal at https://vermontelectric.smarthub.coop uses cookie-based sessions
@@ -216,3 +224,14 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "bills_raw": payload.get("bills", []),
         "usage_raw": payload.get("usage", []),
     }
+
+
+# ── Forwarding re-exports for callers that import directly from this module ───
+# The canonical implementations now live in smarthub.py. These aliases keep
+# existing imports (e.g. app.py's from .adapters.vec import parse_bill) working
+# without modification until the Aug 2026 removal.
+from .smarthub import (  # noqa: F401,F811,E402
+    parse_usage,
+    parse_bill,
+    parse_extension_payload,
+)
