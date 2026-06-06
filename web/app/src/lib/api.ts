@@ -295,6 +295,13 @@ export async function updateAccountEmail(email: string): Promise<string> {
   return res.email;
 }
 
+export async function updateAccountName(name: string): Promise<string> {
+  const res = await request<{ name: string }>("/v1/account/name", {
+    body: { name },
+  });
+  return res.name;
+}
+
 export async function updateAccountFrequency(
   frequency: string,
 ): Promise<string> {
