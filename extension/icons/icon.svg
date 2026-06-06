@@ -1,7 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Single swept gold ray behind the disc (lower-left → upper-right) -->
-  <path d="M 20 96 C 36 60 88 48 108 24"
-        stroke="#e6b470" stroke-width="12" fill="none" stroke-linecap="round"/>
-  <!-- Emerald-700 solar disc -->
-  <circle cx="64" cy="64" r="40" fill="#064e3b"/>
+  <!-- Solar Operator toolbar icon — v1.5.0 brighter sun -->
+  <rect x="0" y="0" width="128" height="128" rx="18" ry="18" fill="#059669"/>
+  <g fill="#F5D08A" transform="translate(64 64)">
+    <g><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(30)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(60)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(90)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(120)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(150)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(180)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(210)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(240)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(270)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(300)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+    <g transform="rotate(330)"><rect x="-3.5" y="-50" width="7" height="14" rx="3"/></g>
+  </g>
+  <circle cx="64" cy="64" r="24" fill="#F5D08A"/>
+  <circle cx="58" cy="58" r="10" fill="#FAE2A8" opacity="0.6"/>
 </svg>
