@@ -20,6 +20,7 @@ export interface CanvasActions {
     originClientId?: number | null,
     loginId?: string | null,
   ) => void;
+  moveArrayToClient: (srcClientId: string, arrayId: string, dstClientId: string, subMeterCount: number) => void;
   /** Look up an origin client by id — used to label moved logins
    *  ("from Marie's GMP login"). Returns null when the origin is unknown or
    *  the lookup hasn't loaded yet. */

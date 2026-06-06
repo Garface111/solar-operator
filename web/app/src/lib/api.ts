@@ -1180,6 +1180,18 @@ export async function reassignAccount(
   });
 }
 
+/** Move an array to a different client (or unclassify when client_id is null).
+ *  Re-points Array.client_id only; UtilityAccount.array_id links are unchanged.
+ *  Sub-meter arrays (multiple accounts sharing one Array) move together. */
+export async function reassignArray(
+  array_id: number,
+  client_id: number | null,
+): Promise<{ ok: true; array_id: number; client_id: number | null; prior_client_id: number | null }> {
+  return request("/v1/sandbox/array/reassign", {
+    body: { array_id, client_id },
+  });
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 
 export async function nepoolCommit(

@@ -5,6 +5,7 @@ export interface SolarArray {
   name: string;
   nepool_gis_id: string;
   mwh_per_qtr: number;
+  reassigned_at?: string | null;
 }
 
 export interface UtilityAccount {

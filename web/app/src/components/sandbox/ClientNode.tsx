@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { type NodeProps } from '@xyflow/react';
 import { useCanvasActions } from './canvasContext';
 import {
@@ -453,6 +453,23 @@ function groupAccountsByLogin(
     });
 }
 
+/** Shows "Moved just now" for up to 10 s after the server-stamped reassigned_at. */
+function MovedBadge({ reassignedAt }: { reassignedAt: string }) {
+  const [visible, setVisible] = useState(() => Date.now() - new Date(reassignedAt).getTime() < 10000);
+  useEffect(() => {
+    const age = Date.now() - new Date(reassignedAt).getTime();
+    if (age >= 10000) { setVisible(false); return; }
+    const t = setTimeout(() => setVisible(false), 10000 - age);
+    return () => clearTimeout(t);
+  }, [reassignedAt]);
+  if (!visible) return null;
+  return (
+    <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700">
+      Moved just now
+    </span>
+  );
+}
+
 function LoginGroupRow({
   clientId,
   utility,
@@ -476,9 +493,18 @@ function LoginGroupRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [draggingArrayId, setDraggingArrayId] = useState<string | null>(null);
   const th = UTILITY_THEME[utility];
   const accountCount = accounts.length;
   const arrayTotal = accounts.reduce((n, a) => n + a.arrays.length, 0);
+
+  // Count how many accounts in this login group share each array id (sub-meter detection).
+  const subMeterCounts = new Map<string, number>();
+  accounts.forEach((a) => {
+    a.arrays.forEach((ar) => {
+      subMeterCounts.set(ar.id, (subMeterCounts.get(ar.id) ?? 0) + 1);
+    });
+  });
 
   // Ref to the row body so we can use it as the drag image (so the whole
   // login row drags visually, not just the six-dot handle).
@@ -506,6 +532,22 @@ function LoginGroupRow({
     _activeDragLoginUtility = null;
     setDragging(false);
   };
+
+  // Array-level drag handlers
+  const onArrayDragStart = useCallback((e: React.DragEvent, accId: string, arrId: string, arrName: string, accNumber: string, subMeterCount: number) => {
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(
+      'application/x-so-array',
+      JSON.stringify({ srcClientId: clientId, arrayId: arrId, accountId: accId, accountNumber: accNumber, arrayName: arrName, subMeterCount }),
+    );
+    e.dataTransfer.setData('text/plain', arrName);
+    setDraggingArrayId(arrId);
+  }, [clientId]);
+
+  const onArrayDragEnd = useCallback(() => {
+    setDraggingArrayId(null);
+  }, []);
 
   // Prevent ReactFlow from starting a node drag when interacting with login rows
   const onMouseDown = (e: React.MouseEvent) => {
@@ -612,8 +654,31 @@ function LoginGroupRow({
               ? acc.arrays.map((arr) => (
                   <div
                     key={`${acc.id}-${arr.id}`}
-                    className="group/arr flex items-center gap-2 rounded-md bg-white/70 px-2 py-1.5"
+                    className={[
+                      'group/arr flex items-center gap-1.5 rounded-md bg-white/70 px-1.5 py-1.5 transition-opacity',
+                      draggingArrayId === arr.id ? 'opacity-50' : '',
+                    ].join(' ')}
                   >
+                    {/* Six-dot drag handle — only draggable surface for the array row */}
+                    <span
+                      className={`nodrag nopan shrink-0 cursor-grab active:cursor-grabbing rounded p-0.5 opacity-30 hover:opacity-70 transition-opacity ${th.rowText}`}
+                      draggable
+                      onDragStart={(e) => onArrayDragStart(e, acc.id, arr.id, arr.name, acc.account_number, subMeterCounts.get(arr.id) ?? 1)}
+                      onDragEnd={onArrayDragEnd}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      title="Drag to move this array to another client"
+                      aria-label="Drag array"
+                    >
+                      <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden>
+                        <circle cx="2" cy="2" r="1.2"/>
+                        <circle cx="8" cy="2" r="1.2"/>
+                        <circle cx="2" cy="7" r="1.2"/>
+                        <circle cx="8" cy="7" r="1.2"/>
+                        <circle cx="2" cy="12" r="1.2"/>
+                        <circle cx="8" cy="12" r="1.2"/>
+                      </svg>
+                    </span>
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${th.rowDot} opacity-60`} />
                     <span
                       className="truncate text-xs font-medium text-zinc-800"
@@ -621,6 +686,7 @@ function LoginGroupRow({
                     >
                       {arr.name}
                     </span>
+                    {arr.reassigned_at && <MovedBadge reassignedAt={arr.reassigned_at} />}
                     <button
                       type="button"
                       className={`nodrag invisible ml-auto shrink-0 rounded p-0.5 text-xs opacity-60 transition-all hover:opacity-100 group-hover/arr:visible ${th.rowText}`}

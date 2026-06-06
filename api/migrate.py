@@ -376,6 +376,15 @@ def main():
             "UPDATE utility_accounts SET canvas_pinned = FALSE WHERE canvas_pinned IS NULL"
         ))
 
+        # 2026-06-05 Array-level drag (feat/array-drag): reassignment audit timestamp.
+        # Set server-side when /v1/sandbox/array/reassign is called so the canvas
+        # can show a "Moved just now" badge for ~10s after the move.
+        if not column_exists(conn, "arrays", "reassigned_at"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN reassigned_at TIMESTAMP"
+            ))
+            print("  + arrays.reassigned_at")
+
     print("=== Migration complete ===")
 
 
