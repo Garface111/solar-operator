@@ -526,7 +526,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                     <span className="font-medium text-zinc-700">
                       {sampleClient ? `${sampleClient.split(" ")[0]}-Q-Report.xlsx` : "Q-Report.xlsx"}
                     </span>
-                    <span className="text-zinc-400">· NEPOOL-GIS workbook</span>
+                    <span className="text-zinc-400">· NEPOOL-format workbook</span>
                   </div>
                 </div>
                 </div> {/* /preview card */}

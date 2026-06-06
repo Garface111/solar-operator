@@ -433,8 +433,10 @@ def send_trial_welcome_email(
         f"<li style='margin-bottom:12px;'><strong>Add each client's NEPOOL arrays</strong> — "
         f"or sign into Green Mountain Power once and we'll auto-detect them.</li>"
         f"</ol>"
-        f"<p>If you don't add anything during the trial, your card won't be charged and "
-        f"your account stays open in standby.</p>"
+        f"<p>If you haven't added any arrays by trial end, we'll extend your trial 3 more "
+        f"days. After that, if you still have zero arrays, we apply a one-array minimum "
+        f"($15/month) plus the $250 setup fee. Cancel anytime before then to avoid any "
+        f"charge — your card stays on file until you say otherwise.</p>"
         f"<p style='margin-top:24px;color:#667;font-size:14px;'>Questions? Just reply — a real person reads every email.</p>"
         f"<p style='margin-top:24px;'>— Solar Operator</p>"
         f"</td></tr>"
@@ -452,8 +454,10 @@ def send_trial_welcome_email(
         f"for each solar subscriber you manage.\n\n"
         f"2. Add each client's NEPOOL arrays — or sign into Green Mountain Power once "
         f"and we'll auto-detect them.\n\n"
-        f"If you don't add anything during the trial, your card won't be charged and "
-        f"your account stays open in standby.\n\n"
+        f"If you haven't added any arrays by trial end, we'll extend your trial 3 more "
+        f"days. After that, if you still have zero arrays, we apply a one-array minimum "
+        f"($15/month) plus the $250 setup fee. Cancel anytime before then to avoid any "
+        f"charge — your card stays on file until you say otherwise.\n\n"
         f"Questions? Just reply — a real person reads every email.\n\n— Solar Operator"
     )
     return _send_via_resend(
@@ -463,15 +467,23 @@ def send_trial_welcome_email(
     )
 
 
-def send_cancellation_email(to: str, name: str) -> bool:
+def send_cancellation_email(to: str, name: str,
+                             cancel_date: "datetime | None" = None) -> bool:
+    from datetime import datetime, timedelta
     first = (name or "there").split()[0]
+    base = cancel_date if cancel_date is not None else datetime.utcnow()
+    purge_date = base + timedelta(days=30)
+    purge_str = purge_date.strftime(f"%B {purge_date.day}, {purge_date.year}")
     html = (f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
             f"<h2 style='color:#2e6b3a;'>Your Solar Operator subscription is canceled</h2>"
             f"<p>Hi {first},</p>"
             f"<p>Your Solar Operator subscription has been canceled. "
             f"You won't be charged again, and we'll stop sending automatic reports.</p>"
-            f"<p>Your historical data is still in our system. If you change your "
-            f"mind, sign up again any time at "
+            f"<p>Your historical data is still in our system. "
+            f"You'll have access to your account and reports for 30 days — download "
+            f"anything you need before <strong>{purge_str}</strong>. After that, your "
+            f"data is permanently deleted.</p>"
+            f"<p>If you change your mind, sign up again any time at "
             f"<a href='https://solaroperator.org/signup.html'>solaroperator.org/signup</a> — "
             f"we'll restore your existing meters automatically.</p>"
             f"<p>If this cancellation was a mistake, or you'd like to share why "
@@ -480,6 +492,9 @@ def send_cancellation_email(to: str, name: str) -> bool:
             f"<p>— Solar Operator</p></body></html>")
     text = (f"Hi {first},\n\nYour Solar Operator subscription is canceled. "
             f"We'll stop sending reports and won't charge you again.\n\n"
+            f"Your historical data is still in our system. You'll have access to your "
+            f"account and reports for 30 days — download anything you need before "
+            f"{purge_str}. After that, your data is permanently deleted.\n\n"
             f"If you change your mind, sign up at https://solaroperator.org/signup.html — "
             f"we'll restore your meters automatically.\n\n"
             f"Questions or feedback? Just reply.\n\n— Solar Operator")

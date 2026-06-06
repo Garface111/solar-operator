@@ -482,9 +482,14 @@ def set_password(body: SetPasswordBody,
 
 def _compute_all_set(db, tenant_id: str) -> bool:
     """True when the tenant has reached their onboarding array estimate with
-    at least one client and enough arrays to meet it."""
+    at least one client and enough arrays to meet it.
+
+    Legacy path: tenants who pre-date the onboarding wizard have NULL estimate.
+    For them, fire once they have at least 1 client and 1 array so the
+    AllSetCelebration isn't permanently suppressed for grandfathered operators.
+    """
     t = db.get(Tenant, tenant_id)
-    if t is None or t.onboarding_array_estimate is None:
+    if t is None:
         return False
     clients_count = db.execute(
         select(func.count()).select_from(Client).where(
@@ -500,7 +505,10 @@ def _compute_all_set(db, tenant_id: str) -> bool:
             Array.deleted_at.is_(None),
         )
     ).scalar() or 0
-    return arrays_count >= t.onboarding_array_estimate
+    if t.onboarding_array_estimate is not None:
+        return arrays_count >= t.onboarding_array_estimate
+    # Legacy: estimate is NULL — fire once at least 1 array exists
+    return arrays_count >= 1
 
 
 @router.get("/v1/account")

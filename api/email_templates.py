@@ -330,6 +330,8 @@ _TEMPLATE_SYSTEM_PROMPT = (
     "yet and suggest the closest supported tag.\n"
     "- Preserve any allowlisted {{...}} merge tags exactly — never remove, "
     "rename, or modify them.\n"
+    "- Do not change the greeting to 'Dear {{client_name}}' unless the operator "
+    "explicitly asks for formal tone.\n"
     "- The body is simple HTML: use only <p>, <br>, <a href='...'>, <b>, <em> tags.\n"
     "- Keep the professional tone appropriate for a regulated energy market.\n\n"
     "Respond ONLY with a JSON object, NO markdown fences, with this exact shape:\n"

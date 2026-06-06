@@ -393,6 +393,42 @@ def test_extension_installed_self_heals_instead_of_402(client, mocks, monkeypatc
     assert resp.json()["stage"] == "clients"
 
 
+# ─── (g) checkout session includes custom_text for pricing disclosure (#2) ─
+
+def test_checkout_session_has_custom_text(client, monkeypatch):
+    """Stripe checkout session must include non-empty custom_text so operators
+    see a pricing disclosure at the card-entry step."""
+    captured: list[dict] = []
+
+    def fake_session_create(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            url="https://checkout.stripe.test/cs_custom_text",
+            metadata=kwargs.get("metadata", {}),
+        )
+
+    monkeypatch.setattr(onboarding.stripe.checkout.Session, "create", fake_session_create)
+    monkeypatch.setattr(onboarding, "STRIPE_SECRET_KEY", "sk_test_dummy")
+    monkeypatch.setattr(onboarding, "send_welcome_email", lambda **kw: True)
+    monkeypatch.setattr(onboarding, "send_internal_alert", lambda *a, **k: True)
+
+    resp = client.post("/v1/onboarding/checkout", json={
+        "email": "ct@example.com",
+        "full_name": "Custom Text Operator",
+        "array_count": 4,
+    })
+    assert resp.status_code == 200, resp.text
+    assert captured, "stripe.checkout.Session.create was not called"
+
+    kwargs = captured[0]
+    ct = kwargs.get("custom_text")
+    assert ct, "custom_text must be set on the Stripe checkout session"
+    # after_submit.message must mention pricing
+    msg = (ct.get("after_submit") or {}).get("message", "")
+    assert msg, "custom_text.after_submit.message must be non-empty"
+    assert "$250" in msg or "250" in msg, "custom_text must mention the $250 setup fee"
+
+
 def test_extension_installed_still_402s_without_paid_session(client, mocks):
     """No session_id and still pending → the 402 guard stays intact."""
     token = _do_checkout(client, email="nopay@example.com")["onboarding_token"]

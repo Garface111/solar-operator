@@ -88,6 +88,26 @@ def test_all_set_false_when_estimate_set_but_zero_clients():
         assert _compute_all_set(db, tid) is False
 
 
+# ── legacy path (estimate IS NULL) ───────────────────────────────────────────
+
+
+def test_all_set_true_legacy_with_client_and_array():
+    """estimate=None + ≥1 client + ≥1 array → True (grandfathered tenants)."""
+    tid, _ = _make_tenant(estimate=None)
+    cid = _add_client(tid)
+    _add_array(tid, cid)
+    with SessionLocal() as db:
+        assert _compute_all_set(db, tid) is True
+
+
+def test_all_set_false_legacy_with_client_no_arrays():
+    """estimate=None + ≥1 client + 0 arrays → False (no data yet)."""
+    tid, _ = _make_tenant(estimate=None)
+    _add_client(tid)
+    with SessionLocal() as db:
+        assert _compute_all_set(db, tid) is False
+
+
 # ── GET /v1/account exposes the two new fields ────────────────────────────────
 
 
