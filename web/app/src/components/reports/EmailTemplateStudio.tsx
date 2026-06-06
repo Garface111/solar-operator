@@ -734,12 +734,6 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               >
                 <span className="text-lg leading-none">✦</span>
                 <span>Ask AI</span>
-                {/* Bobbing chevron — teases the chat input below the panel */}
-                <span className="so-ai-bob" aria-hidden>
-                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-                    <path d="M8 2 L8 12 M4 8 L8 12 L12 8" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </span>
                 {messages.length > 0 && (
                   <span className="rounded-full bg-white/25 px-1.5 py-0.5 text-[10px]">
                     {messages.length}
@@ -820,11 +814,6 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                 ) : (
                   <div className="flex items-center justify-center gap-1 text-[11px] font-medium text-primary-600">
                     <span>Ask AI</span>
-                    <span className="so-ai-bob" aria-hidden>
-                      <svg viewBox="0 0 16 16" width="11" height="11" fill="none">
-                        <path d="M8 2 L8 12 M4 8 L8 12 L12 8" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </span>
                   </div>
                 )}
               </div>
