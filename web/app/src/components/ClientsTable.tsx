@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -7,12 +8,12 @@ import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
 
-const AssignNepoolFromSpreadsheetModal = lazy(() =>
+const AssignNepoolFromSpreadsheetModal = lazyWithRetry(() =>
   import("./AssignNepoolFromSpreadsheetModal").then((m) => ({
     default: m.AssignNepoolFromSpreadsheetModal,
   })),
 );
-const ImportSpreadsheetModal = lazy(() =>
+const ImportSpreadsheetModal = lazyWithRetry(() =>
   import("./ImportSpreadsheetModal").then((m) => ({ default: m.ImportSpreadsheetModal })),
 );
 import {

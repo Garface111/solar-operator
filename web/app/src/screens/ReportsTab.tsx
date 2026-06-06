@@ -1,4 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { QuarterCard, clientDeliveryStatus } from "../components/reports/QuarterCard";
 import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
 import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
@@ -6,7 +7,7 @@ import { FailureStrip, type DeliveryFailure } from "../components/reports/Failur
 import { NextRunCard } from "../components/reports/NextRunCard";
 import { AutoReportsSettingsCard } from "../components/reports/AutoReportsSettingsCard";
 
-const EmailTemplateStudio = lazy(() =>
+const EmailTemplateStudio = lazyWithRetry(() =>
   import("../components/reports/EmailTemplateStudio").then((m) => ({
     default: m.EmailTemplateStudio,
   })),

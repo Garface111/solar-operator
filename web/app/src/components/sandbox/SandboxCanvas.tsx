@@ -1,4 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazyWithRetry } from "../../lib/lazyWithRetry";
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -36,7 +37,7 @@ import {
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
 
-const AddClientByLoginModal = lazy(() =>
+const AddClientByLoginModal = lazyWithRetry(() =>
   import('../AddClientByLoginModal').then((m) => ({ default: m.AddClientByLoginModal })),
 );
 import { CommandPalette } from './CommandPalette';

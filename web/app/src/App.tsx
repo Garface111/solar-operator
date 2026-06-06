@@ -1,4 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { lazyWithRetry } from "./lib/lazyWithRetry";
 import {
   BrowserRouter,
   Routes,
@@ -11,10 +12,10 @@ import DashboardLayout from "./screens/DashboardLayout";
 import ClientsTab from "./screens/ClientsTab";
 import { Spinner } from "./ui/Spinner";
 
-const CaptureTimeline = lazy(() => import("./components/dev/CaptureTimeline"));
+const CaptureTimeline = lazyWithRetry(() => import("./components/dev/CaptureTimeline"));
 
-const AccountTab = lazy(() => import("./screens/AccountTab"));
-const ReportsTab = lazy(() => import("./screens/ReportsTab"));
+const AccountTab = lazyWithRetry(() => import("./screens/AccountTab"));
+const ReportsTab = lazyWithRetry(() => import("./screens/ReportsTab"));
 import { useToast } from "./ui/Toast";
 import {
   getSession,

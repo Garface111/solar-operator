@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
@@ -9,18 +10,18 @@ import { ClientsTable } from "./ClientsTable";
 import { AddClientModal } from "./AddClientModal";
 import { CaptureListener } from "./CaptureListener";
 
-const AddClientByLoginModal = lazy(() =>
+const AddClientByLoginModal = lazyWithRetry(() =>
   import("./AddClientByLoginModal").then((m) => ({ default: m.AddClientByLoginModal })),
 );
-const ImportSpreadsheetModal = lazy(() =>
+const ImportSpreadsheetModal = lazyWithRetry(() =>
   import("./ImportSpreadsheetModal").then((m) => ({ default: m.ImportSpreadsheetModal })),
 );
-const AssignNepoolFromSpreadsheetModal = lazy(() =>
+const AssignNepoolFromSpreadsheetModal = lazyWithRetry(() =>
   import("./AssignNepoolFromSpreadsheetModal").then((m) => ({
     default: m.AssignNepoolFromSpreadsheetModal,
   })),
 );
-const CaptureCeremony = lazy(() =>
+const CaptureCeremony = lazyWithRetry(() =>
   import("./CaptureCeremony").then((m) => ({ default: m.CaptureCeremony })),
 );
 import {
