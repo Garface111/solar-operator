@@ -39,9 +39,16 @@ def _account(number: str, nickname: str) -> dict:
 
 
 def _gmp_payload(email: str, accounts: list[dict]) -> dict:
+    # Holder name derived from the email so each captured login gets a
+    # distinct Client.name under the post-identity-master smart-name rules.
+    # Pre-identity-master this could safely be a constant; the new naming
+    # logic uses holder name as the top-priority signal and the unique
+    # constraint on (tenant_id, client.name) trips when it's reused.
+    local = email.split("@")[0]
+    holder = local.replace(".", " ").replace("_", " ").title() + " (test)"
     return {
         "provider": "gmp",
-        "user": {"email": email, "fullName": "Test User", "username": email},
+        "user": {"email": email, "fullName": holder, "username": email},
         "auth": {"apiToken": "jwt_" + secrets.token_hex(6)},
         "accounts": accounts,
     }
