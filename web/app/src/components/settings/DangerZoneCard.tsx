@@ -36,7 +36,7 @@ export function DangerZoneCard({ onCancelled }: Props) {
         <div className="h-px flex-1 bg-zinc-200" />
       </div>
 
-      <div className="rounded-xl border border-red-200 bg-white p-6">
+      <div className="rounded-2xl border border-red-200 bg-white p-6">
         <h2 className="mb-1 text-base font-semibold text-zinc-800">Cancel trial</h2>
         <p className="mb-4 text-sm text-zinc-500">
           You won&apos;t be charged. Your data will be removed. This can&apos;t be undone.
