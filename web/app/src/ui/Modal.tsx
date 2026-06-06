@@ -37,14 +37,17 @@ export function Modal({ open, onClose, title, children, footer, hideCloseButton 
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="relative w-full max-w-md rounded-xl border border-zinc-200 bg-white p-6 shadow-xl"
+        // Flex column + capped height so a long body scrolls *inside* the
+        // dialog instead of growing it past the viewport (which would push the
+        // footer buttons off-screen). py-8 backdrop = 4rem of vertical inset.
+        className="relative flex max-h-[calc(100vh-4rem)] w-full max-w-md flex-col rounded-xl border border-zinc-200 bg-white shadow-xl"
       >
         {!hideCloseButton && (
           <button
             type="button"
             onClick={onClose}
             aria-label="Close dialog"
-            className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+            className="absolute right-3 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
           >
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
               <path
@@ -56,13 +59,14 @@ export function Modal({ open, onClose, title, children, footer, hideCloseButton 
             </svg>
           </button>
         )}
-        <h2 className="pr-10 text-lg font-semibold tracking-tight text-zinc-900">
+        <h2 className="shrink-0 px-6 pt-6 pr-12 text-lg font-semibold tracking-tight text-zinc-900">
           {title}
         </h2>
-        <div className="mt-4 text-sm text-zinc-600">{children}</div>
+        <div className="mt-4 min-h-0 flex-1 overflow-y-auto px-6 text-sm text-zinc-600">{children}</div>
         {footer && (
-          <div className="mt-6 flex justify-end gap-2">{footer}</div>
+          <div className="mt-4 flex shrink-0 justify-end gap-2 border-t border-zinc-100 px-6 pb-6 pt-4">{footer}</div>
         )}
+        {!footer && <div className="pb-6" />}
       </div>
     </div>
   );

@@ -44,6 +44,8 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
   const [adding, setAdding] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Anchor for shift-click range selection — the last row toggled without shift.
+  const [lastClickedId, setLastClickedId] = useState<number | null>(null);
   const [bulkConfirm, setBulkConfirm] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
@@ -77,6 +79,27 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId, refreshSignal]);
 
+  // Select-mode keyboard shortcuts: "a"/Ctrl+Cmd+a → select all, Esc → cancel.
+  // Skipped while typing in a field so it doesn't hijack editing.
+  useEffect(() => {
+    if (!selectMode) return;
+    function onKey(e: KeyboardEvent) {
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable) return;
+      if (e.key === "Escape") {
+        if (bulkConfirm) return; // let the open modal handle its own Escape
+        exitSelectMode();
+      } else if (e.key === "a" || e.key === "A") {
+        e.preventDefault();
+        setSelectedIds(new Set((arrays ?? []).map((a) => a.id)));
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectMode, arrays, bulkConfirm]);
+
   function replaceArray(updated: ArrayRowT) {
     setArrays((rows) =>
       rows ? rows.map((a) => (a.id === updated.id ? updated : a)) : rows,
@@ -102,17 +125,46 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
     window.dispatchEvent(new CustomEvent("so:arrays-changed"));
   }
 
-  function toggleSelect(id: number) {
+  function toggleSelect(id: number, event?: React.MouseEvent) {
+    const shift = !!event?.shiftKey;
     setSelectedIds((s) => {
       const n = new Set(s);
+      const rows = arrays ?? [];
+      // Shift-click: select/deselect the whole range between the anchor row
+      // and the clicked row. The range adopts whatever state the clicked row
+      // is heading toward (select if it was unselected, else deselect).
+      if (shift && lastClickedId !== null) {
+        const startIdx = rows.findIndex((a) => a.id === lastClickedId);
+        const endIdx = rows.findIndex((a) => a.id === id);
+        if (startIdx !== -1 && endIdx !== -1) {
+          const willSelect = !n.has(id);
+          const [lo, hi] = startIdx <= endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+          for (let i = lo; i <= hi; i++) {
+            if (willSelect) n.add(rows[i].id); else n.delete(rows[i].id);
+          }
+          return n;
+        }
+      }
       if (n.has(id)) n.delete(id); else n.add(id);
       return n;
     });
+    setLastClickedId(id);
+  }
+
+  // "Select all" targets the rendered (visible) rows only — defensive against a
+  // future filter/sort, where hidden rows shouldn't be swept in.
+  const visibleArrays = arrays ?? [];
+  const allVisibleSelected =
+    visibleArrays.length > 0 && visibleArrays.every((a) => selectedIds.has(a.id));
+
+  function selectAllVisible() {
+    setSelectedIds(new Set(visibleArrays.map((a) => a.id)));
   }
 
   function exitSelectMode() {
     setSelectMode(false);
     setSelectedIds(new Set());
+    setLastClickedId(null);
   }
 
   async function handleBulkDelete() {
@@ -159,14 +211,25 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
           >
             {selectMode ? "Cancel" : "Select"}
           </button>
-          {selectMode && selectedIds.size > 0 && (
-            <button
-              type="button"
-              onClick={() => setBulkConfirm(true)}
-              className="rounded border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus:outline-none"
-            >
-              Delete {selectedIds.size} array{selectedIds.size === 1 ? "" : "s"}
-            </button>
+          {selectMode && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => (allVisibleSelected ? setSelectedIds(new Set()) : selectAllVisible())}
+                className="rounded border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-300 focus:outline-none"
+              >
+                {allVisibleSelected ? "Select none" : `Select all (${visibleArrays.length})`}
+              </button>
+              {selectedIds.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setBulkConfirm(true)}
+                  className="rounded border border-red-200 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 focus:outline-none"
+                >
+                  Delete {selectedIds.size} array{selectedIds.size === 1 ? "" : "s"}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -225,6 +288,33 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
         </button>
       )}
 
+      {/* Floating bottom action bar — mirrors the top bar so you don't have to
+          scroll back up after selecting the last row. Sticky within the list on
+          desktop; fixed to the viewport bottom on mobile. */}
+      {selectMode && selectedIds.size > 0 && (
+        <div className="sticky bottom-2 z-30 mt-3 flex items-center justify-between rounded-lg border border-red-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur-sm max-sm:fixed max-sm:inset-x-3 max-sm:bottom-3">
+          <span className="text-xs font-medium text-zinc-700">
+            {selectedIds.size} selected
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={exitSelectMode}
+              className="rounded border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-300 focus:outline-none"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => setBulkConfirm(true)}
+              className="rounded border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 focus:outline-none"
+            >
+              Delete {selectedIds.size} array{selectedIds.size === 1 ? "" : "s"}
+            </button>
+          </div>
+        </div>
+      )}
+
       <Modal
         open={bulkConfirm}
         onClose={() => !bulkDeleting && setBulkConfirm(false)}
@@ -250,11 +340,20 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
           <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
         </p>
         {arrays && selectedIds.size > 0 && (
-          <ul className="mt-2 space-y-0.5 text-sm text-zinc-700">
-            {arrays.filter((a) => selectedIds.has(a.id)).map((a) => (
-              <li key={a.id} className="truncate">• {a.name}</li>
-            ))}
-          </ul>
+          selectedIds.size > 20 ? (
+            // Compact 3-column grid so 30+ names stay visible without scrolling.
+            <ul className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-xs text-zinc-700">
+              {arrays.filter((a) => selectedIds.has(a.id)).map((a) => (
+                <li key={a.id} className="truncate" title={a.name}>• {a.name}</li>
+              ))}
+            </ul>
+          ) : (
+            <ul className="mt-2 space-y-0.5 text-sm text-zinc-700">
+              {arrays.filter((a) => selectedIds.has(a.id)).map((a) => (
+                <li key={a.id} className="truncate">• {a.name}</li>
+              ))}
+            </ul>
+          )
         )}
       </Modal>
     </div>
@@ -278,7 +377,7 @@ function ArrayRow({
   onDelete: (id: number, token: string, name: string) => void;
   selectable?: boolean;
   selected?: boolean;
-  onSelect?: (id: number) => void;
+  onSelect?: (id: number, event?: React.MouseEvent) => void;
 }) {
   const toast = useToast();
   const [expanded, setExpanded] = useState(false);
@@ -411,7 +510,10 @@ function ArrayRow({
             <input
               type="checkbox"
               checked={!!selected}
-              onChange={() => onSelect?.(array.id)}
+              // onClick (not onChange) carries shiftKey for range selection;
+              // onChange kept as a no-op so React stays happy with a controlled box.
+              onChange={() => {}}
+              onClick={(e) => onSelect?.(array.id, e)}
               aria-label={`Select ${array.name}`}
               className="h-4 w-4 accent-primary-500"
             />
