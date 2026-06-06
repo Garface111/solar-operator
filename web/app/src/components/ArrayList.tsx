@@ -219,6 +219,17 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
             >
               {selectMode ? "Cancel" : "Select"}
             </button>
+            {selectMode && visibleArrays.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  allVisibleSelected ? setSelectedIds(new Set()) : selectAllVisible()
+                }
+                className="rounded border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none"
+              >
+                {allVisibleSelected ? "Select none" : `Select all (${visibleArrays.length})`}
+              </button>
+            )}
             {selectMode && selectedIds.size > 0 && (
               <button
                 type="button"
