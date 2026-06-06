@@ -49,12 +49,7 @@ export function ClientsSection({ expandClientId }: Props) {
   const [assigningNepool, setAssigningNepool] = useState(false);
   const [missingNepoolCount, setMissingNepoolCount] = useState(0);
   // The NEPOOL banner is loud enough (amber, full-width, top of section) to
-  // be discovered naturally. We intentionally do NOT autoscroll to it — fresh
-  // captures should let the user dwell on the new client cards in the canvas
-  // above (fill in emails, rename, group logins), THEN encounter NEPOOL when
-  // they scroll down. The previous autoscroll yanked the page mid-onboarding
-  // and felt jarring.
-  const nepoolBannerRef = useRef<HTMLDivElement | null>(null);
+  // be discovered naturally — no autoscroll needed.
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
@@ -285,7 +280,6 @@ export function ClientsSection({ expandClientId }: Props) {
 
       {missingNepoolCount > 0 && (
         <div
-          ref={nepoolBannerRef}
           data-walkthrough="nepool-banner"
           className="mb-4 rounded-2xl border-2 border-amber-300 bg-gradient-to-br from-amber-50 via-amber-50/80 to-white px-5 py-4 shadow-sm"
         >
