@@ -23,6 +23,7 @@ are parsed with the stdlib `csv` module.
 """
 from __future__ import annotations
 
+import difflib
 import io
 import os
 import csv
@@ -62,7 +63,7 @@ _EX2 = json.dumps({"operators": [EXAMPLE_RESIDENTIAL_PORTFOLIO]}, separators=(",
 EXTRACTION_PROMPT = (
     "You are a smart data extractor reading a solar operator's client roster spreadsheet.\n\n"
     "TASK: Extract every client, their utility logins, accounts, and arrays into this EXACT nested JSON hierarchy:\n"
-    '{"operators":[{"name":"<operator>","clients":[{"name":"<client>","logins":[{"utility":"gmp|vec|null","login_email":"<email or null>","accounts":[{"account_number":"<# or null>","arrays":[{"name":"<array>","nepool_gis_id":"<digits or null>","notes":"<notes or null>"}]}]}]}]}]}\n\n'
+    '{"operators":[{"name":"<operator>","clients":[{"name":"<client>","logins":[{"utility":"gmp|vec|null","login_email":"<email or null>","accounts":[{"account_number":"<# or null>","arrays":[{"name":"<array>","nepool_gis_id":"<digits or null>","notes":"<notes or null>","confidence":0.95}]}]}]}]}]}\n\n'
     "SCANNING RULES — follow every one:\n"
     "- Scan EVERY sheet, every row, every column. Do not stop at the first sheet.\n"
     "- NEPOOL-GIS IDs are 4-6 digit numbers. They may appear: inline as 'Array Name (12345)', in a separate column labeled NEPOOL/GIS/Asset ID, in footnotes, or in sheet titles.\n"
@@ -73,6 +74,8 @@ EXTRACTION_PROMPT = (
     "- If a client has multiple utility logins (e.g. personal + spouse + business), list each as a separate login object.\n\n"
     f"EXAMPLE 1 (community solar, multiple clients with multiple accounts):\n{_EX1}\n\n"
     f"EXAMPLE 2 (residential portfolio, one client per login):\n{_EX2}\n\n"
+    "- For each array, add a 'confidence' field (0.0–1.0): your certainty the data is correctly extracted. "
+    "Use 0.95+ for clearly labeled values, 0.7–0.94 for minor ambiguity, below 0.7 for guessed or inferred values.\n\n"
     "Return ONLY valid JSON. No markdown fences, no prose. Set unknown fields to null."
 )
 
@@ -87,6 +90,9 @@ class IngestRow(BaseModel):
     nepool_gis_id: Optional[str] = None
     gmp_account_number: Optional[str] = None
     notes: Optional[str] = None
+    # "skip" = skip this row entirely; "overwrite"/"new" = proceed normally.
+    # Defaults to "new" so existing callers that omit the field keep working.
+    collision_action: Optional[str] = "new"
 
 
 class CommitBody(BaseModel):
@@ -323,12 +329,21 @@ def _flatten_hierarchy_to_rows(data: dict) -> list[dict]:
                         array_name = (array.get("name") or "").strip() or None
                         if not array_name:
                             continue
+                        # Extract per-row confidence (added to prompt schema).
+                        conf_raw = array.get("confidence")
+                        try:
+                            conf: Optional[float] = float(conf_raw) if conf_raw is not None else None
+                            if conf is not None:
+                                conf = max(0.0, min(1.0, conf))
+                        except (TypeError, ValueError):
+                            conf = None
                         rows.append({
                             "operator_name": client_name,
                             "array_name": array_name,
                             "nepool_gis_id": (array.get("nepool_gis_id") or None),
                             "gmp_account_number": gmp_acct,
                             "notes": (array.get("notes") or None),
+                            "_confidence": conf,
                         })
     return rows
 
@@ -430,6 +445,11 @@ def _heuristic_extract(text: str) -> list[dict]:
     return out
 
 
+# Internal keys that must survive _normalize so the preview and commit
+# endpoints can access them after normalization.
+_PASSTHROUGH_KEYS = frozenset({"_confidence", "collision_action"})
+
+
 def _normalize(rows: list[dict]) -> list[dict]:
     """Coerce LLM/heuristic output into clean {FIELDS} dicts."""
     clean: list[dict] = []
@@ -444,10 +464,42 @@ def _normalize(rows: list[dict]) -> list[dict]:
             else:
                 s = str(v).strip()
                 entry[f] = s or None
+        # Preserve passthrough keys so callers can read them post-normalization.
+        for key in _PASSTHROUGH_KEYS:
+            if key in r:
+                entry[key] = r[key]
         # Drop rows with nothing meaningful (no operator AND no array).
         if entry["operator_name"] or entry["array_name"]:
             clean.append(entry)
     return clean
+
+
+def _fuzzy_match_client(name: str, clients: list) -> Optional[dict]:
+    """Fuzzy-match an operator name against existing Client ORM objects.
+
+    Returns a client_match dict or None. Exact match takes priority."""
+    if not name:
+        return None
+    name_lower = name.strip().lower()
+    # Exact match first.
+    for c in clients:
+        if c.name.strip().lower() == name_lower:
+            return {"client_id": c.id, "client_name": c.name, "match_kind": "exact"}
+    # Fuzzy: SequenceMatcher >= 0.85 is the threshold specified in the brief.
+    best_ratio = 0.0
+    best_client = None
+    for c in clients:
+        ratio = difflib.SequenceMatcher(None, name_lower, c.name.strip().lower()).ratio()
+        if ratio >= 0.85 and ratio > best_ratio:
+            best_ratio = ratio
+            best_client = c
+    if best_client is not None:
+        return {
+            "client_id": best_client.id,
+            "client_name": best_client.name,
+            "match_kind": "fuzzy",
+        }
+    return None
 
 
 # ─── endpoints ─────────────────────────────────────────────────────────────
@@ -504,36 +556,57 @@ async def ingest_preview(
 
     arrays = _normalize(rows)
 
-    # ── Collision detection: flag rows whose operator/array name matches an
-    # existing (non-deleted) client or array in this tenant's data.
+    # ── Provenance + collision computation ─────────────────────────────────
+    # Single DB session: pull clients + arrays for both the old collision
+    # field and the new per-row provenance / NEPOOL collision data.
+    from sqlalchemy import and_ as _and
     with SessionLocal() as db:
-        existing_clients = {
-            c.name.strip().lower()
-            for c in db.execute(
-                select(Client).where(
-                    Client.tenant_id == t.id,
-                    Client.deleted_at.is_(None),
-                )
-            ).scalars().all()
-        }
-        existing_arrays = {
-            a.name.strip().lower()
-            for a in db.execute(
-                select(Array).where(
-                    Array.tenant_id == t.id,
-                    Array.deleted_at.is_(None),
-                )
-            ).scalars().all()
-        }
+        existing_client_objs = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalars().all()
+
+        # Join arrays → clients so we can include client_name in nepool_collision.
+        arr_with_clients = db.execute(
+            select(Array, Client.name.label("c_name"))
+            .outerjoin(
+                Client,
+                _and(Array.client_id == Client.id, Client.deleted_at.is_(None)),
+            )
+            .where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+            )
+        ).all()
+
+    # Build lookup sets / maps.
+    existing_clients_lower = {c.name.strip().lower() for c in existing_client_objs}
+    existing_arrays_lower = {arr.name.strip().lower() for arr, _ in arr_with_clients}
+    nepool_map: dict[str, dict] = {}
+    for arr, c_name in arr_with_clients:
+        nid = (arr.nepool_gis_id or "").strip()
+        if nid:
+            nepool_map[nid] = {
+                "existing_array_id": arr.id,
+                "existing_array_name": arr.name,
+                "existing_client_name": c_name or "Unknown",
+            }
+
+    nepool_collision_count = 0
+    client_fuzzy_count = 0
+    warnings: list[dict] = []
 
     for row in arrays:
+        # ── Old collision field (backwards compat) ──────────────────────────
         client_hit = bool(
             row.get("operator_name")
-            and (row["operator_name"] or "").strip().lower() in existing_clients
+            and (row["operator_name"] or "").strip().lower() in existing_clients_lower
         )
         array_hit = bool(
             row.get("array_name")
-            and (row["array_name"] or "").strip().lower() in existing_arrays
+            and (row["array_name"] or "").strip().lower() in existing_arrays_lower
         )
         if client_hit and array_hit:
             row["collision"] = "both"
@@ -544,6 +617,84 @@ async def ingest_preview(
         else:
             row["collision"] = None
 
+        # ── Per-row confidence (LLM only) ───────────────────────────────────
+        row_confidence: Optional[float] = None
+        if source == "llm":
+            raw_conf = row.pop("_confidence", None)
+            if raw_conf is not None:
+                row_confidence = float(raw_conf)
+            else:
+                row_confidence = 0.85  # backfill for rows from old prompt schema
+        else:
+            row.pop("_confidence", None)  # remove internal key regardless
+
+        # ── Client match (fuzzy) ────────────────────────────────────────────
+        client_match = None
+        if row.get("operator_name"):
+            client_match = _fuzzy_match_client(row["operator_name"], existing_client_objs)
+            if client_match and client_match["match_kind"] == "fuzzy":
+                client_fuzzy_count += 1
+
+        # ── NEPOOL collision ────────────────────────────────────────────────
+        nepool_collision = None
+        nid = (row.get("nepool_gis_id") or "").strip()
+        if nid and nid in nepool_map:
+            nepool_collision = nepool_map[nid]
+            nepool_collision_count += 1
+
+        row["provenance"] = {
+            "source": source,
+            "confidence": row_confidence,
+            "client_match": client_match,
+            "nepool_collision": nepool_collision,
+        }
+
+    # ── Top-level warnings ──────────────────────────────────────────────────
+    if not arrays:
+        warnings.append({
+            "kind": "empty_file",
+            "count": 0,
+            "message": (
+                "We couldn't find any arrays in this file. Try a different file, "
+                "paste rows manually, or contact admin@solaroperator.org if this looks wrong."
+            ),
+        })
+    else:
+        if source == "llm":
+            low_conf = sum(
+                1 for r in arrays
+                if (r.get("provenance") or {}).get("confidence") is not None
+                and r["provenance"]["confidence"] < 0.85
+            )
+            if low_conf > 0:
+                warnings.append({
+                    "kind": "low_confidence_rows",
+                    "count": low_conf,
+                    "message": (
+                        f"{low_conf} row{'s' if low_conf != 1 else ''} had low AI confidence "
+                        "— review carefully before saving."
+                    ),
+                })
+        if client_fuzzy_count > 0:
+            warnings.append({
+                "kind": "client_collision",
+                "count": client_fuzzy_count,
+                "message": (
+                    f"{client_fuzzy_count} row{'s' if client_fuzzy_count != 1 else ''} "
+                    "have client names similar (but not identical) to existing clients "
+                    "— review highlighted rows."
+                ),
+            })
+        if nepool_collision_count > 0:
+            warnings.append({
+                "kind": "nepool_collision",
+                "count": nepool_collision_count,
+                "message": (
+                    f"{nepool_collision_count} NEPOOL ID{'s' if nepool_collision_count != 1 else ''} "
+                    "already exist in your account — choose Skip, Overwrite, or New per row."
+                ),
+            })
+
     return {
         "ok": True,
         "source": source,
@@ -551,6 +702,7 @@ async def ingest_preview(
         "arrays": arrays,
         "imported_logins": imported_logins,
         "imported_clients": imported_clients,
+        "warnings": warnings,
     }
 
 
@@ -572,7 +724,7 @@ def ingest_commit(
             400, f"Too many rows ({len(rows)}). Import at most {MAX_COMMIT_ROWS} at a time."
         )
 
-    clients_created = arrays_created = accounts_created = 0
+    clients_created = arrays_created = accounts_created = skipped_count = 0
     # Within-batch caches so two rows for the same operator don't both try to
     # create the client (and so we don't re-query each row).
     client_cache: dict[str, Client] = {}
@@ -613,6 +765,12 @@ def ingest_commit(
             return c
 
         for r in rows:
+            # collision_action="skip" means the user explicitly chose to skip
+            # this row (e.g. for a NEPOOL collision they don't want to resolve).
+            if (r.get("collision_action") or "new") == "skip":
+                skipped_count += 1
+                continue
+
             operator = r["operator_name"] or "Unassigned"
             array_name = r["array_name"]
             if not array_name:
@@ -679,4 +837,5 @@ def ingest_commit(
         "clients_created": clients_created,
         "arrays_created": arrays_created,
         "accounts_created": accounts_created,
+        "skipped_count": skipped_count,
     }
