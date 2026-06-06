@@ -49,12 +49,20 @@ export function ClientsSection({ expandClientId }: Props) {
   const [assigningNepool, setAssigningNepool] = useState(false);
   const [missingNepoolCount, setMissingNepoolCount] = useState(0);
   // One-shot autoscroll: when the missing-NEPOOL count transitions from
-  // 0 → positive (e.g. operator just captured a login with un-mapped arrays),
-  // gently bring the amber "Step 2" banner into view so they see the next
-  // action instead of staring at a populated canvas wondering what to do.
+  // 0 → positive AFTER the first data load (e.g. operator just captured a
+  // login with un-mapped arrays), gently bring the amber "Step 2" banner
+  // into view so they see the next action. Suppressed on initial mount so
+  // returning users land on their client list, not the NEPOOL banner.
   const prevMissingRef = useRef<number>(0);
+  const hasInitializedRef = useRef<boolean>(false);
   const nepoolBannerRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
+    if (!hasInitializedRef.current) {
+      // First arrival of a real count — seed the baseline, don't scroll.
+      hasInitializedRef.current = true;
+      prevMissingRef.current = missingNepoolCount;
+      return;
+    }
     if (prevMissingRef.current === 0 && missingNepoolCount > 0) {
       // Tiny delay so the banner has rendered after the count update.
       setTimeout(() => {
