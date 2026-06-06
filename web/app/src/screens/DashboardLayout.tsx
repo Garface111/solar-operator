@@ -91,8 +91,16 @@ export default function DashboardLayout({ onSignOut }: Props) {
       /* ignore corrupt storage */
     }
   }, [visitKey]);
-  // Mark the current tab as visited any time the route changes.
+  // Scroll to top on every tab change so users always land on the canvas,
+  // not wherever they were scrolled the last time they visited that tab.
+  // history.scrollRestoration = 'manual' (set in App.tsx) suppresses the
+  // browser's own restore; this effect is the explicit replacement.
   const location = useLocation();
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [location.pathname]);
+
+  // Mark the current tab as visited any time the route changes.
   useEffect(() => {
     if (!visitKey) return;
     const path = location.pathname;
