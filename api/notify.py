@@ -364,6 +364,105 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
     )
 
 
+def send_trial_charge_failed_email(
+    to: str,
+    name: str,
+    dashboard_url: str = "https://solaroperator.org/accounts",
+) -> bool:
+    """Notify operator their card was declined when we tried to activate their
+    subscription at trial end. Different from send_payment_failed_email —
+    no retry timeline, and the context is the trial-end charge specifically."""
+    first = (name or "there").split()[0]
+    html = (
+        f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;"
+        f"max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"
+        f"<h2 style='color:#a64a1f;'>Card declined when activating your Solar Operator subscription</h2>"
+        f"<p>Hi {first},</p>"
+        f"<p>Your 14-day free trial just ended, and we tried to charge the card you saved at signup "
+        f"— but it was declined.</p>"
+        f"<p>Reports stay paused until your card is updated.</p>"
+        f"<p>To get back up and running, please update your payment method at "
+        f"<a href='{dashboard_url}'>your Solar Operator dashboard</a> — "
+        f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
+        f"<p>Questions or need help? Just reply.</p>"
+        f"<p>— Solar Operator</p></body></html>"
+    )
+    text = (
+        f"Hi {first},\n\n"
+        f"Your 14-day free trial just ended, and we tried to charge the card you saved at signup "
+        f"— but it was declined.\n\n"
+        f"Reports stay paused until your card is updated.\n\n"
+        f"Update your payment method at {dashboard_url} — sign in, click Manage billing.\n\n"
+        f"Questions or need help? Just reply.\n\n— Solar Operator"
+    )
+    return _send_via_resend(
+        to=to,
+        subject="Card declined when activating your Solar Operator subscription",
+        html=html, text=text,
+    )
+
+
+def send_trial_welcome_email(
+    to: str,
+    name: str,
+    trial_end_iso_date: str,
+    dashboard_url: str = "https://solaroperator.org/accounts",
+) -> bool:
+    """Welcome email sent immediately after onboarding completes. Explains the
+    14-day trial and primes the operator to add clients and arrays."""
+    first = (name or "there").split()[0]
+    html = (
+        f"<!DOCTYPE html><html><body style='margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;"
+        f"background:#f4f6f4;padding:30px 0;color:#1a2a1f;'>"
+        f"<table cellpadding='0' cellspacing='0' border='0' width='100%'><tr><td align='center'>"
+        f"<table cellpadding='0' cellspacing='0' border='0' width='560' "
+        f"style='max-width:560px;background:white;border-radius:12px;overflow:hidden;'>"
+        f"<tr><td style='background:#2e6b3a;padding:28px 32px;color:white;'>"
+        f"<div style='font-size:22px;font-weight:700;'>Solar Operator</div>"
+        f"<div style='font-size:14px;color:#cfe4d3;margin-top:4px;'>Welcome — your 14-day trial has started</div>"
+        f"</td></tr>"
+        f"<tr><td style='padding:32px;font-size:15px;line-height:1.6;'>"
+        f"<p>Hi {first},</p>"
+        f"<p>You're all signed up. Your card won't be charged until <strong>{trial_end_iso_date}</strong> "
+        f"— that's 14 days from today.</p>"
+        f"<p>Two things to do while the trial runs so you're ready when reports start going out:</p>"
+        f"<ol style='padding-left:20px;'>"
+        f"<li style='margin-bottom:12px;'><strong>Add your clients</strong> — "
+        f"<a href='{dashboard_url}' style='color:#2e6b3a;'>open your dashboard</a> "
+        f"and create a client for each solar subscriber you manage.</li>"
+        f"<li style='margin-bottom:12px;'><strong>Add each client's NEPOOL arrays</strong> — "
+        f"or sign into Green Mountain Power once and we'll auto-detect them.</li>"
+        f"</ol>"
+        f"<p>If you don't add anything during the trial, your card won't be charged and "
+        f"your account stays open in standby.</p>"
+        f"<p style='margin-top:24px;color:#667;font-size:14px;'>Questions? Just reply — a real person reads every email.</p>"
+        f"<p style='margin-top:24px;'>— Solar Operator</p>"
+        f"</td></tr>"
+        f"<tr><td style='background:#1f4e2a;padding:14px 32px;font-size:11px;color:#cfe4d3;text-align:center;'>"
+        f"Solar Operator · solaroperator.org"
+        f"</td></tr>"
+        f"</table></td></tr></table></body></html>"
+    )
+    text = (
+        f"Hi {first},\n\n"
+        f"You're all signed up. Your card won't be charged until {trial_end_iso_date} "
+        f"— that's 14 days from today.\n\n"
+        f"Two things to do while the trial runs so you're ready when reports start going out:\n\n"
+        f"1. Add your clients — open your dashboard at {dashboard_url} and create a client "
+        f"for each solar subscriber you manage.\n\n"
+        f"2. Add each client's NEPOOL arrays — or sign into Green Mountain Power once "
+        f"and we'll auto-detect them.\n\n"
+        f"If you don't add anything during the trial, your card won't be charged and "
+        f"your account stays open in standby.\n\n"
+        f"Questions? Just reply — a real person reads every email.\n\n— Solar Operator"
+    )
+    return _send_via_resend(
+        to=to,
+        subject="Welcome to Solar Operator — your 14-day trial has started",
+        html=html, text=text,
+    )
+
+
 def send_cancellation_email(to: str, name: str) -> bool:
     first = (name or "there").split()[0]
     html = (f"<!DOCTYPE html><html><body style='font-family:-apple-system,sans-serif;max-width:560px;margin:30px auto;padding:0 20px;color:#1a2a1f;'>"

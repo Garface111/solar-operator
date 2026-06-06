@@ -25,6 +25,7 @@ from .models import Tenant, Client, Array, Job, UtilitySession, now
 from .notify import (
     send_add_first_array_email,
     send_trial_charged_email,
+    send_trial_charge_failed_email,
     send_internal_alert,
     send_gmp_reauth_needed_email,
 )
@@ -208,6 +209,11 @@ def finalize_expired_trials():
                     f"Arrays: {array_count}, pm: {t.stripe_payment_method_id}\n"
                     f"Error: {e}\nManual intervention needed."
                 )
+                try:
+                    send_trial_charge_failed_email(
+                        to=t.contact_email, name=t.name)
+                except Exception as mail_err:
+                    logger.warning("send_trial_charge_failed_email failed: %s", mail_err)
 
 
 def refresh_expiring_gmp_tokens() -> dict:
