@@ -188,19 +188,10 @@ function MoreMenu({
       </button>
       {open && (
         <div className="absolute right-0 top-7 z-30 min-w-[148px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onDownload();
-            }}
-            disabled={downloading}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
-          >
-            {downloading && <Spinner className="h-3 w-3" />}
-            Download .xlsx
-          </button>
+          {/* Delete on top per Bruce's June 5 meeting note — the destructive
+              action is the most likely one operators reach for from the
+              collapsed row (oops, that's a dupe), so put it where the
+              cursor is already heading. Download stays available below. */}
           {client.active && (
             <button
               type="button"
@@ -214,6 +205,19 @@ function MoreMenu({
               Delete client
             </button>
           )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+              onDownload();
+            }}
+            disabled={downloading}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+          >
+            {downloading && <Spinner className="h-3 w-3" />}
+            Download .xlsx
+          </button>
         </div>
       )}
     </div>

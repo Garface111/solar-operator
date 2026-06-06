@@ -67,6 +67,27 @@ function deliveryStatus(
   };
 }
 
+// Human-readable label for the report cadence enum stored on the client.
+// Surfaced next to the "Email it to me / Download" actions so the operator
+// always knows when the live version of this report goes out — Bruce
+// flagged that this was buried in settings (June 5 meeting note).
+function labelForFrequency(f: string): string {
+  switch (f) {
+    case "monthly":
+      return "every month";
+    case "quarterly":
+      return "every quarter";
+    case "annually":
+    case "yearly":
+      return "once a year";
+    case "manual":
+    case "off":
+      return "manually only — no auto-send";
+    default:
+      return `every ${f}`;
+  }
+}
+
 interface Props {
   client: ClientRow;
   operatorEmail: string | null;
@@ -527,6 +548,16 @@ export function ClientCard({
             </h4>
             <p className="mt-1 text-xs text-zinc-600">
               Preview what you&apos;ll send {client.name} — without contacting them.
+              {" "}
+              <span className="text-zinc-500">
+                Auto-sends{" "}
+                <span className="font-medium text-zinc-700">
+                  {client.report_frequency
+                    ? labelForFrequency(client.report_frequency)
+                    : "on your account schedule"}
+                </span>
+                .
+              </span>
             </p>
             <div className="mt-2 flex flex-wrap gap-2">
               <Button
