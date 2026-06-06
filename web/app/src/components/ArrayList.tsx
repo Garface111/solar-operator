@@ -287,6 +287,10 @@ function ArrayRow({
   async function save(patch: Partial<ArrayRowT>) {
     const updated = await updateArray(clientId, array.id, patch as any);
     onChange(updated);
+    // Bruce Jun 6: inline NEPOOL-ID save didn't clear the "Add NEPOOL ID" banner
+    // until refresh. ClientsSection listens for so:arrays-changed to refetch
+    // /nepool-stats; bulk-delete + merge + spreadsheet-assign already fire it.
+    window.dispatchEvent(new CustomEvent("so:arrays-changed"));
   }
 
   async function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
