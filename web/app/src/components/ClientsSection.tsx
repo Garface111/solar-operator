@@ -28,6 +28,7 @@ import {
   listClients,
   bulkDeleteClients,
   undoDelete,
+  undoMerge,
   getNepoolStats,
 } from "../lib/api";
 import { type PollerHandle, pollUntilChanged } from "../lib/poller";
@@ -63,13 +64,17 @@ export function ClientsSection({ expandClientId }: Props) {
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
   // Undo bar state
-  const [undoPending, setUndoPending] = useState<{ token: string; message: string } | null>(null);
+  const [undoPending, setUndoPending] = useState<{
+    token: string;
+    message: string;
+    kind: "delete" | "merge";
+  } | null>(null);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const importPollerRef = useRef<PollerHandle | null>(null);
 
-  function scheduleUndo(token: string, message: string) {
+  function scheduleUndo(token: string, message: string, kind: "delete" | "merge" = "delete") {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    setUndoPending({ token, message });
+    setUndoPending({ token, message, kind });
     undoTimerRef.current = setTimeout(() => setUndoPending(null), 60_000);
   }
 
@@ -79,8 +84,13 @@ export function ClientsSection({ expandClientId }: Props) {
   }
 
   async function handleUndo(token: string) {
+    const kind = undoPending?.kind ?? "delete";
     try {
-      await undoDelete(token);
+      if (kind === "merge") {
+        await undoMerge(token);
+      } else {
+        await undoDelete(token);
+      }
       clearUndo();
       loadClients();
       toast.success("Restored");
@@ -411,10 +421,14 @@ export function ClientsSection({ expandClientId }: Props) {
           onChange={replaceClient}
           onDeleted={(id, token, msg) => {
             removeClientLocal(id);
-            scheduleUndo(token, msg);
+            scheduleUndo(token, msg, "delete");
           }}
           onUndo={scheduleUndo}
           onOpenAddByLogin={() => setAddingByLogin(true)}
+          allClients={clients}
+          onMerged={(dst, _srcId, undoToken) => {
+            scheduleUndo(undoToken, `Merged into "${dst.name}"`, "merge");
+          }}
         />
       )}
 

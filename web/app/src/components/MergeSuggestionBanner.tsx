@@ -25,9 +25,9 @@ import {
 
 interface Props {
   client: ClientRow;
-  /** Called with the merged-into ClientRow when a merge succeeds. The
-   *  parent should reload its clients list and expand the kept client. */
-  onMerged: (dstClient: ClientRow, mergedFromId: number) => void;
+  /** Called with the merged-into ClientRow, the id of the removed client,
+   *  and an undo token (60-minute window) when a merge succeeds. */
+  onMerged: (dstClient: ClientRow, mergedFromId: number, undoToken: string) => void;
 }
 
 export function MergeSuggestionBanner({ client, onMerged }: Props) {
@@ -68,10 +68,10 @@ export function MergeSuggestionBanner({ client, onMerged }: Props) {
       // Merge the OTHER client INTO this one — current card is the
       // anchor the operator's already looking at. Their arrays come
       // here, the other row goes away.
-      const dst = await mergeClientInto(top.id, client.id);
-      toast.success(`Merged “${top.name}” into “${dst.name}”.`);
+      const result = await mergeClientInto(top.id, client.id);
+      toast.success(`Merged “${top.name}” into “${result.dst_client.name}”.`);
       setHiddenIds((prev) => new Set(prev).add(top.id));
-      onMerged(dst, top.id);
+      onMerged(result.dst_client, top.id, result.undo_token);
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Couldn't merge those clients.",

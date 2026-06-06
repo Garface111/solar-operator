@@ -43,7 +43,7 @@ def _tenant(*, with_placeholder: bool = False) -> tuple[str, str]:
 def _gmp_payload(email: str, accounts: list[dict], *, username: str | None = None) -> dict:
     return {
         "provider": "gmp",
-        "user": {"email": email, "fullName": "X", "username": username or email},
+        "user": {"email": email, "username": username or email},
         "auth": {"apiToken": "jwt_" + secrets.token_hex(6)},
         "accounts": accounts,
     }
@@ -84,12 +84,14 @@ def test_second_distinct_login_auto_creates_client(client):
             select(Client).where(Client.tenant_id == tid).order_by(Client.id)
         ).scalars().all()
         # Two clients: alice (from placeholder adoption) + bob (auto-create).
-        # Names default to the captured login email — per-array nicknames
-        # (Alice Roof, Bob Barn) are intentionally NOT used as client names.
+        # Per the smart-name split (Bruce June 5 meeting), when the login
+        # is an email and the GMP payload carries no account-holder name,
+        # the client name comes from the title-cased local-part — NOT the
+        # raw email. "alice@gmp.test" → "Alice".
         assert len(clients) == 2, [(c.id, c.name, c.gmp_email) for c in clients]
         names_by_email = {c.gmp_email: c.name for c in clients}
-        assert names_by_email["alice@gmp.test"] == "alice@gmp.test"
-        assert names_by_email["bob@gmp.test"] == "bob@gmp.test"
+        assert names_by_email["alice@gmp.test"] == "Alice"
+        assert names_by_email["bob@gmp.test"] == "Bob"
         # Both autopop-enabled so future captures flow through fast path.
         assert all(c.gmp_autopopulate for c in clients)
         # Arrays attached to the right client.
@@ -121,8 +123,10 @@ def test_email_used_as_name_when_no_customer_name(client):
         c = db.execute(
             select(Client).where(Client.tenant_id == tid)
         ).scalar_one()
-        # Falls back to the email since no nicer name was available.
-        assert c.name == "anonymous@gmp.test", c.name
+        # Smart-name fallback: no holder name, no customer_name on the
+        # account → use the email local-part title-cased. "anonymous@…"
+        # → "Anonymous".
+        assert c.name == "Anonymous", c.name
         assert c.gmp_email == "anonymous@gmp.test"
 
 
@@ -172,9 +176,11 @@ def test_username_only_login_falls_back_to_username(client):
     tid, key = _tenant(with_placeholder=False)
 
     # Build a payload where user.email is empty and only username carries info.
+    # No portal-side holder name either — smart-name should fall through to
+    # the username verbatim.
     payload = {
         "provider": "gmp",
-        "user": {"email": "", "fullName": "U", "username": "jdoe"},
+        "user": {"email": "", "fullName": "", "username": "jdoe"},
         "auth": {"apiToken": "jwt_" + secrets.token_hex(6)},
         "accounts": [{
             "accountNumber": "999",

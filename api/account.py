@@ -1415,6 +1415,7 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
     if src_client_id == body.dst_client_id:
         raise HTTPException(400, "src and dst must differ")
 
+    now_ts = datetime.utcnow()
     with SessionLocal() as db:
         src = db.execute(
             select(Client).where(
@@ -1433,6 +1434,28 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
             raise HTTPException(404, "client not found")
         if src.deleted_at is not None:
             return {"ok": True, "noop": True, "dst_client_id": dst.id}
+
+        # Snapshot pre-merge state for undo (before any mutations)
+        src_array_ids_snapshot = [
+            arr.id for arr in db.execute(
+                select(Array).where(
+                    Array.tenant_id == t.id,
+                    Array.client_id == src.id,
+                    Array.deleted_at.is_(None),
+                )
+            ).scalars().all()
+        ]
+        dst_before_merge = {
+            "contact_email": dst.contact_email,
+            "gmp_email": dst.gmp_email,
+            "gmp_username": dst.gmp_username,
+            "vec_email": dst.vec_email,
+            "vec_username": dst.vec_username,
+            "notes": dst.notes,
+            "gmp_autopopulate": dst.gmp_autopopulate,
+            "vec_autopopulate": dst.vec_autopopulate,
+        }
+        src_name = src.name
 
         # Reparent arrays
         for arr in db.execute(
@@ -1461,7 +1484,7 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
             dst.vec_autopopulate = True
 
         # Soft-delete src
-        src.deleted_at = now()
+        src.deleted_at = now_ts
 
         # Clear any dismissal entries involving src (they're irrelevant now)
         pair_a, pair_b = sorted([src.id, dst.id])
@@ -1472,6 +1495,25 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
                 ClientMergeDismissal.client_b_id == src.id,
             ),
         ).delete(synchronize_session=False)
+
+        # Persist undo snapshot in DeleteHistory (1-hour TTL).
+        undo_token = secrets.token_hex(8)
+        db.add(DeleteHistory(
+            tenant_id=t.id,
+            undo_token=undo_token,
+            payload={
+                "kind": "merge_undo",
+                "src_client_id": src_client_id,
+                "src_client_name": src_name,
+                "dst_client_id": body.dst_client_id,
+                "src_array_ids": src_array_ids_snapshot,
+                "dst_before_merge": dst_before_merge,
+                "clients": [src_client_id],
+                "arrays": [],
+                "utility_accounts": [],
+            },
+            expires_at=now_ts + timedelta(hours=1),
+        ))
 
         db.commit()
         db.refresh(dst)
@@ -1484,8 +1526,72 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
         return {
             "ok": True,
             "dst_client": _client_to_dict(dst, array_count=n_arrays),
-            "merged_from_id": src.id,
+            "merged_from_id": src_client_id,
+            "merged_client_id": src_client_id,
+            "undo_token": undo_token,
         }
+
+
+class MergeUndoBody(BaseModel):
+    undo_token: str
+
+
+@router.post("/v1/account/clients/merge-undo")
+def undo_merge(body: MergeUndoBody,
+               authorization: Optional[str] = Header(default=None)):
+    """Reverse a merge within the 1-hour undo window.
+
+    Restores the soft-deleted source client, re-assigns its original arrays
+    back to it, and reverts the destination client's login fields to their
+    pre-merge state. Returns 410 if the window has elapsed."""
+    t = tenant_from_session(authorization)
+    now_ts = datetime.utcnow()
+    with SessionLocal() as db:
+        history = db.execute(
+            select(DeleteHistory).where(
+                DeleteHistory.undo_token == body.undo_token,
+                DeleteHistory.tenant_id == t.id,
+            )
+        ).scalar_one_or_none()
+        if not history:
+            raise HTTPException(404, "Undo token not found")
+        if history.consumed_at is not None:
+            raise HTTPException(409, "This undo token has already been used")
+        if history.expires_at < now_ts:
+            raise HTTPException(410, "Undo window expired — the 1-hour undo period has passed")
+        payload = history.payload or {}
+        if payload.get("kind") != "merge_undo":
+            raise HTTPException(400, "Token is not a merge undo token")
+
+        src_id = payload["src_client_id"]
+        src_array_ids = payload.get("src_array_ids", [])
+        dst_id = payload["dst_client_id"]
+        dst_before = payload.get("dst_before_merge", {})
+
+        # Restore source client
+        src = db.get(Client, src_id)
+        if not src or src.tenant_id != t.id:
+            raise HTTPException(404, "Source client not found")
+        src.deleted_at = None
+
+        # Re-assign arrays back to source
+        if src_array_ids:
+            db.execute(
+                Array.__table__.update()
+                .where(Array.id.in_(src_array_ids), Array.tenant_id == t.id)
+                .values(client_id=src_id)
+            )
+
+        # Restore destination client's pre-merge fields
+        dst = db.get(Client, dst_id)
+        if dst and dst.tenant_id == t.id:
+            for field, val in dst_before.items():
+                if hasattr(dst, field):
+                    setattr(dst, field, val)
+
+        history.consumed_at = now_ts
+        db.commit()
+        return {"ok": True, "restored_client_id": src_id}
 
 
 @router.post("/v1/account/clients/{client_id}/dismiss-merge/{other_id}")
@@ -1816,6 +1922,8 @@ def update_client(client_id: int, body: ClientUpdate,
                     raise HTTPException(409,
                         "Another client already has that name")
                 c.name = new_name
+                # Stamp so re-captures know the operator curated this name.
+                c.name_edited_at = now()
         # Use model_fields_set so an explicit null in the payload can clear a
         # field (e.g. report_frequency=null → inherit from account). Fields
         # absent from the request body are NOT in model_fields_set and are
