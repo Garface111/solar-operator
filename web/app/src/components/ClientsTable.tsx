@@ -390,6 +390,11 @@ const COLS = 9;
 export interface ClientsTableProps {
   clients: ClientRow[];
   operatorEmail: string | null;
+  /** Tenant-wide default report cadence ("monthly" | "quarterly" | …). When
+   *  a client has no per-client override, this is what they actually get,
+   *  so the dropdown shows "Inherit from account (quarterly)" instead of
+   *  the bare "Inherit from account" Bruce found confusing on Jun 6. */
+  accountReportFrequency: string | null;
   expandClientId?: number;
   selectMode: boolean;
   selectedIds: Set<number>;
@@ -407,6 +412,7 @@ export interface ClientsTableProps {
 export function ClientsTable({
   clients,
   operatorEmail,
+  accountReportFrequency,
   expandClientId,
   selectMode,
   selectedIds,
@@ -519,6 +525,7 @@ export function ClientsTable({
               loadingArrays={loadingIdsRef.current.has(client.id)}
               onToggleExpand={() => toggleExpand(client.id)}
               operatorEmail={operatorEmail}
+              accountReportFrequency={accountReportFrequency}
               selectMode={selectMode}
               selected={selectedIds.has(client.id)}
               onToggleSelect={onToggleSelect}
@@ -551,6 +558,9 @@ interface RowProps {
   loadingArrays: boolean;
   onToggleExpand: () => void;
   operatorEmail: string | null;
+  /** See ClientsTableProps.accountReportFrequency — passed through to the
+   *  expanded panel where the override <select> lives. */
+  accountReportFrequency: string | null;
   selectMode: boolean;
   selected: boolean;
   onToggleSelect: (id: number) => void;
@@ -572,6 +582,7 @@ function ClientTableRow({
   loadingArrays,
   onToggleExpand,
   operatorEmail,
+  accountReportFrequency,
   selectMode,
   selected,
   onToggleSelect,
@@ -884,6 +895,7 @@ function ClientTableRow({
                   arrays={arrays}
                   loadingArrays={loadingArrays}
                   operatorEmail={operatorEmail}
+                  accountReportFrequency={accountReportFrequency}
                   onChange={onChange}
                   onDeleted={onDeleted}
                   onUndo={onUndo}
@@ -946,6 +958,7 @@ interface ExpandedPanelProps {
   arrays: ArrayRow[] | undefined;
   loadingArrays: boolean;
   operatorEmail: string | null;
+  accountReportFrequency: string | null;
   onChange: (c: ClientRow) => void;
   onDeleted: (token: string, msg: string) => void;
   onUndo: (token: string, msg: string) => void;
@@ -958,6 +971,7 @@ function ExpandedPanel({
   arrays,
   loadingArrays,
   operatorEmail,
+  accountReportFrequency,
   onChange,
   onDeleted,
   onUndo,
@@ -1275,7 +1289,15 @@ function ExpandedPanel({
                 onChange={(e) => patch({ report_frequency: e.target.value || null })}
                 className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
               >
-                <option value="">Inherit from account</option>
+                {/* Bruce Jun 6: the bare "Inherit from account" left him guessing
+                    what he'd actually receive. Surface the resolved cadence in
+                    parens whenever the account default is known so the
+                    selected option always tells the truth. */}
+                <option value="">
+                  {accountReportFrequency
+                    ? `Inherit from account (${accountReportFrequency})`
+                    : "Inherit from account"}
+                </option>
                 <option value="monthly">Monthly</option>
                 <option value="quarterly">Quarterly</option>
               </select>
