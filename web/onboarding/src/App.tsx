@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import DummyReport from "./screens/DummyReport";
+import GetStarted from "./screens/GetStarted";
 import Welcome from "./screens/Welcome";
 import Info from "./screens/Info";
 import ClientSetup from "./screens/ClientSetup";
@@ -13,12 +14,16 @@ export default function App() {
   return (
     <BrowserRouter basename="/onboarding">
       <Routes>
-        {/* Landing = the sample report. The legacy auto-cycling 3-panel
-            "GetStarted" intro was deleted — it shoved 12s of why-we-built-this
-            in front of "what am I buying". Operators see the actual NEPOOL
-            workbook layout first; the wizard takes over from there. */}
-        <Route path="/" element={<DummyReport />} />
-        <Route path="/demo" element={<Navigate to="/" replace />} />
+        {/* Landing = the intro animation (3 fade-up panels — what operators
+            gain from the software). Followed by a "See the sample report →"
+            CTA that goes to /sample (the NEPOOL workbook mock). The wizard
+            entry point ("Start my free setup →") is the primary action.
+            Ford Jun 6: intro animation comes before the sample spreadsheet. */}
+        <Route path="/" element={<GetStarted />} />
+        <Route path="/sample" element={<DummyReport />} />
+        {/* Legacy /demo + /intro point at the new homes so any old links
+            (extension popup, marketing, bookmarks) still land somewhere sane. */}
+        <Route path="/demo" element={<Navigate to="/sample" replace />} />
         <Route path="/intro" element={<Navigate to="/" replace />} />
         {/* Wizard: Welcome → Info → ClientSetup (with checkout handoff) → Extension → Clients → Done */}
         <Route path="/welcome" element={<Welcome />} />
