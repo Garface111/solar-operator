@@ -23,6 +23,7 @@ import {
   reassignAccount,
   reassignArray,
   updateClient,
+  updateArray,
   deleteClient,
   undoDelete,
   listClients,
@@ -838,6 +839,71 @@ export default function SandboxCanvas() {
   );
 
   const cancelRename = useCallback(() => setRenamingNodeId(null), []);
+
+  const startRenameArray = useCallback((arrayId: number) => {
+    setContextMenu(null);
+    setRenamingNodeId(`array_${arrayId}`);
+  }, []);
+
+  const finishRenameArray = useCallback(
+    (arrayId: number, name: string) => {
+      setRenamingNodeId(null);
+      if (!name) return;
+
+      const current = nodesRef.current;
+      let ownerNodeId: string | null = null;
+      let clientNumId = NaN;
+      let oldName = '';
+      for (const n of current) {
+        if (n.type !== 'client') continue;
+        const d = n.data as ClientNodeData;
+        for (const acc of d.client.accounts) {
+          const match = acc.arrays.find((arr) => arr.id === `arr_${arrayId}`);
+          if (match) {
+            ownerNodeId = n.id;
+            clientNumId = parseInt(n.id.replace('client_', ''), 10);
+            oldName = match.name;
+            break;
+          }
+        }
+        if (ownerNodeId) break;
+      }
+      if (!ownerNodeId || oldName === name) return;
+
+      const applyName = (n: string) =>
+        setNodes((ns) =>
+          ns.map((nd) => {
+            if (nd.id !== ownerNodeId || nd.type !== 'client') return nd;
+            const cd = nd.data as ClientNodeData;
+            return {
+              ...nd,
+              data: {
+                ...cd,
+                client: {
+                  ...cd.client,
+                  accounts: cd.client.accounts.map((acc) => ({
+                    ...acc,
+                    arrays: acc.arrays.map((arr) =>
+                      arr.id === `arr_${arrayId}` ? { ...arr, name: n } : arr,
+                    ),
+                  })),
+                },
+              },
+            };
+          }),
+        );
+
+      applyName(name);
+
+      if (!isNaN(arrayId) && !isNaN(clientNumId)) {
+        updateArray(clientNumId, arrayId, { name }).catch(() => {
+          applyName(oldName);
+          toast.show('Array rename failed — reverted.', 'error');
+        });
+      }
+    },
+    [setNodes, toast],
+  );
 
   const deleteNode = useCallback(
     (nodeId: string) => {
@@ -1853,6 +1919,8 @@ export default function SandboxCanvas() {
     finishRename,
     cancelRename,
     renamingNodeId,
+    startRenameArray,
+    finishRenameArray,
     deleteNode,
     detachAccount,
     moveAccountToClient,
