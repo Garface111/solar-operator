@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { QuarterCard } from "../components/reports/QuarterCard";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { QuarterCard, clientDeliveryStatus } from "../components/reports/QuarterCard";
 import { ReportsEmptyState } from "../components/reports/ReportsEmptyState";
 import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
 import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
@@ -24,7 +24,6 @@ import {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/** Derive the one-glance status from the most recent COMPLETE quarter. */
 function computeStatus(reports: QuarterReport[]): ShipStatus {
   const complete = reports.find((r) => r.status !== "draft");
   if (!complete) return "in_progress";
@@ -33,7 +32,6 @@ function computeStatus(reports: QuarterReport[]): ShipStatus {
   return "in_progress";
 }
 
-/** Build failure list from clients that have bounced and not recovered. */
 function computeFailures(clients: ClientRow[]): DeliveryFailure[] {
   return clients
     .filter((c) => {
@@ -53,6 +51,37 @@ function computeFailures(clients: ClientRow[]): DeliveryFailure[] {
 
 function quarterLabel(r: QuarterReport): string {
   return `Q${r.quarter_num} ${r.year}`;
+}
+
+type StatusFilter = "all" | "sent" | "bounced" | "in_progress";
+
+function passesFilter(
+  rep: QuarterReport,
+  filter: StatusFilter,
+  clients: ClientRow[],
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "sent") return rep.status === "sent" || rep.status === "ready";
+  if (filter === "in_progress") return rep.status === "draft";
+  if (filter === "bounced")
+    return clients.some(
+      (c) => clientDeliveryStatus(c) === "bounced",
+    );
+  return true;
+}
+
+// ─── Timeline dot ─────────────────────────────────────────────────────────────
+
+function TimelineDot({ status }: { status: QuarterReport["status"] }) {
+  if (status === "draft") {
+    return (
+      <div className="h-3 w-3 rounded-full border-2 border-wood-300 bg-cream" />
+    );
+  }
+  if (status === "empty") {
+    return <div className="h-3 w-3 rounded-full bg-zinc-200" />;
+  }
+  return <div className="h-3 w-3 rounded-full bg-primary-600" />;
 }
 
 // ─── Skeleton ────────────────────────────────────────────────────────────────
@@ -79,6 +108,14 @@ export default function ReportsTab() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
+
+  // ── History filter + expand state ─────────────────────────────────────────
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // null = "use default" (most-recent expanded). Set to a concrete Set on
+  // first user interaction so subsequent loadData calls don't reset it.
+  const [expandedSet, setExpandedSet] = useState<Set<string> | null>(null);
+  const defaultApplied = useRef(false);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -119,20 +156,58 @@ export default function ReportsTab() {
   }
 
   const activeClients = clients?.filter((c) => c.active) ?? [];
-  const hasArrays = (reports?.[0]?.array_count ?? 0) > 0 || activeClients.length > 0;
+  const hasArrays =
+    (reports?.[0]?.array_count ?? 0) > 0 || activeClients.length > 0;
 
   const failures: DeliveryFailure[] = computeFailures(activeClients);
 
-  // Most recent complete quarter (not the in-progress current one)
+  // Order: in-progress current → most-recent complete (expanded by default) →
+  // older completes (collapsed). Preserved from batch 9 ordering decision.
   const completeReports = (reports ?? []).filter((r) => r.status !== "draft");
-  const inProgressReports = (reports ?? []).filter((r) => r.status === "draft");
-  // The last complete quarter is expanded by default; older ones collapsed.
+  const inProgressReports = (reports ?? []).filter(
+    (r) => r.status === "draft",
+  );
   const [mostRecent, ...olderReports] = completeReports;
+  const allReports: QuarterReport[] = [
+    ...inProgressReports,
+    ...(mostRecent ? [mostRecent] : []),
+    ...olderReports,
+  ];
+
+  // Apply default expansion once after first data load.
+  if (mostRecent && !defaultApplied.current) {
+    defaultApplied.current = true;
+    if (expandedSet === null) {
+      // Will be set synchronously on this render path; schedule via state.
+      // Use a lazy fallback below instead.
+    }
+  }
+  // Resolve the active expansion set: null → default (mostRecent open).
+  const activeExpandedSet: Set<string> =
+    expandedSet ?? (mostRecent ? new Set([mostRecent.quarter]) : new Set());
+
+  function toggleQuarter(q: string) {
+    const next = new Set(activeExpandedSet);
+    if (next.has(q)) next.delete(q);
+    else next.add(q);
+    setExpandedSet(next);
+  }
+
+  function expandAll() {
+    setExpandedSet(new Set(allReports.map((r) => r.quarter)));
+  }
+
+  function collapseAll() {
+    setExpandedSet(new Set());
+  }
+
+  const filteredReports = allReports.filter((rep) =>
+    passesFilter(rep, statusFilter, activeClients),
+  );
 
   const overallStatus: ShipStatus = reports
     ? computeStatus(reports)
     : "in_progress";
-
   const mostRecentLabel = mostRecent ? quarterLabel(mostRecent) : undefined;
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -146,7 +221,7 @@ export default function ReportsTab() {
         <StatusPill status={overallStatus} quarter={mostRecentLabel} />
       </div>
 
-      {/* 3. Unified delivery settings — cadence, CC-me, and email template. */}
+      {/* 3. Delivery settings — cadence, CC-me, email template */}
       <AutoReportsSettingsCard
         account={account}
         onAccountChange={patchAccount}
@@ -156,14 +231,58 @@ export default function ReportsTab() {
       {/* 4. Next run countdown + send-now */}
       <NextRunCard onSent={loadData} />
 
-      {/* 4. Report history */}
+      {/* 5. Report history — vertical timeline */}
       <div>
-        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-          History
-        </h2>
+        {/* Header + control bar */}
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            History
+          </h2>
+          {!loading && !loadError && hasArrays && (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                placeholder="Search clients…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-7 rounded-lg border border-cream-border bg-white px-3 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-200"
+              />
+              <select
+                value={statusFilter}
+                onChange={(e) =>
+                  setStatusFilter(e.target.value as StatusFilter)
+                }
+                className="h-7 rounded-lg border border-cream-border bg-white px-2 text-xs text-zinc-500 focus:outline-none"
+              >
+                <option value="all">All</option>
+                <option value="sent">Sent</option>
+                <option value="bounced">Bounced</option>
+                <option value="in_progress">In progress</option>
+              </select>
+              <button
+                type="button"
+                onClick={expandAll}
+                className="h-7 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
+              >
+                Expand all
+              </button>
+              <button
+                type="button"
+                onClick={collapseAll}
+                className="h-7 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
+              >
+                Collapse all
+              </button>
+            </div>
+          )}
+        </div>
 
         {loading ? (
-          <div className="space-y-2" aria-label="Loading history" aria-busy>
+          <div
+            className="space-y-3"
+            aria-label="Loading history"
+            aria-busy
+          >
             {Array.from({ length: 4 }).map((_, i) => (
               <RowSkeleton key={i} />
             ))}
@@ -178,53 +297,61 @@ export default function ReportsTab() {
         ) : !hasArrays ? (
           <ReportsEmptyState />
         ) : (
-          <div className="space-y-2">
-            {/* In-progress current quarter(s) — at top, collapsed (Ford Jun 6:
-                current should lead, oldest trail). */}
-            {inProgressReports.map((rep) => (
-              <QuarterCard
-                key={rep.quarter}
-                label={`${quarterLabel(rep)} (current)`}
-                quarter={rep.quarter}
-                status={rep.status}
-                arrayCount={rep.array_count}
-                lastDeliveredAt={rep.last_delivered_at}
-                mwhTotal={rep.mwh_total}
-                clients={activeClients}
-                onRefresh={loadData}
-              />
-            ))}
-
-            {/* Most recent complete quarter — expanded */}
-            {mostRecent && (
-              <QuarterCard
-                key={mostRecent.quarter}
-                label={quarterLabel(mostRecent)}
-                quarter={mostRecent.quarter}
-                status={mostRecent.status}
-                arrayCount={mostRecent.array_count}
-                lastDeliveredAt={mostRecent.last_delivered_at}
-                mwhTotal={mostRecent.mwh_total}
-                clients={activeClients}
-                defaultExpanded
-                onRefresh={loadData}
+          /* Timeline */
+          <div className="relative" data-testid="reports-timeline">
+            {/* Vertical spine — desktop only, runs between first and last dot */}
+            {filteredReports.length > 1 && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute hidden w-0.5 bg-wood-300/40 sm:block"
+                style={{ left: "11px", top: "20px", bottom: "20px" }}
               />
             )}
 
-            {/* Older complete quarters — collapsed, oldest at the bottom */}
-            {olderReports.map((rep) => (
-              <QuarterCard
-                key={rep.quarter}
-                label={quarterLabel(rep)}
-                quarter={rep.quarter}
-                status={rep.status}
-                arrayCount={rep.array_count}
-                lastDeliveredAt={rep.last_delivered_at}
-                mwhTotal={rep.mwh_total}
-                clients={activeClients}
-                onRefresh={loadData}
-              />
-            ))}
+            {filteredReports.length === 0 && (
+              <p className="text-xs text-zinc-400">
+                No quarters match this filter.
+              </p>
+            )}
+
+            {filteredReports.map((rep) => {
+              const isInProgress = rep.status === "draft";
+              const label = isInProgress
+                ? `${quarterLabel(rep)} (current)`
+                : quarterLabel(rep);
+
+              return (
+                <div
+                  key={rep.quarter}
+                  className="relative flex gap-4 pb-5 last:pb-0"
+                >
+                  {/* Dot column — hidden on mobile, timeline rail on sm+ */}
+                  <div
+                    aria-hidden
+                    className="relative z-10 hidden w-6 flex-shrink-0 items-start justify-center pt-1 sm:flex"
+                  >
+                    <TimelineDot status={rep.status} />
+                  </div>
+
+                  {/* Card */}
+                  <div className="min-w-0 flex-1">
+                    <QuarterCard
+                      label={label}
+                      quarter={rep.quarter}
+                      status={rep.status}
+                      arrayCount={rep.array_count}
+                      lastDeliveredAt={rep.last_delivered_at}
+                      mwhTotal={rep.mwh_total}
+                      clients={activeClients}
+                      expanded={activeExpandedSet.has(rep.quarter)}
+                      onToggle={() => toggleQuarter(rep.quarter)}
+                      searchQuery={searchQuery}
+                      onRefresh={loadData}
+                    />
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
