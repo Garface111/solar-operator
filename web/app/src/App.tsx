@@ -10,9 +10,6 @@ import Login from "./screens/Login";
 import DashboardLayout from "./screens/DashboardLayout";
 import ClientsTab from "./screens/ClientsTab";
 import { Spinner } from "./ui/Spinner";
-
-const AccountTab = lazy(() => import("./screens/AccountTab"));
-const ReportsTab = lazy(() => import("./screens/ReportsTab"));
 import { useToast } from "./ui/Toast";
 import {
   getSession,
@@ -21,6 +18,16 @@ import {
   verifyLoginToken,
   UNAUTHORIZED_EVENT,
 } from "./lib/api";
+
+const AccountTab = lazy(() => import("./screens/AccountTab"));
+const ReportsTab = lazy(() => import("./screens/ReportsTab"));
+
+// Prevent the browser from restoring a previous scroll position when
+// React Router navigates between routes. Without this, navigating
+// Clients → Account → Clients restores whatever scroll position the
+// user was at on the previous Clients visit, yanking them away from
+// the canvas on re-arrival.
+history.scrollRestoration = "manual";
 
 function TabSpinner() {
   return (
