@@ -28,6 +28,8 @@ const BANNER_CHIPS = [
 ];
 
 const TOKEN_CHIPS = [
+  "{{greeting}}",
+  "{{client_first_name}}",
   "{{client_name}}",
   "{{quarter}}",
   "{{period_start}}",
@@ -588,7 +590,11 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-800 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                 />
                 <p className="mt-1 text-[11px] text-zinc-400">
-                  HTML allowed. Tokens like{" "}
+                  HTML allowed.{" "}
+                  <span className="font-mono">{"{{greeting}}"}</span>{" "}
+                  <span className="text-zinc-300">(auto-picks Hi/Dear based on client name)</span>,{" "}
+                  <span className="font-mono">{"{{client_first_name}}"}</span>{" "}
+                  <span className="text-zinc-300">(e.g. Bruce)</span>,{" "}
                   <span className="font-mono">{"{{client_name}}"}</span>,{" "}
                   <span className="font-mono">{"{{quarter}}"}</span>,{" "}
                   <span className="font-mono">{"{{signoff}}"}</span> are inserted automatically.

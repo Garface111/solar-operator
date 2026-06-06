@@ -28,7 +28,7 @@ import httpx
 # The merge tags we advertise in the dashboard help text. Anything else in a
 # template is left verbatim (see render_merge).
 MERGE_TAGS = (
-    "client_name", "tenant_name", "quarter", "arrays_count",
+    "client_name", "client_first_name", "tenant_name", "quarter", "arrays_count",
     "period_start", "period_end", "tenant_email",
     "tenant_email_line",
 )
@@ -44,7 +44,7 @@ DEFAULT_SIGNOFF = (
 )
 
 DEFAULT_BODY_TEMPLATE = (
-    "<p>Dear {{client_name}},</p>"
+    "<p>{{greeting}},</p>"
     "<p>Here is your quarterly NEPOOL-GIS report from {{period_start}} to"
     " {{period_end}}. Please reach out with any questions.</p>"
     "{{signoff}}"
@@ -64,6 +64,8 @@ _TAG_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 # (api/account.py preview_email_template + api/delivery.py build_ctx).
 ALLOWED_MERGE_TAGS = frozenset({
     "client_name",
+    "client_first_name",
+    "greeting",
     "quarter",
     "period_start",
     "period_end",
@@ -72,6 +74,84 @@ ALLOWED_MERGE_TAGS = frozenset({
     "arrays_count",
     "signoff",
 })
+
+
+def derive_client_first_name(client_name: str) -> str:
+    """Derive a first-name token from a full client name.
+
+    - "Bruce Genereaux"              → "Bruce"
+    - "Genereaux, Bruce"             → "Bruce"  (last, first format)
+    - "Green Mountain Community Solar" → "Green"
+    - "  Bruce  "                    → "Bruce"  (whitespace stripped)
+    - ""                             → ""       (build_context falls back to full name)
+    """
+    s = client_name.strip()
+    if not s:
+        return ""
+    if "," in s:
+        after_comma = s.split(",", 1)[1].strip()
+        tokens = after_comma.split()
+        return tokens[0] if tokens else s
+    tokens = s.split()
+    return tokens[0] if tokens else s
+
+
+# Normalized (non-alphanumeric stripped, lowercased) org-signal tokens.
+# "Inn" intentionally omitted — too common in surnames; rely on LLC/Inc/4-tokens.
+_ORG_TOKENS = frozenset({
+    "llc", "inc", "corp", "corporation", "company", "companies",
+    "co", "coop", "cooperative", "lp", "llp", "pllc", "ltd",
+    "town", "city", "village", "school", "district", "association", "society",
+    "festival", "foundation", "university", "college", "church", "department",
+    "group", "trust", "partners", "solutions", "energy", "solar", "community",
+    "authority", "bureau", "council", "board", "commission",
+    "center", "centre", "institute", "services", "holdings", "ventures",
+    "elementary", "middle", "high", "academy",
+})
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]")
+
+
+def looks_like_organization(client_name: str) -> bool:
+    """Return True when client_name looks like an organization rather than a person.
+
+    Bias: err on the side of True (org) — 'Dear Full Name,' is stiff but acceptable;
+    'Hi Town,' is embarrassing.
+
+    Signals (any one is sufficient):
+    - Contains '&'
+    - 4+ whitespace-separated tokens
+    - Any token (after stripping non-alphanumeric, lowercase) matches _ORG_TOKENS
+    """
+    if not client_name:
+        return False
+    s = client_name.strip()
+    if not s:
+        return False
+    if "&" in s:
+        return True
+    tokens = s.split()
+    if len(tokens) >= 4:
+        return True
+    for tok in tokens:
+        normalized = _NON_ALNUM.sub("", tok.lower())
+        if normalized in _ORG_TOKENS:
+            return True
+    return False
+
+
+def derive_greeting(client_name: str) -> str:
+    """Return a full greeting line (no trailing comma).
+
+    Person client:  'Bruce Genereaux'              → 'Hi Bruce'
+    Org client:     'Green Mountain Community Solar' → 'Dear Green Mountain Community Solar'
+
+    Templates write {{greeting}}, to get 'Hi Bruce,' or 'Dear Org Name,'.
+    """
+    if looks_like_organization(client_name):
+        return f"Dear {client_name}"
+    first = derive_client_first_name(client_name)
+    return f"Hi {first}" if first else f"Dear {client_name}"
 
 
 def extract_tags(template: str) -> set[str]:
@@ -164,6 +244,8 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
     })
     return {
         "client_name": client_name,
+        "client_first_name": derive_client_first_name(client_name) or client_name,
+        "greeting": derive_greeting(client_name),
         "tenant_name": tenant_name,
         "quarter": qc["quarter"],
         "arrays_count": arrays_count,
@@ -205,9 +287,34 @@ _TEMPLATE_SYSTEM_PROMPT = (
     "You are a writing assistant helping a solar energy consultant customize "
     "their client report email.\n\n"
     "THE ONLY MERGE TAGS THAT EXIST IN THE SYSTEM ARE:\n"
-    "  {{client_name}}, {{quarter}}, {{period_start}}, {{period_end}},\n"
+    "  {{greeting}}, {{client_name}}, {{client_first_name}}, {{quarter}}, {{period_start}}, {{period_end}},\n"
     "  {{tenant_name}}, {{tenant_email_line}}, {{arrays_count}},\n"
     "  {{signoff}}\n\n"
+    "WHEN TO USE WHICH NAME TAG:\n"
+    "- {{greeting}} is the smart auto-pick: it renders as 'Hi <first>' for person "
+    "clients (e.g. 'Hi Bruce') and 'Dear <full company name>' for organizations "
+    "(e.g. 'Dear Green Mountain Community Solar'). USE {{greeting}} as the default "
+    "opening line unless the operator explicitly wants a different tone — it adapts "
+    "per client automatically.\n"
+    "- {{client_first_name}}: forces a first-name greeting for every client — e.g. "
+    "'Hi Bruce,' or 'Hi Green,'. Useful when the operator's entire client base is "
+    "personal contacts. Note: for company names this yields the first word "
+    "(e.g. 'Green Mountain Community Solar' → 'Green').\n"
+    "- {{client_name}}: formal full-name opener for every client — e.g. "
+    "'Dear Bruce Genereaux,' or 'Dear Green Mountain Community Solar,'. Use when "
+    "the operator wants consistent professional-services tone regardless of client type.\n\n"
+    "SMARTER CUSTOMIZATION — you can propose changes to:\n"
+    "- GREETING: switch between 'Hi {{client_first_name}},' (warm) and "
+    "'Dear {{client_name}},' (formal)\n"
+    "- TONE: more conversational, more professional, more concise\n"
+    "- SIGN-OFF wording: a custom closing sentence before {{signoff}}\n"
+    "- PARAGRAPH LENGTH: condense or expand the body as the operator requests\n"
+    "- CALL-TO-ACTION wording: e.g. the 'reach out with any questions' line\n"
+    "If the operator's request is ambiguous (e.g. 'make it more casual' could mean "
+    "switching to first name OR loosening the wording overall), ask ONE clarifying "
+    "question in your 'reply' field before applying the change — e.g. 'Should I "
+    "switch the greeting to Hi {{client_first_name}}, or keep the full name with a "
+    "friendlier tone throughout?'\n\n"
     "CRITICAL RULES:\n"
     "- You may ONLY use the tags listed above. Do NOT invent new merge tags "
     "like {{quarter_total_mwh}}, {{operator_signature}}, {{client_address}}, "

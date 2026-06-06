@@ -10,11 +10,85 @@ from __future__ import annotations
 
 from api.email_templates import (
     ALLOWED_MERGE_TAGS,
+    DEFAULT_BODY_TEMPLATE,
     _augment_reply_with_strip_notice,
     _strip_unknown_tags,
+    build_context,
+    derive_client_first_name,
+    derive_greeting,
     extract_tags,
+    looks_like_organization,
+    render_email,
     unknown_tags,
 )
+
+
+def test_client_first_name_in_allowlist():
+    assert "client_first_name" in ALLOWED_MERGE_TAGS
+
+
+def test_derive_client_first_name_simple():
+    assert derive_client_first_name("Bruce Genereaux") == "Bruce"
+
+
+def test_derive_client_first_name_last_first_format():
+    assert derive_client_first_name("Genereaux, Bruce") == "Bruce"
+
+
+def test_derive_client_first_name_company():
+    assert derive_client_first_name("Green Mountain Community Solar") == "Green"
+
+
+def test_derive_client_first_name_trims_whitespace():
+    assert derive_client_first_name("  Bruce  ") == "Bruce"
+
+
+def test_derive_client_first_name_empty():
+    assert derive_client_first_name("") == ""
+
+
+def test_derive_client_first_name_single_word():
+    assert derive_client_first_name("Madonna") == "Madonna"
+
+
+def test_build_context_includes_first_name():
+    ctx = build_context(
+        client_name="Bruce Genereaux",
+        tenant_name="Solar Co",
+        arrays_count=2,
+    )
+    assert ctx["client_first_name"] == "Bruce"
+
+
+def test_build_context_first_name_fallback_for_empty():
+    """build_context falls back to full client_name when derive returns ''."""
+    ctx = build_context(
+        client_name="",
+        tenant_name="Solar Co",
+        arrays_count=1,
+    )
+    assert ctx["client_first_name"] == ""
+
+
+def test_render_email_substitutes_client_first_name():
+    ctx = build_context(
+        client_name="Bruce Genereaux",
+        tenant_name="Solar Co",
+        arrays_count=2,
+    )
+    subject, html, _ = render_email(
+        subject_template="Hi {{client_first_name}}",
+        body_template="<p>Hello {{client_first_name}},</p>{{signoff}}",
+        ctx=ctx,
+    )
+    assert subject == "Hi Bruce"
+    assert "Hello Bruce," in html
+
+
+def test_default_body_uses_greeting():
+    assert "{{greeting}}" in DEFAULT_BODY_TEMPLATE
+    assert "{{client_first_name}}" not in DEFAULT_BODY_TEMPLATE
+    assert "{{client_name}}" not in DEFAULT_BODY_TEMPLATE.split("{{signoff}}")[0].split("<p>")[1]
 
 
 def test_allowlist_contents_match_render_context():
@@ -108,3 +182,142 @@ def test_reply_notice_summarizes_when_many_bad_tags():
         stripped_body=[f"made_up_{i}" for i in range(7)],
     )
     assert "+3 more" in out
+
+
+# ── looks_like_organization ───────────────────────────────────────────────────
+
+def test_llo_person_two_tokens():
+    assert looks_like_organization("Bruce Genereaux") is False
+
+
+def test_llo_person_single_word():
+    assert looks_like_organization("Madonna") is False
+
+
+def test_llo_person_last_first_format():
+    assert looks_like_organization("Genereaux, Bruce") is False
+
+
+def test_llo_org_four_tokens():
+    assert looks_like_organization("Green Mountain Community Solar") is True
+
+
+def test_llo_org_community_token():
+    assert looks_like_organization("Valley Community Farm") is True
+
+
+def test_llo_org_solar_token():
+    assert looks_like_organization("Tannery Brook Solar") is True
+
+
+def test_llo_org_town_token():
+    assert looks_like_organization("Town of Chester") is True
+
+
+def test_llo_org_llc_suffix():
+    assert looks_like_organization("Wilcox Inn LLC") is True
+
+
+def test_llo_org_inc_suffix():
+    assert looks_like_organization("Acme Energy Inc.") is True
+
+
+def test_llo_org_coop():
+    assert looks_like_organization("Northeast Co-Op") is True
+
+
+def test_llo_org_ampersand():
+    assert looks_like_organization("Smith & Sons") is True
+
+
+def test_llo_org_school_signal():
+    assert looks_like_organization("Brattleboro Elementary") is True
+
+
+def test_llo_org_school_district():
+    assert looks_like_organization("Windsor School District") is True
+
+
+def test_llo_person_single_short_word():
+    # No signal — treated as person (known edge case: Apple, Costco, etc.)
+    assert looks_like_organization("Apple") is False
+
+
+def test_llo_empty_and_whitespace():
+    assert looks_like_organization("") is False
+    assert looks_like_organization("   ") is False
+
+
+def test_llo_org_energy_token():
+    assert looks_like_organization("Green Energy") is True
+
+
+def test_llo_person_three_tokens_no_signal():
+    # Three common-word tokens but none are org signals
+    assert looks_like_organization("James Arthur Brown") is False
+
+
+# ── derive_greeting ───────────────────────────────────────────────────────────
+
+def test_greeting_person():
+    assert derive_greeting("Bruce Genereaux") == "Hi Bruce"
+
+
+def test_greeting_last_first_format():
+    assert derive_greeting("Genereaux, Bruce") == "Hi Bruce"
+
+
+def test_greeting_single_name():
+    assert derive_greeting("Madonna") == "Hi Madonna"
+
+
+def test_greeting_org_four_tokens():
+    assert derive_greeting("Green Mountain Community Solar") == "Dear Green Mountain Community Solar"
+
+
+def test_greeting_org_town():
+    assert derive_greeting("Town of Chester") == "Dear Town of Chester"
+
+
+def test_greeting_org_llc():
+    assert derive_greeting("Wilcox Inn LLC") == "Dear Wilcox Inn LLC"
+
+
+def test_greeting_org_solar():
+    assert derive_greeting("Tannery Brook Solar") == "Dear Tannery Brook Solar"
+
+
+# ── greeting in allowlist and context ────────────────────────────────────────
+
+def test_greeting_in_allowlist():
+    assert "greeting" in ALLOWED_MERGE_TAGS
+
+
+def test_build_context_includes_greeting_person():
+    ctx = build_context(client_name="Bruce Genereaux", tenant_name="Solar Co", arrays_count=1)
+    assert ctx["greeting"] == "Hi Bruce"
+
+
+def test_build_context_includes_greeting_org():
+    ctx = build_context(
+        client_name="Green Mountain Community Solar",
+        tenant_name="Solar Co",
+        arrays_count=3,
+    )
+    assert ctx["greeting"] == "Dear Green Mountain Community Solar"
+
+
+def test_render_email_default_template_person_greeting():
+    ctx = build_context(client_name="Bruce Genereaux", tenant_name="Solar Co", arrays_count=2)
+    _, html, _ = render_email(subject_template=None, body_template=None, ctx=ctx)
+    assert "Hi Bruce," in html
+
+
+def test_render_email_default_template_org_greeting():
+    ctx = build_context(
+        client_name="Green Mountain Community Solar",
+        tenant_name="Solar Co",
+        arrays_count=5,
+    )
+    _, html, _ = render_email(subject_template=None, body_template=None, ctx=ctx)
+    assert "Dear Green Mountain Community Solar," in html

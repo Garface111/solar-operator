@@ -21,12 +21,12 @@ const SEND_MODES = [
   { value: "to_both", label: "To both my clients and me" },
 ] as const;
 
-const MERGE_HELP = "Use {{client_name}}, {{tenant_name}}, {{tenant_email}}, {{quarter}}";
+const MERGE_HELP = "Use {{greeting}} (auto-picks Hi/Dear), {{client_first_name}} (e.g. Bruce), {{client_name}}, {{tenant_name}}, {{tenant_email}}, {{quarter}}";
 
 /** Known merge tags that are valid. Anything double-braced that isn't in this
  *  set is flagged as a probable typo so it doesn't silently pass through. */
 const KNOWN_TAGS = new Set([
-  "client_name", "tenant_name", "quarter", "arrays_count",
+  "greeting", "client_name", "client_first_name", "tenant_name", "quarter", "arrays_count",
   "period_start", "period_end", "tenant_email",
   "tenant_email_line",
 ]);
@@ -247,7 +247,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
           />
           <p className="mt-1.5 text-xs text-zinc-400">
             HTML supported. {MERGE_HELP}, plus {"{{period_start}}"},{" "}
-            {"{{period_end}}"}, {"{{arrays_count}}"}.
+            {"{{period_end}}"}, {"{{arrays_count}}"}, {"{{signoff}}"}.
           </p>
           {findTypoTags(body).length > 0 && (
             <p className="mt-1 text-xs text-amber-700">
