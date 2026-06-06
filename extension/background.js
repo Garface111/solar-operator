@@ -159,6 +159,7 @@ async function _handleSync(payload, tokenHash, sendResponse) {
       is_new_client: isNew,
       result: (result && result.result) || "created",
       client_name: (result && result.client && result.client.name) || null,
+      residentialCount: (result && result.residential_count) || 0,
     };
     broadcastToSoTabs(capturedMsg);
     // v1.4.0: also notify the popup if it is open.

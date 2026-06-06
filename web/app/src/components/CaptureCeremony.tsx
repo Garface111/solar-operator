@@ -22,6 +22,7 @@ interface CaptureEvent {
   id: number;
   provider: Provider;
   accountCount: number;
+  residentialCount: number;
   at: string;
   /** Set when backend signals result=updated — resolveEvent will toast instead of showing a row. */
   isUpdate?: boolean;
@@ -246,6 +247,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded, account }: Props)
         id: nextIdRef.current++,
         provider,
         accountCount: Number(data.accountCount ?? 0),
+        residentialCount: Number(data.residentialCount ?? 0),
         at: String(data.at || new Date().toISOString()),
       };
       setEvents((prev) => [...prev, ev]);
@@ -304,6 +306,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded, account }: Props)
               id: nextIdRef.current++,
               provider,
               accountCount: 0, // we don't know yet — resolveEvent will fill in arrays
+              residentialCount: 0,
               at: new Date().toISOString(),
             };
             setEvents((prev) => [...prev, synth]);
@@ -356,6 +359,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded, account }: Props)
 
   const totalClients = new Set(events.map((e) => e.client?.id).filter(Boolean)).size;
   const totalArrays = events.reduce((sum, e) => sum + (e.accountCount || 0), 0);
+  const totalResidential = events.reduce((sum, e) => sum + (e.residentialCount || 0), 0);
 
   return (
     <div
@@ -380,6 +384,11 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded, account }: Props)
               ? `${totalClients} client${totalClients === 1 ? "" : "s"} · ${totalArrays} array${totalArrays === 1 ? "" : "s"} captured`
               : `${totalArrays} array${totalArrays === 1 ? "" : "s"} captured`}
           </h2>
+          {totalResidential > 0 && !pendingProvider && (
+            <p className="mt-0.5 text-xs text-zinc-500">
+              {`${totalResidential} residential account${totalResidential === 1 ? "" : "s"} saved without arrays`}
+            </p>
+          )}
           {pendingProvider && pendingSince && (
             <p className="mt-1 text-xs text-zinc-500">
               {`Started ${Math.max(1, Math.round((Date.now() - pendingSince) / 1000))}s ago · usually takes 5–30 seconds`}

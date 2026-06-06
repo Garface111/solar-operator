@@ -84,22 +84,27 @@ def test_three_sequential_captures_create_three_clients(client):
     assert emails == {"alpha@gmp.test", "beta@gmp.test", "gamma@gmp.test"}
 
 
-# ── Test 2: non-generating account (no bill history) still creates Array ──────
+# ── Test 2: enrolled solar account with no bill history still creates Array ───
 
 def test_non_generating_account_creates_array(client):
-    """A GMP capture payload for an account with solarNetMeter=False or no
-    bills should still produce a UtilityAccount and Array row. The worker
-    will simply store 0 bills for it initially; data fills in later."""
+    """A GMP capture payload for a solarNetMeter=True account with no bill
+    history should still produce a UtilityAccount and Array row. The worker
+    will store 0 bills for it initially; data fills in later.
+
+    NOTE: solarNetMeter=True is GMP's enrollment flag — it indicates the
+    account is part of the net-metering programme, not whether it is
+    currently producing energy. An account with solarNetMeter=False is
+    treated as residential and does NOT get an Array (see test_skip_residential.py)."""
     tid, key = _tenant()
 
-    # Account with solarNetMeter=False (e.g. a brand-new install not yet generating)
+    # Account enrolled in solar net-metering but with no bill data yet
     acct = {
         "accountNumber": "NEW001",
         "nickname": "New Install",
         "customerNumber": "cust_NEW001",
         "serviceAddress": {"line1": "1 Green St"},
         "isPrimary": True,
-        "solarNetMeter": False,   # ← key: NOT yet generating
+        "solarNetMeter": True,   # enrolled — real solar account, just no bills yet
     }
     payload = _gmp_payload("newinstall@gmp.test", [acct])
     r = _sync(client, key, payload)
@@ -112,12 +117,13 @@ def test_non_generating_account_creates_array(client):
                 UtilityAccount.account_number == "NEW001",
             )
         ).scalar_one_or_none()
-        assert ua is not None, "UtilityAccount not created for non-generating account"
+        assert ua is not None, "UtilityAccount not created for enrolled solar account"
+        assert not ua.is_residential, "Enrolled solar account should not be marked residential"
 
         arr = db.execute(
             select(Array).where(Array.tenant_id == tid)
         ).scalars().first()
-        assert arr is not None, "Array not created for non-generating account"
+        assert arr is not None, "Array not created for enrolled solar account"
         assert arr.id == ua.array_id, "Array not linked to UtilityAccount"
 
 

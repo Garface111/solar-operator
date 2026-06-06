@@ -480,6 +480,30 @@ def main():
             ))
             print("  + tenants.onboarding_array_estimate")
 
+        # 2026-06-06 skip-residential: flag non-generation GMP accounts.
+        # Residential accounts (no solarNetMeter, no groupNetMetered) are
+        # persisted as UtilityAccount rows but never trigger Client/Array
+        # auto-creation. Backfill is safe for Bruce: all 47 of his accounts
+        # have solarNetMeter=true, so none get marked residential.
+        if not column_exists(conn, "utility_accounts", "is_residential"):
+            conn.execute(text(
+                "ALTER TABLE utility_accounts ADD COLUMN is_residential BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+            print("  + utility_accounts.is_residential")
+        res = conn.execute(text("""
+            UPDATE utility_accounts
+            SET is_residential = true
+            WHERE provider = 'GMP'
+              AND COALESCE((extra->>'solarNetMeter')::boolean, false) = false
+              AND COALESCE((extra->>'groupNetMetered')::boolean, false) = false
+              AND is_residential = false
+        """))
+        backfill_n = res.rowcount if res.rowcount is not None else 0
+        if backfill_n > 0:
+            print(f"  ↪ skip-residential backfill: {backfill_n} GMP account(s) marked is_residential=true")
+        else:
+            print("  ↪ skip-residential backfill: no GMP accounts needed marking")
+
     print("=== Migration complete ===")
 
 
