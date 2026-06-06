@@ -16,6 +16,7 @@ import { Modal } from "../ui/Modal";
 import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
+import { CaptureFreshnessHeatmap } from "./CaptureFreshnessHeatmap";
 import { AssignNepoolFromSpreadsheetModal } from "./AssignNepoolFromSpreadsheetModal";
 import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
@@ -383,21 +384,15 @@ export function ClientCard({
           {/* 2-column layout: left = client status at a glance, right = the
               redesigned report sidebar (Ford's boxed region). */}
           <div className="mt-4 grid grid-cols-1 gap-6 sm:grid-cols-[1fr_280px]">
-            {/* LEFT column — client status (the bulk content, the arrays
-                table, lives full-width below this grid). */}
+            {/* LEFT column — capture freshness at a glance. The arrays table
+                lives full-width below this grid; the Active/delivery chips
+                that used to sit here moved up to the collapsed-card header
+                strip (they're already rendered there). */}
             <div className="space-y-4">
-              <div className="flex flex-wrap gap-1.5">
-                {client.active ? (
-                  <Chip variant="emerald">Active</Chip>
-                ) : (
-                  <Chip variant="muted">Suspended</Chip>
-                )}
-                {delivery && (
-                  <Chip variant={delivery.kind === "ok" ? "emerald" : "red"}>
-                    {delivery.text}
-                  </Chip>
-                )}
-              </div>
+              <CaptureFreshnessHeatmap
+                clientId={client.id}
+                accountCount={client.array_count ?? 0}
+              />
             </div>
 
             {/* RIGHT column — the redesigned report sidebar. Three labelled
