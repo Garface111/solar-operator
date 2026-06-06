@@ -402,3 +402,29 @@ class ArrayMergeDismissal(Base):
         UniqueConstraint("tenant_id", "array_a_id", "array_b_id",
                          name="uq_array_merge_dismissal_pair"),
     )
+
+
+class CaptureEvent(Base):
+    """One stage in a capture pipeline run (/v1/sync).
+
+    capture_id (UUID4) groups all events from the same sync call so they
+    can be displayed as a single timeline entry in the dev panel.
+
+    stage values: ingest_received | client_created | client_matched |
+                  client_merged | array_created | array_skipped | capture_error
+    payload_excerpt is scrubbed via capture_events._safe_excerpt before insert;
+    auth tokens and provider blob data are never stored.
+    """
+    __tablename__ = "capture_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    capture_id: Mapped[str] = mapped_column(String(36), index=True)
+    stage: Mapped[str] = mapped_column(String(40))
+    decision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_excerpt: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        Index("ix_capture_events_tenant_created", "tenant_id", "created_at"),
+    )

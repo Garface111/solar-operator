@@ -408,6 +408,19 @@ def main():
             ))
             print("  + tenants.password_hash")
 
+        # 2026-06-05 Capture timeline (feat/capture-timeline-devpanel).
+        # The capture_events table is created by init_db() (create_all) above.
+        # Add composite index explicitly in case the table existed before this
+        # migration ran (idempotent via IF NOT EXISTS).
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_capture_events_tenant_id ON capture_events (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_capture_events_capture_id ON capture_events (capture_id)",
+            "CREATE INDEX IF NOT EXISTS ix_capture_events_created_at ON capture_events (created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_capture_events_tenant_created ON capture_events (tenant_id, created_at)",
+        ]:
+            conn.execute(text(idx_sql))
+        print("  ✓ capture_events indexes ensured")
+
     print("=== Migration complete ===")
 
 
