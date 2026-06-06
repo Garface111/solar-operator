@@ -4,7 +4,7 @@ import { Input } from "../../ui/Input";
 import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
-import { type Account, updateAccountEmail, updateAccountName, setPassword } from "../../lib/api";
+import { type Account, updateAccountEmail, updateAccountName, updateAccountSendFromName, setPassword } from "../../lib/api";
 import { timeAgo } from "./utils";
 
 const STATUS_STYLES: Record<string, string> = {
@@ -174,6 +174,12 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
     toast.success("Email updated");
   }
 
+  async function saveSendFromName(next: string) {
+    const send_from_name = await updateAccountSendFromName(next.trim() || null);
+    onAccountChange({ send_from_name });
+    toast.success("Sign-as name updated");
+  }
+
   return (
     <div>
       <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
@@ -210,6 +216,14 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
                 label="email"
                 type="email"
                 placeholder="you@example.com"
+              />
+            </Row>
+            <Row label="Sign-as name">
+              <EditableField
+                value={account.send_from_name}
+                onSave={saveSendFromName}
+                label="sign-as name"
+                placeholder="How clients see your signature (e.g. 'Bruce Genereaux')"
               />
             </Row>
             <Row label="Clients">

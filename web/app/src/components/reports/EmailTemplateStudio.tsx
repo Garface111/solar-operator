@@ -642,6 +642,16 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   className="w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                 />
 
+                {/* Signoff name tip */}
+                <p className="text-[11px] text-zinc-400">
+                  Tip — the{" "}
+                  <span className="font-mono">{"{{tenant_name}}"}</span>{" "}
+                  variable in your sign-off uses your{" "}
+                  <strong className="font-medium text-zinc-500">Sign-as name</strong>{" "}
+                  from Master Account if set, otherwise your account name. Update it
+                  under <strong className="font-medium text-zinc-500">Master Account → Sign-as name</strong>.
+                </p>
+
                 {/* Signoff action buttons */}
                 <div className="flex items-center gap-2">
                   <Button

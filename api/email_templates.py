@@ -228,7 +228,8 @@ def _fmt_date(d: date) -> str:
 def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
                   tenant_email: str = "",
                   ref: Optional[date] = None,
-                  signoff_template: Optional[str] = None) -> dict:
+                  signoff_template: Optional[str] = None,
+                  tenant_signoff_name: Optional[str] = None) -> dict:
     """Assemble the merge-tag context for one client's email."""
     qc = quarter_context(ref)
     email = tenant_email.strip()
@@ -236,9 +237,12 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
     # Resolve {{signoff}}: render the signoff template's own merge tags first
     # (tenant_name, tenant_email_line) so the body can use {{signoff}} as a
     # fully-rendered block. Two-pass: signoff → ctx → body.
+    # tenant_signoff_name overrides {{tenant_name}} ONLY inside the signoff
+    # sub-render, leaving the body's {{tenant_name}} as the company name.
     signoff_t = (signoff_template or "").strip() or DEFAULT_SIGNOFF
+    effective_signoff_name = (tenant_signoff_name or "").strip() or tenant_name
     rendered_signoff = render_merge(signoff_t, {
-        "tenant_name": tenant_name,
+        "tenant_name": effective_signoff_name,
         "tenant_email": email,
         "tenant_email_line": tenant_email_line,
     })
