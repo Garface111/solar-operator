@@ -3,7 +3,6 @@ import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { EditableField } from "../ui/EditableField";
-import { Toggle } from "../ui/Toggle";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
@@ -65,16 +64,9 @@ function relativeTime(iso: string | null): string {
 
 /** Returns [{ util, count, maskedAccounts }] for chip display in the table row. */
 function utilityChips(
-  c: ClientRow,
   arrays: ArrayRow[] | undefined,
 ): Array<{ util: string; count: number; maskedAccounts: string[] }> {
-  if (!arrays) {
-    // No arrays loaded yet — fall back to login presence only
-    const chips: Array<{ util: string; count: number; maskedAccounts: string[] }> = [];
-    if (c.gmp_autopopulate || c.gmp_email || c.gmp_username) chips.push({ util: "GMP", count: 0, maskedAccounts: [] });
-    if (c.vec_autopopulate || c.vec_email || c.vec_username) chips.push({ util: "VEC", count: 0, maskedAccounts: [] });
-    return chips;
-  }
+  if (!arrays) return [];
   const byUtil = new Map<string, { count: number; masked: string[] }>();
   for (const arr of arrays) {
     for (const acct of arr.accounts) {
@@ -778,7 +770,7 @@ function ClientTableRow({
         {/* Logins — utility chips with per-utility account count */}
         <td className="w-28 py-2.5 pr-3">
           {(() => {
-            const chips = utilityChips(client, arrays);
+            const chips = utilityChips(arrays);
             if (chips.length === 0) return <span className="text-[11px] text-zinc-400">—</span>;
             const tooltip = chips
               .map((ch) => `${ch.util}: ${ch.maskedAccounts.join(", ") || "—"}`)
@@ -1011,37 +1003,11 @@ function ExpandedPanel({
   const [importingArrays, setImportingArrays] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
 
-  const gmpLogin = client.gmp_email || client.gmp_username || "";
-  const vecLogin = client.vec_email || client.vec_username || "";
   const loginGroups = arrays != null ? buildLoginGroups(client, arrays) : [];
-  const hasAnyLogin = !!(
-    gmpLogin ||
-    client.gmp_autopopulate ||
-    vecLogin ||
-    client.vec_autopopulate
-  );
 
   async function patch(p: Partial<ClientCreateInput> & { active?: boolean }) {
     const updated = await updateClient(client.id, p);
     onChange(updated);
-  }
-
-  async function handleGmpToggle(v: boolean) {
-    try {
-      await patch({ gmp_autopopulate: v });
-      toast.success(v ? "GMP auto-populate on" : "GMP auto-populate off");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't update");
-    }
-  }
-
-  async function handleVecToggle(v: boolean) {
-    try {
-      await patch({ vec_autopopulate: v });
-      toast.success(v ? "VEC auto-populate on" : "VEC auto-populate off");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't update");
-    }
   }
 
   async function handleSendToMe() {
@@ -1129,9 +1095,9 @@ function ExpandedPanel({
             </div>
           )}
 
-          {!loadingArrays && !hasAnyLogin && (
+          {!loadingArrays && loginGroups.length === 0 && (
             <div className="rounded-lg border border-dashed border-zinc-200 px-4 py-5 text-center">
-              <p className="text-xs text-zinc-400">No utility logins connected yet.</p>
+              <p className="text-xs text-zinc-400">No accounts captured yet.</p>
               <button
                 type="button"
                 onClick={onOpenAddByLogin}
@@ -1139,21 +1105,6 @@ function ExpandedPanel({
               >
                 + Connect a login
               </button>
-            </div>
-          )}
-
-          {!loadingArrays && hasAnyLogin && loginGroups.length === 0 && (
-            <div className="rounded-lg border border-dashed border-zinc-200 px-4 py-5 text-center">
-              <p className="text-xs text-zinc-400">
-                Login configured but no accounts captured yet.
-              </p>
-              <p className="mt-1 text-xs text-zinc-400">
-                Open the utility portal signed in as{" "}
-                <span className="font-medium">
-                  {gmpLogin || vecLogin || "this client"}
-                </span>{" "}
-                to capture their accounts.
-              </p>
             </div>
           )}
 
@@ -1216,66 +1167,6 @@ function ExpandedPanel({
                 {downloading ? <><Spinner /> Downloading…</> : "Download .xlsx"}
               </button>
             </div>
-          </div>
-
-          {/* GMP auto-populate */}
-          <div className="rounded-xl bg-zinc-50 px-4 py-3">
-            <Toggle
-              id={`gmp-autopop-${client.id}`}
-              checked={client.gmp_autopopulate}
-              onChange={handleGmpToggle}
-              label="GMP — auto-populate arrays from portal"
-            />
-            {client.gmp_autopopulate && (
-              <div className="mt-2">
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  GMP login (email or username)
-                </span>
-                <EditableField
-                  value={gmpLogin}
-                  label="GMP login"
-                  onSave={(v) => {
-                    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-                    return patch({
-                      gmp_email: v && isEmail ? v : null,
-                      gmp_username: v && !isEmail ? v : null,
-                    });
-                  }}
-                  emptyText="add GMP login"
-                  placeholder="client@gmail.com or jdoe"
-                />
-              </div>
-            )}
-          </div>
-
-          {/* VEC auto-populate */}
-          <div className="rounded-xl bg-zinc-50 px-4 py-3">
-            <Toggle
-              id={`vec-autopop-${client.id}`}
-              checked={client.vec_autopopulate}
-              onChange={handleVecToggle}
-              label="VEC — auto-populate arrays from portal"
-            />
-            {client.vec_autopopulate && (
-              <div className="mt-2">
-                <span className="mb-1 block text-xs font-medium text-zinc-600">
-                  VEC login (email or username)
-                </span>
-                <EditableField
-                  value={vecLogin}
-                  label="VEC login"
-                  onSave={(v) => {
-                    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-                    return patch({
-                      vec_email: v && isEmail ? v : null,
-                      vec_username: v && !isEmail ? v : null,
-                    });
-                  }}
-                  emptyText="add VEC login"
-                  placeholder="client@gmail.com or jdoe"
-                />
-              </div>
-            )}
           </div>
 
           {/* Editable fields */}

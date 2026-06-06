@@ -281,8 +281,8 @@ export interface ClientRow {
   last_bounced_at: string | null;
   last_bounce_reason: string | null;
   /** True when the onboarding flow seeded this client as a "Your first
-   *  client" placeholder. Cleared the moment the operator renames it,
-   *  pastes a utility-login email, or arrays land via autopopulate. */
+   *  client" placeholder. Cleared the moment the operator renames it
+   *  OR arrays land from a portal capture. */
   is_placeholder?: boolean;
 }
 
