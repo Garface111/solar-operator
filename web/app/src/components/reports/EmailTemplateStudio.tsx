@@ -693,12 +693,13 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
             )}
           </div>
 
-          {/* ── Floating AI assistant — bottom-LEFT bubble / panel ──
-              Sits over the preview column so it never overlaps the right
-              column's "Send myself a test" / "Save sign-off" / "Save as
-              my default" buttons (Ford's explicit no-overlap rule, June 5). */}
+          {/* ── Floating AI assistant — middle-RIGHT bubble / panel ──
+              Vertically centered on the right edge so it never sits on top
+              of the right column's "Send myself a test" / "Save sign-off" /
+              "Save as my default" buttons at the bottom (Ford's explicit
+              no-overlap rule, June 5). */}
           {!chatOpen && (
-            <div className="absolute bottom-5 left-5 z-20 flex flex-col items-start gap-2">
+            <div className="absolute right-5 top-1/2 -translate-y-1/2 z-20 flex flex-col items-end gap-2">
               {/* First-visit hint card — dismissed on open or explicit ✕ */}
               {!hintShown && (
                 <div className="w-60 rounded-xl border border-primary-200 bg-primary-50 px-4 py-2.5 shadow-md">
@@ -748,7 +749,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
             </div>
           )}
           {chatOpen && (
-            <div className="absolute bottom-5 left-5 z-20 flex h-[440px] w-[340px] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden">
+            <div className="absolute right-5 top-1/2 -translate-y-1/2 z-20 flex h-[440px] w-[340px] flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden">
               {/* Floating header */}
               <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-3 py-2">
                 <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
