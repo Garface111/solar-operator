@@ -378,19 +378,6 @@ export function SandboxWalkthrough({
           )}
         </div>
 
-        {/* Skip link — always visible throughout walkthrough */}
-        <div
-          className="absolute bottom-6 right-6"
-          style={{ pointerEvents: 'auto' }}
-        >
-          <button
-            type="button"
-            className="text-xs text-zinc-400 underline underline-offset-2 transition-colors hover:text-zinc-600"
-            onClick={markDone}
-          >
-            Skip walkthrough
-          </button>
-        </div>
       </div>
     </>
   );

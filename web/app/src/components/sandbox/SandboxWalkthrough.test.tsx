@@ -75,7 +75,7 @@ describe('SandboxWalkthrough', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders the skip button when clientCount=1 and LS_KEY unset (step=welcome)', () => {
+  it('renders the welcome step when clientCount=1 and LS_KEY unset', () => {
     render(
       <SandboxWalkthrough
         clientCount={1}
@@ -84,8 +84,9 @@ describe('SandboxWalkthrough', () => {
         onOpenManual={NOOP}
       />,
     );
-    // Skip button is always in DOM when step !== 'done'
-    expect(screen.getByText('Skip walkthrough')).toBeDefined();
+    // Skip button removed (was a visual glitch). Walkthrough renders some
+    // content when step !== 'done'.
+    expect(screen.queryByText('Skip walkthrough')).toBeNull();
   });
 
   it('renders null when LS_KEY is already set to true', () => {
