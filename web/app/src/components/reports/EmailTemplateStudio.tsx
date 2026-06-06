@@ -89,6 +89,10 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   const previewDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const subjectInputRef = useRef<HTMLInputElement>(null);
+  const bodyTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Which field a token chip click should target. Updated on focus.
+  // Defaults to "subject" so first-click behavior matches the old single-field flow.
+  const [tokenTarget, setTokenTarget] = useState<"subject" | "body">("subject");
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
 
@@ -224,6 +228,26 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
   }
 
   function insertToken(token: string) {
+    if (tokenTarget === "body") {
+      const ta = bodyTextareaRef.current;
+      if (!ta) {
+        setBodyDraft((s) => s + token);
+        setIsDirty(true);
+        schedulePreviewRefresh(subjectDraft, bodyDraft + token, signoffDraft);
+        return;
+      }
+      const start = ta.selectionStart ?? bodyDraft.length;
+      const end = ta.selectionEnd ?? bodyDraft.length;
+      const next = bodyDraft.slice(0, start) + token + bodyDraft.slice(end);
+      setBodyDraft(next);
+      setIsDirty(true);
+      schedulePreviewRefresh(subjectDraft, next, signoffDraft);
+      setTimeout(() => {
+        ta.setSelectionRange(start + token.length, start + token.length);
+        ta.focus();
+      }, 0);
+      return;
+    }
     const input = subjectInputRef.current;
     if (!input) {
       setSubjectDraft((s) => s + token);
@@ -509,7 +533,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                 {/* Token chips for subject */}
                 <div>
                   <p className="mb-1.5 text-[11px] font-medium text-zinc-400">
-                    Insert token into subject
+                    Insert token into {tokenTarget === "body" ? "body" : "subject"} — click a field, then a chip
                   </p>
                   <div className="flex flex-wrap gap-1.5">
                     {TOKEN_CHIPS.map((t) => (
@@ -538,6 +562,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                       setSubjectDraft(e.target.value);
                       setIsDirty(true);
                     }}
+                    onFocus={() => setTokenTarget("subject")}
                     onBlur={() => void refreshPreview()}
                     className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                   />
@@ -549,12 +574,14 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                   Body (HTML)
                 </label>
                 <textarea
+                  ref={bodyTextareaRef}
                   value={bodyDraft}
                   onChange={(e) => {
                     setBodyDraft(e.target.value);
                     setIsDirty(true);
                     schedulePreviewRefresh(subjectDraft, e.target.value, signoffDraft);
                   }}
+                  onFocus={() => setTokenTarget("body")}
                   rows={8}
                   className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-800 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400/30"
                 />
