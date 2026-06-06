@@ -341,12 +341,18 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
 </td></tr></table></body></html>
 """
     text = f"Sign in to Solar Operator: {link}\n\nLink expires in 15 minutes."
-    _send_via_resend(
+    sent = _send_via_resend(
         to=email,
         subject="Sign in to Solar Operator",
         html=html,
         text=text,
     )
+    if not sent:
+        logger.error(
+            "magic_link_send_failed: email=%s reason=%s",
+            email,
+            getattr(_send_via_resend, "_last_error", "unknown"),
+        )
     return True
 
 
@@ -380,6 +386,88 @@ def auth_verify(req: AuthVerify):
     ttl = SESSION_TTL_SECONDS if persist else 24 * 3600  # 30 days or 1 day
     session_token = _sign_session(tenant_id, ttl_seconds=ttl)
     return {"ok": True, "session_token": session_token, "expires_in": ttl}
+
+
+# ─── password auth ──────────────────────────────────────────────────────
+
+class SetPasswordBody(BaseModel):
+    password: str
+    current_password: Optional[str] = None  # required when an existing password is set
+
+
+class PasswordLoginBody(BaseModel):
+    email: EmailStr
+    password: str
+
+
+def _validate_password_strength(pw: str) -> None:
+    if len(pw) < 10:
+        raise HTTPException(400, "Password must be at least 10 characters")
+    if not re.search(r"[a-zA-Z]", pw):
+        raise HTTPException(400, "Password must contain at least one letter")
+    if not re.search(r"[0-9]", pw):
+        raise HTTPException(400, "Password must contain at least one digit")
+
+
+def _hash_password(pw: str) -> str:
+    from passlib.context import CryptContext
+    ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
+    return ctx.hash(pw)
+
+
+def _verify_password(pw: str, hashed: str) -> bool:
+    from passlib.context import CryptContext
+    ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    return ctx.verify(pw, hashed)
+
+
+@router.post("/v1/auth/password-login")
+def password_login(body: PasswordLoginBody):
+    """Exchange email + password for a session token.
+
+    Returns 401 with a generic message on any failure to prevent email enumeration.
+    Mints the same session token shape as /v1/auth/verify so downstream is identical."""
+    email = body.email.lower().strip()
+    _GENERIC_ERROR = "Invalid email or password"
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.contact_email == email)
+        ).scalars().first()
+        if not t or not t.password_hash:
+            raise HTTPException(401, _GENERIC_ERROR)
+        if not _verify_password(body.password, t.password_hash):
+            raise HTTPException(401, _GENERIC_ERROR)
+        tenant_id = t.id
+
+    session_token = _sign_session(tenant_id)
+    logger.info("password_login_success: email=%s tenant=%s", email, tenant_id)
+    return {"ok": True, "session_token": session_token, "expires_in": SESSION_TTL_SECONDS}
+
+
+@router.post("/v1/auth/set-password")
+def set_password(body: SetPasswordBody,
+                 authorization: Optional[str] = Header(default=None)):
+    """Set or change the operator's password.
+
+    First time (has_password=false): current_password is not required — the
+    existing session (from magic-link) is proof of identity.
+    Changing (has_password=true): current_password must be provided and correct.
+    Password rules: min 10 chars, at least 1 letter, at least 1 digit."""
+    t = tenant_from_session(authorization)
+    _validate_password_strength(body.password)
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        if t.password_hash is not None:
+            # Changing an existing password — require the current one
+            if not body.current_password:
+                raise HTTPException(400, "Current password is required to change your password")
+            if not _verify_password(body.current_password, t.password_hash):
+                raise HTTPException(400, "Current password is incorrect")
+        t.password_hash = _hash_password(body.password)
+        db.commit()
+
+    return {"ok": True, "has_password": True}
 
 
 # ─── account read ───────────────────────────────────────────────────────
@@ -437,6 +525,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "extension_heartbeat_at": t.extension_heartbeat_at.isoformat() if t.extension_heartbeat_at else None,
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "trial_ends_at": t.trial_ends_at.isoformat() if t.trial_ends_at else None,
+            "has_password": bool(t.password_hash),
             "accounts_count": int(accounts_count),
             "bills_count": int(bills_count),
             "clients_count": int(clients_count),
@@ -2048,6 +2137,51 @@ def send_one_client_report(client_id: int,
     from .delivery import deliver_for_client
     return deliver_for_client(client_id, override_to=override_to,
                               triggered_by="self-serve")
+
+
+@router.post("/v1/account/clients/{client_id}/resend-report")
+def resend_client_report(client_id: int,
+                         authorization: Optional[str] = Header(default=None)):
+    """Re-send the current report for one client.
+
+    Calls deliver_for_client and surfaces a clear result:
+      200 {ok, recipient, client_name} on success.
+      502 with the upstream error message when Resend fails — so the
+          dashboard can show 'Couldn't resend — <reason>' to the operator."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+    if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
+        raise HTTPException(402, "Reactivate your subscription to send reports")
+
+    from .delivery import deliver_for_client
+    result = deliver_for_client(client_id, triggered_by="resend")
+
+    if not result.get("ok"):
+        reason = result.get("reason", "report generation failed")
+        logger.error(
+            "resend_report_failed: client_id=%s reason=%s", client_id, reason
+        )
+        raise HTTPException(502, reason)
+
+    if not result.get("email_sent"):
+        error_detail = (
+            getattr(_send_via_resend, "_last_error", None)
+            or "email delivery failed"
+        )
+        logger.error(
+            "resend_email_failed: client_id=%s reason=%s", client_id, error_detail
+        )
+        raise HTTPException(502, f"Report generated but email failed: {error_detail}")
+
+    return {
+        "ok": True,
+        "recipient": result.get("recipient", ""),
+        "client_id": client_id,
+        "client_name": result.get("client_name", ""),
+    }
 
 
 @router.get("/v1/account/clients/{client_id}/report.xlsx")
