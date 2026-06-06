@@ -150,10 +150,10 @@ export default function DummyReport() {
       <p className="mt-3 text-center text-xs">
         <button
           type="button"
-          onClick={() => navigate("/intro")}
+          onClick={() => navigate("/")}
           className="text-zinc-400 underline underline-offset-2 transition-colors hover:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
         >
-          What you&apos;ll get →
+          ← Back to the intro
         </button>
       </p>
     </div>

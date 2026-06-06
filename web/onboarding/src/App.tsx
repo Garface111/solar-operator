@@ -14,13 +14,17 @@ export default function App() {
   return (
     <BrowserRouter basename="/onboarding">
       <Routes>
-        {/* Landing = sample report (no mandatory intro). /intro is the opt-in
-            "what you'll get" explainer — reachable via a subtle footer link on
-            DummyReport. Operators who want the pitch can find it; first-visit
-            defaults to "what am I buying" (the NEPOOL workbook). */}
-        <Route path="/" element={<DummyReport />} />
-        <Route path="/demo" element={<Navigate to="/" replace />} />
-        <Route path="/intro" element={<GetStarted />} />
+        {/* Landing = the intro animation (3 fade-up panels — what operators
+            gain from the software). Followed by a "See the sample report →"
+            CTA that goes to /sample (the NEPOOL workbook mock). The wizard
+            entry point ("Start my free setup →") is the primary action.
+            Ford Jun 6: intro animation comes before the sample spreadsheet. */}
+        <Route path="/" element={<GetStarted />} />
+        <Route path="/sample" element={<DummyReport />} />
+        {/* Legacy /demo + /intro point at the new homes so any old links
+            (extension popup, marketing, bookmarks) still land somewhere sane. */}
+        <Route path="/demo" element={<Navigate to="/sample" replace />} />
+        <Route path="/intro" element={<Navigate to="/" replace />} />
         {/* Wizard: Welcome → Info → ClientSetup (with checkout handoff) → Extension → Clients → Done */}
         <Route path="/welcome" element={<Welcome />} />
         <Route path="/info" element={<Info />} />

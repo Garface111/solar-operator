@@ -56,15 +56,6 @@ export default function GetStarted() {
 
   return (
     <div className="mx-auto min-h-dvh max-w-2xl px-4 py-10 sm:py-14">
-      {/* Back link */}
-      <button
-        type="button"
-        onClick={() => navigate("/")}
-        className="mb-8 text-sm text-zinc-400 transition-colors hover:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-      >
-        ← Back to sample report
-      </button>
-
       {/* Hero */}
       <div className="mb-10">
         <h1 className="text-3xl font-semibold tracking-tight text-zinc-900">
@@ -104,10 +95,10 @@ export default function GetStarted() {
       <div className="mt-10 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <button
           type="button"
-          onClick={() => navigate("/")}
+          onClick={() => navigate("/sample")}
           className="text-sm text-zinc-400 transition-colors hover:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
         >
-          ← See the sample report
+          See the sample report →
         </button>
         <Button onClick={() => navigate("/welcome")}>
           Start my free setup →
