@@ -238,6 +238,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         # bill_offset_months=0). Autopop will instead create 3 SEPARATE arrays.
         # The operator MUST merge those duplicates manually via the dashboard
         # afterward — do NOT attempt to guess merges from account metadata.
+        capture_result: str = "noop"
+        capture_client_id: int | None = None
+        capture_client_name: str | None = None
+
         _autopop_cfg = _PROVIDER_AUTOPOP_FIELDS.get(provider)
         if _autopop_cfg:
             captured_user = normalized.get("user") or {}
@@ -326,6 +330,9 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             owner.is_placeholder = False
                     for c in clients:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
+                    capture_result = "updated"
+                    capture_client_id = owner.id
+                    capture_client_name = owner.name
                 elif all_matches:
                     # Case (2): a Client matches this email/username but the
                     # operator explicitly set autopop=False on every match.
@@ -335,6 +342,9 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     # auto-imported.
                     for c in all_matches:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
+                    capture_result = "updated"
+                    capture_client_id = all_matches[0].id
+                    capture_client_name = all_matches[0].name
                 else:
                     # ── Placeholder adoption OR new-client auto-create ─────────
                     # No Client matched on (email|username) for this provider.
@@ -491,6 +501,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             acct.array_id = arr.id
                         if target.is_placeholder:
                             target.is_placeholder = False
+                        db.flush()  # ensure target.id is populated before we read it
+                        capture_result = "created"
+                        capture_client_id = target.id
+                        capture_client_name = target.name
 
         # ── VEC bill/usage persistence (extension-scraped) ──────────────
         # GMP has a separate worker that pulls bill PDFs server-side and
@@ -580,6 +594,9 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         "tenant": tenant.id,
         "accounts": len(normalized["accounts"]),
         "token_expires_at": normalized["auth"].get("apiTokenExpires"),
+        "result": capture_result,
+        "is_new_client": capture_result == "created",
+        "client": {"id": capture_client_id, "name": capture_client_name} if capture_client_id else None,
     }
 
 

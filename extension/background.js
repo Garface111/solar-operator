@@ -149,12 +149,16 @@ async function _handleSync(payload, tokenHash, sendResponse) {
     chrome.action.setBadgeBackgroundColor({ color: "#2e6b3a" });
     // v1.3.0: tell every open solaroperator.org tab so the onboarding wizard
     // can auto-advance the moment a capture lands.
+    const isNew = !result || result.is_new_client !== false;
     const capturedMsg = {
       type: "SO_CAPTURE_LANDED",
       ok: true,
       provider: payload.provider || "gmp",
       accountCount: (payload.accounts || []).length,
       at,
+      is_new_client: isNew,
+      result: (result && result.result) || "created",
+      client_name: (result && result.client && result.client.name) || null,
     };
     broadcastToSoTabs(capturedMsg);
     // v1.4.0: also notify the popup if it is open.

@@ -91,12 +91,20 @@ export function CaptureListener({ onCaptureLanded }: Props) {
         /* parent surfaces its own errors */
       }
 
+      // Check if server explicitly said this was an update/noop (not a new client)
+      const serverSaysUpdate = data.is_new_client === false;
+
       const pending = readPending();
       if (!pending) {
         // Capture landed but we don't know which client the operator
         // was adding (ambient resync, page reload between pick and
         // landing, etc.). Quiet info toast — not an error.
-        toast.show("Captured fresh utility data.", "info");
+        if (serverSaysUpdate) {
+          const name = data.client_name ? data.client_name : "client data";
+          toast.show(`Updated ${name} — latest data captured.`, "info");
+        } else {
+          toast.show("Captured fresh utility data.", "info");
+        }
         try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
         return;
       }
@@ -106,12 +114,17 @@ export function CaptureListener({ onCaptureLanded }: Props) {
       clearPending();
 
       if (newRows.length === 0) {
-        // No new client ID → extension re-scraped the previously-
-        // signed-in account. Warning (amber, actionable) per spec.
-        toast.warning(
-          "Looks like the extension re-captured a client you already have. " +
-          "Sign out of the portal in that tab first, then click Add client again.",
-        );
+        if (serverSaysUpdate) {
+          // Server confirmed this was an intentional re-capture/update — not a mistake
+          const name = data.client_name ? data.client_name : "existing client";
+          toast.show(`Updated ${name} — latest data captured.`, "info");
+        } else {
+          // We don't know if this was intentional — show the existing warning
+          toast.warning(
+            "Looks like the extension re-captured a client you already have. " +
+            "Sign out of the portal in that tab first, then click Add client again.",
+          );
+        }
         try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
         return;
       }
