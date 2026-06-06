@@ -6,6 +6,7 @@ import {
   useExtensionStatus,
   type ExtensionStatus,
 } from "../lib/useExtensionStatus";
+import { wipeCookiesAndWait } from "../lib/openPortalTab";
 
 type Provider = "gmp" | "vec";
 
@@ -68,38 +69,38 @@ export function AddClientByLoginModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Fire-and-forget cookie wipe via the extension. We don't await it —
-  // window.open MUST be called synchronously inside the click handler
-  // or Chrome's popup blocker treats it as programmatic and refuses
-  // to open a foregrounded tab. Cookies usually finish wiping in <50ms,
-  // which beats the portal page's auth-check round-trip on the new tab.
-  function wipeCookiesAsync(domain: string) {
-    try {
-      window.postMessage(
-        { type: "SO_WIPE_COOKIES", domain, reqId: `w-${Date.now()}` },
-        "*",
-      );
-    } catch { /* ignore */ }
-  }
-
   function pick(provider: Provider) {
-    // Open the portal IMMEDIATELY — synchronous, user-initiated click,
-    // foreground tab guaranteed. This is the entire user-facing job;
-    // everything else is bookkeeping.
-    const newTab = window.open(PORTAL_URLS[provider], "_blank", "noopener,noreferrer");
+    const url = PORTAL_URLS[provider];
+    const host =
+      provider === "gmp" ? "greenmountainpower.com" : "smarthub.coop";
+
+    // Pattern A: open about:blank SYNCHRONOUSLY (foreground tab guaranteed —
+    // no await between click and window.open). We omit noopener so the
+    // returned reference is non-null and we can set location.href after the
+    // wipe. about:blank has no meaningful cross-origin security concern.
+    const t0 = Date.now();
+    console.log(`[SO ${t0}] add-login: open about:blank for ${provider}`);
+    const newTab = window.open("about:blank", "_blank");
     if (!newTab) {
-      // Pop-up blocked — silently bail. Toast removed per Ford's call;
-      // user-initiated click should always be allowed by browsers anyway.
+      // Popup blocker — user-initiated click should never hit this in practice.
       return;
     }
 
-    // Cookie wipe runs in parallel — best-effort. If the extension is
-    // installed it'll happen before the new tab finishes its first
-    // network call; if not, the operator just lands wherever they were
-    // last logged in (still functional, just less clean).
-    const host =
-      provider === "gmp" ? "greenmountainpower.com" : "smarthub.coop";
-    wipeCookiesAsync(host);
+    // Await the cookie wipe ack, THEN navigate. This prevents the race where
+    // the portal loads with stale session cookies and lands on the previous
+    // customer's dashboard.
+    (async () => {
+      console.log(`[SO ${Date.now()}] add-login: wipe-start for ${host}`);
+      await wipeCookiesAndWait(host);
+      console.log(`[SO ${Date.now()}] add-login: wipe-done (+${Date.now() - t0}ms), navigating tab`);
+      try {
+        newTab.location.href = url;
+        console.log(`[SO ${Date.now()}] add-login: tab.location.href set → ${url}`);
+      } catch (e) {
+        // Should not happen while tab is on about:blank but log if it does.
+        console.error("[SO] could not navigate new tab:", e);
+      }
+    })();
 
     // Snapshot known clients + close modal. CaptureListener handles
     // success notification when the extension POSTs /v1/sync.

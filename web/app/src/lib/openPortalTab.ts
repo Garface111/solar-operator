@@ -13,6 +13,55 @@
 
 const ACK_TIMEOUT_MS = 250;
 
+// ── Pattern-A cookie wipe ─────────────────────────────────────────────
+//
+// Used by AddClientByLoginModal when it needs a FOREGROUND tab with a
+// guaranteed-clean session. The caller opens about:blank synchronously
+// in the click handler (popup-blocker-safe), then awaits this function
+// before setting newTab.location.href.
+//
+// Sends SO_WIPE_COOKIES and resolves when SO_WIPE_COOKIES_ACK arrives or
+// after WIPE_TIMEOUT_MS — whichever comes first. If the extension is
+// absent the timeout fires and the caller navigates anyway (best-effort,
+// same behaviour as the old fire-and-forget).
+
+export const WIPE_TIMEOUT_MS = 800;
+
+let _wipeCtr = 0;
+
+export function wipeCookiesAndWait(domain: string): Promise<void> {
+  return new Promise((resolve) => {
+    const reqId = `w-${Date.now()}-${++_wipeCtr}`;
+    let done = false;
+
+    function onAck(e: MessageEvent) {
+      if (e.source !== window) return;
+      const d = e.data;
+      if (!d || d.type !== "SO_WIPE_COOKIES_ACK" || d.reqId !== reqId) return;
+      window.removeEventListener("message", onAck);
+      if (done) return;
+      done = true;
+      resolve();
+    }
+
+    window.addEventListener("message", onAck);
+    try {
+      window.postMessage({ type: "SO_WIPE_COOKIES", domain, reqId }, "*");
+    } catch {
+      window.removeEventListener("message", onAck);
+      resolve();
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("message", onAck);
+      resolve();
+    }, WIPE_TIMEOUT_MS);
+  });
+}
+
 function uuid(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

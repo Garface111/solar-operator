@@ -245,14 +245,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // it calls window.open() directly. window.open() inside a user-
   // initiated click handler always foregrounds (no extension involved,
   // no popup blocker). We just handle the session-reset side here.
+  //
+  // v1.4.6: added timestamps for diagnosing wipe-vs-tab-load races,
+  // and set so_pending_storage_wipe so portal_cleaner.js can clear
+  // localStorage/sessionStorage on the first document_start of the
+  // portal page.
   if (msg.type === "SO_WIPE_COOKIES") {
     const domain = String(msg.domain || "");
+    const reqId = msg.reqId || "";
     const allowed = ["greenmountainpower.com", "smarthub.coop"];
     if (!allowed.some((d) => domain.endsWith(d))) {
       sendResponse({ ok: false, error: "domain-not-allowed" });
       return;
     }
     (async () => {
+      const t0 = Date.now();
+      console.log(`[SO ${t0}] wipe-start domain=${domain} reqId=${reqId}`);
       try {
         const cookies = await chrome.cookies.getAll({ domain });
         await Promise.all(cookies.map((c) => {
@@ -262,8 +270,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             url: cookieUrl, name: c.name, storeId: c.storeId,
           });
         }));
+        const elapsed = Date.now() - t0;
+        console.log(`[SO ${Date.now()}] wipe-done domain=${domain} wiped=${cookies.length} +${elapsed}ms`);
+        // Signal portal_cleaner.js to clear localStorage/sessionStorage on next portal load.
+        await chrome.storage.local.set({
+          so_pending_storage_wipe: { domain, ts: t0 },
+        });
         sendResponse({ ok: true, wiped: cookies.length });
       } catch (e) {
+        console.warn(`[SO ${Date.now()}] wipe-error domain=${domain}:`, e);
         sendResponse({ ok: false, error: String(e) });
       }
     })();
