@@ -7,6 +7,8 @@ import {
   type Utility,
   type UtilityAccount,
 } from './mockData';
+import { restoreArray } from '../../lib/api';
+import { useToast } from '../../ui/Toast';
 
 // Lookup for card width class per density (also applies to dense-expanded state)
 const CARD_WIDTH: Record<string, string> = {
@@ -635,7 +637,19 @@ function LoginGroupRow({
           )}
           {accounts.flatMap((acc) =>
             acc.arrays.length > 0
-              ? acc.arrays.map((arr) => (
+              ? acc.arrays.map((arr) => arr.deleted_at
+                  ? (
+                      <DeletedArrayRow
+                        key={`${acc.id}-${arr.id}-deleted`}
+                        arr={arr}
+                        clientId={clientId}
+                        onRestored={() => {
+                          // Mark as optimistically restored — canvas will refresh
+                          // via so:arrays-changed; the ghost row disappears immediately.
+                        }}
+                      />
+                    )
+                  : (
                   <div
                     key={`${acc.id}-${arr.id}`}
                     className={[
@@ -676,7 +690,7 @@ function LoginGroupRow({
                       ×
                     </button>
                   </div>
-                ))
+                  ))
               : [
                   <div
                     key={`${acc.id}-empty`}
@@ -705,6 +719,97 @@ function LoginGroupRow({
   );
 }
 
+
+const PURGE_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Days remaining before the array is permanently purged (ceil so "1" means less than 2 full days). */
+function daysUntilPurge(deletedAt: string): number {
+  const purgeAt = new Date(deletedAt).getTime() + PURGE_GRACE_MS;
+  return Math.ceil((purgeAt - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+/** Extracts numeric array id from strings like "arr_42" or "arr_u_7". Returns NaN if not parseable. */
+function numericArrayId(arrId: string): number {
+  return parseInt(arrId.replace(/^arr_/, ''), 10);
+}
+
+/** Extracts numeric client id from strings like "client_42". Returns NaN if not parseable. */
+function numericClientId(clientId: string): number {
+  return parseInt(clientId.replace(/^client_/, ''), 10);
+}
+
+/** Ghost row for a soft-deleted array — shows name struck-through, purge countdown chip, and Restore button. */
+function DeletedArrayRow({
+  arr,
+  clientId,
+  onRestored,
+}: {
+  arr: SolarArray;
+  clientId: string;
+  onRestored: (arr: SolarArray) => void;
+}) {
+  const toast = useToast();
+  const [optimisticRestored, setOptimisticRestored] = useState(false);
+  const days = arr.deleted_at ? daysUntilPurge(arr.deleted_at) : 0;
+
+  if (optimisticRestored) return null;
+
+  const isLastChance = days <= 1;
+  const chipCls = isLastChance
+    ? 'bg-red-50 text-red-600 border border-red-200'
+    : 'bg-wood-100 text-wood-700 border border-wood-300';
+  const chipLabel = days <= 0 ? 'Purging soon' : days === 1 ? 'Purges tomorrow' : `Purges in ${days}d`;
+
+  async function handleRestore(e: React.MouseEvent) {
+    e.stopPropagation();
+    const cid = numericClientId(clientId);
+    const aid = numericArrayId(arr.id);
+    if (isNaN(cid) || isNaN(aid)) return;
+
+    // Optimistic: hide the ghost row immediately
+    setOptimisticRestored(true);
+    onRestored(arr);
+    try {
+      await restoreArray(cid, aid);
+      window.dispatchEvent(new CustomEvent('so:arrays-changed'));
+    } catch (err: unknown) {
+      // Revert optimistic state
+      setOptimisticRestored(false);
+      const status = (err as { status?: number })?.status;
+      if (status === 410) {
+        toast.error('This array was already purged. Re-add it manually.');
+      } else {
+        toast.error("Couldn't restore — try again.");
+      }
+    }
+  }
+
+  return (
+    <div
+      className="group/arr flex items-center gap-1.5 rounded-md border border-dashed border-zinc-300 bg-zinc-50 px-1.5 py-1.5 opacity-45 transition-opacity hover:opacity-70"
+      title={`Deleted array — purges ${days <= 0 ? 'soon' : `in ${days} day${days === 1 ? '' : 's'}`}`}
+    >
+      {/* Spacer matching the six-dot drag handle width — no drag for deleted rows */}
+      <span className="shrink-0 w-[18px]" />
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-400 opacity-60" />
+      <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-500 line-through">
+        {arr.name}
+      </span>
+      <span className={`nodrag shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold ${chipCls}`}>
+        {chipLabel}
+      </span>
+      <button
+        type="button"
+        className="nodrag shrink-0 rounded border border-zinc-300 bg-white px-1.5 py-0.5 text-[9px] font-semibold text-zinc-600 opacity-80 transition-all hover:border-primary-400 hover:bg-primary-50 hover:text-primary-700 hover:opacity-100"
+        onClick={handleRestore}
+        title="Restore this array"
+        aria-label="Restore array"
+      >
+        Restore
+      </button>
+    </div>
+  );
+}
 
 /** Inline-editable array name. Click to rename; Enter/blur commits; Escape cancels. */
 function ArrayNameCell({ arr }: { arr: SolarArray }) {

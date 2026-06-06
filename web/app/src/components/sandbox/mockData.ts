@@ -6,6 +6,9 @@ export interface SolarArray {
   nepool_gis_id: string;
   mwh_per_qtr: number;
   reassigned_at?: string | null;
+  /** ISO timestamp of soft-deletion. Non-null means the array is in the
+   *  30-day purge countdown window; the sandbox renders it as a ghost row. */
+  deleted_at?: string | null;
 }
 
 export interface UtilityAccount {
@@ -107,6 +110,9 @@ export const SEED_CLIENTS: ClientData[] = [
         arrays: [
           { id: 'arr_01a1', name: 'East Field Array', nepool_gis_id: 'NE-VT-2201', mwh_per_qtr: 32.4 },
           { id: 'arr_01a2', name: 'Barn Roof Array', nepool_gis_id: 'NE-VT-2202', mwh_per_qtr: 18.7 },
+          // Ghost array — decommissioned 27 days ago, purges in 3 days (demo of the purge countdown chip)
+          { id: 'arr_01a3', name: 'Decommissioned 2023-04 Array', nepool_gis_id: 'NE-VT-2299', mwh_per_qtr: 0,
+            deleted_at: new Date(Date.now() - 27 * 24 * 60 * 60 * 1000).toISOString() },
         ],
       },
       {

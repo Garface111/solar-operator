@@ -8,15 +8,18 @@ POST /v1/sandbox/merge      → merge client B into A (thin convenience wrapper)
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from .account import tenant_from_session
 from .db import SessionLocal
 from .models import Array, Client, UtilityAccount, now
+
+HARD_DELETE_GRACE_DAYS = 30
 
 router = APIRouter()
 
@@ -38,13 +41,19 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array]) -> dict:
         "nepool_gis_id": arr.nepool_gis_id if arr else None,
         "login_origin_client_id": getattr(acc, "login_origin_client_id", None),
         "array_reassigned_at": arr.reassigned_at.isoformat() if arr and arr.reassigned_at else None,
+        "array_deleted_at": arr.deleted_at.isoformat() if arr and arr.deleted_at else None,
     }
 
 
 @router.get("/v1/sandbox/canvas")
 def get_canvas(authorization: Optional[str] = Header(default=None)):
-    """Return the tenant's full client → account → array graph with saved positions."""
+    """Return the tenant's full client → account → array graph with saved positions.
+
+    Soft-deleted arrays within the 30-day grace window are included so the
+    sandbox can show a ghost row with a purge countdown chip.
+    """
     tenant = tenant_from_session(authorization)
+    cutoff = datetime.utcnow() - timedelta(days=HARD_DELETE_GRACE_DAYS)
     with SessionLocal() as db:
         clients = db.execute(
             select(Client).where(
@@ -53,18 +62,34 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
             ).order_by(Client.created_at)
         ).scalars().all()
 
+        # Include recently soft-deleted arrays (within grace window) so the
+        # canvas can render them as ghosts with a purge countdown.
         arrays = db.execute(
             select(Array).where(
                 Array.tenant_id == tenant.id,
-                Array.deleted_at.is_(None),
+                or_(
+                    Array.deleted_at.is_(None),
+                    Array.deleted_at >= cutoff,
+                ),
             )
         ).scalars().all()
         array_map: dict[int, Array] = {a.id: a for a in arrays}
 
+        # Soft-deleted accounts that belong to recently soft-deleted arrays are
+        # included so the ghost row appears under the correct login group.
+        deleted_array_ids = {a.id for a in arrays if a.deleted_at is not None}
+        if deleted_array_ids:
+            accounts_where = or_(
+                UtilityAccount.deleted_at.is_(None),
+                UtilityAccount.array_id.in_(deleted_array_ids),
+            )
+        else:
+            accounts_where = UtilityAccount.deleted_at.is_(None)
+
         accounts = db.execute(
             select(UtilityAccount).where(
                 UtilityAccount.tenant_id == tenant.id,
-                UtilityAccount.deleted_at.is_(None),
+                accounts_where,
             ).order_by(UtilityAccount.id)
         ).scalars().all()
 
