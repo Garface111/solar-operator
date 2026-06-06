@@ -1155,6 +1155,7 @@ export interface CanvasAccountData {
 export interface CanvasClientData {
   id: number;
   name: string;
+  contact_email?: string | null;
   canvas_x: number | null;
   canvas_y: number | null;
   canvas_pinned: boolean;
