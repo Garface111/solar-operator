@@ -51,10 +51,6 @@ function deliveryStatus(
   };
 }
 
-// Human-readable label for the report cadence enum stored on the client.
-// Surfaced next to the "Email it to me / Download" actions so the operator
-// always knows when the live version of this report goes out — Bruce
-// flagged that this was buried in settings (June 5 meeting note).
 function labelForFrequency(f: string): string {
   switch (f) {
     case "monthly":
@@ -137,7 +133,21 @@ export function ClientCard({
   // is ignored; every row lands under THIS client. Complements the global
   // "Import spreadsheet" at the top of the page, which creates new clients.
   const [importingArrays, setImportingArrays] = useState(false);
+  const [importDropdownOpen, setImportDropdownOpen] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
+  const importDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!importDropdownOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (importDropdownRef.current && !importDropdownRef.current.contains(e.target as Node)) {
+        setImportDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [importDropdownOpen]);
+
   async function patch(p: Partial<ClientRow>) {
     const updated = await updateClient(client.id, p as any);
     onChange(updated);
@@ -210,8 +220,8 @@ export function ClientCard({
 
   return (
     <div
-      className={`rounded-xl border bg-white transition-shadow ${
-        expanded ? "border-zinc-300 shadow-sm" : "border-zinc-200"
+      className={`rounded-xl border bg-cream transition-shadow ${
+        expanded ? "border-cream-border shadow-sm" : "border-cream-border"
       } ${selected ? "ring-2 ring-primary-400" : ""} ${
         isPlaceholder ? "ring-2 ring-amber-300/70 border-amber-200" : ""
       }`}
@@ -345,7 +355,7 @@ export function ClientCard({
           dead-ends the wave. */}
       {(expanded || reveal.active) && (
         <div
-          className="space-y-5 border-t border-zinc-100 px-4 py-4"
+          className="border-t border-wood-300 px-4 py-4"
           style={!expanded ? { display: "none" } : undefined}
           aria-hidden={!expanded}
         >
@@ -370,133 +380,198 @@ export function ClientCard({
             }}
           />
 
-          {/* Report section — pinned to top of drawer so it's the first thing you see */}
-          <div className="rounded-xl border border-primary-100 bg-primary-50/50 px-4 py-3">
-            <h4 className="text-xs font-semibold uppercase tracking-wide text-primary-700">
-              {client.last_delivery_at
-                ? `Report — ${new Date(client.last_delivery_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
-                : "Report"}
-            </h4>
-            <p className="mt-1 text-xs text-zinc-600">
-              Preview what you&apos;ll send {client.name} — without contacting them.
-              {" "}
-              <span className="text-zinc-500">
-                Auto-sends{" "}
-                <span className="font-medium text-zinc-700">
-                  {labelForFrequency(client.report_frequency ?? "quarterly")}
+          {/* 2-column layout: left = identity + content, right = meta + actions */}
+          <div className="mt-4 grid grid-cols-1 gap-6 sm:grid-cols-[1fr_280px]">
+            {/* LEFT column — CC emails and notes */}
+            <div className="space-y-4">
+              <div>
+                <span className="mb-1 block text-xs font-medium text-zinc-600">
+                  CC emails
                 </span>
-                .
-              </span>
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button
-                variant="secondary"
-                onClick={handleSendToMe}
-                disabled={sendingToMe || !operatorEmail}
-              >
-                {sendingToMe ? (
-                  <>
-                    <Spinner />
-                    Sending…
-                  </>
-                ) : (
-                  "Email it to me"
-                )}
-              </Button>
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={downloading}
-                className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-              >
-                {downloading ? (
-                  <>
-                    <Spinner />
-                    Downloading…
-                  </>
-                ) : (
-                  "Download .xlsx"
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Extra delivery fields — CC recipients, report cadence, notes */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <span className="mb-1 block text-xs font-medium text-zinc-600">
-                CC emails
-              </span>
-              <EditableField
-                value={client.cc_emails}
-                label="CC emails"
-                onSave={(v) => patch({ cc_emails: v || null })}
-                emptyText="none"
-                placeholder="extra@example.com, other@example.com"
-              />
-              <p className="mt-1 text-[11px] text-zinc-400">
-                Comma-separated. These addresses get a copy of every report.
-              </p>
-            </div>
-            <div>
-              <span className="mb-1 block text-xs font-medium text-zinc-600">
-                Report frequency
-              </span>
-              <select
-                value={client.report_frequency ?? "quarterly"}
-                onChange={(e) =>
-                  patch({ report_frequency: e.target.value || "quarterly" })
-                }
-                aria-label="Report frequency"
-                className="w-full rounded-xl border border-zinc-300 bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
-              >
-                <option value="monthly">Monthly</option>
-                <option value="quarterly">Quarterly</option>
-              </select>
-              <p className="mt-1 text-[11px] text-zinc-400">
-                Override the account-wide schedule for this client only.
-              </p>
-            </div>
-          </div>
-
-          <div>
-            <span className="mb-1 block text-xs font-medium text-zinc-600">
-              Notes
-            </span>
-            <EditableField
-              value={client.notes}
-              label="notes"
-              onSave={(v) => patch({ notes: v || null })}
-              emptyText="—"
-              placeholder="Internal notes — not sent to the client"
-            />
-          </div>
-
-          {/* arrays */}
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Arrays
-              </h4>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setImportingArrays(true)}
-                  className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-                  title="Upload a spreadsheet of arrays under this client"
-                >
-                  Import arrays
-                </button>
-                <button
-                  type="button"
-                  data-tour-step="5"
-                  onClick={() => setAssigningNepool(true)}
-                  className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-400 hover:text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-                >
-                  Import NEPOOL IDs
-                </button>
+                <EditableField
+                  value={client.cc_emails}
+                  label="CC emails"
+                  onSave={(v) => patch({ cc_emails: v || null })}
+                  emptyText="none"
+                  placeholder="extra@example.com, other@example.com"
+                />
+                <p className="mt-1 text-[11px] text-zinc-400">
+                  Comma-separated. These addresses get a copy of every report.
+                </p>
+              </div>
+              <div>
+                <span className="mb-1 block text-xs font-medium text-zinc-600">
+                  Notes
+                </span>
+                <EditableField
+                  value={client.notes}
+                  label="notes"
+                  onSave={(v) => patch({ notes: v || null })}
+                  emptyText="—"
+                  placeholder="Internal notes — not sent to the client"
+                />
               </div>
             </div>
+
+            {/* RIGHT column — meta & quick actions */}
+            <div className="space-y-4">
+              {/* Status pills */}
+              <div className="flex flex-wrap gap-1.5">
+                {client.active ? (
+                  <Chip variant="emerald">Active</Chip>
+                ) : (
+                  <Chip variant="muted">Suspended</Chip>
+                )}
+                {delivery && (
+                  <Chip variant={delivery.kind === "ok" ? "emerald" : "red"}>
+                    {delivery.text}
+                  </Chip>
+                )}
+              </div>
+
+              {/* Report frequency */}
+              <div>
+                <span className="mb-1 block text-xs font-medium text-zinc-600">
+                  Report frequency
+                </span>
+                <select
+                  value={client.report_frequency ?? "quarterly"}
+                  onChange={(e) =>
+                    patch({ report_frequency: e.target.value || "quarterly" })
+                  }
+                  aria-label="Report frequency"
+                  className="w-full rounded-xl border border-cream-border bg-white px-3.5 py-2.5 text-sm focus:outline-none focus:border-transparent focus:ring-2 focus:ring-primary-500/40"
+                >
+                  <option value="monthly">Monthly</option>
+                  <option value="quarterly">Quarterly</option>
+                </select>
+                <p className="mt-1 text-[11px] text-zinc-400">
+                  Override the account-wide schedule for this client only. Auto-sends{" "}
+                  <span className="font-medium text-zinc-500">
+                    {labelForFrequency(client.report_frequency ?? "quarterly")}
+                  </span>
+                  .
+                </p>
+              </div>
+
+              {/* Quick actions */}
+              <div className="flex flex-col gap-2">
+                <Button
+                  variant="secondary"
+                  onClick={handleSendToMe}
+                  disabled={sendingToMe || !operatorEmail}
+                >
+                  {sendingToMe ? (
+                    <>
+                      <Spinner />
+                      Sending…
+                    </>
+                  ) : (
+                    "Email it to me"
+                  )}
+                </Button>
+                <button
+                  type="button"
+                  onClick={handleDownload}
+                  disabled={downloading}
+                  className="inline-flex items-center justify-center rounded-lg border border-cream-border bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                >
+                  {downloading ? (
+                    <>
+                      <Spinner />
+                      Downloading…
+                    </>
+                  ) : (
+                    "Download .xlsx"
+                  )}
+                </button>
+                {/* Single "Import data" dropdown — replaces the old two separate buttons.
+                    Dropdown approach: user intent (create vs. assign) stays clear in the menu
+                    without changing the backend preview semantics yet. */}
+                <div className="relative" ref={importDropdownRef} data-tour-step="5">
+                  <button
+                    type="button"
+                    onClick={() => setImportDropdownOpen((o) => !o)}
+                    className="inline-flex w-full items-center justify-between rounded-lg border border-cream-border bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  >
+                    <span>Import data</span>
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                      className={`transition-transform ${importDropdownOpen ? "rotate-180" : ""}`}
+                    >
+                      <polyline points="2,4 6,8 10,4" />
+                    </svg>
+                  </button>
+                  {importDropdownOpen && (
+                    <div className="absolute right-0 z-10 mt-1 w-full overflow-hidden rounded-xl border border-cream-border bg-white shadow-md">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImportDropdownOpen(false);
+                          setImportingArrays(true);
+                        }}
+                        className="block w-full px-3 py-2 text-left hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                      >
+                        <span className="text-sm font-medium text-zinc-700">Import arrays</span>
+                        <span className="mt-0.5 block text-[11px] text-zinc-400">
+                          Creates new arrays from a spreadsheet
+                        </span>
+                      </button>
+                      <div className="border-t border-cream-border" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImportDropdownOpen(false);
+                          setAssigningNepool(true);
+                        }}
+                        className="block w-full px-3 py-2 text-left hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                      >
+                        <span className="text-sm font-medium text-zinc-700">Import NEPOOL IDs</span>
+                        <span className="mt-0.5 block text-[11px] text-zinc-400">
+                          Fills IDs on existing arrays — no new rows created
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Delivery preview — only shown when we have real data */}
+              {(client.last_delivered_at || client.last_bounced_at) && (
+                <div className="space-y-0.5 rounded-lg border border-cream-border px-3 py-2 text-xs">
+                  {client.last_delivered_at && (
+                    <p className="text-zinc-400">
+                      Last delivered:{" "}
+                      {new Date(client.last_delivered_at).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </p>
+                  )}
+                  {client.last_bounced_at && (
+                    <p className="text-red-500">
+                      Bounce: {client.last_bounce_reason ?? "unknown reason"}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Arrays — full width below the 2-col section */}
+          <div className="mt-5">
+            <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+              Arrays
+            </h4>
             <div data-tour-step="7">
               <ArrayList
                 clientId={client.id}
@@ -510,8 +585,7 @@ export function ClientCard({
             </div>
           </div>
 
-
-          <div className="flex justify-end">
+          <div className="mt-4 flex justify-end">
             {client.active ? (
               <button
                 type="button"
