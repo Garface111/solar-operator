@@ -3,6 +3,28 @@
 
 const ACK_TIMEOUT_MS = 250;
 
+// See web/app/src/lib/openPortalTab.ts for the full rationale.
+// Short version: v < 1.4.6 leaves GMP localStorage stale → 404 JSON page at /account/.
+// Fall back to root (/) which redirects to login instead of hitting the broken API path.
+
+export const GMP_ACCOUNT_URL = "https://greenmountainpower.com/account/";
+export const GMP_SAFE_URL = "https://greenmountainpower.com/";
+
+function supportsLocalStorageWipe(version: string): boolean {
+  const parts = version.split(".").map(Number);
+  const ma = parts[0] ?? 0;
+  const mi = parts[1] ?? 0;
+  const pa = parts[2] ?? 0;
+  if (ma !== 1) return ma > 1;
+  if (mi !== 4) return mi > 4;
+  return pa >= 6;
+}
+
+export function gmpPortalUrl(version: string | null): string {
+  if (version && supportsLocalStorageWipe(version)) return GMP_ACCOUNT_URL;
+  return GMP_SAFE_URL;
+}
+
 function uuid(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

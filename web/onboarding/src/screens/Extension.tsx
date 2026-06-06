@@ -6,7 +6,7 @@ import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { Modal } from "../ui/Modal";
 import { useToast } from "../ui/Toast";
-import { openPortalTab } from "../lib/openPortalTab";
+import { openPortalTab, gmpPortalUrl } from "../lib/openPortalTab";
 import {
   getToken,
   fetchStatus,
@@ -75,6 +75,7 @@ export default function Extension() {
 
   // Bridge state
   const [extensionPresent, setExtensionPresent] = useState(false);
+  const [extVersion, setExtVersion] = useState<string | null>(null);
   const [paired, setPaired] = useState(false);
   const [activationCode, setActivationCode] = useState<string | null>(null);
   const pairAttemptedRef = useRef(false);
@@ -101,6 +102,7 @@ export default function Extension() {
 
       if (data.type === "SO_EXTENSION_PRESENT") {
         setExtensionPresent(true);
+        if (typeof data.version === "string") setExtVersion(data.version);
         return;
       }
 
@@ -133,6 +135,7 @@ export default function Extension() {
         // so we'd otherwise miss it and never auto-pair. Treat a successful status
         // response as equivalent to an extension-present signal.
         setExtensionPresent(true);
+        if (typeof data.version === "string") setExtVersion((v) => v ?? data.version);
         if (data.tenantKeySet) setPaired(true);
         if (data.loginState) {
           setLoginState({
@@ -303,9 +306,10 @@ export default function Extension() {
   }
 
   async function openPortal(p: Provider, url: string) {
+    const resolvedUrl = p === "gmp" ? gmpPortalUrl(extVersion) : url;
     setOpeningProvider(p);
     try {
-      await openPortalTab(url);
+      await openPortalTab(resolvedUrl);
       setActiveProvider(p);
     } catch {
       toast.error("Couldn't open that portal — try clicking again.");

@@ -11,7 +11,8 @@
 // doesn't reappear after manual refresh during the same session.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { openPortalTab } from "../lib/openPortalTab";
+import { openPortalTab, gmpPortalUrl } from "../lib/openPortalTab";
+import { useExtensionStatus } from "../lib/useExtensionStatus";
 import { listClients, listArrays, type ClientRow } from "../lib/api";
 import { useToast } from "../ui/Toast";
 
@@ -42,6 +43,9 @@ const DISMISS_KEY = "so_capture_ceremony_dismissed";
 
 export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
   const toast = useToast();
+  // Read cached extension version (no active probe — version was set when the
+  // extension announced itself at page load via SO_EXTENSION_PRESENT).
+  const ext = useExtensionStatus(false);
   const [events, setEvents] = useState<CaptureEvent[]>([]);
   const [pendingProvider, setPendingProvider] = useState<Provider | null>(null);
   const [pendingSince, setPendingSince] = useState<number | null>(null);
@@ -338,7 +342,7 @@ export function CaptureCeremony({ freshVisit, onCaptureLanded }: Props) {
   function openPortal(provider: Provider) {
     const url =
       provider === "gmp"
-        ? "https://greenmountainpower.com/account/"
+        ? gmpPortalUrl(ext.version)
         : "https://vermontelectric.smarthub.coop/";
     void openPortalTab(url);
   }

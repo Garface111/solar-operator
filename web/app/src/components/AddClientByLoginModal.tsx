@@ -6,7 +6,7 @@ import {
   useExtensionStatus,
   type ExtensionStatus,
 } from "../lib/useExtensionStatus";
-import { wipeCookiesAndWait } from "../lib/openPortalTab";
+import { wipeCookiesAndWait, gmpPortalUrl } from "../lib/openPortalTab";
 
 type Provider = "gmp" | "vec";
 
@@ -70,7 +70,7 @@ export function AddClientByLoginModal({
   }, [open]);
 
   function pick(provider: Provider) {
-    const url = PORTAL_URLS[provider];
+    const url = provider === "gmp" ? gmpPortalUrl(ext.version) : PORTAL_URLS[provider];
     const host =
       provider === "gmp" ? "greenmountainpower.com" : "smarthub.coop";
 
