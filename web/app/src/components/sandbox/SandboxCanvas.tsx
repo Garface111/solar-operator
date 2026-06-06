@@ -26,6 +26,9 @@ import {
   deleteClient,
   undoDelete,
   listClients,
+  getSession,
+  clearSession,
+  UNAUTHORIZED_EVENT,
   type CanvasResponse,
 } from '../../lib/api';
 import { useToast } from '../../ui/Toast';
@@ -293,6 +296,8 @@ export default function SandboxCanvas() {
   const [originLookup, setOriginLookup] = useState<NonNullable<CanvasResponse['clients_index']>>({});
   const [lastCapturedClientId, setLastCapturedClientId] = useState<number | null>(null);
 
+  const [sseStatus, setSseStatus] = useState<'connected' | 'reconnecting' | 'disconnected'>('disconnected');
+
   const [densityOverride, setDensityOverride] = useState<DensityOverride>(() => {
     try {
       const saved = localStorage.getItem('so:sandbox:density');
@@ -332,6 +337,12 @@ export default function SandboxCanvas() {
   const sortKeyRef = useRef<SortKey>(sortKey);
   sortKeyRef.current = sortKey;
 
+  // SSE: ref so the connection effect can abort cleanly on unmount.
+  const sseAbortRef = useRef<AbortController | null>(null);
+  // SSE: timestamp of the last so:capture-cleared event — used to de-dupe
+  // SSE toasts from toasts already fired by CaptureListener in the same tab.
+  const recentCaptureClearedRef = useRef<number>(0);
+
   // Pre-drag node positions captured at drag start so we can snap a node
   // back if a merge dialog gets cancelled.
   const dragOriginRef = useRef<Map<string, { x: number; y: number }>>(new Map());
@@ -362,9 +373,12 @@ export default function SandboxCanvas() {
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
-  const loadCanvas = useCallback(async (opts: { silent?: boolean } = {}) => {
+  const loadCanvas = useCallback(async (opts: { silent?: boolean; sseReveal?: boolean } = {}) => {
     setLoadError(null);
-    if (!opts.silent) setLoading(true);
+    if (!opts.silent && !opts.sseReveal) setLoading(true);
+    // Capture pre-load node IDs so newly added nodes can keep their reveal
+    // animation while existing nodes get entryDelay:0 (no flicker on refresh).
+    const prevIds = opts.sseReveal ? new Set(nodesRef.current.map((n) => n.id)) : null;
     try {
       const data = await getCanvasData();
       const loadedCount = data.clients.length;
@@ -387,12 +401,16 @@ export default function SandboxCanvas() {
         catch { return true; }
       })();
       const built = buildNodesFromApi(data, layoutModeRef.current, sortedPositions, effectiveDensity, isFirstVisit);
-      const finalNodes = opts.silent
-        ? built.map((n) => (
-            n.data && typeof n.data === 'object'
-              ? { ...n, data: { ...n.data, entryDelay: 0 } as typeof n.data }
-              : n
-          ))
+      const finalNodes = (opts.silent || opts.sseReveal)
+        ? built.map((n) => {
+            if (!n.data || typeof n.data !== 'object') return n;
+            // sseReveal: new nodes keep their entryDelay (animation plays);
+            // existing nodes get 0 (no re-animation on silent refresh).
+            const isNew = opts.sseReveal && prevIds != null && !prevIds.has(n.id);
+            return isNew
+              ? n
+              : { ...n, data: { ...n.data, entryDelay: 0 } as typeof n.data };
+          })
         : built;
       setNodes(finalNodes);
       setOriginLookup(data.clients_index ?? {});
@@ -466,6 +484,125 @@ export default function SandboxCanvas() {
       clearTimeout(kickoff);
     };
   }, [loadCanvas]);
+
+  // Keep loadCanvas accessible in the SSE effect without adding it as a dep
+  // (which would restart the connection on every render).
+  const loadCanvasRef = useRef(loadCanvas);
+  loadCanvasRef.current = loadCanvas;
+
+  // SSE live-push: subscribe to /v1/events and update the canvas when a
+  // capture.landed event arrives. Uses fetch + ReadableStream so we can
+  // send the Authorization header (browser EventSource cannot).
+  //
+  // Connection lifecycle:
+  //   connected    → streaming, canvas auto-updates on events
+  //   reconnecting → waiting to retry (exponential backoff: 1s→2s→4s→30s cap)
+  //   disconnected → auth failure or unmount — no retry
+  //
+  // On reconnect, a catch-up loadCanvas() is done to recover any events
+  // missed while the connection was down.
+  useEffect(() => {
+    let canceled = false;
+    let retryDelay = 1000;
+
+    const connect = async () => {
+      if (canceled) return;
+      const token = getSession();
+      if (!token) {
+        setSseStatus('disconnected');
+        return;
+      }
+
+      const ac = new AbortController();
+      sseAbortRef.current = ac;
+      setSseStatus('reconnecting');
+
+      try {
+        const resp = await fetch('/v1/events', {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: ac.signal,
+        });
+
+        if (resp.status === 401) {
+          clearSession();
+          window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+          setSseStatus('disconnected');
+          return; // auth failure — don't retry
+        }
+
+        if (!resp.ok || !resp.body) {
+          throw new Error(`SSE response ${resp.status}`);
+        }
+
+        setSseStatus('connected');
+        retryDelay = 1000; // reset backoff on successful connect
+
+        // Catch-up: reload canvas once so we don't miss events that
+        // landed while we were connecting or reconnecting.
+        await loadCanvasRef.current({ silent: true });
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+
+        while (!canceled) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const payload = JSON.parse(line.slice(6)) as {
+                type: string;
+                client_id?: number;
+                client_name?: string;
+                is_new_client?: boolean;
+              };
+              if (payload.type === 'capture.landed') {
+                // De-dupe: CaptureListener handles the toast when
+                // SO_CAPTURE_LANDED fires in this tab (same-tab flow).
+                // If so:capture-cleared fired within 3s, that toast
+                // already ran — skip ours to avoid duplication.
+                const alreadyToasted = Date.now() - recentCaptureClearedRef.current < 3000;
+                // Reload canvas with reveal animation for new nodes.
+                await loadCanvasRef.current({ sseReveal: true });
+                // Write the breadcrumb flag so post-redirect catches also work.
+                try { localStorage.setItem('so:capture:landed:ts', String(Date.now())); } catch { /* noop */ }
+                if (!alreadyToasted && payload.is_new_client && payload.client_name) {
+                  toastRef.current.success(
+                    `${payload.client_name} added — they're on your dashboard.`,
+                  );
+                }
+              }
+            } catch { /* malformed JSON — ignore */ }
+          }
+        }
+      } catch (err) {
+        if (canceled) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // Network error — fall through to reconnect with backoff
+        setSseStatus('reconnecting');
+      }
+
+      if (!canceled) {
+        // Catch-up before retry so events from the gap aren't lost.
+        await loadCanvasRef.current({ silent: true });
+        setSseStatus('reconnecting');
+        setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30_000);
+      }
+    };
+
+    connect();
+
+    return () => {
+      canceled = true;
+      sseAbortRef.current?.abort();
+      setSseStatus('disconnected');
+    };
+  }, []); // Stable: all dependencies accessed via refs
 
   // Forward-refs to drag-target actions so the document-level rescue handler
   // (declared below, before these callbacks) can call them. We bind these
@@ -585,9 +722,13 @@ export default function SandboxCanvas() {
     tryFocus();
   }, [setCenter, setNodes, fitView]);
 
-  // Refresh the canvas when a new capture completes
+  // Refresh the canvas when a new capture completes. Also record the
+  // timestamp so the SSE handler knows CaptureListener already toasted.
   useEffect(() => {
-    const onCapture = () => void loadCanvas();
+    const onCapture = () => {
+      recentCaptureClearedRef.current = Date.now();
+      void loadCanvas();
+    };
     window.addEventListener('so:capture-cleared', onCapture);
     return () => window.removeEventListener('so:capture-cleared', onCapture);
   }, [loadCanvas]);
@@ -1820,6 +1961,13 @@ export default function SandboxCanvas() {
           <Background variant={BackgroundVariant.Dots} color="#9caf88" gap={22} size={1.6} />
           <Controls showInteractive={false} />
 
+          {/* SSE live indicator — top-left, always visible after initial load */}
+          {!loading && (
+            <Panel position="top-left">
+              <LiveIndicator status={sseStatus} />
+            </Panel>
+          )}
+
           {/* Toolbar — top-right */}
           {!loading && !isEmpty && (
             <Panel position="top-right">
@@ -2259,6 +2407,29 @@ function MergeOption({ label, name, onClick }: { label: string; name: string; on
     >
       {label} <span className="font-semibold">&ldquo;{name}&rdquo;</span>
     </button>
+  );
+}
+
+function LiveIndicator({ status }: { status: 'connected' | 'reconnecting' | 'disconnected' }) {
+  const connected = status === 'connected';
+  return (
+    <div
+      title={connected ? 'Updates in real time' : 'Reconnecting…'}
+      className={[
+        'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors',
+        connected
+          ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+          : 'bg-zinc-100 text-zinc-400 ring-1 ring-zinc-200',
+      ].join(' ')}
+    >
+      <span
+        className={[
+          'h-1.5 w-1.5 rounded-full transition-colors',
+          connected ? 'bg-emerald-500' : 'bg-zinc-400',
+        ].join(' ')}
+      />
+      {connected ? 'Live' : 'Reconnecting'}
+    </div>
   );
 }
 
