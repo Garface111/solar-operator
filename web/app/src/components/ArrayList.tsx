@@ -331,6 +331,12 @@ function ArrayRow({
               label="NEPOOL-GIS ID"
               onSave={(v) => save({ nepool_gis_id: v || null })}
               placeholder="53984"
+              maxLength={5}
+              transform={(v) => v.replace(/\D/g, "").slice(0, 5)}
+              validate={(v) => ({
+                valid: v === "" || /^\d{5}$/.test(v),
+                reason: "NEPOOL IDs are 5 digits",
+              })}
             />
             {!array.nepool_gis_id && (
               <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700">
@@ -621,15 +627,21 @@ function AddArrayRow({
   const toast = useToast();
   const [name, setName] = useState("");
   const [gis, setGis] = useState("");
+  const [gisError, setGisError] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function save() {
     if (!name.trim() || saving) return;
+    const gisTrimmed = gis.trim();
+    if (gisTrimmed !== "" && !/^\d{5}$/.test(gisTrimmed)) {
+      setGisError("NEPOOL IDs are 5 digits");
+      return;
+    }
     setSaving(true);
     try {
       const a = await createArray(clientId, {
         name: name.trim(),
-        nepool_gis_id: gis.trim() || null,
+        nepool_gis_id: gisTrimmed || null,
       });
       onCreated(a);
       toast.success(`Added ${a.name}`);
@@ -656,13 +668,22 @@ function AddArrayRow({
           id={`new-array-gis-${clientId}`}
           label="NEPOOL-GIS ID"
           placeholder="53984"
+          maxLength={5}
           value={gis}
-          onChange={(e) => setGis(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value.replace(/\D/g, "").slice(0, 5);
+            setGis(v);
+            if (gisError) setGisError("");
+          }}
         />
-        <p className="mt-1 text-[11px] leading-snug text-zinc-400">
-          5-digit ISO-NE asset ID — required to ship reports. Add it later if you
-          don&apos;t have it now.
-        </p>
+        {gisError ? (
+          <p className="mt-0.5 text-[11px] text-red-600">{gisError}</p>
+        ) : (
+          <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+            5-digit ISO-NE asset ID — required to ship reports. Add it later if you
+            don&apos;t have it now.
+          </p>
+        )}
       </div>
       <div className="flex gap-2">
         <Button onClick={save} disabled={!name.trim() || saving} className="px-3 py-2">

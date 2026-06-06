@@ -14,6 +14,14 @@ interface EditableFieldProps {
   readOnly?: boolean;
   className?: string;
   inputClassName?: string;
+  /** Applied to the raw input value on every keystroke before updating draft. */
+  transform?: (value: string) => string;
+  /**
+   * Commit-time validator. If `valid` is false the save is blocked and
+   * `reason` is shown as inline red text below the input.
+   */
+  validate?: (value: string) => { valid: boolean; reason?: string };
+  maxLength?: number;
 }
 
 /**
@@ -32,10 +40,14 @@ export function EditableField({
   readOnly = false,
   className = "",
   inputClassName = "",
+  transform,
+  validate,
+  maxLength,
 }: EditableFieldProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value ?? "");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Keep the draft in sync when the upstream value changes and we're idle.
@@ -50,7 +62,18 @@ export function EditableField({
   async function commit() {
     const next = draft.trim();
     const current = (value ?? "").trim();
+
+    if (validate) {
+      const result = validate(next);
+      if (!result.valid) {
+        setError(result.reason ?? "Invalid value");
+        inputRef.current?.focus();
+        return;
+      }
+    }
+
     setEditing(false);
+    setError("");
     if (next === current) {
       setDraft(value ?? "");
       return;
@@ -104,27 +127,39 @@ export function EditableField({
   }
 
   return (
-    <input
-      ref={inputRef}
-      type={type}
-      value={draft}
-      placeholder={placeholder}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          (e.target as HTMLInputElement).blur();
-        } else if (e.key === "Escape") {
-          setDraft(value ?? "");
-          setEditing(false);
-        }
-      }}
-      className={[
-        "w-full rounded-md border border-primary-400 bg-white px-2 py-1 text-sm",
-        "focus:outline-none focus:ring-2 focus:ring-primary-500/40",
-        inputClassName,
-      ].join(" ")}
-    />
+    <div className="min-w-0">
+      <input
+        ref={inputRef}
+        type={type}
+        value={draft}
+        placeholder={placeholder}
+        maxLength={maxLength}
+        onChange={(e) => {
+          const v = transform ? transform(e.target.value) : e.target.value;
+          setDraft(v);
+          if (error) setError("");
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          } else if (e.key === "Escape") {
+            setDraft(value ?? "");
+            setEditing(false);
+            setError("");
+          }
+        }}
+        className={[
+          "w-full rounded-md border bg-white px-2 py-1 text-sm",
+          "focus:outline-none focus:ring-2 focus:ring-primary-500/40",
+          error ? "border-red-400 focus:ring-red-400/40" : "border-primary-400",
+          inputClassName,
+        ].join(" ")}
+      />
+      {error && (
+        <p className="mt-0.5 text-[11px] text-red-600">{error}</p>
+      )}
+    </div>
   );
 }
