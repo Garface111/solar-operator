@@ -123,8 +123,8 @@ def test_webhook_setup_mode_stores_pm_and_trial(client, mocks, monkeypatch):
         assert t.stripe_customer_id == "cus_setup_123"
         assert t.stripe_payment_method_id == "pm_test_xyz"
         assert t.trial_ends_at is not None
-        # trial_ends_at should be ~4 days from now
-        expected = datetime.utcnow() + timedelta(days=4)
+        # trial_ends_at should be ~14 days from now
+        expected = datetime.utcnow() + timedelta(days=14)
         diff = abs((t.trial_ends_at - expected).total_seconds())
         assert diff < 60, f"trial_ends_at too far off: {t.trial_ends_at}"
         # No subscription created yet
