@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { Toggle } from "../../ui/Toggle";
-import { Button } from "../../ui/Button";
 import { useToast } from "../../ui/Toast";
 import {
   type Account,
@@ -256,9 +255,16 @@ export function AutoReportsSettingsCard({
             </div>
 
             <div className="mt-4">
-              <Button onClick={onOpenStudio} className="w-full py-3">
+              {/* Big button at this scale was too saturated in primary green —
+                  use the light emerald-50 + emerald-700 text pattern that
+                  matches array-row tint elsewhere. */}
+              <button
+                type="button"
+                onClick={onOpenStudio}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-medium bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100 hover:bg-emerald-100 active:bg-emerald-200 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
                 Customize email template
-              </Button>
+              </button>
             </div>
           </div>
         </div>
