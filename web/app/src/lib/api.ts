@@ -846,6 +846,37 @@ export async function getClientProduction(
   return res;
 }
 
+// ─── quarterly progress ────────────────────────────────────────────────
+
+export interface QuarterlyProgressArray {
+  id: number;
+  name: string;
+}
+
+export interface QuarterlyProgressMissingArray {
+  id: number;
+  name: string;
+  missing_months: string[]; // e.g. ["2026-06"]
+}
+
+export interface QuarterlyProgress {
+  quarter: string; // e.g. "Q2-2026"
+  quarter_start: string; // ISO date
+  quarter_end: string; // ISO date
+  ready_arrays: QuarterlyProgressArray[];
+  missing_arrays: QuarterlyProgressMissingArray[];
+  total_arrays: number;
+  all_ready: boolean;
+}
+
+export async function getQuarterlyProgress(
+  clientId: number,
+): Promise<QuarterlyProgress> {
+  return request<QuarterlyProgress>(
+    `/v1/account/clients/${clientId}/quarterly_progress`,
+  );
+}
+
 // ─── arrays ──────────────────────────────────────────────────────────────
 
 export async function listArrays(clientId: number): Promise<ArrayRow[]> {

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../ui/Button";
 import { Chip } from "../ui/Chip";
 import { RevealNumber } from "../ui/RevealNumber";
 import { useReveal } from "./WelcomeReveal";
+import { QuarterlyProgressChip } from "./QuarterlyProgressChip";
 
 /** Helper to compute stagger delay for numeric reveals inside a card.
  *  Returns 0 when reveal is inactive — RevealNumber will snap instantly. */
@@ -22,10 +23,12 @@ import { ImportSpreadsheetModal } from "./ImportSpreadsheetModal";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
 import {
   type ClientRow,
+  type ArrayRow,
   updateClient,
   deleteClient,
   sendClientReportToMe,
   downloadClientReport,
+  listArrays,
 } from "../lib/api";
 
 
@@ -149,6 +152,9 @@ export function ClientCard({
   const [importDropdownOpen, setImportDropdownOpen] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
   const importDropdownRef = useRef<HTMLDivElement>(null);
+  // Array rows — loaded when card is expanded; used by both the inline
+  // accounts list and as the trigger for quarterly progress chip refresh.
+  const [arrayRows, setArrayRows] = useState<ArrayRow[] | null>(null);
 
   useEffect(() => {
     if (!importDropdownOpen) return;
@@ -160,6 +166,25 @@ export function ClientCard({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [importDropdownOpen]);
+
+  const loadArrayRows = useCallback(() => {
+    let cancelled = false;
+    listArrays(client.id)
+      .then((rows) => { if (!cancelled) setArrayRows(rows); })
+      .catch(() => { /* silently skip — freshness heatmap still works */ });
+    return () => { cancelled = true; };
+  }, [client.id]);
+
+  // Load array rows once the card expands, and re-load when arrays change.
+  useEffect(() => {
+    if (!expanded && !reveal.active) return;
+    const cancel = loadArrayRows();
+    window.addEventListener("so:arrays-changed", loadArrayRows);
+    return () => {
+      cancel?.();
+      window.removeEventListener("so:arrays-changed", loadArrayRows);
+    };
+  }, [expanded, reveal.active, loadArrayRows]);
 
   async function patch(p: Partial<ClientRow>) {
     const updated = await updateClient(client.id, p as any);
@@ -396,15 +421,19 @@ export function ClientCard({
           {/* 2-column layout: left = client status at a glance, right = the
               redesigned report sidebar (Ford's boxed region). */}
           <div className="mt-4 grid grid-cols-1 gap-6 sm:grid-cols-[1fr_280px]">
-            {/* LEFT column — capture freshness at a glance. The arrays table
-                lives full-width below this grid; the Active/delivery chips
-                that used to sit here moved up to the collapsed-card header
-                strip (they're already rendered there). */}
+            {/* LEFT column — capture freshness + quarterly readiness + accounts. */}
             <div className="space-y-4">
               <CaptureFreshnessHeatmap
                 clientId={client.id}
                 accountCount={client.array_count ?? 0}
               />
+
+              <QuarterlyProgressChip
+                clientId={client.id}
+                onSendReports={handleSendToMe}
+              />
+
+              <LoginsAndAccountsCard arrayRows={arrayRows} />
             </div>
 
             {/* RIGHT column — the redesigned report card. Wears the sandbox
@@ -713,6 +742,103 @@ export function ClientCard({
           <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
         </p>
       </Modal>
+    </div>
+  );
+}
+
+// ─── LOGINS & ACCOUNTS inline card ──────────────────────────────────────────
+
+/** Provider string → display chip classes. Mirrors sandbox UTILITY_THEME. */
+function providerChipClass(provider: string): string {
+  const p = provider.toLowerCase();
+  if (p === "gmp") return "bg-emerald-100 text-emerald-700";
+  if (p === "vec" || p === "wec" || p === "vec_smarthub") return "bg-sky-100 text-sky-700";
+  return "bg-zinc-100 text-zinc-600";
+}
+
+function providerLabel(provider: string, providerLabel: string): string {
+  return providerLabel || provider.toUpperCase();
+}
+
+/** Inline scrollable list of all utility accounts under a client, grouped by
+ *  array. Earns the left-column height that was previously empty air. */
+function LoginsAndAccountsCard({ arrayRows }: { arrayRows: ArrayRow[] | null }) {
+  // Flatten: one row per account, carrying its parent array name.
+  const rows: Array<{
+    accountId: number;
+    provider: string;
+    providerLabelStr: string;
+    display: string;
+    arrayName: string;
+  }> = [];
+
+  if (arrayRows) {
+    for (const arr of arrayRows) {
+      for (const acc of arr.accounts) {
+        rows.push({
+          accountId: acc.id,
+          provider: acc.provider,
+          providerLabelStr: acc.provider_label ?? acc.provider.toUpperCase(),
+          display: acc.nickname || `${(acc.provider_label || acc.provider).toUpperCase()} ••${acc.account_number.slice(-4)}`,
+          arrayName: arr.name,
+        });
+      }
+    }
+  }
+
+  return (
+    <div
+      data-testid="logins-accounts-card"
+      className="rounded-xl border border-cream-border bg-cream p-4 sm:p-5"
+    >
+      <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+        Logins &amp; accounts
+      </h4>
+
+      {arrayRows === null ? (
+        // Loading skeleton
+        <div className="space-y-1.5" aria-hidden>
+          {[1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="h-7 w-full animate-pulse rounded-md bg-zinc-100"
+            />
+          ))}
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="text-sm leading-snug text-zinc-500">
+          No utility accounts yet — log into your portal to pull them in.
+        </p>
+      ) : (
+        <div
+          data-testid="accounts-scroll-list"
+          className="space-y-1 overflow-y-auto overscroll-contain"
+          style={{ maxHeight: "320px", scrollbarGutter: "stable" }}
+        >
+          {rows.map((row) => (
+            <div
+              key={row.accountId}
+              className="flex items-center gap-2 rounded-md bg-white/70 px-2 py-1.5"
+            >
+              <span
+                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${providerChipClass(row.provider)}`}
+              >
+                {providerLabel(row.provider, row.providerLabelStr)}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-800">
+                {row.display}
+              </span>
+              <span
+                className="shrink-0 truncate text-[11px] text-zinc-400"
+                title={row.arrayName}
+                style={{ maxWidth: "7rem" }}
+              >
+                {row.arrayName}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

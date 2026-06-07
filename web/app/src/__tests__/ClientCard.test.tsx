@@ -16,6 +16,16 @@ vi.mock("../lib/api", () => ({
   deleteClient: vi.fn().mockResolvedValue({ undo_token: "tok" }),
   sendClientReportToMe: vi.fn().mockResolvedValue({}),
   downloadClientReport: vi.fn().mockResolvedValue({}),
+  listArrays: vi.fn().mockResolvedValue([]),
+  getQuarterlyProgress: vi.fn().mockResolvedValue({
+    quarter: "Q2-2026",
+    quarter_start: "2026-04-01",
+    quarter_end: "2026-06-30",
+    ready_arrays: [],
+    missing_arrays: [],
+    total_arrays: 0,
+    all_ready: false,
+  }),
 }));
 
 vi.mock("../ui/Toast", () => ({
