@@ -2475,6 +2475,32 @@ def download_client_report(
     )
 
 
+# ─── Quarterly readiness ────────────────────────────────────────────────
+
+@router.get("/v1/account/clients/{client_id}/quarterly_progress")
+def client_quarterly_progress(
+    client_id: int,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Quarterly bill readiness for all arrays under a client.
+
+    Answers: 'What is my next move for this client before Q<N> reports can ship?'
+    Each non-excluded, non-deleted array is checked for bill coverage across all
+    three calendar months of the current quarter. Coverage is determined from
+    bill.period_start / period_end (not bill_date), so GMP and SmartHub arrays
+    are handled uniformly regardless of bill_offset_months.
+
+    Response shape: see api/quarterly.py:compute_quarterly_progress.
+    """
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+        from .quarterly import compute_quarterly_progress
+        return compute_quarterly_progress(client_id, db)
+
+
 # ─── Production data ────────────────────────────────────────────────────
 
 @router.get("/v1/account/clients/{client_id}/production")
