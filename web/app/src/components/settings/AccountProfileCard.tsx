@@ -236,11 +236,6 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
                 {account.accounts_count}
               </span>
             </Row>
-            <Row label="Bills on file">
-              <span title="Individual monthly bills pulled from utility accounts.">
-                {account.bills_count}
-              </span>
-            </Row>
             {account.last_delivery_at && (
               <Row label="Last delivery">
                 <span>
