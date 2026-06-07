@@ -17,15 +17,17 @@ Run on Railway prod (after merge, before the homepage CTA goes live):
 ──────────────────────────────────────────────────────────────────────────
 Fictional names actually used (verified non-colliding at seed time — see
 _resolve_client_name; the demo refuses to reuse a real customer's name):
-    Catamount Community Power
-    Green Hollow Methodist Church
-    Riverbend Cohousing
-    Putney Library
-    Maple Ridge Cooperative
+    Catamount Community Power, Northeast Kingdom Cooperative,
+    Green Hollow Methodist Church, Riverbend Cohousing, Putney Library,
+    Maple Ridge Cooperative, Mad River School District,
+    Lamoille Valley Dairy, Central Vermont Medical, Hill Farmstead Brewery,
+    Worcester Town Office, Smugglers' Notch Lodge, Calais Congregational,
+    Sharon Academy, Marlboro Homestead
 Spare fallback names, used only if one of the above collides with a real
 non-demo Client already in the database:
     Cabot Public School · Stowe Mountain Co-op · Worcester Grange ·
-    Bristol Falls Collective
+    Bristol Falls Collective · Underhill Maple Co-op · Brookfield Town Hall ·
+    Marshfield Energy Trust · Plainfield Mutual
 NEPOOL-GIS IDs are all 5-digit and start with "99"; GMP account numbers are
 all 10-digit and start with "99" — neither can collide with a real grid asset
 or utility account.
@@ -72,48 +74,156 @@ SEASONAL = [0.42, 0.55, 0.82, 1.06, 1.22, 1.31, 1.30, 1.18, 0.98, 0.74, 0.48, 0.
 SPARE_NAMES = [
     "Cabot Public School", "Stowe Mountain Co-op",
     "Worcester Grange", "Bristol Falls Collective",
+    "Underhill Maple Co-op", "Brookfield Town Hall",
+    "Marshfield Energy Trust", "Plainfield Mutual",
 ]
 
-# client name → list of arrays; each array: (name, nepool_gis_id, base_mwh,
-# region, n_accounts). base_mwh is the array's TOTAL typical mid-season month;
-# accounts split it evenly (believable sub-meters).
+# client name → list of arrays; each array tuple:
+#   (name, nepool_gis_id, base_mwh, region, n_accounts, provider)
+# base_mwh is the array's TOTAL typical mid-season month; accounts split it
+# evenly (believable sub-meters). provider is one of "gmp", "vec", "wec" —
+# mixing utilities so the canvas shows the multi-provider chip variety.
+#
+# Sized to show off the operator's range: ~15 clients, ~28 arrays, ~60
+# accounts. Mix of single-array residences/churches and large multi-array
+# cooperatives. Sub-metered arrays sprinkled throughout so the new "N meters"
+# dedupe chip is visible without hunting.
 DEMO_CLIENTS: list[dict] = [
+    # ── Anchor customer: 5 arrays, mixed providers, two sub-metered ─────────
     {
         "name": "Catamount Community Power",
         "email": "catamount@demo.example",
         "arrays": [
-            ("Catamount Ridge Solar", "99101", 18.0, "central", 3),
-            ("Hardwick Field Array",  "99102", 11.5, "north",   2),
+            ("Catamount Ridge Solar",   "99101", 18.0, "central", 3, "gmp"),
+            ("Hardwick Field Array",    "99102", 11.5, "north",   2, "gmp"),
+            ("Greensboro Carport",      "99103",  7.8, "north",   1, "gmp"),
+            ("Walden Town Garage",      "99104",  9.2, "north",   1, "vec"),
+            ("Craftsbury Common Roof",  "99105",  6.4, "north",   1, "vec"),
         ],
     },
+    # ── Big multi-utility co-op: 4 arrays across all three providers ───────
+    {
+        "name": "Northeast Kingdom Cooperative",
+        "email": "nekcoop@demo.example",
+        "arrays": [
+            ("Lyndon Industrial Park",  "99106", 22.0, "north",   3, "gmp"),
+            ("St Johnsbury Mill Roof",  "99107", 16.4, "north",   2, "wec"),
+            ("Burke Mountain Lot",      "99108", 14.1, "north",   1, "vec"),
+            ("Newport Lakefront Array", "99109", 19.6, "north",   2, "vec"),
+        ],
+    },
+    # ── Mid-size church + carport (the original Green Hollow, expanded) ────
     {
         "name": "Green Hollow Methodist Church",
         "email": "greenhollow@demo.example",
         "arrays": [
-            ("Fellowship Hall Roof", "99103", 6.2, "central", 2),
+            ("Fellowship Hall Roof",    "99110",  6.2, "central", 2, "gmp"),
+            ("Parish Carport",          "99111",  4.1, "central", 1, "gmp"),
         ],
     },
+    # ── Cohousing community: 3 arrays, one sub-metered ─────────────────────
     {
         "name": "Riverbend Cohousing",
         "email": "riverbend@demo.example",
         "arrays": [
-            ("Riverbend Commons", "99104", 9.4, "south", 2),
-            ("Riverbend Carport", "99105", 4.8, "south", 2),
+            ("Riverbend Commons",       "99112",  9.4, "south",   2, "gmp"),
+            ("Riverbend Carport",       "99113",  4.8, "south",   2, "gmp"),
+            ("Riverbend Workshop",      "99114",  3.6, "south",   1, "gmp"),
         ],
     },
+    # ── Small single-array library (kept tiny to show the floor case) ──────
     {
         "name": "Putney Library",
         "email": "putney@demo.example",
         "arrays": [
-            ("Putney Library Roof", "99106", 7.1, "south", 2),
+            ("Putney Library Roof",     "99115",  7.1, "south",   2, "gmp"),
         ],
     },
+    # ── Multi-array farm co-op ─────────────────────────────────────────────
     {
         "name": "Maple Ridge Cooperative",
         "email": "mapleridge@demo.example",
         "arrays": [
-            ("Maple Ridge North", "99107", 15.3, "north", 3),
-            ("Maple Ridge South", "99108", 13.6, "north", 2),
+            ("Maple Ridge North",       "99116", 15.3, "north",   3, "gmp"),
+            ("Maple Ridge South",       "99117", 13.6, "north",   2, "gmp"),
+            ("Maple Ridge Sugarhouse",  "99118",  4.2, "north",   1, "wec"),
+        ],
+    },
+    # ── Municipal customer: school district, three buildings ───────────────
+    {
+        "name": "Mad River School District",
+        "email": "madriver@demo.example",
+        "arrays": [
+            ("Waitsfield Elementary",   "99119",  8.7, "central", 1, "gmp"),
+            ("Harwood Union High",      "99120", 17.2, "central", 2, "gmp"),
+            ("Crossett Brook Middle",   "99121", 10.4, "central", 1, "gmp"),
+        ],
+    },
+    # ── Single-array residential farm ──────────────────────────────────────
+    {
+        "name": "Lamoille Valley Dairy",
+        "email": "lamoille@demo.example",
+        "arrays": [
+            ("Dairy Barn Roof",         "99122",  5.6, "north",   1, "gmp"),
+        ],
+    },
+    # ── Hospital — one big array fed by FOUR meters (showpiece) ────────────
+    {
+        "name": "Central Vermont Medical",
+        "email": "cvmed@demo.example",
+        "arrays": [
+            ("CVMC Main Campus Solar",  "99123", 28.4, "central", 4, "gmp"),
+            ("CVMC Parking Deck",       "99124", 11.0, "central", 1, "gmp"),
+        ],
+    },
+    # ── Brewery: single big array ──────────────────────────────────────────
+    {
+        "name": "Hill Farmstead Brewery",
+        "email": "hillfarmstead@demo.example",
+        "arrays": [
+            ("Brewery Roof Array",      "99125",  9.8, "north",   2, "vec"),
+        ],
+    },
+    # ── Town: small municipal building ─────────────────────────────────────
+    {
+        "name": "Worcester Town Office",
+        "email": "worcester@demo.example",
+        "arrays": [
+            ("Town Hall Roof",          "99126",  3.2, "central", 1, "wec"),
+        ],
+    },
+    # ── Resort: multi-building ─────────────────────────────────────────────
+    {
+        "name": "Smugglers' Notch Lodge",
+        "email": "smuggs@demo.example",
+        "arrays": [
+            ("Main Lodge Roof",         "99127", 18.6, "north",   2, "vec"),
+            ("Base Lodge Carport",      "99128", 12.4, "north",   1, "vec"),
+        ],
+    },
+    # ── Single-array church (small) ────────────────────────────────────────
+    {
+        "name": "Calais Congregational",
+        "email": "calais@demo.example",
+        "arrays": [
+            ("Sanctuary Roof",          "99129",  3.8, "central", 1, "gmp"),
+        ],
+    },
+    # ── Mid-size school ────────────────────────────────────────────────────
+    {
+        "name": "Sharon Academy",
+        "email": "sharon@demo.example",
+        "arrays": [
+            ("Academy Building Roof",   "99130", 11.4, "south",   2, "gmp"),
+            ("Athletic Field Array",    "99131",  7.9, "south",   1, "gmp"),
+        ],
+    },
+    # ── Floor case: single small array (homestead) ─────────────────────────
+    {
+        "name": "Marlboro Homestead",
+        "email": "marlboro@demo.example",
+        "arrays": [
+            ("Homestead Roof",          "99132",  2.4, "south",   1, "gmp"),
         ],
     },
 ]
@@ -267,7 +377,7 @@ def seed(today: date | None = None) -> dict:
             db.flush()
             counts["clients"] += 1
 
-            for ai, (aname, nepool, base_mwh, region, n_acc) in enumerate(cdef["arrays"]):
+            for ai, (aname, nepool, base_mwh, region, n_acc, provider) in enumerate(cdef["arrays"]):
                 arr = Array(
                     tenant_id=DEMO_TENANT_ID,
                     client_id=client.id,
@@ -288,7 +398,7 @@ def seed(today: date | None = None) -> dict:
                     acct = UtilityAccount(
                         tenant_id=DEMO_TENANT_ID,
                         array_id=arr.id,
-                        provider="gmp",
+                        provider=provider,
                         account_number=f"99{acct_seq:08d}",
                         customer_number=f"99{acct_seq:08d}",
                         nickname=f"{aname}" if n_acc == 1 else f"{aname} (meter {k + 1})",
