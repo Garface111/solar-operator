@@ -136,6 +136,24 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
   return (
     <div className="min-h-full">
+      {account?.is_demo === true && (
+        <div
+          className="flex h-9 items-center justify-center border-b-2 border-wood-300 bg-cream px-4 text-center text-xs text-zinc-700"
+          role="status"
+        >
+          <span>
+            Demo mode — this is a sample account with read-only data.{" "}
+            <a
+              href="/signup"
+              className="font-medium text-wood-600 underline underline-offset-2 hover:text-wood-700"
+            >
+              Sign up free to try it for real
+            </a>{" "}
+            ↗
+          </span>
+        </div>
+      )}
+
       <TabBar
         tabs={TABS}
         unvisited={unvisited}

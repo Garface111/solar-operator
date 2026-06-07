@@ -26,7 +26,7 @@ from sqlalchemy.orm import joinedload
 
 from .db import SessionLocal
 from .models import Array, Client
-from .account import tenant_from_session
+from .account import tenant_from_session, require_not_demo, require_not_demo
 from .ingest import (
     _file_to_text,
     _detect_gmcs_shape,
@@ -300,6 +300,7 @@ def nepool_commit(
     """Assign nepool_gis_id to confirmed arrays. Refuses to overwrite an
     existing non-null NEPOOL ID — clear it per-array first if needed."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
 
     if not body.assignments:
         raise HTTPException(400, "Nothing to assign")

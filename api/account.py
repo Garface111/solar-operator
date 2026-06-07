@@ -109,8 +109,14 @@ router = APIRouter()
 
 # ─── session token signing (compact HMAC, no JWT lib needed) ─────────────
 
-def _sign_session(tenant_id: str, ttl_seconds: int = SESSION_TTL_SECONDS) -> str:
+def _sign_session(tenant_id: str, ttl_seconds: int = SESSION_TTL_SECONDS,
+                  is_demo: bool = False) -> str:
     payload = {"tid": tenant_id, "exp": int(time.time()) + ttl_seconds}
+    # The demo magic-link carries an is_demo claim so the SPA can render its
+    # read-only banner without a second round-trip. Authoritative demo gating
+    # still lives on Tenant.is_demo (checked server-side by require_not_demo).
+    if is_demo:
+        payload["is_demo"] = True
     body = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).rstrip(b"=")
     sig = hmac.new(SESSION_SECRET.encode(), body, hashlib.sha256).hexdigest()
     return body.decode() + "." + sig
@@ -160,6 +166,32 @@ def tenant_from_session(authorization: Optional[str]) -> Tenant:
         # can see their status and (if comped) export their data. Read-only
         # gated downstream where needed.
         return t
+
+
+# Signup CTA the demo read-only error points visitors at. Marketing serves
+# /signup (Netlify) which kicks off the real onboarding flow.
+DEMO_SIGNUP_URL = "/signup"
+
+
+def require_not_demo(t: Tenant) -> None:
+    """Guard for every mutating endpoint. Raises HTTP 403 with a friendly,
+    machine-readable body when `t` is the shared read-only demo tenant.
+
+    Safe to call on ANY tenant — it is a no-op for real (is_demo=False) tenants,
+    so over-applying it to a write endpoint can never harm a paying customer.
+    Apply it right after the tenant is resolved, before any mutation."""
+    if getattr(t, "is_demo", False):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "demo-read-only",
+                "message": (
+                    "This is a demo account — sign up for free to try this "
+                    "for real."
+                ),
+                "cta_url": DEMO_SIGNUP_URL,
+            },
+        )
 
 
 # ─── schemas ─────────────────────────────────────────────────────────────
@@ -410,6 +442,45 @@ def auth_verify(req: AuthVerify):
     return {"ok": True, "session_token": session_token, "expires_in": ttl}
 
 
+# ─── shared read-only demo magic-link ────────────────────────────────────
+
+# Fixed id of the single shared demo tenant seeded by scripts/seed_demo_tenant.py.
+DEMO_TENANT_ID = "ten_demo_readonly_v1"
+# Where the SPA should land after storing the demo session.
+DEMO_REDIRECT_TARGET = "/accounts/"
+
+
+@router.get("/v1/demo/enter")
+def demo_enter():
+    """Mint a session token for the shared read-only demo tenant.
+
+    The marketing-side magic link (/demo-account) ultimately calls this and
+    redirects the browser to /accounts/. The returned token is signed exactly
+    like a normal session, plus an is_demo claim so the SPA can render its
+    read-only banner immediately. All mutating endpoints still refuse for the
+    demo tenant server-side (require_not_demo), so the claim is convenience,
+    not the security boundary.
+
+    Returns 503 if the demo tenant hasn't been seeded yet."""
+    with SessionLocal() as db:
+        t = db.get(Tenant, DEMO_TENANT_ID)
+        if not t or not t.is_demo:
+            raise HTTPException(
+                503,
+                "Demo is not available right now — please try again later.",
+            )
+    session_token = _sign_session(
+        DEMO_TENANT_ID, ttl_seconds=SESSION_TTL_SECONDS, is_demo=True
+    )
+    return {
+        "ok": True,
+        "session_token": session_token,
+        "expires_in": SESSION_TTL_SECONDS,
+        "is_demo": True,
+        "redirect": DEMO_REDIRECT_TARGET,
+    }
+
+
 # ─── password auth ──────────────────────────────────────────────────────
 
 class SetPasswordBody(BaseModel):
@@ -476,6 +547,7 @@ def set_password(body: SetPasswordBody,
     Changing (has_password=true): current_password must be provided and correct.
     Password rules: min 10 chars, at least 1 letter, at least 1 digit."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     _validate_password_strength(body.password)
 
     with SessionLocal() as db:
@@ -559,6 +631,9 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "email": t.contact_email,
             "plan": t.plan,
             "active": t.active,
+            # Shared read-only demo tenant flag. Drives the SPA demo banner and
+            # hides the Mind button (which would otherwise burn API spend).
+            "is_demo": bool(t.is_demo),
             "subscription_status": t.subscription_status,
             "report_frequency": t.report_frequency,
             "cc_on_reports": bool(t.cc_on_reports),
@@ -599,6 +674,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
 @router.post("/v1/account/email")
 def update_email(body: UpdateEmail, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     new_email = body.email.lower().strip()
     with SessionLocal() as db:
         # Refuse if email is taken by another active tenant
@@ -627,6 +703,7 @@ def update_email(body: UpdateEmail, authorization: Optional[str] = Header(defaul
 @router.post("/v1/account/name")
 def update_name(body: UpdateName, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(400, "Name can't be empty")
@@ -654,6 +731,7 @@ def update_send_from_name(body: UpdateSendFromName,
     null / empty string → clear the override (signoff falls back to tenant.name).
     Stored in Tenant.send_from_name, which also drives the email From display name."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     raw = (body.send_from_name or "").strip()
     if raw and len(raw) > 120:
         raise HTTPException(400, "Sign-as name is too long (max 120 characters)")
@@ -672,6 +750,7 @@ def regen_activation_key(authorization: Optional[str] = Header(default=None)):
     The old code stops working immediately. The operator must paste the new
     code into the extension options page to resume captures."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     new_key = "sol_live_" + secrets.token_urlsafe(32)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
@@ -683,6 +762,7 @@ def regen_activation_key(authorization: Optional[str] = Header(default=None)):
 @router.post("/v1/account/frequency")
 def update_frequency(body: UpdateFrequency, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if body.frequency not in ("monthly", "quarterly"):
         raise HTTPException(400, "frequency must be monthly or quarterly")
     with SessionLocal() as db:
@@ -697,6 +777,7 @@ def update_cc_on_reports(body: UpdateCcOnReports,
                          authorization: Optional[str] = Header(default=None)):
     """Toggle 'send me a copy of every report'. Returns the updated value."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.cc_on_reports = bool(body.cc_on_reports)
@@ -795,6 +876,7 @@ def update_email_settings(body: EmailSettings,
     settings. Empty-string fields clear back to the built-in default; omitted
     fields are left unchanged."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     _validate_email_settings(body)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
@@ -878,6 +960,7 @@ def patch_reports_send_mode(body: _SendModeBody,
     if mode not in _VALID_SEND_MODES:
         raise HTTPException(400, "send_mode must be 'to_client', 'to_me', or 'to_both'")
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.send_mode = mode
@@ -907,6 +990,7 @@ def send_my_report(
     the calling tenant). Returns the same {ok, client_count, delivered,
     results} shape either way so the frontend can use one code path."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send reports")
 
@@ -964,6 +1048,7 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
     Useful for operators who want to see exactly what their clients will receive
     before the first real quarterly run."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send sample reports")
     tenant_email = (t.contact_email or "").strip()
@@ -1153,6 +1238,7 @@ def save_email_template(body: _TemplateBody,
                         authorization: Optional[str] = Header(default=None)):
     """Persist the operator's custom template as their send-time default."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     for field, value in [("subject_template", body.subject_template),
                          ("body_template", body.body_template)]:
         if value:
@@ -1179,6 +1265,7 @@ def test_send_email_template(body: _TemplateBody,
                              authorization: Optional[str] = Header(default=None)):
     """Render the proposed template with real data and send a [TEST] to the tenant's email."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     tenant_email = (t.contact_email or "").strip()
     if not tenant_email:
         raise HTTPException(422, "Add an email address to your account first.")
@@ -1218,6 +1305,7 @@ def test_send_email_template(body: _TemplateBody,
 def reset_email_template(authorization: Optional[str] = Header(default=None)):
     """Clear the tenant's template overrides — reverts all three to the system built-in defaults."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.email_subject_template = None
@@ -1236,6 +1324,7 @@ def save_email_signoff(body: _SignoffBody,
                        authorization: Optional[str] = Header(default=None)):
     """Persist the operator's custom sign-off. Pass signoff=null to revert to default."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.email_signoff = _blank_to_none(body.signoff or "")
@@ -1353,6 +1442,7 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
 def create_client(body: ClientCreate,
                   authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "name is required")
@@ -1639,6 +1729,7 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
 
     Idempotent on already-deleted src (returns 200 with no-op flag)."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if src_client_id == body.dst_client_id:
         raise HTTPException(400, "src and dst must differ")
 
@@ -1772,6 +1863,7 @@ def undo_merge(body: MergeUndoBody,
     back to it, and reverts the destination client's login fields to their
     pre-merge state. Returns 410 if the window has elapsed."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         history = db.execute(
@@ -1828,6 +1920,7 @@ def dismiss_merge_suggestion(client_id: int, other_id: int,
     we don't suggest the same merge again. Symmetric — pair is stored
     as (min_id, max_id)."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if client_id == other_id:
         raise HTTPException(400, "ids must differ")
     a, b = sorted([client_id, other_id])
@@ -2005,6 +2098,7 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
 
     Idempotent on already-soft-deleted src (returns noop:true)."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if src_array_id == body.dst_array_id:
         raise HTTPException(400, "src and dst must differ")
 
@@ -2095,6 +2189,7 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
 def dismiss_array_merge_suggestion(array_id: int, other_id: int,
                                    authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if array_id == other_id:
         raise HTTPException(400, "ids must differ")
     a, b = sorted([array_id, other_id])
@@ -2127,6 +2222,7 @@ def dismiss_array_merge_suggestion(array_id: int, other_id: int,
 def update_client(client_id: int, body: ClientUpdate,
                   authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if body.report_frequency and body.report_frequency not in (
             "monthly", "quarterly"):
         raise HTTPException(400,
@@ -2186,6 +2282,7 @@ def delete_client(client_id: int,
     """Soft-delete a client and all its arrays + utility accounts.
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         c = db.get(Client, client_id)
@@ -2245,6 +2342,7 @@ def refresh_capture(client_id: int,
     'Last GMP capture' indicator reflects any capture that has landed since the
     page opened. A real on-demand GMP poll is a separate feature."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2260,6 +2358,7 @@ def send_one_client_report(client_id: int,
                            to: Optional[str] = Query(default=None),
                            authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2288,6 +2387,7 @@ def resend_client_report(client_id: int,
       502 with the upstream error message when Resend fails — so the
           dashboard can show 'Couldn't resend — <reason>' to the operator."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2581,6 +2681,7 @@ def list_client_arrays(
 def create_array(client_id: int, body: ArrayCreate,
                  authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "name is required")
@@ -2638,6 +2739,7 @@ def create_array(client_id: int, body: ArrayCreate,
 def update_array(client_id: int, array_id: int, body: ArrayUpdate,
                  authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
         a = db.get(Array, array_id)
@@ -2674,6 +2776,7 @@ def delete_array(client_id: int, array_id: int,
     """Soft-delete an array and its utility accounts.
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
@@ -2729,6 +2832,7 @@ def restore_array(client_id: int, array_id: int,
     and a note is included in the response.
     """
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     now_ts = datetime.utcnow()
     cutoff = now_ts - timedelta(days=HARD_DELETE_GRACE_DAYS)
 
@@ -2807,6 +2911,7 @@ def bulk_delete_arrays(
     """Soft-delete multiple arrays (from any client under the tenant) in one shot.
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if not body.ids:
         raise HTTPException(400, "ids must be non-empty")
     now_ts = datetime.utcnow()
@@ -2862,6 +2967,7 @@ def bulk_delete_clients(
     """Soft-delete multiple clients and cascade to their arrays + utility accounts.
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if not body.ids:
         raise HTTPException(400, "ids must be non-empty")
     now_ts = datetime.utcnow()
@@ -2929,6 +3035,7 @@ def undo_delete(
     """Restore soft-deleted records referenced by undo_token.
     Only works within 5 minutes of the delete. Returns 410 if expired."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         history = db.execute(
@@ -3004,6 +3111,7 @@ class AccountUpdate(BaseModel):
 def add_utility_account(client_id: int, array_id: int, body: AccountCreate,
                         authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     code = (body.provider or "").lower().strip()
     if code not in PROVIDER_CODES:
         raise HTTPException(400, f"Unknown provider '{body.provider}'")
@@ -3043,6 +3151,7 @@ def add_utility_account(client_id: int, array_id: int, body: AccountCreate,
 def remove_utility_account(client_id: int, array_id: int, acct_id: int,
                            authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
         a = db.get(Array, array_id)
@@ -3337,6 +3446,7 @@ def regenerate_report(
     If quarter provided (e.g. 'Q1-2026'): target that quarter's rolling window.
     Returns {status, generated_at}."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
 
     reference_date: Optional[date] = None
     if body.quarter:

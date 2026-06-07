@@ -186,6 +186,9 @@ export interface Account {
   email: string | null;
   plan: string | null;
   active: boolean;
+  /** Shared read-only demo tenant. When true the SPA shows the demo banner and
+   *  hides the Mind button; mutating API calls return a 403 demo-read-only. */
+  is_demo: boolean;
   subscription_status: string | null;
   report_frequency: string | null;
   cc_on_reports: boolean;

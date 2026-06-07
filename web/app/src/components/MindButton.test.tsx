@@ -18,6 +18,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
     email: "test@example.com",
     plan: "standard",
     active: true,
+    is_demo: false,
     subscription_status: "trialing",
     report_frequency: "quarterly",
     cc_on_reports: false,
@@ -57,9 +58,11 @@ describe("MindButton", () => {
     localStorage.clear();
   });
 
-  it("does not render for a non-allow-listed email", () => {
+  it("does not render when there is no account email", () => {
+    // Email-based allow-listing was removed Jun 6'26 (beta: show to everyone
+    // with an authenticated email). The only remaining gate is "has an email".
     const { queryByLabelText } = render(
-      <MindButton account={makeAccount({ email: "someone@else.com" })} />,
+      <MindButton account={makeAccount({ email: null })} />,
     );
     expect(queryByLabelText("Talk to OCICBB")).toBeNull();
   });
@@ -69,6 +72,13 @@ describe("MindButton", () => {
       <MindButton account={makeAccount({ email: ALLOWED_EMAIL })} />,
     );
     expect(queryByLabelText("Talk to OCICBB")).not.toBeNull();
+  });
+
+  it("does not render on the read-only demo tenant", () => {
+    const { queryByLabelText } = render(
+      <MindButton account={makeAccount({ email: ALLOWED_EMAIL, is_demo: true })} />,
+    );
+    expect(queryByLabelText("Talk to OCICBB")).toBeNull();
   });
 
   it("opens the chat panel when the launcher is clicked", () => {

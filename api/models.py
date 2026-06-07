@@ -31,9 +31,15 @@ class Tenant(Base):
     name: Mapped[str] = mapped_column(String(200))
     contact_email: Mapped[str] = mapped_column(String(200), index=True)
     tenant_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sol_live_...
-    plan: Mapped[str] = mapped_column(String(32), default="standard")  # standard | comped | legacy_*
+    plan: Mapped[str] = mapped_column(String(32), default="standard")  # standard | comped | legacy_* | demo
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Shared read-only demo tenant (June 2026). When True, every visitor who
+    # clicks the homepage "Try it" magic link signs in as THIS tenant, and all
+    # mutating endpoints refuse with a friendly 403 (see account.require_not_demo).
+    # Default False for every real tenant — only the seeded demo tenant gets True.
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
 
     # Stripe linkage (added June 2026 for lifecycle + billing portal)
     stripe_customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)

@@ -22,7 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File
 from sqlalchemy import select, func
 
-from .account import tenant_from_session
+from .account import tenant_from_session, require_not_demo, require_not_demo
 from .db import SessionLocal
 from .models import Array, DailyGeneration, now
 
@@ -154,6 +154,7 @@ async def upload_daily_csv(
 ):
     """Accept a GMP daily generation CSV and upsert DailyGeneration rows."""
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
 
     with SessionLocal() as db:
         arr = db.get(Array, array_id)

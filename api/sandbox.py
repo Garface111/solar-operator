@@ -15,7 +15,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, or_
 
-from .account import tenant_from_session
+from .account import tenant_from_session, require_not_demo, require_not_demo
 from .db import SessionLocal
 from .models import Array, Client, UtilityAccount, now
 
@@ -195,6 +195,7 @@ def patch_positions(
 ):
     """Persist dragged node positions. Silently ignores unknown/foreign IDs."""
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     with SessionLocal() as db:
         for u in updates:
             if u.node_type == "client":
@@ -227,6 +228,7 @@ def pin_client(
     of any list, render with a gold star, and survive bulk operations more
     visibly. Reuses the existing clients.canvas_pinned column."""
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     with SessionLocal() as db:
         c = db.get(Client, body.client_id)
         if not c or c.tenant_id != tenant.id or c.deleted_at is not None:
@@ -251,6 +253,7 @@ def sandbox_merge(
     """Merge src into dst: reparent all arrays, soft-delete src.
     For full login-credential merging use POST /v1/account/clients/{src}/merge-into."""
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     if body.src_client_id == body.dst_client_id:
         raise HTTPException(400, "src and dst must differ")
 
@@ -315,6 +318,7 @@ def sandbox_account_reassign(
     POST /v1/sandbox/array/reassign.
     """
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     with SessionLocal() as db:
         acc = db.get(UtilityAccount, body.account_id)
         if not acc or acc.tenant_id != tenant.id or acc.deleted_at is not None:
@@ -461,6 +465,7 @@ def sandbox_array_reassign(
     'Moved just now' badge for ~10s after the move.
     """
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     with SessionLocal() as db:
         arr = db.execute(
             select(Array).where(

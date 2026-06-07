@@ -88,6 +88,7 @@ from .worker import pull_bills_for_tenant, run_pending_jobs
 # Its Stripe webhook moved to api/stripe_webhook.py (still mounted below).
 from .stripe_webhook import router as stripe_webhook_router
 from .account import router as account_router
+from .account import require_not_demo
 from .onboarding import router as onboarding_router
 from .ingest import router as ingest_router
 from .daily_generation import router as daily_generation_router
@@ -203,6 +204,7 @@ def extension_heartbeat(authorization: str | None = Header(default=None)):
     Called by background.js every 60s when on a GMP tab. Returns the server
     timestamp so the extension can show clock-skew warnings if needed."""
     tenant = tenant_from_bearer(authorization)
+    require_not_demo(tenant)
     with SessionLocal() as db:
         t = db.get(Tenant, tenant.id)
         if t:
@@ -231,6 +233,7 @@ async def sync(request: Request, authorization: str | None = Header(default=None
     """Chrome extension sends the captured session here. We persist a new
     UtilitySession row and upsert UtilityAccount rows."""
     tenant = tenant_from_bearer(authorization)
+    require_not_demo(tenant)
     payload = await request.json()
     adapter = get_adapter(payload.get("provider", "gmp"))
     normalized = adapter.parse_extension_payload(payload)
@@ -809,6 +812,7 @@ def tenant_bills(tid: str, authorization: str | None = Header(default=None)):
 @app.post("/v1/tenants/{tid}/pull")
 def tenant_pull(tid: str, authorization: str | None = Header(default=None)):
     tenant = tenant_from_bearer(authorization)
+    require_not_demo(tenant)
     if tenant.id != tid:
         raise HTTPException(403, "tenant mismatch")
     result = pull_bills_for_tenant(tid)
