@@ -6,6 +6,16 @@
 
 :root {
   color-scheme: light;
+
+  /* Mind button FAB bottom offset — on desktop sits near the floor,
+     on mobile it lifts above the 56px BottomTabBar + safe area. */
+  --so-fab-bottom: max(1.5rem, calc(1rem + env(safe-area-inset-bottom, 0px)));
+}
+
+@media (max-width: 639px) {
+  :root {
+    --so-fab-bottom: max(4.5rem, calc(3.75rem + env(safe-area-inset-bottom, 0px)));
+  }
 }
 
 html,

@@ -32,18 +32,18 @@ interface TabBarProps {
 export function TabBar({ tabs, unvisited, email, onSignOut }: TabBarProps) {
   return (
     <nav className="sticky top-0 z-30 border-b border-cream-border bg-cream/90 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 sm:gap-4">
-        {/* Left: wordmark — hidden on mobile to give tabs more room */}
+      {/* py-3 sm:py-0 gives the bar height on mobile where tabs are hidden (moved to BottomTabBar) */}
+      <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:gap-4 sm:py-0">
+        {/* Left: wordmark — always visible. On mobile this anchors the compact top bar. */}
         <div
-          className="hidden shrink-0 text-base font-semibold tracking-tight text-zinc-900 sm:block"
+          className="shrink-0 text-base font-semibold tracking-tight text-zinc-900"
           style={{ fontFamily: "'Georgia', ui-serif, serif" }}
         >
           <span className="text-primary-600">Solar</span> Operator
         </div>
 
-        {/* Center: tabs — flex-1 so the row gets the leftover width and each
-            tab is roughly 1/3 of the tabs region. */}
-        <div className="flex flex-1 justify-center">
+        {/* Center: tabs — hidden on mobile (< 640px); those screens use BottomTabBar instead. */}
+        <div className="hidden sm:flex flex-1 justify-center">
           <div className="flex w-full max-w-xl">
             {tabs.map((tab) => {
               const isUnvisited = unvisited?.has(tab.to) ?? false;

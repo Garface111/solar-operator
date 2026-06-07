@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TrialBanner } from "../components/TrialBanner";
 import { AllSetCelebration } from "../components/AllSetCelebration";
+import { BottomTabBar } from "../components/BottomTabBar";
 import { MindButton } from "../components/MindButton";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
@@ -142,12 +143,13 @@ export default function DashboardLayout({ onSignOut }: Props) {
           role="status"
         >
           <span>
-            Demo mode — this is a sample account with read-only data.{" "}
+            Demo mode
+            <span className="hidden sm:inline"> — this is a sample account with read-only data</span>.{" "}
             <a
               href="/signup"
               className="font-medium text-wood-600 underline underline-offset-2 hover:text-wood-700"
             >
-              Sign up free to try it for real
+              Sign up free
             </a>{" "}
             ↗
           </span>
@@ -191,11 +193,12 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
       <AllSetCelebration account={account} />
 
-      <main className="mx-auto max-w-4xl px-4 py-8">
+      {/* pb-24 on mobile clears the 56px bottom tab bar + safe area. */}
+      <main className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8">
         <Outlet context={ctx} />
       </main>
 
-      <footer className="mx-auto max-w-4xl px-4 py-8 text-center text-xs text-zinc-400">
+      <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
         Solar Operator · admin@solaroperator.org ·{" "}
         <a
           href="https://solaroperator.org/privacy"
@@ -207,7 +210,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
         </a>
       </footer>
 
-      {/* Private dogfood: only renders for allow-listed operators. */}
+      {/* Mobile-only bottom tab bar — hidden on sm+ where the top TabBar handles navigation. */}
+      <BottomTabBar />
+
+      {/* Mind button — position via CSS var that lifts it above BottomTabBar on mobile. */}
       <MindButton account={account} />
     </div>
   );
