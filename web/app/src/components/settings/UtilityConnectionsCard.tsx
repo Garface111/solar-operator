@@ -167,7 +167,18 @@ export function UtilityConnectionsCard({ account }: Props) {
                     billing data from.
                   </>
                 ) : (
-                  "Extension not yet connected — install it and log into your utility portal."
+                  <>
+                    Extension not yet connected —{" "}
+                    <a
+                      href="https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-emerald-700 underline decoration-emerald-700/40 underline-offset-2 hover:decoration-emerald-700"
+                    >
+                      install it from the Chrome Web Store
+                    </a>{" "}
+                    and log into your utility portal.
+                  </>
                 )}
               </p>
             </div>
