@@ -59,7 +59,16 @@ def clean_gmp_nickname(raw: str | None) -> str | None:
     s = _GMP_POSITIONAL_PREFIX.sub("", raw)
     s = s.replace("_", " ")
     s = _WS.sub(" ", s).strip()
-    # All-caps shout → title-case
-    if s and s == s.upper() and any(c.isalpha() for c in s):
-        s = s.title()
+    # All-caps shout → title-case, BUT preserve short ALL-CAPS tokens
+    # (4 chars or fewer) as acronyms. "BMU", "NRC", "GMP" should stay; "WATERFORD"
+    # should become "Waterford". Per-word check so "WATERFORD BMU" handled right.
+    if s and any(c.isalpha() for c in s):
+        words = s.split(" ")
+        cleaned = []
+        for w in words:
+            if w and w == w.upper() and any(c.isalpha() for c in w) and len(w) > 4:
+                cleaned.append(w.title())
+            else:
+                cleaned.append(w)
+        s = " ".join(cleaned)
     return s if s else raw
