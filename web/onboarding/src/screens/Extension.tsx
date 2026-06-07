@@ -178,7 +178,7 @@ function GmpHeroCard({ portal, isOpening, isActive, disabled, onOpen }: GmpHeroC
         onClick={onOpen}
         disabled={disabled}
         aria-label={`Open Green Mountain Power portal — ${portal.members}`}
-        className="mt-4 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors duration-150 ease-in-out hover:bg-emerald-700 active:bg-emerald-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#E6B470] focus-visible:ring-offset-2 disabled:opacity-60"
+        className="mt-4 inline-flex items-center justify-center rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors duration-150 ease-in-out hover:bg-emerald-600 active:bg-emerald-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#E6B470] focus-visible:ring-offset-2 disabled:opacity-60"
       >
         {isOpening ? "Opening GMP…" : "Open GMP portal →"}
       </button>
@@ -212,7 +212,7 @@ function UtilityRow({ portal, isOpening, isActive, disabled, onOpen }: UtilityRo
       style={{ borderColor: "#E8E2D9" }}
     >
       <span
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-semibold text-emerald-800"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-semibold text-emerald-600"
         aria-hidden
       >
         {portal.short.slice(0, 3)}
@@ -220,7 +220,7 @@ function UtilityRow({ portal, isOpening, isActive, disabled, onOpen }: UtilityRo
       <span className="min-w-0 flex-1 text-sm font-medium text-zinc-900">
         {isOpening ? `Opening ${portal.short}…` : portal.name}
       </span>
-      <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-800">
+      <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-600">
         {portal.members}
       </span>
       {isActive && !isOpening ? (

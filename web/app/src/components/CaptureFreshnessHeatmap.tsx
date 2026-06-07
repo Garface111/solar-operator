@@ -75,7 +75,7 @@ interface ChipSpec {
 function summaryChip(counts: Record<Status, number>): ChipSpec {
   const allFresh: ChipSpec = {
     label: "All fresh",
-    className: "bg-emerald-50 text-emerald-700",
+    className: "bg-emerald-50 text-emerald-600",
   };
   const worst = PRECEDENCE.find((s) => counts[s] > 0);
   if (!worst) return allFresh;

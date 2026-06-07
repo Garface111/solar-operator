@@ -305,7 +305,7 @@ function ExtensionStatusBanner({
   if (status === "unknown") return null;
   if (status === "present-paired") {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+      <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-600">
         <span aria-hidden>✓</span>
         <span>
           Extension paired{version ? ` (v${version})` : ""} — auto-capture is on.
@@ -363,11 +363,11 @@ function PortalCard({
       disabled={disabled}
       className="group flex flex-col items-start gap-1 rounded-xl border-2 border-zinc-200 bg-white p-4 text-left transition-all hover:border-emerald-400 hover:bg-emerald-50/50 disabled:cursor-not-allowed disabled:opacity-50"
     >
-      <span className="text-base font-semibold text-zinc-900 group-hover:text-emerald-800">
+      <span className="text-base font-semibold text-zinc-900 group-hover:text-emerald-600">
         {label}
       </span>
       <span className="text-xs text-zinc-500">{hint}</span>
-      <span className="mt-2 text-xs font-medium text-emerald-600 group-hover:text-emerald-700">
+      <span className="mt-2 text-xs font-medium text-emerald-600 group-hover:text-emerald-600">
         Open {provider.toUpperCase()} portal →
       </span>
     </button>

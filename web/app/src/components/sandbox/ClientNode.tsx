@@ -31,10 +31,10 @@ export interface ClientNodeData extends Record<string, unknown> {
 
 const UTILITY_THEME: Record<Utility, { pill: string; dot: string; row: string; rowText: string; rowDot: string }> = {
   GMP: {
-    pill: 'bg-emerald-100 text-emerald-800',
+    pill: 'bg-emerald-100 text-emerald-600',
     dot: 'bg-emerald-400',
     row: 'bg-emerald-50 border-emerald-100',
-    rowText: 'text-emerald-700',
+    rowText: 'text-emerald-600',
     rowDot: 'bg-emerald-400',
   },
   VEC: {
@@ -452,7 +452,7 @@ function MovedBadge({ reassignedAt }: { reassignedAt: string }) {
   }, [reassignedAt]);
   if (!visible) return null;
   return (
-    <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700">
+    <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-600">
       Moved just now
     </span>
   );

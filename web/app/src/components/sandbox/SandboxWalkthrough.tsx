@@ -91,9 +91,9 @@ function useElemPos(
 function ArrowLeft({ className = '' }: { className?: string }) {
   return (
     <svg width="40" height="24" viewBox="0 0 40 24" fill="none" aria-hidden="true" className={className}>
-      <path d="M38 12 C 26 12 14 12 4 12" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" />
-      <path d="M 4 12 L 13 5" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" />
-      <path d="M 4 12 L 13 19" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M38 12 C 26 12 14 12 4 12" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M 4 12 L 13 5" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M 4 12 L 13 19" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" />
     </svg>
   );
 }
@@ -102,9 +102,9 @@ function ArrowLeft({ className = '' }: { className?: string }) {
 function ArrowUp({ className = '' }: { className?: string }) {
   return (
     <svg width="24" height="40" viewBox="0 0 24 40" fill="none" aria-hidden="true" className={className}>
-      <path d="M12 38 C 12 26 12 14 12 4" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" />
-      <path d="M 12 4 L 5 13" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" />
-      <path d="M 12 4 L 19 13" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M12 38 C 12 26 12 14 12 4" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M 12 4 L 5 13" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M 12 4 L 19 13" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" />
     </svg>
   );
 }

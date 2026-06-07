@@ -18,19 +18,19 @@ export default {
       },
       colors: {
         // Solar green accent — full palette so primary-50..950 all resolve.
-        // Darkened Jun 2026: the old emerald-500 base (#10b981) read too light/
-        // vibrant. primary-500 is now emerald-700, with 600/700 shifted to
-        // emerald-800/900 so hover/active states (bg-primary-600/700) stay
-        // legibly darker than the base CTA.
+        // Re-lightened Jun 6'26 (Ford): "all dark green is ugly — use the
+        // light array-row green sitewide". 500 → emerald-500 #10b981
+        // (living-leaf), 600/700/800/900 stay one step darker each for
+        // hover/active legibility but NEVER reach the old forest-green.
         primary: {
           50: "#ecfdf5",
           100: "#d1fae5",
           200: "#a7f3d0",
           300: "#6ee7b7",
           400: "#34d399",
-          500: "#047857",
-          600: "#065f46",
-          700: "#064e3b",
+          500: "#10b981",
+          600: "#059669",
+          700: "#047857",
           800: "#065f46",
           900: "#064e3b",
           950: "#022c22",

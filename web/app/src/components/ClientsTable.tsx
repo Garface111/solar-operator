@@ -154,7 +154,7 @@ function buildLoginGroups(client: ClientRow, arrays: ArrayRow[]): LoginGroup[] {
 // ─── Utility color themes ────────────────────────────────────────────────────
 
 const UTIL_THEME: Record<string, { pill: string; border: string; bg: string }> = {
-  GMP: { pill: "bg-emerald-100 text-emerald-800", border: "border-emerald-200", bg: "bg-emerald-50" },
+  GMP: { pill: "bg-emerald-100 text-emerald-600", border: "border-emerald-200", bg: "bg-emerald-50" },
   VEC: { pill: "bg-blue-100 text-blue-800", border: "border-blue-200", bg: "bg-blue-50" },
   WEC: { pill: "bg-amber-100 text-amber-800", border: "border-amber-200", bg: "bg-amber-50" },
 };
@@ -835,7 +835,7 @@ function ClientTableRow({
               className={[
                 "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
                 delivery.kind === "ok"
-                  ? "bg-emerald-50 text-emerald-700"
+                  ? "bg-emerald-50 text-emerald-600"
                   : "bg-red-50 text-red-700",
               ].join(" ")}
               title={delivery.label}

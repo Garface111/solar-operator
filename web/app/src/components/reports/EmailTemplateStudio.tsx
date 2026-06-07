@@ -805,7 +805,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
               {/* ── C4: "Looks great" CTA ── shown only when all defaults, nothing dirty */}
               {isAllDefault && (
                 <div className="rounded-xl border-2 border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
-                  <p className="text-sm font-semibold text-emerald-800 mb-3">
+                  <p className="text-sm font-semibold text-emerald-600 mb-3">
                     Looks good as-is — use the default for all my client emails
                   </p>
                   <Button
@@ -815,7 +815,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                       );
                       onClose();
                     }}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-xs"
+                    className="bg-emerald-600 hover:bg-emerald-600 text-xs"
                   >
                     Looks great, use this
                   </Button>

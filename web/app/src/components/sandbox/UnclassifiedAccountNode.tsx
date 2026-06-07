@@ -15,7 +15,7 @@ const UTILITY_THEME: Record<
     border: 'border-emerald-200',
     header: 'bg-emerald-50',
     icon: '☀',
-    label: 'text-emerald-700',
+    label: 'text-emerald-600',
     dot: 'bg-emerald-400',
   },
   VEC: {

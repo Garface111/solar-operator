@@ -416,7 +416,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
 
             {/* Auto-fill banner */}
             {autoFilledCount > 0 && (
-              <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800">
+              <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-600">
                 ✨ Auto-matched {autoFilledCount} row{autoFilledCount === 1 ? "" : "s"} to a client (existing match or derived from filename). Override below if any are wrong.
               </div>
             )}
@@ -484,7 +484,7 @@ export function ImportSpreadsheetModal({ open, onClose, onImported, forceClientI
                               !r.operator_name
                                 ? "border-amber-300 text-amber-800 focus:border-amber-400 focus:ring-amber-400/40"
                                 : isExistingClient(r.operator_name, existingClients)
-                                  ? "border-emerald-300 text-emerald-900 focus:border-emerald-400 focus:ring-emerald-400/40"
+                                  ? "border-emerald-300 text-emerald-600 focus:border-emerald-400 focus:ring-emerald-400/40"
                                   : "border-transparent text-zinc-800 focus:border-primary-400 focus:ring-primary-400/40",
                             ].join(" ")}
                           />
@@ -689,7 +689,7 @@ function ClientProvenancePill({
 
   if (match?.match_kind === "exact") {
     return (
-      <p className="mt-0.5 text-xs text-emerald-700">
+      <p className="mt-0.5 text-xs text-emerald-600">
         ✓ matches your client &lsquo;{match.client_name}&rsquo;
       </p>
     );
