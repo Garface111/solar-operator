@@ -441,13 +441,11 @@ export function ClientsTable({
   allClients,
   onMerged,
 }: ClientsTableProps) {
-  // Start with EVERY client row expanded — operators arriving here for the
-  // first time need to immediately see that their arrays actually propagated
-  // from the utility capture (the whole product promise hinges on "look,
-  // your data is here"). A specific expandClientId from the route still
-  // wins as a deep-link hint, but we never start collapsed.
+  // Start collapsed by default — operators land on a tidy list and choose what
+  // to drill into. An `expandClientId` from the route still wins as a deep-link
+  // hint (e.g. coming back from a report screen) so we honor that.
   const initialExpanded = () => {
-    const ids = new Set<number>(clients.map((c) => c.id));
+    const ids = new Set<number>();
     if (expandClientId != null) ids.add(expandClientId);
     return ids;
   };
