@@ -110,8 +110,19 @@ export function MindButton({ account }: Props) {
         body: JSON.stringify({
           project: "solar-operator",
           session_id: sessionId.current,
-          page_path: window.location.pathname,
+          page: window.location.pathname,
+          page_path: window.location.pathname,  // belt+suspenders: backend uses `page`
           message: text,
+          // Identity — the Mind is on our team and should know who it's talking
+          // to. The host product already has the auth context; pass it through
+          // instead of forcing the Mind to address an anonymized "operator-since-N"
+          // when we know perfectly well it's Bruce running GMCS. Ford Jun 7'26:
+          // "the agent needs access to the person who is using its account so
+          // they are on the same page and can introduce themselves. IT'S OUR SYSTEM."
+          operator_name: account?.send_from_name || account?.name || "",
+          operator_email: account?.email || "",
+          tenant_name: account?.name || "",
+          tenant_id: account?.tenant_id || "",
         }),
       });
       if (!res.ok || !res.body) {
