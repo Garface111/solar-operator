@@ -72,8 +72,8 @@ export function MindButton({ account }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
-  const allowed =
-    !!account?.email && MIND_BUTTON_ALLOWED_EMAILS.includes(account.email);
+  // Beta: show to everyone. Gating removed Jun 6'26 ("we are still beta testing").
+  const allowed = !!account?.email;
   if (!allowed) return null;
 
   async function send() {
