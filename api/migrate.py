@@ -492,6 +492,18 @@ def main():
             conn.execute(text(idx_sql))
         print("  ✓ daily_generation table + indexes ensured")
 
+        # 2026-06-06 Shared read-only demo tenant (feat/demo-tenant).
+        # is_demo flags the single public demo tenant; every real tenant stays
+        # False. Mutating endpoints refuse for is_demo tenants.
+        if not column_exists(conn, "tenants", "is_demo"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN is_demo BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+            print("  + tenants.is_demo")
+        conn.execute(text(
+            "UPDATE tenants SET is_demo = FALSE WHERE is_demo IS NULL"
+        ))
+
         # 2026-06-06 SolarEdge Monitoring API integration (feat/solaredge-adapter).
         # Stores operator-pasted API key (plain text — read-only scope) and the
         # SolarEdge site ID this array maps to. Nullable; NULL means no SolarEdge.

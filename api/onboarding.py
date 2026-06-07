@@ -39,6 +39,7 @@ from .notify import (
     send_trial_welcome_email,
 )
 from .account import (
+    require_not_demo,
     issue_magic_link,
     mint_session_for_tenant,
     tenant_from_session,
@@ -517,6 +518,7 @@ def extension_installed(token: str = Query(...),
     Advances the stage to 'clients'."""
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
+        require_not_demo(t)
         stage = t.onboarding_stage
     if stage == "pending_payment":
         # Webhook may simply be lagging. If we hold a paid Checkout session,
@@ -545,6 +547,7 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
     created_ids: list[int] = []
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
+        require_not_demo(t)
         if not t.active:
             raise HTTPException(402, "Payment not complete")
 
@@ -640,6 +643,7 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
     dashboard (reuses account.py's auth flow)."""
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
+        require_not_demo(t)
         if not t.active:
             raise HTTPException(402, "Payment not complete")
         # Set the operator's password BEFORE we mark stage=done. If the
@@ -724,6 +728,7 @@ def cancel_trial(authorization: Optional[str] = Header(default=None)):
     Stripe Billing Portal.
     """
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     if t.subscription_status != "trialing":
         raise HTTPException(400, "No active trial to cancel")
 

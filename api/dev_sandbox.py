@@ -20,7 +20,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .account import tenant_from_session
+from .account import tenant_from_session, require_not_demo, require_not_demo
 from .db import SessionLocal
 from .models import Array, Client, UtilityAccount, now
 
@@ -100,6 +100,7 @@ def seed_clients(
 ):
     _require_dev()
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     count = max(1, min(25, body.count))
     created = []
     with SessionLocal() as db:
@@ -169,6 +170,7 @@ def seed_login(
     real GMP scraper."""
     _require_dev()
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     n = max(1, min(15, body.arrays))
     utility = body.utility.upper()
     if utility not in ("GMP", "VEC", "WEC"):
@@ -252,6 +254,7 @@ def seed_unclassified(
 ):
     _require_dev()
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     n = max(1, min(15, body.count))
     utility = body.utility.upper()
     if utility not in ("GMP", "VEC", "WEC"):
@@ -290,6 +293,7 @@ def wipe(authorization: Optional[str] = Header(default=None)):
     [DEV]-nicknamed utility account that's not under a real client."""
     _require_dev()
     tenant = tenant_from_session(authorization)
+    require_not_demo(tenant)
     n_clients = 0
     n_arrays = 0
     n_accounts = 0

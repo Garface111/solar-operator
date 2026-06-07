@@ -18,6 +18,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
     email: "test@example.com",
     plan: "standard",
     active: true,
+    is_demo: false,
     subscription_status: "trialing",
     report_frequency: "quarterly",
     cc_on_reports: false,

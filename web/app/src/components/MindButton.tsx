@@ -72,6 +72,11 @@ export function MindButton({ account }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
+  // Never show the Mind on the shared read-only demo tenant: it proxies to
+  // Ford's localhost via a Cloudflare tunnel, so every demo visitor would burn
+  // API spend Ford pays for. (Hidden before the email gate below.)
+  if (account?.is_demo) return null;
+
   // Beta: show to everyone. Gating removed Jun 6'26 ("we are still beta testing").
   const allowed = !!account?.email;
   if (!allowed) return null;

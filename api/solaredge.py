@@ -20,7 +20,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .account import tenant_from_session
+from .account import tenant_from_session, require_not_demo, require_not_demo
 from .adapters.solaredge import (
     SolarEdgeAuthError,
     SolarEdgeError,
@@ -68,6 +68,7 @@ def setup_solaredge(
     show a picker. Saves credentials only when site_id is known.
     """
     t = tenant_from_session(authorization)
+    require_not_demo(t)
     api_key = (body.api_key or "").strip()
     if not api_key:
         raise HTTPException(400, "api_key is required")
@@ -179,6 +180,7 @@ def disconnect_solaredge(
     data is preserved. Only future pulls are disabled.
     """
     t = tenant_from_session(authorization)
+    require_not_demo(t)
 
     with SessionLocal() as db:
         arr = _resolve_array_for_client(db, t.id, client_id, array_id)

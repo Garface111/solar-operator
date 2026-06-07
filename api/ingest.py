@@ -39,7 +39,7 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .models import Client, Array, UtilityAccount
-from .account import tenant_from_session
+from .account import tenant_from_session, require_not_demo, require_not_demo
 from .import_examples import EXAMPLE_GMCS_STYLE, EXAMPLE_RESIDENTIAL_PORTFOLIO
 
 logger = logging.getLogger(__name__)
@@ -868,6 +868,7 @@ def ingest_commit(
       find_or_create Client by operator_name → Array by name → UtilityAccount.
     Returns counts of newly created records."""
     t = tenant_from_session(authorization)
+    require_not_demo(t)
 
     rows = _normalize([r.model_dump() for r in body.arrays])
     if not rows:
