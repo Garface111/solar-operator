@@ -45,6 +45,23 @@ function deliveryStatus(c: ClientRow): { kind: "ok" | "bounced"; label: string }
   return { kind: "ok", label: `Delivered ${new Date(c.last_delivered_at!).toLocaleDateString()}` };
 }
 
+/** Human "Last sent" line for the REPORT section. Relative for recent sends
+ *  (≤30 days), absolute date for anything older, explicit "Never sent" when
+ *  we've never delivered to this client. Mirrors ClientCard's helper. */
+function lastSentLabel(c: ClientRow): string {
+  if (!c.last_delivered_at) return "Never sent";
+  const then = new Date(c.last_delivered_at).getTime();
+  const days = Math.floor((Date.now() - then) / 86_400_000);
+  if (days <= 0) return "Last sent: today";
+  if (days === 1) return "Last sent: yesterday";
+  if (days <= 30) return `Last sent: ${days} days ago`;
+  return `Last sent: ${new Date(c.last_delivered_at).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  })}`;
+}
+
 function lastCaptureIso(c: ClientRow): string | null {
   const dates = [c.gmp_last_sync_at, c.vec_last_sync_at].filter(Boolean) as string[];
   if (!dates.length) return null;
@@ -1002,7 +1019,20 @@ function ExpandedPanel({
   const [deleting, setDeleting] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
   const [importingArrays, setImportingArrays] = useState(false);
+  const [importDropdownOpen, setImportDropdownOpen] = useState(false);
   const [arrayRefreshSignal, setArrayRefreshSignal] = useState(0);
+  const importDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!importDropdownOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (importDropdownRef.current && !importDropdownRef.current.contains(e.target as Node)) {
+        setImportDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [importDropdownOpen]);
 
   const loginGroups = arrays != null ? buildLoginGroups(client, arrays) : [];
 
@@ -1144,110 +1174,180 @@ function ExpandedPanel({
           )}
         </div>
 
-        {/* ── Right: Settings ── */}
-        <div className="space-y-4">
-          {/* Report actions */}
-          <div className="rounded-xl border border-primary-100 bg-primary-50/50 px-4 py-3">
-            <h4 className="text-[10px] font-semibold uppercase tracking-wide text-primary-700">
-              Report
-            </h4>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button
-                variant="secondary"
-                onClick={handleSendToMe}
-                disabled={sendingToMe || !operatorEmail}
-              >
-                {sendingToMe ? <><Spinner /> Sending…</> : "Email it to me"}
-              </Button>
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={downloading}
-                className="inline-flex items-center rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 focus:outline-none"
-              >
-                {downloading ? <><Spinner /> Downloading…</> : "Download .xlsx"}
-              </button>
-            </div>
+        {/* ── Right: the redesigned report sidebar (Ford's boxed region).
+            Three labelled sub-sections — REPORT / DELIVERY / DATA — on a
+            single cream card, separated by wood-300 gold hairlines. Mirrors
+            the design shipped in ClientCard.tsx. ── */}
+        <div className="rounded-xl border border-cream-border bg-cream p-4 sm:p-5">
+          {/* ── Section 1: REPORT — outgoing report actions ── */}
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            Report
+          </h4>
+          <div className="mt-4 flex flex-col gap-2">
+            <Button
+              variant="primary"
+              className="w-full"
+              onClick={handleSendToMe}
+              disabled={sendingToMe || !operatorEmail}
+            >
+              {sendingToMe ? <><Spinner /> Sending…</> : "Email it to me"}
+            </Button>
+            <button
+              type="button"
+              onClick={handleDownload}
+              disabled={downloading}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+            >
+              {downloading ? <><Spinner /> Downloading…</> : "Download .xlsx"}
+            </button>
           </div>
+          <p className="mt-2 text-[11px] text-zinc-500">{lastSentLabel(client)}</p>
 
-          {/* Editable fields */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <span className="mb-1 block text-xs font-medium text-zinc-600">Contact email</span>
-              <EditableField
-                value={client.contact_email}
-                label="contact email"
-                type="email"
-                onSave={(v) => patch({ contact_email: v || null })}
-                emptyText="add contact email"
-                placeholder="reports@client.org"
-              />
-            </div>
-            <div>
-              <span className="mb-1 block text-xs font-medium text-zinc-600">CC emails</span>
-              <EditableField
-                value={client.cc_emails}
-                label="CC emails"
-                onSave={(v) => patch({ cc_emails: v || null })}
-                emptyText="none"
-                placeholder="extra@example.com"
-              />
-            </div>
-          </div>
+          {/* gold hairline */}
+          <div className="my-4 border-t border-wood-300/60" />
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <span className="mb-1 block text-xs font-medium text-zinc-600">
-                Report frequency
+          {/* ── Section 2: DELIVERY — who it goes to + how often ── */}
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            Delivery
+          </h4>
+          <div className="mt-4 space-y-2">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                To
+              </span>
+              <div className="min-w-0">
+                <EditableField
+                  value={client.contact_email}
+                  label="contact email"
+                  type="email"
+                  onSave={(v) => patch({ contact_email: v || null })}
+                  emptyText="add email"
+                  placeholder="reports@client.org"
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                CC
+              </span>
+              <div className="min-w-0">
+                <EditableField
+                  value={client.cc_emails}
+                  label="CC emails"
+                  onSave={(v) => patch({ cc_emails: v || null })}
+                  emptyText="—"
+                  placeholder="extra@example.com, other@example.com"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-x-2">
+              <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                Frequency
               </span>
               <select
                 value={client.report_frequency ?? "quarterly"}
                 onChange={(e) =>
                   patch({ report_frequency: e.target.value || "quarterly" })
                 }
-                className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+                aria-label="Report frequency"
+                className="min-w-0 flex-1 rounded-lg border border-cream-border bg-white px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
               >
                 <option value="monthly">Monthly</option>
                 <option value="quarterly">Quarterly</option>
               </select>
             </div>
-            <div>
-              <span className="mb-1 block text-xs font-medium text-zinc-600">Notes</span>
-              <EditableField
-                value={client.notes}
-                label="notes"
-                onSave={(v) => patch({ notes: v || null })}
-                emptyText="—"
-                placeholder="Internal notes"
-              />
+          </div>
+
+          {/* gold hairline */}
+          <div className="my-4 border-t border-wood-300/60" />
+
+          {/* ── Section 3: DATA — import + notes ── */}
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+            Data
+          </h4>
+          <div className="mt-4 space-y-3">
+            {/* Single "Import data" dropdown — replaces the two separate
+                "Import arrays" + "Import NEPOOL IDs" buttons that used to
+                live in the Arrays header. Same pattern as ClientCard. */}
+            <div className="relative" ref={importDropdownRef}>
+              <button
+                type="button"
+                onClick={() => setImportDropdownOpen((o) => !o)}
+                className="inline-flex w-full items-center justify-between rounded-lg border border-cream-border bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
+                <span>Import data</span>
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                  className={`transition-transform ${importDropdownOpen ? "rotate-180" : ""}`}
+                >
+                  <polyline points="2,4 6,8 10,4" />
+                </svg>
+              </button>
+              {importDropdownOpen && (
+                <div className="absolute right-0 z-10 mt-1 w-full overflow-hidden rounded-xl border border-cream-border bg-white shadow-md">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportDropdownOpen(false);
+                      setImportingArrays(true);
+                    }}
+                    className="block w-full px-3 py-2 text-left hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  >
+                    <span className="text-sm font-medium text-zinc-700">Import arrays</span>
+                    <span className="mt-0.5 block text-[11px] text-zinc-400">
+                      Creates new arrays from a spreadsheet
+                    </span>
+                  </button>
+                  <div className="border-t border-cream-border" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportDropdownOpen(false);
+                      setAssigningNepool(true);
+                    }}
+                    className="block w-full px-3 py-2 text-left hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  >
+                    <span className="text-sm font-medium text-zinc-700">Import NEPOOL IDs</span>
+                    <span className="mt-0.5 block text-[11px] text-zinc-400">
+                      Fills IDs on existing arrays — no new rows created
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                Notes
+              </span>
+              <div className="min-w-0">
+                <EditableField
+                  value={client.notes}
+                  label="notes"
+                  onSave={(v) => patch({ notes: v || null })}
+                  emptyText="—"
+                  placeholder="Internal notes — not sent to the client"
+                />
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Arrays section */}
+      {/* Arrays section — import actions moved into the right-column DATA
+          dropdown ("Import data ▾"), so the header is just the label now. */}
       <div className="mt-6">
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2">
           <h4 className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
             Arrays
           </h4>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setImportingArrays(true)}
-              className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 hover:border-zinc-400 hover:text-zinc-800 focus:outline-none"
-              title="Upload a spreadsheet of arrays under this client"
-            >
-              Import arrays
-            </button>
-            <button
-              type="button"
-              onClick={() => setAssigningNepool(true)}
-              className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 hover:border-zinc-400 hover:text-zinc-800 focus:outline-none"
-            >
-              Import NEPOOL IDs
-            </button>
-          </div>
         </div>
         <ArrayList
           clientId={client.id}
