@@ -1361,16 +1361,28 @@ def create_client(body: ClientCreate,
         raise HTTPException(400,
             "report_frequency must be monthly or quarterly")
     with SessionLocal() as db:
-        # Name dedup
-        existing = db.execute(
-            select(Client).where(
-                Client.tenant_id == t.id,
-                Client.name == name,
-                Client.deleted_at.is_(None),
-            )
-        ).scalar_one_or_none()
-        if existing:
-            raise HTTPException(409, "A client with that name already exists")
+        # Name dedup — for placeholder names (e.g. "Untitled client"), auto-
+        # suffix instead of 409'ing. Ford spam-clicks "+ Add client manually"
+        # in the sandbox and expects N consecutive cards. Without this server-
+        # side suffix the client-side dedupe still races on the round-trip
+        # (concurrent POST requests both see an empty SELECT).
+        original_name = name
+        suffix = 1
+        while True:
+            existing = db.execute(
+                select(Client).where(
+                    Client.tenant_id == t.id,
+                    Client.name == name,
+                    Client.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                break
+            # Placeholder-style names auto-increment; real names get 409.
+            if not original_name.lower().startswith("untitled client") and not original_name.lower().startswith("new client"):
+                raise HTTPException(409, "A client with that name already exists")
+            suffix += 1
+            name = f"{original_name} {suffix}"
 
         # Login dedup — if the operator's already added a client (manually
         # OR via portal autopop) with the same GMP/VEC email or username,
@@ -1432,7 +1444,26 @@ def create_client(body: ClientCreate,
             vec_autopopulate=bool(body.vec_autopopulate),
             active=True,
         )
-        db.add(c); db.commit(); db.refresh(c)
+        # Commit-with-retry on UNIQUE (tenant_id, name): the earlier SELECT
+        # check races against concurrent spam-click POSTs, so we may still
+        # collide at INSERT. For placeholder names ("Untitled client", "New
+        # client"), bump the suffix and retry. For real user-supplied names,
+        # return 409.
+        from sqlalchemy.exc import IntegrityError
+        for _ in range(20):  # bounded retry budget
+            try:
+                db.add(c); db.commit(); db.refresh(c)
+                break
+            except IntegrityError:
+                db.rollback()
+                lname = original_name.lower()
+                if not (lname.startswith("untitled client") or lname.startswith("new client")):
+                    raise HTTPException(409, "A client with that name already exists")
+                suffix += 1
+                name = f"{original_name} {suffix}"
+                c.name = name
+        else:
+            raise HTTPException(500, "Couldn't generate a unique placeholder name after 20 tries")
         return {"ok": True, "client": _client_to_dict(c, 0)}
 
 
