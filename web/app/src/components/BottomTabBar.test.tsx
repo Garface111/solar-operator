@@ -80,11 +80,12 @@ describe("BottomTabBar", () => {
     ).not.toContain("text-primary-600");
   });
 
-  it("applies safe-area-inset-bottom padding via inline style attribute", () => {
+  it("is fixed-positioned with z-30 so it always floats at the bottom", () => {
     renderWithRouter();
     const nav = screen.getByTestId("bottom-tab-bar");
-    // jsdom strips env() from computed style; check the raw attribute instead.
-    expect(nav.getAttribute("style")).toContain("safe-area-inset-bottom");
+    // Fixed + z-30 keeps the bar above page content but below the z-40 MindButton.
+    expect(nav.className).toContain("fixed");
+    expect(nav.className).toContain("z-30");
   });
 
   it("nav container has sm:hidden class so it hides on desktop", () => {
