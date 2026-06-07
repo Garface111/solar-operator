@@ -1931,7 +1931,11 @@ export default function SandboxCanvas() {
     const names = new Set<string>(pendingClientNamesRef.current);
     for (const n of nodesRef.current) {
       if (n.type === 'client' && n.data && typeof n.data === 'object') {
-        const nm = (n.data as ClientNodeData).label;
+        // The on-canvas client name lives at data.client.name (not data.label —
+        // we had that wrong; it returned undefined which meant the on-canvas
+        // de-dupe loop never saw existing clients and spam-click #2 collided
+        // on the (tenant_id, name) UNIQUE constraint).
+        const nm = (n.data as ClientNodeData).client?.name;
         if (typeof nm === 'string') names.add(nm);
       }
     }
