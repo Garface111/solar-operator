@@ -240,13 +240,13 @@ export default function ReportsTab() {
             History
           </h2>
           {!loading && !loadError && hasArrays && (
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
               <input
                 type="text"
                 placeholder="Search clients…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="h-9 rounded-lg border border-cream-border bg-white px-3 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-200"
+                className="h-9 min-w-0 flex-1 rounded-lg border border-cream-border bg-white px-3 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-200 sm:flex-none sm:w-44"
               />
               <select
                 value={statusFilter}
@@ -263,14 +263,14 @@ export default function ReportsTab() {
               <button
                 type="button"
                 onClick={expandAll}
-                className="h-9 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
+                className="hidden h-9 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 sm:block"
               >
                 Expand all
               </button>
               <button
                 type="button"
                 onClick={collapseAll}
-                className="h-9 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
+                className="hidden h-9 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 sm:block"
               >
                 Collapse all
               </button>

@@ -222,7 +222,7 @@ export function MindButton({ account }: Props) {
         onClick={() => setOpen(true)}
         aria-label="Talk to OCICBB"
         title="Talk to OCICBB"
-        style={{ bottom: 'max(1.5rem, calc(1rem + env(safe-area-inset-bottom)))' }}
+        style={{ bottom: 'var(--so-fab-bottom)' }}
         className="fixed right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-white shadow-lg ring-1 ring-black/5 transition-all duration-150 hover:-translate-y-0.5 hover:shadow-xl hover:ring-2 hover:ring-wood-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-wood-300"
       >
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden fill="currentColor">
