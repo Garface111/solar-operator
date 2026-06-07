@@ -33,6 +33,7 @@ import {
   clearSession,
   UNAUTHORIZED_EVENT,
   type CanvasResponse,
+  type CanvasClientData,
 } from '../../lib/api';
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
@@ -68,6 +69,61 @@ const GRID: Record<Density, { COL_W: number; ROW_H: number }> = {
 // always 'full' at runtime.
 const DENSITY_COLS: Record<Density, number> = { full: 4, compact: 5, dense: 7 };
 
+// ── Card height estimation (sorted layout packing) ───────────────────────────
+// Estimates rendered card height so the masonry packer can reserve the right
+// vertical slot. Values tuned to ClientNode.tsx layout at each density tier.
+// Exported for Vitest (pure function — no React deps).
+
+export function estimateCardHeight(loginGroups: number, totalArrays: number, density: Density): number {
+  if (density === 'dense') return 40; // dense: collapsed chip row — always single slot
+  const isCompact = density === 'compact';
+  const HEADER   = isCompact ? 65 : 80;  // avatar + name + email
+  const GRP_HDR  = isCompact ? 36 : 44;  // login group header (px-3 py-2.5 + content)
+  const GRP_OVHD = isCompact ? 20 : 28;  // cred row + border + bottom pad per group
+  const ARR_ROW  = isCompact ? 26 : 32;  // per array row (py-1.5 + content)
+  const GRP_SEP  = isCompact ?  6 :  8;  // space-y-2 between login groups
+  const CARD_PAD = isCompact ? 20 : 24;  // card bottom padding
+  return (
+    HEADER
+    + loginGroups * (GRP_HDR + GRP_OVHD)
+    + totalArrays * ARR_ROW
+    + Math.max(0, loginGroups - 1) * GRP_SEP
+    + CARD_PAD
+  );
+}
+
+// Returns 1 or 2: how many ROW_H slots this API client card will occupy.
+export function cardSpanForApi(client: CanvasClientData, density: Density): number {
+  if (density === 'dense') return 1;
+  const { ROW_H } = GRID[density];
+  const groups = new Set(
+    client.accounts.map((a) => `${a.provider}::${a.login_origin_client_id ?? 'home'}`),
+  ).size;
+  const arrays = client.accounts.filter((a) => a.array_name != null).length;
+  return Math.min(2, Math.ceil(estimateCardHeight(groups, arrays, density) / ROW_H));
+}
+
+// Returns 1 or 2: how many ROW_H slots this in-canvas client card will occupy.
+export function cardSpanForNode(client: ClientData, density: Density): number {
+  if (density === 'dense') return 1;
+  const { ROW_H } = GRID[density];
+  const ownNum = (() => {
+    const m = client.id.match(/^client_(\d+)$/);
+    return m ? parseInt(m[1], 10) : null;
+  })();
+  const groups = new Set(
+    client.accounts.map((a) => {
+      const origin =
+        a.login_origin_client_id != null && a.login_origin_client_id !== ownNum
+          ? a.login_origin_client_id
+          : null;
+      return `${a.utility}::${origin ?? 'home'}`;
+    }),
+  ).size;
+  const arrays = clientArrayCount(client);
+  return Math.min(2, Math.ceil(estimateCardHeight(groups, arrays, density) / ROW_H));
+}
+
 // ── Provider normalizer ─────────────────────────────────────────────────────
 
 function normalizeProvider(p: string): Utility {
@@ -102,12 +158,17 @@ function computeSortedPositionsFromApiClients(
       default: return 0;
     }
   });
+  // Per-column Y cursor — masonry pack: each card is placed in the shortest
+  // column so tall cards don't collide with the card below them.
+  const colCursors: number[] = new Array(cols).fill(40);
   const map = new Map<number, { x: number; y: number }>();
-  sorted.forEach((client, rank) => {
-    map.set(client.id, {
-      x: (rank % cols) * COL_W + 40,
-      y: Math.floor(rank / cols) * ROW_H + 40,
-    });
+  sorted.forEach((client) => {
+    let bestCol = 0;
+    for (let c = 1; c < cols; c++) {
+      if (colCursors[c] < colCursors[bestCol]) bestCol = c;
+    }
+    map.set(client.id, { x: bestCol * COL_W + 40, y: colCursors[bestCol] });
+    colCursors[bestCol] += cardSpanForApi(client, density) * ROW_H;
   });
   return map;
 }
@@ -136,12 +197,17 @@ function computeSortedPositionsFromNodes(
       default: return 0;
     }
   });
+  // Per-column Y cursor — same masonry-pack strategy as computeSortedPositionsFromApiClients.
+  const colCursors: number[] = new Array(cols).fill(40);
   const map = new Map<string, { x: number; y: number }>();
-  sorted.forEach((node, rank) => {
-    map.set(node.id, {
-      x: (rank % cols) * COL_W + 40,
-      y: Math.floor(rank / cols) * ROW_H + 40,
-    });
+  sorted.forEach((node) => {
+    const client = (node.data as ClientNodeData).client;
+    let bestCol = 0;
+    for (let c = 1; c < cols; c++) {
+      if (colCursors[c] < colCursors[bestCol]) bestCol = c;
+    }
+    map.set(node.id, { x: bestCol * COL_W + 40, y: colCursors[bestCol] });
+    colCursors[bestCol] += cardSpanForNode(client, density) * ROW_H;
   });
   return map;
 }
