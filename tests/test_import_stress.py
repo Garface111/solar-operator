@@ -578,20 +578,17 @@ class TestSheetStructureChaos:
         assert len(rows) == 1
         assert rows[0]["nepool_gis_id"] == "53984"
 
-    @pytest.mark.xfail(reason="defect-import-05: intra-file duplicate NEPOOL IDs are "
-                       "not detected; only DB-level collision (nepool_map) is checked. "
-                       "Two rows in the same upload with the same NEPOOL pass through "
-                       "silently, creating ambiguity at commit time.", strict=True)
     def test_intrafile_duplicate_nepool_flagged(self, authed_stress):
-        """Two rows in the same file with the same NEPOOL ID → should be flagged.
+        """Two rows in the same file with the same NEPOOL ID → flagged.
 
-        Current behaviour: both rows appear in the preview with no warning.
-        Correct behaviour: a warning (or per-row flag) should surface the
-        intra-file duplicate so the operator resolves it before commit.
+        Fixed (defect-import-05): a top-level warning AND a per-row provenance
+        flag now surface the intra-file duplicate so the operator resolves it
+        before commit.
 
-        Severity: HIGH — at commit time the second row will silently re-use the
-        first row's Array record (find_or_create by name), which may or may not
-        be the operator's intent.
+        Severity: HIGH — at commit time the two rows would create two Array
+        records sharing one NEPOOL ID. Anything keyed by NEPOOL downstream
+        (production attribution → RECs → revenue) then collapses to one,
+        silently misattributing kWh.
         """
         xlsx = _xlsx_bytes_single([
             ["Client", "Array Name", "NEPOOL GIS ID"],
@@ -616,10 +613,105 @@ class TestSheetStructureChaos:
         assert resp.status_code == 200
         body = resp.json()
         warning_kinds = [w["kind"] for w in body["warnings"]]
-        # Expect a new warning kind like 'intrafile_nepool_duplicate'
+        # A warning kind like 'intrafile_nepool_duplicate' must be present.
         assert any("duplicate" in k or "intrafile" in k for k in warning_kinds), (
             "no warning for intra-file NEPOOL duplicate"
         )
+        # Both rows must still appear (never silently merged or dropped) and each
+        # must carry a per-row flag pointing at the other row.
+        assert body["count"] == 2
+        for row in body["arrays"]:
+            dup = row["provenance"]["intrafile_nepool_duplicate"]
+            assert dup is not None, "each duplicate row must carry the per-row flag"
+            assert dup["nepool_gis_id"] == "53984"
+            assert dup["count"] == 2
+            assert len(dup["duplicate_row_indices"]) == 1
+
+    def test_intrafile_triple_duplicate_nepool_flagged(self, authed_stress):
+        """THREE rows sharing one NEPOOL ID → all three flagged, count == 3.
+
+        Guards the off-by-one: a fix that only compares adjacent rows, or only
+        flags the 2nd occurrence, would miss the 3rd. Every member of the dup
+        group must know the group size and point at the other two rows.
+        """
+        xlsx = _xlsx_bytes_single([
+            ["Client", "Array Name", "NEPOOL GIS ID"],
+            ["Op A", "Array Alpha", "61001"],
+            ["Op B", "Array Beta",  "61001"],
+            ["Op C", "Array Gamma", "61001"],
+        ])
+
+        def _login(client_name: str, array_name: str) -> dict:
+            return {"name": client_name, "logins": [{"utility": "gmp",
+                "login_email": None, "accounts": [{"account_number": None,
+                    "arrays": [{"name": array_name, "nepool_gis_id": "61001",
+                                "notes": None, "confidence": 0.95}]}]}]}
+
+        hier = {"operators": [{"name": "TripleOp", "clients": [
+            _login("Op A", "Array Alpha"),
+            _login("Op B", "Array Beta"),
+            _login("Op C", "Array Gamma"),
+        ]}]}
+        with patch("api.ingest._llm_extract_hierarchical", return_value=hier):
+            resp = _preview(authed_stress, xlsx)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 3
+
+        dup_warnings = [w for w in body["warnings"]
+                        if w["kind"] == "intrafile_nepool_duplicate"]
+        assert len(dup_warnings) == 1
+        # All 3 rows are part of the single duplicated ID group.
+        assert dup_warnings[0]["count"] == 3
+        assert dup_warnings[0]["nepool_ids"] == ["61001"]
+
+        for row in body["arrays"]:
+            dup = row["provenance"]["intrafile_nepool_duplicate"]
+            assert dup is not None
+            assert dup["count"] == 3
+            # Each row points at the OTHER two rows, not itself.
+            assert len(dup["duplicate_row_indices"]) == 2
+
+    def test_intrafile_duplicate_conflicting_fields_not_merged(self, authed_stress):
+        """Same NEPOOL ID, different array names AND different clients → flagged,
+        NOT merged. Both rows survive verbatim.
+
+        This is the ambiguous case the fix deliberately refuses to auto-resolve:
+        we cannot know which array name is correct, so we flag and let the
+        operator decide. The fix must never collapse the two distinct names into
+        one or silently pick a winner — that would corrupt the roster.
+        """
+        xlsx = _xlsx_bytes_single([
+            ["Client", "Array Name", "NEPOOL GIS ID"],
+            ["Maple Co",  "North Field",  "70123"],
+            ["Birch LLC", "South Pasture", "70123"],  # same ID, all else differs
+        ])
+        hier = {"operators": [{"name": "ConflictOp", "clients": [
+            {"name": "Maple Co", "logins": [{"utility": "gmp", "login_email": None,
+                "accounts": [{"account_number": None,
+                    "arrays": [{"name": "North Field", "nepool_gis_id": "70123",
+                                "notes": None, "confidence": 0.95}]}]}]},
+            {"name": "Birch LLC", "logins": [{"utility": "gmp", "login_email": None,
+                "accounts": [{"account_number": None,
+                    "arrays": [{"name": "South Pasture", "nepool_gis_id": "70123",
+                                "notes": None, "confidence": 0.95}]}]}]},
+        ]}]}
+        with patch("api.ingest._llm_extract_hierarchical", return_value=hier):
+            resp = _preview(authed_stress, xlsx)
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # Both rows preserved with distinct names and clients — no merge.
+        assert body["count"] == 2
+        names = {r["array_name"] for r in body["arrays"]}
+        clients = {r["operator_name"] for r in body["arrays"]}
+        assert names == {"North Field", "South Pasture"}
+        assert clients == {"Maple Co", "Birch LLC"}
+
+        # Still flagged as an intra-file duplicate despite the conflicts.
+        assert any(w["kind"] == "intrafile_nepool_duplicate" for w in body["warnings"])
+        for row in body["arrays"]:
+            assert row["provenance"]["intrafile_nepool_duplicate"] is not None
 
 
 # ── Category 5: CSV / XLSX Masquerade ──────────────────────────────────────────

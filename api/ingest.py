@@ -562,6 +562,31 @@ def _normalize(rows: list[dict]) -> list[dict]:
     return clean
 
 
+def _find_intrafile_nepool_duplicates(rows: list[dict]) -> dict[str, list[int]]:
+    """Find NEPOOL GIS IDs that appear on more than one row of the SAME upload.
+
+    Returns {canonical_nepool_id: [row_index, ...]} containing only IDs that
+    occur 2+ times. Rows whose nepool_gis_id is None (blank or parse-error) are
+    ignored — a missing ID is not a duplicate.
+
+    Why this is a hard flag, not a silent merge: each preview row is an *array*
+    (name + NEPOOL ID + account), not an additive quantity. Two rows claiming the
+    same NEPOOL ID with different array names is exactly the ambiguous case where
+    we cannot know which name is correct, so we must not auto-merge. Worse, if the
+    operator commits both, find_or_create makes TWO Array records sharing one
+    NEPOOL ID; downstream production/billing keyed by NEPOOL (nepool_map) then
+    collapses to one, silently misattributing kWh — and kWh drives RECs and
+    customer revenue. Surfacing the duplicate at preview is the human gate that
+    stops that before commit.
+    """
+    seen: dict[str, list[int]] = {}
+    for idx, row in enumerate(rows):
+        nid = (row.get("nepool_gis_id") or "").strip()
+        if nid:
+            seen.setdefault(nid, []).append(idx)
+    return {nid: idxs for nid, idxs in seen.items() if len(idxs) > 1}
+
+
 def _fuzzy_match_client(name: str, clients: list) -> Optional[dict]:
     """Fuzzy-match an operator name against existing Client ORM objects.
 
@@ -682,11 +707,16 @@ async def ingest_preview(
                 "existing_client_name": c_name or "Unknown",
             }
 
+    # Intra-file (within this upload) duplicate NEPOOL IDs. Independent of the
+    # DB-level nepool_map collision below: two rows in the SAME file can both be
+    # brand-new to the account yet collide with each other.
+    intrafile_dup_map = _find_intrafile_nepool_duplicates(arrays)
+
     nepool_collision_count = 0
     client_fuzzy_count = 0
     warnings: list[dict] = []
 
-    for row in arrays:
+    for idx, row in enumerate(arrays):
         # ── Old collision field (backwards compat) ──────────────────────────
         client_hit = bool(
             row.get("operator_name")
@@ -723,18 +753,29 @@ async def ingest_preview(
             if client_match and client_match["match_kind"] == "fuzzy":
                 client_fuzzy_count += 1
 
-        # ── NEPOOL collision ────────────────────────────────────────────────
+        # ── NEPOOL collision (against existing DB rows) ─────────────────────
         nepool_collision = None
         nid = (row.get("nepool_gis_id") or "").strip()
         if nid and nid in nepool_map:
             nepool_collision = nepool_map[nid]
             nepool_collision_count += 1
 
+        # ── Intra-file NEPOOL duplicate (against other rows in THIS upload) ──
+        intrafile_duplicate = None
+        if nid and nid in intrafile_dup_map:
+            others = [i for i in intrafile_dup_map[nid] if i != idx]
+            intrafile_duplicate = {
+                "nepool_gis_id": nid,
+                "duplicate_row_indices": others,
+                "count": len(intrafile_dup_map[nid]),
+            }
+
         row["provenance"] = {
             "source": source,
             "confidence": row_confidence,
             "client_match": client_match,
             "nepool_collision": nepool_collision,
+            "intrafile_nepool_duplicate": intrafile_duplicate,
         }
 
     # ── Top-level warnings ──────────────────────────────────────────────────
@@ -780,6 +821,23 @@ async def ingest_preview(
                 "message": (
                     f"{nepool_collision_count} NEPOOL ID{'s' if nepool_collision_count != 1 else ''} "
                     "already exist in your account — choose Skip, Overwrite, or New per row."
+                ),
+            })
+        if intrafile_dup_map:
+            dup_ids = len(intrafile_dup_map)
+            dup_rows = sum(len(idxs) for idxs in intrafile_dup_map.values())
+            warnings.append({
+                "kind": "intrafile_nepool_duplicate",
+                "count": dup_rows,
+                # Expose the offending IDs so the UI can point straight at them.
+                "nepool_ids": sorted(intrafile_dup_map.keys()),
+                "message": (
+                    f"{dup_rows} rows share {dup_ids} NEPOOL ID"
+                    f"{'s' if dup_ids != 1 else ''} within this file "
+                    f"({', '.join(sorted(intrafile_dup_map.keys()))}). "
+                    "Each NEPOOL ID identifies one array — consolidate or correct "
+                    "the duplicated rows before saving so production isn't split "
+                    "across two arrays."
                 ),
             })
 
