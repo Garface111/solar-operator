@@ -248,6 +248,56 @@ def test_login_origin_cleared_on_detach(client):
         assert acc.login_origin_client_id is None
 
 
+def test_submeter_move_creates_no_extra_arrays(client):
+    """Moving a sub-meter array must not split or duplicate arrays.
+
+    Regression guard for the frontend bug where dragging a sub-meter array
+    could route through the per-account reassign path, creating one new holder
+    array per account instead of moving the shared Array record. The backend
+    endpoint moves only Array.client_id; UtilityAccount.array_id is never
+    touched, so no new Array rows are created.
+    """
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        c_a = Client(tenant_id=tid, name="SM No-dup Source", active=True)
+        c_b = Client(tenant_id=tid, name="SM No-dup Dest", active=True)
+        db.add_all([c_a, c_b])
+        db.flush()
+        arr = Array(tenant_id=tid, client_id=c_a.id, name="Starlake NoDup")
+        db.add(arr)
+        db.flush()
+        sub1 = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="ND-001")
+        sub2 = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="ND-002")
+        sub3 = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp", account_number="ND-003")
+        db.add_all([sub1, sub2, sub3])
+        db.commit()
+        arr_id = arr.id
+        dst_id = c_b.id
+        acc_ids = [sub1.id, sub2.id, sub3.id]
+
+    resp = _post(client, auth, {"array_id": arr_id, "client_id": dst_id})
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        # Array moved to new client
+        arr_row = db.get(Array, arr_id)
+        assert arr_row.client_id == dst_id
+
+        # All 3 sub-meter accounts still point at the SAME original array
+        for aid in acc_ids:
+            acc = db.get(UtilityAccount, aid)
+            assert acc.array_id == arr_id, f"account {aid} lost its array link after move"
+
+        # No new Arrays were created for this tenant beyond the original one
+        all_arrays = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+        ).scalars().all()
+        assert len(all_arrays) == 1, (
+            f"Expected 1 array, found {len(all_arrays)} — sub-meter move incorrectly split the array"
+        )
+        assert all_arrays[0].id == arr_id
+
+
 def test_login_origin_submeter_all_accounts_stamped(client):
     """Sub-meter case: 3 accounts sharing one array all get the same stamp."""
     tid, auth = _make_tenant()
