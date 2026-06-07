@@ -1177,8 +1177,12 @@ function ExpandedPanel({
         {/* ── Right: the redesigned report sidebar (Ford's boxed region).
             Three labelled sub-sections — REPORT / DELIVERY / DATA — on a
             single cream card, separated by wood-300 gold hairlines. Mirrors
-            the design shipped in ClientCard.tsx. ── */}
-        <div className="rounded-xl border border-cream-border bg-cream p-4 sm:p-5">
+            the design shipped in ClientCard.tsx.
+            mt offset on desktop only so the card's top edge aligns with
+            the left column's first content row (the left has an external
+            "Logins & accounts" header above its content; we mirror that
+            spacing here). ── */}
+        <div className="rounded-xl border border-cream-border bg-cream p-4 sm:p-5 lg:mt-7">
           {/* ── Section 1: REPORT — outgoing report actions ── */}
           <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
             Report
