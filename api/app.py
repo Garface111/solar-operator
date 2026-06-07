@@ -16,11 +16,11 @@ Admin (no auth in MVP — guard with a deploy-time env in prod):
   GET  /admin/tenants           — list all
 """
 from __future__ import annotations
-import os, secrets, json, logging
+import io, os, pathlib, secrets, shutil, json, logging, tarfile
 from datetime import datetime
 from typing import Any
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -984,14 +984,110 @@ class SPAStaticFiles(StaticFiles):
             raise
 
 
+# ---- v0.6.7: per-change preview bundles (MC Lens-Picker live iframes) -------
+#
+# MC uploads a built dist/ as a tar.gz after each Worker run. The bundle is
+# extracted to PREVIEW_BUNDLES_DIR/<change_id>/dist/ and served at
+# /accounts/preview/<change_id>/. Cleanup via DELETE /admin/preview/<change_id>.
+
+PREVIEW_BUNDLES_DIR = pathlib.Path(os.path.dirname(__file__)) / "preview_bundles"
+
+
+def _preview_bundle_path(change_id: str) -> pathlib.Path:
+    """Return the dist/ directory for a given change_id."""
+    safe = change_id.replace("/", "").replace("..", "")  # no traversal
+    return PREVIEW_BUNDLES_DIR / safe / "dist"
+
+
+@app.post("/admin/preview/upload")
+async def preview_upload(
+    request: Request,
+    change_id: str,
+    _: None = Depends(_require_admin),
+):
+    """Accept a tar.gz of a dist/ directory from MC's preview_uploader.
+
+    The archive must have a top-level `dist/` directory. Files are extracted to
+    PREVIEW_BUNDLES_DIR/<change_id>/dist/ and served at /accounts/preview/<change_id>/.
+
+    Returns 200 + {"ok": true, "preview_url": "..."} on success.
+    """
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "empty body — expected a tar.gz of the dist/ directory")
+
+    dest = _preview_bundle_path(change_id)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+            # Security: only extract safe members (no absolute paths, no ..)
+            safe_members = [
+                m for m in tar.getmembers()
+                if not os.path.isabs(m.name) and ".." not in m.name
+            ]
+            tar.extractall(path=str(dest.parent), members=safe_members)
+    except (tarfile.TarError, EOFError) as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(400, f"invalid tar.gz: {exc}") from exc
+
+    if not dest.exists():
+        raise HTTPException(422, "tar.gz did not contain a dist/ directory at its root")
+
+    return {"ok": True, "change_id": change_id,
+            "preview_url": f"/accounts/preview/{change_id}/"}
+
+
+@app.delete("/admin/preview/{change_id}")
+def preview_delete(
+    change_id: str,
+    _: None = Depends(_require_admin),
+):
+    """Clean up a preview bundle after the founder ships or declines the lens."""
+    bundle_dir = PREVIEW_BUNDLES_DIR / change_id.replace("/", "").replace("..", "")
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+    return {"ok": True, "change_id": change_id}
+
+
+# Dynamic preview file serving — /accounts/preview/<change_id>/<path>
+# Serves the per-change bundle as a SPA (index.html fallback for deep links).
+@app.get("/accounts/preview/{change_id}/{file_path:path}")
+@app.get("/accounts/preview/{change_id}")
+def accounts_preview(change_id: str, file_path: str = ""):
+    """Serve the live preview bundle for a change. Acts as a mini-SPA with
+    index.html fallback (same behaviour as SPAStaticFiles)."""
+    dist = _preview_bundle_path(change_id)
+    if not dist.exists():
+        raise HTTPException(404, f"no preview bundle for change {change_id}")
+
+    # Normalise: empty path or directory → index.html
+    target = (dist / file_path) if file_path else dist / "index.html"
+    if target.is_dir():
+        target = target / "index.html"
+
+    if not target.exists() or not str(target).startswith(str(dist)):
+        # SPA fallback: serve index.html for any unresolved path
+        index = dist / "index.html"
+        if index.exists():
+            return FileResponse(str(index), media_type="text/html")
+        raise HTTPException(404, "preview index.html not found")
+
+    return FileResponse(str(target))
+
+
 # Each SPA's build is copied into api/ before commit because Railway's Railpack
 # builder only ships directories it recognizes — web/ at the repo root was being
 # dropped. build_onboarding.sh and build_app.sh do the copy.
 #   /onboarding ← api/onboarding_dist  (web/onboarding/dist)
 #   /app        ← api/app_dist         (web/app/dist — customer dashboard)
+#   /accounts   ← api/app_dist         (alias for the customer SPA — production iframe)
 _SPA_MOUNTS = [
     ("/onboarding", "onboarding_dist", "build_onboarding.sh", "web/onboarding"),
     ("/app", "app_dist", "build_app.sh", "web/app"),
+    ("/accounts", "app_dist", "build_app.sh", "web/app"),  # v0.6.7 — production iframe alias
 ]
 
 for _prefix, _dirname, _build_script, _src in _SPA_MOUNTS:
