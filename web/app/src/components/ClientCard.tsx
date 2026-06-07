@@ -69,6 +69,18 @@ function lastSentLabel(c: ClientRow): string {
   })}`;
 }
 
+/** Two-letter initials for the report-card avatar circle. Empty string when
+ *  the name yields nothing (callers fall back to a ✉ glyph). Mirrors the
+ *  sandbox ClientNode helper so the two surfaces feel identical. */
+function getInitials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .slice(0, 2)
+    .map((w) => w[0]!.toUpperCase())
+    .join("");
+}
+
 interface Props {
   client: ClientRow;
   operatorEmail: string | null;
@@ -395,111 +407,152 @@ export function ClientCard({
               />
             </div>
 
-            {/* RIGHT column — the redesigned report sidebar. Three labelled
-                sub-sections (REPORT / DELIVERY / DATA) on a single 16px
-                vertical rhythm, separated by wood-300 gold hairlines. */}
-            <div className="rounded-xl border border-cream-border bg-cream p-4 sm:p-5">
-              {/* ── Section 1: REPORT — outgoing report actions ── */}
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Report
-              </h4>
-              <div className="mt-4 flex flex-col gap-2">
-                <Button
-                  variant="primary"
-                  className="w-full"
-                  onClick={handleSendToMe}
-                  disabled={sendingToMe || !operatorEmail}
-                >
-                  {sendingToMe ? (
-                    <>
-                      <Spinner />
-                      Sending…
-                    </>
-                  ) : (
-                    "Email it to me"
-                  )}
-                </Button>
-                <button
-                  type="button"
-                  onClick={handleDownload}
-                  disabled={downloading}
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-                >
-                  {downloading ? (
-                    <>
-                      <Spinner />
-                      Downloading…
-                    </>
-                  ) : (
-                    "Download .xlsx"
-                  )}
-                </button>
+            {/* RIGHT column — the redesigned report card. Wears the sandbox
+                client-card visual language: rounded-2xl white shell with a
+                soft layered shadow, an avatar header strip, and REPORT /
+                DELIVERY / DATA rendered as nested "login-row"-style themed
+                cards. Mirrors ClientsTable.tsx exactly. */}
+            <div className="so-node-enter rounded-2xl border-[1.5px] border-zinc-300 bg-white p-4 shadow-[0_4px_14px_-2px_rgba(15,23,42,0.12),0_2px_4px_-1px_rgba(15,23,42,0.06)] transition-all duration-150 hover:border-zinc-400 hover:shadow-[0_8px_24px_-4px_rgba(15,23,42,0.16),0_3px_6px_-1px_rgba(15,23,42,0.08)] sm:p-5">
+              {/* ── Header strip — sandbox avatar + micro-label pattern ── */}
+              <div className="mb-3 flex items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-50 text-xs font-bold text-primary-700 select-none">
+                  {getInitials(client.name) || "✉"}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <span className="block text-[10px] font-semibold uppercase tracking-wider text-primary-600/80 select-none">
+                    Report card
+                  </span>
+                  <p className="truncate text-sm font-semibold text-zinc-900">
+                    Quarterly delivery
+                  </p>
+                </div>
+                <span className="shrink-0 text-[11px] text-zinc-400">
+                  {lastSentLabel(client)}
+                </span>
               </div>
-              <p className="mt-2 text-[11px] text-zinc-500">{lastSentLabel(client)}</p>
 
-              {/* gold hairline */}
-              <div className="my-4 border-t border-wood-300/60" />
-
-              {/* ── Section 2: DELIVERY — who it goes to + how often ── */}
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Delivery
-              </h4>
-              <div className="mt-4 space-y-2">
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
-                    To
+              {/* ── Sub-card 1: REPORT (emerald) — outgoing report actions.
+                  Styled like a sandbox "Login" row: caret + colored dot + label. ── */}
+              <div className="mb-2 rounded-xl border border-emerald-100 bg-emerald-50 p-2.5">
+                <div className="mb-2 flex items-center gap-1.5">
+                  <svg className="h-3 w-3 shrink-0 rotate-90 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+                    Report
                   </span>
-                  <div className="min-w-0">
-                    <EditableField
-                      value={client.contact_email}
-                      label="contact email"
-                      type="email"
-                      onSave={(v) => patch({ contact_email: v || null })}
-                      emptyText="add email"
-                      placeholder="reports@client.org"
-                    />
-                  </div>
                 </div>
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
-                    CC
-                  </span>
-                  <div className="min-w-0">
-                    <EditableField
-                      value={client.cc_emails}
-                      label="CC emails"
-                      onSave={(v) => patch({ cc_emails: v || null })}
-                      emptyText="—"
-                      placeholder="extra@example.com, other@example.com"
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center gap-x-2">
-                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
-                    Frequency
-                  </span>
-                  <select
-                    value={client.report_frequency ?? "quarterly"}
-                    onChange={(e) =>
-                      patch({ report_frequency: e.target.value || "quarterly" })
-                    }
-                    aria-label="Report frequency"
-                    className="min-w-0 flex-1 rounded-lg border border-cream-border bg-white px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+                <div className="flex flex-col gap-2">
+                  <Button
+                    variant="primary"
+                    className="w-full"
+                    onClick={handleSendToMe}
+                    disabled={sendingToMe || !operatorEmail}
                   >
-                    <option value="monthly">Monthly</option>
-                    <option value="quarterly">Quarterly</option>
-                  </select>
+                    {sendingToMe ? (
+                      <>
+                        <Spinner />
+                        Sending…
+                      </>
+                    ) : (
+                      "Email it to me"
+                    )}
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={handleDownload}
+                    disabled={downloading}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  >
+                    {downloading ? (
+                      <>
+                        <Spinner />
+                        Downloading…
+                      </>
+                    ) : (
+                      "Download .xlsx"
+                    )}
+                  </button>
                 </div>
               </div>
 
-              {/* gold hairline */}
-              <div className="my-4 border-t border-wood-300/60" />
+              {/* ── Sub-card 2: DELIVERY (amber) — who it goes to + how often.
+                  Body rows are bg-white/70 chips, echoing sandbox account rows. ── */}
+              <div className="mb-2 rounded-xl border border-amber-100 bg-amber-50 p-2.5">
+                <div className="mb-2 flex items-center gap-1.5">
+                  <svg className="h-3 w-3 shrink-0 rotate-90 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span className="h-2 w-2 rounded-full bg-amber-400" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-700">
+                    Delivery
+                  </span>
+                  <span className="ml-auto rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                    {(client.report_frequency ?? "quarterly") === "monthly" ? "Monthly" : "Quarterly"}
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-baseline gap-2 rounded-md bg-white/70 px-2 py-1.5">
+                    <span className="w-14 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                      To
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <EditableField
+                        value={client.contact_email}
+                        label="contact email"
+                        type="email"
+                        onSave={(v) => patch({ contact_email: v || null })}
+                        emptyText="add email"
+                        placeholder="reports@client.org"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-baseline gap-2 rounded-md bg-white/70 px-2 py-1.5">
+                    <span className="w-14 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                      CC
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <EditableField
+                        value={client.cc_emails}
+                        label="CC emails"
+                        onSave={(v) => patch({ cc_emails: v || null })}
+                        emptyText="—"
+                        placeholder="extra@example.com, other@example.com"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-md bg-white/70 px-2 py-1.5">
+                    <span className="w-14 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                      Every
+                    </span>
+                    <select
+                      value={client.report_frequency ?? "quarterly"}
+                      onChange={(e) =>
+                        patch({ report_frequency: e.target.value || "quarterly" })
+                      }
+                      aria-label="Report frequency"
+                      className="min-w-0 flex-1 rounded-md border border-amber-100 bg-white px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                    >
+                      <option value="monthly">Monthly</option>
+                      <option value="quarterly">Quarterly</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
 
-              {/* ── Section 3: DATA — import + notes ── */}
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                Data
-              </h4>
-              <div className="mt-4 space-y-3">
+              {/* ── Sub-card 3: DATA (sky) — import + notes ── */}
+              <div className="rounded-xl border border-sky-100 bg-sky-50 p-2.5">
+                <div className="mb-2 flex items-center gap-1.5">
+                  <svg className="h-3 w-3 shrink-0 rotate-90 text-sky-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span className="h-2 w-2 rounded-full bg-sky-400" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-sky-700">
+                    Data
+                  </span>
+                </div>
+                <div className="space-y-2">
                 {/* Single "Import data" dropdown — replaces the old two separate buttons.
                     Dropdown approach: user intent (create vs. assign) stays clear in the menu
                     without changing the backend preview semantics yet. */}
@@ -507,7 +560,7 @@ export function ClientCard({
                   <button
                     type="button"
                     onClick={() => setImportDropdownOpen((o) => !o)}
-                    className="inline-flex w-full items-center justify-between rounded-lg border border-cream-border bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                    className="inline-flex w-full items-center justify-between rounded-lg border border-sky-100 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
                   >
                     <span>Import data</span>
                     <svg
@@ -557,11 +610,11 @@ export function ClientCard({
                     </div>
                   )}
                 </div>
-                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                  <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                <div className="flex items-baseline gap-2 rounded-md bg-white/70 px-2 py-1.5">
+                  <span className="w-14 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                     Notes
                   </span>
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <EditableField
                       value={client.notes}
                       label="notes"
@@ -570,6 +623,7 @@ export function ClientCard({
                       placeholder="Internal notes — not sent to the client"
                     />
                   </div>
+                </div>
                 </div>
               </div>
             </div>
