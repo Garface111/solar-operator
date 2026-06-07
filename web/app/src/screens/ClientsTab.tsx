@@ -18,13 +18,12 @@ export default function ClientsTab() {
 
   return (
     <div className="space-y-8">
-      {/* Spatial canvas — constrained height so the list below stays
-          discoverable. 560px lets ~6-9 client cards breathe at default
-          zoom; operators can pan/zoom freely inside. */}
+      {/* Spatial canvas — responsive height: compact on mobile (220px gives a
+          useful peek without consuming the entire viewport), full 560px on
+          sm+ where there's room for the canvas to breathe. */}
       <section
         aria-label="Clients sandbox"
-        className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 shadow-sm"
-        style={{ height: 560 }}
+        className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 shadow-sm h-[220px] sm:h-[560px]"
       >
         <ReactFlowProvider>
           <SandboxCanvas />

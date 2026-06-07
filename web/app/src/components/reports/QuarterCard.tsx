@@ -203,7 +203,7 @@ function ClientTableRow({
             disabled={downloading}
             onClick={handleDownload}
             title="Download .xlsx"
-            className="rounded px-1.5 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-50"
+            className="min-h-[32px] rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-50"
           >
             {downloading ? <Spinner className="h-3 w-3" /> : ".xlsx"}
           </button>
@@ -212,7 +212,7 @@ function ClientTableRow({
             disabled={sending || deliveryStatus === "no_email"}
             onClick={handleResend}
             title="Re-send report"
-            className="rounded px-1.5 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-100 hover:text-primary-600 disabled:opacity-50"
+            className="min-h-[32px] rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-100 hover:text-primary-600 disabled:opacity-50"
           >
             {sending ? <Spinner className="h-3 w-3" /> : "↩ send"}
           </button>

@@ -47,8 +47,8 @@ function StatusBadge({ account }: { account: Account }) {
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-4 py-2.5">
-      <span className="text-sm text-zinc-500">{label}</span>
-      <div className="text-right text-sm font-medium text-zinc-800">{children}</div>
+      <span className="shrink-0 text-sm text-zinc-500">{label}</span>
+      <div className="min-w-0 text-right text-sm font-medium text-zinc-800">{children}</div>
     </div>
   );
 }

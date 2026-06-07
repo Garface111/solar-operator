@@ -246,14 +246,14 @@ export default function ReportsTab() {
                 placeholder="Search clients…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="h-7 rounded-lg border border-cream-border bg-white px-3 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-200"
+                className="h-9 rounded-lg border border-cream-border bg-white px-3 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-200"
               />
               <select
                 value={statusFilter}
                 onChange={(e) =>
                   setStatusFilter(e.target.value as StatusFilter)
                 }
-                className="h-7 rounded-lg border border-cream-border bg-white px-2 text-xs text-zinc-500 focus:outline-none"
+                className="h-9 rounded-lg border border-cream-border bg-white px-2 text-xs text-zinc-500 focus:outline-none"
               >
                 <option value="all">All</option>
                 <option value="sent">Sent</option>
@@ -263,14 +263,14 @@ export default function ReportsTab() {
               <button
                 type="button"
                 onClick={expandAll}
-                className="h-7 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
+                className="h-9 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
               >
                 Expand all
               </button>
               <button
                 type="button"
                 onClick={collapseAll}
-                className="h-7 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
+                className="h-9 rounded-lg border border-cream-border px-3 text-xs text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700"
               >
                 Collapse all
               </button>
