@@ -154,8 +154,8 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
   return (
     <>
       <div className="rounded-xl border border-cream-border bg-cream p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-4">
-          <div>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
             <p className="text-sm font-semibold text-zinc-900">
               Next run:{" "}
               <span className="text-primary-700">{countdownLabel}</span>
@@ -164,12 +164,13 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
               Will include {preview}
             </p>
           </div>
-          <div className="flex flex-col items-end gap-2">
-            {/* Send mode — 3-segment toggle */}
+          {/* Send configuration — stacks full-width on mobile, right-aligned on sm+ */}
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:items-end">
+            {/* Send mode — 3-segment toggle; full-width on mobile */}
             <div
               role="radiogroup"
               aria-label="Report recipients"
-              className="flex rounded-xl border border-zinc-200 bg-zinc-50 p-1"
+              className="flex w-full rounded-xl border border-zinc-200 bg-zinc-50 p-1 sm:w-auto"
             >
               {SEND_MODES.map((m) => {
                 const selected = sendMode === m.value;
@@ -181,7 +182,7 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
                     aria-checked={selected}
                     onClick={() => handleModeChange(m.value)}
                     className={[
-                      "rounded-lg px-3 py-1 text-xs font-medium transition-colors",
+                      "flex-1 rounded-lg px-3 py-2 text-xs font-medium transition-colors sm:flex-none sm:py-1",
                       "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40",
                       selected
                         ? "bg-white text-zinc-900 shadow-sm"
@@ -197,7 +198,7 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
               Applies to this run and saves as your default.
             </p>
             <Button
-              className="h-8 shrink-0 px-3 text-xs"
+              className="h-10 w-full px-4 text-sm sm:h-8 sm:w-auto sm:px-3 sm:text-xs"
               onClick={() => setConfirmOpen(true)}
             >
               Send now

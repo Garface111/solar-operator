@@ -652,7 +652,7 @@ export function ClientCard({
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
-                className="rounded text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+                className="min-h-[44px] rounded px-2 text-xs font-medium text-zinc-400 transition-colors hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
               >
                 Delete client
               </button>
@@ -660,7 +660,7 @@ export function ClientCard({
               <button
                 type="button"
                 onClick={reactivate}
-                className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
+                className="min-h-[44px] rounded px-2 text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
               >
                 Reactivate client
               </button>

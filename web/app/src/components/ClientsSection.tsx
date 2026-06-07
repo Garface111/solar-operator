@@ -471,7 +471,7 @@ export function ClientsSection({ expandClientId }: Props) {
                 </li>
               </ul>
             </div>
-            <div className="flex shrink-0 flex-col gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:shrink-0">
               <button
                 type="button"
                 onClick={() => setAssigningNepool(true)}
@@ -504,7 +504,7 @@ export function ClientsSection({ expandClientId }: Props) {
         />
       </Suspense>
 
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <SectionTitle title="Clients" count={clients?.length} />
           {/* Live polling indicator: subtle at 50% opacity, pulses green for 1s on new data. */}
@@ -517,7 +517,7 @@ export function ClientsSection({ expandClientId }: Props) {
             ].join(" ")}
           />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {clients && clients.length > 0 && (
             <button
               type="button"
@@ -535,14 +535,14 @@ export function ClientsSection({ expandClientId }: Props) {
           <Button
             variant="secondary"
             onClick={() => setImporting(true)}
-            className="px-4 py-2"
+            className="px-3 py-2 text-xs sm:px-4 sm:text-sm"
             data-tour-step="6-import"
           >
             Import spreadsheet
           </Button>
           <Button
             onClick={() => setAddingByLogin(true)}
-            className="px-4 py-2"
+            className="px-3 py-2 text-xs sm:px-4 sm:text-sm"
             data-tour-step="6-add"
           >
             + Add client
@@ -603,7 +603,7 @@ export function ClientsSection({ expandClientId }: Props) {
 
       {/* Sticky bulk-action bar */}
       {selectMode && selectedIds.size > 0 && (
-        <div className="sticky bottom-4 mt-4 flex items-center justify-between rounded-xl border border-zinc-200 bg-white px-5 py-3 shadow-lg">
+        <div className="sticky bottom-4 mt-4 flex items-center justify-between rounded-xl border border-zinc-200 bg-white px-5 py-3 shadow-lg" style={{ marginBottom: 'env(safe-area-inset-bottom, 0px)' }}>
           <span className="text-sm text-zinc-600">
             {selectedIds.size} client{selectedIds.size === 1 ? "" : "s"} selected
           </span>

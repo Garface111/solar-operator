@@ -190,13 +190,14 @@ export function MindButton({ account }: Props) {
 
   return (
     <>
-      {/* Floating launcher */}
+      {/* Floating launcher — right-6 from edge, bottom respects iOS safe area */}
       <button
         type="button"
         onClick={() => setOpen(true)}
         aria-label="Talk to OCICBB"
         title="Talk to OCICBB"
-        className="fixed bottom-6 right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-white shadow-lg ring-1 ring-black/5 transition-all duration-150 hover:-translate-y-0.5 hover:shadow-xl hover:ring-2 hover:ring-wood-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-wood-300"
+        style={{ bottom: 'max(1.5rem, calc(1rem + env(safe-area-inset-bottom)))' }}
+        className="fixed right-6 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary-500 text-white shadow-lg ring-1 ring-black/5 transition-all duration-150 hover:-translate-y-0.5 hover:shadow-xl hover:ring-2 hover:ring-wood-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-wood-300"
       >
         <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden fill="currentColor">
           {/* Four-point sparkle */}
@@ -278,8 +279,8 @@ export function MindButton({ account }: Props) {
               )}
             </div>
 
-            {/* Composer */}
-            <div className="shrink-0 border-t border-cream-border bg-cream px-4 py-3">
+            {/* Composer — pb respects iOS home indicator safe area */}
+            <div className="shrink-0 border-t border-cream-border bg-cream px-4 pt-3" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
               <div className="flex items-end gap-2">
                 <textarea
                   value={input}

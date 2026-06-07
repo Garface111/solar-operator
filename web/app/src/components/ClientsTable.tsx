@@ -552,7 +552,14 @@ export function ClientsTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-cream-border">
+    <div className="relative rounded-xl border border-cream-border">
+      {/* Gradient edge on mobile to signal horizontal scroll. Hidden on sm+
+          where the table fits or the wider viewport makes it obvious. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 right-0 z-10 w-10 rounded-r-xl bg-gradient-to-l from-cream/80 to-transparent sm:hidden"
+      />
+      <div className="overflow-x-auto rounded-xl">
       <table className="w-full min-w-[680px] border-collapse text-xs">
         <thead>
           <tr className="sticky top-0 z-10 border-b border-cream-border bg-cream text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
@@ -596,6 +603,7 @@ export function ClientsTable({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -1421,7 +1429,7 @@ function ExpandedPanel({
           <button
             type="button"
             onClick={() => setConfirmDelete(true)}
-            className="rounded text-xs font-medium text-zinc-400 hover:text-red-600 focus:outline-none"
+            className="min-h-[44px] rounded px-2 text-xs font-medium text-zinc-400 hover:text-red-600 focus:outline-none"
           >
             Delete client
           </button>
@@ -1429,7 +1437,7 @@ function ExpandedPanel({
           <button
             type="button"
             onClick={reactivate}
-            className="rounded text-xs font-medium text-primary-600 hover:text-primary-700 focus:outline-none"
+            className="min-h-[44px] rounded px-2 text-xs font-medium text-primary-600 hover:text-primary-700 focus:outline-none"
           >
             Reactivate client
           </button>
