@@ -179,6 +179,13 @@ class CommitBody(BaseModel):
     # the client, so we don't need to do any name-matching/auto-create
     # on the operator_name column.
     force_client_id: Optional[int] = None
+    # When True, intra-file NEPOOL duplicates are allowed through anyway.
+    # Default False = HARD BLOCK at commit. The preview surfaces the
+    # warning; the operator must consciously choose to accept the risk
+    # by re-sending with this flag. Belt-and-suspenders to the preview
+    # warning, because RECs are revenue and duplicate-NEPOOL Arrays
+    # silently poison production attribution downstream.
+    allow_intrafile_nepool_duplicates: bool = False
 
 
 # ─── file → plain text ─────────────────────────────────────────────────────
@@ -869,6 +876,32 @@ def ingest_commit(
         raise HTTPException(
             400, f"Too many rows ({len(rows)}). Import at most {MAX_COMMIT_ROWS} at a time."
         )
+
+    # HARD BLOCK: intra-file NEPOOL duplicates poison production attribution
+    # downstream. Refuse the commit unless the caller has explicitly accepted
+    # the risk via allow_intrafile_nepool_duplicates=True. Same detector the
+    # preview uses, so any warning the operator saw is now enforced.
+    if not body.allow_intrafile_nepool_duplicates:
+        intrafile_dups = _find_intrafile_nepool_duplicates(rows)
+        if intrafile_dups:
+            n_ids = len(intrafile_dups)
+            n_rows = sum(len(idxs) for idxs in intrafile_dups.values())
+            sample = next(iter(intrafile_dups.keys()))
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "intrafile-nepool-duplicates",
+                    "message": (
+                        f"{n_rows} rows share {n_ids} duplicated NEPOOL ID(s) "
+                        f"(e.g. \"{sample}\"). Duplicates poison production "
+                        f"attribution downstream. Resolve in the source file, "
+                        f"or re-commit with allow_intrafile_nepool_duplicates=true "
+                        f"to override."
+                    ),
+                    "duplicate_nepool_ids": list(intrafile_dups.keys()),
+                    "duplicate_row_count": n_rows,
+                },
+            )
 
     clients_created = arrays_created = accounts_created = skipped_count = 0
     # Within-batch caches so two rows for the same operator don't both try to
