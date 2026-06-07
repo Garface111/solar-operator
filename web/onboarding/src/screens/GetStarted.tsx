@@ -91,17 +91,16 @@ export default function GetStarted() {
         ))}
       </div>
 
-      {/* Footer CTAs */}
-      <div className="mt-10 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <button
-          type="button"
-          onClick={() => navigate("/sample")}
-          className="text-sm text-zinc-400 transition-colors hover:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-        >
+      {/* Footer CTA — single primary action.
+          Flow: GetStarted (intro animation) → /sample (workbook preview)
+          → /welcome (Terms + checkout). Ford Jun 7'26: previously the
+          primary jumped straight to /welcome, skipping the sample entirely
+          and burying it behind a tiny secondary link nobody clicked.
+          DummyReport carries its own "Start my free setup →" CTA so users
+          who like what they see can continue from there. */}
+      <div className="mt-10 flex flex-col items-center gap-3">
+        <Button onClick={() => navigate("/sample")}>
           See the sample report →
-        </button>
-        <Button onClick={() => navigate("/welcome")}>
-          Start my free setup →
         </Button>
       </div>
 
