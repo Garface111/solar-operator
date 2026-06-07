@@ -25,6 +25,13 @@ export interface UtilityAccount {
    *  means it's currently at its original home. Used by the sandbox to
    *  keep moved logins visually separate. */
   login_origin_client_id?: number | null;
+  /** Sub-meters that share this array. When a single physical/NEPOOL-registered
+   *  Array is metered by multiple utility accounts, the canvas dedupes them
+   *  into ONE node (array = NEPOOL asset, sub-meters are operational detail)
+   *  and stashes the underlying meter list here so the UI can show a
+   *  "N meters" chip and keep move/detach semantics honest. When omitted or
+   *  length ≤ 1, the account represents itself (no dedupe happened). */
+  meters?: Array<{ id: string; account_number: string }>;
 }
 
 export interface ClientData {
@@ -161,10 +168,19 @@ export const SEED_CLIENTS: ClientData[] = [
           { id: 'arr_03a2', name: 'Brook Side B', nepool_gis_id: 'NE-VT-4402', mwh_per_qtr: 19.3 },
         ],
       },
+      // Tannery Main is one NEPOOL-registered array fed by THREE utility
+      // sub-meters (account numbers 9088, 9088-A, 9088-B). The canvas dedupes
+      // them into a single row with a "3 meters" chip — proving the sandbox
+      // count matches the per-array pricing model and the table below.
       {
         id: 'acc_03b', utility: 'GMP', account_number: '3341-9088', owner_name: 'Tannery Brook Holdings',
         arrays: [
           { id: 'arr_03b1', name: 'Tannery Main', nepool_gis_id: 'NE-VT-4403', mwh_per_qtr: 47.5 },
+        ],
+        meters: [
+          { id: 'acc_03b', account_number: '3341-9088' },
+          { id: 'acc_03b2', account_number: '3341-9088-A' },
+          { id: 'acc_03b3', account_number: '3341-9088-B' },
         ],
       },
       {

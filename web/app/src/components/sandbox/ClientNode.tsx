@@ -492,11 +492,19 @@ function LoginGroupRow({
   const accountCount = accounts.length;
   const arrayTotal = accounts.reduce((n, a) => n + a.arrays.length, 0);
 
-  // Count how many accounts in this login group share each array id (sub-meter detection).
+  // Count meters per array. After the sub-meter dedupe in SandboxCanvas's
+  // buildNodesFromApi (Jun 7'26 fix for the canvas-vs-table count drift),
+  // each account already represents ONE array; sub-meters live in
+  // account.meters[] when length > 1. Falls back to the old account-counting
+  // path for any code path that hasn't been deduped yet (defensive).
   const subMeterCounts = new Map<string, number>();
   accounts.forEach((a) => {
     a.arrays.forEach((ar) => {
-      subMeterCounts.set(ar.id, (subMeterCounts.get(ar.id) ?? 0) + 1);
+      const explicit = a.meters?.length;
+      const count = explicit && explicit > 1
+        ? explicit
+        : (subMeterCounts.get(ar.id) ?? 0) + 1;
+      subMeterCounts.set(ar.id, count);
     });
   });
 
@@ -679,16 +687,35 @@ function LoginGroupRow({
                     </span>
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${th.rowDot} opacity-60`} />
                     <ArrayNameCell arr={arr} />
+                    {(() => {
+                      const n = subMeterCounts.get(arr.id) ?? 1;
+                      if (n <= 1) return null;
+                      const meters = acc.meters ?? [];
+                      const title = meters.length > 0
+                        ? `Sub-metered: ${meters.map((m) => m.account_number).join(', ')}`
+                        : `${n} sub-meters feed this array`;
+                      return (
+                        <span
+                          className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-600"
+                          title={title}
+                          aria-label={title}
+                        >
+                          {n} meters
+                        </span>
+                      );
+                    })()}
                     {arr.reassigned_at && <MovedBadge reassignedAt={arr.reassigned_at} />}
-                    <button
-                      type="button"
-                      className={`nodrag invisible ml-auto shrink-0 rounded p-0.5 text-xs opacity-60 transition-all hover:opacity-100 group-hover/arr:visible ${th.rowText}`}
-                      onClick={() => onDetach(acc.id)}
-                      title="Detach this account from the client"
-                      aria-label="Detach account"
-                    >
-                      ×
-                    </button>
+                    {(subMeterCounts.get(arr.id) ?? 1) <= 1 && (
+                      <button
+                        type="button"
+                        className={`nodrag invisible ml-auto shrink-0 rounded p-0.5 text-xs opacity-60 transition-all hover:opacity-100 group-hover/arr:visible ${th.rowText}`}
+                        onClick={() => onDetach(acc.id)}
+                        title="Detach this account from the client"
+                        aria-label="Detach account"
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
                   ))
               : [

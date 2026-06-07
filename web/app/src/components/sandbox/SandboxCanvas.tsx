@@ -227,30 +227,76 @@ function buildNodesFromApi(
   let autoAccIdx = 0;
 
   data.clients.forEach((client, i) => {
+    // Dedupe accounts that share the same array_id (sub-meter detection).
+    // Array = NEPOOL-GIS asset (one physical/registered solar installation);
+    // sub-meters are free operational detail. The backend currently emits one
+    // (account, array) row per sub-meter so a 1-array, 3-meter Catamount looks
+    // like 3 arrays in the canvas. We collapse them HERE so the sandbox count
+    // matches the ClientsTable count below and the per-array pricing model.
+    // Grouping is keyed by (provider, login_origin, array_id) so a moved-login
+    // sub-meter under the same login still collapses correctly.
+    const dedupedAccounts: typeof client.accounts = [];
+    const meterGroups = new Map<string, number>(); // key → index into dedupedAccounts
+    for (const acc of client.accounts) {
+      if (acc.array_id == null) {
+        // No array yet — keep as its own row.
+        dedupedAccounts.push(acc);
+        continue;
+      }
+      const key = `${acc.provider}::${acc.login_origin_client_id ?? 'home'}::${acc.array_id}`;
+      const existingIdx = meterGroups.get(key);
+      if (existingIdx == null) {
+        meterGroups.set(key, dedupedAccounts.length);
+        dedupedAccounts.push(acc);
+      }
+      // else: silently drop — first occurrence carries the array; meters list
+      // is reconstructed below from the original client.accounts.
+    }
+    // Build meters[] lookup from the original list (one entry per row keyed
+    // by the same dedupe key).
+    const metersByKey = new Map<string, Array<{ id: string; account_number: string }>>();
+    for (const acc of client.accounts) {
+      if (acc.array_id == null) continue;
+      const key = `${acc.provider}::${acc.login_origin_client_id ?? 'home'}::${acc.array_id}`;
+      const list = metersByKey.get(key) ?? [];
+      list.push({ id: `account_${acc.id}`, account_number: acc.account_number });
+      metersByKey.set(key, list);
+    }
+
     const clientData: ClientData = {
       id: `client_${client.id}`,
       name: client.name,
       contact_email: client.contact_email ?? null,
       logins: client.logins as Partial<Record<Utility, string | null>> | undefined,
       pinned: client.canvas_pinned ?? false,
-      accounts: client.accounts.map((acc) => ({
-        id: `account_${acc.id}`,
-        utility: normalizeProvider(acc.provider),
-        account_number: acc.account_number,
-        customer_number: acc.customer_number ?? null,
-        owner_name: (acc.service_address as Record<string, string> | null)?.street ?? '',
-        login_origin_client_id: acc.login_origin_client_id ?? null,
-        arrays: acc.array_name != null
-          ? [{
-              id: acc.array_id != null ? `arr_${acc.array_id}` : `arr_u_${acc.id}`,
-              name: acc.array_name,
-              nepool_gis_id: acc.nepool_gis_id ?? '',
-              mwh_per_qtr: 0,
-              reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
-              deleted_at: acc.array_deleted_at ?? null,
-            }]
-          : [],
-      })),
+      accounts: dedupedAccounts.map((acc) => {
+        const key = acc.array_id != null
+          ? `${acc.provider}::${acc.login_origin_client_id ?? 'home'}::${acc.array_id}`
+          : null;
+        const meters = key != null ? metersByKey.get(key) ?? [] : [];
+        return {
+          id: `account_${acc.id}`,
+          utility: normalizeProvider(acc.provider),
+          account_number: acc.account_number,
+          customer_number: acc.customer_number ?? null,
+          owner_name: (acc.service_address as Record<string, string> | null)?.street ?? '',
+          login_origin_client_id: acc.login_origin_client_id ?? null,
+          arrays: acc.array_name != null
+            ? [{
+                id: acc.array_id != null ? `arr_${acc.array_id}` : `arr_u_${acc.id}`,
+                name: acc.array_name,
+                nepool_gis_id: acc.nepool_gis_id ?? '',
+                mwh_per_qtr: 0,
+                reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
+                deleted_at: acc.array_deleted_at ?? null,
+              }]
+            : [],
+          // Only attach meters[] when we actually deduped (>1) — leaves the
+          // single-meter common case untouched so existing UI/tests don't see
+          // a 1-element list they need to special-case.
+          meters: meters.length > 1 ? meters : undefined,
+        };
+      }),
     };
 
     // Sorted mode: position is ALWAYS computed from sort rank — DB coords ignored.
