@@ -1506,22 +1506,23 @@ function ExpandedPanel({
   );
 }
 
-// ── Collapsible login → accounts → arrays renderer ─────────────────────────
-// When a client has many utility accounts and each has many arrays, the inline
-// expansion can grow taller than the rest of the page. These two components
-// show the first few items and a "+ N more" toggle so the row stays compact
-// by default but every detail is one click away.
+// ── Login → accounts → arrays renderer ─────────────────────────────────────
+// Accounts render in full (LoginAccountList) — the parent login-tree container
+// caps height with max-h + overflow-y-auto, so the whole list is one scroll
+// away rather than hidden behind a toggle. The deeper arrays level
+// (AccountArraysList) still shows the first few with a "+ N more arrays" toggle,
+// since a single account can fan out to many arrays and that nesting is rarely
+// what the operator is scanning for.
 
 function LoginAccountList({ group }: { group: LoginGroup }) {
-  const [expanded, setExpanded] = useState(false);
-  const COLLAPSED_LIMIT = 3;
-  const visible = expanded
-    ? group.accounts
-    : group.accounts.slice(0, COLLAPSED_LIMIT);
-  const remainder = group.accounts.length - visible.length;
+  // Every account renders inline — no "+ N more accounts" toggle. The parent
+  // login-tree container (max-h-[420px] overflow-y-auto) already bounds the
+  // total height, so truncating here only left dead vertical space below the
+  // collapsed list. Letting the full list flow fills that space and keeps a
+  // single, predictable scroll region instead of nested expand/collapse state.
   return (
     <div className="space-y-2 pl-1">
-      {visible.map(({ account, arrays: acctArrays }) => (
+      {group.accounts.map(({ account, arrays: acctArrays }) => (
         <div key={account.id}>
           <p className="text-[11px] font-medium text-zinc-600">
             Account {account.account_number}
@@ -1539,24 +1540,6 @@ function LoginAccountList({ group }: { group: LoginGroup }) {
           <AccountArraysList arrays={acctArrays} />
         </div>
       ))}
-      {remainder > 0 && (
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className="text-[11px] font-medium text-primary-600 hover:text-primary-700 focus:outline-none"
-        >
-          + {remainder} more account{remainder === 1 ? "" : "s"}
-        </button>
-      )}
-      {expanded && group.accounts.length > COLLAPSED_LIMIT && (
-        <button
-          type="button"
-          onClick={() => setExpanded(false)}
-          className="text-[11px] font-medium text-zinc-400 hover:text-zinc-600 focus:outline-none"
-        >
-          Show less
-        </button>
-      )}
     </div>
   );
 }
