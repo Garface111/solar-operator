@@ -7,6 +7,7 @@ import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayList } from "./ArrayList";
 import { MergeSuggestionBanner } from "./MergeSuggestionBanner";
+import { QuarterlyProgressChip } from "./QuarterlyProgressChip";
 
 const AssignNepoolFromSpreadsheetModal = lazyWithRetry(() =>
   import("./AssignNepoolFromSpreadsheetModal").then((m) => ({
@@ -1138,6 +1139,13 @@ function ExpandedPanel({
           <h4 className="mb-3 text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
             Logins &amp; accounts
           </h4>
+
+          <div className="mb-3">
+            <QuarterlyProgressChip
+              clientId={client.id}
+              onSendReports={handleSendToMe}
+            />
+          </div>
 
           {loadingArrays && (
             <div className="flex items-center gap-2 text-xs text-zinc-400">
