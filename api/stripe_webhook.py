@@ -165,14 +165,16 @@ def _process_checkout_completed(sess: dict) -> dict:
             t.stripe_subscription_id = stripe_subscription_id
         db.commit()
         snapshot = dict(
-            tenant_key=t.tenant_key, tenant_name=t.name,
+            tenant_key=t.tenant_key,
+            tenant_name=t.company_name or t.name,
+            operator_name=t.operator_name or t.company_name or t.name,
             tenant_email=t.contact_email, tenant_plan=t.plan,
         )
 
     try:
         send_welcome_email(
             to=snapshot["tenant_email"],
-            name=(sess.get("metadata") or {}).get("name") or snapshot["tenant_name"],
+            name=(sess.get("metadata") or {}).get("name") or snapshot["operator_name"],
             tenant_key=snapshot["tenant_key"],
             plan=snapshot["tenant_plan"],
         )
@@ -248,7 +250,8 @@ def _process_subscription_deleted(sub: dict) -> dict:
         t.subscription_status = "canceled"
         t.active = False
         db.commit()
-        tid, email, name = t.id, t.contact_email, t.name
+        tid, email = t.id, t.contact_email
+        name = t.operator_name or t.company_name or t.name
 
     from datetime import datetime as _dt
     try:
@@ -278,7 +281,8 @@ def _process_invoice_payment_failed(invoice: dict) -> dict:
         ).scalars().first()
         if not t:
             return {"ignored": f"no tenant for customer={customer_id}"}
-        tid, email, name = t.id, t.contact_email, t.name
+        tid, email = t.id, t.contact_email
+        name = t.operator_name or t.company_name or t.name
 
     try:
         send_payment_failed_email(

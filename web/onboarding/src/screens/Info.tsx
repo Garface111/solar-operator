@@ -28,7 +28,7 @@ export const SO_OPERATOR_PASSWORD_KEY = "so_operator_password";
 export interface OperatorInfo {
   email: string;
   fullName: string;
-  company?: string;
+  company: string;
 }
 
 export default function Info() {
@@ -37,14 +37,18 @@ export default function Info() {
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [password, setPassword] = useState("");
-  const [touched, setTouched] = useState<{ name?: boolean; email?: boolean; password?: boolean }>({});
+  const [touched, setTouched] = useState<{ name?: boolean; email?: boolean; company?: boolean; password?: boolean }>({});
 
   // Stripe sends operators back here with ?cancelled=1 if they bail on Checkout.
   const cancelled =
     new URLSearchParams(window.location.search).get("cancelled") === "1";
 
   const nameError =
-    touched.name && fullName.trim().length < 2 ? "Enter your full name" : undefined;
+    touched.name && fullName.trim().length < 2 ? "Enter your name" : undefined;
+  const companyError =
+    touched.company && company.trim().length < 2
+      ? "Enter your business or organization name"
+      : undefined;
   const emailError =
     touched.email && !EMAIL_RE.test(email.trim())
       ? "Enter a valid email address"
@@ -52,16 +56,17 @@ export default function Info() {
   const pwError = touched.password ? passwordError(password) : undefined;
   const valid =
     fullName.trim().length >= 2 &&
+    company.trim().length >= 2 &&
     EMAIL_RE.test(email.trim()) &&
     !passwordError(password);
 
   function handleSubmit() {
-    setTouched({ name: true, email: true, password: true });
+    setTouched({ name: true, email: true, company: true, password: true });
     if (!valid) return;
     const info: OperatorInfo = {
       email: email.trim(),
       fullName: fullName.trim(),
-      company: company.trim() || undefined,
+      company: company.trim(),
     };
     // Store in sessionStorage so Plan can read it after client setup.
     sessionStorage.setItem(SO_OPERATOR_KEY, JSON.stringify(info));
@@ -91,13 +96,23 @@ export default function Info() {
         <div className="mt-8 space-y-5">
           <Input
             id="full_name"
-            label="Full name"
-            placeholder="Jane Operator"
+            label="What should we call you?"
+            placeholder="Bruce"
             value={fullName}
             onChange={(e) => setFullName(e.target.value)}
             onBlur={() => setTouched((t) => ({ ...t, name: true }))}
             error={nameError}
             autoComplete="name"
+          />
+          <Input
+            id="company"
+            label="Business or organization name"
+            placeholder="Green Valley Solar LLC"
+            value={company}
+            onChange={(e) => setCompany(e.target.value)}
+            onBlur={() => setTouched((t) => ({ ...t, company: true }))}
+            error={companyError}
+            autoComplete="organization"
           />
           <Input
             id="email"
@@ -127,14 +142,6 @@ export default function Info() {
               also email a magic link as a backup for the future.
             </p>
           </div>
-          <Input
-            id="company"
-            label="Company (optional)"
-            placeholder="Green Valley Solar LLC"
-            value={company}
-            onChange={(e) => setCompany(e.target.value)}
-            autoComplete="organization"
-          />
         </div>
 
         <div className="mt-8 flex items-center justify-between">

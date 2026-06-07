@@ -4,7 +4,7 @@ import { Input } from "../../ui/Input";
 import { Button } from "../../ui/Button";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
-import { type Account, updateAccountEmail, updateAccountName, updateAccountSendFromName, setPassword } from "../../lib/api";
+import { type Account, updateAccountEmail, updateAccountName, updateAccountCompanyName, updateAccountSendFromName, setPassword } from "../../lib/api";
 import { timeAgo } from "./utils";
 
 const STATUS_STYLES: Record<string, string> = {
@@ -160,11 +160,19 @@ interface Props {
 export function AccountProfileCard({ account, onAccountChange }: Props) {
   const toast = useToast();
 
-  async function saveName(next: string) {
+  async function saveOperatorName(next: string) {
     if (!next) throw new Error("Name can't be empty");
-    const name = await updateAccountName(next);
-    onAccountChange({ name });
+    const operator_name = await updateAccountName(next);
+    onAccountChange({ operator_name });
     toast.success("Name updated");
+  }
+
+  async function saveCompanyName(next: string) {
+    if (!next) throw new Error("Company name can't be empty");
+    const company_name = await updateAccountCompanyName(next);
+    // Legacy `name` column mirrors company_name on write — keep local state in sync.
+    onAccountChange({ company_name, name: company_name });
+    toast.success("Company name updated");
   }
 
   async function saveEmail(next: string) {
@@ -191,7 +199,7 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
         <div className="flex items-start justify-between gap-3 px-5 py-4">
           <div>
             <p className="text-sm font-medium text-zinc-800">
-              {account.name || "Your account"}
+              {account.company_name || account.operator_name || "Your account"}
             </p>
             <p className="mt-0.5 text-xs text-zinc-400">Solar Operator</p>
           </div>
@@ -201,12 +209,20 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
         {/* Data rows */}
         <div className="border-t border-cream-border px-5 py-1">
           <div className="divide-y divide-zinc-100">
-            <Row label="Name">
+            <Row label="Your name">
               <EditableField
-                value={account.name}
-                onSave={saveName}
-                label="name"
-                placeholder="Your name or company"
+                value={account.operator_name}
+                onSave={saveOperatorName}
+                label="your name"
+                placeholder="What should we call you?"
+              />
+            </Row>
+            <Row label="Company name">
+              <EditableField
+                value={account.company_name}
+                onSave={saveCompanyName}
+                label="company name"
+                placeholder="Your business or organization"
               />
             </Row>
             <Row label="Email">

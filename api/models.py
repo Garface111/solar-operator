@@ -28,7 +28,21 @@ class Tenant(Base):
     """A paying customer (a solar operator like Bruce)."""
     __tablename__ = "tenants"
     id: Mapped[str] = mapped_column(String(32), primary_key=True)  # ten_abc123
+    # Legacy single-name field. Pre-Jun-2026 this was overloaded as BOTH the
+    # operator's personal name AND their company name. Still populated for
+    # backward compat with code paths we haven't migrated yet — it now mirrors
+    # company_name on write. Will be removed in a future cleanup once nothing
+    # reads it. New code MUST use operator_name / company_name explicitly.
     name: Mapped[str] = mapped_column(String(200))
+    # ── Split-name fields (Jun 2026) ─────────────────────────────────────
+    # operator_name = the human's personal name ("Ford Genereaux") — used in
+    # report signoffs, magic-link greetings, internal alerts, welcome emails.
+    # company_name  = the business name ("Genereaux Solar Co.") — used in the
+    # email From: display, report titles, Stripe customer record.
+    # Both nullable: existing tenants are backfilled with company_name=name,
+    # operator_name=NULL (operator fills it on the Settings card).
+    operator_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    company_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     contact_email: Mapped[str] = mapped_column(String(200), index=True)
     tenant_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sol_live_...
     plan: Mapped[str] = mapped_column(String(32), default="standard")  # standard | comped | legacy_* | demo

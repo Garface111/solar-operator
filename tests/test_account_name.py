@@ -1,4 +1,12 @@
-"""Tests for POST /v1/account/name — update tenant display name."""
+"""Tests for POST /v1/account/name — update operator personal name.
+
+Since the operator/company split (feat/split-operator-and-company-name,
+Jun 7'26), POST /v1/account/name writes ``tenants.operator_name`` only and
+LEAVES the legacy ``tenants.name`` column untouched. Company-name writes
+go through POST /v1/account/company-name (covered by tests/test_account_namesplit.py).
+The response body still returns ``name`` for backward compat with any
+client still reading that field — it now reflects the freshly written
+operator_name."""
 from __future__ import annotations
 
 import secrets
@@ -26,9 +34,10 @@ def _make_tenant(name: str = "Original Name") -> tuple[str, str]:
 
 
 def _fetch_name(tid: str) -> str | None:
+    """Read the field that POST /v1/account/name now writes (operator_name)."""
     with SessionLocal() as db:
         t = db.get(Tenant, tid)
-        return t.name
+        return t.operator_name
 
 
 class TestUpdateName:

@@ -183,6 +183,8 @@ export interface Account {
   tenant_id: string;
   tenant_key: string | null;
   name: string | null;
+  operator_name: string | null;
+  company_name: string | null;
   email: string | null;
   plan: string | null;
   active: boolean;
@@ -310,6 +312,13 @@ export async function updateAccountEmail(email: string): Promise<string> {
 
 export async function updateAccountName(name: string): Promise<string> {
   const res = await request<{ name: string }>("/v1/account/name", {
+    body: { name },
+  });
+  return res.name;
+}
+
+export async function updateAccountCompanyName(name: string): Promise<string> {
+  const res = await request<{ name: string }>("/v1/account/company-name", {
     body: { name },
   });
   return res.name;

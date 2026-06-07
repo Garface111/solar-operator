@@ -147,7 +147,7 @@ def finalize_expired_trials():
                 db.commit()
                 try:
                     send_add_first_array_email(
-                        to=t.contact_email, name=t.name)
+                        to=t.contact_email, name=t.operator_name or t.company_name or t.name)
                 except Exception:
                     pass
                 send_internal_alert(
@@ -193,7 +193,7 @@ def finalize_expired_trials():
 
                 try:
                     send_trial_charged_email(
-                        to=t.contact_email, name=t.name,
+                        to=t.contact_email, name=t.operator_name or t.company_name or t.name,
                         array_count=quantity, amount_dollars=amount_dollars)
                 except Exception:
                     pass
@@ -212,7 +212,7 @@ def finalize_expired_trials():
                 )
                 try:
                     send_trial_charge_failed_email(
-                        to=t.contact_email, name=t.name)
+                        to=t.contact_email, name=t.operator_name or t.company_name or t.name)
                 except Exception as mail_err:
                     logger.warning("send_trial_charge_failed_email failed: %s", mail_err)
 
@@ -268,7 +268,7 @@ def refresh_expiring_gmp_tokens() -> dict:
                     try:
                         send_gmp_reauth_needed_email(
                             to=tenant.contact_email,
-                            name=tenant.name,
+                            name=tenant.operator_name or tenant.company_name or tenant.name,
                         )
                     except Exception as notify_exc:
                         logger.error(

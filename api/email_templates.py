@@ -69,7 +69,11 @@ ALLOWED_MERGE_TAGS = frozenset({
     "quarter",
     "period_start",
     "period_end",
+    # tenant_name is the legacy alias — resolves to company_name so existing
+    # saved templates keep rendering after the Jun-2026 split.
     "tenant_name",
+    "operator_name",
+    "company_name",
     "tenant_email_line",
     "arrays_count",
     "signoff",
@@ -250,7 +254,12 @@ def build_context(*, client_name: str, tenant_name: str, arrays_count: int,
         "client_name": client_name,
         "client_first_name": derive_client_first_name(client_name) or client_name,
         "greeting": derive_greeting(client_name),
+        # tenant_name is the legacy/backward-compat alias for company_name; both
+        # resolve to the same value so saved templates that still use the old
+        # tag keep rendering.
         "tenant_name": tenant_name,
+        "company_name": tenant_name,
+        "operator_name": effective_signoff_name,
         "quarter": qc["quarter"],
         "arrays_count": arrays_count,
         "period_start": qc["period_start"],

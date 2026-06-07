@@ -122,7 +122,8 @@ def build_workbook(tenant_id: str, year: int | None = None,
     TOTAL_FONT = Font(bold=True)
     BORDER = Border(*[Side(style="thin", color="C8D4C4")] * 4)
 
-    sh["A1"] = f"{tenant.name} — {year} Monthly kWh"
+    title_name = tenant.company_name or tenant.name or tenant.operator_name or ""
+    sh["A1"] = f"{title_name} — {year} Monthly kWh"
     sh["A1"].font = Font(bold=True, size=14, color="2E6B3A")
     sh.merge_cells("A1:O1")
     sh["A2"] = (f"Source: utility JSON bills · "

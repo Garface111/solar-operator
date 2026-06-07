@@ -518,6 +518,35 @@ def main():
                 conn.execute(text(sql))
                 print(f"  + arrays.{col}")
 
+        # 2026-06-07 Split Tenant.name into operator_name + company_name
+        # (feat/split-operator-and-company-name). Bug: the single `name` field
+        # was being stamped on email From: AND report signoffs AND internal
+        # alerts — telling the operator's clients that their company is named
+        # "Ford Genereaux". Now: company_name on From / titles / Stripe;
+        # operator_name on signoffs / greetings / alerts.
+        #
+        # Legacy `tenants.name` column stays for now (deprecated; mirrors
+        # company_name on write). Backfill copies name → company_name.
+        # operator_name defaults NULL so existing operators see an empty
+        # "Your name" row on the Settings card and can fill it in.
+        namesplit_cols = [
+            ("operator_name",
+             "ALTER TABLE tenants ADD COLUMN operator_name VARCHAR(120)"),
+            ("company_name",
+             "ALTER TABLE tenants ADD COLUMN company_name VARCHAR(200)"),
+        ]
+        for col, sql in namesplit_cols:
+            if not column_exists(conn, "tenants", col):
+                conn.execute(text(sql))
+                print(f"  + tenants.{col}")
+        # Idempotent backfill: only touches rows where company_name is still NULL.
+        backfilled = conn.execute(text(
+            "UPDATE tenants SET company_name = name "
+            "WHERE company_name IS NULL AND name IS NOT NULL"
+        )).rowcount
+        if backfilled:
+            print(f"  ↪ backfilled company_name from name on {backfilled} tenant(s)")
+
     print("=== Migration complete ===")
 
 

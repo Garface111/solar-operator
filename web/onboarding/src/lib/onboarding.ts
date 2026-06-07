@@ -91,7 +91,7 @@ export interface ClientSeedPayload {
 export async function createCheckout(body: {
   email: string;
   full_name: string;
-  company?: string;
+  company: string;
   /** Path A: pre-entered clients+arrays; quantity = total arrays across all clients. */
   clients?: ClientSeedPayload[];
   /** Path B: operator estimate; quantity syncs to reality when real arrays are added. */

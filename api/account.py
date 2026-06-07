@@ -213,6 +213,10 @@ class UpdateName(BaseModel):
     name: str
 
 
+class UpdateCompanyName(BaseModel):
+    name: str
+
+
 class UpdateSendFromName(BaseModel):
     send_from_name: Optional[str] = None
 
@@ -370,8 +374,7 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
         expires = datetime.utcnow() + timedelta(seconds=LOGIN_LINK_TTL_SECONDS)
         db.add(LoginToken(token=token, tenant_id=t.id, email=email, expires_at=expires, persist_session=persist))
         db.commit()
-        tenant_name = t.name
-
+        tenant_name = t.operator_name or t.company_name or t.name
     # Magic link lands on the dashboard SPA, which exchanges this one-time login
     # token for a session via POST /v1/auth/verify (see web/app AuthGate).
     link = f"{PUBLIC_DASHBOARD_URL}/?token={token}"
@@ -628,6 +631,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             # Safe to return to the authenticated owner of this tenant.
             "tenant_key": t.tenant_key,
             "name": t.name,
+            "operator_name": t.operator_name,
+            "company_name": t.company_name or t.name,
             "email": t.contact_email,
             "plan": t.plan,
             "active": t.active,
@@ -702,6 +707,14 @@ def update_email(body: UpdateEmail, authorization: Optional[str] = Header(defaul
 
 @router.post("/v1/account/name")
 def update_name(body: UpdateName, authorization: Optional[str] = Header(default=None)):
+    """Update the operator's PERSONAL name (e.g. 'Ford Genereaux').
+
+    Backward-compat note: this endpoint used to overwrite Tenant.name (the
+    overloaded single-field). Post Jun-2026 split it writes operator_name
+    only. The legacy `name` column is left alone here so anything still
+    reading t.name continues to see the company name. Use
+    POST /v1/account/company-name to change the company.
+    """
     t = tenant_from_session(authorization)
     require_not_demo(t)
     new_name = body.name.strip()
@@ -711,6 +724,33 @@ def update_name(body: UpdateName, authorization: Optional[str] = Header(default=
         raise HTTPException(400, "Name is too long")
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
+        t.operator_name = new_name
+        db.commit()
+
+    return {"ok": True, "name": new_name, "operator_name": new_name}
+
+
+@router.post("/v1/account/company-name")
+def update_company_name(body: UpdateCompanyName,
+                         authorization: Optional[str] = Header(default=None)):
+    """Update the company name (e.g. 'Genereaux Solar Co.').
+
+    Mirrors into the legacy Tenant.name column for now (any unmigrated read
+    paths keep working). Also syncs to Stripe so the customer name on
+    invoices matches.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(400, "Company name can't be empty")
+    if len(new_name) > 200:
+        raise HTTPException(400, "Company name is too long")
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.company_name = new_name
+        # Mirror to legacy column so unmigrated readers still see the
+        # right value. Safe: company_name is the previous behavior of `name`.
         t.name = new_name
         db.commit()
 
@@ -718,9 +758,9 @@ def update_name(body: UpdateName, authorization: Optional[str] = Header(default=
         try:
             stripe.Customer.modify(t.stripe_customer_id, name=new_name)
         except Exception as e:
-            logger.warning("Failed to sync name to Stripe: %s", e)
+            logger.warning("Failed to sync company name to Stripe: %s", e)
 
-    return {"ok": True, "name": new_name}
+    return {"ok": True, "name": new_name, "company_name": new_name}
 
 
 @router.post("/v1/account/send-from-name")
@@ -912,7 +952,8 @@ def preview_email(body: EmailSettings,
     _validate_email_settings(body)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
-        tenant_name = t.name or "your company"
+        company_name = t.company_name or t.name or "your company"
+        operator_name = t.operator_name or t.company_name or t.name or "your company"
         tenant_email = (t.contact_email or "").strip()
         eff_from_email = _effective(body.send_from_email, t.send_from_email)
         eff_from_name = _effective(body.send_from_name, t.send_from_name)
@@ -922,13 +963,13 @@ def preview_email(body: EmailSettings,
                     or "to_client").strip() or "to_client"
 
     ctx = build_context(
-        client_name=_PREVIEW_CLIENT, tenant_name=tenant_name,
+        client_name=_PREVIEW_CLIENT, tenant_name=company_name,
         arrays_count=3, tenant_email=tenant_email,
-        tenant_signoff_name=eff_from_name,
+        tenant_signoff_name=eff_from_name or operator_name,
     )
     subject, html, text = render_email(
         subject_template=eff_subject, body_template=eff_body, ctx=ctx)
-    from_header = resolve_from_header(eff_from_email, eff_from_name, tenant_name)
+    from_header = resolve_from_header(eff_from_email, eff_from_name, company_name)
     if eff_mode == "to_me":
         recipient = tenant_email or "you (your account email)"
     elif eff_mode == "to_both":
@@ -1176,7 +1217,7 @@ def preview_email_template(body: _TemplateBody,
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
-        tenant_name = t.name or "Your Company"
+        tenant_name = t.company_name or t.name or "Your Company"
         tenant_email = (t.contact_email or "").strip()
         stored_subject = t.email_subject_template
         stored_body = t.email_body_template
@@ -1185,7 +1226,7 @@ def preview_email_template(body: _TemplateBody,
         signoff_t = (body.signoff or "").strip() or stored_signoff or DEFAULT_SIGNOFF
         ctx, sample_client = _query_sample_client_ctx(
             db, t.id, tenant_name, tenant_email, signoff_template=signoff_t,
-            tenant_signoff_name=t.send_from_name)
+            tenant_signoff_name=t.send_from_name or t.operator_name)
     subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
     body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
     return {
@@ -1271,11 +1312,11 @@ def test_send_email_template(body: _TemplateBody,
         raise HTTPException(422, "Add an email address to your account first.")
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
-        tenant_name = t.name or "Your Company"
+        tenant_name = t.company_name or t.name or "Your Company"
         from_header = resolve_from_header(
             t.send_from_email or t.contact_email,
             t.send_from_name,
-            t.name,
+            tenant_name,
         )
         stored_subject = t.email_subject_template
         stored_body = t.email_body_template
@@ -1283,7 +1324,7 @@ def test_send_email_template(body: _TemplateBody,
         signoff_t = (body.signoff or "").strip() or stored_signoff or DEFAULT_SIGNOFF
         ctx, _ = _query_sample_client_ctx(
             db, t.id, tenant_name, tenant_email, signoff_template=signoff_t,
-            tenant_signoff_name=t.send_from_name)
+            tenant_signoff_name=t.send_from_name or t.operator_name)
     subj_t = (body.subject_template or "").strip() or stored_subject or DEFAULT_SUBJECT_TEMPLATE
     body_t = (body.body_template or "").strip() or stored_body or DEFAULT_BODY_TEMPLATE
     subject, html, text = render_email(

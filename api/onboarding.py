@@ -261,6 +261,8 @@ def checkout(req: CheckoutRequest):
 
         t = Tenant(
             id=tenant_id, name=display_name, contact_email=email,
+            operator_name=req.full_name.strip()[:120],
+            company_name=(req.company or req.full_name).strip()[:200],
             tenant_key=tenant_key, plan="standard", active=False, created_at=now(),
             subscription_status="pending",
             onboarding_token=onboarding_token,
@@ -656,7 +658,7 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
         t.onboarding_stage = "done"
         db.commit()
         email = t.contact_email
-        name = t.name
+        name = t.operator_name or t.company_name or t.name
         tenant_key = t.tenant_key
         plan = t.plan
         tenant_id = t.id

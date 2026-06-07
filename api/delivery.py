@@ -72,7 +72,10 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             raise ValueError(f"Tenant not found for client {client_id}")
         is_active = (tenant.active or tenant.subscription_status in ("comped", "trialing")) and client.active
         client_name = client.name
-        tenant_name = tenant.name
+        # Split-name (Jun 2026): company_name on From: header & body
+        # ({{tenant_name}}); operator_name on signoff.
+        tenant_name = tenant.company_name or tenant.name
+        operator_name = tenant.operator_name or tenant.company_name or tenant.name
         tenant_id = tenant.id
         tenant_email = (tenant.contact_email or "").strip()
         # V2 email customization snapshot (session closes below).
@@ -155,7 +158,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             client_name=client_name, tenant_name=tenant_name,
             arrays_count=arrays_count, tenant_email=tenant_email,
             signoff_template=signoff_template,
-            tenant_signoff_name=send_from_name,
+            tenant_signoff_name=send_from_name or operator_name,
         )
         subject, html, text = render_email(
             subject_template=subject_template,
