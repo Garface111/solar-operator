@@ -260,6 +260,14 @@ interface MergeDialog {
   sourceOrigin: { x: number; y: number };
 }
 
+interface SubMeterMoveDialog {
+  srcClientId: string;
+  arrayId: string;
+  dstClientId: string;
+  subMeterCount: number;
+  arrayName: string;
+}
+
 interface ContextMenu {
   x: number;
   y: number;
@@ -282,6 +290,7 @@ export default function SandboxCanvas() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mergeDialog, setMergeDialog] = useState<MergeDialog | null>(null);
+  const [subMeterMoveDialog, setSubMeterMoveDialog] = useState<SubMeterMoveDialog | null>(null);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
@@ -1683,14 +1692,11 @@ export default function SandboxCanvas() {
 
   // ── Array-level drag ──────────────────────────────────────────────────────
 
-  const moveArrayToClient = useCallback(
-    (srcClientId: string, arrayId: string, dstClientId: string, subMeterCount: number) => {
-      if (srcClientId === dstClientId) return;
-      if (subMeterCount > 1) {
-        if (!window.confirm(
-          `This array has ${subMeterCount} sub-meter accounts — they'll move together. Proceed?`,
-        )) return;
-      }
+  // Executes the actual array move without any confirmation step.
+  // Called directly for single-account arrays, or after the sub-meter
+  // confirmation dialog is confirmed.
+  const executeArrayMove = useCallback(
+    (srcClientId: string, arrayId: string, dstClientId: string) => {
       const current = nodesRef.current;
       const src = current.find((n) => n.id === srcClientId && n.type === 'client');
       const dst = current.find((n) => n.id === dstClientId && n.type === 'client');
@@ -1774,6 +1780,39 @@ export default function SandboxCanvas() {
     },
     [setNodes, toast, loadCanvas, pushUndo],
   );
+
+  // Entry point called by the drag-drop handler. For single-account arrays,
+  // moves immediately. For sub-meter arrays (subMeterCount > 1), shows a
+  // React confirmation modal instead of window.confirm — Chrome blocks
+  // synchronous browser dialogs when called from within drag event handlers,
+  // which caused the move to silently no-op for all sub-meter arrays.
+  const moveArrayToClient = useCallback(
+    (srcClientId: string, arrayId: string, dstClientId: string, subMeterCount: number) => {
+      if (srcClientId === dstClientId) return;
+      if (subMeterCount > 1) {
+        const src = nodesRef.current.find((n) => n.id === srcClientId && n.type === 'client');
+        const srcData = src?.data as ClientNodeData | undefined;
+        const arrayName = (srcData?.client.accounts ?? [])
+          .flatMap((a) => a.arrays)
+          .find((ar) => ar.id === arrayId)?.name ?? 'this array';
+        setSubMeterMoveDialog({ srcClientId, arrayId, dstClientId, subMeterCount, arrayName });
+        return;
+      }
+      executeArrayMove(srcClientId, arrayId, dstClientId);
+    },
+    [executeArrayMove],
+  );
+
+  const confirmSubMeterMove = useCallback(() => {
+    if (!subMeterMoveDialog) return;
+    const { srcClientId, arrayId, dstClientId } = subMeterMoveDialog;
+    setSubMeterMoveDialog(null);
+    executeArrayMove(srcClientId, arrayId, dstClientId);
+  }, [subMeterMoveDialog, executeArrayMove]);
+
+  const cancelSubMeterMove = useCallback(() => {
+    setSubMeterMoveDialog(null);
+  }, []);
 
   // Bind drag-rescue forward-refs now that the callbacks exist.
   moveLoginRef.current = moveLoginToClient;
@@ -2274,6 +2313,39 @@ export default function SandboxCanvas() {
               >
                 Cancel
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Sub-meter array move confirmation — replaces window.confirm which
+            Chrome blocks when called from within drag event handlers. */}
+        {subMeterMoveDialog && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]">
+            <div className="w-80 rounded-2xl bg-white p-6 shadow-2xl">
+              <p className="mb-1 text-sm font-semibold text-zinc-900">Move sub-metered array?</p>
+              <p className="mb-4 text-xs text-zinc-500">
+                <span className="font-medium text-zinc-700">
+                  &ldquo;{subMeterMoveDialog.arrayName}&rdquo;
+                </span>{' '}
+                has {subMeterMoveDialog.subMeterCount} sub-meter accounts — they'll all move
+                together to the new client.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="flex-1 rounded-xl bg-primary-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary-600 active:bg-primary-700"
+                  onClick={confirmSubMeterMove}
+                >
+                  Move all {subMeterMoveDialog.subMeterCount}
+                </button>
+                <button
+                  type="button"
+                  className="flex-1 rounded-xl border border-zinc-200 px-4 py-2.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-50"
+                  onClick={cancelSubMeterMove}
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         )}
