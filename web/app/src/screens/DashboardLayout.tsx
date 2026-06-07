@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TrialBanner } from "../components/TrialBanner";
 import { AllSetCelebration } from "../components/AllSetCelebration";
+import { MindButton } from "../components/MindButton";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
@@ -187,6 +188,9 @@ export default function DashboardLayout({ onSignOut }: Props) {
           Privacy &amp; Data
         </a>
       </footer>
+
+      {/* Private dogfood: only renders for allow-listed operators. */}
+      <MindButton account={account} />
     </div>
   );
 }
