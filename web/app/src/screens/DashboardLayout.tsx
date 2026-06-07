@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
-import { TopNav } from "../components/TopNav";
 import { TrialBanner } from "../components/TrialBanner";
 import { AllSetCelebration } from "../components/AllSetCelebration";
 import { TabBar, type Tab } from "../ui/TabBar";
@@ -136,11 +135,12 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
   return (
     <div className="min-h-full">
-      <TopNav
+      <TabBar
+        tabs={TABS}
+        unvisited={unvisited}
         email={account?.email ?? null}
         onSignOut={onSignOut}
       />
-      <TabBar tabs={TABS} unvisited={unvisited} />
 
       {account?.trial_ends_at &&
         new Date(account.trial_ends_at) > new Date() && (
