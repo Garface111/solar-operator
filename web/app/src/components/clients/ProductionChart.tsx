@@ -86,7 +86,7 @@ function BarChart({
             x={bx(i)} y={by(m.mwh)}
             width={barW} height={h}
             rx={2}
-            fill={isSelected ? "#2563eb" : "#93c5fd"}
+            fill={isSelected ? "#0284c7" : "#7dd3fc"}
             style={{ cursor: "pointer", transition: "fill 0.1s" }}
             onClick={() => onSelect(isSelected ? null : i)}
           />
@@ -152,8 +152,8 @@ function DrillDown({ month }: { month: ProductionMonthEntry }) {
   const [yr, mo] = month.month.split("-").map(Number);
   const label = `${MONTH_ABBR[mo - 1]} ${yr}`;
   return (
-    <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
-      <div className="mb-1.5 text-[11px] font-semibold text-blue-700">{label} — per array</div>
+    <div className="mt-2 rounded-lg border border-sky-100 bg-sky-50/60 px-3 py-2">
+      <div className="mb-1.5 text-[11px] font-semibold text-sky-700">{label} — per array</div>
       <table className="w-full text-xs">
         <tbody>
           {month.by_array.map((a) => (

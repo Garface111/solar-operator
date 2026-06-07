@@ -10,7 +10,7 @@ import { listCaptures, type CaptureGroup, type CaptureEventRow } from "../../lib
 const POLL_INTERVAL_MS = 5000;
 
 const STAGE_COLOR: Record<string, string> = {
-  ingest_received: "text-blue-400",
+  ingest_received: "text-sky-400",
   client_created: "text-green-400",
   client_matched: "text-emerald-400",
   client_merged: "text-yellow-400",

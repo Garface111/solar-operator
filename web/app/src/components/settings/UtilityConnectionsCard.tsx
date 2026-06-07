@@ -19,7 +19,7 @@ const PORTAL_URLS: Record<string, string> = {
 
 const UTILITY_TAG_STYLES: Record<string, string> = {
   GMP: "bg-emerald-50 text-emerald-600",
-  VEC: "bg-blue-50 text-blue-700",
+  VEC: "bg-sky-50 text-sky-700",
 };
 
 interface LoginRowProps {

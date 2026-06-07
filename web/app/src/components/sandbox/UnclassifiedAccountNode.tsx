@@ -19,11 +19,11 @@ const UTILITY_THEME: Record<
     dot: 'bg-emerald-400',
   },
   VEC: {
-    border: 'border-blue-200',
-    header: 'bg-blue-50',
+    border: 'border-sky-200',
+    header: 'bg-sky-50',
     icon: '⚡',
-    label: 'text-blue-700',
-    dot: 'bg-blue-400',
+    label: 'text-sky-700',
+    dot: 'bg-sky-400',
   },
   WEC: {
     border: 'border-amber-200',

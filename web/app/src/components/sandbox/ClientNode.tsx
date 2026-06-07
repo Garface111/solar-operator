@@ -38,11 +38,11 @@ const UTILITY_THEME: Record<Utility, { pill: string; dot: string; row: string; r
     rowDot: 'bg-emerald-400',
   },
   VEC: {
-    pill: 'bg-blue-100 text-blue-800',
-    dot: 'bg-blue-400',
-    row: 'bg-blue-50 border-blue-100',
-    rowText: 'text-blue-700',
-    rowDot: 'bg-blue-400',
+    pill: 'bg-sky-100 text-sky-800',
+    dot: 'bg-sky-400',
+    row: 'bg-sky-50 border-sky-100',
+    rowText: 'text-sky-700',
+    rowDot: 'bg-sky-400',
   },
   WEC: {
     pill: 'bg-amber-100 text-amber-800',

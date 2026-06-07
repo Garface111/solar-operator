@@ -167,7 +167,7 @@ function buildLoginGroups(client: ClientRow, arrays: ArrayRow[]): LoginGroup[] {
 
 const UTIL_THEME: Record<string, { pill: string; border: string; bg: string }> = {
   GMP: { pill: "bg-emerald-100 text-emerald-600", border: "border-emerald-200", bg: "bg-emerald-50" },
-  VEC: { pill: "bg-blue-100 text-blue-800", border: "border-blue-200", bg: "bg-blue-50" },
+  VEC: { pill: "bg-sky-100 text-sky-800", border: "border-sky-200", bg: "bg-sky-50" },
   WEC: { pill: "bg-amber-100 text-amber-800", border: "border-amber-200", bg: "bg-amber-50" },
 };
 const DEFAULT_UTIL_THEME = { pill: "bg-zinc-100 text-zinc-700", border: "border-zinc-200", bg: "bg-zinc-50" };
