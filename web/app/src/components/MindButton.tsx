@@ -1,3 +1,4 @@
+import html2canvas from "html2canvas";
 import { useEffect, useRef, useState } from "react";
 import type { Account } from "../lib/api";
 
@@ -53,6 +54,7 @@ export function MindButton({ account }: Props) {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [thinking, setThinking] = useState(false);
+  const [shareScreen, setShareScreen] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const sessionId = useRef<string | null>(null);
 
@@ -81,12 +83,30 @@ export function MindButton({ account }: Props) {
   const allowed = !!account?.email;
   if (!allowed) return null;
 
+  async function captureCurrentPage(): Promise<string | null> {
+    try {
+      const canvas = await html2canvas(document.body, {
+        logging: false,
+        useCORS: true,
+        width: Math.min(document.body.scrollWidth, 1440),
+        height: Math.min(document.body.scrollHeight, 4000),
+      });
+      return canvas.toDataURL("image/png");
+    } catch {
+      return null;
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || thinking) return;
     if (!sessionId.current) sessionId.current = getSessionId();
 
+    // Capture before clearing state so we get the current DOM.
+    const capture = shareScreen ? await captureCurrentPage() : null;
+
     setInput("");
+    setShareScreen(false);
     setMessages((m) => [...m, { role: "user", text }]);
     setThinking(true);
 
@@ -128,6 +148,12 @@ export function MindButton({ account }: Props) {
           operator_email: account?.email || "",
           tenant_name: account?.name || "",
           tenant_id: account?.tenant_id || "",
+          // VISION — authenticated session token so screenshot_page can render the
+          // logged-in dashboard instead of the sign-in screen.
+          viewer_token: localStorage.getItem("so_session") || "",
+          // VISION — browser-captured snapshot when the operator opts in (📷 button).
+          // Empty string when they didn't share this message.
+          ...(capture ? { viewer_capture: capture } : {}),
         }),
       });
       if (!res.ok || !res.body) {
@@ -295,6 +321,20 @@ export function MindButton({ account }: Props) {
                   placeholder="Talk to OCICBB…"
                   className="min-h-0 flex-1 resize-none rounded-xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
                 />
+                {/* Camera toggle — share what you're seeing with the Mind */}
+                <button
+                  type="button"
+                  onClick={() => setShareScreen((v) => !v)}
+                  aria-label={shareScreen ? "Cancel screen share" : "Share what I'm seeing"}
+                  title={shareScreen ? "Screen share ON — will send with next message" : "Share what I'm seeing"}
+                  className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
+                    shareScreen
+                      ? "border-primary-500 bg-primary-50 text-primary-600"
+                      : "border-zinc-300 bg-white text-zinc-400 hover:border-zinc-400 hover:text-zinc-600"
+                  }`}
+                >
+                  📷
+                </button>
                 <button
                   type="button"
                   onClick={() => void send()}
@@ -305,6 +345,11 @@ export function MindButton({ account }: Props) {
                   Send
                 </button>
               </div>
+              {shareScreen && (
+                <p className="mt-1.5 text-xs text-primary-600">
+                  📷 Screen share on — your current view will be included with the next message.
+                </p>
+              )}
             </div>
           </div>
         </div>
