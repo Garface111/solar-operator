@@ -2241,9 +2241,6 @@ export default function SandboxCanvas() {
                 >
                   + Add Client
                 </button>
-                <ToolbarButton onClick={handleAddPlaceholderClient}>
-                  + Add client manually
-                </ToolbarButton>
                 <LayoutModeControl layoutMode={layoutMode} onChange={handleLayoutModeChange} />
                 {layoutMode === 'sorted' && (
                   <SortKeyControl sortKey={sortKey} onChange={handleSortKeyChange} />

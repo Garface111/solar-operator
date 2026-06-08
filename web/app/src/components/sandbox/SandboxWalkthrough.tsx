@@ -128,7 +128,7 @@ export function SandboxWalkthrough({
   clientCount,
   lastCapturedClientId,
   onOpenByLogin,
-  onOpenManual,
+  onOpenManual: _onOpenManual,
 }: Props) {
   const [step, setStep] = useState<Step>(() => initStep(clientCount));
   const [fadeIn, setFadeIn] = useState(false);
@@ -300,14 +300,6 @@ export function SandboxWalkthrough({
                 >
                   Connect a GMP login
                 </button>
-                <button
-                  type="button"
-                  className="w-full rounded-lg border border-zinc-200 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-50"
-                  onClick={() => { onOpenManual(); markDone(); }}
-                  style={{ pointerEvents: 'auto' }}
-                >
-                  + Add empty client
-                </button>
               </CalloutCard>
             </div>
           )}
@@ -366,13 +358,6 @@ export function SandboxWalkthrough({
                 onClick={() => { onOpenByLogin(); markDone(); }}
               >
                 + Add another client
-              </button>
-              <button
-                type="button"
-                className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-medium text-zinc-600 shadow-sm transition-colors hover:bg-zinc-50"
-                onClick={() => { onOpenManual(); markDone(); }}
-              >
-                + Add empty client
               </button>
             </div>
           )}
