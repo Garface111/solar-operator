@@ -17,12 +17,13 @@ Run on Railway prod (after merge, before the homepage CTA goes live):
 ──────────────────────────────────────────────────────────────────────────
 Fictional names actually used (verified non-colliding at seed time — see
 _resolve_client_name; the demo refuses to reuse a real customer's name):
-    Catamount Community Power, Northeast Kingdom Cooperative,
-    Green Hollow Methodist Church, Riverbend Cohousing, Putney Library,
-    Maple Ridge Cooperative, Mad River School District,
-    Lamoille Valley Dairy, Central Vermont Medical, Hill Farmstead Brewery,
-    Worcester Town Office, Smugglers' Notch Lodge, Calais Congregational,
-    Sharon Academy, Marlboro Homestead
+    Green Mountain Community Solar, Catamount Community Power,
+    Northeast Kingdom Cooperative, Green Hollow Methodist Church,
+    Riverbend Cohousing, Putney Library, Maple Ridge Cooperative,
+    Mad River School District, Lamoille Valley Dairy,
+    Central Vermont Medical, Hill Farmstead Brewery, Worcester Town Office,
+    Smugglers' Notch Lodge, Calais Congregational, Sharon Academy,
+    Marlboro Homestead
 Spare fallback names, used only if one of the above collides with a real
 non-demo Client already in the database:
     Cabot Public School · Stowe Mountain Co-op · Worcester Grange ·
@@ -89,6 +90,23 @@ SPARE_NAMES = [
 # cooperatives. Sub-metered arrays sprinkled throughout so the new "N meters"
 # dedupe chip is visible without hunting.
 DEMO_CLIENTS: list[dict] = [
+    # ── Showpiece: GMCS — the operator's own community-solar book, 7 arrays,
+    #    one sub-metered showpiece (Starlake = 3 meters into one array). Mirrors
+    #    Bruce Genereaux's real portfolio shape so the demo reads as "this is
+    #    what your book will look like." Fictional NEPOOL/account IDs.
+    {
+        "name": "Green Mountain Community Solar",
+        "email": "gmcs@demo.example",
+        "arrays": [
+            ("Starlake",          "99100", 21.0, "central", 3, "gmp"),  # sub-metered
+            ("Chester",           "99133", 12.4, "south",   1, "gmp"),
+            ("JSIS",              "99134",  8.8, "central", 1, "gmp"),
+            ("Londonderry",       "99135",  9.6, "south",   1, "gmp"),
+            ("Tannery Brook",     "99136",  7.2, "central", 1, "gmp"),
+            ("Timberworks",       "99137", 10.4, "north",   1, "gmp"),
+            ("Waterford",         "99138",  6.8, "north",   1, "gmp"),
+        ],
+    },
     # ── Anchor customer: 5 arrays, mixed providers, two sub-metered ─────────
     {
         "name": "Catamount Community Power",
