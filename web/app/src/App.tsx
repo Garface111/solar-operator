@@ -14,6 +14,8 @@ import { Spinner } from "./ui/Spinner";
 
 const CaptureTimeline = lazyWithRetry(() => import("./components/dev/CaptureTimeline"));
 
+const VerifyAccuracy = lazyWithRetry(() => import("./screens/VerifyAccuracy"));
+
 const AccountTab = lazyWithRetry(() => import("./screens/AccountTab"));
 const ReportsTab = lazyWithRetry(() => import("./screens/ReportsTab"));
 import { useToast } from "./ui/Toast";
@@ -176,6 +178,14 @@ function AuthGate() {
           }
         />
         <Route path="/sandbox" element={<Navigate to="/clients" replace />} />
+        <Route
+          path="/verify/:clientId"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <VerifyAccuracy />
+            </Suspense>
+          }
+        />
         <Route
           path="/dev/captures"
           element={

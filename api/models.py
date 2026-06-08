@@ -473,6 +473,29 @@ class DailyGeneration(Base):
     tenant: Mapped["Tenant"] = relationship()
 
 
+class VerificationCheck(Base):
+    """Operator uploads their own records to compare against the SO-generated workbook."""
+    __tablename__ = "verification_checks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"))
+    client_id: Mapped[int] = mapped_column(Integer, ForeignKey("clients.id"))
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True)
+    uploaded_filename: Mapped[str] = mapped_column(String(500))
+    uploaded_mime: Mapped[str] = mapped_column(String(100))
+    storage_path: Mapped[str] = mapped_column(String(1000))
+    period_label: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    # pending | confirmed | flagged
+    operator_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_verification_tenant", "tenant_id"),
+        Index("ix_verification_client", "client_id"),
+    )
+
+
 class CaptureEvent(Base):
     """One stage in a capture pipeline run (/v1/sync).
 
