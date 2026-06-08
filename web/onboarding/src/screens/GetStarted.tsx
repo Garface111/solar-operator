@@ -17,13 +17,18 @@ const CHROME_STORE_URL =
  *  api/writers/gmcs_writer.py output: A1:C1 merged title, quarter-blocks of
  *  three month rows. Stripped to ~6 rows for a quick read. */
 function SampleReportVisual() {
+  // Monthly rows mirror api/writers/gmcs_writer.py output: each quarter is
+  // three month rows (Jul/Aug/Sep, Oct/Nov/Dec, ...) with MWh and floor(MWh)
+  // RECs.  Showing month on every row keeps all three columns visibly
+  // populated — the previous merge-cell convention (quarter label only on
+  // the first row of each block) read as "missing data."
   const rows = [
-    { q: "Q3 2025", mwh: 28.541, recs: 28 },
-    { q: "", mwh: 31.82, recs: 31 },
-    { q: "", mwh: 24.193, recs: 24 },
-    { q: "Q4 2025", mwh: 16.72, recs: 16 },
-    { q: "", mwh: 9.34, recs: 9 },
-    { q: "", mwh: 7.081, recs: 7 },
+    { period: "Jul 2025", mwh: 28.541, recs: 28 },
+    { period: "Aug 2025", mwh: 31.82, recs: 31 },
+    { period: "Sep 2025", mwh: 24.193, recs: 24 },
+    { period: "Oct 2025", mwh: 16.72, recs: 16 },
+    { period: "Nov 2025", mwh: 9.34, recs: 9 },
+    { period: "Dec 2025", mwh: 7.081, recs: 7 },
   ];
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white shadow-[0_10px_30px_-12px_rgba(0,0,0,0.18)] overflow-hidden">
@@ -38,15 +43,20 @@ function SampleReportVisual() {
       <table className="w-full text-xs">
         <thead className="bg-zinc-50 text-[10px] uppercase tracking-wide text-zinc-500">
           <tr>
-            <th className="px-3 py-2 text-left font-medium">Quarter</th>
-            <th className="px-3 py-2 text-right font-medium">Generation (MWh)</th>
+            <th className="px-3 py-2 text-left font-medium">Month</th>
+            <th className="px-3 py-2 text-right font-medium">MWh</th>
             <th className="px-3 py-2 text-right font-medium">RECs</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={i} className="border-t border-zinc-100">
-              <td className="px-3 py-2 font-medium text-zinc-800">{r.q}</td>
+            <tr
+              key={i}
+              className={`border-t border-zinc-100 ${
+                i === 3 ? "border-t-2 border-t-zinc-200" : ""
+              }`}
+            >
+              <td className="px-3 py-2 font-medium text-zinc-800">{r.period}</td>
               <td className="px-3 py-2 text-right font-mono tabular-nums text-zinc-700">
                 {r.mwh.toLocaleString("en-US", { maximumFractionDigits: 3 })}
               </td>
