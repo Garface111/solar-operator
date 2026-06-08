@@ -39,7 +39,11 @@ const BASE = import.meta.env.BASE_URL;
 export default function Welcome() {
   const navigate = useNavigate();
   const [agreed, setAgreed] = useState(false);
-  const [termsOpen, setTermsOpen] = useState(false);
+  // Outer panel (the plain-English bullets) opens by default so the user
+  // sees the gist without an extra click. The nested "full legal text"
+  // accordion stays collapsed so the page doesn't feel like a wall.
+  // Ford Jun 8'26: first bulleted dropdown should be auto-revealed.
+  const [termsOpen, setTermsOpen] = useState(true);
   const [legalOpen, setLegalOpen] = useState(false);
 
   return (
