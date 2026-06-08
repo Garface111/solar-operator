@@ -17,7 +17,8 @@ from sqlalchemy import select, or_
 
 from .account import tenant_from_session, require_not_demo, require_not_demo
 from .db import SessionLocal
-from .models import Array, Client, UtilityAccount, now
+from .models import Array, Bill, Client, UtilityAccount, now
+from .email_templates import quarter_context
 
 HARD_DELETE_GRACE_DAYS = 30
 
@@ -26,7 +27,7 @@ router = APIRouter()
 
 # ── GET /v1/sandbox/canvas ───────────────────────────────────────────────────
 
-def _fmt_account(acc: UtilityAccount, arr: Optional[Array]) -> dict:
+def _fmt_account(acc: UtilityAccount, arr: Optional[Array], mwh_per_qtr: Optional[float] = None) -> dict:
     return {
         "id": acc.id,
         "provider": acc.provider,
@@ -39,6 +40,10 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array]) -> dict:
         "array_id": arr.id if arr else None,
         "array_name": arr.name if arr else None,
         "nepool_gis_id": arr.nepool_gis_id if arr else None,
+        # MWh/qtr — most recent complete quarter, summed across all Bill rows
+        # whose account_id points at this UtilityAccount. None when no
+        # generation data has landed yet (clean dash in the UI, not "0 MWh").
+        "mwh_per_qtr": mwh_per_qtr,
         "login_origin_client_id": getattr(acc, "login_origin_client_id", None),
         "array_reassigned_at": arr.reassigned_at.isoformat() if arr and arr.reassigned_at else None,
         "array_deleted_at": arr.deleted_at.isoformat() if arr and arr.deleted_at else None,
@@ -92,6 +97,43 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
                 accounts_where,
             ).order_by(UtilityAccount.id)
         ).scalars().all()
+
+        # ── MWh/qtr per UtilityAccount (Bruce June 6: "0 MWh/qtr" bug) ────
+        # Bills land per UtilityAccount keyed by document_number. The card
+        # footer shows the most-recent COMPLETE quarter's generation in MWh.
+        # We sum Bill.kwh_generated where period_start (or bill_date as fallback)
+        # falls inside that quarter, then divide by 1000. If no bills have
+        # landed for an account, mwh_per_qtr stays None — the UI renders
+        # "— MWh/qtr" instead of a misleading 0.
+        qc = quarter_context()
+        q_start_dt = datetime.combine(qc["_start_date"], datetime.min.time())
+        q_end_dt = datetime.combine(qc["_end_date"], datetime.max.time())
+        bills_in_q = db.execute(
+            select(Bill).where(
+                Bill.tenant_id == tenant.id,
+                Bill.kwh_generated.is_not(None),
+            )
+        ).scalars().all()
+        kwh_by_account: dict[int, int] = defaultdict(int)
+        bills_seen: set[int] = set()
+        for b in bills_in_q:
+            # Use period_start if present, else bill_date — both are nullable
+            # but at least one is set on parsed bills.
+            ref_dt = b.period_start or b.bill_date
+            if ref_dt is None:
+                continue
+            if not (q_start_dt <= ref_dt <= q_end_dt):
+                continue
+            if not b.kwh_generated or b.kwh_generated <= 0:
+                continue
+            kwh_by_account[b.account_id] += b.kwh_generated
+            bills_seen.add(b.account_id)
+        # Accounts with bills landed but 0 generation in-quarter still get 0.0
+        # (real signal: "we have data, this quarter was zero"). Accounts with
+        # no bills at all stay None ("no data yet, don't claim zero").
+        mwh_per_acct: dict[int, float] = {
+            acc_id: round(k / 1000.0, 3) for acc_id, k in kwh_by_account.items()
+        }
 
         # Group accounts by which array they belong to
         accs_by_array: dict[int, list[UtilityAccount]] = defaultdict(list)

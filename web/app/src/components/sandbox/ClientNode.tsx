@@ -326,7 +326,8 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
             />
           ) : (
             <p
-              className={`nodrag cursor-text truncate ${nameText} font-semibold text-zinc-900 select-none hover:text-primary-700 hover:underline hover:underline-offset-2 decoration-primary-300`}
+              className={`nodrag cursor-text ${nameText} font-semibold leading-tight break-words text-zinc-900 select-none hover:text-primary-700 hover:underline hover:underline-offset-2 decoration-primary-300`}
+              style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
               onClick={(e) => { e.stopPropagation(); actions.startRename(id); }}
               title={`${client.name} — click to rename`}
             >

@@ -188,17 +188,45 @@ export function SandboxWalkthrough({
     return () => clearTimeout(t);
   }, [step, go]);
 
-  // cta: if the operator clicks the very button the callout is pointing at
-  // (the toolbar Add Client button), dismiss the callout — otherwise the
-  // tooltip lingers awkwardly over the modal that just opened. Bruce Jun 8:
-  // reported tooltip stays even when you click "what it's suggesting".
+  // loop → done. The loop step previously rendered a persistent
+  // "+ Add another client" floating button (the user's dismiss gesture).
+  // That button was removed Jun 8 2026 (duplicated the toolbar button), so
+  // loop now has nothing to render — auto-complete it so the rAF tracker
+  // doesn't run forever.
+  useEffect(() => {
+    if (step !== 'loop') return;
+    markDone();
+  }, [step, markDone]);
+
+  // cta: dismiss the "Add your next client" callout on ANY click anywhere
+  // in the document. If they click the button itself it opens the modal
+  // (and we tear down the now-redundant arrow); if they click anywhere else
+  // they've signaled "not right now" and the arrow shouldn't keep hovering.
+  // Bruce Jun 8: tooltip lingers even when you click what it's suggesting.
+  // Ford Jun 8: also dismiss when the user clicks anywhere else — they're
+  // clearly not adding a client right now, the arrow becomes nagware.
+  // Excludes clicks inside the callout itself so the operator can still
+  // read it without it vanishing under their cursor.
   useEffect(() => {
     if (step !== 'cta') return;
-    const btn = document.querySelector('[data-walkthrough="add-client-btn"]');
-    if (!btn) return;
-    const onClick = () => markDone();
-    btn.addEventListener('click', onClick, { once: true });
-    return () => btn.removeEventListener('click', onClick);
+    // Defer attaching one tick so the same click that landed the user on
+    // the cta step (e.g. finishing a capture) doesn't immediately dismiss it.
+    let attached = false;
+    const onDocClick = (e: MouseEvent) => {
+      if (!attached) return;
+      const target = e.target as Node | null;
+      if (!target) { markDone(); return; }
+      // Don't dismiss if the click is inside our own callout card.
+      const overlay = overlayRef.current;
+      if (overlay && overlay.contains(target)) return;
+      markDone();
+    };
+    const armId = window.setTimeout(() => { attached = true; }, 0);
+    document.addEventListener('click', onDocClick, true);
+    return () => {
+      window.clearTimeout(armId);
+      document.removeEventListener('click', onDocClick, true);
+    };
   }, [step, markDone]);
 
   // Bruce Jun 6: removed the auto-complete @ 3+ clients. The walkthrough is
@@ -359,21 +387,10 @@ export function SandboxWalkthrough({
             </>
           )}
 
-          {/* Persistent corner buttons — shown during captured + loop */}
-          {(step === 'loop' || step === 'captured') && (
-            <div
-              className="absolute flex flex-col items-end gap-2"
-              style={{ bottom: 52, right: 24, pointerEvents: 'auto' }}
-            >
-              <button
-                type="button"
-                className="rounded-xl bg-primary-500 px-4 py-2.5 text-sm font-semibold text-white shadow-md transition-colors hover:bg-primary-600 active:bg-primary-700"
-                onClick={() => { onOpenByLogin(); markDone(); }}
-              >
-                + Add another client
-              </button>
-            </div>
-          )}
+          {/* Persistent corner button removed Jun 8 2026 — duplicated the
+              toolbar "+ Add Client" and crowded the bottom-right of the
+              canvas. Walkthrough still advances via the toolbar button's
+              one-shot click listener (see effect above). */}
         </div>
 
       </div>

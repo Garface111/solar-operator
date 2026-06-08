@@ -429,4 +429,27 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       console.log("[Solar Operator] v1.0.2 migration: cleared stale Railway endpoint, now defaulting to", PROD_ENDPOINT);
     }
   }
+
+  // v1.5.2: retro-inject so_bridge.js into any SO tabs the user already had
+  // open at install/update time. Content scripts declared in manifest only
+  // fire on future navigations, so without this the onboarding page sits
+  // there waiting for SO_EXTENSION_PRESENT forever (user has to refresh).
+  try {
+    chrome.tabs.query({ url: SO_TAB_URLS }, (tabs) => {
+      if (chrome.runtime.lastError) { void chrome.runtime.lastError; return; }
+      for (const t of tabs || []) {
+        if (typeof t.id !== "number") continue;
+        chrome.scripting.executeScript({
+          target: { tabId: t.id },
+          files: ["so_bridge.js"],
+        }).catch((e) => {
+          // Tab may be in a state that doesn't accept injection (e.g. chrome://
+          // redirect) — non-fatal, swallow.
+          console.warn("[Solar Operator] so_bridge inject skipped for tab", t.id, e && e.message);
+        });
+      }
+    });
+  } catch (e) {
+    console.warn("[Solar Operator] retro-inject failed:", e);
+  }
 });
