@@ -1,4 +1,5 @@
 import { Suspense, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
@@ -1255,6 +1256,12 @@ function ExpandedPanel({
               >
                 {downloading ? <><Spinner /> Downloading…</> : "Download .xlsx"}
               </button>
+              <Link
+                to={`/verify/${client.id}`}
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-emerald-100 bg-white/60 px-5 py-2 text-sm font-medium text-emerald-700 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
+                Verify accuracy →
+              </Link>
             </div>
           </div>
 
