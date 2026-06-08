@@ -194,6 +194,29 @@ def require_not_demo(t: Tenant) -> None:
         )
 
 
+def require_active_subscription(t: Tenant) -> None:
+    """Guard for tenant-data mutation endpoints. Raises HTTP 402 with a
+    machine-readable body when `t` has been auto-paused for lack of a card
+    (`subscription_status == "paused_no_card"`).
+
+    Rejects ONLY the paused_no_card state. Every other status — active,
+    trialing, comped, canceled, past_due, or NULL — passes through untouched,
+    so a comped pilot (Bruce) is NEVER blocked here. Read-only (GET) endpoints
+    and the two unpause paths (add-payment-method / resume-from-pause) must NOT
+    call this, or the operator could never get out of the paused state.
+
+    Safe to apply right after require_not_demo(); over-applying it to a write
+    endpoint can only ever reject a paused operator, never a paying one."""
+    if getattr(t, "subscription_status", None) == "paused_no_card":
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "paused_no_card",
+                "message": "Add a payment method to resume",
+            },
+        )
+
+
 # ─── schemas ─────────────────────────────────────────────────────────────
 
 class AuthRequest(BaseModel):
@@ -683,6 +706,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
 def update_email(body: UpdateEmail, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     new_email = body.email.lower().strip()
     with SessionLocal() as db:
         # Refuse if email is taken by another active tenant
@@ -720,6 +744,7 @@ def update_name(body: UpdateName, authorization: Optional[str] = Header(default=
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(400, "Name can't be empty")
@@ -744,6 +769,7 @@ def update_company_name(body: UpdateCompanyName,
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(400, "Company name can't be empty")
@@ -775,6 +801,7 @@ def update_send_from_name(body: UpdateSendFromName,
     Stored in Tenant.send_from_name, which also drives the email From display name."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     raw = (body.send_from_name or "").strip()
     if raw and len(raw) > 120:
         raise HTTPException(400, "Sign-as name is too long (max 120 characters)")
@@ -794,6 +821,7 @@ def regen_activation_key(authorization: Optional[str] = Header(default=None)):
     code into the extension options page to resume captures."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     new_key = "sol_live_" + secrets.token_urlsafe(32)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
@@ -806,6 +834,7 @@ def regen_activation_key(authorization: Optional[str] = Header(default=None)):
 def update_frequency(body: UpdateFrequency, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if body.frequency not in ("monthly", "quarterly"):
         raise HTTPException(400, "frequency must be monthly or quarterly")
     with SessionLocal() as db:
@@ -821,6 +850,7 @@ def update_cc_on_reports(body: UpdateCcOnReports,
     """Toggle 'send me a copy of every report'. Returns the updated value."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.cc_on_reports = bool(body.cc_on_reports)
@@ -920,6 +950,7 @@ def update_email_settings(body: EmailSettings,
     fields are left unchanged."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     _validate_email_settings(body)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
@@ -1005,6 +1036,7 @@ def patch_reports_send_mode(body: _SendModeBody,
         raise HTTPException(400, "send_mode must be 'to_client', 'to_me', or 'to_both'")
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.send_mode = mode
@@ -1035,6 +1067,7 @@ def send_my_report(
     results} shape either way so the frontend can use one code path."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send reports")
 
@@ -1093,6 +1126,7 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
     before the first real quarterly run."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send sample reports")
     tenant_email = (t.contact_email or "").strip()
@@ -1283,6 +1317,7 @@ def save_email_template(body: _TemplateBody,
     """Persist the operator's custom template as their send-time default."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     for field, value in [("subject_template", body.subject_template),
                          ("body_template", body.body_template)]:
         if value:
@@ -1310,6 +1345,7 @@ def test_send_email_template(body: _TemplateBody,
     """Render the proposed template with real data and send a [TEST] to the tenant's email."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     tenant_email = (t.contact_email or "").strip()
     if not tenant_email:
         raise HTTPException(422, "Add an email address to your account first.")
@@ -1350,6 +1386,7 @@ def reset_email_template(authorization: Optional[str] = Header(default=None)):
     """Clear the tenant's template overrides — reverts all three to the system built-in defaults."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.email_subject_template = None
@@ -1369,6 +1406,7 @@ def save_email_signoff(body: _SignoffBody,
     """Persist the operator's custom sign-off. Pass signoff=null to revert to default."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.email_signoff = _blank_to_none(body.signoff or "")
@@ -1567,6 +1605,7 @@ def create_client(body: ClientCreate,
                   authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "name is required")
@@ -1854,6 +1893,7 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
     Idempotent on already-deleted src (returns 200 with no-op flag)."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if src_client_id == body.dst_client_id:
         raise HTTPException(400, "src and dst must differ")
 
@@ -1988,6 +2028,7 @@ def undo_merge(body: MergeUndoBody,
     pre-merge state. Returns 410 if the window has elapsed."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         history = db.execute(
@@ -2045,6 +2086,7 @@ def dismiss_merge_suggestion(client_id: int, other_id: int,
     as (min_id, max_id)."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if client_id == other_id:
         raise HTTPException(400, "ids must differ")
     a, b = sorted([client_id, other_id])
@@ -2223,6 +2265,7 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
     Idempotent on already-soft-deleted src (returns noop:true)."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if src_array_id == body.dst_array_id:
         raise HTTPException(400, "src and dst must differ")
 
@@ -2314,6 +2357,7 @@ def dismiss_array_merge_suggestion(array_id: int, other_id: int,
                                    authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if array_id == other_id:
         raise HTTPException(400, "ids must differ")
     a, b = sorted([array_id, other_id])
@@ -2347,6 +2391,7 @@ def update_client(client_id: int, body: ClientUpdate,
                   authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if body.report_frequency and body.report_frequency not in (
             "monthly", "quarterly"):
         raise HTTPException(400,
@@ -2407,6 +2452,7 @@ def delete_client(client_id: int,
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         c = db.get(Client, client_id)
@@ -2467,6 +2513,7 @@ def refresh_capture(client_id: int,
     page opened. A real on-demand GMP poll is a separate feature."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2483,6 +2530,7 @@ def send_one_client_report(client_id: int,
                            authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2512,6 +2560,7 @@ def resend_client_report(client_id: int,
           dashboard can show 'Couldn't resend — <reason>' to the operator."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         c = db.get(Client, client_id)
         if not c or c.tenant_id != t.id:
@@ -2832,6 +2881,7 @@ def create_array(client_id: int, body: ArrayCreate,
                  authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "name is required")
@@ -2890,6 +2940,7 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
                  authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
         a = db.get(Array, array_id)
@@ -2927,6 +2978,7 @@ def delete_array(client_id: int, array_id: int,
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
@@ -2983,6 +3035,7 @@ def restore_array(client_id: int, array_id: int,
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     now_ts = datetime.utcnow()
     cutoff = now_ts - timedelta(days=HARD_DELETE_GRACE_DAYS)
 
@@ -3062,6 +3115,7 @@ def bulk_delete_arrays(
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if not body.ids:
         raise HTTPException(400, "ids must be non-empty")
     now_ts = datetime.utcnow()
@@ -3118,6 +3172,7 @@ def bulk_delete_clients(
     Returns an undo_token valid for 5 minutes."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     if not body.ids:
         raise HTTPException(400, "ids must be non-empty")
     now_ts = datetime.utcnow()
@@ -3186,6 +3241,7 @@ def undo_delete(
     Only works within 5 minutes of the delete. Returns 410 if expired."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     now_ts = datetime.utcnow()
     with SessionLocal() as db:
         history = db.execute(
@@ -3262,6 +3318,7 @@ def add_utility_account(client_id: int, array_id: int, body: AccountCreate,
                         authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     code = (body.provider or "").lower().strip()
     if code not in PROVIDER_CODES:
         raise HTTPException(400, f"Unknown provider '{body.provider}'")
@@ -3302,6 +3359,7 @@ def remove_utility_account(client_id: int, array_id: int, acct_id: int,
                            authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
         a = db.get(Array, array_id)
@@ -3597,6 +3655,7 @@ def regenerate_report(
     Returns {status, generated_at}."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    require_active_subscription(t)
 
     reference_date: Optional[date] = None
     if body.quarter:

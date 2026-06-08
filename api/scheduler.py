@@ -248,16 +248,16 @@ def send_trial_ending_reminders() -> dict:
     """Remind no-card trialing operators ~3 days before their trial ends.
 
     Runs once daily. Selects trialing tenants with NO payment method on file
-    whose trial_ends_at lands in the (now+2d, now+3d] window. Because the job
-    runs daily and the window is exactly one day wide, each such tenant is
-    reminded roughly once — no 'reminded' column needed (SPEC: no new columns).
+    whose trial_ends_at is within 3 days AND who haven't already been reminded
+    (trial_reminder_sent_at IS NULL). After sending we stamp
+    trial_reminder_sent_at, making the reminder exactly-once regardless of tick
+    cadence — a missed or double-fired tick no longer drops or duplicates it.
     Tenants who already added a card go through the normal trial-charge path and
     are skipped here.
     """
     if not os.getenv("STRIPE_SECRET_KEY"):
         # Mirrors finalize_expired_trials: skip when billing isn't configured.
         return {"reminded": []}
-    window_start = datetime.utcnow() + timedelta(days=2)
     window_end = datetime.utcnow() + timedelta(days=3)
     reminded: list[str] = []
     with SessionLocal() as db:
@@ -265,23 +265,33 @@ def send_trial_ending_reminders() -> dict:
             select(Tenant).where(
                 Tenant.subscription_status == "trialing",
                 Tenant.stripe_payment_method_id.is_(None),
-                Tenant.trial_ends_at > window_start,
                 Tenant.trial_ends_at <= window_end,
+                Tenant.trial_reminder_sent_at.is_(None),
             )
         ).scalars().all()
         targets = [(t.id, t.contact_email,
                     t.operator_name or t.company_name or t.name,
                     t.trial_ends_at) for t in rows]
 
-    for tid, email, name, trial_ends_at in targets:
-        try:
-            end_str = trial_ends_at.strftime(f"%B {trial_ends_at.day}, {trial_ends_at.year}")
-            send_trial_ending_no_card_reminder_email(
-                to=email, name=name, trial_end_date=end_str)
-            reminded.append(tid)
-        except Exception as e:
-            logger.warning("send_trial_ending_no_card_reminder_email failed for %s: %s",
-                           tid, e)
+        for tid, email, name, trial_ends_at in targets:
+            try:
+                end_str = trial_ends_at.strftime(
+                    f"%B {trial_ends_at.day}, {trial_ends_at.year}")
+                send_trial_ending_no_card_reminder_email(
+                    to=email, name=name, trial_end_date=end_str)
+                # Stamp only on a successful send so a transient email failure
+                # leaves the tenant eligible for the next tick (at-least-once on
+                # failure, exactly-once on success).
+                t = db.get(Tenant, tid)
+                if t is not None:
+                    t.trial_reminder_sent_at = datetime.utcnow()
+                    db.commit()
+                reminded.append(tid)
+            except Exception as e:
+                db.rollback()
+                logger.warning(
+                    "send_trial_ending_no_card_reminder_email failed for %s: %s",
+                    tid, e)
     logger.info("send_trial_ending_reminders: reminded=%d", len(reminded))
     return {"reminded": reminded}
 

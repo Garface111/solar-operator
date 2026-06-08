@@ -547,6 +547,16 @@ def main():
         if backfilled:
             print(f"  ↪ backfilled company_name from name on {backfilled} tenant(s)")
 
+        # 2026-06-07 No-upfront-payment: exactly-once trial-end reminder dedup.
+        # trial_reminder_sent_at is stamped when the ~3-day "trial ending, no
+        # card" reminder goes out, replacing the fragile now+2d/now+3d rolling
+        # window in scheduler.send_trial_ending_reminders. NULL = not yet sent.
+        if not column_exists(conn, "tenants", "trial_reminder_sent_at"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN trial_reminder_sent_at TIMESTAMP NULL"
+            ))
+            print("  + tenants.trial_reminder_sent_at")
+
     print("=== Migration complete ===")
 
 

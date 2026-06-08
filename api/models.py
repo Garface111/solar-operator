@@ -103,6 +103,11 @@ class Tenant(Base):
     trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     stripe_payment_method_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     trial_extended: Mapped[bool] = mapped_column(Boolean, default=False)
+    # No-upfront-payment: set the moment the ~3-day "trial ending, no card on
+    # file" reminder is sent, so the scheduler fires it exactly once regardless
+    # of tick cadence (replaces the fragile 1-day rolling window). NULL = not
+    # yet reminded.
+    trial_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Password-based login (June 2026). Nullable — null means magic-link only.
     # bcrypt hash (passlib, cost 12). Never expose this field in API responses.
