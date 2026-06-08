@@ -96,6 +96,7 @@ from .solaredge import router as solaredge_router
 from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
+from .verification import router as verification_router
 from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
 from .dev_captures import router as dev_captures_router
 from .events import router as events_router, broadcast as _sse_broadcast
@@ -172,6 +173,8 @@ app.include_router(nepool_router)
 app.include_router(resend_webhook_router)
 # Sandbox canvas: client graph visualization + position persistence.
 app.include_router(sandbox_router)
+# Verify accuracy: operator uploads their records to compare against SO workbook.
+app.include_router(verification_router)
 # SSE live-push: streams capture.landed events to the sandbox canvas.
 app.include_router(events_router)
 # Dev-only sandbox helpers. Mounted but each route guards on SO_DEV_ENABLED;

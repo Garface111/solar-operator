@@ -1574,3 +1574,104 @@ export async function nepoolCommit(
     body: { assignments },
   });
 }
+
+// ─── verify accuracy ──────────────────────────────────────────────────────
+
+export interface VerificationCheck {
+  id: number;
+  tenant_id: string;
+  client_id: number;
+  array_id: number | null;
+  uploaded_filename: string;
+  uploaded_mime: string;
+  period_label: string;
+  status: "pending" | "confirmed" | "flagged";
+  operator_note: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export async function uploadVerification(
+  clientId: number,
+  periodLabel: string,
+  file: File,
+  arrayId?: number,
+): Promise<VerificationCheck> {
+  const token = getSession();
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("client_id", String(clientId));
+  fd.append("period_label", periodLabel);
+  if (arrayId !== undefined) fd.append("array_id", String(arrayId));
+
+  const res = await fetchWithTimeout("/v1/verification/upload", {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: fd,
+  });
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}
+
+export async function listVerifications(
+  clientId: number,
+): Promise<VerificationCheck[]> {
+  const res = await request<{ checks: VerificationCheck[] }>(
+    `/v1/verification?client_id=${clientId}`,
+  );
+  return res.checks;
+}
+
+export async function resolveVerification(
+  id: number,
+  status: "confirmed" | "flagged",
+  note?: string,
+): Promise<VerificationCheck> {
+  return request<VerificationCheck>(`/v1/verification/${id}/resolve`, {
+    method: "POST",
+    body: { status, ...(note ? { note } : {}) },
+  });
+}
+
+export async function fetchVerificationUploadedFile(id: number): Promise<Blob> {
+  const token = getSession();
+  const res = await fetchWithTimeout(`/v1/verification/${id}/uploaded-file`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.blob();
+}
+
+export async function fetchVerificationSoWorkbook(
+  id: number,
+): Promise<ArrayBuffer> {
+  const token = getSession();
+  const res = await fetchWithTimeout(`/v1/verification/${id}/so-workbook`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `SO workbook unavailable (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return res.arrayBuffer();
+}
