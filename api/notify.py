@@ -97,17 +97,23 @@ def send_workbook_email(to: str, subject: str, html: str, text: str,
     attachments = [{"filename": filename or p.name, "content": encoded}]
 
     # Wrap the operator's rendered body in the skin. The skin provides the brand
-    # header/footer; the operator's template HTML is the entire body content.
+    # header/footer + a visible attachment chip; the operator's template HTML
+    # is the entire body content.  Do NOT pass the subject as intro_line — the
+    # subject is already visible in the recipient's inbox row and repeating it
+    # as a subhead reads as a glitch (Ford Jun 8'26 fix).
     wrapped_html = render_email_skin(
         preheader="Your quarterly solar generation report is attached.",
         headline="Solar Operator",
-        intro_line=subject,
+        intro_line="",  # falls back to brand tagline
         body_html=html,
+        attachment_label=filename or p.name,
+        attachment_size_bytes=p.stat().st_size,
     )
     wrapped_text = render_email_skin_text(
         headline="Solar Operator",
-        intro_line=subject,
+        intro_line="",
         body_text=text,
+        attachment_label=filename or p.name,
     )
 
     ok = _send_via_resend(
