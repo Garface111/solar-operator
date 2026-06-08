@@ -27,7 +27,7 @@ export function TrialBanner({ trialEndsAt, hasPaymentMethod }: Props) {
   if (!hasPaymentMethod) {
     return (
       <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
-        <div className="mx-auto max-w-4xl">
+        <div className="mx-auto max-w-4xl text-center">
           <p className="text-sm text-amber-800">
             <span className="font-semibold">{daysLabel}</span>
             {" — add a card before "}
@@ -47,7 +47,7 @@ export function TrialBanner({ trialEndsAt, hasPaymentMethod }: Props) {
   // Card on file → informational sky banner (unchanged copy).
   return (
     <div className="border-b border-sky-200 bg-sky-50 px-4 py-2.5">
-      <div className="mx-auto max-w-4xl">
+      <div className="mx-auto max-w-4xl text-center">
         <p className="text-sm text-sky-800">
           <span className="font-semibold">{daysLabel}</span>
           {" — "}
