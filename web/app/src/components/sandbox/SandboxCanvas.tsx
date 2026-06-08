@@ -2241,6 +2241,19 @@ export default function SandboxCanvas() {
                 >
                   + Add Client
                 </button>
+                {/* Secondary path: drop a blank client card straight onto the
+                    canvas, no modal. Same effect as the modal's "Add manually"
+                    fallback. Ford Jun 8: operators who already know the
+                    client's name shouldn't have to detour through the login
+                    picker. */}
+                <button
+                  type="button"
+                  onClick={() => { void handleAddPlaceholderClient(); }}
+                  className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 shadow-sm ring-1 ring-zinc-200 transition-colors hover:bg-zinc-50 active:bg-zinc-100"
+                  title="Drop a blank client card on the canvas — fill in details after"
+                >
+                  + Blank Card
+                </button>
                 <LayoutModeControl layoutMode={layoutMode} onChange={handleLayoutModeChange} />
                 {layoutMode === 'sorted' && (
                   <SortKeyControl sortKey={sortKey} onChange={handleSortKeyChange} />
