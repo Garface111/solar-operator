@@ -188,6 +188,19 @@ export function SandboxWalkthrough({
     return () => clearTimeout(t);
   }, [step, go]);
 
+  // cta: if the operator clicks the very button the callout is pointing at
+  // (the toolbar Add Client button), dismiss the callout — otherwise the
+  // tooltip lingers awkwardly over the modal that just opened. Bruce Jun 8:
+  // reported tooltip stays even when you click "what it's suggesting".
+  useEffect(() => {
+    if (step !== 'cta') return;
+    const btn = document.querySelector('[data-walkthrough="add-client-btn"]');
+    if (!btn) return;
+    const onClick = () => markDone();
+    btn.addEventListener('click', onClick, { once: true });
+    return () => btn.removeEventListener('click', onClick);
+  }, [step, markDone]);
+
   // Bruce Jun 6: removed the auto-complete @ 3+ clients. The walkthrough is
   // now dismissed only by an explicit user gesture (the "Got it" button on
   // the loop step, or closing the callout). Otherwise a returning operator
