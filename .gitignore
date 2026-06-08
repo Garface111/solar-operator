@@ -12,3 +12,4 @@ web/app/node_modules
 
 # Stripe key bundles
 .stripe-keys-*.env
+dist/
