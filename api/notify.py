@@ -416,16 +416,18 @@ def send_trial_welcome_email(
     trial_end_iso_date: str,
     dashboard_url: str = "https://solaroperator.org/accounts",
 ) -> bool:
-    """Welcome email sent immediately after onboarding completes. Explains the
-    14-day trial and primes the operator to add clients and arrays."""
+    """Welcome email sent immediately after onboarding completes. No-card reality:
+    the trial is live with no payment method on file, so the copy primes the
+    operator to add clients/arrays and add a card whenever they're ready."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
     trial_end_escaped = _html.escape(trial_end_iso_date)
 
     body_html = (
         f"<p>Hi {first},</p>"
-        f"<p>You're all signed up. Your card won't be charged until "
-        f"<strong>{trial_end_escaped}</strong> — that's 14 days from today.</p>"
+        f"<p>Your 14-day trial is live — <strong>no card required.</strong> "
+        f"Add a payment method whenever you're ready, and we'll remind you a few "
+        f"days before the trial ends so reports keep flowing.</p>"
         f"<p>Two things to do while the trial runs so you're ready when reports start going out:</p>"
         f'<ol style="padding-left:20px;">'
         f'<li style="margin-bottom:12px;"><strong>Add your clients</strong> — '
@@ -434,30 +436,30 @@ def send_trial_welcome_email(
         f'<li style="margin-bottom:12px;"><strong>Add each client\'s NEPOOL arrays</strong> — '
         f"or sign into Green Mountain Power once and we'll auto-detect them.</li>"
         f"</ol>"
-        f"<p>If you haven't added any arrays by trial end, we'll extend your trial 3 more "
-        f"days. After that, if you still have zero arrays, we apply a one-array minimum "
-        f"($15/month) plus the $250 setup fee. Cancel anytime before then to avoid any "
-        f"charge — your card stays on file until you say otherwise.</p>"
+        f"<p>When your trial ends on <strong>{trial_end_escaped}</strong>, add a card "
+        f"from the Accounts tab to keep your reports going — it's $250 one-time setup "
+        f"plus $15/array/month. No card, no charge: we'll just pause reports and hold "
+        f"all your data until you're ready.</p>"
         f'<p style="margin-top:24px;color:#3a5a42;font-size:14px;">Questions? Just reply — a real person reads every email.</p>'
         f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"You're all signed up. Your card won't be charged until {trial_end_iso_date} "
-        f"— that's 14 days from today.\n\n"
+        f"Your 14-day trial is live — no card required. Add a payment method "
+        f"whenever you're ready, and we'll remind you a few days before the trial "
+        f"ends so reports keep flowing.\n\n"
         f"Two things to do while the trial runs so you're ready when reports start going out:\n\n"
         f"1. Add your clients — open your dashboard at {dashboard_url} and create a client "
         f"for each solar subscriber you manage.\n\n"
         f"2. Add each client's NEPOOL arrays — or sign into Green Mountain Power once "
         f"and we'll auto-detect them.\n\n"
-        f"If you haven't added any arrays by trial end, we'll extend your trial 3 more "
-        f"days. After that, if you still have zero arrays, we apply a one-array minimum "
-        f"($15/month) plus the $250 setup fee. Cancel anytime before then to avoid any "
-        f"charge — your card stays on file until you say otherwise.\n\n"
+        f"When your trial ends on {trial_end_iso_date}, add a card from the Accounts tab "
+        f"to keep your reports going — $250 one-time setup plus $15/array/month. No card, "
+        f"no charge: we'll just pause reports and hold all your data until you're ready.\n\n"
         f"Questions? Just reply — a real person reads every email.\n\n— Solar Operator"
     )
     html = render_email_skin(
-        preheader=f"Your Solar Operator trial has started — charge date {trial_end_iso_date}.",
+        preheader="Your Solar Operator trial has started — no card needed today.",
         headline="Solar Operator",
         intro_line="Welcome — your 14-day trial has started.",
         body_html=body_html,
@@ -472,6 +474,112 @@ def send_trial_welcome_email(
     return _send_via_resend(
         to=to,
         subject="Welcome to Solar Operator — your 14-day trial has started",
+        html=html,
+        text=text,
+    )
+
+
+def send_trial_paused_no_card_email(
+    to: str,
+    name: str,
+    dashboard_url: str = "https://solaroperator.org/accounts",
+) -> bool:
+    """Trial ended with no card on file — the account is paused (read-only).
+    Tell the operator nothing was deleted and how to resume."""
+    import html as _html
+    first = _html.escape((name or "there").split()[0])
+
+    body_html = (
+        f"<p>Hi {first},</p>"
+        f"<p>Your trial ended. Add a payment method from your dashboard to resume "
+        f"reports — we've held all your data, and <strong>nothing is deleted.</strong></p>"
+        f"<p>Until you add a card, your account is read-only: you can still see all "
+        f"your clients, arrays, and past reports, but we've paused sending new ones.</p>"
+        f'<p>Add a card from the <a href="{dashboard_url}" style="color:#047857;">Accounts '
+        f"tab</a> and your reports pick right back up — $250 one-time setup plus "
+        f"$15/array/month.</p>"
+        f"<p>Questions? Just reply — a real person reads every email.</p>"
+        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+    )
+    body_text = (
+        f"Hi {(name or 'there').split()[0]},\n\n"
+        f"Your trial ended. Add a payment method from your dashboard to resume reports. "
+        f"We've held all your data — nothing is deleted.\n\n"
+        f"Until you add a card, your account is read-only: you can still see everything, "
+        f"but we've paused sending new reports.\n\n"
+        f"Add a card from the Accounts tab at {dashboard_url} — $250 one-time setup plus "
+        f"$15/array/month — and your reports pick right back up.\n\n"
+        f"Questions? Just reply.\n\n— Solar Operator"
+    )
+    html = render_email_skin(
+        preheader="Your trial ended — add a card to resume reports. Nothing was deleted.",
+        headline="Add a card to resume reports",
+        intro_line="Your trial ended — we've held all your data.",
+        body_html=body_html,
+        cta={"label": "Add a payment method", "url": dashboard_url},
+    )
+    text = render_email_skin_text(
+        headline="Add a card to resume reports",
+        intro_line="Your trial ended — we've held all your data.",
+        body_text=body_text,
+        cta={"label": "Add a payment method", "url": dashboard_url},
+    )
+    return _send_via_resend(
+        to=to,
+        subject="Add a card to resume your Solar Operator reports",
+        html=html,
+        text=text,
+    )
+
+
+def send_trial_ending_no_card_reminder_email(
+    to: str,
+    name: str,
+    trial_end_date: str,
+    dashboard_url: str = "https://solaroperator.org/accounts",
+) -> bool:
+    """Sent ~3 days before a no-card trial ends. Nudge the operator to add a card
+    so reports don't pause when the trial expires."""
+    import html as _html
+    first = _html.escape((name or "there").split()[0])
+    end_escaped = _html.escape(trial_end_date)
+
+    body_html = (
+        f"<p>Hi {first},</p>"
+        f"<p>Your free trial ends on <strong>{end_escaped}</strong>. Add a card to "
+        f"keep your reports flowing — without one, we'll pause reports when the trial "
+        f"ends (your data stays safe, nothing is deleted).</p>"
+        f'<p>It takes a minute from the <a href="{dashboard_url}" style="color:#047857;">'
+        f"Accounts tab</a> — $250 one-time setup plus $15/array/month, charged when the "
+        f"trial ends.</p>"
+        f"<p>Questions? Just reply.</p>"
+        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+    )
+    body_text = (
+        f"Hi {(name or 'there').split()[0]},\n\n"
+        f"Your free trial ends on {trial_end_date}. Add a card to keep your reports "
+        f"flowing — without one, we'll pause reports when the trial ends (your data "
+        f"stays safe, nothing is deleted).\n\n"
+        f"Add a card from the Accounts tab at {dashboard_url} — $250 one-time setup plus "
+        f"$15/array/month, charged when the trial ends.\n\n"
+        f"Questions? Just reply.\n\n— Solar Operator"
+    )
+    html = render_email_skin(
+        preheader=f"Your trial ends {trial_end_date} — add a card to keep reports flowing.",
+        headline="Add a card to keep reports flowing",
+        intro_line=f"Your free trial ends on {trial_end_date}.",
+        body_html=body_html,
+        cta={"label": "Add a payment method", "url": dashboard_url},
+    )
+    text = render_email_skin_text(
+        headline="Add a card to keep reports flowing",
+        intro_line=f"Your free trial ends on {trial_end_date}.",
+        body_text=body_text,
+        cta={"label": "Add a payment method", "url": dashboard_url},
+    )
+    return _send_via_resend(
+        to=to,
+        subject="Add a card to keep your Solar Operator reports flowing",
         html=html,
         text=text,
     )

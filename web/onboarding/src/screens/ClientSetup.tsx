@@ -5,8 +5,8 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
-import { createCheckout, setToken } from "../lib/onboarding";
-import { SO_OPERATOR_KEY, type OperatorInfo } from "./Info";
+import { startOnboarding, setToken } from "../lib/onboarding";
+import { SO_OPERATOR_KEY, SO_OPERATOR_PASSWORD_KEY, type OperatorInfo } from "./Info";
 
 /**
  * Page 3 — Array count estimate + checkout handoff.
@@ -95,19 +95,29 @@ export default function ClientSetup() {
 
     setSubmitting(true);
     try {
-      const { checkout_url, onboarding_token } = await createCheckout({
+      // No card collected — start a live trial immediately. The password chosen
+      // on /info (if any) is hashed server-side here; it's also re-sent at
+      // /complete (Done.tsx), so we leave it stashed for that step.
+      let password: string | undefined;
+      try {
+        password = sessionStorage.getItem(SO_OPERATOR_PASSWORD_KEY) || undefined;
+      } catch {
+        /* sessionStorage may be locked down — password still set at /complete */
+      }
+      const { onboarding_token } = await startOnboarding({
         full_name: info.fullName,
         email: info.email,
         company: info.company,
+        password,
         array_count: count,
       });
       setToken(onboarding_token);
-      window.location.href = checkout_url;
+      navigate("/extension");
     } catch (err) {
       toast.error(
         err instanceof Error
           ? err.message
-          : "Couldn't reach checkout. Check your connection and try again.",
+          : "Couldn't start your trial. Check your connection and try again.",
       );
       setSubmitting(false);
     }
@@ -120,12 +130,12 @@ export default function ClientSetup() {
           About how many arrays do you manage?
         </h1>
         <p className="mt-2 text-sm text-zinc-500">
-          A ballpark is fine — we use it to set up your subscription pricing.
-          You won&apos;t be charged today; your free trial begins as soon as
-          you save your payment method. You&apos;ll add your real clients
-          and arrays in the dashboard, and the extension auto-populates most
-          of it when you log into your utility portal. We reconcile your
-          subscription quantity automatically as the real count comes in.
+          A ballpark is fine — we use it to set up your subscription. No payment
+          today; your 14-day free trial begins right now. You&apos;ll add your
+          real clients and arrays in the dashboard, and the extension
+          auto-populates most of it when you log into your utility portal. We
+          reconcile your subscription quantity automatically as the real count
+          comes in.
         </p>
 
         {/* Quick picks */}
@@ -181,18 +191,17 @@ export default function ClientSetup() {
           </div>
         </div>
 
-        {/* Billing breakdown — folded in from the deleted Plan screen.
-            In setup-mode checkout we collect the payment method only;
-            nothing is charged until trial_ends_at. */}
+        {/* Billing breakdown — no payment today. Nothing is collected at
+            signup; the operator adds a card later from the dashboard. */}
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 p-5 space-y-3">
           <div className="flex items-center justify-between text-sm font-semibold text-primary-800">
-            <span>Charged today</span>
-            <span>$0.00</span>
+            <span>After your trial</span>
+            <span>${SETUP_FEE + monthly}</span>
           </div>
           <p className="text-xs text-primary-700">
-            Your 14-day free trial starts the moment you save your card. Use
-            it to add your clients and arrays. We won&apos;t charge you until
-            the trial ends — and we&apos;ll email you a few days before that.
+            Your 14-day free trial starts right now — no payment today. Use it
+            to add your clients and arrays. We&apos;ll email you a few days
+            before the trial ends so you can add a card.
           </p>
           <div className="border-t border-primary-200 pt-3 space-y-2 text-xs text-primary-800">
             <div className="flex items-center justify-between">
@@ -212,6 +221,9 @@ export default function ClientSetup() {
             <p className="text-xs text-primary-700 pt-1">
               If you have zero arrays at trial end, a one-array minimum ($15) applies so your subscription stays active.
             </p>
+            <p className="text-xs text-primary-700 pt-1">
+              You&apos;ll add your card later from the dashboard.
+            </p>
           </div>
         </div>
 
@@ -223,10 +235,10 @@ export default function ClientSetup() {
             {submitting ? (
               <>
                 <Spinner />
-                Redirecting…
+                Starting…
               </>
             ) : (
-              "Save payment method & start free trial →"
+              "Start my free trial →"
             )}
           </Button>
         </div>
@@ -238,9 +250,10 @@ export default function ClientSetup() {
         <p className="mt-2 text-xs text-zinc-400">
           Not sure yet? Pick the closest estimate — your subscription
           quantity reconciles automatically once your real arrays are set
-          up in the dashboard. You won&apos;t be charged anything today and
-          you won&apos;t be charged extra later without notice. Card details
-          are stored securely by Stripe — we never see them.
+          up in the dashboard. No payment today, and you won&apos;t be charged
+          later without notice. You&apos;ll add your card from the dashboard
+          when you&apos;re ready; it&apos;s stored securely by Stripe — we never
+          see it.
         </p>
       </Card>
     </ScreenLayout>

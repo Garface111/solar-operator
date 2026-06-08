@@ -9,6 +9,7 @@ import {
   getBillingSummary,
   getNextInvoice,
   getBillingPortalUrl,
+  addPaymentMethod,
 } from "../../lib/api";
 import { relativeTime, nextReportDate, fmtMoney } from "./utils";
 
@@ -21,6 +22,7 @@ export function PlanBillingCard({ account }: Props) {
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [nextInvoice, setNextInvoice] = useState<NextInvoice | null>(null);
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [addingCard, setAddingCard] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +59,24 @@ export function PlanBillingCard({ account }: Props) {
     }
   }
 
+  async function startAddCard() {
+    setAddingCard(true);
+    try {
+      await addPaymentMethod(); // redirects to Stripe Checkout (setup mode)
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't open the add-card page",
+      );
+      setAddingCard(false);
+    }
+  }
+
+  // No-upfront-payment: a live trial can have no card yet, and a trial that
+  // ended card-less is paused (read-only). billing.has_payment_method is the
+  // source of truth; fall back to false while billing is still loading.
+  const hasCard = billing?.has_payment_method ?? false;
+  const isPaused = account.subscription_status === "paused_no_card";
+
   const nextReport = nextReportDate(account.report_frequency);
   const nextPullAt = account.last_pull_at
     ? new Date(new Date(account.last_pull_at).getTime() + 6 * 60 * 60 * 1000)
@@ -87,6 +107,61 @@ export function PlanBillingCard({ account }: Props) {
                 Reports will continue while we retry. Click &quot;Manage billing&quot; below
                 to update your payment method.
               </p>
+            </div>
+          )}
+
+          {/* Paused (trial ended, no card) — amber banner with a primary CTA. */}
+          {isPaused && (
+            <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+              <p className="text-sm font-semibold text-amber-900">
+                Trial ended. Add a card to resume reports.
+              </p>
+              <p className="mt-0.5 text-xs text-amber-800">
+                Your account is read-only until a card is on file. We&apos;ve held all
+                your data — nothing is deleted.
+              </p>
+              <button
+                type="button"
+                onClick={startAddCard}
+                disabled={addingCard}
+                className="mt-3 inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-60"
+              >
+                {addingCard ? (
+                  <>
+                    <Spinner />
+                    Opening…
+                  </>
+                ) : (
+                  "Add card →"
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Live (trialing/active) but no card yet — gentle add-payment CTA. */}
+          {!isPaused && billing && !hasCard && (
+            <div className="mt-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3">
+              <p className="text-sm font-medium text-primary-900">
+                No payment method on file yet.
+              </p>
+              <p className="mt-0.5 text-xs text-primary-800">
+                Add a card so your reports keep flowing when your trial ends.
+              </p>
+              <button
+                type="button"
+                onClick={startAddCard}
+                disabled={addingCard}
+                className="mt-3 inline-flex items-center gap-2 rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-700 disabled:opacity-60"
+              >
+                {addingCard ? (
+                  <>
+                    <Spinner />
+                    Opening…
+                  </>
+                ) : (
+                  "Add payment method →"
+                )}
+              </button>
             </div>
           )}
         </div>
@@ -171,23 +246,27 @@ export function PlanBillingCard({ account }: Props) {
           </ul>
         </div>
 
-        {/* Billing portal CTA */}
-        <div className="border-t border-cream-border px-5 py-4">
-          <Button
-            variant="secondary"
-            onClick={openBillingPortal}
-            disabled={openingPortal}
-          >
-            {openingPortal ? (
-              <>
-                <Spinner />
-                Opening…
-              </>
-            ) : (
-              "Manage billing →"
-            )}
-          </Button>
-        </div>
+        {/* Billing portal CTA — only meaningful once a card is on file. The
+            Stripe billing portal requires a customer with a payment method, so
+            we hide it until then and surface the add-card CTA above instead. */}
+        {hasCard && (
+          <div className="border-t border-cream-border px-5 py-4">
+            <Button
+              variant="secondary"
+              onClick={openBillingPortal}
+              disabled={openingPortal}
+            >
+              {openingPortal ? (
+                <>
+                  <Spinner />
+                  Opening…
+                </>
+              ) : (
+                "Manage billing →"
+              )}
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

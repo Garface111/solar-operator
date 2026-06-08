@@ -93,11 +93,49 @@ def _fire_checkout_webhook(client, onboarding_token, event_id="evt_test_1"):
     return resp.json()
 
 
-# ─── (a) checkout creates a pending tenant ───────────────────────────────
+# ─── (start) no-upfront-payment signup creates a live trial ──────────────
 
-def test_checkout_creates_pending_tenant(client, mocks):
+def test_start_creates_trialing_tenant_no_stripe(client, mocks, monkeypatch):
+    """POST /v1/onboarding/start creates a live, trialing tenant with
+    trial_ends_at set and NO Stripe calls."""
+    # Blow up if anyone tries to hit Stripe Checkout from the no-card flow.
+    def _boom(**kwargs):
+        raise AssertionError("start must not call Stripe Checkout")
+    monkeypatch.setattr(onboarding.stripe.checkout.Session, "create", _boom)
+
+    resp = client.post("/v1/onboarding/start", json={
+        "email": "start@example.com",
+        "full_name": "Stella Start",
+        "company": "Start Solar",
+        "array_count": 7,
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    token = body["onboarding_token"]
+    assert token and len(token) >= 30
+    assert body["tenant_id"].startswith("ten_")
+
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.onboarding_token == token)
+        ).scalar_one()
+        assert t.active is True
+        assert t.subscription_status == "trialing"
+        assert t.onboarding_stage == "extension"
+        assert t.trial_ends_at is not None
+        assert t.stripe_customer_id is None
+        assert t.stripe_payment_method_id is None
+        assert t.onboarding_array_estimate == 7
+        assert t.contact_email == "start@example.com"
+
+
+# ─── (a) checkout shim now creates a live trial (no card) ────────────────
+
+def test_checkout_shim_creates_trialing_tenant(client, mocks):
+    """The deprecated /checkout shim mirrors /start: a live trialing tenant,
+    checkout_url=None (no Stripe Checkout to redirect to)."""
     body = _do_checkout(client, email="a@example.com")
-    assert body["checkout_url"].startswith("https://checkout.stripe.test/")
+    assert body["checkout_url"] is None
     token = body["onboarding_token"]
     assert token and len(token) >= 30
 
@@ -105,9 +143,10 @@ def test_checkout_creates_pending_tenant(client, mocks):
         t = db.execute(
             select(Tenant).where(Tenant.onboarding_token == token)
         ).scalar_one()
-        assert t.active is False
-        assert t.onboarding_stage == "pending_payment"
-        assert t.subscription_status == "pending"
+        assert t.active is True
+        assert t.onboarding_stage == "extension"
+        assert t.subscription_status == "trialing"
+        assert t.trial_ends_at is not None
         assert t.contact_email == "a@example.com"
 
 
@@ -118,10 +157,12 @@ def test_status_returns_stage(client, mocks):
     resp = client.get("/v1/onboarding/status", params={"token": token})
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["stage"] == "pending_payment"
-    assert data["active"] is False
-    assert data["activation_code"] is None  # not active yet
-    assert data["clients_count"] == 0
+    # No-upfront-payment: the tenant is live the moment signup starts.
+    assert data["stage"] == "extension"
+    assert data["active"] is True
+    assert data["activation_code"] is not None
+    # A "Your first client" placeholder is seeded at activation (now signup-time).
+    assert data["clients_count"] == 1
 
 
 def test_status_unknown_token_404(client, mocks):
@@ -329,19 +370,15 @@ def _fake_paid_session(token, *, paid=True, customer="cus_heal", sub="sub_heal")
     }
 
 
-def test_reconcile_activates_pending_tenant(client, mocks, monkeypatch):
-    """Webhook lag: tenant still pending, but the Checkout session is paid →
-    reconcile flips it active and advances to the extension stage."""
+def test_reconcile_is_noop_for_active_tenant(client, mocks, monkeypatch):
+    """No-upfront-payment: tenants are active from signup, so reconcile-checkout
+    is a harmless no-op — it just echoes the live state (stale extension popups
+    still call it; never 500/402 them)."""
     token = _do_checkout(client, email="heal@example.com")["onboarding_token"]
-    # NOTE: deliberately do NOT fire the webhook — simulate it lagging.
 
-    monkeypatch.setattr(
-        onboarding.stripe.checkout.Session, "retrieve",
-        lambda sid: _fake_paid_session(token),
-    )
-
+    # Even without a session_id (the stale-popup case), it must not error.
     resp = client.post("/v1/onboarding/reconcile-checkout",
-                       params={"token": token, "session_id": "cs_test_heal"})
+                       params={"token": token})
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["active"] is True
@@ -349,89 +386,13 @@ def test_reconcile_activates_pending_tenant(client, mocks, monkeypatch):
     assert data["activation_code"] is not None
 
 
-def test_reconcile_idempotent_when_unpaid(client, mocks, monkeypatch):
-    """Unpaid session → no activation, but never an error: returns pending."""
-    token = _do_checkout(client, email="unpaid@example.com")["onboarding_token"]
-    monkeypatch.setattr(
-        onboarding.stripe.checkout.Session, "retrieve",
-        lambda sid: _fake_paid_session(token, paid=False),
-    )
-    resp = client.post("/v1/onboarding/reconcile-checkout",
-                       params={"token": token, "session_id": "cs_test_heal"})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["active"] is False
-    assert resp.json()["stage"] == "pending_payment"
-
-
-def test_reconcile_rejects_session_for_other_token(client, mocks, monkeypatch):
-    """A session_id whose metadata token doesn't match must not activate us."""
-    token = _do_checkout(client, email="victim@example.com")["onboarding_token"]
-    monkeypatch.setattr(
-        onboarding.stripe.checkout.Session, "retrieve",
-        lambda sid: _fake_paid_session("someone-elses-token"),
-    )
-    resp = client.post("/v1/onboarding/reconcile-checkout",
-                       params={"token": token, "session_id": "cs_test_heal"})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["active"] is False
-
-
-def test_extension_installed_self_heals_instead_of_402(client, mocks, monkeypatch):
-    """Clicking 'I've installed it' while pending must self-heal with a paid
-    session_id rather than 402 a paying customer."""
+def test_extension_installed_advances_without_payment(client, mocks):
+    """No-upfront-payment: 'I've installed it' just advances extension→clients;
+    there is no payment gate (no 402)."""
     token = _do_checkout(client, email="click@example.com")["onboarding_token"]
-    monkeypatch.setattr(
-        onboarding.stripe.checkout.Session, "retrieve",
-        lambda sid: _fake_paid_session(token),
-    )
     resp = client.post(
         "/v1/onboarding/extension-installed",
-        params={"token": token, "session_id": "cs_test_heal"},
+        params={"token": token},
     )
     assert resp.status_code == 200, resp.text
-    # Advanced past extension since we healed from pending in one shot.
     assert resp.json()["stage"] == "clients"
-
-
-# ─── (g) checkout session includes custom_text for pricing disclosure (#2) ─
-
-def test_checkout_session_has_custom_text(client, monkeypatch):
-    """Stripe checkout session must include non-empty custom_text so operators
-    see a pricing disclosure at the card-entry step."""
-    captured: list[dict] = []
-
-    def fake_session_create(**kwargs):
-        captured.append(kwargs)
-        return SimpleNamespace(
-            url="https://checkout.stripe.test/cs_custom_text",
-            metadata=kwargs.get("metadata", {}),
-        )
-
-    monkeypatch.setattr(onboarding.stripe.checkout.Session, "create", fake_session_create)
-    monkeypatch.setattr(onboarding, "STRIPE_SECRET_KEY", "sk_test_dummy")
-    monkeypatch.setattr(onboarding, "send_welcome_email", lambda **kw: True)
-    monkeypatch.setattr(onboarding, "send_internal_alert", lambda *a, **k: True)
-
-    resp = client.post("/v1/onboarding/checkout", json={
-        "email": "ct@example.com",
-        "full_name": "Custom Text Operator",
-        "array_count": 4,
-    })
-    assert resp.status_code == 200, resp.text
-    assert captured, "stripe.checkout.Session.create was not called"
-
-    kwargs = captured[0]
-    ct = kwargs.get("custom_text")
-    assert ct, "custom_text must be set on the Stripe checkout session"
-    # after_submit.message must mention pricing
-    msg = (ct.get("after_submit") or {}).get("message", "")
-    assert msg, "custom_text.after_submit.message must be non-empty"
-    assert "$250" in msg or "250" in msg, "custom_text must mention the $250 setup fee"
-
-
-def test_extension_installed_still_402s_without_paid_session(client, mocks):
-    """No session_id and still pending → the 402 guard stays intact."""
-    token = _do_checkout(client, email="nopay@example.com")["onboarding_token"]
-    resp = client.post("/v1/onboarding/extension-installed",
-                       params={"token": token})
-    assert resp.status_code == 402

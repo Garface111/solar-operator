@@ -71,11 +71,6 @@ async function parseError(res: Response): Promise<string> {
   return `Request failed (${res.status})`;
 }
 
-export interface CheckoutResponse {
-  checkout_url: string;
-  onboarding_token: string;
-}
-
 export interface ArraySeedPayload {
   name: string;
   nepool_gis_id?: string;
@@ -88,22 +83,55 @@ export interface ClientSeedPayload {
   arrays: ArraySeedPayload[];
 }
 
-export async function createCheckout(body: {
+export interface StartResponse {
+  onboarding_token: string;
+  tenant_id: string;
+}
+
+/**
+ * No-upfront-payment signup. Creates a live, trialing tenant — no card is
+ * collected. The 14-day trial starts immediately; the operator adds a payment
+ * method later from the dashboard. Replaces the old createCheckout() →
+ * Stripe-Checkout redirect.
+ */
+export async function startOnboarding(body: {
   email: string;
   full_name: string;
   company: string;
-  /** Path A: pre-entered clients+arrays; quantity = total arrays across all clients. */
-  clients?: ClientSeedPayload[];
-  /** Path B: operator estimate; quantity syncs to reality when real arrays are added. */
+  /** Optional: password chosen on /info, hashed server-side. */
+  password?: string;
+  /** Operator's array estimate; quantity syncs to reality when real arrays are added. */
   array_count?: number;
-}): Promise<CheckoutResponse> {
-  const res = await fetchWithTimeout("/v1/onboarding/checkout", {
+}): Promise<StartResponse> {
+  const res = await fetchWithTimeout("/v1/onboarding/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
+}
+
+export interface CheckoutResponse {
+  /** Always null now — no card is collected at signup. */
+  checkout_url: string | null;
+  onboarding_token: string;
+  tenant_id?: string;
+}
+
+/**
+ * @deprecated Card collection was removed from signup. Thin wrapper around
+ * startOnboarding() kept only for any stale caller; returns checkout_url=null.
+ * ClientSetup now calls startOnboarding() directly.
+ */
+export async function createCheckout(body: {
+  email: string;
+  full_name: string;
+  company: string;
+  array_count?: number;
+}): Promise<CheckoutResponse> {
+  const { onboarding_token, tenant_id } = await startOnboarding(body);
+  return { checkout_url: null, onboarding_token, tenant_id };
 }
 
 export interface ExtensionPing {

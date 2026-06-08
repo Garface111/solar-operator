@@ -11,12 +11,102 @@ import os
 import logging
 
 import stripe
+from sqlalchemy import func, select
 
 from .notify import send_internal_alert
 
 logger = logging.getLogger(__name__)
 
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
+
+
+def create_subscription_for_tenant(tenant_id: str) -> dict:
+    """Create the live Stripe subscription for a tenant that has a card on file.
+
+    Builds the subscription items (one-time setup fee + per-array line at the
+    current billable array count, minimum 1) on the tenant's stored payment
+    method, then flips the tenant to active/'active' and clears the trial clock.
+
+    Shared by:
+      - account.resume-from-pause (operator-/webhook-driven resume after a
+        'paused_no_card' tenant adds a card)
+    Reads price IDs from the environment at call time (so tests can monkeypatch
+    via env). Returns {"ok": bool, ...}. Never raises — surfaces failures via an
+    internal alert and an {"ok": False, "error": ...} payload so callers (and the
+    webhook) don't 500.
+    """
+    # Deferred imports avoid a circular dependency (db/models ← account ← helpers).
+    from .db import SessionLocal
+    from .models import Tenant, Array
+
+    setup_price_id = os.getenv("STRIPE_SETUP_PRICE_ID", "")
+    array_price_id = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        return {"ok": False, "error": "stripe-not-configured"}
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            return {"ok": False, "error": "tenant-not-found"}
+        if not t.stripe_payment_method_id or not t.stripe_customer_id:
+            return {"ok": False, "error": "no-payment-method"}
+        if t.stripe_subscription_id:
+            # Already has a live subscription — nothing to create. Idempotent.
+            return {"ok": True, "subscription_id": t.stripe_subscription_id,
+                    "already_active": True}
+        array_count = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
+        ).scalar() or 0
+        customer_id = t.stripe_customer_id
+        pm_id = t.stripe_payment_method_id
+        email = t.contact_email
+
+    quantity = max(int(array_count), 1)
+    items: list[dict] = []
+    if setup_price_id:
+        items.append({"price": setup_price_id, "quantity": 1})
+    if array_price_id:
+        items.append({"price": array_price_id, "quantity": quantity})
+
+    try:
+        sub = stripe.Subscription.create(
+            customer=customer_id,
+            items=items if items else None,
+            default_payment_method=pm_id,
+        )
+        sub_dict = sub.to_dict() if hasattr(sub, "to_dict") else sub
+        sub_id = sub_dict["id"]
+    except Exception as e:  # noqa: BLE001 — never 500 the caller / webhook
+        logger.exception("create_subscription_for_tenant failed for %s", tenant_id)
+        send_internal_alert(
+            f"⚠️ Resume subscription FAILED: {tenant_id}",
+            f"Tenant {tenant_id} ({email}) added a card but creating the "
+            f"subscription failed: {e}\nArrays: {array_count}, pm: {pm_id}. "
+            f"Fix manually in the Stripe dashboard."
+        )
+        return {"ok": False, "error": str(e)}
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if t:
+            t.stripe_subscription_id = sub_id
+            t.subscription_status = "active"
+            t.active = True
+            t.trial_ends_at = None
+            db.commit()
+
+    send_internal_alert(
+        f"✅ Subscription resumed: {tenant_id}",
+        f"Tenant {tenant_id} ({email}) added a card and resumed. "
+        f"Arrays: {array_count}, billed qty: {quantity}. Subscription: {sub_id}"
+    )
+    return {"ok": True, "subscription_id": sub_id, "array_count": int(array_count),
+            "quantity": quantity}
 
 
 def reconcile_subscription_quantity(

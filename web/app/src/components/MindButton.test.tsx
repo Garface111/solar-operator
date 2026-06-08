@@ -36,6 +36,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
     extension_heartbeat_at: null,
     created_at: null,
     trial_ends_at: null,
+    has_payment_method: false,
     accounts_count: 0,
     bills_count: 0,
     clients_count: 0,

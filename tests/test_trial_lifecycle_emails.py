@@ -123,16 +123,19 @@ def test_trial_welcome_body_contains_two_ctas(monkeypatch):
     assert "NEPOOL" in html or "Green Mountain Power" in html
 
 
-def test_trial_welcome_body_zero_array_grace_copy(monkeypatch):
-    """Copy must match ToS: 3-day grace extension, then one-array minimum + setup fee."""
+def test_trial_welcome_body_no_card_copy(monkeypatch):
+    """No-upfront-payment: the welcome email must reflect the no-card reality —
+    trial is live with no card required, and a card-less trial-end pauses (holds
+    data) rather than charging. Pricing is still disclosed."""
     sent = _capture_resend(monkeypatch)
     from api.notify import send_trial_welcome_email
     send_trial_welcome_email(to="op@example.com", name="Bob Operator",
                              trial_end_iso_date="June 20, 2026")
-    combined = sent[0]["html"] + sent[0]["text"]
-    assert "$250 setup" in combined or "$250" in combined
-    assert "one-array minimum" in combined
-    assert "3 more days" in combined
+    combined = (sent[0]["html"] + sent[0]["text"]).lower()
+    assert "$250" in combined  # pricing still disclosed
+    assert "no card required" in combined
+    assert "pause" in combined  # no charge without a card — we pause + hold data
+    assert "june 20, 2026" in combined  # the trial end date
 
 
 def test_trial_welcome_returns_true_on_success(monkeypatch):

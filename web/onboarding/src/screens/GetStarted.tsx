@@ -105,7 +105,7 @@ export default function GetStarted() {
       </div>
 
       <p className="mt-3 text-center text-sm text-zinc-500">
-        Start free — 14-day trial, cancel anytime before your card is charged
+        Start free — 14-day trial, no card required
       </p>
 
       <p className="mt-2 text-center text-xs text-zinc-400">

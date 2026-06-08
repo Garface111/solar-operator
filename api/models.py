@@ -112,8 +112,10 @@ class Tenant(Base):
     # onboarding_token is a 32-char random string handed to the SPA + passed as
     # Stripe metadata so the post-payment return path can find the pending tenant.
     onboarding_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    onboarding_stage: Mapped[str] = mapped_column(String(20), default="pending_payment")
-    # pending_payment | extension | clients | done
+    onboarding_stage: Mapped[str] = mapped_column(String(20), default="extension")
+    # extension | clients | done
+    # (Was 'pending_payment' pre no-upfront-payment — operators are now in a live
+    # trial the moment they finish signup, so there is no pre-payment stage.)
     onboarding_array_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Array count entered at signup (Path A: sum of array entries; Path B:
     # operator's numeric estimate). NULL for tenants who pre-date this field.

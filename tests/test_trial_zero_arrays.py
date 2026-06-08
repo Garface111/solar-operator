@@ -15,7 +15,8 @@ from api.db import SessionLocal
 from api.models import Tenant, now
 
 
-def _make_trialing_tenant(email: str, trial_extended: bool = False) -> str:
+def _make_trialing_tenant(email: str, trial_extended: bool = False,
+                          pm_id: str | None = "pm_zero_test") -> str:
     import secrets
     tid = "ten_zero_" + secrets.token_hex(4)
     with SessionLocal() as db:
@@ -28,7 +29,7 @@ def _make_trialing_tenant(email: str, trial_extended: bool = False) -> str:
             active=True,
             subscription_status="trialing",
             stripe_customer_id="cus_zero_test",
-            stripe_payment_method_id="pm_zero_test",
+            stripe_payment_method_id=pm_id,
             trial_ends_at=datetime.utcnow() - timedelta(hours=1),
             trial_extended=trial_extended,
             created_at=now(),
@@ -93,6 +94,55 @@ def test_second_run_bills_minimum_when_still_no_arrays(monkeypatch):
         if item.get("price") == "price_array":
             assert item["quantity"] >= 1
     assert mock_charged.called
+
+
+def test_zero_arrays_no_card_still_extends_first(monkeypatch):
+    """No-upfront-payment: the zero-arrays grace check runs BEFORE the no-card
+    check. So a card-less operator with zero arrays still gets the 3-day
+    extension on the first run — not an immediate pause."""
+    tid = _make_trialing_tenant("zero_nocard@example.com",
+                                trial_extended=False, pm_id=None)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
+
+    with patch("api.scheduler.stripe") as mock_stripe, \
+         patch("api.scheduler.send_add_first_array_email") as mock_add_email, \
+         patch("api.scheduler.send_trial_paused_no_card_email") as mock_paused, \
+         patch("api.scheduler.send_internal_alert"):
+        import api.scheduler as sched
+        sched.finalize_expired_trials()
+        mock_stripe.Subscription.create.assert_not_called()
+        assert mock_add_email.called          # got the 3-day extension email
+        mock_paused.assert_not_called()        # NOT paused yet
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert t.subscription_status == "trialing"  # still trialing
+        assert t.trial_extended is True
+        assert t.active is True
+
+
+def test_zero_arrays_no_card_pauses_after_extension(monkeypatch):
+    """Second run: already extended, still zero arrays, still no card → pause
+    (the no-card check now applies since the zero-arrays grace is spent)."""
+    tid = _make_trialing_tenant("zero_nocard2@example.com",
+                                trial_extended=True, pm_id=None)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
+
+    with patch("api.scheduler.stripe") as mock_stripe, \
+         patch("api.scheduler.send_add_first_array_email") as mock_add_email, \
+         patch("api.scheduler.send_trial_paused_no_card_email") as mock_paused, \
+         patch("api.scheduler.send_internal_alert"):
+        import api.scheduler as sched
+        sched.finalize_expired_trials()
+        mock_stripe.Subscription.create.assert_not_called()
+        mock_add_email.assert_not_called()
+        assert mock_paused.called
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert t.subscription_status == "paused_no_card"
+        assert t.active is False
+        assert t.trial_ends_at is None
 
 
 def test_first_run_does_not_extend_when_already_extended(monkeypatch):

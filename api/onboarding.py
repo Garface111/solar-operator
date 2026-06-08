@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import secrets
 import logging
+from datetime import timedelta
 from typing import Optional
 
 import stripe
@@ -137,8 +138,27 @@ class CheckoutRequest(BaseModel):
 
 
 class CheckoutResponse(BaseModel):
-    checkout_url: str
+    # checkout_url is now always None (no card is collected at signup). Kept in
+    # the response shape so any stale wizard bundle still in a browser tab can
+    # deserialize the response without crashing.
+    checkout_url: Optional[str] = None
     onboarding_token: str
+    tenant_id: Optional[str] = None
+
+
+class StartRequest(BaseModel):
+    """No-upfront-payment signup. No card is collected — the operator drops
+    straight into a 14-day trial and adds a card later from the dashboard."""
+    email: EmailStr
+    full_name: str = Field(..., min_length=2, max_length=120)
+    company: Optional[str] = Field(None, max_length=200)
+    password: Optional[str] = None
+    array_count: Optional[int] = Field(None, ge=1)
+
+
+class StartResponse(BaseModel):
+    onboarding_token: str
+    tenant_id: str
 
 
 class ArrayInput(BaseModel):
@@ -215,36 +235,28 @@ def _line_items(quantity: int = 1) -> list[dict]:
     ]
 
 
-# ─── 1. checkout ─────────────────────────────────────────────────────────
+# ─── 1. start (no-upfront-payment signup) ────────────────────────────────
 
-@router.post("/checkout", response_model=CheckoutResponse)
-def checkout(req: CheckoutRequest):
-    """Create a pending tenant + Stripe Checkout session.
+def _create_trial_tenant(
+    *, email: str, full_name: str, company: Optional[str],
+    password: Optional[str], array_count: Optional[int],
+) -> tuple[str, str]:
+    """Create a live, trialing tenant — no card, no Stripe call.
 
-    The tenant is inactive (active=False, stage='pending_payment') until the
-    Stripe webhook fires on `checkout.session.completed`. The onboarding_token
-    is returned to the SPA AND embedded in Stripe metadata so the webhook /
-    return path can find this exact pending tenant.
+    The operator is `active=True` and `subscription_status='trialing'` the
+    moment they finish signup, with a 14-day trial clock. They add a card later
+    from the dashboard (see account.add_payment_method). Returns
+    (onboarding_token, tenant_id).
+
+    Raises HTTPException(409) if an active tenant already owns the email, or
+    HTTPException(400) if a supplied password is too weak.
     """
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(500, "Stripe is not configured on this server")
+    email = email.lower().strip()
+    display_name = (company or full_name).strip()[:200]
 
-    email = req.email.lower().strip()
-    display_name = (req.company or req.full_name).strip()[:200]
-
-    # N4: derive Stripe line-item quantity from pre-entered clients (Path A) or
-    # operator estimate (Path B). Old SPA builds send neither → quantity=1.
-    # onboarding_estimate is persisted on the Tenant row for the "all set?" check.
-    if req.clients is not None:
-        _raw_count = sum(len(c.arrays) for c in req.clients)
-        quantity = max(1, _raw_count)
-        onboarding_estimate: int | None = _raw_count
-    elif req.array_count is not None:
-        quantity = max(1, req.array_count)
-        onboarding_estimate = req.array_count
-    else:
-        quantity = 1
-        onboarding_estimate = None
+    # Validate the password up front so a weak one 400s before we touch the DB.
+    if password:
+        _validate_password_strength(password)
 
     tenant_id = gen_tenant_id()
     tenant_key = gen_tenant_key()
@@ -261,93 +273,80 @@ def checkout(req: CheckoutRequest):
 
         t = Tenant(
             id=tenant_id, name=display_name, contact_email=email,
-            operator_name=req.full_name.strip()[:120],
-            company_name=(req.company or req.full_name).strip()[:200],
-            tenant_key=tenant_key, plan="standard", active=False, created_at=now(),
-            subscription_status="pending",
+            operator_name=full_name.strip()[:120],
+            company_name=(company or full_name).strip()[:200],
+            tenant_key=tenant_key, plan="standard", active=True, created_at=now(),
+            subscription_status="trialing",
+            trial_ends_at=now() + timedelta(days=14),
             onboarding_token=onboarding_token,
-            onboarding_stage="pending_payment",
-            onboarding_array_estimate=onboarding_estimate,
+            onboarding_stage="extension",
+            onboarding_array_estimate=array_count,
+            # No card on file yet — these stay NULL until the operator adds a
+            # payment method from the dashboard.
+            stripe_customer_id=None,
+            stripe_payment_method_id=None,
+            stripe_subscription_id=None,
         )
+        if password:
+            t.password_hash = _hash_password(password)
         db.add(t)
-
-        # Path A: persist clients + arrays before payment so the Stripe quantity
-        # matches the real count from the moment the subscription is created.
-        # Cascade delete on Tenant handles cleanup if Stripe session creation fails.
-        if req.clients:
-            for ci in req.clients:
-                cname = ci.name.strip()
-                if not cname:
-                    continue
-                c = Client(
-                    tenant_id=tenant_id,
-                    name=cname,
-                    contact_email=ci.contact_email,
-                    # Default GMP+VEC autopop ON — operator's first portal
-                    # login populates arrays without an extra opt-in step.
-                    gmp_autopopulate=True,
-                    vec_autopopulate=True,
-                    active=True,
-                )
-                db.add(c)
-                db.flush()  # get c.id for the Array FK
-                for ai in ci.arrays:
-                    aname = ai.name.strip()
-                    if aname:
-                        db.add(Array(
-                            tenant_id=tenant_id,
-                            client_id=c.id,
-                            name=aname,
-                            nepool_gis_id=ai.nepool_gis_id,
-                            bill_offset_months=(
-                                ai.bill_offset_months
-                                if ai.bill_offset_months is not None else 1
-                            ),
-                        ))
-
+        db.flush()
+        # Seed the "Your first client" placeholder so the dashboard has somewhere
+        # to anchor the first-visit walkthrough and autopop has a target. Real
+        # clients entered later (onboarding /clients) delete this placeholder.
+        ensure_placeholder_client(db, tenant_id)
         db.commit()
 
-    try:
-        session = stripe.checkout.Session.create(
-            mode="setup",
-            payment_method_types=["card"],
-            customer_email=email,
-            custom_text={
-                "after_submit": {
-                    "message": (
-                        "You won't be charged today — Solar Operator will charge "
-                        f"$250 (one-time setup) + $15/array/month at trial end."
-                    ),
-                },
-            },
-            setup_intent_data={
-                "metadata": {
-                    "onboarding_token": onboarding_token,
-                    "tenant_id": tenant_id,
-                },
-            },
-            success_url=(
-                f"{PUBLIC_ONBOARDING_URL}/extension"
-                f"?onboarding_token={onboarding_token}"
-                f"&session_id={{CHECKOUT_SESSION_ID}}"
-            ),
-            cancel_url=f"{PUBLIC_ONBOARDING_URL}/info?cancelled=1",
-            metadata={
-                "onboarding_token": onboarding_token,
-                "tenant_id": tenant_id,
-                "name": req.full_name,
-                "company": req.company or "",
-            },
-        )
-    except stripe.error.StripeError as e:
-        # Roll back the orphaned pending tenant
-        with SessionLocal() as db:
-            t = db.get(Tenant, tenant_id)
-            if t:
-                db.delete(t); db.commit()
-        raise HTTPException(502, f"Stripe error: {str(e)}")
+    return onboarding_token, tenant_id
 
-    return CheckoutResponse(checkout_url=session.url, onboarding_token=onboarding_token)
+
+@router.post("/start", response_model=StartResponse)
+def start(req: StartRequest):
+    """Begin onboarding with NO upfront payment.
+
+    Creates a live, trialing tenant and returns its onboarding token. No card is
+    collected — the 14-day trial starts immediately and the operator adds a
+    payment method later from the Accounts tab.
+    """
+    onboarding_token, tenant_id = _create_trial_tenant(
+        email=req.email, full_name=req.full_name, company=req.company,
+        password=req.password, array_count=req.array_count,
+    )
+    send_internal_alert(
+        "🌞 New trial started (no card)",
+        f"Tenant {tenant_id} ({req.email.lower().strip()}) started a 14-day "
+        f"trial. No card on file. Array estimate: {req.array_count}."
+    )
+    return StartResponse(onboarding_token=onboarding_token, tenant_id=tenant_id)
+
+
+# ─── 1b. checkout (DEPRECATED shim) ──────────────────────────────────────
+
+@router.post("/checkout", response_model=CheckoutResponse)
+def checkout(req: CheckoutRequest):
+    """DEPRECATED. Card collection was removed from signup (no-upfront-payment).
+
+    Kept mounted only so a stale wizard bundle still open in a browser tab
+    doesn't crash mid-signup. Does the same tenant creation as /start and
+    returns checkout_url=None — there is no Stripe Checkout to redirect to.
+    """
+    logger.warning(
+        "DEPRECATED /v1/onboarding/checkout called (use /v1/onboarding/start). "
+        "email=%s", req.email,
+    )
+    # Old Path A bundles sent pre-entered clients; Path B sent array_count.
+    # We only need the count now (real clients are added post-signup).
+    if req.clients is not None:
+        array_count: Optional[int] = sum(len(c.arrays) for c in req.clients) or None
+    else:
+        array_count = req.array_count
+
+    onboarding_token, tenant_id = _create_trial_tenant(
+        email=req.email, full_name=req.full_name, company=req.company,
+        password=None, array_count=array_count,
+    )
+    return CheckoutResponse(
+        checkout_url=None, onboarding_token=onboarding_token, tenant_id=tenant_id)
 
 
 # ─── 2. status ───────────────────────────────────────────────────────────
@@ -502,11 +501,13 @@ def _activate_from_paid_session(token: str, session_id: Optional[str]) -> bool:
 
 
 @router.post("/reconcile-checkout")
-def reconcile_checkout(token: str = Query(...), session_id: str = Query(...)):
-    """Self-heal endpoint for Screen 3: verify the Stripe Checkout session and,
-    if paid, activate the tenant. Safe to call repeatedly while the webhook is
-    in flight. Always returns the current onboarding status — never 402s a
-    tenant we just redirected back from Checkout."""
+def reconcile_checkout(token: str = Query(...),
+                       session_id: Optional[str] = Query(default=None)):
+    """No-op for the no-upfront-payment flow: tenants are already active=True the
+    moment they finish signup, so there's nothing to reconcile. Kept mounted
+    because stale extension popups still POST here — just echo current state and
+    never 500/402 them. (Legacy in-flight Stripe Checkout sessions, if any, are
+    still self-healed via _activate_from_paid_session.)"""
     _activate_from_paid_session(token, session_id)
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
@@ -517,18 +518,11 @@ def reconcile_checkout(token: str = Query(...), session_id: str = Query(...)):
 def extension_installed(token: str = Query(...),
                         session_id: Optional[str] = Query(default=None)):
     """Manual fallback for Screen 3 — operator clicks "I've installed it".
-    Advances the stage to 'clients'."""
+    Advances the stage to 'clients'. No payment gate: the tenant is already in a
+    live trial from the moment they finished signup."""
     with SessionLocal() as db:
         t = _tenant_by_token(db, token)
         require_not_demo(t)
-        stage = t.onboarding_stage
-    if stage == "pending_payment":
-        # Webhook may simply be lagging. If we hold a paid Checkout session,
-        # self-heal instead of telling a paying customer to pay again.
-        if not _activate_from_paid_session(token, session_id):
-            raise HTTPException(402, "Complete payment before installing the extension")
-    with SessionLocal() as db:
-        t = _tenant_by_token(db, token)
         if t.onboarding_stage == "extension":
             t.onboarding_stage = "clients"
             db.commit()

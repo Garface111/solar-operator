@@ -99,6 +99,42 @@ def test_finalize_creates_subscription_for_tenant_with_arrays(monkeypatch):
     assert mock_charged.called
 
 
+def test_finalize_pauses_tenant_with_no_card(monkeypatch):
+    """No-upfront-payment: trial expires with arrays but NO card on file →
+    auto-pause (paused_no_card, active=False, trial cleared), email sent, and NO
+    Stripe.Subscription.create call."""
+    with SessionLocal() as db:
+        t = _make_trialing_tenant(db, "nocard@example.com", pm_id=None)
+        tid = t.id
+        _add_client_with_arrays(db, tid, 2)
+        db.commit()
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
+    monkeypatch.setenv("STRIPE_SETUP_PRICE_ID", "price_setup")
+    monkeypatch.setenv("STRIPE_ARRAY_PRICE_ID", "price_array")
+
+    with patch("api.scheduler.stripe") as mock_stripe, \
+         patch("api.scheduler.send_trial_paused_no_card_email") as mock_paused, \
+         patch("api.scheduler.send_trial_charged_email") as mock_charged, \
+         patch("api.scheduler.send_internal_alert"):
+        import api.scheduler as sched
+        sched.finalize_expired_trials()
+        mock_stripe.Subscription.create.assert_not_called()
+        assert mock_paused.called
+        mock_charged.assert_not_called()
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert t.subscription_status == "paused_no_card"
+        assert t.active is False
+        assert t.trial_ends_at is None
+        # Nothing deleted — the arrays are still there.
+        n = db.execute(
+            select(Array).where(Array.tenant_id == tid)
+        ).scalars().all()
+        assert len(n) == 2
+
+
 def test_finalize_skips_future_trials(monkeypatch):
     """Tenants whose trial_ends_at is in the future must NOT be processed."""
     with SessionLocal() as db:

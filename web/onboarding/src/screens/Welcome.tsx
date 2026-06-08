@@ -24,7 +24,7 @@ const PP_BULLETS = [
 ];
 
 const TOS_BULLETS = [
-  "Free for 14 days — we collect your card to start the trial, but you aren't charged until the trial ends.",
+  "Free for 14 days — no card required. Add a payment method from your dashboard before the trial ends to keep reports flowing.",
   "After trial: $250 one-time setup, then $15 per solar array per month, billed monthly.",
   "Cancel anytime — no penalty. Your data stays accessible for 30 days after cancellation.",
   "You own your data. We use it only to run the service. We never sell it.",
@@ -60,9 +60,8 @@ export default function Welcome() {
             14-day free trial · $250 setup + $15/array/month after · cancel anytime
           </p>
           <p className="mt-1 text-xs text-primary-700">
-            We save your card to start the trial — no charge today. Use the
-            trial to add your clients and arrays. We email you before any
-            charge so the first bill is never a surprise.
+            Trial starts the moment you finish signup — no card needed today.
+            Add your card from the Accounts tab whenever you&apos;re ready.
           </p>
         </div>
 

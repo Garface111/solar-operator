@@ -1,6 +1,12 @@
 """
-Task 7 — Test 1: checkout creates a SetupIntent (setup mode) and the webhook
-stores the payment method + sets trial_ends_at.
+LEGACY-FLOW tests (pre no-upfront-payment).
+
+Card collection was removed from signup: the /checkout endpoint is now a thin
+shim that creates a live, trialing tenant with NO Stripe call (see
+test_checkout_shim_*). The checkout.session.completed setup-mode webhook handler
+is kept ONLY for in-flight legacy Stripe Checkout sessions (an operator who
+started Checkout before the deploy and finished after) — the webhook tests below
+exercise that legacy path, which still stores the payment method + trial.
 """
 from __future__ import annotations
 
@@ -92,19 +98,25 @@ def _fire_setup_webhook(client, onboarding_token, monkeypatch,
 
 # ─── tests ────────────────────────────────────────────────────────────────
 
-def test_checkout_uses_setup_mode(client, mocks):
-    """checkout endpoint must use mode='setup' and not pass line_items."""
+def test_checkout_shim_creates_trialing_tenant_no_stripe(client, mocks, monkeypatch):
+    """No-upfront-payment: /checkout is now a shim — it creates a live trialing
+    tenant with no Stripe Checkout (checkout_url=None) and no Stripe call."""
+    def _boom(**kwargs):
+        raise AssertionError("checkout shim must not call Stripe")
+    monkeypatch.setattr(onboarding.stripe.checkout.Session, "create", _boom)
+
     body = _do_checkout(client, email="setup1@example.com")
-    assert body["checkout_url"].startswith("https://checkout.stripe.test/")
+    assert body["checkout_url"] is None
     token = body["onboarding_token"]
 
     with SessionLocal() as db:
         t = db.execute(
             select(Tenant).where(Tenant.onboarding_token == token)
         ).scalar_one()
-        assert t.active is False
-        assert t.subscription_status == "pending"
-        assert t.trial_ends_at is None  # not set until webhook fires
+        assert t.active is True
+        assert t.subscription_status == "trialing"
+        assert t.trial_ends_at is not None  # live trial starts at signup
+        assert t.stripe_payment_method_id is None  # no card yet
 
 
 def test_webhook_setup_mode_stores_pm_and_trial(client, mocks, monkeypatch):
@@ -138,9 +150,10 @@ def test_webhook_setup_mode_no_welcome_email(client, mocks, monkeypatch):
     assert mocks["welcome"] == []
 
 
-def test_checkout_missing_subscription_data(client, mocks):
-    """Stripe session must not carry subscription_data in setup mode."""
-    # The fake_session_create fixture already asserts this — just verify the
-    # checkout call doesn't crash and returns a URL.
+def test_checkout_shim_returns_token_and_tenant(client, mocks):
+    """The shim returns an onboarding_token + tenant_id so a stale wizard bundle
+    can keep going without crashing."""
     body = _do_checkout(client, email="setup4@example.com")
-    assert "checkout_url" in body
+    assert body["checkout_url"] is None
+    assert body["onboarding_token"]
+    assert body["tenant_id"].startswith("ten_")

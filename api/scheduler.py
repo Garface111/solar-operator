@@ -27,6 +27,8 @@ from .notify import (
     send_payment_failed_email,
     send_trial_charged_email,
     send_trial_charge_failed_email,
+    send_trial_paused_no_card_email,
+    send_trial_ending_no_card_reminder_email,
     send_internal_alert,
     send_gmp_reauth_needed_email,
 )
@@ -157,6 +159,31 @@ def finalize_expired_trials():
                 )
                 continue
 
+            # No-upfront-payment: if the operator never added a card, we can't
+            # charge them. Auto-pause instead of failing — keep the tenant alive,
+            # flip to read-only, stop sending reports. They can add a card from
+            # the dashboard any time and resume. This check comes AFTER the
+            # zero-arrays grace so a card-less operator with no arrays still gets
+            # the 3-day extension first.
+            if not t.stripe_payment_method_id:
+                t.subscription_status = "paused_no_card"
+                t.trial_ends_at = None
+                t.active = False  # gates report delivery (see filters below)
+                db.commit()
+                try:
+                    send_trial_paused_no_card_email(
+                        to=t.contact_email,
+                        name=t.operator_name or t.company_name or t.name)
+                except Exception as mail_err:
+                    logger.warning("send_trial_paused_no_card_email failed: %s", mail_err)
+                send_internal_alert(
+                    f"Trial paused (no card): {t.id}",
+                    f"Tenant {t.id} ({t.contact_email}) reached trial end with no "
+                    f"card on file. Paused (read-only), {array_count} arrays held. "
+                    f"Nothing deleted — they can add a card to resume."
+                )
+                continue
+
             # Charge the card.
             quantity = max(array_count, 1)
             try:
@@ -215,6 +242,48 @@ def finalize_expired_trials():
                         to=t.contact_email, name=t.operator_name or t.company_name or t.name)
                 except Exception as mail_err:
                     logger.warning("send_trial_charge_failed_email failed: %s", mail_err)
+
+
+def send_trial_ending_reminders() -> dict:
+    """Remind no-card trialing operators ~3 days before their trial ends.
+
+    Runs once daily. Selects trialing tenants with NO payment method on file
+    whose trial_ends_at lands in the (now+2d, now+3d] window. Because the job
+    runs daily and the window is exactly one day wide, each such tenant is
+    reminded roughly once — no 'reminded' column needed (SPEC: no new columns).
+    Tenants who already added a card go through the normal trial-charge path and
+    are skipped here.
+    """
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        # Mirrors finalize_expired_trials: skip when billing isn't configured.
+        return {"reminded": []}
+    window_start = datetime.utcnow() + timedelta(days=2)
+    window_end = datetime.utcnow() + timedelta(days=3)
+    reminded: list[str] = []
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Tenant).where(
+                Tenant.subscription_status == "trialing",
+                Tenant.stripe_payment_method_id.is_(None),
+                Tenant.trial_ends_at > window_start,
+                Tenant.trial_ends_at <= window_end,
+            )
+        ).scalars().all()
+        targets = [(t.id, t.contact_email,
+                    t.operator_name or t.company_name or t.name,
+                    t.trial_ends_at) for t in rows]
+
+    for tid, email, name, trial_ends_at in targets:
+        try:
+            end_str = trial_ends_at.strftime(f"%B {trial_ends_at.day}, {trial_ends_at.year}")
+            send_trial_ending_no_card_reminder_email(
+                to=email, name=name, trial_end_date=end_str)
+            reminded.append(tid)
+        except Exception as e:
+            logger.warning("send_trial_ending_no_card_reminder_email failed for %s: %s",
+                           tid, e)
+    logger.info("send_trial_ending_reminders: reminded=%d", len(reminded))
+    return {"reminded": reminded}
 
 
 def refresh_expiring_gmp_tokens() -> dict:
@@ -325,6 +394,12 @@ def start():
     scheduler.add_job(
         refresh_expiring_gmp_tokens,
         "interval", hours=1, id="refresh_gmp_tokens", replace_existing=True,
+    )
+    # Daily at 08:00 UTC: remind no-card trialing operators ~3 days out.
+    scheduler.add_job(
+        send_trial_ending_reminders,
+        CronTrigger(hour=8, minute=0),
+        id="trial_ending_reminders", replace_existing=True,
     )
     # Drain the queue every minute
     from .worker import run_pending_jobs

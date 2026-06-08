@@ -209,6 +209,10 @@ export interface Account {
   extension_heartbeat_at: string | null;
   created_at: string | null;
   trial_ends_at: string | null;
+  /** No-upfront-payment: true once the operator has added a card. A live
+   *  trialing tenant can have this false. Drives the trial-banner CTA and the
+   *  read-only pause gating. */
+  has_payment_method: boolean;
   accounts_count: number;
   bills_count: number;
   clients_count: number;
@@ -353,12 +357,36 @@ export interface BillingSummary {
   price_cents: number;
   total_cents: number;
   currency: string;
+  /** No-upfront-payment: a live (trialing) tenant can have no card on file.
+   *  Drives the "Add payment method" CTA and the paused-no-card banner. */
+  has_payment_method: boolean;
 }
 
 /** What the tenant is billed for: array count (the Stripe quantity) × per-array
  *  price. Lets the Account tab show the real monthly figure. */
 export async function getBillingSummary(): Promise<BillingSummary> {
   return request<BillingSummary>("/v1/account/billing-summary");
+}
+
+/** Start the add-card flow: returns a Stripe Checkout setup-mode URL and
+ *  redirects the browser to it. The setup_intent.succeeded webhook attributes
+ *  the saved card back to the tenant (and auto-resumes a paused account). */
+export async function addPaymentMethod(): Promise<void> {
+  const res = await request<{ checkout_url: string }>(
+    "/v1/account/add-payment-method",
+    { method: "POST" },
+  );
+  window.location.href = res.checkout_url;
+}
+
+/** Manual fallback to resume a 'paused_no_card' tenant once a card is on file.
+ *  Normally the webhook resumes automatically right after the card is added. */
+export async function resumeFromPause(): Promise<{
+  ok: boolean;
+  subscription_status: string;
+  active: boolean;
+}> {
+  return request("/v1/account/resume-from-pause", { method: "POST" });
 }
 
 export interface CaptureEntry {

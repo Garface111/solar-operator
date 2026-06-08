@@ -43,7 +43,7 @@ from .db import SessionLocal
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
-from .stripe_helpers import reconcile_subscription_quantity
+from .stripe_helpers import reconcile_subscription_quantity, create_subscription_for_tenant
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_SIGNOFF,
     MERGE_TAGS, build_context, render_email,
@@ -660,6 +660,9 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "trial_ends_at": t.trial_ends_at.isoformat() if t.trial_ends_at else None,
             "has_password": bool(t.password_hash),
+            # No-upfront-payment: a live trial can have no card yet. Drives the
+            # trial banner CTA and the read-only pause gating in the dashboard.
+            "has_payment_method": t.stripe_payment_method_id is not None,
             "accounts_count": int(accounts_count),
             "bills_count": int(bills_count),
             "clients_count": int(clients_count),
@@ -1397,6 +1400,9 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
         "price_cents": cents,
         "total_cents": billable * cents,
         "currency": currency,
+        # Drives the dashboard "Add payment method" CTA + paused-no-card banner.
+        # No-upfront-payment: a tenant can be live (trialing) with no card yet.
+        "has_payment_method": t.stripe_payment_method_id is not None,
     }
 
 
@@ -1450,6 +1456,83 @@ def billing_portal(authorization: Optional[str] = Header(default=None)):
         return {"url": session.url}
     except stripe.error.StripeError as e:
         raise HTTPException(502, f"Stripe error: {e}")
+
+
+@router.post("/v1/account/add-payment-method")
+def add_payment_method(authorization: Optional[str] = Header(default=None)):
+    """Return a Stripe Checkout Session URL (mode='setup') so the operator can
+    add a card from the dashboard.
+
+    No-upfront-payment: operators sign up with no card and add one here. The
+    SetupIntent carries metadata.tenant_id so the setup_intent.succeeded webhook
+    can attribute the saved card back to this tenant (and auto-resume them if
+    they were paused). Lazy-creates the Stripe Customer if the tenant doesn't
+    have one yet."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(500, "Stripe not configured")
+
+    customer_id = t.stripe_customer_id
+    if not customer_id:
+        # Lazy-create the Customer with the tenant's email + name so receipts and
+        # the Stripe dashboard are attributable from the first card.
+        try:
+            customer = stripe.Customer.create(
+                email=t.contact_email,
+                name=t.company_name or t.name or t.operator_name or None,
+                metadata={"tenant_id": t.id},
+            )
+            customer_id = customer["id"] if isinstance(customer, dict) else customer.id
+        except stripe.error.StripeError as e:
+            raise HTTPException(502, f"Stripe error: {e}")
+        with SessionLocal() as db:
+            db_t = db.get(Tenant, t.id)
+            if db_t:
+                db_t.stripe_customer_id = customer_id
+                db.commit()
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="setup",
+            payment_method_types=["card"],
+            customer=customer_id,
+            success_url=f"{APP_URL}/accounts/?card_added=1",
+            cancel_url=f"{APP_URL}/accounts/?card_cancelled=1",
+            setup_intent_data={"metadata": {"tenant_id": t.id}},
+            metadata={"tenant_id": t.id},
+        )
+        url = session["url"] if isinstance(session, dict) else session.url
+        return {"checkout_url": url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(502, f"Stripe error: {e}")
+
+
+@router.post("/v1/account/resume-from-pause")
+def resume_from_pause(authorization: Optional[str] = Header(default=None)):
+    """Resume a 'paused_no_card' tenant once a card is on file.
+
+    Creates the subscription (setup fee + per-array × current count), sets
+    active=True, subscription_status='active'. Normally the setup_intent.succeeded
+    webhook resumes the operator automatically the moment they add a card, so this
+    endpoint is the manual/idempotent fallback. Requires a payment method on file."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not t.stripe_payment_method_id:
+        raise HTTPException(
+            400, "Add a payment method before resuming your subscription.")
+    result = create_subscription_for_tenant(t.id)
+    if not result.get("ok"):
+        raise HTTPException(
+            502, "Couldn't resume your subscription — we've been alerted. "
+                 "Please try again or contact admin@solaroperator.org.")
+    with SessionLocal() as db:
+        db_t = db.get(Tenant, t.id)
+        return {
+            "ok": True,
+            "subscription_status": db_t.subscription_status if db_t else "active",
+            "active": bool(db_t.active) if db_t else True,
+        }
 
 
 # ─── Clients (sub-clients) ──────────────────────────────────────────────

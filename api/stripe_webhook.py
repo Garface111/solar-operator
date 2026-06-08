@@ -52,10 +52,17 @@ router = APIRouter()
 # ─── event handlers ───────────────────────────────────────────────────────
 
 def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) -> dict:
-    """New 5-screen onboarding flow: activate the pending tenant and advance
-    it to the 'extension' stage. Crucially does NOT send the welcome email —
-    that is deferred to POST /v1/onboarding/complete so the operator only gets
-    it once they actually finish setup.
+    """LEGACY PATH (pre no-upfront-payment). Card collection was removed from
+    signup, so new operators never hit Stripe Checkout during onboarding. This
+    handler is kept alive ONLY for in-flight legacy sessions — any operator who
+    started Stripe Checkout BEFORE this deploy and completed it after. New signups
+    are activated directly in api.onboarding._create_trial_tenant with no Stripe
+    round-trip, and card collection now happens via setup_intent.succeeded
+    (dashboard add-card flow).
+
+    Activates the pending tenant and advances it to the 'extension' stage.
+    Crucially does NOT send the welcome email — that is deferred to POST
+    /v1/onboarding/complete so the operator only gets it once they finish setup.
 
     Handles two modes:
       setup mode (deferred billing) — collect card only, set trial_ends_at
@@ -337,6 +344,57 @@ def _process_payment_method_detached(pm: dict) -> dict:
     return {"tenant": tid, "pm_cleared": True}
 
 
+def _process_setup_intent_succeeded(si: dict) -> dict:
+    """Dashboard add-card flow completed: store the card and (if the tenant is
+    paused for lack of one) auto-resume their subscription.
+
+    The dashboard's POST /v1/account/add-payment-method creates a Stripe Checkout
+    Session in mode='setup' carrying metadata.tenant_id. When the operator
+    finishes it, Stripe fires setup_intent.succeeded. We look the tenant up by
+    that metadata, store stripe_customer_id + stripe_payment_method_id, and — if
+    they were 'paused_no_card' — create the subscription so reports resume with
+    no further clicks. Idempotent: re-delivery just re-stores the same IDs and
+    create_subscription_for_tenant no-ops once a subscription exists.
+    """
+    meta = si.get("metadata") or {}
+    tenant_id = meta.get("tenant_id")
+    if not tenant_id:
+        return {"ignored": "no tenant_id in setup_intent metadata"}
+
+    customer_id = si.get("customer")
+    payment_method_id = si.get("payment_method")
+    if not payment_method_id:
+        return {"ignored": f"no payment_method on setup_intent for tenant={tenant_id}"}
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            return {"ignored": f"no tenant {tenant_id} for setup_intent"}
+        t.stripe_payment_method_id = payment_method_id
+        if customer_id:
+            t.stripe_customer_id = customer_id
+        was_paused = t.subscription_status == "paused_no_card"
+        db.commit()
+        tid, email = t.id, t.contact_email
+
+    logger.info("setup_intent.succeeded: stored pm=%s for tenant=%s (was_paused=%s)",
+                payment_method_id, tid, was_paused)
+
+    result: dict = {"tenant": tid, "pm_stored": True}
+    if was_paused:
+        # Auto-resume so the operator doesn't have to click anything else.
+        from .stripe_helpers import create_subscription_for_tenant
+        resume = create_subscription_for_tenant(tid)
+        result["resumed"] = bool(resume.get("ok"))
+    else:
+        send_internal_alert(
+            "💳 Card added",
+            f"Tenant {tid} ({email}) added a payment method ({payment_method_id}). "
+            f"Not paused — no resume needed."
+        )
+    return result
+
+
 # ─── webhook route ─────────────────────────────────────────────────────────
 
 @router.post("/v1/stripe/webhook")
@@ -389,6 +447,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
 
     handlers = {
         "checkout.session.completed": _process_checkout_completed,
+        "setup_intent.succeeded": _process_setup_intent_succeeded,
         "customer.subscription.updated": _process_subscription_updated,
         "customer.subscription.deleted": _process_subscription_deleted,
         "invoice.payment_failed": _process_invoice_payment_failed,

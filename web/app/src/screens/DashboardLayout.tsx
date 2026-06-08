@@ -6,7 +6,7 @@ import { BottomTabBar } from "../components/BottomTabBar";
 import { MindButton } from "../components/MindButton";
 import { TabBar, type Tab } from "../ui/TabBar";
 import { useToast } from "../ui/Toast";
-import { type Account, getAccount } from "../lib/api";
+import { type Account, getAccount, addPaymentMethod } from "../lib/api";
 import { openPortalTab } from "../lib/openPortalTab";
 import { useAutoPairExtension } from "../lib/useExtensionStatus";
 
@@ -116,6 +116,23 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
   const ctx: DashboardContext = { account, failed, patchAccount, retryLoad };
 
+  // No-upfront-payment: a trial that ended with no card on file is paused
+  // (read-only). Stop showing the trial banner, surface a resume CTA, and (via
+  // the server's active=False gate) reports/scrapes are already halted.
+  const pausedNoCard = account?.subscription_status === "paused_no_card";
+  const [addingCard, setAddingCard] = useState(false);
+  const startAddCard = useCallback(async () => {
+    setAddingCard(true);
+    try {
+      await addPaymentMethod(); // redirects to Stripe Checkout (setup mode)
+    } catch (err) {
+      setAddingCard(false);
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't open the add-card page",
+      );
+    }
+  }, [toast]);
+
   // Auto-pair the extension as soon as we know the operator's tenant_key.
   // The activation-code UI was removed — pairing is fully zero-touch now.
   useAutoPairExtension(account?.tenant_key ?? null);
@@ -163,9 +180,33 @@ export default function DashboardLayout({ onSignOut }: Props) {
         onSignOut={onSignOut}
       />
 
-      {account?.trial_ends_at &&
+      {pausedNoCard && (
+        <div className="border-b border-amber-300 bg-amber-50 px-4 py-3" role="alert">
+          <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-amber-900">
+              <span className="font-semibold">Trial ended.</span>{" "}
+              Add a card to resume reports — your account is read-only until then.
+              We&apos;ve held all your data; nothing is deleted.
+            </p>
+            <button
+              type="button"
+              onClick={startAddCard}
+              disabled={addingCard}
+              className="shrink-0 rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-700 disabled:opacity-60"
+            >
+              {addingCard ? "Opening…" : "Add card →"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!pausedNoCard &&
+        account?.trial_ends_at &&
         new Date(account.trial_ends_at) > new Date() && (
-          <TrialBanner trialEndsAt={account.trial_ends_at} />
+          <TrialBanner
+            trialEndsAt={account.trial_ends_at}
+            hasPaymentMethod={account.has_payment_method}
+          />
         )}
 
       {heartbeatStale && (
