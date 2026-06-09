@@ -140,12 +140,26 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
         unclassified: list[UtilityAccount] = []
 
         for acc in accounts:
+            # A soft-deleted account must NEVER become a floating "unclassified"
+            # card. The accounts query above intentionally pulls soft-deleted
+            # accounts so they can render as ghost ROWS under their client during
+            # the 30-day grace window — but only when their (also soft-deleted)
+            # array still resolves to a client below. If a soft-deleted account
+            # has no array_id, or its array is gone / detached from any client,
+            # there is nothing to ghost under, so we drop it rather than spawn a
+            # nonsensical "Drag onto a client card to attach" card for something
+            # the operator just deleted. (Ford, Jun 9 '26: deleting arrays must
+            # not leave orphan cards behind.)
+            acc_deleted = acc.deleted_at is not None
             if acc.array_id is None:
-                unclassified.append(acc)
+                if not acc_deleted:
+                    unclassified.append(acc)
                 continue
             arr = array_map.get(acc.array_id)
             if arr is None or arr.client_id is None:
-                unclassified.append(acc)
+                if not acc_deleted:
+                    unclassified.append(acc)
+                # else: soft-deleted account with nowhere to ghost — drop it.
             else:
                 accs_by_array[arr.id].append(acc)
 

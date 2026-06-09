@@ -211,3 +211,57 @@ def test_canvas_includes_soft_deleted_array(client):
     ]
     assert len(ghost_accs) == 1
     assert ghost_accs[0]["array_deleted_at"] is not None
+
+
+# ── H. Soft-deleted account with no client to ghost under is NOT unclassified ──
+
+def test_soft_deleted_orphan_account_not_unclassified(client):
+    """Regression (Ford, Jun 9 '26): deleting arrays must not leave behind a
+    floating 'Drag onto a client card to attach' card.
+
+    A soft-deleted UtilityAccount whose array is detached from any client (or
+    has a null array_id) has nowhere to render as a ghost row, so it must be
+    DROPPED from the canvas — never promoted into the `unclassified` bucket.
+    """
+    tid, auth = _make_tenant()
+    now_ts = datetime.utcnow()
+
+    # Case 1: soft-deleted account with array_id = None (fully orphaned)
+    with SessionLocal() as db:
+        u_null = UtilityAccount(
+            tenant_id=tid, array_id=None, provider="gmp",
+            account_number="4392604400", nickname="Orphan",
+            deleted_at=now_ts - timedelta(minutes=1),
+        )
+        db.add(u_null)
+        db.commit()
+        u_null_id = u_null.id
+
+    # Case 2: soft-deleted account whose array is deleted AND has no client
+    clientless_arr = _make_array(tid, None, "Clientless",  # type: ignore[arg-type]
+                                 deleted_at=now_ts - timedelta(minutes=1))
+    u_detached_id = _make_ua(tid, clientless_arr, "9999-0000",
+                             deleted_at=now_ts - timedelta(minutes=1))
+
+    resp = client.get("/v1/sandbox/canvas", headers={"Authorization": auth})
+    assert resp.status_code == 200
+    data = resp.json()
+
+    uncl_ids = {a["id"] for a in data["unclassified"]}
+    assert u_null_id not in uncl_ids, "fully-orphaned soft-deleted account leaked as a card"
+    assert u_detached_id not in uncl_ids, "detached soft-deleted account leaked as a card"
+
+    # And a LIVE orphan (array_id None, not deleted) DOES still appear — the
+    # legitimate "needs attaching" case must keep working.
+    with SessionLocal() as db:
+        u_live = UtilityAccount(
+            tenant_id=tid, array_id=None, provider="gmp",
+            account_number="1111-2222", nickname="LiveOrphan",
+        )
+        db.add(u_live)
+        db.commit()
+        u_live_id = u_live.id
+
+    resp2 = client.get("/v1/sandbox/canvas", headers={"Authorization": auth})
+    uncl_ids2 = {a["id"] for a in resp2.json()["unclassified"]}
+    assert u_live_id in uncl_ids2, "live unattached account should still show as a card"
