@@ -1431,12 +1431,21 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
                 Array.excluded.is_(False),
             )
         ).scalar() or 0
-    cents, currency = _array_price_cents()
+    _cents, currency = _array_price_cents()
     billable = int(billable)
+    # Volume/graduated pricing: total is the sum across tier bands, NOT a flat
+    # billable * unit. compute_monthly_cents mirrors the live Stripe graduated
+    # price so this estimate matches the actual invoice to the penny. price_cents
+    # is the *blended* (average) per-array rate, kept for display continuity with
+    # the old flat-rate field; full_unit_cents exposes the undiscounted $15 so
+    # the UI can show "$15/array, volume discounts past 50".
+    from .pricing import compute_monthly_cents, blended_unit_cents, FULL_UNIT_CENTS
+    total_cents = compute_monthly_cents(billable)
     return {
         "billable_arrays": billable,
-        "price_cents": cents,
-        "total_cents": billable * cents,
+        "price_cents": blended_unit_cents(billable),
+        "full_unit_cents": FULL_UNIT_CENTS,
+        "total_cents": total_cents,
         "currency": currency,
         # Drives the dashboard "Add payment method" CTA + paused-no-card banner.
         # No-upfront-payment: a tenant can be live (trialing) with no card yet.
