@@ -355,6 +355,8 @@ export async function getBillingPortalUrl(): Promise<string> {
 export interface BillingSummary {
   billable_arrays: number;
   price_cents: number;
+  /** Undiscounted per-array price ($15). Present when volume tiers are live. */
+  full_unit_cents?: number;
   total_cents: number;
   currency: string;
   /** No-upfront-payment: a live (trialing) tenant can have no card on file.

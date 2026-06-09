@@ -272,17 +272,31 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             Billing
           </div>
           {billing.billable_arrays > 0 ? (
-            <p className="mt-1 text-sm text-zinc-700">
-              <span className="font-semibold text-zinc-900">
-                {billing.billable_arrays}
-              </span>{" "}
-              billable {billing.billable_arrays === 1 ? "array" : "arrays"} ·{" "}
-              {fmtMoney(billing.price_cents, billing.currency)} ×{" "}
-              {billing.billable_arrays} ={" "}
-              <span className="font-semibold text-zinc-900">
-                {fmtMoney(billing.total_cents, billing.currency)}/mo
-              </span>
-            </p>
+            billing.full_unit_cents && billing.price_cents < billing.full_unit_cents ? (
+              <p className="mt-1 text-sm text-zinc-700">
+                <span className="font-semibold text-zinc-900">
+                  {billing.billable_arrays}
+                </span>{" "}
+                billable {billing.billable_arrays === 1 ? "array" : "arrays"} ·{" "}
+                volume-discounted to{" "}
+                {fmtMoney(billing.price_cents, billing.currency)}/array ={" "}
+                <span className="font-semibold text-zinc-900">
+                  {fmtMoney(billing.total_cents, billing.currency)}/mo
+                </span>
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-zinc-700">
+                <span className="font-semibold text-zinc-900">
+                  {billing.billable_arrays}
+                </span>{" "}
+                billable {billing.billable_arrays === 1 ? "array" : "arrays"} ·{" "}
+                {fmtMoney(billing.price_cents, billing.currency)} ×{" "}
+                {billing.billable_arrays} ={" "}
+                <span className="font-semibold text-zinc-900">
+                  {fmtMoney(billing.total_cents, billing.currency)}/mo
+                </span>
+              </p>
+            )
           ) : nextInvoice?.amount_cents && nextInvoice.amount_cents > 0 ? (
             // No arrays on file yet but Stripe is billing — operator used the
             // estimate path at checkout. Make this explicit so they're not surprised.

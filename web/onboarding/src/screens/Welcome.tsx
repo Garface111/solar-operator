@@ -61,7 +61,7 @@ export default function Welcome() {
 
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 p-5">
           <p className="text-sm font-semibold text-primary-800">
-            14-day free trial · $250 setup + $15/array/month after · cancel anytime
+            14-day free trial · $250 setup + $15/array/month after (volume discounts past 50 arrays) · cancel anytime
           </p>
           <p className="mt-1 text-xs text-primary-700">
             Trial starts the moment you finish signup — no card needed today.

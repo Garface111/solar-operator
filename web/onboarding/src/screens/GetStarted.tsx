@@ -449,7 +449,7 @@ export default function GetStarted() {
           Skip the tour — start setup
         </button>
         <p className="text-xs text-zinc-400">
-          Start free — 14-day trial · $15/array/month · $250 one-time setup · cancel anytime
+          Start free — 14-day trial · $15/array/month (volume discounts past 50) · $250 one-time setup · cancel anytime
         </p>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Spinner } from "../../ui/Spinner";
 import {
   type Account,
@@ -10,6 +10,7 @@ import {
   listClients,
 } from "../../lib/api";
 import { openPortalTab } from "../../lib/openPortalTab";
+import { useExtensionStatus } from "../../lib/useExtensionStatus";
 import { timeAgo } from "./utils";
 
 const PORTAL_URLS: Record<string, string> = {
@@ -81,13 +82,20 @@ function LoginRow({
 
 interface Props {
   account: Account;
+  /** Re-fetch the account so server-side heartbeat/last-seen fills in once
+   *  the extension pairs live. Optional — card still works without it. */
+  onRefresh?: () => void;
 }
 
-export function UtilityConnectionsCard({ account }: Props) {
+export function UtilityConnectionsCard({ account, onRefresh }: Props) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [captures, setCaptures] = useState<CaptureEntry[] | null>(null);
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
+
+  // Live extension presence (postMessage bridge). Updates the instant the
+  // extension injects / pairs / lands a capture — no page reload required.
+  const ext = useExtensionStatus();
 
   useEffect(() => {
     listProviders()
@@ -101,11 +109,38 @@ export function UtilityConnectionsCard({ account }: Props) {
       .catch(() => setClients([]));
   }, []);
 
-  const lastSeen = account.extension_heartbeat_at
+  const serverLastSeen = account.extension_heartbeat_at
     ? new Date(account.extension_heartbeat_at)
     : null;
+  // Live signal that the extension is here right now, even if the server
+  // heartbeat hasn't been written/refetched yet.
+  const liveConnected =
+    ext.status === "present-paired" || ext.status === "present-unpaired";
+  const liveLastSync = ext.lastSyncAt ? new Date(ext.lastSyncAt) : null;
+  // The card considers the extension connected when EITHER the server has a
+  // heartbeat OR the live bridge sees it on the page.
+  const lastSeen = serverLastSeen ?? liveLastSync;
+  const connected = Boolean(serverLastSeen) || liveConnected;
+
+  // When the extension pairs live but the server account still shows no
+  // heartbeat, pull a fresh account once so last-seen / banners reconcile.
+  const refreshedRef = useRef(false);
+  useEffect(() => {
+    if (
+      liveConnected &&
+      !account.extension_heartbeat_at &&
+      onRefresh &&
+      !refreshedRef.current
+    ) {
+      refreshedRef.current = true;
+      onRefresh();
+    }
+  }, [liveConnected, account.extension_heartbeat_at, onRefresh]);
+
   const extensionStale =
-    lastSeen ? Date.now() - lastSeen.getTime() > 48 * 60 * 60 * 1000 : false;
+    serverLastSeen && !liveConnected
+      ? Date.now() - serverLastSeen.getTime() > 48 * 60 * 60 * 1000
+      : false;
 
   async function reconnect(code: string) {
     const url = PORTAL_URLS[code];
@@ -161,10 +196,14 @@ export function UtilityConnectionsCard({ account }: Props) {
             <div>
               <p className="text-sm font-medium text-zinc-800">Chrome extension</p>
               <p className="mt-0.5 text-xs text-zinc-400">
-                {lastSeen ? (
+                {connected ? (
                   <>
-                    Last seen {timeAgo(lastSeen)} · Portals the extension pulls
-                    billing data from.
+                    {lastSeen ? (
+                      <>Last seen {timeAgo(lastSeen)} · </>
+                    ) : (
+                      <>Connected · </>
+                    )}
+                    Portals the extension pulls billing data from.
                   </>
                 ) : (
                   <>
@@ -182,7 +221,7 @@ export function UtilityConnectionsCard({ account }: Props) {
                 )}
               </p>
             </div>
-            {lastSeen && (
+            {connected && (
               <span
                 className={[
                   "inline-flex shrink-0 items-center rounded-full px-2.5 py-0.5 text-xs font-medium",

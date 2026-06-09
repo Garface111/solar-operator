@@ -145,7 +145,7 @@ export default function DummyReport() {
       </div>
 
       <p className="mt-6 text-center text-xs text-zinc-400">
-        $15/array/month &middot; $250 one-time setup &middot; 14-day free trial &middot; cancel anytime
+        $15/array/month (volume discounts past 50) &middot; $250 one-time setup &middot; 14-day free trial &middot; cancel anytime
       </p>
       <p className="mt-3 text-center text-xs">
         <button
