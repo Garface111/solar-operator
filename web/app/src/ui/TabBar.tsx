@@ -34,13 +34,18 @@ export function TabBar({ tabs, unvisited, email, onSignOut }: TabBarProps) {
     <nav className="sticky top-0 z-30 border-b border-cream-border bg-cream/90 backdrop-blur">
       {/* py-3 sm:py-0 gives the bar height on mobile where tabs are hidden (moved to BottomTabBar) */}
       <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:gap-4 sm:py-0">
-        {/* Left: wordmark — always visible. On mobile this anchors the compact top bar. */}
-        <div
-          className="shrink-0 text-base font-semibold tracking-tight text-zinc-900"
+        {/* Left: wordmark — always visible. On mobile this anchors the compact top bar.
+            Links to the marketing landing page (solaroperator.org root). Plain <a>,
+            not a router NavLink, because the landing site is a separate deploy from
+            this app (which is served under /accounts/). */}
+        <a
+          href="https://solaroperator.org"
+          className="shrink-0 rounded text-base font-semibold tracking-tight text-zinc-900 transition-opacity hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
           style={{ fontFamily: "'Georgia', ui-serif, serif" }}
+          title="Go to solaroperator.org"
         >
           <span className="text-primary-600">Solar</span> Operator
-        </div>
+        </a>
 
         {/* Center: tabs — hidden on mobile (< 640px); those screens use BottomTabBar instead. */}
         <div className="hidden sm:flex flex-1 justify-center">
