@@ -34,7 +34,13 @@ Layout (Jun 8 2026 redesign):
 """
 from __future__ import annotations
 
-_FONT = '-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif'
+# Font names use SINGLE quotes — these strings are interpolated into
+# double-quoted style="..." attributes, so double-quoted font names
+# ("Segoe UI") would prematurely close the attribute and silently drop
+# every declaration after font-family (color, font-size, etc.). That bug
+# rendered header + wordmark text dark-on-dark. Single quotes are valid
+# CSS and safe inside a double-quoted attribute.
+_FONT = "-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif"
 
 # The tagline that sits as a quiet subhead in the emerald header strip.
 # Static + brand-y — not a per-email value — so it never collides with the

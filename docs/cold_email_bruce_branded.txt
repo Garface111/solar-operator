@@ -1,0 +1,19 @@
+SOLAR OPERATOR
+Quarterly NEPOOL-GIS generation reports, made simple.
+
+Hi Bruce,
+
+You know the quarterly net-metering credit reports better than almost anyone on the NEPOOL verifier list — the pull-the-bills, reconcile-the-kWh, rebuild-the-same-spreadsheet-every-quarter grind. One sheet per array, every quarter, by hand.
+
+I built Solar Operator to do that part for you. It logs into the utility portal, pulls the bills, and emails a finished, audit-ready credit report — per array, every quarter.
+
+Already running on a Vermont operator's 7 arrays across 9 GMP accounts — reports out the door without a spreadsheet in sight.
+
+Worth 15 minutes to see it on your own numbers? I'll run one of your real arrays through it so you're looking at the genuine output — not a demo.
+
+— Ford
+
+See a sample report: https://solaroperator.org
+
+—
+Solar Operator · solaroperator.org
