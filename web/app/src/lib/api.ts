@@ -369,6 +369,29 @@ export async function updateAccountFrequency(
   return res.frequency;
 }
 
+// ─── provider catalog ────────────────────────────────────────────────────
+
+export interface ProviderEntry {
+  code: string;
+  label: string;
+  state: string;
+  scrape_status: "live" | "in-progress" | "manual";
+  smarthub_host: string;
+  portal_url: string;
+  notes: string;
+}
+
+/** The full supported-utility catalog (public; drives the Add-a-client portal
+ *  list). Sourced from api/data/providers/*.csv via GET /v1/providers, so new
+ *  utilities appear here the moment the backend deploys — no frontend rebuild. */
+export async function getProviders(): Promise<ProviderEntry[]> {
+  const res = await request<{ ok: boolean; providers: ProviderEntry[] }>(
+    "/v1/providers",
+    { noAuth: true },
+  );
+  return res.providers;
+}
+
 export async function getBillingPortalUrl(): Promise<string> {
   const res = await request<{ url: string }>("/v1/account/billing-portal");
   return res.url;

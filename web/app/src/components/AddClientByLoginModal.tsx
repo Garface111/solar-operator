@@ -1,83 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
-import { requestUtilityAddition } from "../lib/api";
+import { requestUtilityAddition, getProviders } from "../lib/api";
 import {
   useExtensionStatus,
   type ExtensionStatus,
 } from "../lib/useExtensionStatus";
 import { wipeCookiesAndWait, gmpPortalUrl } from "../lib/openPortalTab";
 
-type SmartHubProvider =
-  | "vec"
-  | "wec"
-  | "stowe"
-  | "hyde_park"
-  | "ludlow"
-  | "enosburg"
-  | "barton"
-  | "nhec";
-
-type Provider = "gmp" | SmartHubProvider;
-
+// A pickable SmartHub portal, derived at runtime from the provider catalog
+// (GET /v1/providers → rows with a smarthub_host). The hardcoded list is gone:
+// new utilities added to api/data/providers/*.csv appear here automatically.
 interface SmartHubEntry {
-  provider: SmartHubProvider;
+  provider: string;
   name: string;
   hint: string;
   url: string;
 }
-
-const SMARTHUB_PORTALS: SmartHubEntry[] = [
-  {
-    provider: "vec",
-    name: "Vermont Electric Cooperative",
-    hint: "Northeast Kingdom (VEC)",
-    url: "https://vermontelectric.smarthub.coop/",
-  },
-  {
-    provider: "wec",
-    name: "Washington Electric Co-op",
-    hint: "Central Vermont (WEC)",
-    url: "https://washingtonelectric.smarthub.coop/",
-  },
-  {
-    provider: "stowe",
-    name: "Stowe Electric Department",
-    hint: "Stowe area",
-    url: "https://stoweelectric.smarthub.coop/",
-  },
-  {
-    provider: "hyde_park",
-    name: "Village of Hyde Park",
-    hint: "Hyde Park",
-    url: "https://villageofhydepark.smarthub.coop/",
-  },
-  {
-    provider: "ludlow",
-    name: "Village of Ludlow Electric",
-    hint: "Ludlow area",
-    url: "https://ludlow.smarthub.coop/",
-  },
-  {
-    provider: "enosburg",
-    name: "Village of Enosburg Falls",
-    hint: "Enosburg Falls",
-    url: "https://villageofenosburgfalls.smarthub.coop/",
-  },
-  {
-    provider: "barton",
-    name: "Village of Barton",
-    hint: "Barton (Barton Village Electric)",
-    url: "https://bartonelectric.smarthub.coop/",
-  },
-  {
-    provider: "nhec",
-    name: "NH Electric Cooperative",
-    hint: "New Hampshire (NHEC)",
-    url: "https://nhec.smarthub.coop/",
-  },
-];
 
 interface Props {
   open: boolean;
@@ -92,15 +32,7 @@ interface Props {
   onSwitchToManual: () => void;
 }
 
-const PORTAL_URLS: Record<Provider, string> = {
-  gmp: "https://greenmountainpower.com/account/",
-  ...Object.fromEntries(SMARTHUB_PORTALS.map((p) => [p.provider, p.url])),
-} as Record<Provider, string>;
-
-const FRIENDLY: Record<Provider, string> = {
-  gmp: "Green Mountain Power",
-  ...Object.fromEntries(SMARTHUB_PORTALS.map((p) => [p.provider, p.name])),
-} as Record<Provider, string>;
+const GMP_FRIENDLY = "Green Mountain Power";
 
 /**
  * AddClientByLoginModal — the "click a portal, sign in, done" flow.
@@ -111,7 +43,8 @@ const FRIENDLY: Record<Provider, string> = {
  * cognitive layer the operator never needed.
  *
  * New flow:
- *   1. Operator picks GMP or VEC.
+ *   1. Operator picks GMP or a SmartHub utility (the SmartHub list is loaded
+ *      live from /v1/providers, so it scales as we add utilities nationwide).
  *   2. We close the modal immediately and open the portal in a fresh
  *      foreground tab (extension wipes session cookies first).
  *   3. Operator signs in. The extension POSTs /v1/sync. Backend creates
@@ -131,6 +64,13 @@ export function AddClientByLoginModal({
   const toast = useToast();
   const ext = useExtensionStatus(open);
 
+  // SmartHub portals, loaded live from the provider catalog (rows with a
+  // smarthub_host). Falls back to an empty list on error — GMP + the manual
+  // path always work regardless.
+  const [smarthubPortals, setSmarthubPortals] = useState<SmartHubEntry[]>([]);
+  const [portalsLoaded, setPortalsLoaded] = useState(false);
+  const [query, setQuery] = useState("");
+
   // Re-probe whenever the modal opens so a freshly-installed extension
   // is detected without a page reload.
   useEffect(() => {
@@ -138,17 +78,63 @@ export function AddClientByLoginModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  function pick(provider: Provider) {
-    const url = provider === "gmp" ? gmpPortalUrl(ext.version) : PORTAL_URLS[provider];
-    const host =
-      provider === "gmp" ? "greenmountainpower.com" : "smarthub.coop";
+  // Load the SmartHub portal list once the modal opens (cached after first load).
+  useEffect(() => {
+    if (!open || portalsLoaded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const providers = await getProviders();
+        if (cancelled) return;
+        const portals: SmartHubEntry[] = providers
+          .filter((p) => p.scrape_status === "live" && p.smarthub_host)
+          .map((p) => ({
+            provider: p.code,
+            name: p.label,
+            hint: p.state || "SmartHub",
+            url: p.portal_url || `https://${p.smarthub_host}/`,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setSmarthubPortals(portals);
+      } catch {
+        // Non-fatal: GMP + manual entry still work. Leave the list empty.
+      } finally {
+        if (!cancelled) setPortalsLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, portalsLoaded]);
+
+  const filteredPortals = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return smarthubPortals;
+    return smarthubPortals.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.hint.toLowerCase().includes(q) ||
+        p.provider.toLowerCase().includes(q),
+    );
+  }, [smarthubPortals, query]);
+
+  /**
+   * pick — open a utility's login portal in a fresh tab after a cookie wipe.
+   * `code` is the provider code ("gmp" or any SmartHub code); `friendly` is the
+   * display name for the toast; `portalUrl` is the SmartHub URL (ignored for GMP,
+   * which computes its own version-aware URL).
+   */
+  function pick(code: string, friendly: string, portalUrl?: string) {
+    const isGmp = code === "gmp";
+    const url = isGmp ? gmpPortalUrl(ext.version) : (portalUrl ?? "");
+    const host = isGmp ? "greenmountainpower.com" : "smarthub.coop";
 
     // Pattern A: open about:blank SYNCHRONOUSLY (foreground tab guaranteed —
     // no await between click and window.open). We omit noopener so the
     // returned reference is non-null and we can set location.href after the
     // wipe. about:blank has no meaningful cross-origin security concern.
     const t0 = Date.now();
-    console.log(`[SO ${t0}] add-login: open about:blank for ${provider}`);
+    console.log(`[SO ${t0}] add-login: open about:blank for ${code}`);
     const newTab = window.open("about:blank", "_blank");
     if (!newTab) {
       // Popup blocker — user-initiated click should never hit this in practice.
@@ -180,14 +166,14 @@ export function AddClientByLoginModal({
           sessionStorage.setItem(
             "so_capture_pending",
             JSON.stringify({
-              provider,
+              provider: code,
               startedAt: Date.now(),
               knownIds: before.map((c) => c.id),
             }),
           );
           try {
             window.dispatchEvent(
-              new CustomEvent("so:capture-pending", { detail: { provider } }),
+              new CustomEvent("so:capture-pending", { detail: { provider: code } }),
             );
           } catch { /* ignore */ }
         } catch { /* non-fatal */ }
@@ -203,7 +189,7 @@ export function AddClientByLoginModal({
       );
     } else {
       toast.success(
-        `Opened ${FRIENDLY[provider]}. Sign in as the new client — their arrays show up here automatically.`,
+        `Opened ${friendly}. Sign in as the new client — their arrays show up here automatically.`,
       );
     }
   }
@@ -265,30 +251,67 @@ export function AddClientByLoginModal({
         <div className={extensionAbsent ? "opacity-50" : ""}>
           {/* GMP — its own button, not SmartHub */}
           <PortalCard
-            provider="gmp"
             label="Green Mountain Power"
             hint="Most VT solar clients"
-            onClick={() => pick("gmp")}
+            cta="Open GMP portal →"
+            onClick={() => pick("gmp", GMP_FRIENDLY)}
             disabled={extensionUnknown}
           />
 
-          {/* SmartHub utilities group */}
+          {/* SmartHub utilities group — loaded live from /v1/providers so the
+              list grows automatically as we add utilities nationwide. */}
           <div className="mt-4">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-              SmartHub utilities
-            </p>
+            <div className="mb-2 flex items-baseline justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                SmartHub utilities
+              </p>
+              {smarthubPortals.length > 0 && (
+                <span className="text-xs text-zinc-400">
+                  {smarthubPortals.length} supported
+                </span>
+              )}
+            </div>
+
+            {smarthubPortals.length > 6 && (
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search utilities by name or state…"
+                className="mb-2 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+              />
+            )}
+
+            {!portalsLoaded && (
+              <p className="text-xs text-zinc-400">Loading supported utilities…</p>
+            )}
+            {portalsLoaded && smarthubPortals.length === 0 && (
+              <p className="text-xs text-zinc-500">
+                Couldn&apos;t load the utility list. You can still use GMP above
+                or add the client manually.
+              </p>
+            )}
+
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {SMARTHUB_PORTALS.map((p) => (
+              {filteredPortals.map((p) => (
                 <PortalCard
                   key={p.provider}
-                  provider={p.provider}
                   label={p.name}
                   hint={p.hint}
-                  onClick={() => pick(p.provider)}
+                  cta="Open portal →"
+                  onClick={() => pick(p.provider, p.name, p.url)}
                   disabled={extensionUnknown}
                 />
               ))}
             </div>
+            {portalsLoaded &&
+              smarthubPortals.length > 0 &&
+              filteredPortals.length === 0 && (
+                <p className="mt-1 text-xs text-zinc-500">
+                  No supported utility matches &ldquo;{query}&rdquo;. Submit it
+                  below and we&apos;ll add it.
+                </p>
+              )}
           </div>
 
           {/* Escape hatch: the operator's client uses a utility we don't list
@@ -356,17 +379,17 @@ function ExtensionStatusBanner({
 }
 
 function PortalCard({
-  provider,
   label,
   hint,
   onClick,
   disabled,
+  cta = "Open portal →",
 }: {
-  provider: Provider;
   label: string;
   hint: string;
   onClick: () => void;
   disabled: boolean;
+  cta?: string;
 }) {
   return (
     <button
@@ -380,7 +403,7 @@ function PortalCard({
       </span>
       <span className="text-xs text-zinc-500">{hint}</span>
       <span className="mt-2 text-xs font-medium text-emerald-600 group-hover:text-emerald-600">
-        Open {provider.toUpperCase()} portal →
+        {cta}
       </span>
     </button>
   );

@@ -16,13 +16,25 @@
       provider: "barton",
       name: "Village of Barton (Barton Village Electric)",
     },
+    "belmontlight.smarthub.coop": {
+      provider: "belmont",
+      name: "Belmont Municipal Light Department",
+    },
     "blockisland.smarthub.coop": {
       provider: "block_island",
       name: "Block Island Power Company",
     },
+    "concord.smarthub.coop": {
+      provider: "concord",
+      name: "Concord Municipal Light Plant",
+    },
     "emec.smarthub.coop": {
       provider: "emec",
       name: "Eastern Maine Electric Cooperative",
+    },
+    "hull.smarthub.coop": {
+      provider: "hull",
+      name: "Hull Municipal Lighting Plant",
     },
     "klpd.smarthub.coop": {
       provider: "klpd",
