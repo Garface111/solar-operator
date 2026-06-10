@@ -119,6 +119,20 @@ PROVIDERS: list[ProviderDef] = [
         "notes": "NHEC SmartHub — adapter coming.",
     },
     {
+        "code": "liberty",
+        "label": "Liberty Utilities (NH)",
+        "portal_url": "https://new-hampshire.libertyutilities.com",
+        "state": "NH",
+        "scrape_status": "in-progress",
+        "notes": (
+            "Liberty (Algonquin/AQN, formerly Granite State Electric) — "
+            "investor-owned, NOT on NISC SmartHub. Customer billing runs on a "
+            "third-party portal (Paymentus/KUBRA-class); a bespoke adapter "
+            "needs a live Liberty login to reverse-engineer, like GMP. "
+            "Manual PDF upload accepted until the adapter ships."
+        ),
+    },
+    {
         "code": "other",
         "label": "Other (manual upload)",
         "portal_url": "",
