@@ -186,9 +186,13 @@ def test_restore_cross_tenant_returns_404(client):
     assert resp.status_code == 404
 
 
-# ── G. Canvas includes recently deleted array with array_deleted_at ────────────
+# ── G. Canvas EXCLUDES soft-deleted arrays entirely (no ghost rows) ───────────
 
-def test_canvas_includes_soft_deleted_array(client):
+def test_canvas_excludes_soft_deleted_array(client):
+    """Ford, Jun 9 '26: deleting an array out of the sandbox removes it
+    immediately — the canvas must NOT return soft-deleted arrays as ghost
+    rows. The soft-delete row still exists in the DB (undo works), but it's
+    invisible to the canvas."""
     tid, auth = _make_tenant()
     c_id = _make_client(tid, "Canvas Client")
     now_ts = datetime.utcnow()
@@ -200,17 +204,19 @@ def test_canvas_includes_soft_deleted_array(client):
     assert resp.status_code == 200
     data = resp.json()
 
-    # The client should appear (it's not deleted)
+    # The client should still appear (it's not deleted)
     client_out = next((c for c in data["clients"] if c["id"] == c_id), None)
     assert client_out is not None, "canvas client missing"
 
-    # The ghost array's account should appear with array_deleted_at set
+    # The soft-deleted array's account must NOT appear anywhere on the canvas.
     ghost_accs = [
         a for a in client_out["accounts"]
         if a.get("array_id") == arr_id
     ]
-    assert len(ghost_accs) == 1
-    assert ghost_accs[0]["array_deleted_at"] is not None
+    assert len(ghost_accs) == 0, "soft-deleted array leaked onto canvas as a ghost row"
+    uncl_ids = {a["id"] for a in data["unclassified"]}
+    assert not any(a.get("array_id") == arr_id for a in data["unclassified"]), \
+        "soft-deleted array's account leaked into unclassified"
 
 
 # ── H. Soft-deleted account with no client to ghost under is NOT unclassified ──

@@ -8,12 +8,12 @@ POST /v1/sandbox/merge      → merge client B into A (thin convenience wrapper)
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, or_
+from sqlalchemy import select
 
 from .account import tenant_from_session, require_not_demo, require_not_demo
 from .db import SessionLocal
@@ -54,11 +54,14 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array], mwh_per_qtr: Optiona
 def get_canvas(authorization: Optional[str] = Header(default=None)):
     """Return the tenant's full client → account → array graph with saved positions.
 
-    Soft-deleted arrays within the 30-day grace window are included so the
-    sandbox can show a ghost row with a purge countdown chip.
+    Deleted arrays are excluded entirely — once an operator deletes an array
+    out of the sandbox it disappears immediately (no "ghost" purge-countdown
+    row). The soft-delete row still lives in the DB so the in-session undo
+    button (Cmd+Z, token-based) can restore it, but the canvas never surfaces
+    deleted arrays or their accounts. (Ford, Jun 9 '26: deleted arrays must be
+    permanently gone from the sandbox; undo still works.)
     """
     tenant = tenant_from_session(authorization)
-    cutoff = datetime.utcnow() - timedelta(days=HARD_DELETE_GRACE_DAYS)
     with SessionLocal() as db:
         clients = db.execute(
             select(Client).where(
@@ -67,34 +70,20 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
             ).order_by(Client.created_at)
         ).scalars().all()
 
-        # Include recently soft-deleted arrays (within grace window) so the
-        # canvas can render them as ghosts with a purge countdown.
+        # Live arrays only — soft-deleted arrays are never shown in the sandbox.
         arrays = db.execute(
             select(Array).where(
                 Array.tenant_id == tenant.id,
-                or_(
-                    Array.deleted_at.is_(None),
-                    Array.deleted_at >= cutoff,
-                ),
+                Array.deleted_at.is_(None),
             )
         ).scalars().all()
         array_map: dict[int, Array] = {a.id: a for a in arrays}
 
-        # Soft-deleted accounts that belong to recently soft-deleted arrays are
-        # included so the ghost row appears under the correct login group.
-        deleted_array_ids = {a.id for a in arrays if a.deleted_at is not None}
-        if deleted_array_ids:
-            accounts_where = or_(
-                UtilityAccount.deleted_at.is_(None),
-                UtilityAccount.array_id.in_(deleted_array_ids),
-            )
-        else:
-            accounts_where = UtilityAccount.deleted_at.is_(None)
-
+        # Live accounts only — no ghost rows for deleted arrays.
         accounts = db.execute(
             select(UtilityAccount).where(
                 UtilityAccount.tenant_id == tenant.id,
-                accounts_where,
+                UtilityAccount.deleted_at.is_(None),
             ).order_by(UtilityAccount.id)
         ).scalars().all()
 
@@ -140,26 +129,15 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
         unclassified: list[UtilityAccount] = []
 
         for acc in accounts:
-            # A soft-deleted account must NEVER become a floating "unclassified"
-            # card. The accounts query above intentionally pulls soft-deleted
-            # accounts so they can render as ghost ROWS under their client during
-            # the 30-day grace window — but only when their (also soft-deleted)
-            # array still resolves to a client below. If a soft-deleted account
-            # has no array_id, or its array is gone / detached from any client,
-            # there is nothing to ghost under, so we drop it rather than spawn a
-            # nonsensical "Drag onto a client card to attach" card for something
-            # the operator just deleted. (Ford, Jun 9 '26: deleting arrays must
-            # not leave orphan cards behind.)
-            acc_deleted = acc.deleted_at is not None
+            # Only live accounts reach here (the query filters deleted_at IS
+            # NULL). An account with no array, or one whose array is gone /
+            # detached from any client, is a legitimate "needs attaching" card.
             if acc.array_id is None:
-                if not acc_deleted:
-                    unclassified.append(acc)
+                unclassified.append(acc)
                 continue
             arr = array_map.get(acc.array_id)
             if arr is None or arr.client_id is None:
-                if not acc_deleted:
-                    unclassified.append(acc)
-                # else: soft-deleted account with nowhere to ghost — drop it.
+                unclassified.append(acc)
             else:
                 accs_by_array[arr.id].append(acc)
 
