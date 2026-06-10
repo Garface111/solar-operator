@@ -215,8 +215,15 @@ class Client(Base):
 
 
 class Array(Base):
-    """A solar array. A logical unit that maps to one OR MORE utility accounts
-    (e.g. Bruce's 'Starlake' = 3 GMP accounts summed)."""
+    """A generation array that mints renewable-energy certificates. A logical
+    unit that maps to one OR MORE utility accounts (e.g. Bruce's 'Starlake' =
+    3 GMP accounts summed).
+
+    Historically solar-only; V2 (feat/v2-rec-fuels) generalizes the same
+    capture → array×months MWh → REC=floor(MWh) → attestation pipeline to any
+    REC-bearing fuel via `fuel_type`. Solar behavior is unchanged: fuel_type
+    defaults to 'solar' and cert_registry NULL means the implicit NEPOOL-GIS
+    registry that solar has always used."""
     __tablename__ = "arrays"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
@@ -245,6 +252,17 @@ class Array(Base):
     # Future hardening: encrypt at rest.
     solaredge_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     solaredge_site_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # V2 (feat/v2-rec-fuels): the REC-minting fuel this array represents.
+    # Allowed values: solar | wind | hydro | digester | storage. Defaults to
+    # 'solar' so every existing array and all solar logic is byte-identical.
+    fuel_type: Mapped[str] = mapped_column(
+        String(20), default="solar", server_default="solar"
+    )
+    # Which certificate registry the RECs are issued through, e.g.
+    # 'NEPOOL-GIS' or 'LIHI' (Low Impact Hydropower Institute). NULL means the
+    # implicit NEPOOL-GIS registry that solar has always used.
+    cert_registry: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="arrays")
     client: Mapped["Client | None"] = relationship(back_populates="arrays")

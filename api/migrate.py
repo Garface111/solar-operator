@@ -557,6 +557,32 @@ def main():
             ))
             print("  + tenants.trial_reminder_sent_at")
 
+        # 2026-06-09 V2 REC-bearing fuels (feat/v2-rec-fuels). Generalizes the
+        # array data model from solar-only to any fuel that mints renewable-
+        # energy certificates (wind, hydro, anaerobic digester/biogas, storage).
+        # The capture → MWh → REC=floor(MWh) → attestation pipeline is identical;
+        # this only labels what an array is. fuel_type defaults to 'solar' with a
+        # server_default so existing rows and all solar writers/reports/scrapers
+        # stay byte-identical. cert_registry is nullable (NULL = the implicit
+        # NEPOOL-GIS registry solar has always used).
+        recfuel_cols = [
+            ("fuel_type",
+             "ALTER TABLE arrays ADD COLUMN fuel_type VARCHAR(20) DEFAULT 'solar'"),
+            ("cert_registry",
+             "ALTER TABLE arrays ADD COLUMN cert_registry VARCHAR(40)"),
+        ]
+        for col, sql in recfuel_cols:
+            if not column_exists(conn, "arrays", col):
+                conn.execute(text(sql))
+                print(f"  + arrays.{col}")
+        # Idempotent backfill: stamp every existing array as solar where the
+        # column is still NULL (rows created before the server_default took).
+        backfilled = conn.execute(text(
+            "UPDATE arrays SET fuel_type = 'solar' WHERE fuel_type IS NULL"
+        )).rowcount
+        if backfilled:
+            print(f"  ↪ backfilled fuel_type='solar' on {backfilled} array(s)")
+
     print("=== Migration complete ===")
 
 
