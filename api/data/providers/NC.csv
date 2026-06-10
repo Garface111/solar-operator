@@ -1,0 +1,44 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+duke_energy,Duke Energy (NC),NC,in-progress,,https://duke-energy.com,"Dominant NC IOU (~80% market share). Bespoke customer portal, not SmartHub. Adapter needs live login. Manual upload meanwhile."
+blue_ridge_emc,Blue Ridge Electric Membership Corporation,NC,live,bremc.smarthub.coop,https://bremc.smarthub.coop,NISC SmartHub portal (bremc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+brunswick_emc,Brunswick Electric Membership Corporation,NC,live,bemc.smarthub.coop,https://bemc.smarthub.coop,NISC SmartHub portal (bemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+cape_hatteras_emc,Cape Hatteras Electric Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+carteret_craven_emc,Carteret-Craven Electric Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+central_emc,Central Electric Membership Corporation,NC,live,cemc.smarthub.coop,https://cemc.smarthub.coop,NISC SmartHub portal (cemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+energy_united,EnergyUnited,NC,live,energyunited.smarthub.coop,https://energyunited.smarthub.coop,"NISC SmartHub portal (energyunited.smarthub.coop verified Jun 2026) — large NC co-op formed from merger of Crescent/Davidson/Yadkin Valley. Extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports."
+edgecombe_martin_emc,Edgecombe-Martin County EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+four_county_emc,Four County EMC,NC,live,fcremc.smarthub.coop,https://fcremc.smarthub.coop,NISC SmartHub portal (fcremc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+french_broad_emc,French Broad Electric Membership Corporation,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+halifax_emc,Halifax Electric Membership Corporation,NC,live,hemc.smarthub.coop,https://hemc.smarthub.coop,NISC SmartHub portal (hemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+haywood_emc,Haywood EMC,NC,live,haywoodemc.smarthub.coop,https://haywoodemc.smarthub.coop,NISC SmartHub portal (haywoodemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+jefferson_emc,Jefferson Electric Membership Corporation,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+jones_onslow_emc,Jones-Onslow EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+lumbee_river_emc,Lumbee River EMC,NC,live,lumbeeriver.smarthub.coop,https://lumbeeriver.smarthub.coop,NISC SmartHub portal (lumbeeriver.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+pee_dee_emc,Pee Dee EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+piedmont_emc,Piedmont Electric Membership Corporation,NC,live,pemc.smarthub.coop,https://pemc.smarthub.coop,NISC SmartHub portal (pemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+randolph_emc,Randolph EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+roanoke_emc,Roanoke Electric Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+rutherford_emc,Rutherford EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+south_river_emc,South River EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+surry_yadkin_emc,Surry-Yadkin EMC,NC,live,syemc.smarthub.coop,https://syemc.smarthub.coop,NISC SmartHub portal (syemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+tideland_emc,Tideland EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+tri_county_emc,Tri-County EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+union_power,Union Power Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+wake_emc,Wake Electric Membership Corporation,NC,live,wemc.smarthub.coop,https://wemc.smarthub.coop,NISC SmartHub portal (wemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+new_river_lp,New River Light & Power,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+nc_concord,City of Concord Electric,NC,in-progress,,,NC municipal (ElectriCities member). No unique SmartHub host found (Jun 2026) — concord.smarthub.coop is MA. Check for bespoke portal or manual upload.
+fayetteville_pwc,Fayetteville Public Works Commission,NC,in-progress,,https://faypwc.com,"NC municipal (ElectriCities member). Bespoke portal, not SmartHub. Check for customer login."
+gastonia,City of Gastonia Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+greenville_utilities,Greenville Utilities Commission,NC,in-progress,,https://guc.com,"NC municipal (ElectriCities member). Bespoke portal, not SmartHub. Check for customer login."
+high_point,City of High Point Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+kinston,City of Kinston Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+lumberton,City of Lumberton Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+monroe,City of Monroe Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+morganton,City of Morganton Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+new_bern,City of New Bern Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+rocky_mount,City of Rocky Mount Electric,NC,in-progress,,https://rockymountnc.gov,"NC municipal (ElectriCities member). Bespoke portal, not SmartHub. Check for customer login."
+shelby,City of Shelby Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+statesville,City of Statesville Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+tarboro,Town of Tarboro Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+washington,City of Washington Electric,NC,in-progress,,,NC municipal (ElectriCities member). No SmartHub found (Jun 2026). Check for portal or manual upload.
+wilson,City of Wilson Electric,NC,in-progress,,https://wilsonnc.org,"NC municipal (ElectriCities member). Bespoke portal, not SmartHub. Check for customer login."

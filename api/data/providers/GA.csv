@@ -1,0 +1,87 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+georgia_power,Georgia Power Company,GA,in-progress,,https://customerservice2.southerncompany.com/Login?mnuOpco=GPC,"Major IOU serving 2.7M+ customers in 155 of 159 GA counties. Bespoke Southern Company portal — adapter needs live login to reverse-engineer. Manual PDF upload meanwhile."
+coastal_electric,Coastal Electric Cooperative,GA,live,coastalelectric.smarthub.coop,https://coastalelectric.smarthub.coop,NISC SmartHub portal (coastalelectric.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+cobb_emc,Cobb EMC,GA,live,cobbemc.smarthub.coop,https://cobbemc.smarthub.coop,NISC SmartHub portal (cobbemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+habersham_emc,Habersham EMC,GA,live,habershamemc.smarthub.coop,https://habershamemc.smarthub.coop,NISC SmartHub portal (habershamemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+jackson_emc,Jackson EMC,GA,live,jacksonemc.smarthub.coop,https://jacksonemc.smarthub.coop,NISC SmartHub portal (jacksonemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+planters_emc,Planters EMC,GA,live,planters.smarthub.coop,https://planters.smarthub.coop,NISC SmartHub portal (planters.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+sawnee_emc,Sawnee EMC,GA,live,sawnee.smarthub.coop,https://sawnee.smarthub.coop,NISC SmartHub portal (sawnee.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+tri_state_emc,Tri-State EMC,GA,live,tristate.smarthub.coop,https://tristate.smarthub.coop,NISC SmartHub portal (tristate.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+washington_emc,Washington EMC,GA,live,washingtonemc.smarthub.coop,https://washingtonemc.smarthub.coop,NISC SmartHub portal (washingtonemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+altamaha_emc,Altamaha EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+amicalola_emc,Amicalola EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+blue_ridge_mountain_emc,Blue Ridge Mountain EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+canoochee_emc,Canoochee EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+carroll_emc,Carroll EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+central_georgia_emc,Central Georgia EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+colquitt_emc,Colquitt EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+coweta_fayette_emc,Coweta-Fayette EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+diverse_power,Diverse Power,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+excelsior_emc,Excelsior EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+flint_energies,Flint Energies,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+grady_emc,Grady EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+greystone_power,GreyStone Power Corporation,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+hart_emc,Hart EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+irwin_emc,Irwin EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+jefferson_energy,Jefferson Energy Cooperative,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+little_ocmulgee_emc,Little Ocmulgee EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+middle_georgia_emc,Middle Georgia EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+mitchell_emc,Mitchell EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+north_georgia_emc,North Georgia EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+ocmulgee_emc,Ocmulgee EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+oconee_emc,Oconee EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+okefenokee_remc,Okefenokee REMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+rayle_emc,Rayle EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+satilla_remc,Satilla REMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+slash_pine_emc,Slash Pine EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+snapping_shoals_emc,Snapping Shoals EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+southern_rivers,Southern Rivers Energy,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+sumter_emc,Sumter EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+three_notch_emc,Three Notch EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+tri_county_emc_ga,Tri-County EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+upson_emc,Upson EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+walton_emc,Walton EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+albany,City of Albany (Albany Utility Board),GA,in-progress,,https://www.albanyga.gov/,"MEAG Power participant. Municipal utility, no SmartHub found (Jun 2026). Manual PDF upload meanwhile."
+acworth,City of Acworth,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+adel,City of Adel,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+barnesville,City of Barnesville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+ga_blakely,City of Blakely,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+brinson,Town of Brinson,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+buford,City of Buford,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+cairo,City of Cairo,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+calhoun,City of Calhoun,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+camilla,City of Camilla,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+cartersville,City of Cartersville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+chickamauga,City of Chickamauga,GA,in-progress,,,Non-MEAG municipal utility. Manual PDF upload until portal confirmed.
+college_park,City of College Park,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+commerce,City of Commerce,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+covington,City of Covington,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+crisp_county,Crisp County Power Commission,GA,in-progress,,,MEAG Power participant. County-level municipal utility. Manual PDF upload until portal confirmed.
+dalton,Dalton Utilities,GA,in-progress,,https://www.dutil.com,"Non-MEAG municipal utility operating since 1889. Bespoke portal — adapter needs live login. Manual PDF upload meanwhile."
+doerun,City of Doerun,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+douglas,City of Douglas,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+east_point,City of East Point,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+elberton,City of Elberton,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+ellaville,City of Ellaville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+fairburn,City of Fairburn,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+fitzgerald,City of Fitzgerald,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+forsyth,City of Forsyth,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+fort_valley,City of Fort Valley,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+grantville,City of Grantville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+griffin,City of Griffin,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+hampton,City of Hampton,GA,in-progress,,,Non-MEAG municipal utility. Manual PDF upload until portal confirmed.
+hogansville,City of Hogansville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+jackson,City of Jackson,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+lafayette,City of LaFayette,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+lagrange,City of LaGrange,GA,in-progress,,https://www.lagrangega.gov/departments/utilities/,"MEAG Power participant. Municipal utility providing electric, gas, water. Manual PDF upload meanwhile."
+lawrenceville,City of Lawrenceville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+marietta,Marietta Power (City of Marietta),GA,in-progress,,https://www.mariettaga.gov/861/Power,"MEAG Power participant. One of GA's largest municipal utilities, 45K+ customers since 1906. Manual PDF upload meanwhile."
+monroe_ga,City of Monroe,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+moultrie,City of Moultrie,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+newnan,City of Newnan,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+oxford,City of Oxford,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+palmetto_ga,City of Palmetto,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+sylvester,City of Sylvester,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+thomasville,City of Thomasville,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+washington_ga,City of Washington,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
+west_point,City of West Point,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
