@@ -1,0 +1,3 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+other,Other (manual upload),,manual,,,Customer emails PDF bills; we OCR and ingest manually.
+vpps,Other VPPSA member utility (manual),VT,manual,,https://vppsa.com,Most VPPSA members issue paper bills. Customer emails PDFs; we OCR.

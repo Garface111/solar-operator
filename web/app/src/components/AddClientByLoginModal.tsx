@@ -1,7 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
+import { requestUtilityAddition } from "../lib/api";
 import {
   useExtensionStatus,
   type ExtensionStatus,
@@ -15,6 +16,7 @@ type SmartHubProvider =
   | "hyde_park"
   | "ludlow"
   | "enosburg"
+  | "barton"
   | "nhec";
 
 type Provider = "gmp" | SmartHubProvider;
@@ -62,6 +64,12 @@ const SMARTHUB_PORTALS: SmartHubEntry[] = [
     name: "Village of Enosburg Falls",
     hint: "Enosburg Falls",
     url: "https://villageofenosburgfalls.smarthub.coop/",
+  },
+  {
+    provider: "barton",
+    name: "Village of Barton",
+    hint: "Barton (Barton Village Electric)",
+    url: "https://bartonelectric.smarthub.coop/",
   },
   {
     provider: "nhec",
@@ -282,6 +290,10 @@ export function AddClientByLoginModal({
               ))}
             </div>
           </div>
+
+          {/* Escape hatch: the operator's client uses a utility we don't list
+              yet. Submitting routes to a Hermes agent that adds it to the repo. */}
+          <SubmitUtilityForm />
         </div>
 
         <p className="text-xs text-zinc-500">
@@ -373,3 +385,133 @@ function PortalCard({
     </button>
   );
 }
+
+/**
+ * SubmitUtilityForm — the "Don't see your utility?" escape hatch shown at the
+ * bottom of the portal list. Collapsed to a single text button by default
+ * (click is tax — don't make operators read a form they rarely need). On
+ * expand it collects the utility name + optional portal/region/notes and POSTs
+ * to /v1/account/request-utility, which emails the SO team and fires the
+ * Hermes agent webhook that adds the utility to the repo and opens a PR.
+ */
+function SubmitUtilityForm() {
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+  const [name, setName] = useState("");
+  const [portal, setPortal] = useState("");
+  const [region, setRegion] = useState("");
+  const [notes, setNotes] = useState("");
+
+  async function submit() {
+    const utility = name.trim();
+    if (!utility) {
+      toast.show("Enter the utility's name first.", "info");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await requestUtilityAddition({
+        utility_name: utility,
+        portal_url: portal.trim() || null,
+        region: region.trim() || null,
+        notes: notes.trim() || null,
+      });
+      setDone(true);
+      toast.success(
+        `Thanks — we got your request for ${utility}. We'll add it and follow up.`,
+      );
+    } catch (e) {
+      toast.show(
+        e instanceof Error ? e.message : "Couldn't submit that — try again.",
+        "error",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+        Request received — we&apos;ll add{" "}
+        <b>{name.trim() || "your utility"}</b> and let you know when it&apos;s
+        ready. You can close this and add the client manually in the meantime.
+      </div>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-4 w-full rounded-xl border border-dashed border-zinc-300 px-4 py-3 text-left text-sm font-medium text-zinc-500 transition-colors hover:border-emerald-400 hover:text-emerald-600"
+      >
+        Don&apos;t see your utility? Submit a utility for addition →
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">
+          Submit a utility for addition
+        </p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Tell us the utility your client signs into and we&apos;ll add support
+          for it. SmartHub co-ops are usually quick; others we&apos;ll scope and
+          follow up.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <input
+          type="text"
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Utility name (e.g. Burlington Electric Department)"
+          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+        />
+        <input
+          type="text"
+          value={portal}
+          onChange={(e) => setPortal(e.target.value)}
+          placeholder="Login / portal URL (optional)"
+          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+        />
+        <input
+          type="text"
+          value={region}
+          onChange={(e) => setRegion(e.target.value)}
+          placeholder="State / region (optional, e.g. VT)"
+          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+        />
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Anything else we should know? (optional)"
+          rows={2}
+          className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+        />
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button variant="primary" onClick={submit} disabled={submitting}>
+          {submitting ? "Submitting…" : "Submit utility"}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => setOpen(false)}
+          disabled={submitting}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+

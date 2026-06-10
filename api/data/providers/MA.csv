@@ -1,0 +1,2 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+national_grid,National Grid (MA / RI),MA,in-progress,,https://nationalgridus.com,National Grid customer portal — adapter coming.

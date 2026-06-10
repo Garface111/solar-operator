@@ -26,45 +26,28 @@ from typing import Any
 
 import httpx
 
-# Registry of supported utilities. Adding a utility = one entry here.
-# provider: lowercase code used in DB (UtilityAccount.provider) and payloads.
-SMARTHUB_UTILITIES: dict[str, dict[str, str]] = {
-    "VEC": {
-        "host": "vermontelectric.smarthub.coop",
-        "name": "Vermont Electric Cooperative",
-        "provider": "vec",
-    },
-    "WEC": {
-        "host": "washingtonelectric.smarthub.coop",
-        "name": "Washington Electric Cooperative",
-        "provider": "wec",
-    },
-    "STOWE": {
-        "host": "stoweelectric.smarthub.coop",
-        "name": "Stowe Electric Department",
-        "provider": "stowe",
-    },
-    "HYDE_PARK": {
-        "host": "villageofhydepark.smarthub.coop",
-        "name": "Village of Hyde Park",
-        "provider": "hyde_park",
-    },
-    "LUDLOW": {
-        "host": "ludlow.smarthub.coop",
-        "name": "Village of Ludlow Electric",
-        "provider": "ludlow",
-    },
-    "ENOSBURG": {
-        "host": "villageofenosburgfalls.smarthub.coop",
-        "name": "Village of Enosburg Falls",
-        "provider": "enosburg",
-    },
-    "NHEC": {
-        "host": "nhec.smarthub.coop",
-        "name": "New Hampshire Electric Cooperative",
-        "provider": "nhec",
-    },
-}
+# Registry of supported utilities. SINGLE SOURCE OF TRUTH is the per-state CSV
+# catalog in api/data/providers/*.csv (the `smarthub_host` column). We derive
+# SMARTHUB_UTILITIES from api.providers.SMARTHUB_HOSTS so a utility is wired
+# end-to-end from one CSV line — no second place to keep in sync.
+#
+# Shape kept identical to the legacy hand-maintained dict for compatibility:
+#   { "<UPPER_CODE>": {"host": ..., "name": ..., "provider": "<code>"} }
+def _build_smarthub_utilities() -> dict[str, dict[str, str]]:
+    from ..providers import PROVIDERS, SMARTHUB_HOSTS
+
+    name_by_code = {p["code"]: p["label"] for p in PROVIDERS}
+    out: dict[str, dict[str, str]] = {}
+    for code, host in SMARTHUB_HOSTS.items():
+        out[code.upper()] = {
+            "host": host,
+            "name": name_by_code.get(code, code),
+            "provider": code,
+        }
+    return out
+
+
+SMARTHUB_UTILITIES: dict[str, dict[str, str]] = _build_smarthub_utilities()
 
 # Maps *.smarthub.coop hostname → lowercase provider code
 HOST_TO_PROVIDER: dict[str, str] = {

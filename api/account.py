@@ -248,6 +248,13 @@ class UpdateFrequency(BaseModel):
     frequency: str  # weekly | monthly | quarterly
 
 
+class UtilityRequest(BaseModel):
+    utility_name: str
+    portal_url: Optional[str] = None
+    region: Optional[str] = None
+    notes: Optional[str] = None
+
+
 class UpdateCcOnReports(BaseModel):
     cc_on_reports: bool
 
@@ -730,6 +737,41 @@ def update_email(body: UpdateEmail, authorization: Optional[str] = Header(defaul
             logger.warning("Failed to sync email to Stripe: %s", e)
 
     return {"ok": True, "email": new_email}
+
+
+@router.post("/v1/account/request-utility")
+def request_utility(
+    body: UtilityRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Operator-submitted "Don't see your utility?" request.
+
+    Emails Ford and (if HERMES_UTILITY_WEBHOOK_URL is configured) fires a
+    signed webhook that triggers an autonomous Hermes agent run which adds the
+    utility to the repo and opens a PR. See api/utility_request.py.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    name = (body.utility_name or "").strip()
+    if not name:
+        raise HTTPException(422, "Utility name is required")
+
+    from .utility_request import submit_utility_request
+
+    with SessionLocal() as db:
+        fresh = db.get(Tenant, t.id)
+        tenant_name = (fresh.company_name or fresh.name or fresh.operator_name) if fresh else None
+        tenant_email = fresh.contact_email if fresh else None
+
+    return submit_utility_request(
+        tenant_id=t.id,
+        tenant_name=tenant_name,
+        tenant_email=tenant_email,
+        utility_name=name,
+        portal_url=body.portal_url,
+        region=body.region,
+        notes=body.notes,
+    )
 
 
 @router.post("/v1/account/name")

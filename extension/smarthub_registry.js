@@ -1,48 +1,48 @@
-// smarthub_registry.js — single source of truth for SmartHub utility hosts.
+// smarthub_registry.js — GENERATED FILE. DO NOT EDIT BY HAND.
 //
-// Keep this file in sync with SMARTHUB_UTILITIES in api/adapters/smarthub.py.
-// Adding a new utility = one entry here + one entry in the Python registry.
+// Source of truth: api/data/providers/*.csv (rows with a smarthub_host).
+// Regenerate:  python scripts/gen_smarthub_registry_js.py
+// CI verifies this file is in sync via --check.
 //
 // Exported as window.SMARTHUB_REGISTRY so smarthub_content.js can read it
-// without module imports (content scripts run in the page context, not ES modules).
+// without module imports (content scripts run in the page context).
 
 (function () {
   "use strict";
 
   // Maps *.smarthub.coop hostname → lowercase provider code (matches DB)
   const SMARTHUB_REGISTRY = {
-    "vermontelectric.smarthub.coop": {
-      provider: "vec",
-      name: "Vermont Electric Cooperative",
-    },
-    "washingtonelectric.smarthub.coop": {
-      provider: "wec",
-      name: "Washington Electric Cooperative",
-    },
-    "weci.smarthub.coop": {
-      // Alternate WEC hostname
-      provider: "wec",
-      name: "Washington Electric Cooperative",
-    },
-    "stoweelectric.smarthub.coop": {
-      provider: "stowe",
-      name: "Stowe Electric Department",
-    },
-    "villageofhydepark.smarthub.coop": {
-      provider: "hyde_park",
-      name: "Village of Hyde Park",
+    "bartonelectric.smarthub.coop": {
+      provider: "barton",
+      name: "Village of Barton (Barton Village Electric)",
     },
     "ludlow.smarthub.coop": {
       provider: "ludlow",
-      name: "Village of Ludlow Electric",
+      name: "Village of Ludlow Electric Light Department",
+    },
+    "nhec.smarthub.coop": {
+      provider: "nhec",
+      name: "New Hampshire Electric Cooperative",
+    },
+    "stoweelectric.smarthub.coop": {
+      provider: "stowe",
+      name: "Village of Stowe Electric Department",
+    },
+    "vermontelectric.smarthub.coop": {
+      provider: "vec",
+      name: "Vermont Electric Cooperative",
     },
     "villageofenosburgfalls.smarthub.coop": {
       provider: "enosburg",
       name: "Village of Enosburg Falls",
     },
-    "nhec.smarthub.coop": {
-      provider: "nhec",
-      name: "New Hampshire Electric Cooperative",
+    "villageofhydepark.smarthub.coop": {
+      provider: "hyde_park",
+      name: "Village of Hyde Park",
+    },
+    "washingtonelectric.smarthub.coop": {
+      provider: "wec",
+      name: "Washington Electric Co-op",
     },
   };
 
@@ -54,7 +54,7 @@
     if (hostname.endsWith(".smarthub.coop")) {
       console.warn(
         `[Solar Operator] Unknown SmartHub host: ${hostname}. ` +
-          "Treating as VEC (vermontelectric). Add this host to smarthub_registry.js."
+          "Treating as VEC (vermontelectric). Add this host to a provider CSV."
       );
       return { provider: "vec", name: "Unknown SmartHub Utility" };
     }

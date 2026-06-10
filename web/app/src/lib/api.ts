@@ -341,6 +341,25 @@ export async function updateAccountSendFromName(
   return res.send_from_name;
 }
 
+export interface UtilityRequestInput {
+  utility_name: string;
+  portal_url?: string | null;
+  region?: string | null;
+  notes?: string | null;
+}
+
+/** Submit a "don't see your utility?" request. Emails the SO team and, when a
+ *  Hermes agent webhook is configured server-side, kicks off an autonomous
+ *  agent run that adds the utility to the repo and opens a PR. */
+export async function requestUtilityAddition(
+  input: UtilityRequestInput,
+): Promise<{ ok: boolean; agent_dispatched: boolean }> {
+  return request<{ ok: boolean; agent_dispatched: boolean }>(
+    "/v1/account/request-utility",
+    { body: input },
+  );
+}
+
 export async function updateAccountFrequency(
   frequency: string,
 ): Promise<string> {
