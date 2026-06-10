@@ -16,6 +16,18 @@
       provider: "barton",
       name: "Village of Barton (Barton Village Electric)",
     },
+    "blockisland.smarthub.coop": {
+      provider: "block_island",
+      name: "Block Island Power Company",
+    },
+    "emec.smarthub.coop": {
+      provider: "emec",
+      name: "Eastern Maine Electric Cooperative",
+    },
+    "klpd.smarthub.coop": {
+      provider: "klpd",
+      name: "Kennebunk Light & Power District",
+    },
     "ludlow.smarthub.coop": {
       provider: "ludlow",
       name: "Village of Ludlow Electric Light Department",
