@@ -265,6 +265,9 @@ export interface ArrayRow {
   nepool_gis_id: string | null;
   region: string | null;
   bill_offset_months: number | null;
+  /** V2: generation source — solar|wind|hydro|digester|storage. Backend
+   *  defaults to 'solar'; treat a missing value as solar. */
+  fuel_type?: string | null;
   notes: string | null;
   excluded: boolean;
   accounts: UtilityAccount[];
@@ -931,6 +934,8 @@ export interface ArrayCreateInput {
   region?: string | null;
   bill_offset_months?: number | null;
   notes?: string | null;
+  /** V2: generation source. Omit to let the backend default to 'solar'. */
+  fuel_type?: string | null;
 }
 
 export async function createArray(
@@ -1406,6 +1411,9 @@ export interface CanvasAccountData {
   array_id: number | null;
   array_name: string | null;
   nepool_gis_id: string | null;
+  /** V2: generation source of the linked array (solar|wind|hydro|digester|
+   *  storage). Null/absent reads as solar. */
+  fuel_type?: string | null;
   /** Original client this account belonged to before being moved in the
    *  sandbox. NULL while the account is still at its original home. */
   login_origin_client_id?: number | null;

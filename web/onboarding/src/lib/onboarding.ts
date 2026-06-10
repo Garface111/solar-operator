@@ -197,6 +197,8 @@ export interface ArrayPayload {
   name: string;
   nepool_gis_id?: string;
   bill_offset_months?: number;
+  /** V2: generation source — solar|wind|hydro|digester|storage. Omit for solar. */
+  fuel_type?: string;
 }
 
 export interface ClientPayload {
@@ -205,6 +207,9 @@ export interface ClientPayload {
   gmp_email?: string;
   gmp_username?: string;
   gmp_autopopulate: boolean;
+  /** V2: the kind of generation this client reports. Seeds manually-added
+   *  arrays and lets the backend tag auto-populated arrays. Omit for solar. */
+  default_fuel_type?: string;
   arrays: ArrayPayload[];
 }
 

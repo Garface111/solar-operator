@@ -6,6 +6,8 @@ import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Toggle } from "../ui/Toggle";
 import { Spinner } from "../ui/Spinner";
+import { FuelPicker } from "../ui/FuelPicker";
+import { DEFAULT_FUEL, fuelMeta, type FuelType } from "../lib/fuel";
 import { useToast } from "../ui/Toast";
 import {
   getToken,
@@ -17,6 +19,7 @@ import {
 interface ArrayDraft {
   name: string;
   nepool_gis_id: string;
+  fuel_type: FuelType;
 }
 
 interface ClientDraft {
@@ -27,6 +30,9 @@ interface ClientDraft {
   // GMP accepts either an email or a username at login; one field captures
   // whichever the client uses. Split into gmp_email / gmp_username at submit.
   gmp_login: string;
+  // V2: the kind of generation this client reports. Defaults to solar so the
+  // existing solar-only flow is unchanged. Seeds each new manual array.
+  fuel_type: FuelType;
   arrays: ArrayDraft[];
 }
 
@@ -38,6 +44,7 @@ function blankClient(): ClientDraft {
     contact_email: "",
     gmp_autopopulate: true,
     gmp_login: "",
+    fuel_type: DEFAULT_FUEL,
     arrays: [],
   };
 }
@@ -45,7 +52,7 @@ function blankClient(): ClientDraft {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 interface ConfirmSummary {
-  clients: Array<{ name: string; contact_email: string; arrayCount: number; autopop: boolean }>;
+  clients: Array<{ name: string; contact_email: string; arrayCount: number; autopop: boolean; fuel: FuelType }>;
 }
 
 export default function Clients() {
@@ -102,7 +109,7 @@ export default function Clients() {
     setClients((cs) =>
       cs.map((c) =>
         c.id === id
-          ? { ...c, arrays: [...c.arrays, { name: "", nepool_gis_id: "" }] }
+          ? { ...c, arrays: [...c.arrays, { name: "", nepool_gis_id: "", fuel_type: c.fuel_type }] }
           : c,
       ),
     );
@@ -167,6 +174,9 @@ export default function Clients() {
         name: c.name.trim(),
         contact_email: c.contact_email.trim() || undefined,
         gmp_autopopulate: c.gmp_autopopulate,
+        // Only send a non-solar default — keeps solar payloads byte-identical
+        // to the pre-V2 shape.
+        default_fuel_type: c.fuel_type === DEFAULT_FUEL ? undefined : c.fuel_type,
         gmp_email:
           c.gmp_autopopulate && login && looksLikeEmail ? login : undefined,
         gmp_username:
@@ -178,6 +188,7 @@ export default function Clients() {
               .map((a) => ({
                 name: a.name.trim(),
                 nepool_gis_id: a.nepool_gis_id.trim() || undefined,
+                fuel_type: a.fuel_type === DEFAULT_FUEL ? undefined : a.fuel_type,
               })),
       };
     });
@@ -190,6 +201,7 @@ export default function Clients() {
           contact_email: c.contact_email.trim(),
           arrayCount: c.gmp_autopopulate ? 0 : c.arrays.filter((a) => a.name.trim()).length,
           autopop: c.gmp_autopopulate,
+          fuel: c.fuel_type,
         })),
       });
       setSubmitting(false);
@@ -233,8 +245,15 @@ export default function Clients() {
               <li key={i} className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3">
                 <div className="flex items-start justify-between gap-2">
                   <span className="font-medium text-zinc-900">{c.name}</span>
-                  <span className="shrink-0 rounded-full bg-primary-100 px-2 py-0.5 text-[11px] font-medium text-primary-700">
-                    {c.autopop ? "auto-detect arrays" : `${c.arrayCount} array${c.arrayCount === 1 ? "" : "s"}`}
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    {c.fuel !== DEFAULT_FUEL && (
+                      <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-600">
+                        {fuelMeta(c.fuel).icon} {fuelMeta(c.fuel).label}
+                      </span>
+                    )}
+                    <span className="rounded-full bg-primary-100 px-2 py-0.5 text-[11px] font-medium text-primary-700">
+                      {c.autopop ? "auto-detect arrays" : `${c.arrayCount} array${c.arrayCount === 1 ? "" : "s"}`}
+                    </span>
                   </span>
                 </div>
                 {c.contact_email && (
@@ -337,6 +356,22 @@ export default function Clients() {
                   </p>
                 )}
 
+                {/* V2 — generation type. Warm, plain wording; solar is the
+                    default so a solar-only operator just leaves it alone. */}
+                <div className="rounded-xl bg-zinc-50 px-4 py-3">
+                  <p className="text-sm font-medium text-zinc-700">
+                    What kind of generation are you reporting?
+                  </p>
+                  <p className="mt-0.5 mb-2.5 text-xs text-zinc-500">
+                    Most folks are solar — if that&apos;s you, you&apos;re all set. We also
+                    handle wind, hydro, a farm digester, or battery storage.
+                  </p>
+                  <FuelPicker
+                    value={c.fuel_type}
+                    onChange={(f) => update(c.id, { fuel_type: f })}
+                  />
+                </div>
+
                 <div className="rounded-xl bg-zinc-50 px-4 py-3">
                   <Toggle
                     id={`autopop-${c.id}`}
@@ -367,10 +402,8 @@ export default function Clients() {
                       </p>
                       <div className="space-y-3">
                         {c.arrays.map((a, ai) => (
-                          <div
-                            key={ai}
-                            className="flex flex-col gap-2 sm:flex-row sm:items-end"
-                          >
+                          <div key={ai} className="space-y-2">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                             <div className="flex-1">
                               <Input
                                 id={`arr-name-${c.id}-${ai}`}
@@ -408,6 +441,14 @@ export default function Clients() {
                             >
                               ✕
                             </button>
+                            </div>
+                            {/* Per-array fuel — seeded from the client's answer
+                                above; override here for a mixed-fuel site. */}
+                            <FuelPicker
+                              size="sm"
+                              value={a.fuel_type}
+                              onChange={(f) => updateArray(c.id, ai, { fuel_type: f })}
+                            />
                           </div>
                         ))}
                       </div>

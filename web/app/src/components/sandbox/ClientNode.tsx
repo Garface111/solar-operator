@@ -8,6 +8,7 @@ import {
   type UtilityAccount,
 } from './mockData';
 import { restoreArray } from '../../lib/api';
+import { FuelBadge } from '../FuelControls';
 import { useToast } from '../../ui/Toast';
 
 // Lookup for card width class per density (also applies to dense-expanded state)
@@ -688,6 +689,9 @@ function LoginGroupRow({
                     </span>
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${th.rowDot} opacity-60`} />
                     <ArrayNameCell arr={arr} />
+                    {/* Non-solar fuel marker — solar renders nothing so the
+                        common case looks identical to before V2. */}
+                    <FuelBadge fuel={arr.fuel_type} className="shrink-0" />
                     {(() => {
                       const n = subMeterCounts.get(arr.id) ?? 1;
                       if (n <= 1) return null;

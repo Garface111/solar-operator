@@ -7,6 +7,8 @@ import { EditableField } from "../ui/EditableField";
 import { useToast } from "../ui/Toast";
 import { ArrayMergeSuggestionBanner } from "./ArrayMergeSuggestionBanner";
 import { InlineNepoolField } from "./InlineNepoolField";
+import { FuelPicker, FuelBadge } from "./FuelControls";
+import { DEFAULT_FUEL, type FuelType } from "../lib/fuel";
 import {
   type ArrayRow as ArrayRowT,
   type Provider,
@@ -312,8 +314,9 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
           clientId={clientId}
           onCancel={() => setAdding(false)}
           onCreated={(a) => {
+            // Keep the form open for bulk entry — AddArrayRow clears its own
+            // fields and refocuses. "Done" (onCancel) closes it.
             addArrayLocal(a);
-            setAdding(false);
           }}
         />
       ) : (
@@ -568,6 +571,10 @@ function ArrayRow({
             className="max-w-full font-medium"
           />
         </div>
+        {/* Fuel badge — renders only for non-solar arrays so a mixed-fuel
+            operator can tell wind/hydro/etc. apart at a glance. Solar shows
+            nothing, keeping the solar-only list visually unchanged. */}
+        <FuelBadge fuel={array.fuel_type} className="shrink-0" />
         {/* data-nepool-field: stable hook for the "Take me to next NEPOOL ID" guided-fill button */}
         <div data-nepool-field className="shrink-0">
           <InlineNepoolField
@@ -990,6 +997,11 @@ function AddArrayRow({
   const [gis, setGis] = useState("");
   const [gisError, setGisError] = useState("");
   const [saving, setSaving] = useState(false);
+  // Fuel stays sticky across consecutive adds so an operator entering, say,
+  // five wind turbines picks "Wind" once and keeps adding. Defaults to solar
+  // so the common solar-only flow is one less decision.
+  const [fuel, setFuel] = useState<FuelType>(DEFAULT_FUEL);
+  const nameRef = useRef<HTMLInputElement | null>(null);
 
   async function save() {
     if (!name.trim() || saving) return;
@@ -1003,9 +1015,19 @@ function AddArrayRow({
       const a = await createArray(clientId, {
         name: name.trim(),
         nepool_gis_id: gisTrimmed || null,
+        // Only send a non-default fuel — keeps solar create payloads identical
+        // to the pre-V2 shape.
+        fuel_type: fuel === DEFAULT_FUEL ? undefined : fuel,
       });
       onCreated(a);
       toast.success(`Added ${a.name}`);
+      // Stay open for bulk entry: clear the per-array fields, keep the fuel
+      // selection, and refocus the name field. Fuel carries to the next array.
+      setName("");
+      setGis("");
+      setGisError("");
+      setSaving(false);
+      nameRef.current?.focus();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't add array");
       setSaving(false);
@@ -1013,46 +1035,56 @@ function AddArrayRow({
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-primary-200 bg-white p-3 sm:flex-row sm:items-end">
-      <div className="flex-1">
-        <Input
-          id={`new-array-name-${clientId}`}
-          label="Array name"
-          autoFocus
-          placeholder="South Field"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </div>
-      <div className="flex-1">
-        <Input
-          id={`new-array-gis-${clientId}`}
-          label="NEPOOL-GIS ID"
-          placeholder="53984"
-          maxLength={5}
-          value={gis}
-          onChange={(e) => {
-            const v = e.target.value.replace(/\D/g, "").slice(0, 5);
-            setGis(v);
-            if (gisError) setGisError("");
-          }}
-        />
-        {gisError ? (
-          <p className="mt-0.5 text-[11px] text-red-600">{gisError}</p>
-        ) : (
-          <p className="mt-1 text-[11px] leading-snug text-zinc-400">
-            5-digit ISO-NE asset ID — required to ship reports. Add it later if you
-            don&apos;t have it now.
-          </p>
-        )}
-      </div>
-      <div className="flex gap-2">
-        <Button onClick={save} disabled={!name.trim() || saving} className="px-3 py-2">
-          {saving ? <Spinner /> : "Add"}
-        </Button>
-        <Button variant="ghost" onClick={onCancel} disabled={saving} className="px-3 py-2">
-          Cancel
-        </Button>
+    <div className="flex flex-col gap-3 rounded-xl border border-primary-200 bg-white p-3">
+      <FuelPicker value={fuel} onChange={setFuel} label="Generation type" />
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <div className="flex-1">
+          <Input
+            ref={nameRef}
+            id={`new-array-name-${clientId}`}
+            label="Array name"
+            autoFocus
+            placeholder="South Field"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save();
+            }}
+          />
+        </div>
+        <div className="flex-1">
+          <Input
+            id={`new-array-gis-${clientId}`}
+            label="NEPOOL-GIS ID"
+            placeholder="53984"
+            maxLength={5}
+            value={gis}
+            onChange={(e) => {
+              const v = e.target.value.replace(/\D/g, "").slice(0, 5);
+              setGis(v);
+              if (gisError) setGisError("");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save();
+            }}
+          />
+          {gisError ? (
+            <p className="mt-0.5 text-[11px] text-red-600">{gisError}</p>
+          ) : (
+            <p className="mt-1 text-[11px] leading-snug text-zinc-400">
+              5-digit ISO-NE asset ID — required to ship reports. Add it later if you
+              don&apos;t have it now.
+            </p>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <Button onClick={save} disabled={!name.trim() || saving} className="px-3 py-2">
+            {saving ? <Spinner /> : "Add"}
+          </Button>
+          <Button variant="ghost" onClick={onCancel} disabled={saving} className="px-3 py-2">
+            Done
+          </Button>
+        </div>
       </div>
     </div>
   );

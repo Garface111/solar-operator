@@ -4,6 +4,9 @@ export interface SolarArray {
   id: string;
   name: string;
   nepool_gis_id: string;
+  /** V2: generation source — solar|wind|hydro|digester|storage. Optional so
+   *  existing mock/test data (all solar) needs no change; absent reads solar. */
+  fuel_type?: string | null;
   mwh_per_qtr: number;
   reassigned_at?: string | null;
   /** ISO timestamp of soft-deletion. Non-null means the array is in the
