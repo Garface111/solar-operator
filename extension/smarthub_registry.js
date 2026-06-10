@@ -12,6 +12,10 @@
 
   // Maps *.smarthub.coop hostname → lowercase provider code (matches DB)
   const SMARTHUB_REGISTRY = {
+    "adams.smarthub.coop": {
+      provider: "adams",
+      name: "Adams Electric Cooperative",
+    },
     "adamsec.smarthub.coop": {
       provider: "adams_ec",
       name: "Adams Electric Cooperative",
@@ -19,6 +23,10 @@
     "aec.smarthub.coop": {
       provider: "aiken",
       name: "Aiken Electric Cooperative",
+    },
+    "algerdelta.smarthub.coop": {
+      provider: "algerdelta",
+      name: "Alger Delta Cooperative Electric Association",
     },
     "arkvalley.smarthub.coop": {
       provider: "arkvalley",
@@ -36,9 +44,21 @@
       provider: "barc",
       name: "BARC Electric Cooperative",
     },
+    "barronelectric.smarthub.coop": {
+      provider: "barron",
+      name: "Barron Electric Cooperative",
+    },
     "bartonelectric.smarthub.coop": {
       provider: "barton",
       name: "Village of Barton (Barton Village Electric)",
+    },
+    "bayfieldelectric.smarthub.coop": {
+      provider: "bayfield",
+      name: "Bayfield Electric Cooperative",
+    },
+    "bcremc.smarthub.coop": {
+      provider: "bcremc",
+      name: "Bartholomew County REMC",
     },
     "bedfordrec.smarthub.coop": {
       provider: "bedford_rec",
@@ -116,6 +136,10 @@
       provider: "clayelectric",
       name: "Clay Electric Cooperative",
     },
+    "cloverland.smarthub.coop": {
+      provider: "cloverland",
+      name: "Cloverland Electric Cooperative",
+    },
     "cmec.smarthub.coop": {
       provider: "clarke_washington",
       name: "Clarke-Washington EMC",
@@ -144,6 +168,14 @@
       provider: "concord",
       name: "Concord Municipal Light Plant",
     },
+    "consolidatedelectric.smarthub.coop": {
+      provider: "oh_consolidated",
+      name: "Consolidated Cooperative",
+    },
+    "cornbeltenergy.smarthub.coop": {
+      provider: "cornbelt",
+      name: "Corn Belt Energy Corporation",
+    },
     "craigheadelectric.smarthub.coop": {
       provider: "craighead",
       name: "Craighead Electric Cooperative",
@@ -152,13 +184,25 @@
       provider: "cumberland_valley",
       name: "Cumberland Valley Electric",
     },
+    "cve.smarthub.coop": {
+      provider: "chippewa_valley",
+      name: "Chippewa Valley Electric Cooperative",
+    },
     "cvec.smarthub.coop": {
       provider: "cvec",
       name: "Central Virginia Electric Cooperative (CVEC)",
     },
+    "cwremc.smarthub.coop": {
+      provider: "cwremc",
+      name: "Carroll White REMC",
+    },
     "dce.smarthub.coop": {
       provider: "dce",
       name: "Delaware County Electric Cooperative",
+    },
+    "dcremc.smarthub.coop": {
+      provider: "dcremc",
+      name: "Decatur County REMC",
     },
     "decoop.smarthub.coop": {
       provider: "dec",
@@ -172,6 +216,30 @@
       provider: "dixie_epa",
       name: "Dixie Electric Power Association",
     },
+    "dmremc.smarthub.coop": {
+      provider: "dmremc",
+      name: "Daviess-Martin County REMC",
+    },
+    "duboisrec.smarthub.coop": {
+      provider: "duboisrec",
+      name: "Dubois REC",
+    },
+    "dunnenergy.smarthub.coop": {
+      provider: "dunnenergy",
+      name: "Dunn Energy Cooperative",
+    },
+    "ecec.smarthub.coop": {
+      provider: "ecec",
+      name: "Eau Claire Energy Cooperative",
+    },
+    "egyptian.smarthub.coop": {
+      provider: "egyptian",
+      name: "Egyptian Electric Cooperative Association",
+    },
+    "eiec.smarthub.coop": {
+      provider: "eiec",
+      name: "Eastern Illini Electric Cooperative",
+    },
     "emec.smarthub.coop": {
       provider: "emec",
       name: "Eastern Maine Electric Cooperative",
@@ -179,6 +247,10 @@
     "energyunited.smarthub.coop": {
       provider: "energy_united",
       name: "EnergyUnited",
+    },
+    "enerstar.smarthub.coop": {
+      provider: "enerstar",
+      name: "EnerStar Electric Cooperative",
     },
     "erec.smarthub.coop": {
       provider: "erec",
@@ -208,6 +280,10 @@
       provider: "fleming_mason",
       name: "Fleming-Mason Energy Cooperative",
     },
+    "frontierpower.smarthub.coop": {
+      provider: "oh_frontierpower",
+      name: "Frontier Power Company",
+    },
     "gcec.smarthub.coop": {
       provider: "gcec",
       name: "Gulf Coast Electric Cooperative (GCEC)",
@@ -216,9 +292,17 @@
       provider: "gladesec",
       name: "Glades Electric Cooperative",
     },
+    "glenergy.smarthub.coop": {
+      provider: "gle",
+      name: "Great Lakes Energy Cooperative",
+    },
     "habershamemc.smarthub.coop": {
       provider: "habersham_emc",
       name: "Habersham EMC",
+    },
+    "hamiltonelectric.smarthub.coop": {
+      provider: "oh_hamilton",
+      name: "Hamilton Municipal Electric",
     },
     "harrisonrea.smarthub.coop": {
       provider: "hrea",
@@ -232,9 +316,21 @@
       provider: "halifax_emc",
       name: "Halifax Electric Membership Corporation",
     },
+    "hendrickspower.smarthub.coop": {
+      provider: "hendrickspower",
+      name: "Hendricks Power Cooperative",
+    },
+    "henrycountyremc.smarthub.coop": {
+      provider: "henrycountyremc",
+      name: "Henry County REMC",
+    },
     "holston.smarthub.coop": {
       provider: "holston",
       name: "Holston Electric Cooperative",
+    },
+    "homeworks.smarthub.coop": {
+      provider: "homeworks",
+      name: "HomeWorks Tri-County Electric Cooperative",
     },
     "hull.smarthub.coop": {
       provider: "hull",
@@ -252,6 +348,26 @@
       provider: "jackson_energy",
       name: "Jackson Energy Cooperative",
     },
+    "jacksonremc.smarthub.coop": {
+      provider: "jacksonremc",
+      name: "Jackson County REMC",
+    },
+    "jasper.smarthub.coop": {
+      provider: "jasper",
+      name: "Jasper Municipal Electric",
+    },
+    "jayremc.smarthub.coop": {
+      provider: "jayremc",
+      name: "Jay County REMC",
+    },
+    "jcremc.smarthub.coop": {
+      provider: "jcremc",
+      name: "Johnson County REMC",
+    },
+    "jrec.smarthub.coop": {
+      provider: "jrec",
+      name: "Jump River Electric Cooperative",
+    },
     "kenergycorp.smarthub.coop": {
       provider: "kenergy",
       name: "Kenergy Corp.",
@@ -260,9 +376,17 @@
       provider: "klpd",
       name: "Kennebunk Light & Power District",
     },
+    "kvremc.smarthub.coop": {
+      provider: "kvremc",
+      name: "Kankakee Valley REMC",
+    },
     "lcec.smarthub.coop": {
       provider: "lcec",
       name: "Lee County Electric Cooperative (LCEC)",
+    },
+    "lebanonutilities.smarthub.coop": {
+      provider: "lebanon",
+      name: "Lebanon Utilities",
     },
     "ludlow.smarthub.coop": {
       provider: "ludlow",
@@ -288,6 +412,10 @@
       provider: "magnolia_epa",
       name: "Magnolia Electric Power Association",
     },
+    "mcdonoughpower.smarthub.coop": {
+      provider: "mcdonough",
+      name: "McDonough Power Cooperative",
+    },
     "mec.smarthub.coop": {
       provider: "mec",
       name: "Mountain Electric Cooperative",
@@ -303,6 +431,10 @@
     "mvec.smarthub.coop": {
       provider: "magoffin_valley",
       name: "Magoffin Valley Electric Cooperative",
+    },
+    "mwec.smarthub.coop": {
+      provider: "mwec",
+      name: "Midwestern Electric",
     },
     "myrec.smarthub.coop": {
       provider: "myrec",
@@ -320,9 +452,17 @@
       provider: "nnec",
       name: "Northern Neck Electric Cooperative (NNEC)",
     },
+    "nobleremc.smarthub.coop": {
+      provider: "nobleremc",
+      name: "Noble REMC",
+    },
     "nolinrecc.smarthub.coop": {
       provider: "nolin_recc",
       name: "Nolin RECC",
+    },
+    "norriselectric.smarthub.coop": {
+      provider: "norris",
+      name: "Norris Electric Cooperative",
     },
     "northcentralelectric.smarthub.coop": {
       provider: "northcentral_ec",
@@ -335,6 +475,14 @@
     "novec.smarthub.coop": {
       provider: "novec",
       name: "Northern Virginia Electric Cooperative (NOVEC)",
+    },
+    "ocontoelectric.smarthub.coop": {
+      provider: "oconto",
+      name: "Oconto Electric Cooperative",
+    },
+    "ontorea.smarthub.coop": {
+      provider: "ontonagon",
+      name: "Ontonagon County REA",
     },
     "ozarksecc.smarthub.coop": {
       provider: "ozarks",
@@ -360,6 +508,18 @@
       provider: "pgec",
       name: "Prince George Electric Cooperative",
     },
+    "pieg.smarthub.coop": {
+      provider: "pieg",
+      name: "Presque Isle Electric & Gas Co-op",
+    },
+    "piercepepin.smarthub.coop": {
+      provider: "piercepepin",
+      name: "Pierce Pepin Cooperative Services",
+    },
+    "pioneerec.smarthub.coop": {
+      provider: "oh_pioneerec",
+      name: "Pioneer Rural Electric Cooperative",
+    },
     "pjecc.smarthub.coop": {
       provider: "pjecc",
       name: "Petit Jean Electric Cooperative",
@@ -368,17 +528,45 @@
       provider: "planters_emc",
       name: "Planters EMC",
     },
+    "polkburnett.smarthub.coop": {
+      provider: "polkburnett",
+      name: "Polk-Burnett Electric Cooperative",
+    },
+    "ppec.smarthub.coop": {
+      provider: "ppec",
+      name: "Paulding Putnam Electric Cooperative",
+    },
     "preco.smarthub.coop": {
       provider: "preco",
       name: "Peace River Electric Cooperative (PRECO)",
+    },
+    "priceelectric.smarthub.coop": {
+      provider: "priceelectric",
+      name: "Price Electric Cooperative",
     },
     "reaenergy.smarthub.coop": {
       provider: "rea_energy",
       name: "REA Energy Cooperative",
     },
+    "reedsburgutility.smarthub.coop": {
+      provider: "reedsburg",
+      name: "Reedsburg Utility Commission",
+    },
+    "riverlandenergy.smarthub.coop": {
+      provider: "riverlandenergy",
+      name: "Riverland Energy Cooperative",
+    },
     "rmec.smarthub.coop": {
       provider: "rmec",
       name: "Rich Mountain Electric Cooperative",
+    },
+    "rock.smarthub.coop": {
+      provider: "rock",
+      name: "Rock Energy Cooperative",
+    },
+    "rse.smarthub.coop": {
+      provider: "rse",
+      name: "RushShelby Energy",
     },
     "santee.smarthub.coop": {
       provider: "santee",
@@ -396,13 +584,33 @@
       provider: "sec",
       name: "Southside Electric Cooperative",
     },
+    "seiec.smarthub.coop": {
+      provider: "seiec",
+      name: "SouthEastern Illinois Electric Cooperative",
+    },
+    "seiremc.smarthub.coop": {
+      provider: "seiremc",
+      name: "Southeastern Indiana REMC",
+    },
+    "shelbyelectric.smarthub.coop": {
+      provider: "oh_shelby",
+      name: "Shelby Municipal Electric",
+    },
     "shelbyenergy.smarthub.coop": {
       provider: "shelby_energy",
       name: "Shelby Energy Cooperative",
     },
+    "siec.smarthub.coop": {
+      provider: "siec",
+      name: "Southern Illinois Electric Cooperative",
+    },
     "singingriver.smarthub.coop": {
       provider: "singing_river",
       name: "Singing River Electric Cooperative",
+    },
+    "sirec.smarthub.coop": {
+      provider: "sirec",
+      name: "Southern Indiana REC",
     },
     "skrecc.smarthub.coop": {
       provider: "south_kentucky",
@@ -415,6 +623,10 @@
     "somersetrec.smarthub.coop": {
       provider: "somerset_rec",
       name: "Somerset Rural Electric Cooperative",
+    },
+    "southcentralpower.smarthub.coop": {
+      provider: "oh_southcentral",
+      name: "South Central Power Company",
     },
     "southwestepa.smarthub.coop": {
       provider: "southwest_epa",
@@ -452,9 +664,25 @@
       provider: "tri_county_ky",
       name: "Tri-County Electric Membership Corporation (KY)",
     },
+    "teammidwest.smarthub.coop": {
+      provider: "midwest_energy",
+      name: "Midwest Energy & Communications",
+    },
     "tec.smarthub.coop": {
       provider: "tec",
       name: "Talquin Electric Cooperative",
+    },
+    "tecmi.smarthub.coop": {
+      provider: "tecmi",
+      name: "Thumb Electric Cooperative",
+    },
+    "theenergycoop.smarthub.coop": {
+      provider: "oh_tec",
+      name: "The Energy Cooperative",
+    },
+    "tipmont.smarthub.coop": {
+      provider: "tipmont",
+      name: "Tipmont REMC",
     },
     "tombigbee.smarthub.coop": {
       provider: "tombigbee",
@@ -488,6 +716,10 @@
       provider: "vec",
       name: "Vermont Electric Cooperative",
     },
+    "vernonelectric.smarthub.coop": {
+      provider: "vernonelectric",
+      name: "Vernon Electric Cooperative",
+    },
     "villageofenosburgfalls.smarthub.coop": {
       provider: "enosburg",
       name: "Village of Enosburg Falls",
@@ -499,6 +731,10 @@
     "volunteer.smarthub.coop": {
       provider: "volunteer",
       name: "Volunteer Energy Cooperative",
+    },
+    "wabash.smarthub.coop": {
+      provider: "wabash",
+      name: "Wabash County REMC",
     },
     "warrenec.smarthub.coop": {
       provider: "warren_ec",
@@ -523,6 +759,10 @@
     "wrecc.smarthub.coop": {
       provider: "warren_recc",
       name: "Warren RECC",
+    },
+    "wwvremc.smarthub.coop": {
+      provider: "wwvremc",
+      name: "Whitewater Valley REMC",
     },
   };
 
