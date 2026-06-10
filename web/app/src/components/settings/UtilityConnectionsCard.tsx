@@ -18,6 +18,9 @@ const PORTAL_URLS: Record<string, string> = {
   vec: "https://vermontelectric.smarthub.coop",
 };
 
+const EXTENSION_INSTALL_URL =
+  "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
+
 const UTILITY_TAG_STYLES: Record<string, string> = {
   GMP: "bg-emerald-50 text-emerald-600",
   VEC: "bg-sky-50 text-sky-700",
@@ -194,7 +197,17 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
         <div className="px-5 py-4">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-medium text-zinc-800">Chrome extension</p>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-medium text-zinc-800">Chrome extension</p>
+                <a
+                  href={EXTENSION_INSTALL_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium text-emerald-700 underline decoration-emerald-700/40 underline-offset-2 hover:decoration-emerald-700"
+                >
+                  Install extension →
+                </a>
+              </div>
               <p className="mt-0.5 text-xs text-zinc-400">
                 {connected ? (
                   <>
@@ -203,13 +216,14 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
                     ) : (
                       <>Connected · </>
                     )}
-                    Portals the extension pulls billing data from.
+                    Portals the extension pulls billing data from. Need it on
+                    another computer? Use the install link above.
                   </>
                 ) : (
                   <>
                     Extension not yet connected —{" "}
                     <a
-                      href="https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl"
+                      href={EXTENSION_INSTALL_URL}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="font-medium text-emerald-700 underline decoration-emerald-700/40 underline-offset-2 hover:decoration-emerald-700"
