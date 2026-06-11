@@ -5,7 +5,7 @@
 ## Quick summary
 
 - **We never sell your data.** Your information is used only to run the reporting service.
-- **We only read your utility billing data (Green Mountain Power and Vermont Electric Co-op)** — nothing else from your browser.
+- **We only read your utility billing data** — nothing else from your browser.
 - **You can delete everything** by emailing admin@solaroperator.org. We purge your data within 24 hours.
 - **Your login session expires automatically** (~21 days) and is replaced each time you log in to your utility portal with the extension active.
 - **Our only email provider is Resend.com**, which delivers your reports and sign-in links. No other third party sees your data.
@@ -93,7 +93,7 @@ each one does in plain English:
 | Run a background check (alarms) | To check every 12 hours whether your utility session is close to expiring, so we can remind you before it does. |
 | Show desktop notifications | To display a reminder when your session will expire within 3 days, so you can log into your utility portal and refresh it. |
 | Access greenmountainpower.com | So the extension can read your Green Mountain Power sign-in data after you log in. |
-| Access vermontelectric.smarthub.coop | So the extension can read your Vermont Electric Co-op sign-in data after you log in. |
+| Access *.smarthub.coop | So the extension can read your sign-in data after you log in to your utility's SmartHub portal (the NISC SmartHub platform used by hundreds of co-ops and municipal utilities nationwide, including Vermont Electric Co-op). |
 | Access api.greenmountainpower.com | Reserved for future use. The extension does not currently make any requests to this address. |
 | Access api.solaroperator.org | So the extension can send the captured data to your Solar Operator account. |
 

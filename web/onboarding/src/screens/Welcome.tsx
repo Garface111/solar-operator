@@ -7,7 +7,7 @@ import { Checkbox } from "../ui/Checkbox";
 import { MarkdownDoc } from "../ui/MarkdownDoc";
 
 const SERVICES = [
-  "Auto-pull GMP and VEC bills",
+  "Auto-pull bills from your utility — hundreds supported nationwide",
   "NEPOOL-format Excel reports",
   "Email delivery to your clients",
   "Multi-client portal",
@@ -17,7 +17,7 @@ const SERVICES = [
 // and tos.md (Quick summary sections). If you edit those files, update here.
 const PP_BULLETS = [
   "We never sell your data — it's only used to run the reporting service.",
-  "We only read your utility billing data (Green Mountain Power, Vermont Electric Co-op) — nothing else from your browser.",
+  "We only read your utility billing data — nothing else from your browser.",
   "You can delete everything by emailing admin@solaroperator.org. We purge your data within 24 hours.",
   "Your utility login session expires automatically (~21 days) and is refreshed each time you log in with the extension active.",
   "Our only email provider is Resend.com — it delivers your reports and sign-in links. No other third party sees your data.",
@@ -29,7 +29,7 @@ const TOS_BULLETS = [
   "Cancel anytime — no penalty. Your data stays accessible for 30 days after cancellation.",
   "You own your data. We use it only to run the service. We never sell it.",
   "You're responsible for entering correct NEPOOL-GIS IDs — we don't verify them.",
-  "Currently supports Green Mountain Power and Vermont Electric Cooperative. More utilities coming.",
+  "Supports hundreds of utilities nationwide — co-ops, municipals, and Green Mountain Power are automated today, with more added every week. Don't see yours? Request it.",
 ];
 
 // Served from web/onboarding/public/ by Vite (and FastAPI in prod) under the
@@ -53,10 +53,10 @@ export default function Welcome() {
           Quarterly solar reports, on autopilot.
         </h1>
         <p className="mt-3 text-base text-zinc-500">
-          We pull your utility bills (Green Mountain Power, Vermont Electric
-          Coop, and more), build NEPOOL-format net-metering credit reports,
-          and email them to your clients every quarter — so you never touch
-          a spreadsheet again.
+          We pull your utility bills — hundreds of utilities supported coast
+          to coast — build NEPOOL-format net-metering credit reports, and
+          email them to your clients every quarter, so you never touch a
+          spreadsheet again.
         </p>
 
         <div className="mt-8 rounded-xl border border-primary-200 bg-primary-50 p-5">

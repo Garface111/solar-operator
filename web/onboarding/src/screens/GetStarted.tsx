@@ -155,7 +155,7 @@ function PipelineVisual() {
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-[0_10px_30px_-12px_rgba(0,0,0,0.18)]">
       <div className="flex items-center gap-2 sm:gap-3">
-        <Node label="GMP, VEC, WEC…" sub="Utility" icon="⚡" tone="neutral" />
+        <Node label="Your utility" sub="Hundreds, US-wide" icon="⚡" tone="neutral" />
         <span className="shrink-0 text-2xl text-zinc-300" aria-hidden>→</span>
         <Node label="Chrome extension" sub="Captures bills" icon="🧩" tone="accent" />
         <span className="shrink-0 text-2xl text-zinc-300" aria-hidden>→</span>
@@ -265,7 +265,7 @@ const slides: SlideDef[] = [
       },
       {
         icon: "⚡",
-        text: "Solar Operator pulls every utility bill and builds the workbook for you.",
+        text: "Solar Operator pulls every utility bill and builds the workbook for you — hundreds of utilities supported, coast to coast.",
       },
       {
         icon: "🧩",
@@ -287,7 +287,7 @@ const slides: SlideDef[] = [
     kicker: "How Solar Operator solves it",
     headline: "Connect once. Reports build themselves.",
     body:
-      "Solar Operator hooks into your utility logins (Green Mountain Power, Vermont Electric Co-op, and more), captures each bill the moment it posts, and renders the NEPOOL-GIS workbook on autopilot every quarter — formatted exactly the way ISO-NE expects.",
+      "Solar Operator hooks into your utility logins — hundreds of utilities supported coast to coast — captures each bill the moment it posts, and renders the NEPOOL-GIS workbook on autopilot every quarter, formatted exactly the way ISO-NE expects.",
     visual: <PipelineVisual />,
   },
   // 4 — Granularity on the install.
@@ -451,6 +451,10 @@ export default function GetStarted() {
         </button>
         <p className="text-xs text-zinc-400">
           Start free — 14-day trial · $15/array/month (volume discounts past 50) · $250 one-time setup · cancel anytime
+        </p>
+        <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-primary-700">
+          <span aria-hidden>🌄</span>
+          Born in the Green Mountains · now serving solar operators coast to coast
         </p>
       </div>
 

@@ -9,7 +9,7 @@
 - **Cancel anytime:** no penalty. Your data stays accessible for 30 days after cancellation.
 - **You own your data.** We use it only to run the service. We never sell it.
 - **You are responsible for entering correct NEPOOL-GIS IDs.** We don't verify them — an incorrect ID could cause a wrong report.
-- **This service currently works with Green Mountain Power (GMP) and Vermont Electric Co-op (VEC, via SmartHub) accounts. Other Vermont utilities are in development.**
+- **This service supports hundreds of utilities across the United States.** Many co-ops, municipals, and Green Mountain Power are fully automated today; additional utilities are added on an ongoing basis. Where an automated connection isn't yet available for your utility, you can upload bills manually or request that we add it.
 
 ---
 
@@ -22,14 +22,15 @@ agree to these Terms. If you do not agree, do not use the Service.
 
 ## 1. What the Service does
 
-Solar Operator automates quarterly net-metering credit reporting for
-community solar operators in Vermont. The Service pulls billing and
-production data from your Green Mountain Power ("GMP") and Vermont Electric
-Co-op ("VEC") accounts — through the Solar Operator Sync browser extension
-and your own utility logins — and
+Solar Operator automates quarterly net-metering and renewable-energy-credit
+reporting for community solar operators across the United States. The Service
+pulls billing and production data from your utility accounts — through the
+Solar Operator Sync browser extension and your own utility logins — and
 uses it to generate NEPOOL-format Excel reports. We deliver those reports
 by email to the recipients you designate for each of your clients. The
-Service currently works with GMP and VEC data; other utilities are in development.
+Service supports hundreds of utilities nationwide, with automated coverage
+expanding on an ongoing basis; where automation isn't yet available for a
+given utility, bills can be uploaded manually.
 
 We may add, change, or remove features over time. We will make reasonable
 efforts to keep the Service available, but we do not guarantee it will be
@@ -97,8 +98,8 @@ how you use the Service, including:
   these IDs independently. An incorrect ID can cause an inaccurate or
   misattributed report — that is your responsibility to catch and correct.
 - **Permission to access utility data.** You confirm that you have the
-  right to access the utility accounts you connect to the Service (GMP or
-  VEC), including consent from your clients where their accounts are involved.
+  right to access the utility accounts you connect to the Service,
+  including consent from your clients where their accounts are involved.
 - **Report review.** The Service automates report preparation, but you
   are responsible for reviewing each report for accuracy before relying
   on it or sending it to clients or regulators.
@@ -107,11 +108,10 @@ how you use the Service, including:
 
 ## 7. Third-party services
 
-The Service relies on third parties, including Green Mountain Power,
-Vermont Electric Co-op, Stripe, and our email and hosting providers. We
-are not responsible for their availability or accuracy. If GMP or VEC
-changes its portal or data formats, we may need to update or temporarily
-suspend features in response.
+The Service relies on third parties, including your utility providers,
+Stripe, and our email and hosting providers. We are not responsible for
+their availability or accuracy. If a utility changes its portal or data
+formats, we may need to update or temporarily suspend features in response.
 
 ## 8. No warranties
 

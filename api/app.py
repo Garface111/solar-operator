@@ -889,7 +889,7 @@ code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
 <div class="endpoint">POST /admin/tenants    {"name":"...", "contact_email":"..."}</div>
 <div class="endpoint">GET  /admin/tenants</div>
 <div class="endpoint">POST /admin/jobs/run</div>
-<p style="margin-top:30px;color:#888;font-size:13px">Solar Operator v0.1.0 · single-utility (GMP) · multi-tenant ready</p>
+<p style="margin-top:30px;color:#888;font-size:13px">Solar Operator · hundreds of utilities supported nationwide · multi-tenant</p>
 </body></html>
 """
 
