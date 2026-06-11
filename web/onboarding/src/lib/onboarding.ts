@@ -288,3 +288,25 @@ export async function fetchProviders(): Promise<Provider[]> {
   const body = await res.json();
   return (body?.providers ?? []) as Provider[];
 }
+
+export interface UtilityRequestInput {
+  utility_name: string;
+  region?: string;
+  email?: string;
+  notes?: string;
+  willing_to_help?: boolean;
+}
+
+/** Submit a "please add my utility" request from the public home page. No auth.
+ *  Emails Ford and (when configured) fires the add-a-utility agent webhook. */
+export async function requestUtility(
+  input: UtilityRequestInput,
+): Promise<{ ok: boolean; agent_dispatched?: boolean }> {
+  const res = await fetchWithTimeout("/v1/onboarding/request-utility", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.json();
+}

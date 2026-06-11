@@ -76,15 +76,27 @@ def submit_utility_request(
     portal_url: str | None,
     region: str | None,
     notes: str | None,
+    willing_to_help: bool = False,
 ) -> dict:
     """Record + route an operator's utility-addition request.
 
     Returns {"ok": True, "agent_dispatched": bool}. Always emails Ford; also
-    fires the Hermes agent webhook when configured."""
+    fires the Hermes agent webhook when configured.
+
+    `willing_to_help` is set when the requester checks the box offering to help
+    expand the network (e.g. share a portal login so we can build the adapter).
+    It's a strong signal — surfaced loudly in Ford's alert and passed to the
+    agent payload so an outreach follow-up can be prioritised."""
     utility_name = (utility_name or "").strip()
     portal_url = (portal_url or "").strip() or None
     region = (region or "").strip() or None
     notes = (notes or "").strip() or None
+
+    help_line = (
+        "Willing to HELP expand the network (offered to assist) — follow up."
+        if willing_to_help
+        else "(did not offer to help)"
+    )
 
     lines = [
         "New utility-addition request from an operator.",
@@ -93,6 +105,7 @@ def submit_utility_request(
         f"Portal:   {portal_url or '(not provided)'}",
         f"Region:   {region or '(not provided)'}",
         f"Notes:    {notes or '(none)'}",
+        f"Help?:    {help_line}",
         "",
         f"Operator: {tenant_name or '(unnamed)'} <{tenant_email or 'no-email'}>",
         f"Tenant:   {tenant_id}",
@@ -106,7 +119,10 @@ def submit_utility_request(
 
     # 1. Always notify Ford by email.
     try:
-        send_internal_alert(f"Utility request: {utility_name}", body)
+        subject = f"Utility request: {utility_name}"
+        if willing_to_help:
+            subject += " (volunteer 🙋)"
+        send_internal_alert(subject, body)
     except Exception as e:  # noqa: BLE001
         logger.error("utility-request: internal alert failed: %s", e)
 
@@ -123,6 +139,7 @@ def submit_utility_request(
             "tenant_id": tenant_id,
             "tenant_name": tenant_name,
             "tenant_email": tenant_email,
+            "willing_to_help": willing_to_help,
         },
     }
     dispatched = _dispatch_to_hermes(agent_payload)

@@ -1,15 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchProviders,
+  requestUtility,
   type Provider,
   type ProviderStatus,
 } from "../lib/onboarding";
 
-/* ─── "Is my utility supported?" search ──────────────────────────────────────
+/* ─── "Is my utility supported?" search + request ────────────────────────────
    A prospect on the home page types their utility (or state) and instantly
    sees whether automated capture is live today, on the roadmap, or
    manual-only. Honest by construction — the three states map 1:1 to the
    backend scrape_status, so we never claim automation that isn't wired.
+
+   If they don't find it, they can request it (POST /v1/onboarding/request-
+   utility, public) and optionally check a box volunteering to help expand
+   the network. That offer is a strong lead — it's flagged loudly in Ford's
+   alert and in the add-a-utility agent payload.
 
    Data source: GET /v1/providers (public). Fetched once, filtered client-side
    (the catalog is ~1.4k tiny rows). Ford Jun 8'26 voice: artifact/answer first,
@@ -47,11 +53,139 @@ function rank(p: Provider): number {
   return p.scrape_status === "live" ? 0 : p.scrape_status === "in-progress" ? 1 : 2;
 }
 
+/* ─── Request-a-utility form ──────────────────────────────────────────────── */
+
+function RequestUtilityForm({ initialName }: { initialName: string }) {
+  const [name, setName] = useState(initialName);
+  const [region, setRegion] = useState("");
+  const [email, setEmail] = useState("");
+  const [willing, setWilling] = useState(false);
+  const [state, setState] = useState<"idle" | "sending" | "done" | "error">(
+    "idle",
+  );
+  const [err, setErr] = useState<string | null>(null);
+
+  // Keep the utility field in sync if the searcher keeps typing before opening.
+  useEffect(() => {
+    setName((cur) => (cur.trim() === "" ? initialName : cur));
+  }, [initialName]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (state === "sending") return;
+    const utility_name = name.trim();
+    if (utility_name.length < 2) {
+      setErr("Enter the utility name.");
+      setState("error");
+      return;
+    }
+    setState("sending");
+    setErr(null);
+    try {
+      await requestUtility({
+        utility_name,
+        region: region.trim() || undefined,
+        email: email.trim() || undefined,
+        willing_to_help: willing,
+      });
+      setState("done");
+    } catch (e2: any) {
+      setErr(e2?.message || "Couldn't send that — try again.");
+      setState("error");
+    }
+  }
+
+  if (state === "done") {
+    return (
+      <div className="rounded-xl border border-primary-200 bg-primary-50/60 px-4 py-4 text-center">
+        <p className="text-sm font-semibold text-primary-800">
+          Got it — thank you! 🌞
+        </p>
+        <p className="mt-1 text-xs text-primary-700">
+          We've logged your request{willing ? " and your offer to help" : ""}.
+          {willing
+            ? " We'll reach out about getting your utility connected."
+            : " Coverage expands every week — we'll add it as fast as we can."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="space-y-3 rounded-xl border border-zinc-200 bg-white px-4 py-4 text-left"
+    >
+      <p className="text-sm font-semibold text-zinc-800">
+        Request a utility
+      </p>
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Utility name (e.g. Acme Electric Co-op)"
+        aria-label="Utility name"
+        autoComplete="off"
+        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm placeholder:text-zinc-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+      />
+      <div className="flex flex-col gap-3 sm:flex-row">
+        <input
+          type="text"
+          value={region}
+          onChange={(e) => setRegion(e.target.value)}
+          placeholder="State / region (optional)"
+          aria-label="State or region"
+          autoComplete="off"
+          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm placeholder:text-zinc-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+        />
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Your email (optional)"
+          aria-label="Your email"
+          autoComplete="email"
+          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm placeholder:text-zinc-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary-500/40"
+        />
+      </div>
+
+      {/* Volunteer-to-help checkbox */}
+      <label className="flex cursor-pointer items-start gap-2.5 rounded-lg bg-zinc-50 px-3 py-2.5">
+        <input
+          type="checkbox"
+          checked={willing}
+          onChange={(e) => setWilling(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-300 text-primary-600 focus:ring-primary-500/40"
+        />
+        <span className="text-xs leading-relaxed text-zinc-600">
+          I'm willing to help expand Solar Operator's network — I can share my
+          utility login so you can build support for it faster.
+        </span>
+      </label>
+
+      {state === "error" && err && (
+        <p className="text-xs text-red-600">{err}</p>
+      )}
+
+      <button
+        type="submit"
+        disabled={state === "sending"}
+        className="inline-flex w-full items-center justify-center rounded-xl bg-primary-500 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-primary-600 disabled:opacity-60"
+      >
+        {state === "sending" ? "Sending…" : "Request this utility →"}
+      </button>
+    </form>
+  );
+}
+
+/* ─── Search ──────────────────────────────────────────────────────────────── */
+
 export default function UtilitySearch() {
   const [all, setAll] = useState<Provider[] | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [raw, setRaw] = useState("");
   const [query, setQuery] = useState("");
+  const [showRequest, setShowRequest] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Load the catalog once.
@@ -192,17 +326,44 @@ export default function UtilitySearch() {
         </ul>
       )}
 
-      {showEmpty && (
+      {showEmpty && !showRequest && (
         <div className="mt-4 rounded-xl border border-zinc-100 bg-zinc-50/60 px-4 py-4 text-center">
           <p className="text-sm font-medium text-zinc-700">
             We don't list that one yet.
           </p>
           <p className="mt-1 text-xs text-zinc-500">
             We can still onboard you with manual bill uploads while we add it.
-            Start setup and tell us your utility — coverage is expanding every
-            week.
           </p>
+          <button
+            type="button"
+            onClick={() => setShowRequest(true)}
+            className="mt-3 inline-flex items-center justify-center rounded-xl bg-primary-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-primary-600"
+          >
+            Request this utility →
+          </button>
         </div>
+      )}
+
+      {/* The request form: opens from the empty state, or always available via
+          the footer link below. */}
+      {showRequest && (
+        <div className="mt-4">
+          <RequestUtilityForm initialName={raw.trim()} />
+        </div>
+      )}
+
+      {!showRequest && !showEmpty && all && (
+        <p className="mt-4 text-center text-xs text-zinc-400">
+          Don't see your utility?{" "}
+          <button
+            type="button"
+            onClick={() => setShowRequest(true)}
+            className="font-medium text-primary-600 underline-offset-2 hover:underline"
+          >
+            Request it
+          </button>{" "}
+          — and help us expand the network.
+        </p>
       )}
     </section>
   );

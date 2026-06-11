@@ -753,3 +753,46 @@ def cancel_trial(authorization: Optional[str] = Header(default=None)):
         f"PM {pm_id} detached. Customer: {cus_id}"
     )
     return {"ok": True}
+
+
+# ─── Public "request a utility" (pre-signup, no auth) ────────────────────────
+
+class PublicUtilityRequest(BaseModel):
+    """Home-page "don't see your utility?" submission. Public — no session.
+
+    Length-capped to blunt abuse since this is unauthenticated. The optional
+    `email` lets us follow up with an anonymous prospect; `willing_to_help`
+    flags a volunteer offering to share a portal login so we can build the
+    adapter (a strong lead — surfaced loudly in the internal alert)."""
+    utility_name: str = Field(..., min_length=2, max_length=120)
+    region: Optional[str] = Field(None, max_length=80)
+    email: Optional[EmailStr] = None
+    notes: Optional[str] = Field(None, max_length=600)
+    willing_to_help: bool = False
+
+
+@router.post("/request-utility")
+def public_request_utility(body: PublicUtilityRequest):
+    """Prospect-submitted utility-addition request from the public home page.
+
+    Same routing as the authenticated /v1/account/request-utility (emails Ford,
+    fires the Hermes add-a-utility webhook when configured), but requires no
+    login — a prospect can ask for their utility before signing up. The
+    `willing_to_help` box lets them volunteer to help expand coverage.
+    """
+    from .utility_request import submit_utility_request
+
+    name = (body.utility_name or "").strip()
+    if not name:
+        raise HTTPException(422, "Utility name is required")
+
+    return submit_utility_request(
+        tenant_id="(public-home-page)",
+        tenant_name="Prospect (not signed up)",
+        tenant_email=body.email,
+        utility_name=name,
+        portal_url=None,
+        region=body.region,
+        notes=body.notes,
+        willing_to_help=bool(body.willing_to_help),
+    )

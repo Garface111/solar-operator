@@ -253,6 +253,7 @@ class UtilityRequest(BaseModel):
     portal_url: Optional[str] = None
     region: Optional[str] = None
     notes: Optional[str] = None
+    willing_to_help: bool = False
 
 
 class UpdateCcOnReports(BaseModel):
@@ -771,6 +772,7 @@ def request_utility(
         portal_url=body.portal_url,
         region=body.region,
         notes=body.notes,
+        willing_to_help=bool(body.willing_to_help),
     )
 
 
