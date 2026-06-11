@@ -1,0 +1,44 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+oppd,Omaha Public Power District (OPPD),NE,in-progress,,https://oppd.com,"Major public power district serving Omaha metro area. Bespoke customer portal, adapter needs a live login. Manual PDF upload meanwhile."
+nppd,Nebraska Public Power District (NPPD),NE,in-progress,,https://nppd.com,"Largest public power district in NE (serves 86 counties). Bespoke customer portal, adapter needs a live login. Manual PDF upload meanwhile."
+les,Lincoln Electric System (LES),NE,in-progress,,https://les.com,"Lincoln public power district. Bespoke customer portal, adapter needs a live login. Manual PDF upload meanwhile."
+butler_ppd,Butler Public Power District,NE,in-progress,,,No distinct SmartHub host found (butler.smarthub.coop belongs to Butler Municipal NJ). Manual PDF upload until portal confirmed.
+dawson_ppd,Dawson Public Power District,NE,live,dawsonpower.smarthub.coop,https://dawsonpower.smarthub.coop,NISC SmartHub portal (dawsonpower.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports.
+niobrara_ea,Niobrara Electric Association,NE,live,niobraraelectric.smarthub.coop,https://niobraraelectric.smarthub.coop,NISC SmartHub portal (niobraraelectric.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports.
+prema,Panhandle Rural Electric Membership Association,NE,live,prema.smarthub.coop,https://prema.smarthub.coop,NISC SmartHub portal (prema.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports.
+wheatbelt_ppd,Wheat Belt Public Power District,NE,live,wheatbelt.smarthub.coop,https://wheatbelt.smarthub.coop,NISC SmartHub portal (wheatbelt.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports.
+burt_ppd,Burt County Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+cornhusker_ppd,Cornhusker Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+cuming_ppd,Cuming County Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+elkhorn_rppd,Elkhorn Rural Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+loup_ppd,Loup Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+midwest_ec,Midwest Electric Cooperative Corporation,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+niobrara_valley_emc,Niobrara Valley Electric Membership Corporation,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+norris_ppd,Norris Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+northwest_rppd,Northwest Rural Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+twinvalley_ppd,Twin Valley Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+auburn_mu,Auburn Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+beatrice_mu,Beatrice Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+cambridge_mu,Cambridge Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+centralcity_mu,Central City Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+crete_mu,Crete Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+davidcity_mu,David City Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+fairbury_mu,Fairbury Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+fremont_mu,Fremont Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+geneva_mu,Geneva Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+hartington_mu,Hartington Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+hickman_mu,Hickman Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+imperial_mu,Imperial Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+mccook_mu,McCook Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+minden_mu,Minden Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+nebraskacity_mu,Nebraska City Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+nelson_mu,Nelson Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+northplatte_mu,North Platte Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+plattsmouth_mu,Plattsmouth Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+seward_mu,Seward Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+stromsburg_mu,Stromsburg Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+superior_mu,Superior Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+wakefield_mu,Wakefield Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+wayne_mu,Wayne Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+westpoint_mu,West Point Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
+york_mu,York Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
