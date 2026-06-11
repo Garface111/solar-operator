@@ -45,4 +45,4 @@ mi_wakefield,Wakefield Electric,MI,in-progress,,,Wakefield muni (MI). MPPA assoc
 baraga,Village of Baraga,MI,in-progress,,https://villageofbaraga.com/utilities/,"Baraga muni (Upper Peninsula). WPPI Energy member, uses WPPI MyAccount portal. Adapter needs live login. Manual upload meanwhile."
 lanse,Village of L'Anse,MI,in-progress,,,L'Anse muni (Upper Peninsula). WPPI Energy member. No SmartHub host or customer portal found (Jun 2026). Manual upload until portal confirmed.
 crystal_falls,City of Crystal Falls,MI,in-progress,,https://crystalfalls.org/electric,"Crystal Falls muni (Upper Peninsula). WPPI Energy member, uses WPPI MyAccount portal. Adapter needs live login. Manual upload meanwhile."
-gladstone_mi,City of Gladstone,MI,in-progress,,https://myaccount.gladstonemi.org,"Gladstone muni (Upper Peninsula). Proprietary MyAccount portal at myaccount.gladstonemi.org. Adapter needs live login. Manual upload meanwhile."
+gladstone_mi,City of Gladstone,MI,in-progress,,https://myaccount.gladstonemi.org,Gladstone muni (Upper Peninsula). Proprietary MyAccount portal at myaccount.gladstonemi.org. Adapter needs live login. Manual upload meanwhile.

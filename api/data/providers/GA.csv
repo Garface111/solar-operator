@@ -1,5 +1,5 @@
 code,label,state,scrape_status,smarthub_host,portal_url,notes
-georgia_power,Georgia Power Company,GA,in-progress,,https://customerservice2.southerncompany.com/Login?mnuOpco=GPC,"Major IOU serving 2.7M+ customers in 155 of 159 GA counties. Bespoke Southern Company portal — adapter needs live login to reverse-engineer. Manual PDF upload meanwhile."
+georgia_power,Georgia Power Company,GA,in-progress,,https://customerservice2.southerncompany.com/Login?mnuOpco=GPC,Major IOU serving 2.7M+ customers in 155 of 159 GA counties. Bespoke Southern Company portal — adapter needs live login to reverse-engineer. Manual PDF upload meanwhile.
 coastal_electric,Coastal Electric Cooperative,GA,live,coastalelectric.smarthub.coop,https://coastalelectric.smarthub.coop,NISC SmartHub portal (coastalelectric.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
 cobb_emc,Cobb EMC,GA,live,cobbemc.smarthub.coop,https://cobbemc.smarthub.coop,NISC SmartHub portal (cobbemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
 habersham_emc,Habersham EMC,GA,live,habershamemc.smarthub.coop,https://habershamemc.smarthub.coop,NISC SmartHub portal (habershamemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
@@ -57,7 +57,7 @@ college_park,City of College Park,GA,in-progress,,,MEAG Power participant. Munic
 commerce,City of Commerce,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
 covington,City of Covington,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
 crisp_county,Crisp County Power Commission,GA,in-progress,,,MEAG Power participant. County-level municipal utility. Manual PDF upload until portal confirmed.
-dalton,Dalton Utilities,GA,in-progress,,https://www.dutil.com,"Non-MEAG municipal utility operating since 1889. Bespoke portal — adapter needs live login. Manual PDF upload meanwhile."
+dalton,Dalton Utilities,GA,in-progress,,https://www.dutil.com,Non-MEAG municipal utility operating since 1889. Bespoke portal — adapter needs live login. Manual PDF upload meanwhile.
 doerun,City of Doerun,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
 douglas,City of Douglas,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.
 east_point,City of East Point,GA,in-progress,,,MEAG Power participant. Municipal utility. Manual PDF upload until portal confirmed.

@@ -8,11 +8,11 @@ epb,EPB (Chattanooga Electric Power Board),TN,in-progress,,https://epb.com,"EPB 
 nes,Nashville Electric Service,TN,in-progress,,https://www.nespower.com,"Nashville Electric Service (NES) — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
 mlgw,Memphis Light Gas and Water,TN,in-progress,,https://www.mlgw.com,"Memphis Light, Gas and Water Division (MLGW) — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
 kub,Knoxville Utilities Board,TN,in-progress,,https://www.kub.org,"Knoxville Utilities Board (KUB) — municipal, bespoke portal (includes electric, gas, water). Adapter needs a live login. Manual PDF upload meanwhile."
-cemc,Cumberland Electric Membership Corporation,TN,in-progress,,,"Cumberland EMC — SmartHub host cemc.smarthub.coop resolves but is already claimed by NC's Central Electric. Need to find TN-specific host or confirm portal. Manual PDF upload meanwhile."
-caneyfork,Caney Fork Electric Cooperative,TN,in-progress,,,"Caney Fork Electric — no distinct SmartHub host found (cec.smarthub.coop claimed by SC). Manual PDF upload until portal confirmed."
-tcec_tn,Tri-County Electric Membership Corporation,TN,in-progress,,,"Tri-County EMC (TN) — SmartHub host tcec.smarthub.coop resolves but is already claimed by FL's Tri-County. Need to find TN-specific host. Manual PDF upload meanwhile."
-pec_tn,Plateau Electric Cooperative,TN,in-progress,,,"Plateau Electric (TN) — SmartHub host pec.smarthub.coop resolves but is already claimed by SC's Palmetto Electric. Need to find TN-specific host. Manual PDF upload meanwhile."
-svec_tn,Sequachee Valley Electric Cooperative,TN,in-progress,,,"Sequachee Valley Electric (TN) — SmartHub host svec.smarthub.coop resolves but is already claimed by VA's Shenandoah Valley Electric. Need to find TN-specific host. Manual PDF upload meanwhile."
+cemc,Cumberland Electric Membership Corporation,TN,in-progress,,,Cumberland EMC — SmartHub host cemc.smarthub.coop resolves but is already claimed by NC's Central Electric. Need to find TN-specific host or confirm portal. Manual PDF upload meanwhile.
+caneyfork,Caney Fork Electric Cooperative,TN,in-progress,,,Caney Fork Electric — no distinct SmartHub host found (cec.smarthub.coop claimed by SC). Manual PDF upload until portal confirmed.
+tcec_tn,Tri-County Electric Membership Corporation,TN,in-progress,,,Tri-County EMC (TN) — SmartHub host tcec.smarthub.coop resolves but is already claimed by FL's Tri-County. Need to find TN-specific host. Manual PDF upload meanwhile.
+pec_tn,Plateau Electric Cooperative,TN,in-progress,,,Plateau Electric (TN) — SmartHub host pec.smarthub.coop resolves but is already claimed by SC's Palmetto Electric. Need to find TN-specific host. Manual PDF upload meanwhile.
+svec_tn,Sequachee Valley Electric Cooperative,TN,in-progress,,,Sequachee Valley Electric (TN) — SmartHub host svec.smarthub.coop resolves but is already claimed by VA's Shenandoah Valley Electric. Need to find TN-specific host. Manual PDF upload meanwhile.
 dremc,Duck River Electric Membership Corporation,TN,in-progress,,,Duck River EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
 fdemc,Forked Deer Electric Cooperative,TN,in-progress,,,Forked Deer EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
 gemc,Gibson Electric Membership Corporation,TN,in-progress,,,Gibson EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
@@ -29,31 +29,31 @@ cleveland_util,Cleveland Utilities,TN,in-progress,,https://www.clevelandutilitie
 cookeville,Cookeville Electric Department,TN,in-progress,,https://cookeville-tn.gov/departments/electric,"Cookeville Electric — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
 johnson_city,Johnson City Power Board,TN,in-progress,,https://www.jcpb.com,"Johnson City Power Board — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
 alcoa,Alcoa Utilities,TN,in-progress,,https://www.alcoautilities.com,"Alcoa Utilities (electric, water, gas) — municipal. Manual PDF upload until portal confirmed."
-athens,Athens Utilities Board,TN,in-progress,,https://www.athensutilities.com,"Athens Utilities Board — municipal. Manual PDF upload until portal confirmed."
-bolivar,Bolivar Energy Authority,TN,in-progress,,https://www.cityofbolivar.com,"Bolivar Energy Authority — municipal. Manual PDF upload until portal confirmed."
-bristol_tn,Bristol Tennessee Essential Services,TN,in-progress,,https://www.bristoltn.org/btes,"Bristol Tennessee Essential Services (BTES) — municipal. Manual PDF upload until portal confirmed."
-clinton_tn,Clinton Utilities Board,TN,in-progress,,https://www.clintonutilities.com,"Clinton Utilities Board — municipal. Manual PDF upload until portal confirmed."
-dickson,Dickson Electric System,TN,in-progress,,https://www.dicksonelectric.com,"Dickson Electric System — municipal. Manual PDF upload until portal confirmed."
-elizabethton,Elizabethton Electric System,TN,in-progress,,https://www.elizabethton.org,"Elizabethton Electric System — municipal. Manual PDF upload until portal confirmed."
-erwin,Erwin Utilities,TN,in-progress,,https://www.erwinutilities.com,"Erwin Utilities — municipal. Manual PDF upload until portal confirmed."
-greeneville,Greeneville Light & Power System,TN,in-progress,,https://greenevillelps.com,"Greeneville Light & Power System — municipal. Manual PDF upload until portal confirmed."
-jackson_ea,Jackson Energy Authority,TN,in-progress,,https://www.jaxenergy.com,"Jackson Energy Authority — municipal. Manual PDF upload until portal confirmed."
-lafollette,LaFollette Utilities Board,TN,in-progress,,https://www.cityoflafollette.com,"LaFollette Utilities Board — municipal. Manual PDF upload until portal confirmed."
-lawrenceburg,Lawrenceburg Utility Systems,TN,in-progress,,https://lawrenceburgutilities.com,"Lawrenceburg Utility Systems — municipal. Manual PDF upload until portal confirmed."
-lenoir_city,Lenoir City Utilities Board,TN,in-progress,,https://www.lcub.com,"Lenoir City Utilities Board (LCUB) — municipal. Manual PDF upload until portal confirmed."
-lewisburg,Lewisburg Electric System,TN,in-progress,,https://www.lewisburgelectric.com,"Lewisburg Electric System — municipal. Manual PDF upload until portal confirmed."
-mcminnville,McMinnville Electric System,TN,in-progress,,https://www.mcminnvilleutilities.com,"McMinnville Electric System — municipal. Manual PDF upload until portal confirmed."
-milan,Milan Department of Public Utilities,TN,in-progress,,https://cityofmilan.org,"Milan Department of Public Utilities — municipal. Manual PDF upload until portal confirmed."
-morristown,Morristown Utility Commission,TN,in-progress,,https://www.muc-tn.com,"Morristown Utility Commission — municipal. Manual PDF upload until portal confirmed."
-newport,Newport Utilities,TN,in-progress,,https://www.newportutilities.org,"Newport Utilities — municipal. Manual PDF upload until portal confirmed."
-paris,Paris Board of Public Utilities,TN,in-progress,,https://parisbpu.org,"Paris Board of Public Utilities — municipal. Manual PDF upload until portal confirmed."
-pulaski,Pulaski Electric System,TN,in-progress,,https://www.pulaskielectric.com,"Pulaski Electric System — municipal. Manual PDF upload until portal confirmed."
-ripley,Ripley Power & Light,TN,in-progress,,https://www.ripleypowerandlight.com,"Ripley Power & Light — municipal. Manual PDF upload until portal confirmed."
-rockwood,Rockwood Electric Utility,TN,in-progress,,https://www.rockwoodtn.com,"Rockwood Electric Utility — municipal. Manual PDF upload until portal confirmed."
-sevier_county,Sevier County Electric System,TN,in-progress,,https://www.sevierelectric.com,"Sevier County Electric System — municipal. Manual PDF upload until portal confirmed."
-shelbyville,Shelbyville Power System,TN,in-progress,,https://shelbyvillepower.com,"Shelbyville Power System — municipal. Manual PDF upload until portal confirmed."
-springfield,Springfield Department of Electricity,TN,in-progress,,https://www.springfield-tn.org,"Springfield Department of Electricity — municipal. Manual PDF upload until portal confirmed."
-sweetwater,Sweetwater Utilities Board,TN,in-progress,,https://www.sweetwaterutilities.org,"Sweetwater Utilities Board — municipal. Manual PDF upload until portal confirmed."
-tullahoma,Tullahoma Utilities Board,TN,in-progress,,https://www.tub.com,"Tullahoma Utilities Board (TUB) — municipal. Manual PDF upload until portal confirmed."
-union_city,Union City Energy Authority,TN,in-progress,,https://www.ucea.net,"Union City Energy Authority — municipal. Manual PDF upload until portal confirmed."
-winchester,Winchester Utility System,TN,in-progress,,https://www.winchester-tn.com,"Winchester Utility System — municipal. Manual PDF upload until portal confirmed."
+athens,Athens Utilities Board,TN,in-progress,,https://www.athensutilities.com,Athens Utilities Board — municipal. Manual PDF upload until portal confirmed.
+bolivar,Bolivar Energy Authority,TN,in-progress,,https://www.cityofbolivar.com,Bolivar Energy Authority — municipal. Manual PDF upload until portal confirmed.
+bristol_tn,Bristol Tennessee Essential Services,TN,in-progress,,https://www.bristoltn.org/btes,Bristol Tennessee Essential Services (BTES) — municipal. Manual PDF upload until portal confirmed.
+clinton_tn,Clinton Utilities Board,TN,in-progress,,https://www.clintonutilities.com,Clinton Utilities Board — municipal. Manual PDF upload until portal confirmed.
+dickson,Dickson Electric System,TN,in-progress,,https://www.dicksonelectric.com,Dickson Electric System — municipal. Manual PDF upload until portal confirmed.
+elizabethton,Elizabethton Electric System,TN,in-progress,,https://www.elizabethton.org,Elizabethton Electric System — municipal. Manual PDF upload until portal confirmed.
+erwin,Erwin Utilities,TN,in-progress,,https://www.erwinutilities.com,Erwin Utilities — municipal. Manual PDF upload until portal confirmed.
+greeneville,Greeneville Light & Power System,TN,in-progress,,https://greenevillelps.com,Greeneville Light & Power System — municipal. Manual PDF upload until portal confirmed.
+jackson_ea,Jackson Energy Authority,TN,in-progress,,https://www.jaxenergy.com,Jackson Energy Authority — municipal. Manual PDF upload until portal confirmed.
+lafollette,LaFollette Utilities Board,TN,in-progress,,https://www.cityoflafollette.com,LaFollette Utilities Board — municipal. Manual PDF upload until portal confirmed.
+lawrenceburg,Lawrenceburg Utility Systems,TN,in-progress,,https://lawrenceburgutilities.com,Lawrenceburg Utility Systems — municipal. Manual PDF upload until portal confirmed.
+lenoir_city,Lenoir City Utilities Board,TN,in-progress,,https://www.lcub.com,Lenoir City Utilities Board (LCUB) — municipal. Manual PDF upload until portal confirmed.
+lewisburg,Lewisburg Electric System,TN,in-progress,,https://www.lewisburgelectric.com,Lewisburg Electric System — municipal. Manual PDF upload until portal confirmed.
+mcminnville,McMinnville Electric System,TN,in-progress,,https://www.mcminnvilleutilities.com,McMinnville Electric System — municipal. Manual PDF upload until portal confirmed.
+milan,Milan Department of Public Utilities,TN,in-progress,,https://cityofmilan.org,Milan Department of Public Utilities — municipal. Manual PDF upload until portal confirmed.
+morristown,Morristown Utility Commission,TN,in-progress,,https://www.muc-tn.com,Morristown Utility Commission — municipal. Manual PDF upload until portal confirmed.
+newport,Newport Utilities,TN,in-progress,,https://www.newportutilities.org,Newport Utilities — municipal. Manual PDF upload until portal confirmed.
+paris,Paris Board of Public Utilities,TN,in-progress,,https://parisbpu.org,Paris Board of Public Utilities — municipal. Manual PDF upload until portal confirmed.
+pulaski,Pulaski Electric System,TN,in-progress,,https://www.pulaskielectric.com,Pulaski Electric System — municipal. Manual PDF upload until portal confirmed.
+ripley,Ripley Power & Light,TN,in-progress,,https://www.ripleypowerandlight.com,Ripley Power & Light — municipal. Manual PDF upload until portal confirmed.
+rockwood,Rockwood Electric Utility,TN,in-progress,,https://www.rockwoodtn.com,Rockwood Electric Utility — municipal. Manual PDF upload until portal confirmed.
+sevier_county,Sevier County Electric System,TN,in-progress,,https://www.sevierelectric.com,Sevier County Electric System — municipal. Manual PDF upload until portal confirmed.
+shelbyville,Shelbyville Power System,TN,in-progress,,https://shelbyvillepower.com,Shelbyville Power System — municipal. Manual PDF upload until portal confirmed.
+springfield,Springfield Department of Electricity,TN,in-progress,,https://www.springfield-tn.org,Springfield Department of Electricity — municipal. Manual PDF upload until portal confirmed.
+sweetwater,Sweetwater Utilities Board,TN,in-progress,,https://www.sweetwaterutilities.org,Sweetwater Utilities Board — municipal. Manual PDF upload until portal confirmed.
+tullahoma,Tullahoma Utilities Board,TN,in-progress,,https://www.tub.com,Tullahoma Utilities Board (TUB) — municipal. Manual PDF upload until portal confirmed.
+union_city,Union City Energy Authority,TN,in-progress,,https://www.ucea.net,Union City Energy Authority — municipal. Manual PDF upload until portal confirmed.
+winchester,Winchester Utility System,TN,in-progress,,https://www.winchester-tn.com,Winchester Utility System — municipal. Manual PDF upload until portal confirmed.

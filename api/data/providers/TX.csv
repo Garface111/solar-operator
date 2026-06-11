@@ -1,0 +1,70 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+pec,Pedernales Electric Cooperative,TX,in-progress,,https://pec.smarthub.coop,"[host contested] Pedernales EC (TX). pec.smarthub.coop also claimed by Palmetto EC (SC, committed). Needs ownership verification before live."
+coserv,CoServ Electric,TX,live,coserv.smarthub.coop,https://coserv.smarthub.coop,NISC SmartHub portal — North Texas co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+gvec,Guadalupe Valley Electric Cooperative,TX,live,gvec.smarthub.coop,https://gvec.smarthub.coop,NISC SmartHub portal — South-Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+bluebonnet,Bluebonnet Electric Cooperative,TX,live,bluebonnet.smarthub.coop,https://bluebonnet.smarthub.coop,NISC SmartHub portal — Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+deepeast,Deep East Texas Electric Cooperative,TX,live,deepeast.smarthub.coop,https://deepeast.smarthub.coop,NISC SmartHub portal — East TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+fayette,Fayette Electric Cooperative,TX,live,fayette.smarthub.coop,https://fayette.smarthub.coop,NISC SmartHub portal — Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+taylor,Taylor Electric Cooperative,TX,in-progress,,https://taylorelectric.smarthub.coop,[host contested] Taylor EC (TX). taylorelectric.smarthub.coop also claimed by Taylor County RECC (KY). Verify ownership.
+tcec_tx,Tri-County Electric Cooperative,TX,in-progress,,https://tcec.smarthub.coop,[host contested] Tri-County EC (TX). tcec.smarthub.coop also claimed by Tri-County EC (FL). Verify ownership.
+lighthouse,Lighthouse Electric Cooperative,TX,live,lighthouse.smarthub.coop,https://lighthouse.smarthub.coop,NISC SmartHub portal — West TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+grayson_collin,Grayson-Collin Electric Cooperative,TX,live,graysoncollin.smarthub.coop,https://graysoncollin.smarthub.coop,NISC SmartHub portal — North TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+hotec,Heart of Texas Electric Cooperative,TX,live,hotec.smarthub.coop,https://hotec.smarthub.coop,NISC SmartHub portal — Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+farmers_tx,Farmers Electric Cooperative,TX,in-progress,,https://farmers.smarthub.coop,[host contested] Farmers EC (TX). farmers.smarthub.coop also claimed by Farmers EC (AR). Verify ownership.
+ctec,Central Texas Electric Cooperative,TX,live,ctec.smarthub.coop,https://ctec.smarthub.coop,NISC SmartHub portal — Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+karnes,Karnes Electric Cooperative,TX,live,karnesec.smarthub.coop,https://karnesec.smarthub.coop,NISC SmartHub portal — South TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+bandera,Bandera Electric Cooperative,TX,live,bandera.smarthub.coop,https://bandera.smarthub.coop,NISC SmartHub portal — South-Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+mvec,Magic Valley Electric Cooperative,TX,in-progress,,https://mvec.smarthub.coop,[host contested] TX. mvec.smarthub.coop also claimed by Magoffin Valley (KY). Verify.
+rgec,Rio Grande Electric Cooperative,TX,live,rgec.smarthub.coop,https://rgec.smarthub.coop,NISC SmartHub portal — Southwest TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+sam_houston,Sam Houston Electric Cooperative,TX,live,samhouston.smarthub.coop,https://samhouston.smarthub.coop,NISC SmartHub portal — Southeast TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+sbec,San Bernard Electric Cooperative,TX,live,sbec.smarthub.coop,https://sbec.smarthub.coop,NISC SmartHub portal — Southeast TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+lamar,Lamar County Electric Cooperative,TX,in-progress,,https://lcec.smarthub.coop,[host contested] Lamar County EC (TX). lcec.smarthub.coop also claimed by LCEC (FL). Verify.
+fannin,Fannin County Electric Cooperative,TX,live,fcec.smarthub.coop,https://fcec.smarthub.coop,NISC SmartHub portal — North TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+lyntegar,Lyntegar Electric Cooperative,TX,live,lyntegar.smarthub.coop,https://lyntegar.smarthub.coop,NISC SmartHub portal — West TX co-op (Lynn and Terry counties). Extension scrapes billing + usage. kWh unverified on real generation meter.
+hilco,Hilco Electric Cooperative,TX,live,hilco.smarthub.coop,https://hilco.smarthub.coop,NISC SmartHub portal — Northeast TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+wcec,Wood County Electric Cooperative,TX,live,wcec.smarthub.coop,https://wcec.smarthub.coop,NISC SmartHub portal — Northeast TX co-op (now Mid-South Synergy). Extension scrapes billing + usage. kWh unverified on real generation meter.
+nortex,Nortex Electric Cooperative,TX,live,ntec.smarthub.coop,https://ntec.smarthub.coop,NISC SmartHub portal — North-Central TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+victoria,Victoria Electric Cooperative,TX,live,victoriaelectric.smarthub.coop,https://victoriaelectric.smarthub.coop,NISC SmartHub portal — South TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+swre,Southwest Rural Electric Association,TX,live,swre.smarthub.coop,https://swre.smarthub.coop,NISC SmartHub portal — Southwest TX co-op. Extension scrapes billing + usage. kWh unverified on real generation meter.
+rusk,Rusk County Electric Cooperative,TX,in-progress,,https://rcec.smarthub.coop,[host contested] Rusk County EC (TX). rcec.smarthub.coop also claimed by Roosevelt County (NM). Verify.
+jasper_newton,Jasper-Newton Electric Cooperative,TX,in-progress,,https://jasper.smarthub.coop,[host contested] Jasper-Newton EC (TX). jasper.smarthub.coop also claimed by Jasper County REMC (IN). Verify.
+medina,Medina Electric Cooperative,TX,in-progress,,https://mec.smarthub.coop,[host contested] Medina EC (TX). mec.smarthub.coop also claimed by Meriwether/TN mec. Verify.
+oncor,Oncor Electric Delivery,TX,in-progress,,https://oncor.com,"Investor-owned transmission/distribution utility (Dallas-Fort Worth region, largest in TX by area). Not a retail provider in deregulated areas. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+centerpoint,CenterPoint Energy,TX,in-progress,,https://centerpointenergy.com,"Investor-owned transmission/distribution utility (Houston region). Not a retail provider in deregulated areas. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+aep_texas,AEP Texas,TX,in-progress,,https://aeptexas.com,"Investor-owned transmission/distribution utility (Central/West TX). Not a retail provider in deregulated areas. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+tnmp,Texas-New Mexico Power (TNMP),TX,in-progress,,https://tnmp.com,"Investor-owned transmission/distribution utility. PNM Resources subsidiary. Not a retail provider in deregulated areas. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+cps,CPS Energy,TX,in-progress,,https://cpsenergy.com,"City Public Service of San Antonio — largest municipal utility in TX, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+austin_energy,Austin Energy,TX,in-progress,,https://austinenergy.com,"City of Austin municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+garland,Garland Power & Light,TX,in-progress,,https://garlandpower.com,"City of Garland municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+lubbock,Lubbock Power & Light,TX,in-progress,,https://lpandl.com,"City of Lubbock municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+georgetown_tx,Georgetown Utility Systems,TX,in-progress,,https://georgetown.org/utilities,"City of Georgetown municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+bryan,Bryan Texas Utilities,TX,in-progress,,https://btutilities.com,"City of Bryan municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+kerrville,Kerrville Public Utility Board,TX,in-progress,,https://kerrvillepub.com,"City of Kerrville municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+san_marcos,San Marcos Electric Utility,TX,in-progress,,https://sanmarcostx.gov/electric,"City of San Marcos municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+denton,Denton Municipal Electric,TX,in-progress,,https://cityofdenton.com/dme,"City of Denton municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+brownsville,Brownsville Public Utilities Board,TX,in-progress,,https://brownsville-pub.com,"City of Brownsville municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+college_station,College Station Utilities,TX,in-progress,,https://cstx.gov/utilities,"City of College Station municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+greenville,Greenville Electric Utility System (GEUS),TX,in-progress,,https://geus.org,"City of Greenville municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+weatherford,Weatherford Municipal Utility System,TX,in-progress,,https://weatherfordtx.gov/utilities,"City of Weatherford municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+new_braunfels,New Braunfels Utilities,TX,in-progress,,https://nbutexas.com,"City of New Braunfels municipal utility, vertically integrated. Bespoke portal, adapter needs live login. Manual upload meanwhile."
+united_coop,United Cooperative Services,TX,in-progress,,,North-Central TX co-op. No SmartHub host confirmed (Jun 2026). May have bespoke portal. Manual upload until verified.
+nueces,Nueces Electric Cooperative,TX,in-progress,,,South TX co-op (Corpus Christi area). No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+brazos_coop,Brazos Electric Cooperative,TX,in-progress,,,Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+cherokee,Cherokee County Electric Cooperative,TX,in-progress,,,East TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+jackson_tx,Jackson Electric Cooperative,TX,in-progress,,,South-Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+navarro,Navarro County Electric Cooperative,TX,in-progress,,,North-Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+greenbelt,Greenbelt Electric Cooperative,TX,in-progress,,,West TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+south_plains,South Plains Electric Cooperative,TX,in-progress,,,West TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+coleman,Coleman County Electric Cooperative,TX,in-progress,,,West-Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+cap_rock,Cap Rock Electric Cooperative,TX,in-progress,,,West TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+comanche,Comanche County Electric Cooperative,TX,in-progress,,,Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+hamilton,Hamilton County Electric Cooperative,TX,in-progress,,,Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+kendall,Kendall Electric Cooperative,TX,in-progress,,,South-Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+bartlett,Bartlett Electric Cooperative,TX,in-progress,,,Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+san_patricio,San Patricio Electric Cooperative,TX,in-progress,,,South TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+rayburn,Rayburn Country Electric Cooperative,TX,in-progress,,,East TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+upshur,Upshur-Rural Electric Cooperative,TX,in-progress,,,Northeast TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+bowie_cass,Bowie-Cass Electric Cooperative,TX,in-progress,,,Northeast TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+erath,Erath County Electric Cooperative,TX,in-progress,,,North-Central TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+wharton,Wharton County Electric Cooperative,TX,in-progress,,,Southeast TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.
+navasota,Navasota Valley Electric Cooperative,TX,in-progress,,,Southeast TX co-op. No SmartHub host confirmed (Jun 2026). Manual upload until verified.

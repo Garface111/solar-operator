@@ -9,25 +9,25 @@ centralhudson,Central Hudson Gas & Electric,NY,in-progress,,https://www.centralh
 oru,Orange & Rockland Utilities,NY,in-progress,,https://www.oru.com,"O&R — serves Rockland County and Hudson Valley. ConEd subsidiary, IOU with bespoke portal, adapter needs a live login. Manual PDF upload meanwhile."
 psegli,PSEG Long Island,NY,in-progress,,https://www.psegliny.com,"PSEG Long Island (formerly LIPA) — serves Long Island and Rockaways. Bespoke portal, adapter needs a live login. Manual PDF upload meanwhile."
 jamestown,Jamestown Board of Public Utilities,NY,in-progress,,https://www.cityofjamestownny.com/bpu,"Jamestown BPU — municipal electric in western NY. No SmartHub host found (Jun 2026), likely bespoke or manual billing. Manual PDF upload meanwhile."
-massena,Village of Massena Electric Department,NY,in-progress,,,"Massena Electric — municipal electric in St. Lawrence County. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-plattsburgh,City of Plattsburgh Municipal Lighting Department,NY,in-progress,,,"Plattsburgh MLD — municipal electric in Clinton County. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-rockvillecentre,Village of Rockville Centre Electric Department,NY,in-progress,,,"Rockville Centre Electric — Long Island municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-greenport,Village of Greenport Electric Department,NY,in-progress,,,"Greenport Electric — Long Island municipal (Suffolk County). No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-freeport,Village of Freeport Electric Department,NY,in-progress,,,"Freeport Electric — Long Island municipal (Nassau County). No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-deposit,Village of Deposit Electric Department,NY,in-progress,,,"Deposit Electric — Delaware County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-fairport,Village of Fairport Electric Department,NY,in-progress,,,"Fairport Electric — Monroe County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-pennyan,Village of Penn Yan Electric Department,NY,in-progress,,,"Penn Yan Electric — Yates County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-boonville,Village of Boonville Electric Department,NY,in-progress,,,"Boonville Electric — Oneida County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-clayton,Village of Clayton Electric Department,NY,in-progress,,,"Clayton Electric — Jefferson County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-frankfort,Village of Frankfort Electric Department,NY,in-progress,,,"Frankfort Electric — Herkimer County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-ilion,Village of Ilion Electric Department,NY,in-progress,,,"Ilion Electric — Herkimer County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-lakeplacid,Village of Lake Placid Electric Department,NY,in-progress,,,"Lake Placid Electric — Essex County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-lyons,Village of Lyons Electric Department,NY,in-progress,,,"Lyons Electric — Wayne County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-ny_norwood,Village of Norwood Electric Department,NY,in-progress,,,"Norwood Electric — St. Lawrence County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-potsdam,Village of Potsdam Electric Department,NY,in-progress,,,"Potsdam Electric — St. Lawrence County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-salamanca,City of Salamanca Electric Department,NY,in-progress,,,"Salamanca Electric — Cattaraugus County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-tupperlake,Village of Tupper Lake Electric Department,NY,in-progress,,,"Tupper Lake Electric — Franklin County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-waddington,Village of Waddington Electric Department,NY,in-progress,,,"Waddington Electric — St. Lawrence County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-ny_westfield,Village of Westfield Electric Department,NY,in-progress,,,"Westfield Electric — Chautauqua County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-solvay,Village of Solvay Electric Department,NY,in-progress,,,"Solvay Electric — Onondaga County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
-sherburne,Village of Sherburne Electric Department,NY,in-progress,,,"Sherburne Electric — Chenango County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile."
+massena,Village of Massena Electric Department,NY,in-progress,,,Massena Electric — municipal electric in St. Lawrence County. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+plattsburgh,City of Plattsburgh Municipal Lighting Department,NY,in-progress,,,Plattsburgh MLD — municipal electric in Clinton County. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+rockvillecentre,Village of Rockville Centre Electric Department,NY,in-progress,,,Rockville Centre Electric — Long Island municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+greenport,Village of Greenport Electric Department,NY,in-progress,,,Greenport Electric — Long Island municipal (Suffolk County). No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+freeport,Village of Freeport Electric Department,NY,in-progress,,,Freeport Electric — Long Island municipal (Nassau County). No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+deposit,Village of Deposit Electric Department,NY,in-progress,,,Deposit Electric — Delaware County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+fairport,Village of Fairport Electric Department,NY,in-progress,,,Fairport Electric — Monroe County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+pennyan,Village of Penn Yan Electric Department,NY,in-progress,,,Penn Yan Electric — Yates County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+boonville,Village of Boonville Electric Department,NY,in-progress,,,Boonville Electric — Oneida County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+clayton,Village of Clayton Electric Department,NY,in-progress,,,Clayton Electric — Jefferson County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+frankfort,Village of Frankfort Electric Department,NY,in-progress,,,Frankfort Electric — Herkimer County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+ilion,Village of Ilion Electric Department,NY,in-progress,,,Ilion Electric — Herkimer County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+lakeplacid,Village of Lake Placid Electric Department,NY,in-progress,,,Lake Placid Electric — Essex County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+lyons,Village of Lyons Electric Department,NY,in-progress,,,Lyons Electric — Wayne County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+ny_norwood,Village of Norwood Electric Department,NY,in-progress,,,Norwood Electric — St. Lawrence County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+potsdam,Village of Potsdam Electric Department,NY,in-progress,,,Potsdam Electric — St. Lawrence County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+salamanca,City of Salamanca Electric Department,NY,in-progress,,,Salamanca Electric — Cattaraugus County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+tupperlake,Village of Tupper Lake Electric Department,NY,in-progress,,,Tupper Lake Electric — Franklin County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+waddington,Village of Waddington Electric Department,NY,in-progress,,,Waddington Electric — St. Lawrence County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+ny_westfield,Village of Westfield Electric Department,NY,in-progress,,,Westfield Electric — Chautauqua County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+solvay,Village of Solvay Electric Department,NY,in-progress,,,Solvay Electric — Onondaga County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.
+sherburne,Village of Sherburne Electric Department,NY,in-progress,,,Sherburne Electric — Chenango County municipal. No SmartHub host or public portal found (Jun 2026). Manual PDF upload meanwhile.

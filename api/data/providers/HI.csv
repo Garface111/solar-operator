@@ -1,0 +1,5 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+kiuc,Kauai Island Utility Cooperative (KIUC),HI,live,kiuc.smarthub.coop,https://kiuc.smarthub.coop,"NISC SmartHub portal (kiuc.smarthub.coop, confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports."
+heco,Hawaiian Electric Company (HECO),HI,in-progress,,https://www.hawaiianelectric.com,"Investor-owned, serves Oahu. Hawaiian Electric MyAccount — bespoke portal, NOT SmartHub. Adapter needs a live login to reverse-engineer. Manual PDF upload accepted meanwhile."
+helco,Hawaii Electric Light Company (HELCO),HI,in-progress,,https://www.hawaiianelectric.com,"Investor-owned, serves Hawaii Island (Big Island). Hawaiian Electric MyAccount — bespoke portal, NOT SmartHub. Adapter needs a live login to reverse-engineer. Manual PDF upload accepted meanwhile."
+meco,Maui Electric Company (MECO),HI,in-progress,,https://www.hawaiianelectric.com,"Investor-owned, serves Maui County. Hawaiian Electric MyAccount — bespoke portal, NOT SmartHub. Adapter needs a live login to reverse-engineer. Manual PDF upload accepted meanwhile."
