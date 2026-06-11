@@ -1,0 +1,28 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+pnm,Public Service Company of New Mexico (PNM),NM,in-progress,,https://pnm.com,"PNM serves Albuquerque metro and central NM — largest IOU in state. Customer portal at pnm.com, not SmartHub. Adapter needs live login. Manual upload meanwhile."
+elpaso,El Paso Electric,NM,in-progress,,https://epelectric.com,"El Paso Electric serves southern NM (Las Cruces, Deming, parts of TX). IOU, NOT on SmartHub. Customer portal at epelectric.com, adapter needs live login. Manual upload meanwhile."
+sps,Southwestern Public Service (SPS/Xcel Energy),NM,in-progress,,https://xcelenergy.com,"SPS (Xcel Energy brand) serves eastern NM (Clovis, Portales, Hobbs). IOU, NOT on SmartHub. Customer portal at xcelenergy.com, adapter needs live login. Manual upload meanwhile."
+cnmec,Central New Mexico Electric Cooperative,NM,live,cnmec.smarthub.coop,https://cnmec.smarthub.coop,NISC SmartHub portal (cnmec.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+cdec,Continental Divide Electric Cooperative,NM,live,cdec.smarthub.coop,https://cdec.smarthub.coop,NISC SmartHub portal (cdec.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+nm_farmers,Farmers' Electric Cooperative,NM,in-progress,,,NM co-op. farmers.smarthub.coop already claimed by AR utility — must find distinct NM host or confirm this is the same multi-state utility. Manual upload until verified.
+nm_lcec,Lea County Electric Cooperative (NM),NM,live,leacountyelectric.smarthub.coop,https://leacountyelectric.smarthub.coop,NISC SmartHub portal (leacountyelectric.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+rcec,Roosevelt County Electric Cooperative,NM,live,rcec.smarthub.coop,https://rcec.smarthub.coop,NISC SmartHub portal (rcec.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+sierra,Sierra Electric Cooperative,NM,live,sierraelectric.smarthub.coop,https://sierraelectric.smarthub.coop,NISC SmartHub portal (sierraelectric.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+nm_mvec,Mountain View Electric Cooperative (NM),NM,in-progress,,,NM co-op. mvec.smarthub.coop already claimed by KY Magoffin Valley — must find distinct NM host. Manual upload until verified.
+kitcarson,Kit Carson Electric Cooperative,NM,in-progress,,,"Taos-area co-op. No SmartHub host found (tried kitcarson, kcec, kitcarsonelectric — all 000). Manual upload until portal confirmed."
+jemez,Jemez Mountains Electric Cooperative,NM,in-progress,,,"Rural co-op. No SmartHub host found (tried jemez, jmec, jemezmountains — all 000). Manual upload until portal confirmed."
+morasanmiguel,Mora-San Miguel Electric Cooperative,NM,in-progress,,,"Rural co-op. No SmartHub host found (tried mora, msmec, morasanmiguel — all 000). Manual upload until portal confirmed."
+socorro,Socorro Electric Cooperative,NM,in-progress,,,"Socorro area co-op. No SmartHub host found (tried socorro, socorroelectric, socorroec — all 000). Manual upload until portal confirmed."
+springer,Springer Electric Cooperative,NM,in-progress,,,"Northeast NM co-op. No SmartHub host found (tried springer, springerelectric, springerec — all 000). Manual upload until portal confirmed."
+columbus,Columbus Electric Cooperative,NM,in-progress,,,"Small co-op. No SmartHub host found (tried columbus, columbuselectric, columbusec — all 000). Manual upload until portal confirmed."
+nraec,Northern Rio Arriba Electric Cooperative,NM,in-progress,,,"Northern NM co-op. No SmartHub host found (tried nraec, northernrioarriba — all 000). Manual upload until portal confirmed."
+aztec,City of Aztec Municipal Light & Power,NM,in-progress,,,"Municipal utility. No SmartHub host found (tried aztec, aztecelectric — all 000). Manual upload until portal confirmed."
+bloomfield,City of Bloomfield Electric Utility,NM,in-progress,,,"Municipal utility. No SmartHub host found (tried bloomfield, bloomfieldelectric — all 000). Manual upload until portal confirmed."
+farmington,City of Farmington Electric Utility,NM,in-progress,,https://fmtn.org,Municipal utility. No SmartHub host found. City of Farmington website at fmtn.org. Manual upload until portal confirmed.
+gallup,City of Gallup Board of Public Utilities,NM,in-progress,,,"Municipal utility. No SmartHub host found (tried gallup, gallupelectric — all 000). Manual upload until portal confirmed."
+raton,City of Raton Electric Department,NM,in-progress,,,"Municipal utility. No SmartHub host found (tried raton, ratonelectric — all 000). Manual upload until portal confirmed."
+nm_clayton,City of Clayton Electric Department,NM,in-progress,,,"Municipal utility. No SmartHub host found (tried clayton, claytonelectric — all 000). Manual upload until portal confirmed."
+losalamos,Los Alamos County Department of Public Utilities,NM,in-progress,,https://losalamosnm.us,Los Alamos County muni. No SmartHub host found. County website at losalamosnm.us. Manual upload until portal confirmed.
+cloudcroft,Village of Cloudcroft,NM,in-progress,,,Small village utility. No SmartHub host found. Manual upload until portal confirmed.
+ruidoso,Village of Ruidoso,NM,in-progress,,,Small village utility. No SmartHub host found. Manual upload until portal confirmed.
+angelfire,Village of Angel Fire,NM,in-progress,,,Small village utility. No SmartHub host found. Manual upload until portal confirmed.

@@ -1,0 +1,45 @@
+code,label,state,scrape_status,smarthub_host,portal_url,notes
+bvea,Bridger Valley Electric Association,UT,live,bvea.smarthub.coop,https://bvea.smarthub.coop,"NISC SmartHub portal (bvea.smarthub.coop, confirmed Jun 2026). Serves Utah/Wyoming. kWh unverified on a real generation meter; verify before trusting reports."
+dixie_power,Dixie Power (Dixie Escalante REC),UT,live,dixiepower.smarthub.coop,https://dixiepower.smarthub.coop,"NISC SmartHub portal (dixiepower.smarthub.coop, confirmed Jun 2026). ~25,000 members in Southern Utah/Northern Arizona. kWh unverified on a real generation meter; verify before trusting reports."
+garkane,Garkane Energy Cooperative,UT,live,garkaneenergy.smarthub.coop,https://garkaneenergy.smarthub.coop,"NISC SmartHub portal (garkaneenergy.smarthub.coop, confirmed Jun 2026). kWh unverified on a real generation meter; verify before trusting reports."
+mlea,Moon Lake Electric Association,UT,live,mlea.smarthub.coop,https://mlea.smarthub.coop,"NISC SmartHub portal (mlea.smarthub.coop, confirmed Jun 2026). Serves Colorado/Utah, HQ Roosevelt UT. kWh unverified on a real generation meter; verify before trusting reports."
+mwpower,Mt. Wheeler Power,UT,live,mwpower.smarthub.coop,https://mwpower.smarthub.coop,"NISC SmartHub portal (mwpower.smarthub.coop, confirmed Jun 2026). 4,600+ accounts across Nevada/Utah. kWh unverified on a real generation meter; verify before trusting reports."
+rrelectric,Raft River Rural Electric Co-op,UT,live,rrelectric.smarthub.coop,https://rrelectric.smarthub.coop,"NISC SmartHub portal (rrelectric.smarthub.coop, confirmed Jun 2026). 5,000+ customers in Idaho/Utah/Nevada, HQ Malta ID. kWh unverified on a real generation meter; verify before trusting reports."
+wrec_ut,Wells Rural Electric Company,UT,in-progress,,https://wrec.smarthub.coop,[host unattributed] Wells Rural EC (UT/NV). wrec.smarthub.coop held by Withlacoochee River EC (FL). No distinct host found. Manual until verified.
+beaver,City of Beaver (Beaver City Light & Power),UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+blanding,City of Blanding,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+bountiful,Bountiful City Light & Power,UT,in-progress,,https://cityofbountifulut.municipalonlinepayments.com/cityofbountifulut/utilities,Municipal electric system. Bespoke portal (MunicipalOnlinePayments) — adapter needs a live login. Manual PDF upload meanwhile.
+brigham,Brigham City Corporation (Brigham City Power),UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+enterprise,City of Enterprise,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+ephraim,City of Ephraim,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+fairview,City of Fairview,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+fillmore,City of Fillmore,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+helper,City of Helper,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+holden_ut,Town of Holden,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+hurricane,City of Hurricane (Hurricane Power),UT,in-progress,,https://www.cityofhurricane.com,Municipal electric system. Bespoke portal (Xpress Bill Pay) — adapter needs a live login. Manual PDF upload meanwhile.
+hyrum,City of Hyrum,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+kanosh,Town of Kanosh,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+kaysville,City of Kaysville,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+lehi,Lehi City Power,UT,in-progress,,https://www.lehi-ut.gov/departments/power,Municipal electric system. Bespoke portal (Xpress Bill Pay) — adapter needs a live login. Manual PDF upload meanwhile.
+levan,Town of Levan,UT,in-progress,,,UMPA member municipal. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+logan,Logan City Light & Power,UT,in-progress,,https://cityofloganut.municipalonlinepayments.com/cityofloganut/utilities,Municipal electric system. Bespoke portal (MunicipalOnlinePayments) — adapter needs a live login. Manual PDF upload meanwhile.
+manti,City of Manti,UT,in-progress,,,UMPA member municipal. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+meadow,Town of Meadow,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+monroe_ut,City of Monroe,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+morgan,Morgan City Corporation,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+mt_pleasant,City of Mt. Pleasant,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+murray,Murray City Power,UT,in-progress,,https://www.municipalonlinepayments.com/cityofmurraycityut/utilities,Municipal electric system. Bespoke portal (MunicipalOnlinePayments) — adapter needs a live login. Manual PDF upload meanwhile.
+nephi,City of Nephi,UT,in-progress,,,UMPA member municipal. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+oak_city,Town of Oak City,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+paragonah,Town of Paragonah,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+parowan,City of Parowan,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+payson,Payson City Corporation (Payson City Power),UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+price,Price City (Price Municipal Corporation),UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+provo,Provo City Power,UT,in-progress,,https://myusage.provo.org/app/login.jsp,UMPA member municipal. Bespoke portal — adapter needs a live login. Manual PDF upload meanwhile.
+salem_ut,City of Salem,UT,in-progress,,,UMPA member municipal. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+santa_clara,City of Santa Clara,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+spanish_fork,Spanish Fork City Power,UT,in-progress,,https://www.spanishfork.gov/power,UMPA member municipal. Bespoke portal — adapter needs a live login. Manual PDF upload meanwhile.
+spring_city,Town of Spring City,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+springville,City of Springville,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
+st_george,City of St. George (Energy Services),UT,in-progress,,,"Municipal electric system (~33,000 customers). No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed."
+washington_city,City of Washington,UT,in-progress,,,Municipal electric system. No SmartHub host or customer portal found (Jun 2026). Manual PDF upload until a login/portal is confirmed.
