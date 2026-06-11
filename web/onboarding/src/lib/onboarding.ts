@@ -261,3 +261,30 @@ export async function fetchStatus(token: string): Promise<OnboardingStatus> {
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
+
+// ─── Utility provider catalog (public; powers the home-page "is my utility
+//     supported?" search) ──────────────────────────────────────────────────
+
+/** scrape_status from the backend catalog. `live` = automated capture works
+ *  today; `in-progress` = portal known, adapter not yet built (manual upload
+ *  fallback); `manual` = no portal, PDFs only. Mirrors api/providers.py. */
+export type ProviderStatus = "live" | "in-progress" | "manual";
+
+export interface Provider {
+  code: string;
+  label: string;
+  state: string;
+  scrape_status: ProviderStatus;
+  smarthub_host: string;
+  portal_url: string;
+  notes: string;
+}
+
+/** Fetch the full supported-utility catalog. Public, no auth — safe to call
+ *  before signup. Cached by the caller; the list is ~1.4k rows but tiny. */
+export async function fetchProviders(): Promise<Provider[]> {
+  const res = await fetchWithTimeout("/v1/providers");
+  if (!res.ok) throw new Error(await parseError(res));
+  const body = await res.json();
+  return (body?.providers ?? []) as Provider[];
+}

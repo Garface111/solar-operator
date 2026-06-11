@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../ui/Button";
+import UtilitySearch from "../components/UtilitySearch";
 
 const CHROME_STORE_URL =
   "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
@@ -452,6 +453,10 @@ export default function GetStarted() {
           Start free — 14-day trial · $15/array/month (volume discounts past 50) · $250 one-time setup · cancel anytime
         </p>
       </div>
+
+      {/* Coverage self-check — let a prospect confirm their utility before they
+          commit to setup. Honest 3-state answer straight from /v1/providers. */}
+      <UtilitySearch />
     </div>
   );
 }
