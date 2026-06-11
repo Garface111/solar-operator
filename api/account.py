@@ -642,6 +642,19 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             select(func.count()).select_from(UtilityAccount)
             .where(UtilityAccount.tenant_id == t.id)
         ).scalar() or 0
+        # Distinct provider codes this tenant actually has utility accounts for —
+        # the true "connected portals" set. Nationally there are 470+ live
+        # providers; the dashboard should only surface the handful this operator
+        # is connected to, not the whole catalog.
+        connected_providers = [
+            row[0]
+            for row in db.execute(
+                select(UtilityAccount.provider)
+                .where(UtilityAccount.tenant_id == t.id)
+                .distinct()
+            ).all()
+            if row[0]
+        ]
         last_sess = db.execute(
             select(UtilitySession).where(UtilitySession.tenant_id == t.id)
             .order_by(UtilitySession.captured_at.desc())
@@ -695,6 +708,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             # trial banner CTA and the read-only pause gating in the dashboard.
             "has_payment_method": t.stripe_payment_method_id is not None,
             "accounts_count": int(accounts_count),
+            "connected_providers": connected_providers,
             "bills_count": int(bills_count),
             "clients_count": int(clients_count),
             "onboarding_array_estimate": t.onboarding_array_estimate,

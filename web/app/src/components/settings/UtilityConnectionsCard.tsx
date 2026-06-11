@@ -21,6 +21,37 @@ const PORTAL_URLS: Record<string, string> = {
 const EXTENSION_INSTALL_URL =
   "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
 
+/**
+ * Split the live-provider catalog into the operator's connected portals vs the
+ * rest. `connectedProviderCodes` is the authoritative set from the backend
+ * (account.connected_providers); `legacyCodes` is a fallback (e.g. ["gmp"])
+ * derived from legacy login presence when the backend list is empty/absent.
+ * Exported for unit testing.
+ */
+export function splitPortals<T extends { code: string }>(
+  providers: T[],
+  connectedProviderCodes: string[],
+  legacyCodes: string[] = [],
+): {
+  connectedCodes: Set<string>;
+  connected: T[];
+  others: T[];
+} {
+  const connectedCodes = new Set<string>(
+    connectedProviderCodes.map((c) => c.toLowerCase()),
+  );
+  if (connectedCodes.size === 0) {
+    for (const c of legacyCodes) connectedCodes.add(c.toLowerCase());
+  }
+  const connected = providers.filter((p) =>
+    connectedCodes.has(p.code.toLowerCase()),
+  );
+  const others = providers.filter(
+    (p) => !connectedCodes.has(p.code.toLowerCase()),
+  );
+  return { connectedCodes, connected, others };
+}
+
 const UTILITY_TAG_STYLES: Record<string, string> = {
   GMP: "bg-emerald-50 text-emerald-600",
   VEC: "bg-sky-50 text-sky-700",
@@ -95,6 +126,10 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
   const [captures, setCaptures] = useState<CaptureEntry[] | null>(null);
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
+  // Live portals section: collapsed/expanded, and whether the not-connected
+  // portals are revealed. Default: section open, connected-only shown.
+  const [portalsOpen, setPortalsOpen] = useState(true);
+  const [showAllPortals, setShowAllPortals] = useState(false);
 
   // Live extension presence (postMessage bridge). Updates the instant the
   // extension injects / pairs / lands a capture — no page reload required.
@@ -180,6 +215,24 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
 
   const hasAnyLogin = gmpLogins.length > 0 || vecLogins.length > 0;
 
+  // Connected = providers this tenant actually has utility accounts for. The
+  // backend supplies the authoritative set (account.connected_providers); we
+  // fall back to legacy login presence so an older API still highlights GMP/VEC.
+  const legacyConnected: string[] = [];
+  if (gmpLogins.length > 0) legacyConnected.push("gmp");
+  if (vecLogins.length > 0) legacyConnected.push("vec");
+  const {
+    connectedCodes,
+    connected: connectedPortals,
+    others: otherPortals,
+  } = splitPortals(providers, account.connected_providers ?? [], legacyConnected);
+  // What the list renders: connected by default; the full catalog when the
+  // operator clicks "Show all". When nothing is connected yet, fall back to
+  // showing all so the section isn't mysteriously empty.
+  const haveConnected = connectedPortals.length > 0;
+  const visiblePortals =
+    showAllPortals || !haveConnected ? providers : connectedPortals;
+
   const gmpSess = account.session ?? null;
   const needsReauth = (gmpSess?.refresh_failures ?? 0) > 0;
   const lastRefresh = gmpSess?.last_refresh_at
@@ -250,51 +303,114 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
           </div>
         </div>
 
-        {/* Live portals */}
+        {/* Live portals — collapsible. Auto-shows the portals this operator is
+            connected to; the not-connected national catalog stays hidden behind
+            "Show all" so the list isn't a 400-utility wall. */}
         {providers.length > 0 && (
           <div className="border-t border-cream-border px-5 py-4">
-            <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
-              Live portals
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {providers.map((p) => (
-                <div
-                  key={p.code}
-                  className="flex items-center gap-2.5 rounded-lg border border-cream-border bg-white px-3 py-2"
-                >
-                  <span className="text-sm font-medium text-zinc-800">
-                    {p.label}
+            <button
+              type="button"
+              onClick={() => setPortalsOpen((o) => !o)}
+              aria-expanded={portalsOpen}
+              aria-controls="live-portals-panel"
+              className="flex w-full items-center justify-between gap-2 text-left focus:outline-none"
+            >
+              <span className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                  Live portals
+                </span>
+                {haveConnected && (
+                  <span className="rounded-full bg-primary-100 px-2 py-0.5 text-[11px] font-medium text-primary-700">
+                    {connectedPortals.length} connected
                   </span>
-                  {needsReauth && p.code === "gmp" && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-                      Re-auth needed
-                    </span>
-                  )}
-                  <span className="text-xs text-zinc-400">
-                    {p.scrape_status === "live"
-                      ? "Automated capture"
-                      : p.scrape_status}
-                    {lastRefresh && p.code === "gmp" && (
-                      <> · refreshed {timeAgo(lastRefresh)}</>
-                    )}
-                  </span>
-                  {PORTAL_URLS[p.code] && (
-                    <button
-                      type="button"
-                      disabled={reconnecting === p.code}
-                      onClick={() => reconnect(p.code)}
-                      className="text-xs font-medium text-primary-600 hover:underline focus:outline-none disabled:opacity-50"
-                    >
-                      {reconnecting === p.code ? (
-                        <Spinner className="h-3 w-3" />
-                      ) : (
-                        "Open portal →"
-                      )}
-                    </button>
-                  )}
+                )}
+              </span>
+              <span
+                aria-hidden
+                className={`text-zinc-400 transition-transform duration-150 ${
+                  portalsOpen ? "rotate-180" : ""
+                }`}
+              >
+                ▾
+              </span>
+            </button>
+
+            {portalsOpen && (
+              <div id="live-portals-panel" className="mt-2.5">
+                <div className="flex flex-wrap gap-2">
+                  {visiblePortals.map((p) => {
+                    const isConnected = connectedCodes.has(p.code.toLowerCase());
+                    return (
+                      <div
+                        key={p.code}
+                        className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 ${
+                          isConnected
+                            ? "border-primary-200 bg-primary-50/40"
+                            : "border-cream-border bg-white"
+                        }`}
+                      >
+                        {isConnected && (
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"
+                            title="Connected"
+                          />
+                        )}
+                        <span className="text-sm font-medium text-zinc-800">
+                          {p.label}
+                        </span>
+                        {needsReauth && p.code === "gmp" && (
+                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                            Re-auth needed
+                          </span>
+                        )}
+                        <span className="text-xs text-zinc-400">
+                          {p.scrape_status === "live"
+                            ? "Automated capture"
+                            : p.scrape_status}
+                          {lastRefresh && p.code === "gmp" && (
+                            <> · refreshed {timeAgo(lastRefresh)}</>
+                          )}
+                        </span>
+                        {PORTAL_URLS[p.code] && (
+                          <button
+                            type="button"
+                            disabled={reconnecting === p.code}
+                            onClick={() => reconnect(p.code)}
+                            className="text-xs font-medium text-primary-600 hover:underline focus:outline-none disabled:opacity-50"
+                          >
+                            {reconnecting === p.code ? (
+                              <Spinner className="h-3 w-3" />
+                            ) : (
+                              "Open portal →"
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
+
+                {/* Show-all / collapse-to-connected toggle. Only meaningful when
+                    there are connected portals AND additional ones to reveal. */}
+                {haveConnected && otherPortals.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllPortals((s) => !s)}
+                    className="mt-2.5 text-xs font-medium text-primary-600 hover:underline focus:outline-none"
+                  >
+                    {showAllPortals
+                      ? "Show only my connected portals"
+                      : `Show all ${providers.length} supported portals →`}
+                  </button>
+                )}
+                {!haveConnected && (
+                  <p className="mt-2 text-[11px] text-zinc-400">
+                    No portals connected yet. Add a client and sign into their
+                    utility to connect one.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
 

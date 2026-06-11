@@ -214,6 +214,10 @@ export interface Account {
    *  read-only pause gating. */
   has_payment_method: boolean;
   accounts_count: number;
+  /** Distinct provider codes this tenant has utility accounts for — the true
+   *  "connected portals" set. Drives the Live portals list so it shows only
+   *  the operator's connected utilities, not the whole national catalog. */
+  connected_providers?: string[];
   bills_count: number;
   clients_count: number;
   onboarding_array_estimate: number | null;
