@@ -8,6 +8,7 @@ import {
   type ExtensionStatus,
 } from "../lib/useExtensionStatus";
 import { wipeCookiesAndWait, gmpPortalUrl } from "../lib/openPortalTab";
+import { milesToState } from "../lib/stateGeo";
 
 // A pickable SmartHub portal, derived at runtime from the provider catalog
 // (GET /v1/providers → rows with a smarthub_host). The hardcoded list is gone:
@@ -16,6 +17,9 @@ interface SmartHubEntry {
   provider: string;
   name: string;
   hint: string;
+  /** Two-letter state code, used to rank by distance when the operator
+   *  shares their location. Empty for utilities with no state on file. */
+  stateCode: string;
   url: string;
 }
 
@@ -71,6 +75,32 @@ export function AddClientByLoginModal({
   const [portalsLoaded, setPortalsLoaded] = useState(false);
   const [query, setQuery] = useState("");
 
+  // Operator location for "nearest utilities first". null = not requested or
+  // denied (we fall back to alphabetical). geoState tracks the UX of the ask.
+  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [geoState, setGeoState] = useState<
+    "idle" | "prompting" | "granted" | "denied" | "unsupported"
+  >("idle");
+
+  function requestLocation() {
+    if (!("geolocation" in navigator)) {
+      setGeoState("unsupported");
+      return;
+    }
+    setGeoState("prompting");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGeoState("granted");
+      },
+      () => {
+        // Denied or errored — silently fall back to the alphabetical list.
+        setGeoState("denied");
+      },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
+    );
+  }
+
   // Re-probe whenever the modal opens so a freshly-installed extension
   // is detected without a page reload.
   useEffect(() => {
@@ -92,6 +122,7 @@ export function AddClientByLoginModal({
             provider: p.code,
             name: p.label,
             hint: p.state || "SmartHub",
+            stateCode: (p.state || "").toUpperCase(),
             url: p.portal_url || `https://${p.smarthub_host}/`,
           }))
           .sort((a, b) => a.name.localeCompare(b.name));
@@ -107,16 +138,34 @@ export function AddClientByLoginModal({
     };
   }, [open, portalsLoaded]);
 
+  // Filter by the search box first, then rank. When the operator has shared
+  // their location, rank by distance to each utility's state centroid (nearest
+  // first; unknown-state utilities sink to the bottom). Otherwise keep the
+  // alphabetical order the list was built with.
   const filteredPortals = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return smarthubPortals;
-    return smarthubPortals.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.hint.toLowerCase().includes(q) ||
-        p.provider.toLowerCase().includes(q),
-    );
-  }, [smarthubPortals, query]);
+    const base = !q
+      ? smarthubPortals
+      : smarthubPortals.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            p.hint.toLowerCase().includes(q) ||
+            p.provider.toLowerCase().includes(q),
+        );
+
+    if (!coords) return base.map((p) => ({ ...p, miles: null as number | null }));
+
+    return base
+      .map((p) => ({ ...p, miles: milesToState(coords, p.stateCode) }))
+      .sort((a, b) => {
+        // Unknown distance (no/blank state) always sorts last.
+        if (a.miles == null && b.miles == null)
+          return a.name.localeCompare(b.name);
+        if (a.miles == null) return 1;
+        if (b.miles == null) return -1;
+        return a.miles - b.miles || a.name.localeCompare(b.name);
+      });
+  }, [smarthubPortals, query, coords]);
 
   /**
    * pick — open a utility's login portal in a fresh tab after a cookie wipe.
@@ -272,6 +321,42 @@ export function AddClientByLoginModal({
               )}
             </div>
 
+            {/* Nearest-first control. Asks for browser location, then ranks the
+                list by distance to each utility's state. Pure convenience —
+                denial/absence falls back silently to the alphabetical list. */}
+            {smarthubPortals.length > 1 && (
+              <div className="mb-2">
+                {geoState !== "granted" ? (
+                  <button
+                    type="button"
+                    onClick={requestLocation}
+                    disabled={geoState === "prompting"}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:border-emerald-400 hover:text-emerald-600 disabled:opacity-60"
+                  >
+                    <span aria-hidden>📍</span>
+                    {geoState === "prompting"
+                      ? "Locating…"
+                      : "Sort by nearest to me"}
+                  </button>
+                ) : (
+                  <div className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700">
+                    <span aria-hidden>📍</span>
+                    Sorted by nearest to you
+                  </div>
+                )}
+                {geoState === "denied" && (
+                  <span className="ml-2 text-xs text-zinc-400">
+                    Location off — showing A–Z. Search by state instead.
+                  </span>
+                )}
+                {geoState === "unsupported" && (
+                  <span className="ml-2 text-xs text-zinc-400">
+                    Location isn&apos;t available in this browser.
+                  </span>
+                )}
+              </div>
+            )}
+
             {smarthubPortals.length > 6 && (
               <input
                 type="text"
@@ -297,7 +382,11 @@ export function AddClientByLoginModal({
                 <PortalCard
                   key={p.provider}
                   label={p.name}
-                  hint={p.hint}
+                  hint={
+                    p.miles != null
+                      ? `${p.hint} · ~${Math.round(p.miles)} mi`
+                      : p.hint
+                  }
                   cta="Open portal →"
                   onClick={() => pick(p.provider, p.name, p.url)}
                   disabled={extensionUnknown}
