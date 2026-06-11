@@ -15,6 +15,49 @@ export const MIND_BUTTON_ALLOWED_EMAILS = ["ford.genereaux@gmail.com"];
 // local dev port when VITE_MIND_BASE is unset. See web/app/README.md.
 const MIND_BASE = import.meta.env.VITE_MIND_BASE ?? "http://localhost:8001";
 
+// ── Durable backend resolution (the stable pointer) ─────────────────────────
+// Master Control (the OCICBB Mind) runs on Ford's laptop behind an *ephemeral*
+// cloudflared quick-tunnel whose URL rotates on every restart. Baking that URL
+// into the build (the old approach) meant every tunnel rotation silently broke
+// the Mind button until someone rebuilt + redeployed the whole site.
+//
+// Instead we resolve the backend at runtime from a stable GitHub Gist that the
+// laptop supervisor rewrites whenever the tunnel URL changes. The gist's raw
+// URL never changes and is CORS-open, so the button always finds the live Mind
+// without a redeploy. We fetch it once per panel-open, cache the result, and
+// fall back to the build-time MIND_BASE if the pointer is unreachable.
+const MIND_POINTER_URL =
+  "https://gist.githubusercontent.com/Garface111/6f55fb2062fa64809b2a9d1826851009/raw/mind-pointer.json";
+
+let resolvedMindBase: string | null = null;
+
+async function resolveMindBase(): Promise<string> {
+  if (resolvedMindBase) return resolvedMindBase;
+  try {
+    // cache:no-store so a rotated tunnel is picked up promptly, not from a
+    // stale browser cache. 4s timeout — if the pointer is slow, don't make the
+    // operator wait; fall back to the baked base.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch(`${MIND_POINTER_URL}?t=${Date.now()}`, {
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (res.ok) {
+      const data = (await res.json()) as { mind_base?: string };
+      if (data.mind_base && /^https?:\/\//.test(data.mind_base)) {
+        resolvedMindBase = data.mind_base.replace(/\/+$/, "");
+        return resolvedMindBase;
+      }
+    }
+  } catch {
+    // Pointer unreachable / malformed — fall through to the baked base.
+  }
+  resolvedMindBase = MIND_BASE;
+  return resolvedMindBase;
+}
+
 const SESSION_KEY = "mind-session-id";
 
 interface ChatMessage {
@@ -129,7 +172,8 @@ export function MindButton({ account }: Props) {
     };
 
     try {
-      const res = await fetch(`${MIND_BASE}/v1/chat`, {
+      const base = await resolveMindBase();
+      const res = await fetch(`${base}/v1/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
