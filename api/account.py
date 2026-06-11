@@ -28,7 +28,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import stripe
@@ -51,6 +51,24 @@ from .email_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize a datetime as an ISO-8601 string with an explicit UTC offset.
+
+    Timestamps in the DB are naive UTC (models.now() == datetime.utcnow()).
+    Calling .isoformat() on a naive datetime emits a string with NO timezone
+    marker, which the browser's `new Date(...)` then parses as *local* time —
+    skewing every displayed timestamp by the client's UTC offset (e.g. +4h in
+    EDT, which pushed the "next utility data pull" countdown past its own 6h
+    cadence). Stamping tzinfo=UTC makes isoformat() emit "+00:00" so the client
+    parses the correct instant. Already-aware datetimes are passed through.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 APP_URL = os.getenv("APP_URL", "https://solaroperator.org").rstrip("/")
 # Public, buyer-facing dashboard URL. Netlify 200-proxies solaroperator.org/accounts
@@ -304,7 +322,7 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "report_frequency": c.report_frequency,
         "active": c.active,
         "array_count": array_count,
-        "last_delivery_at": c.last_delivery_at.isoformat() if c.last_delivery_at else None,
+        "last_delivery_at": _iso_utc(c.last_delivery_at),
         "notes": c.notes,
         "gmp_email": c.gmp_email,
         "gmp_username": c.gmp_username,
@@ -698,11 +716,11 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "default_email_subject": DEFAULT_SUBJECT_TEMPLATE,
             "default_email_body": DEFAULT_BODY_TEMPLATE,
             "merge_tags": list(MERGE_TAGS),
-            "last_pull_at": t.last_pull_at.isoformat() if t.last_pull_at else None,
-            "last_delivery_at": t.last_delivery_at.isoformat() if t.last_delivery_at else None,
-            "extension_heartbeat_at": t.extension_heartbeat_at.isoformat() if t.extension_heartbeat_at else None,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-            "trial_ends_at": t.trial_ends_at.isoformat() if t.trial_ends_at else None,
+            "last_pull_at": _iso_utc(t.last_pull_at),
+            "last_delivery_at": _iso_utc(t.last_delivery_at),
+            "extension_heartbeat_at": _iso_utc(t.extension_heartbeat_at),
+            "created_at": _iso_utc(t.created_at),
+            "trial_ends_at": _iso_utc(t.trial_ends_at),
             "has_password": bool(t.password_hash),
             # No-upfront-payment: a live trial can have no card yet. Drives the
             # trial banner CTA and the read-only pause gating in the dashboard.

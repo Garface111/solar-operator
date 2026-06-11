@@ -78,8 +78,18 @@ export function PlanBillingCard({ account }: Props) {
   const isPaused = account.subscription_status === "paused_no_card";
 
   const nextReport = nextReportDate(account.report_frequency);
+  // Pulls run every 6h, so the next one is last_pull_at + 6h. Defensive clamp:
+  // if a malformed/future-skewed last_pull_at would push the countdown beyond
+  // the 6h cadence (the timezone bug that once showed "in 11h, every 6 hours"),
+  // cap it at now + 6h so the display can never contradict its own cadence.
+  const PULL_INTERVAL_MS = 6 * 60 * 60 * 1000;
   const nextPullAt = account.last_pull_at
-    ? new Date(new Date(account.last_pull_at).getTime() + 6 * 60 * 60 * 1000)
+    ? new Date(
+        Math.min(
+          new Date(account.last_pull_at).getTime() + PULL_INTERVAL_MS,
+          Date.now() + PULL_INTERVAL_MS,
+        ),
+      )
     : null;
 
   return (

@@ -359,7 +359,7 @@ def _status_payload(db, t: Tenant) -> dict:
     n_arrays = db.execute(
         select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
     ).scalar() or 0
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
     hb = t.extension_heartbeat_at
     # "extension_active" = heartbeat received within the last 2 minutes.
     extension_active = (
@@ -374,7 +374,13 @@ def _status_payload(db, t: Tenant) -> dict:
         "clients_count": int(n_clients),
         "arrays_count": int(n_arrays),
         "extension_active": extension_active,
-        "extension_heartbeat_at": hb.isoformat() if hb else None,
+        # Naive UTC in the DB → stamp UTC offset so the browser doesn't parse it
+        # as local time (see account._iso_utc for the full rationale).
+        "extension_heartbeat_at": (
+            hb.replace(tzinfo=_tz.utc).isoformat()
+            if hb is not None and hb.tzinfo is None
+            else (hb.isoformat() if hb else None)
+        ),
     }
 
 
