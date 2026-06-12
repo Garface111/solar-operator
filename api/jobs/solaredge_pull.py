@@ -89,8 +89,10 @@ def pull_daily_for_array(
 def pull_all_solaredge_arrays(days_back: int = 90) -> dict:
     """Pull daily generation for every array with a SolarEdge API key.
 
-    Called by the scheduler at 03:00 UTC daily. Errors per array are logged
-    but do not crash the scheduler.
+    DEPRECATED: superseded by api.jobs.inverter_pull.pull_all_inverters, which
+    the scheduler now calls and which covers every vendor (including legacy
+    solaredge arrays via the virtual-connection fallback). Kept for any direct
+    callers / one-off ops use; pull_daily_for_array above is still live.
     """
     results: list[dict] = []
 

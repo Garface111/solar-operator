@@ -5,20 +5,26 @@ import {
   useRef,
   useState,
 } from "react";
+import type { ReactNode } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
+import { Checkbox } from "../ui/Checkbox";
 import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
 import {
   arrayOwnersOverview,
   connectSolarEdge,
+  connectSolarEdgeAccount,
+  discoverSolarEdge,
   UnauthorizedError,
 } from "../lib/api";
 import type {
   ArrayHealthStatus,
   ArrayOwnerArray,
   ArrayOwnersOverview,
+  ConnectAccountResult,
+  SolarEdgeDiscoveredSite,
 } from "../lib/arrayOwners";
 
 const POLL_MS = 60_000;
@@ -218,31 +224,107 @@ interface ConnectModalProps {
   onConnected: () => void;
 }
 
+/** kW formatter for the site picker rows. */
+function formatKw(kw: number | null): string {
+  if (kw === null || kw === undefined) return "—";
+  return `${kw.toLocaleString("en-US", { maximumFractionDigits: 2 })} kW`;
+}
+
+type ConnectStep = "key" | "sites" | "done";
+
+/**
+ * Account-first SolarEdge connect.
+ *
+ * Step 1: paste ONE account-level API key.
+ * Step 2: we discover every site on the account and show them as checkboxes.
+ * Step 3: connect-account attaches them all at once, then a celebratory summary.
+ *
+ * The old per-array "single site" flow (api key + site id) is kept under a
+ * small link — this is the fallback the real pilot needed when a site-level
+ * key can't enumerate.
+ */
 function ConnectInverterModal({ array, onClose, onConnected }: ConnectModalProps) {
   const toast = useToast();
   const [apiKey, setApiKey] = useState("");
-  const [siteId, setSiteId] = useState("");
-  const [saving, setSaving] = useState(false);
+  const [step, setStep] = useState<ConnectStep>("key");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset the form whenever a different array opens the modal.
+  // Discovery (step 2).
+  const [sites, setSites] = useState<SolarEdgeDiscoveredSite[]>([]);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+
+  // Celebration (step 3).
+  const [result, setResult] = useState<ConnectAccountResult | null>(null);
+
+  // Manual single-site fallback path.
+  const [manual, setManual] = useState(false);
+  const [siteId, setSiteId] = useState("");
+
+  // Reset everything whenever a different array opens the modal.
   useEffect(() => {
     setApiKey("");
-    setSiteId("");
+    setStep("key");
+    setBusy(false);
     setError(null);
-    setSaving(false);
+    setSites([]);
+    setSelected(new Set());
+    setResult(null);
+    setManual(false);
+    setSiteId("");
   }, [array?.array_id]);
 
+  const open = array !== null;
   const siteIdNum = Number(siteId.trim());
-  const valid =
+  const manualValid =
     apiKey.trim().length > 0 &&
     siteId.trim().length > 0 &&
     Number.isInteger(siteIdNum) &&
     siteIdNum > 0;
 
-  async function handleConnect() {
-    if (!array || !valid || saving) return;
-    setSaving(true);
+  async function handleDiscover() {
+    if (!apiKey.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await discoverSolarEdge(apiKey.trim());
+      if (res.sites.length === 0) {
+        setError(res.message || "No sites found on this SolarEdge account.");
+        return;
+      }
+      setSites(res.sites);
+      setSelected(new Set(res.sites.map((s) => s.site_id))); // all checked
+      setStep("sites");
+    } catch (err) {
+      if (err instanceof UnauthorizedError) return; // handled globally
+      // 400s carry the server's actionable guidance (e.g. "use an account-level
+      // key") — surface inline so the operator can fix it, not a fleeting toast.
+      setError(err instanceof Error ? err.message : "Couldn't reach SolarEdge");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleConnectAccount() {
+    if (busy || selected.size === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await connectSolarEdgeAccount(apiKey.trim(), [...selected]);
+      setResult(res);
+      setStep("done");
+      onConnected(); // refresh the overview underneath
+    } catch (err) {
+      if (err instanceof UnauthorizedError) return;
+      setError(err instanceof Error ? err.message : "Couldn't connect your sites");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleManualConnect() {
+    if (!array || !manualValid || busy) return;
+    setBusy(true);
     setError(null);
     try {
       const res = await connectSolarEdge(array.array_id, apiKey.trim(), siteIdNum);
@@ -250,67 +332,249 @@ function ConnectInverterModal({ array, onClose, onConnected }: ConnectModalProps
       onConnected();
       onClose();
     } catch (err) {
-      if (err instanceof UnauthorizedError) return; // handled globally
-      // 400s arrive as a thrown Error carrying the server's detail — show it
-      // inline rather than as a transient toast so the operator can fix it.
+      if (err instanceof UnauthorizedError) return;
       setError(err instanceof Error ? err.message : "Couldn't connect the inverter");
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
+  }
+
+  function toggleSite(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const title = manual
+    ? array
+      ? `Connect a single site — ${array.name}`
+      : "Connect a single site"
+    : step === "done"
+      ? "SolarEdge connected"
+      : "Connect SolarEdge";
+
+  // ── footer (varies by step / mode) ──
+  let footer: ReactNode;
+  if (manual) {
+    footer = (
+      <>
+        <Button variant="ghost" onClick={() => setManual(false)} disabled={busy}>
+          Back
+        </Button>
+        <Button onClick={handleManualConnect} disabled={!manualValid || busy}>
+          {busy ? (
+            <>
+              <Spinner />
+              Connecting…
+            </>
+          ) : (
+            "Connect"
+          )}
+        </Button>
+      </>
+    );
+  } else if (step === "key") {
+    footer = (
+      <>
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
+          Cancel
+        </Button>
+        <Button onClick={handleDiscover} disabled={!apiKey.trim() || busy}>
+          {busy ? (
+            <>
+              <Spinner />
+              Finding sites…
+            </>
+          ) : (
+            "Discover my sites"
+          )}
+        </Button>
+      </>
+    );
+  } else if (step === "sites") {
+    footer = (
+      <>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            setStep("key");
+            setError(null);
+          }}
+          disabled={busy}
+        >
+          Back
+        </Button>
+        <Button onClick={handleConnectAccount} disabled={selected.size === 0 || busy}>
+          {busy ? (
+            <>
+              <Spinner />
+              Connecting…
+            </>
+          ) : (
+            `Connect ${selected.size} ${selected.size === 1 ? "array" : "arrays"}`
+          )}
+        </Button>
+      </>
+    );
+  } else {
+    footer = (
+      <Button onClick={onClose}>Done</Button>
+    );
   }
 
   return (
     <Modal
-      open={array !== null}
+      open={open}
       onClose={() => {
-        if (!saving) onClose();
+        if (!busy) onClose();
       }}
-      title={array ? `Connect inverter — ${array.name}` : "Connect inverter"}
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose} disabled={saving}>
-            Cancel
-          </Button>
-          <Button onClick={handleConnect} disabled={!valid || saving}>
-            {saving ? (
-              <>
-                <Spinner />
-                Connecting…
-              </>
-            ) : (
-              "Connect"
-            )}
-          </Button>
-        </>
-      }
+      title={title}
+      footer={footer}
     >
-      <div className="space-y-4">
-        <p className="text-sm text-zinc-500">
-          Paste your SolarEdge monitoring API key and the site ID for this
-          array. We validate the key with SolarEdge before saving.
-        </p>
-        <Input
-          id="se-api-key"
-          label="SolarEdge API key"
-          autoFocus
-          placeholder="e.g. ABCD1234EFGH5678"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-        <Input
-          id="se-site-id"
-          label="Site ID"
-          inputMode="numeric"
-          placeholder="e.g. 1234567"
-          value={siteId}
-          onChange={(e) => setSiteId(e.target.value.replace(/[^0-9]/g, ""))}
-          error={error ?? undefined}
-        />
-        <p className="text-xs text-zinc-400">
-          Find both in the SolarEdge monitoring portal under Admin → Site
-          Access → API Access.
-        </p>
-      </div>
+      {/* ── manual single-site fallback ── */}
+      {manual ? (
+        <div className="space-y-4">
+          <p className="text-sm text-zinc-500">
+            Paste your SolarEdge API key and the site ID for this array. We
+            validate the key with SolarEdge before saving.
+          </p>
+          <Input
+            id="se-api-key-manual"
+            label="SolarEdge API key"
+            autoFocus
+            placeholder="e.g. ABCD1234EFGH5678"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+          <Input
+            id="se-site-id"
+            label="Site ID"
+            inputMode="numeric"
+            placeholder="e.g. 1234567"
+            value={siteId}
+            onChange={(e) => setSiteId(e.target.value.replace(/[^0-9]/g, ""))}
+            error={error ?? undefined}
+          />
+          <p className="text-xs text-zinc-400">
+            Find both in the SolarEdge monitoring portal under Admin → Site
+            Access → API Access.
+          </p>
+        </div>
+      ) : step === "key" ? (
+        /* ── step 1: one field ── */
+        <div className="space-y-4">
+          <p className="text-sm text-zinc-500">
+            Paste your <span className="font-medium text-zinc-700">account-level</span>{" "}
+            SolarEdge API key. We&apos;ll find every site on your account and
+            connect them all at once — no need to do one array at a time.
+          </p>
+          <Input
+            id="se-api-key"
+            label="SolarEdge API key"
+            autoFocus
+            placeholder="e.g. ABCD1234EFGH5678"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            error={error ?? undefined}
+          />
+          <p className="text-xs text-zinc-400">
+            Find it in the SolarEdge monitoring portal under Admin → Site
+            Access → API Access. An account key lists every site; a site key
+            only covers one.
+          </p>
+          <button
+            type="button"
+            className="text-xs font-medium text-primary-600 hover:text-primary-700"
+            onClick={() => {
+              setManual(true);
+              setError(null);
+            }}
+          >
+            Connect a single site manually
+          </button>
+        </div>
+      ) : step === "sites" ? (
+        /* ── step 2: pick sites ── */
+        <div className="space-y-4">
+          <p className="text-sm text-zinc-500">
+            We found{" "}
+            <span className="font-medium text-zinc-700">
+              {sites.length} {sites.length === 1 ? "site" : "sites"}
+            </span>{" "}
+            on your account. Choose which to connect.
+          </p>
+          <div className="max-h-72 space-y-1 overflow-y-auto rounded-xl border border-zinc-200 p-1">
+            {sites.map((s) => (
+              <label
+                key={s.site_id}
+                className="flex cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2.5 hover:bg-zinc-50"
+              >
+                <span className="flex min-w-0 items-center gap-2.5">
+                  <Checkbox
+                    id={`se-site-${s.site_id}`}
+                    checked={selected.has(s.site_id)}
+                    onChange={() => toggleSite(s.site_id)}
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-medium text-zinc-900">
+                      {s.name || `Site ${s.site_id}`}
+                    </span>
+                    <span className="block text-xs text-zinc-400">
+                      Site {s.site_id}
+                    </span>
+                  </span>
+                </span>
+                <span className="shrink-0 text-sm tabular-nums text-zinc-500">
+                  {formatKw(s.peak_power_kw)}
+                </span>
+              </label>
+            ))}
+          </div>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <button
+            type="button"
+            className="text-xs font-medium text-primary-600 hover:text-primary-700"
+            onClick={() =>
+              setSelected((prev) =>
+                prev.size === sites.length
+                  ? new Set()
+                  : new Set(sites.map((s) => s.site_id)),
+              )
+            }
+          >
+            {selected.size === sites.length ? "Clear all" : "Select all"}
+          </button>
+        </div>
+      ) : (
+        /* ── step 3: celebration ── */
+        <div className="flex flex-col items-center gap-3 py-2 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary-50">
+            <svg
+              viewBox="0 0 24 24"
+              className="h-6 w-6 text-primary-600"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+          </div>
+          <p className="text-lg font-semibold text-zinc-900">
+            {result?.connected.length ?? 0}{" "}
+            {(result?.connected.length ?? 0) === 1 ? "array" : "arrays"} connected
+          </p>
+          <p className="text-sm text-zinc-500">
+            {result?.created.length ?? 0} new · {result?.matched.length ?? 0}{" "}
+            matched to existing arrays
+          </p>
+        </div>
+      )}
     </Modal>
   );
 }

@@ -10,7 +10,9 @@
 
 import type {
   ArrayOwnersOverview,
+  ConnectAccountResult,
   ConnectSolarEdgeResult,
+  SolarEdgeDiscoverResult,
 } from "./arrayOwners";
 
 const SESSION_KEY = "so_session";
@@ -1757,5 +1759,35 @@ export async function connectSolarEdge(
   return request<ConnectSolarEdgeResult>(
     `/v1/array-owners/arrays/${arrayId}/solaredge`,
     { body: { api_key: apiKey, site_id: siteId } },
+  );
+}
+
+/** Preview every SolarEdge site an ACCOUNT-LEVEL key can read. Saves nothing —
+ *  the modal shows the sites as checkboxes before the operator commits. A
+ *  site-level key (403) or bad key (401) throws with the server's guidance. */
+export async function discoverSolarEdge(
+  apiKey: string,
+): Promise<SolarEdgeDiscoverResult> {
+  return request<SolarEdgeDiscoverResult>(
+    "/v1/array-owners/solaredge/discover",
+    { body: { api_key: apiKey } },
+  );
+}
+
+/** Attach every (or a chosen subset of) SolarEdge site on an account-level key
+ *  to the tenant's arrays in one shot. Idempotent — re-running updates the same
+ *  arrays. Returns {connected, created, matched} so the UI can celebrate. */
+export async function connectSolarEdgeAccount(
+  apiKey: string,
+  siteIds?: number[],
+): Promise<ConnectAccountResult> {
+  return request<ConnectAccountResult>(
+    "/v1/array-owners/solaredge/connect-account",
+    {
+      body: {
+        api_key: apiKey,
+        ...(siteIds !== undefined ? { site_ids: siteIds } : {}),
+      },
+    },
   );
 }

@@ -491,6 +491,37 @@ class DailyGeneration(Base):
     tenant: Mapped["Tenant"] = relationship()
 
 
+class InverterConnection(Base):
+    """A per-array connection to an inverter vendor's cloud API.
+
+    Generalizes the SolarEdge-only integration: one row per array, `vendor`
+    selects the adapter (solaredge | fronius | sma | chint) and `config` holds
+    that vendor's credentials/IDs as a JSON blob (shape defined by the vendor
+    module's FIELDS).
+
+    Backward compat: arrays connected before this table existed carry their
+    SolarEdge creds on Array.solaredge_api_key/solaredge_site_id. Readers treat
+    those as a virtual {vendor: "solaredge"} connection when no row exists here.
+
+    SECURITY TODO (encrypt at rest): `config` stores vendor secrets in PLAIN
+    TEXT — same posture as Array.solaredge_api_key today (read-only,
+    operator-controlled scope). Encrypt this column before onboarding vendors
+    whose keys grant broader access.
+    """
+    __tablename__ = "inverter_connections"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    array_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("arrays.id"), unique=True, index=True
+    )
+    vendor: Mapped[str] = mapped_column(String(20))
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="unverified")
+    # unverified | ok | error
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class VerificationCheck(Base):
     """Operator uploads their own records to compare against the SO-generated workbook."""
     __tablename__ = "verification_checks"

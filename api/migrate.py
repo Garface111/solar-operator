@@ -596,6 +596,21 @@ def main():
         if backfilled:
             print(f"  ↪ backfilled fuel_type='solar' on {backfilled} array(s)")
 
+        # 2026-06 Multi-vendor inverter framework (feat/inverter-framework).
+        # The inverter_connections table comes free via Base.metadata.create_all
+        # (init_db() above) — confirmed: it's a brand-new table, no pre-existing
+        # rows to migrate. The legacy Array.solaredge_api_key/solaredge_site_id
+        # columns stay (added 2026-06-06 block above) for backward compat; arrays
+        # with those set and no inverter_connections row are read as a virtual
+        # {vendor: "solaredge"} connection. We only ensure the array_id lookup
+        # index idempotently here in case the table predates this index.
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_inverter_connections_array_id "
+            "ON inverter_connections (array_id)",
+        ]:
+            conn.execute(text(idx_sql))
+        print("  ✓ inverter_connections table + index ensured")
+
     print("=== Migration complete ===")
 
 

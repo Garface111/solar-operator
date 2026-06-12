@@ -17,39 +17,42 @@ avoid a circular import — api.app imports many of this module's siblings).
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+from collections import defaultdict
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Optional
 
-import httpx
+import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.get
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from .adapters.solaredge import (
-    SOLAREDGE_API_BASE,
-    SolarEdgeAuthError,
-    SolarEdgeError,
-)
+from . import inverters
 from .db import SessionLocal
-from .models import Array, DailyGeneration, Tenant, UtilityAccount, now
+from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
+from .models import Array, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_TIMEOUT = 20.0  # seconds
-
 # An array is "stale" once its newest DailyGeneration row is older than this.
 STALE_DAYS = 3
 
-# ── live SolarEdge overview cache ─────────────────────────────────────────────
-# SolarEdge allows ~300 req/day per token, so we cache the /overview response
-# per site for 5 minutes. Keyed by site_id -> (fetched_at, overview_dict).
+# ── live power cache ──────────────────────────────────────────────────────────
+# Vendor live reads are rate-limited (SolarEdge ~300 req/day per token), so we
+# cache each connection's live result for 5 minutes. Keyed by a stable
+# (vendor, config) signature -> (fetched_at, live_dict|None).
 _CACHE_TTL = timedelta(minutes=5)
-_overview_cache: dict[int, tuple[datetime, dict]] = {}
+_overview_cache: dict[str, tuple[datetime, Optional[dict]]] = {}
+
+
+def _cache_key(vendor: str, config: dict) -> str:
+    return vendor + ":" + json.dumps(config, sort_keys=True, default=str)
 
 
 def _tenant_from_bearer(authorization: str | None) -> Tenant:
@@ -69,67 +72,70 @@ def _tenant_from_bearer(authorization: str | None) -> Tenant:
     return tenant_from_bearer(authorization)
 
 
-# ── SolarEdge HTTP helpers (all network goes through this module's httpx) ──────
+# ── inverter connection resolution ────────────────────────────────────────────
 
-def _fetch_overview(api_key: str, site_id: int, *, use_cache: bool = True) -> dict:
-    """Return the SolarEdge site `overview` block.
+def _resolve_connection(db, arr: Array):
+    """Return the array's inverter connection, or None.
 
-    Raises SolarEdgeAuthError on 401/403, SolarEdgeError on any other failure.
-    Successful responses are cached per site for _CACHE_TTL.
+    Prefers a real InverterConnection row. Falls back to a virtual
+    {vendor: "solaredge"} connection synthesized from the legacy
+    Array.solaredge_api_key/solaredge_site_id columns when no row exists, so
+    arrays connected before the InverterConnection table keep working.
     """
-    if use_cache:
-        cached = _overview_cache.get(site_id)
-        if cached is not None and (now() - cached[0]) < _CACHE_TTL:
-            return cached[1]
-
-    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/overview"
-    try:
-        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
-    except httpx.RequestError as exc:
-        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
-
-    if resp.status_code in (401, 403):
-        raise SolarEdgeAuthError(
-            f"SolarEdge API key rejected for site {site_id} (401/403). "
-            "Verify the key and site ID are correct."
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is not None:
+        return conn
+    if arr.solaredge_api_key and arr.solaredge_site_id:
+        return SimpleNamespace(
+            vendor="solaredge",
+            config={"api_key": arr.solaredge_api_key, "site_id": arr.solaredge_site_id},
+            status="ok",
         )
-    if not resp.is_success:
-        raise SolarEdgeError(
-            f"SolarEdge /site/{site_id}/overview returned {resp.status_code}: "
-            f"{resp.text[:200]}"
-        )
-
-    try:
-        body = resp.json()
-    except Exception as exc:  # noqa: BLE001 — any decode failure is a SolarEdge error
-        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
-
-    overview = body.get("overview", {}) or {}
-    _overview_cache[site_id] = (now(), overview)
-    return overview
+    return None
 
 
-def _fetch_site_meta(api_key: str, site_id: int) -> dict:
-    """Best-effort site name + peak kW for the connect confirmation screen.
+def _cached_fetch_live(vendor: str, config: dict) -> Optional[dict]:
+    """Vendor fetch_live with a short-TTL cache. Raises InverterError on failure."""
+    key = _cache_key(vendor, config)
+    cached = _overview_cache.get(key)
+    if cached is not None and (now() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    live = inverters.fetch_live(vendor, config)
+    _overview_cache[key] = (now(), live)
+    return live
 
-    Returns {"name": str | None, "peak_kw": float | None}. Never raises — the
-    key is already validated by the time we call this, so display metadata is
-    non-critical.
+
+def _connect_inverter(db, arr: Array, vendor: str, config: dict) -> dict:
+    """Validate `config` against the vendor's live API, then upsert the
+    connection. Raises InverterError/InverterAuthError on bad credentials —
+    nothing is persisted in that case (validate runs first).
+
+    Returns the vendor's validate() result (includes at least "site_name").
     """
-    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/details"
-    try:
-        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
-        if not resp.is_success:
-            return {"name": None, "peak_kw": None}
-        details = resp.json().get("details", {}) or {}
-    except (httpx.RequestError, ValueError, KeyError):
-        return {"name": None, "peak_kw": None}
+    result = inverters.validate(vendor, config)  # raises before any write
 
-    peak = details.get("peakPower")
-    return {
-        "name": details.get("name") or None,
-        "peak_kw": float(peak) if peak is not None else None,
-    }
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is None:
+        conn = InverterConnection(array_id=arr.id, vendor=vendor, config=config, status="ok")
+        db.add(conn)
+    else:
+        conn.vendor = vendor
+        conn.config = config
+        conn.status = "ok"
+        conn.last_error = None
+
+    # Backward compat: mirror SolarEdge creds onto the legacy columns so the
+    # daily-pull virtual-connection path and any legacy readers keep working.
+    if vendor == "solaredge":
+        arr.solaredge_api_key = str(config.get("api_key") or "").strip()
+        arr.solaredge_site_id = int(config["site_id"])
+
+    db.commit()
+    return result
 
 
 # ── aggregation helpers ───────────────────────────────────────────────────────
@@ -254,27 +260,30 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 ).where(DailyGeneration.array_id == arr.id)
             ).one()
 
-            has_live_source = bool(arr.solaredge_api_key and arr.solaredge_site_id)
+            conn = _resolve_connection(db, arr)
+            module = VENDORS.get(conn.vendor) if conn is not None else None
+            has_live_source = bool(
+                module is not None and getattr(module, "SUPPORTS_LIVE", False)
+            )
 
             live: dict | None = None
             overview_ok: bool | None = None
             if has_live_source:
                 try:
-                    ov = _fetch_overview(arr.solaredge_api_key, arr.solaredge_site_id)
-                    raw_power = (ov.get("currentPower") or {}).get("power")
-                    power_w = float(raw_power) if raw_power is not None else None
+                    live_raw = _cached_fetch_live(conn.vendor, conn.config)
+                    power_w = (live_raw or {}).get("current_power_w")
                     live = {
-                        "source": "solaredge",
+                        "source": conn.vendor,
                         "current_power_w": power_w,
-                        "as_of": ov.get("lastUpdateTime"),
+                        "as_of": (live_raw or {}).get("as_of"),
                     }
                     overview_ok = True
                     if power_w is not None:
                         tot_power += power_w
-                except SolarEdgeError:
+                except InverterError:
                     overview_ok = False
                     live = {
-                        "source": "solaredge",
+                        "source": conn.vendor,
                         "current_power_w": None,
                         "as_of": None,
                     }
@@ -318,6 +327,55 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
     }
 
 
+@router.get("/v1/array-owners/inverter-vendors")
+def inverter_vendors(authorization: str | None = Header(default=None)) -> list[dict]:
+    """The connect-form spec the dashboard renders: one entry per vendor.
+
+    Each entry: {code, label, fields:[{name,label,secret}], available, note}.
+    Chint comes back available=false with its manual-CSV note.
+    """
+    _tenant_from_bearer(authorization)
+    return inverters.vendor_catalog()
+
+
+class InverterConnectBody(BaseModel):
+    vendor: str
+    config: dict
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/inverter")
+def connect_inverter(
+    array_id: int,
+    body: InverterConnectBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Connect an inverter source of any vendor to an array.
+
+    Dispatches validate() for the vendor; on success upserts the
+    InverterConnection (status="ok"). Credential/validation errors return 400
+    and persist nothing.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    vendor = (body.vendor or "").strip().lower()
+    if vendor not in VENDORS:
+        raise HTTPException(400, f"Unknown inverter vendor: {vendor!r}")
+
+    with SessionLocal() as db:
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != tenant.id:
+            raise HTTPException(404, "Array not found")
+
+        try:
+            result = _connect_inverter(db, arr, vendor, dict(body.config or {}))
+        except InverterAuthError as exc:
+            raise HTTPException(400, str(exc))
+        except InverterError as exc:
+            raise HTTPException(400, str(exc))
+
+    return {"ok": True, "site_name": result.get("site_name")}
+
+
 class SolarEdgeConnectBody(BaseModel):
     api_key: str
     site_id: int
@@ -329,10 +387,12 @@ def connect_solaredge(
     body: SolarEdgeConnectBody,
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """Validate a SolarEdge key against a live overview call, then save it.
+    """Legacy SolarEdge connect — thin shim over the inverter framework.
 
-    A rejected key (401/403) or unreachable site returns 400 and persists
-    nothing.
+    Kept for backward compat (existing frontend + tests). Forwards to the
+    vendor-agnostic connect path and preserves the original response shape
+    (site_name + peak_power_kw + site_id). A rejected key (401/403) or
+    unreachable site returns 400 and persists nothing.
     """
     tenant = _tenant_from_bearer(authorization)
 
@@ -340,28 +400,525 @@ def connect_solaredge(
     if not api_key:
         raise HTTPException(400, "api_key is required")
 
+    config = {"api_key": api_key, "site_id": body.site_id}
+
     with SessionLocal() as db:
         arr = db.get(Array, array_id)
         if arr is None or arr.tenant_id != tenant.id:
             raise HTTPException(404, "Array not found")
 
-        # Validate before saving — fresh call, never the cache.
         try:
-            _fetch_overview(api_key, body.site_id, use_cache=False)
-        except SolarEdgeAuthError as exc:
+            result = _connect_inverter(db, arr, "solaredge", config)
+        except InverterAuthError as exc:
             raise HTTPException(400, str(exc))
-        except SolarEdgeError as exc:
+        except InverterError as exc:
             raise HTTPException(400, f"SolarEdge error: {exc}")
 
-        meta = _fetch_site_meta(api_key, body.site_id)
+    return {
+        "ok": True,
+        "site_name": result.get("site_name"),
+        "peak_power_kw": result.get("peak_power_kw"),
+        "site_id": body.site_id,
+    }
 
-        arr.solaredge_api_key = api_key
-        arr.solaredge_site_id = body.site_id
+
+# ── account-level SolarEdge discovery ("paste one credential, attach all") ─────
+
+def _attach_solaredge(db, arr: Array, api_key: str, site_id: int) -> InverterConnection:
+    """Upsert a solaredge InverterConnection on `arr` WITHOUT a per-site validate
+    call — the account-level key was already proven by discover(), so we don't
+    burn one SolarEdge request per site. Mirrors the creds onto the legacy
+    columns so the daily pull + virtual-connection path keep working.
+    """
+    config = {"api_key": api_key, "site_id": int(site_id)}
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is None:
+        conn = InverterConnection(
+            array_id=arr.id, vendor="solaredge", config=config, status="ok"
+        )
+        db.add(conn)
+    else:
+        conn.vendor = "solaredge"
+        conn.config = config
+        conn.status = "ok"
+        conn.last_error = None
+    arr.solaredge_api_key = api_key
+    arr.solaredge_site_id = int(site_id)
+    return conn
+
+
+class SolarEdgeDiscoverBody(BaseModel):
+    api_key: str
+
+
+@router.post("/v1/array-owners/solaredge/discover")
+def solaredge_discover(
+    body: SolarEdgeDiscoverBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Preview step: list every SolarEdge site an account-level key can read.
+
+    Saves NOTHING — the dashboard shows the sites as checkboxes before the
+    operator commits. A site-level key (403) or bad key (401) comes back as a
+    400 with a clear, actionable message; a SolarEdge 5xx comes back as a 502.
+    """
+    _tenant_from_bearer(authorization)
+
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(400, "api_key is required")
+
+    try:
+        sites = inverters.solaredge.discover_sites(api_key)
+    except InverterScopeError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"SolarEdge error: {exc}")
+
+    return {
+        "ok": True,
+        "sites": sites,
+        "message": None if sites else "No sites found on this SolarEdge account.",
+    }
+
+
+class SolarEdgeConnectAccountBody(BaseModel):
+    api_key: str
+    # When omitted, every discovered site is connected.
+    site_ids: Optional[list[int]] = None
+
+
+@router.post("/v1/array-owners/solaredge/connect-account")
+def solaredge_connect_account(
+    body: SolarEdgeConnectAccountBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Attach every (or a chosen subset of) SolarEdge site on an account-level
+    key to the tenant's arrays in one shot.
+
+    Per site: match an existing array by (1) its InverterConnection site_id,
+    (2) the legacy Array.solaredge_site_id, or (3) an EXACT case-insensitive
+    name match — otherwise create a fresh Array (solar, no client). Idempotent:
+    re-running updates the same arrays instead of duplicating them.
+
+    Returns {connected, created, matched} so the UI can celebrate specifics.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(400, "api_key is required")
+
+    requested: set[int] | None = None
+    if body.site_ids is not None:
+        requested = {int(s) for s in body.site_ids}
+
+    # 1. Discover the account's sites (or fall back for a site-level key).
+    try:
+        discovered = inverters.solaredge.discover_sites(api_key)
+    except InverterScopeError:
+        # Site-level key — can't enumerate. If the caller named explicit sites we
+        # can still validate each by id; otherwise ask for an account-level key.
+        if not requested:
+            raise HTTPException(
+                400,
+                "This is a site-level SolarEdge key, which can't list your "
+                "sites. Enter the site ID manually, or paste an account-level "
+                "API key (SolarEdge Admin → Site Access → API Access) to attach "
+                "every array at once.",
+            )
+        discovered = []
+        for sid in sorted(requested):
+            try:
+                details = inverters.solaredge.validate(
+                    {"api_key": api_key, "site_id": sid}
+                )
+            except InverterAuthError as exc:
+                raise HTTPException(400, str(exc))
+            except InverterError as exc:
+                raise HTTPException(502, f"SolarEdge error: {exc}")
+            discovered.append({
+                "site_id": sid,
+                "name": details.get("site_name") or f"SolarEdge site {sid}",
+                "peak_power_kw": details.get("peak_power_kw"),
+                "status": "",
+            })
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"SolarEdge error: {exc}")
+
+    # 2. Narrow to the requested subset (account-level path).
+    if requested is not None:
+        discovered = [s for s in discovered if int(s["site_id"]) in requested]
+
+    if not discovered:
+        return {
+            "ok": True,
+            "connected": [], "created": [], "matched": [],
+            "message": "No SolarEdge sites to connect.",
+        }
+
+    # 3. Attach each site to an array (match existing or create new).
+    connected: list[dict] = []
+    created: list[dict] = []
+    matched: list[dict] = []
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        conns = {
+            c.array_id: c for c in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_([a.id for a in arrays] or [0])
+                )
+            ).scalars().all()
+        }
+
+        by_site_id: dict[int, list[int]] = defaultdict(list)
+        by_name: dict[str, list[int]] = defaultdict(list)
+        names_lower: set[str] = set()
+        arr_by_id = {a.id: a for a in arrays}
+        for a in arrays:
+            key = a.name.strip().lower()
+            names_lower.add(key)
+            by_name[key].append(a.id)
+            sid = None
+            c = conns.get(a.id)
+            if c is not None and c.vendor == "solaredge":
+                sid = (c.config or {}).get("site_id")
+            elif a.solaredge_site_id:
+                sid = a.solaredge_site_id
+            if sid is not None:
+                try:
+                    by_site_id[int(sid)].append(a.id)
+                except (TypeError, ValueError):
+                    pass
+
+        used: set[int] = set()
+
+        for site in discovered:
+            sid = int(site["site_id"])
+            site_name = (site.get("name") or "").strip() or f"SolarEdge site {sid}"
+            entry = {
+                "array_id": None,
+                "name": site_name,
+                "site_id": sid,
+                "peak_power_kw": site.get("peak_power_kw"),
+            }
+
+            claimants = [aid for aid in by_site_id.get(sid, []) if aid not in used]
+            if len(claimants) > 1:
+                # Pre-existing data integrity problem — don't silently pick one.
+                raise HTTPException(
+                    409,
+                    f"Two arrays already claim SolarEdge site {sid} "
+                    f"(arrays {sorted(claimants)}). Resolve the duplicate before "
+                    "connecting this account.",
+                )
+
+            target = None
+            if claimants:
+                target = arr_by_id[claimants[0]]
+            else:
+                name_hits = [
+                    aid for aid in by_name.get(site_name.lower(), [])
+                    if aid not in used
+                ]
+                # Exact, unambiguous name match only — never guess fuzzily, and
+                # never collapse two same-named sites onto one array.
+                if len(name_hits) == 1:
+                    target = arr_by_id[name_hits[0]]
+
+            if target is not None:
+                _attach_solaredge(db, target, api_key, sid)
+                used.add(target.id)
+                entry["array_id"] = target.id
+                entry["name"] = target.name
+                matched.append(entry)
+            else:
+                name = site_name
+                if name.lower() in names_lower:
+                    # Two sites share a name (or it collides with an array we
+                    # won't reuse) — disambiguate so uq_array_per_tenant holds.
+                    name = f"{site_name} ({sid})"
+                new_arr = Array(
+                    tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
+                )
+                db.add(new_arr)
+                db.flush()
+                _attach_solaredge(db, new_arr, api_key, sid)
+                used.add(new_arr.id)
+                names_lower.add(name.lower())
+                arr_by_id[new_arr.id] = new_arr
+                entry["array_id"] = new_arr.id
+                entry["name"] = new_arr.name
+                created.append(entry)
+
+            connected.append(entry)
+
         db.commit()
 
     return {
         "ok": True,
-        "site_name": meta["name"],
-        "peak_power_kw": meta["peak_kw"],
-        "site_id": body.site_id,
+        "connected": connected,
+        "created": created,
+        "matched": matched,
+        "message": (
+            f"{len(connected)} arrays connected — "
+            f"{len(created)} new, {len(matched)} matched."
+        ),
+    }
+
+
+# ── account-level Locus discovery ("paste one credential, attach all") ─────────
+
+def _attach_locus(db, arr: Array, creds: dict, site_id: int) -> InverterConnection:
+    """Upsert a locus InverterConnection on `arr` WITHOUT a per-site validate
+    call — the partner credential was already proven by discover(), so we don't
+    burn one Locus request per site. There is NO legacy-column mirroring for
+    locus (the solaredge_* columns are SolarEdge-only).
+    """
+    config = {
+        "client_id": creds["client_id"],
+        "client_secret": creds["client_secret"],
+        "username": creds["username"],
+        "password": creds["password"],
+        "site_id": int(site_id),
+    }
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is None:
+        conn = InverterConnection(
+            array_id=arr.id, vendor="locus", config=config, status="ok"
+        )
+        db.add(conn)
+    else:
+        conn.vendor = "locus"
+        conn.config = config
+        conn.status = "ok"
+        conn.last_error = None
+    return conn
+
+
+class LocusDiscoverBody(BaseModel):
+    client_id: str
+    client_secret: str
+    username: str
+    password: str
+    partner_id: int
+
+
+@router.post("/v1/array-owners/locus/discover")
+def locus_discover(
+    body: LocusDiscoverBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Preview step: list every Locus site under the partner the credential reads.
+
+    Saves NOTHING — the dashboard shows the sites as checkboxes before the
+    operator commits. Bad credentials (401) or a forbidden partner (403) come
+    back as a 400 with a clear message; a Locus 5xx comes back as a 502.
+    """
+    _tenant_from_bearer(authorization)
+
+    creds = {
+        "client_id": body.client_id,
+        "client_secret": body.client_secret,
+        "username": body.username,
+        "password": body.password,
+        "partner_id": body.partner_id,
+    }
+
+    try:
+        sites = inverters.locus.discover_sites(creds)
+    except InverterScopeError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"Locus error: {exc}")
+
+    return {
+        "ok": True,
+        "sites": sites,
+        "message": None if sites else "No sites found under this Locus partner.",
+    }
+
+
+class LocusConnectAccountBody(BaseModel):
+    client_id: str
+    client_secret: str
+    username: str
+    password: str
+    partner_id: int
+    # When omitted, every discovered site is connected.
+    site_ids: Optional[list[int]] = None
+
+
+@router.post("/v1/array-owners/locus/connect-account")
+def locus_connect_account(
+    body: LocusConnectAccountBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Attach every (or a chosen subset of) Locus site under a partner credential
+    to the tenant's arrays in one shot.
+
+    Per site: match an existing array by (1) its locus InverterConnection
+    site_id, or (2) an EXACT case-insensitive name match — otherwise create a
+    fresh Array (solar, no client). Idempotent: re-running updates the same
+    arrays instead of duplicating them.
+
+    Returns {connected, created, matched} so the UI can celebrate specifics.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    creds = {
+        "client_id": body.client_id,
+        "client_secret": body.client_secret,
+        "username": body.username,
+        "password": body.password,
+        "partner_id": body.partner_id,
+    }
+
+    requested: set[int] | None = None
+    if body.site_ids is not None:
+        requested = {int(s) for s in body.site_ids}
+
+    # 1. Discover the partner's sites.
+    try:
+        discovered = inverters.locus.discover_sites(creds)
+    except InverterScopeError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"Locus error: {exc}")
+
+    # 2. Narrow to the requested subset.
+    if requested is not None:
+        discovered = [s for s in discovered if int(s["site_id"]) in requested]
+
+    if not discovered:
+        return {
+            "ok": True,
+            "connected": [], "created": [], "matched": [],
+            "message": "No Locus sites to connect.",
+        }
+
+    # 3. Attach each site to an array (match existing or create new).
+    connected: list[dict] = []
+    created: list[dict] = []
+    matched: list[dict] = []
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        conns = {
+            c.array_id: c for c in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_([a.id for a in arrays] or [0])
+                )
+            ).scalars().all()
+        }
+
+        by_site_id: dict[int, list[int]] = defaultdict(list)
+        by_name: dict[str, list[int]] = defaultdict(list)
+        names_lower: set[str] = set()
+        arr_by_id = {a.id: a for a in arrays}
+        for a in arrays:
+            key = a.name.strip().lower()
+            names_lower.add(key)
+            by_name[key].append(a.id)
+            c = conns.get(a.id)
+            if c is not None and c.vendor == "locus":
+                sid = (c.config or {}).get("site_id")
+                if sid is not None:
+                    try:
+                        by_site_id[int(sid)].append(a.id)
+                    except (TypeError, ValueError):
+                        pass
+
+        used: set[int] = set()
+
+        for site in discovered:
+            sid = int(site["site_id"])
+            site_name = (site.get("name") or "").strip() or f"Locus site {sid}"
+            entry = {
+                "array_id": None,
+                "name": site_name,
+                "site_id": sid,
+                "peak_power_kw": site.get("peak_power_kw"),
+            }
+
+            claimants = [aid for aid in by_site_id.get(sid, []) if aid not in used]
+            if len(claimants) > 1:
+                # Pre-existing data integrity problem — don't silently pick one.
+                raise HTTPException(
+                    409,
+                    f"Two arrays already claim Locus site {sid} "
+                    f"(arrays {sorted(claimants)}). Resolve the duplicate before "
+                    "connecting this account.",
+                )
+
+            target = None
+            if claimants:
+                target = arr_by_id[claimants[0]]
+            else:
+                name_hits = [
+                    aid for aid in by_name.get(site_name.lower(), [])
+                    if aid not in used
+                ]
+                # Exact, unambiguous name match only — never guess fuzzily.
+                if len(name_hits) == 1:
+                    target = arr_by_id[name_hits[0]]
+
+            if target is not None:
+                _attach_locus(db, target, creds, sid)
+                used.add(target.id)
+                entry["array_id"] = target.id
+                entry["name"] = target.name
+                matched.append(entry)
+            else:
+                name = site_name
+                if name.lower() in names_lower:
+                    # Disambiguate so uq_array_per_tenant holds.
+                    name = f"{site_name} ({sid})"
+                new_arr = Array(
+                    tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
+                )
+                db.add(new_arr)
+                db.flush()
+                _attach_locus(db, new_arr, creds, sid)
+                used.add(new_arr.id)
+                names_lower.add(name.lower())
+                arr_by_id[new_arr.id] = new_arr
+                entry["array_id"] = new_arr.id
+                entry["name"] = new_arr.name
+                created.append(entry)
+
+            connected.append(entry)
+
+        db.commit()
+
+    return {
+        "ok": True,
+        "connected": connected,
+        "created": created,
+        "matched": matched,
+        "message": (
+            f"{len(connected)} arrays connected — "
+            f"{len(created)} new, {len(matched)} matched."
+        ),
     }

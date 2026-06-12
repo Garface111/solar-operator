@@ -30,7 +30,14 @@ class SolarEdgeError(Exception):
 
 
 class SolarEdgeAuthError(SolarEdgeError):
-    """Raised specifically for 401/403 — bad or expired API key."""
+    """Raised specifically for 401 — bad or expired API key."""
+
+
+class SolarEdgeScopeError(SolarEdgeAuthError):
+    """Raised for 403 on an account-level endpoint — the key is VALID but is a
+    site-level key, so it can't enumerate every site. Distinct from a 401 so
+    callers can fall back to the single-site (known site_id) path instead of
+    telling the user their key is bad."""
 
 
 def fetch_daily_energy(
@@ -89,6 +96,38 @@ def fetch_daily_energy(
     return results
 
 
+def fetch_overview(api_key: str, site_id: int) -> dict:
+    """Return the SolarEdge site `overview` block (current power, last update).
+
+    Raises SolarEdgeAuthError on 401/403, SolarEdgeError on any other failure.
+    The inverter framework's solaredge.fetch_live() wraps this; array_owners
+    keeps its own short-TTL cache around it to stay inside the 300 req/day cap.
+    """
+    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/overview"
+    try:
+        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
+    except httpx.RequestError as exc:
+        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
+
+    if resp.status_code in (401, 403):
+        raise SolarEdgeAuthError(
+            f"SolarEdge API key rejected for site {site_id} (401/403). "
+            "Verify the key and site ID are correct."
+        )
+    if not resp.is_success:
+        raise SolarEdgeError(
+            f"SolarEdge /site/{site_id}/overview returned {resp.status_code}: "
+            f"{resp.text[:200]}"
+        )
+
+    try:
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — any decode failure is a SolarEdge error
+        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
+
+    return body.get("overview", {}) or {}
+
+
 def list_sites(api_key: str) -> list[dict]:
     """For an Account-level API key, list all sites the operator can read.
 
@@ -118,8 +157,15 @@ def list_sites(api_key: str) -> list[dict]:
     except Exception as exc:
         raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
 
-    sites_block = body.get("sites", {})
-    raw_sites = sites_block.get("site", [])
+    sites_block, _count = _parse_sites_block(body)
+    return sites_block
+
+
+def _parse_sites_block(body: dict) -> tuple[list[dict], int]:
+    """Parse a /sites/list response into ([{site_id, name, address, peak_kw,
+    status}, ...], total_count). Shared by list_sites + list_all_sites."""
+    sites_block = body.get("sites", {}) or {}
+    raw_sites = sites_block.get("site", []) or []
     # API may return a single dict instead of a list when there's exactly one site
     if isinstance(raw_sites, dict):
         raw_sites = [raw_sites]
@@ -133,15 +179,83 @@ def list_sites(api_key: str) -> list[dict]:
             location.get("state", ""),
         ]
         address = ", ".join(p for p in address_parts if p)
-        peak_kw = float(s.get("peakPower") or 0)
         results.append({
             "site_id": int(s.get("id", 0)),
             "name": s.get("name", ""),
             "address": address,
-            "peak_kw": peak_kw,
+            "peak_kw": float(s.get("peakPower") or 0),
+            "status": s.get("status", ""),
         })
 
-    return results
+    try:
+        total = int(sites_block.get("count", len(results)))
+    except (TypeError, ValueError):
+        total = len(results)
+    return results, total
+
+
+# SolarEdge caps /sites/list at 100 rows per page; paginate via startIndex.
+_SITES_PAGE_SIZE = 100
+
+
+def _fetch_sites_page(api_key: str, start_index: int, size: int) -> tuple[list[dict], int]:
+    """One page of /sites/list. Raises SolarEdgeScopeError on 403 (site-level
+    key), SolarEdgeAuthError on 401, SolarEdgeError otherwise. Returns
+    (sites_page, total_count)."""
+    url = f"{SOLAREDGE_API_BASE}/sites/list"
+    params = {"api_key": api_key, "size": size, "startIndex": start_index}
+    try:
+        resp = httpx.get(url, params=params, timeout=_TIMEOUT)
+    except httpx.RequestError as exc:
+        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
+
+    if resp.status_code == 403:
+        raise SolarEdgeScopeError(
+            "SolarEdge rejected /sites/list with 403 — this is a site-level API "
+            "key. Use an account-level key (SolarEdge Admin → Site Access → API "
+            "Access) to auto-discover every site."
+        )
+    if resp.status_code == 401:
+        raise SolarEdgeAuthError(
+            "SolarEdge API key rejected (401). Check the key is valid and active."
+        )
+    if not resp.is_success:
+        raise SolarEdgeError(
+            f"SolarEdge /sites/list returned {resp.status_code}: {resp.text[:200]}"
+        )
+
+    try:
+        body = resp.json()
+    except Exception as exc:
+        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
+
+    return _parse_sites_block(body)
+
+
+def list_all_sites(api_key: str, page_size: int = _SITES_PAGE_SIZE) -> list[dict]:
+    """Every site an ACCOUNT-LEVEL key can read, paginating /sites/list via
+    startIndex (size capped at 100 by the API).
+
+    Unlike list_sites(), this RAISES on auth/scope failures instead of swallowing
+    them — the account-discovery flow needs to tell a bad key (401) apart from a
+    site-level key (403) apart from an empty account ([]).
+    """
+    page_size = max(1, min(int(page_size), _SITES_PAGE_SIZE))
+    all_sites: list[dict] = []
+    start = 0
+    seen_ids: set[int] = set()
+    while True:
+        page, total = _fetch_sites_page(api_key, start, page_size)
+        for s in page:
+            if s["site_id"] not in seen_ids:
+                seen_ids.add(s["site_id"])
+                all_sites.append(s)
+        start += page_size
+        # Stop once we've covered the reported total or the page came back short
+        # (defends against a server that ignores startIndex — no infinite loop).
+        if not page or len(page) < page_size or start >= total:
+            break
+    return all_sites
 
 
 def site_details(api_key: str, site_id: int) -> dict:
