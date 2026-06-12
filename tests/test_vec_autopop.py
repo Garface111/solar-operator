@@ -117,7 +117,10 @@ def test_vec_autopop_creates_one_array_per_account(client):
         assert all(a.bill_offset_months == 0 for a in arrays)
         assert all(u.array_id is not None for u in uaccts)
         assert {u.array_id for u in uaccts} == {a.id for a in arrays}
-        assert {a.name for a in arrays} == {"North", "South"}
+        # Array names come from the service ADDRESS (physical array identity),
+        # not customerName — customerName names the Client. (v1.6.0 change:
+        # "RICHARD G EVANS" arrays under a "Richard G Evans" client was wrong.)
+        assert {a.name for a in arrays} == {"V001 Maple St", "V002 Maple St"}
 
         c = db.get(Client, cid)
         assert c.vec_last_sync_at is not None
@@ -213,7 +216,8 @@ def test_vec_autopop_matches_on_username(client):
         assert len(arrays) == 2
         assert all(a.client_id == cid for a in arrays)
         assert {u.array_id for u in uaccts} == {a.id for a in arrays}
-        assert {a.name for a in arrays} == {"East", "West"}
+        # Array names come from the service ADDRESS, not customerName (v1.6.0)
+        assert {a.name for a in arrays} == {"V401 Maple St", "V402 Maple St"}
         c = db.get(Client, cid)
         assert c.vec_last_sync_at is not None
 

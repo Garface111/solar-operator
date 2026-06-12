@@ -170,7 +170,9 @@ def test_parse_extension_payload_with_accounts():
     assert normalized["auth"] == {}
     assert len(normalized["accounts"]) == 1
     assert normalized["accounts"][0]["account_number"] == "6578300"
-    assert normalized["accounts"][0]["nickname"] == "WGRBS LLC"
+    # Nickname = service ADDRESS (physical array identity), title-cased;
+    # customerName ("WGRBS LLC") names the Client, not the array.
+    assert normalized["accounts"][0]["nickname"] == "123 Main Rd, West Glover VT"
     assert normalized["accounts"][0]["service_address"] == {
         "line1": "123 Main Rd, West Glover VT"
     }
