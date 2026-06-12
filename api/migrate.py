@@ -338,10 +338,13 @@ def main():
 
         # 2026-06-05 GMP token refresh worker: failure counter + last-refreshed timestamp.
         for col, sql in [
+            # NOTE: no "IF NOT EXISTS" — that's Postgres-only syntax and breaks
+            # sqlite dev DBs. The column_exists() guard below already makes
+            # this idempotent on both engines.
             ("refresh_failures",
-             "ALTER TABLE utility_sessions ADD COLUMN IF NOT EXISTS refresh_failures INTEGER NOT NULL DEFAULT 0"),
+             "ALTER TABLE utility_sessions ADD COLUMN refresh_failures INTEGER NOT NULL DEFAULT 0"),
             ("last_refresh_at",
-             "ALTER TABLE utility_sessions ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMP NULL"),
+             "ALTER TABLE utility_sessions ADD COLUMN last_refresh_at TIMESTAMP NULL"),
         ]:
             if not column_exists(conn, "utility_sessions", col):
                 conn.execute(text(sql))
@@ -394,6 +397,16 @@ def main():
                 "ALTER TABLE utility_accounts ADD COLUMN captured_client_name VARCHAR(200)"
             ))
             print("  + utility_accounts.captured_client_name")
+
+        # 2026-06 residential-customer detection (api/app.py /v1/sync). Column
+        # exists in models.py with server_default but had NO migration here —
+        # any pre-existing DB (sqlite dev included) broke on first SELECT.
+        if not column_exists(conn, "utility_accounts", "is_residential"):
+            conn.execute(text(
+                "ALTER TABLE utility_accounts ADD COLUMN is_residential "
+                "BOOLEAN NOT NULL DEFAULT FALSE"
+            ))
+            print("  + utility_accounts.is_residential")
         if not column_exists(conn, "clients", "name_edited_at"):
             conn.execute(text(
                 "ALTER TABLE clients ADD COLUMN name_edited_at TIMESTAMP"

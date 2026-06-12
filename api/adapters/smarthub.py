@@ -179,34 +179,66 @@ def fetch_account_list(host: str, session: dict[str, Any]) -> list[dict[str, Any
     resp.raise_for_status()
     data = resp.json()
 
-    elec_key = _detect_electric_service_key(data)
-
-    # UNVERIFIED: exact structure confirmed from HA integration source.
-    # Maps location_id (str) → list of location summary objects.
-    location_map: dict[str, Any] = (
-        data.get("serviceLocationToUserDataServiceLocationSummaries") or {}
-    )
+    # VERIFIED against live WEC (washingtonelectric.smarthub.coop, Jun 2026,
+    # customer-zero provisioning): /services/secured/user-data returns a LIST
+    # of account objects — one per utility account on the login — each shaped:
+    #   {
+    #     "account": "982501",                # the utility account number
+    #     "customerName": "...", "address": "...",
+    #     "serviceToServiceDescription": {"ELEC": "ELECTRIC SERVICE"},
+    #     "serviceLocationToUserDataServiceLocationSummaries": {
+    #         "9825": [ {"services": ["ELEC"], "address": {...}, ...} ]
+    #     },
+    #     ...
+    #   }
+    # The old code assumed a single top-level dict (HA-integration reading) and
+    # crashed with `'list' object has no attribute 'get'`. Handle both shapes.
+    account_objs: list[dict[str, Any]]
+    if isinstance(data, list):
+        account_objs = [d for d in data if isinstance(d, dict)]
+    else:
+        account_objs = [data]
 
     results: list[dict[str, Any]] = []
-    for location_id, summaries in location_map.items():
-        for summary in (summaries if isinstance(summaries, list) else [summaries]):
-            services: list[str] = summary.get("services") or []
-            if isinstance(services, list) and elec_key not in services:
-                continue
-            # UNVERIFIED: accountNumber field name inside summary.
-            # The location_id itself is used as fallback.
-            acct_no = (
-                summary.get("accountNumber")
-                or summary.get("account_number")
-                or summary.get("id")
-                or location_id
-            )
-            results.append({
-                "service_location_number": location_id,
-                "account_number": acct_no,
-                "description": summary.get("description") or "",
-                "services": services,
-            })
+    for acct_obj in account_objs:
+        elec_key = _detect_electric_service_key(acct_obj)
+        # Account number lives at the account-object level (VERIFIED "account"
+        # on WEC); summary-level fallbacks kept for other deployments.
+        acct_level_no = (
+            acct_obj.get("account")
+            or acct_obj.get("accountNumber")
+            or acct_obj.get("account_number")
+        )
+        location_map: dict[str, Any] = (
+            acct_obj.get("serviceLocationToUserDataServiceLocationSummaries") or {}
+        )
+
+        for location_id, summaries in location_map.items():
+            for summary in (summaries if isinstance(summaries, list) else [summaries]):
+                services: list[str] = summary.get("services") or []
+                if isinstance(services, list) and elec_key not in services:
+                    continue
+                acct_no = (
+                    acct_level_no
+                    or summary.get("accountNumber")
+                    or summary.get("account_number")
+                    or location_id
+                )
+                # Human label: street address (VERIFIED nested dict on WEC),
+                # falling back to the legacy "description" string.
+                addr = summary.get("address")
+                if isinstance(addr, dict):
+                    description = ", ".join(
+                        str(addr[k]) for k in ("addr1", "city", "state") if addr.get(k)
+                    )
+                else:
+                    description = summary.get("description") or ""
+                results.append({
+                    "service_location_number": str(location_id),
+                    "account_number": str(acct_no),
+                    "description": description,
+                    "services": services,
+                })
 
     return results
 
