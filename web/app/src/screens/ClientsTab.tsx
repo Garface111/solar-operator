@@ -60,10 +60,13 @@ export default function ClientsTab() {
       <section
         aria-label="Clients sandbox"
         className={[
-          "relative overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
+          // NOTE: `relative` and `fixed` must never coexist on this element —
+          // Tailwind resolves conflicts by stylesheet order (not class order),
+          // and `relative` beats `fixed`, collapsing the section to 0 height.
+          "overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
           isFullscreen
-            ? "fixed inset-0 z-[100] h-auto"
-            : "rounded-2xl h-[220px] sm:h-[560px]",
+            ? "fixed inset-0 z-[100]"
+            : "relative rounded-2xl h-[220px] sm:h-[560px]",
         ].join(" ")}
       >
         {/* Mobile notice — overlays the canvas below 640px. The canvas still
