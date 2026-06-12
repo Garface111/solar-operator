@@ -59,7 +59,12 @@ def _smart_client_name(
             or extra.get("customer_name")
         )
         if cname and str(cname).strip():
-            return str(cname).strip()[:200]
+            s = str(cname).strip()
+            # Scraped SmartHub names arrive ALL-CAPS ("RICHARD G EVANS") —
+            # title-case for display.
+            if s.isupper():
+                s = s.title()
+            return s[:200]
 
     # 2. Portal user profile name (account holder display name)
     holder = (
@@ -71,12 +76,17 @@ def _smart_client_name(
     if holder:
         return holder[:200]
 
-    # 3. Local-part of email, de-dotted + title-cased
-    if user_email and "@" in user_email:
-        local = user_email.split("@")[0]
+    # 3. Local-part of email, de-dotted + title-cased. SmartHub logins use the
+    #    email AS the username, so apply the same cleanup there — never return
+    #    a raw email address as the client name.
+    _emailish = user_email if (user_email and "@" in user_email) else (
+        user_username if (user_username and "@" in user_username) else ""
+    )
+    if _emailish:
+        local = _emailish.split("@")[0]
         cleaned = local.replace(".", " ").replace("_", " ").replace("-", " ")
         result = cleaned.strip().title()
-        return result[:200] if result else user_email[:200]
+        return result[:200] if result else _emailish[:200]
 
     # 4. Username
     if user_username:
@@ -693,18 +703,26 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 ).scalar_one_or_none()
                 if exists:
                     continue
-                # Attach usage from the same billing month, if available
+                # Attach usage from the same billing month, if available.
+                # API-captured bills (v1.6.0) carry kWh + meter-read period
+                # inline — prefer those; usage-explorer rows remain the
+                # fallback for DOM-scraped captures.
                 u = usage_by_acct.get(acct_no, {}).get(b["billing_date"].strftime("%Y-%m"))
+                _ps = b.get("period_start") or (u["period_start"] if u else None)
+                _pe = b.get("period_end") or (u["period_end"] if u else None)
+                _kwh = b.get("kwh")
+                if _kwh is None and u:
+                    _kwh = u["kwh"]
                 db.add(Bill(
                     tenant_id=tenant.id,
                     account_id=acct_id,
                     bill_date=b["billing_date"],
-                    period_start=u["period_start"] if u else None,
-                    period_end=u["period_end"] if u else None,
-                    kwh_generated=int(u["kwh"]) if u else None,
+                    period_start=_ps,
+                    period_end=_pe,
+                    kwh_generated=int(_kwh) if _kwh is not None else None,
                     document_number=doc_no,
                     pdf_path=b.get("pdf_url"),
-                    parse_status="parsed" if u else "partial",
+                    parse_status="parsed" if _kwh is not None else "partial",
                 ))
 
         try:

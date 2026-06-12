@@ -237,6 +237,131 @@
     );
   }
 
+  // ─── API-based capture (works from ANY signed-in page) ─────────────────
+  // NISC SmartHub 26.x encodes session params as base64 in the SPA hash:
+  //   #/home?<base64 of "includeInactive=false&custNbr=…&acctNbr=…&userId=…">
+  // and exposes a cookie-authenticated JSON endpoint with the full billing
+  // history INCLUDING kWh usage + meter-read period dates:
+  //   GET /services/secured/billing/history/overview?acctNbr=NNN
+  // This fires on the HOME page immediately after login — the operator never
+  // has to click Billing History. The DOM scrape below remains as fallback
+  // (and still runs on the billing-history page for older deployments).
+
+  function decodeHashCreds() {
+    const q = (location.hash.split("?")[1] || "").trim();
+    if (!q) return null;
+    try {
+      const decoded = atob(q);
+      if (!/acctNbr|custNbr|userId/.test(decoded)) return null;
+      const p = new URLSearchParams(decoded);
+      return {
+        acctNbr: p.get("acctNbr"),
+        custNbr: p.get("custNbr"),
+        userId: p.get("userId"),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function acctsFromDom() {
+    // Home page renders one heading per account:
+    //   "982501 - 1519 WRIGHTS MTN ROAD, BRADFORD, VT 05033"
+    const found = new Map();
+    for (const h of document.querySelectorAll("h2, h3")) {
+      const m = (h.textContent || "").trim().match(/^(\d{4,})\s*[-—–]\s*(.+)$/);
+      if (m) found.set(m[1], m[2].trim());
+    }
+    return found;
+  }
+
+  function customerNameFromDom() {
+    // Customer-overview card on #/home shows the account holder name
+    // ("RICHARD G EVANS") in a .header-text span inside a mat-card.
+    for (const el of document.querySelectorAll(".header-text, mat-card .header-text")) {
+      const t = (el.textContent || "").trim();
+      if (/^[A-Z][A-Z .'&-]{3,}$/.test(t) && !/OVERVIEW|NOTIFICATION|USAGE|PAYMENT|SMARTHUB/i.test(t)) {
+        return t;
+      }
+    }
+    return "";
+  }
+
+  function fmtDateMDY(ts) {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+  }
+
+  function isoDay(ts) {
+    return new Date(ts).toISOString().slice(0, 10);
+  }
+
+  let apiCaptureInFlight = false;
+  let apiCaptureDone = false;
+
+  async function tryApiCapture() {
+    if (apiCaptureInFlight || apiCaptureDone) return apiCaptureDone;
+    const creds = decodeHashCreds();
+    const domAccts = acctsFromDom();
+    const acctNbrs = new Set(domAccts.keys());
+    if (creds && creds.acctNbr) acctNbrs.add(creds.acctNbr);
+    if (acctNbrs.size === 0) return false;
+
+    apiCaptureInFlight = true;
+    try {
+      const holderName = customerNameFromDom();
+      const bills = [];
+      for (const acctNbr of acctNbrs) {
+        let rows;
+        try {
+          const res = await fetch(
+            `/services/secured/billing/history/overview?acctNbr=${encodeURIComponent(acctNbr)}`,
+            { credentials: "include" }
+          );
+          if (!res.ok) continue;
+          rows = await res.json();
+        } catch (_) {
+          continue;
+        }
+        for (const r of rows || []) {
+          const loc = (r.servLocs && r.servLocs[0]) || {};
+          const addr = loc.address || {};
+          const addrStr =
+            [addr.addr1, addr.city, addr.state, addr.zip].filter(Boolean).join(", ") ||
+            domAccts.get(acctNbr) ||
+            "";
+          bills.push({
+            account_id: String(r.acctNbr || acctNbr),
+            customer_name: holderName,
+            service_address: addrStr,
+            billing_date: r.billingDateTimestamp ? fmtDateMDY(r.billingDateTimestamp) : "",
+            bill_amount: r.adjustedBillAmount != null ? String(r.adjustedBillAmount) : "",
+            adjustments: r.totalAdjustments != null ? String(r.totalAdjustments) : "",
+            total_due: "",
+            pdf_url: null,
+            bill_uuid: r.billProcessUuid || null,
+            bill_timestamp: r.billingDateTimestamp ? String(r.billingDateTimestamp) : null,
+            // API-only riches: kWh + meter-read period (DOM scrape never had these)
+            kwh: typeof r.totalUsage === "number" ? r.totalUsage : null,
+            period_start: loc.lastBillPrevReadDtTm ? isoDay(loc.lastBillPrevReadDtTm) : null,
+            period_end: loc.lastBillPresReadDtTm ? isoDay(loc.lastBillPresReadDtTm) : null,
+            customer_number: r.custNbr ? String(r.custNbr) : (creds && creds.custNbr) || null,
+            source: "api",
+          });
+        }
+      }
+      if (bills.length === 0) return false;
+      if (creds && creds.userId && !capturedPrimaryUsername) {
+        capturedPrimaryUsername = creds.userId;
+      }
+      await sendCapture(bills, []);
+      apiCaptureDone = true;
+      return true;
+    } finally {
+      apiCaptureInFlight = false;
+    }
+  }
+
   // ─── Main capture loop ───────────────────────────────────────────────────
 
   async function tryScrape() {
@@ -258,11 +383,21 @@
         return;
       }
     } else {
-      return; // not a page we handle
+      // Any other page (incl. #/home right after login): try the API capture.
+      // Retry on the poll loop — the SPA hash creds / account headings may not
+      // have rendered yet on the first ticks.
+      const ok = await tryApiCapture();
+      if (!ok && pollCount < MAX_POLLS) {
+        setTimeout(tryScrape, POLL_INTERVAL_MS);
+      }
+      return;
     }
 
     if (bills.length === 0 && usage.length === 0) return;
+    await sendCapture(bills, usage);
+  }
 
+  async function sendCapture(bills, usage) {
     const accounts = extractAccounts(bills);
     const authBlock = capturedAuthToken
       ? {

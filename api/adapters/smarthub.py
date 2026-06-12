@@ -465,6 +465,13 @@ def parse_bill(row: dict[str, Any]) -> dict[str, Any]:
     dm = _BILL_DATE_RE.match((row.get("billing_date") or "").strip())
     if dm:
         billing_date = datetime(int(dm.group(3)), int(dm.group(1)), int(dm.group(2)))
+
+    def _iso_day(s: Any) -> datetime | None:
+        try:
+            return datetime.fromisoformat(str(s)) if s else None
+        except ValueError:
+            return None
+
     return {
         "account_id": row.get("account_id"),
         "customer_name": row.get("customer_name"),
@@ -476,10 +483,37 @@ def parse_bill(row: dict[str, Any]) -> dict[str, Any]:
         "pdf_url": row.get("pdf_url"),
         "bill_uuid": row.get("bill_uuid"),
         "bill_timestamp": row.get("bill_timestamp"),
+        # API-capture extras (extension v1.6.0 billing/history/overview JSON):
+        # kWh + meter-read period come straight from NISC — no usage-explorer
+        # visit required.
+        "kwh": row.get("kwh") if isinstance(row.get("kwh"), (int, float)) else None,
+        "period_start": _iso_day(row.get("period_start")),
+        "period_end": _iso_day(row.get("period_end")),
     }
 
 
 # ─── extension payload normalization ──────────────────────────────────────────
+
+def _title_address(addr: str) -> str:
+    """Title-case an ALL-CAPS scraped address for a friendlier array label.
+
+    "1519 WRIGHTS MTN ROAD, BRADFORD, VT 05033"
+      → "1519 Wrights Mtn Road, Bradford, VT 05033"
+    Keeps 2-letter state codes uppercase.
+    """
+    if not addr:
+        return ""
+    words = []
+    for w in addr.split():
+        bare = w.strip(",")
+        if len(bare) == 2 and bare.isalpha() and bare.isupper():
+            words.append(w)  # state code (VT, NH…)
+        elif bare.isdigit() or any(ch.isdigit() for ch in bare):
+            words.append(w)  # house number / zip
+        else:
+            words.append(w.title())
+    return " ".join(words)[:200]
+
 
 def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize the Chrome extension SmartHub POST body into the standard shape
@@ -508,11 +542,19 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
         seen.add(acct_no)
         svc_addr = a.get("serviceAddress")
         customer_name = a.get("customerName") or a.get("customer_name")
+        # Array nickname = the service ADDRESS (identifies the physical array),
+        # NOT the customer name (that's the Client's name — using it for the
+        # array produced "RICHARD G EVANS" arrays under a "Richard G Evans"
+        # client). Fall back to customer_name only when no address scraped.
+        addr_label = (svc_addr or "").strip() if isinstance(svc_addr, str) else (
+            (svc_addr or {}).get("line1") or ""
+        ).strip()
+        nickname = _title_address(addr_label) or customer_name
         accounts.append({
             "account_number": acct_no,
             "customer_number": None,
             "customer_name": customer_name,
-            "nickname": customer_name,
+            "nickname": nickname,
             "service_address": (
                 {"line1": svc_addr} if isinstance(svc_addr, str) else svc_addr
             ),
@@ -527,11 +569,12 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             seen.add(acct_no)
             customer_name = b.get("customer_name")
+            nickname = _title_address((b.get("service_address") or "").strip()) or customer_name
             accounts.append({
                 "account_number": acct_no,
-                "customer_number": None,
+                "customer_number": b.get("customer_number"),
                 "customer_name": customer_name,
-                "nickname": customer_name,
+                "nickname": nickname,
                 "service_address": (
                     {"line1": b["service_address"]}
                     if b.get("service_address") else None
