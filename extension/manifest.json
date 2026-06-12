@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Solar Operator Sync",
   "short_name": "Solar Operator",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Captures Green Mountain Power and SmartHub utility bills for Solar Operator quarterly NEPOOL reports.",
   "author": "Solar Operator",
   "homepage_url": "https://solaroperator.org",

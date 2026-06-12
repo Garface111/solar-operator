@@ -378,8 +378,12 @@ def fetch_daily_generation(
 # ─── aria-label parsing (NISC SmartHub SPA format — uniform across deployments) ─
 
 _ARIA_RE = re.compile(
+    # Two observed label shapes across NISC deployments:
+    #   VEC:  "Meter 63698951 - Consumption - kWh: 0 kWh"   (3 segments)
+    #   WEC:  "Meter 29747 - kWh: 1137 kWh"                 (2 segments)
+    # The middle "- <type> -" segment is therefore OPTIONAL.
     r"^([^\n.]+?)\s+Billing Period\.\s+Usage Dates:\s+([^\n.]+?)\s*\."
-    r"[\s\S]+?Meter\s+(\d+)\s+-\s+[^\n\-]+?\s+-\s+kWh:\s+([\d.]+)\s+kWh"
+    r"[\s\S]+?Meter\s+(\d+)\s+-\s+(?:[^\n\-]+?\s+-\s+)?kWh:\s+([\d,.]+)\s+kWh"
     r"(?:[\s\S]*?Average Temperature:\s+([\d.]+)\s*°?F)?",
     re.IGNORECASE,
 )
@@ -427,7 +431,7 @@ def parse_usage(aria_label: str) -> dict[str, Any] | None:
     period_label = m.group(1).strip()
     usage_dates_raw = m.group(2).strip()
     meter_id = m.group(3)
-    kwh = float(m.group(4))
+    kwh = float(m.group(4).replace(",", ""))
     avg_temp_f = float(m.group(5)) if m.group(5) else None
     year_m = _YEAR_RE.search(period_label)
     billing_year = int(year_m.group(1)) if year_m else None

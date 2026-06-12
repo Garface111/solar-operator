@@ -652,12 +652,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         if is_smarthub_provider(provider):
             from .adapters.smarthub import parse_bill as _vec_parse_bill, parse_usage as _vec_parse_usage
             # Build an account-number → UtilityAccount.id map from this tenant's accounts
+            # NOTE: must match THIS capture's provider — was hardcoded "vec",
+            # which silently dropped every WEC/Stowe/other-SmartHub bill.
             acct_map = {
                 r.account_number: r.id
                 for r in db.execute(
                     select(UtilityAccount).where(
                         UtilityAccount.tenant_id == tenant.id,
-                        UtilityAccount.provider == "vec",
+                        UtilityAccount.provider == provider,
                     )
                 ).scalars().all()
             }

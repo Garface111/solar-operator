@@ -94,15 +94,61 @@
     const trs = document.querySelectorAll("table tr, mat-row");
     for (const tr of trs) {
       const cells = tr.querySelectorAll("td, mat-cell");
-      if (cells.length < 8) continue;
-      const maybeDate = (cells[4]?.textContent || "").trim();
-      if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(maybeDate)) continue;
+      if (cells.length === 0) continue;
+
+      // ── Layout B (WEC + newer NISC responsive tables, June 2026) ──────
+      // 5 mat-cells with data-label attributes:
+      //   Account | Billing Date | Paperless (amount + View Bill) |
+      //   Adjustments | Total Due
+      // "View Bill" is an Angular click handler (a.view-bill-pdf, NO href).
+      const byLabel = {};
+      for (const c of cells) {
+        const label = (c.getAttribute("data-label") || "").trim().toLowerCase();
+        if (label) byLabel[label] = c;
+      }
+
+      let maybeDate, accountId, customerName, serviceAddress;
+      let billAmountText, adjustmentsText, totalDueText;
+
+      if (byLabel["billing date"]) {
+        const dateText = (byLabel["billing date"].textContent || "").trim();
+        const dm = dateText.match(/\d{1,2}\/\d{1,2}\/\d{4}/);
+        if (!dm) continue;
+        maybeDate = dm[0];
+
+        const acctCell = byLabel["account"];
+        const acctText = acctCell ? acctCell.innerText || "" : "";
+        // "ELECTRIC SERVICE — 982501" (em-dash or hyphen)
+        const am = acctText.match(/[—\-–]\s*(\d{4,})/);
+        accountId = am ? am[1] : "";
+        // Account cell lines: header, service—acct, AutoPay, NAME, ADDRESS, View Usage
+        const lines = acctText.split("\n").map((s) => s.trim()).filter(Boolean);
+        customerName =
+          lines.find((l) => /^[A-Z][A-Z .'-]+$/.test(l) && !/SERVICE|ACCOUNT|AUTO ?PAY|VIEW|PAPERLESS/i.test(l)) || "";
+        serviceAddress =
+          lines.find((l) => /\d+.*(,|RD|ROAD|ST|STREET|AVE|LN|DR|VT|NH|MA)\b/i.test(l) && l !== customerName) || "";
+
+        const amtCell = byLabel["paperless"] || byLabel["bill amount"];
+        billAmountText = amtCell ? (amtCell.innerText.match(/\$[\d,.\-]+/) || [""])[0] : "";
+        adjustmentsText = byLabel["adjustments"] ? byLabel["adjustments"].innerText : "";
+        totalDueText = byLabel["total due"] ? byLabel["total due"].innerText : "";
+      } else {
+        // ── Layout A (legacy VEC 8-column flat table) ──────────────────
+        if (cells.length < 8) continue;
+        maybeDate = (cells[4]?.textContent || "").trim();
+        if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(maybeDate)) continue;
+        accountId = (cells[0]?.textContent || "").trim();
+        customerName = (cells[2]?.textContent || "").trim();
+        serviceAddress = (cells[3]?.textContent || "").trim();
+        billAmountText = cells[5]?.textContent || "";
+        adjustmentsText = cells[6]?.textContent || "";
+        totalDueText = cells[7]?.textContent || "";
+      }
 
       const link = tr.querySelector("a[href*='billPdfService']");
       let pdfUrl = link ? link.href : null;
       let billUuid = null;
       let billTimestamp = null;
-      let accountId = (cells[0]?.textContent || "").trim();
 
       if (pdfUrl) {
         try {
@@ -115,12 +161,12 @@
 
       rows.push({
         account_id: accountId,
-        customer_name: (cells[2]?.textContent || "").trim(),
-        service_address: (cells[3]?.textContent || "").trim(),
+        customer_name: (customerName || "").trim(),
+        service_address: (serviceAddress || "").trim(),
         billing_date: maybeDate,
-        bill_amount: (cells[5]?.textContent || "").replace(/[^0-9.\-]/g, ""),
-        adjustments: (cells[6]?.textContent || "").replace(/[^0-9.\-]/g, ""),
-        total_due: (cells[7]?.textContent || "").replace(/[^0-9.\-]/g, ""),
+        bill_amount: (billAmountText || "").replace(/[^0-9.\-]/g, ""),
+        adjustments: (adjustmentsText || "").replace(/[^0-9.\-]/g, ""),
+        total_due: (totalDueText || "").replace(/[^0-9.\-]/g, ""),
         pdf_url: pdfUrl,
         bill_uuid: billUuid,
         bill_timestamp: billTimestamp,
@@ -134,8 +180,10 @@
   //   "Jun 2023 Billing Period. Usage Dates: May 18 - June 17.
   //    Meter 63698951 - Consumption - kWh: 0 kWh. Average Temperature: 58 °F"
 
+  // Two observed shapes: VEC "Meter N - Consumption - kWh: X kWh" and
+  // WEC "Meter N - kWh: X kWh" — the middle type segment is optional.
   const ARIA_RE =
-    /^([^\n.]+?)\s+Billing Period\.\s+Usage Dates:\s+([^\n.]+?)\s*\.[\s\S]+?Meter\s+(\d+)\s+-\s+[^\n\-]+?\s+-\s+kWh:\s+([\d.]+)\s+kWh(?:[\s\S]*?Average Temperature:\s+([\d.]+)\s*°?F)?/i;
+    /^([^\n.]+?)\s+Billing Period\.\s+Usage Dates:\s+([^\n.]+?)\s*\.[\s\S]+?Meter\s+(\d+)\s+-\s+(?:[^\n\-]+?\s+-\s+)?kWh:\s+([\d,.]+)\s+kWh(?:[\s\S]*?Average Temperature:\s+([\d.]+)\s*°?F)?/i;
 
   function parseUsageExplorer() {
     const rows = [];
@@ -174,9 +222,11 @@
   // ─── Page detection ──────────────────────────────────────────────────────
 
   function isOnBillingHistory() {
+    // VEC legacy: /ui/billing/history — WEC (26.x SPA): /ui/#/billingHistory
     return (
       location.pathname.includes("billing/history") ||
-      location.hash.includes("billing/history")
+      location.hash.includes("billing/history") ||
+      location.hash.toLowerCase().includes("billinghistory")
     );
   }
 
