@@ -1,0 +1,153 @@
+/* popup.css — Solar Operator extension popup v1.5.1 (solarpunk palette)
+   emerald-700: #064e3b | wood-300: #e6b470 | cream: #faf8f5
+   cream-border: #e8e2d9 | zinc-900: #18181b | zinc-500: #71717a */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  width: 320px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #18181b;
+  background: #faf8f5;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+.header {
+  background: #064e3b;
+  color: #fff;
+  padding: 11px 14px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 2px solid #e6b470;
+}
+
+.header-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  flex: 1;
+}
+
+/* ── Status pill ─────────────────────────────────────────────────────────── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.pill::before {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.pill-connected  { background: #d1fae5; color: #065f46; }
+.pill-connected::before  { background: #047857; }
+.pill-not-paired { background: #faedd8; color: #8c4e1c; }
+.pill-not-paired::before { background: #d4914a; }
+.pill-offline    { background: #fee2e2; color: #991b1b; }
+.pill-offline::before    { background: #dc2626; }
+.pill-loading    { background: #e8e2d9; color: #6b7280; }
+.pill-loading::before    { background: #9ca3af; }
+
+/* ── Body ────────────────────────────────────────────────────────────────── */
+.body { padding: 12px 14px 14px; }
+
+/* ── Toast ───────────────────────────────────────────────────────────────── */
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #d1fae5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 10px;
+  transition: opacity 0.4s ease;
+}
+.toast.hidden  { display: none; }
+.toast.fading  { opacity: 0; }
+
+/* ── Error block ─────────────────────────────────────────────────────────── */
+.error-block {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #991b1b;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.error-block.hidden { display: none; }
+.error-msg { flex: 1; line-height: 1.4; word-break: break-word; }
+
+.retry-btn {
+  background: #991b1b;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.retry-btn:hover { background: #7f1d1d; }
+
+/* ── Stats ───────────────────────────────────────────────────────────────── */
+.stats { margin-bottom: 12px; }
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid #e8e2d9;
+}
+.stat-row:last-child { border-bottom: none; }
+
+.stat-label { color: #71717a; font-size: 12px; }
+.stat-value { font-weight: 500; color: #18181b; font-size: 12px; }
+
+/* ── Primary button ──────────────────────────────────────────────────────── */
+.btn-primary {
+  width: 100%;
+  background: #064e3b;
+  color: #fff;
+  border: 0;
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  letter-spacing: 0.1px;
+}
+.btn-primary:hover { background: #053429; }
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+.footer {
+  border-top: 1px solid #e8e2d9;
+  padding: 8px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11.5px;
+}
+
+a { color: #064e3b; text-decoration: none; }
+a:hover { text-decoration: underline; }

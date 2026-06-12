@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Solar Operator — Settings</title>
+<style>
+  /* solarpunk palette: emerald-700 #064e3b | wood-300 #e6b470 | cream #faf8f5
+     cream-border #e8e2d9 | zinc-900 #18181b | zinc-500 #71717a */
+  body {
+    max-width: 520px;
+    margin: 48px auto;
+    padding: 0 24px;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #18181b;
+    line-height: 1.55;
+    background: #faf8f5;
+  }
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 36px 40px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+  }
+  h1 { color: #18181b; font-size: 22px; margin: 0 0 4px 0; }
+  .sub {
+    color: #71717a; font-size: 13px;
+    padding-bottom: 20px; margin-bottom: 8px;
+    border-bottom: 2px solid #e6b470;
+  }
+  .form-section { margin-top: 20px; }
+  label {
+    display: block; margin: 18px 0 6px;
+    font-size: 13px; font-weight: 600; color: #18181b;
+  }
+  input[type="text"] {
+    width: 100%; box-sizing: border-box; padding: 10px 12px;
+    border: 1px solid #e8e2d9; border-radius: 6px; font-size: 14px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  input[type="text"]:focus { outline: 2px solid #064e3b; border-color: #064e3b; }
+  .help { font-size: 12.5px; color: #71717a; margin-top: 6px; }
+  button {
+    background: #064e3b; color: #fff; border: 0; border-radius: 6px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600;
+    cursor: pointer; margin-top: 20px;
+  }
+  button:hover { background: #053429; }
+  .saved {
+    margin-top: 14px; padding: 10px 14px; background: #ecf5f0;
+    border-left: 3px solid #064e3b; color: #064e3b; border-radius: 4px;
+    font-size: 13px; display: none;
+  }
+  .return-setup {
+    display: none; margin-top: 16px; text-align: center;
+    background: #064e3b; color: #fff; text-decoration: none;
+    padding: 11px 20px; border-radius: 6px;
+    font-size: 14px; font-weight: 600;
+  }
+  .return-setup:hover { background: #053429; }
+  .status-box {
+    margin-top: 28px; padding: 16px 18px; border-radius: 8px;
+    background: #faf8f5; border: 1px solid #e8e2d9;
+  }
+  .status-box h2 {
+    margin: 0 0 8px 0; font-size: 13px;
+    color: #71717a; letter-spacing: 0.5px;
+    text-transform: uppercase; font-weight: 600;
+  }
+  .status-row {
+    display: flex; justify-content: space-between; padding: 4px 0;
+    font-size: 13px;
+  }
+  .status-row .k { color: #71717a; }
+  .status-row .v { font-weight: 500; font-variant-numeric: tabular-nums; }
+  .danger-area {
+    margin-top: 32px; padding-top: 24px; border-top: 1px solid #e8e2d9;
+  }
+  .danger-area .help { color: #71717a; }
+  button.danger {
+    background: #fff; color: #a04030; border: 1px solid #d9b8b0;
+    font-weight: 500;
+  }
+  button.danger:hover { background: #fdf0ed; }
+  details summary {
+    cursor: pointer; color: #71717a; font-size: 12px;
+    padding: 8px 0; user-select: none;
+  }
+  details[open] summary { margin-bottom: 8px; }
+  .advanced label { margin-top: 12px; }
+  .advanced input { font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Solar Operator Sync</h1>
+    <div class="sub">Connect your Green Mountain Power or NISC SmartHub utility account to Solar Operator.</div>
+
+    <div class="form-section">
+    <label for="tenant_key">Activation code</label>
+    <input type="text" id="tenant_key" placeholder="sol_live_…" autocomplete="off" spellcheck="false">
+    <div class="help">Paste the activation code from your welcome email.</div>
+
+    <button id="save">Save</button>
+    <div class="saved" id="saved-msg">✓ Saved. You're connected.</div>
+    <a class="return-setup" id="return-setup"
+       href="https://solaroperator.org/onboarding/extension"
+       target="_blank" rel="noopener">
+      Saved ✓ — return to setup →
+    </a>
+
+    <div class="status-box">
+      <h2>Status</h2>
+      <div id="status-content">
+        <div class="status-row"><span class="k">Last capture</span><span class="v" id="last-capture">—</span></div>
+        <div class="status-row"><span class="k">Accounts connected</span><span class="v" id="acct-count">—</span></div>
+        <div class="status-row"><span class="k">Session expires</span><span class="v" id="token-expires">—</span></div>
+      </div>
+    </div>
+
+    <details class="advanced">
+      <summary>Advanced settings</summary>
+      <label for="endpoint">API endpoint</label>
+      <input type="text" id="endpoint" placeholder="https://api.solaroperator.org/v1/sync">
+      <div class="help">Leave the default unless your account manager gave you a custom URL.</div>
+    </details>
+
+    <div class="danger-area">
+      <button id="clear" class="danger">Disconnect</button>
+      <div class="help">Removes the locally stored session. Visiting greenmountainpower.com will re-capture.</div>
+    </div>
+    </div><!-- /.form-section -->
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Solar Operator</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <span class="header-title">Solar Operator</span>
+    <span id="status-pill" class="pill pill-loading">Loading</span>
+  </div>
+  <div class="body">
+    <div id="toast" class="toast hidden">✓ Captured!</div>
+    <div id="error-block" class="error-block hidden">
+      <span id="error-msg" class="error-msg"></span>
+      <button id="retry-btn" class="retry-btn">Retry</button>
+    </div>
+    <div class="stats">
+      <div class="stat-row">
+        <span class="stat-label">Last capture</span>
+        <span id="last-capture" class="stat-value">No captures yet</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Today</span>
+        <span id="count-today" class="stat-value">—</span>
+      </div>
+    </div>
+    <button id="open-dashboard" class="btn-primary">Open dashboard</button>
+  </div>
+  <div class="footer">
+    <a href="#" id="open-options">Settings</a>
+    <a href="#" id="open-gmp">Open GMP</a>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

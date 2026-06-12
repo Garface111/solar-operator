@@ -1,0 +1,90 @@
+{
+  "manifest_version": 3,
+  "name": "Solar Operator Sync",
+  "short_name": "Solar Operator",
+  "version": "1.5.3",
+  "description": "Captures Green Mountain Power and SmartHub utility bills for Solar Operator quarterly NEPOOL reports.",
+  "author": "Solar Operator",
+  "homepage_url": "https://solaroperator.org",
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "cookies",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.greenmountainpower.com/*",
+    "https://api.greenmountainpower.com/*",
+    "https://vermontelectric.smarthub.coop/*",
+    "https://*.smarthub.coop/*",
+    "https://api.solaroperator.org/*",
+    "https://solaroperator.org/*",
+    "https://*.solaroperator.org/*",
+    "https://web-production-49c83.up.railway.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://greenmountainpower.com/*",
+        "https://*.greenmountainpower.com/*",
+        "https://*.smarthub.coop/*"
+      ],
+      "js": [
+        "portal_cleaner.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://greenmountainpower.com/*",
+        "https://*.greenmountainpower.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.smarthub.coop/*"
+      ],
+      "js": [
+        "smarthub_registry.js",
+        "smarthub_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://solaroperator.org/*",
+        "https://*.solaroperator.org/*",
+        "https://web-production-49c83.up.railway.app/*"
+      ],
+      "js": [
+        "so_bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Solar Operator Sync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options/options.html"
+}
