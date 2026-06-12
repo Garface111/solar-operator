@@ -83,3 +83,41 @@ export interface ConnectSolarEdgeResult {
   site_name: string;
   peak_power_kw: number;
 }
+
+// ── account-level SolarEdge discovery ("paste one credential, attach all") ──
+
+/** One site returned by POST /v1/array-owners/solaredge/discover. */
+export interface SolarEdgeDiscoveredSite {
+  site_id: number;
+  name: string;
+  peak_power_kw: number | null;
+  status: string;
+}
+
+/** POST /v1/array-owners/solaredge/discover response (preview — saves nothing). */
+export interface SolarEdgeDiscoverResult {
+  ok: boolean;
+  sites: SolarEdgeDiscoveredSite[];
+  /** Friendly note for the empty-account case; null when sites were found. */
+  message: string | null;
+}
+
+/** One array attached by connect-account (created or matched). */
+export interface ConnectAccountEntry {
+  array_id: number | null;
+  name: string;
+  site_id: number;
+  peak_power_kw: number | null;
+}
+
+/** POST /v1/array-owners/solaredge/connect-account response. */
+export interface ConnectAccountResult {
+  ok: boolean;
+  /** Every site attached this run (created ∪ matched). */
+  connected: ConnectAccountEntry[];
+  /** Arrays freshly created from a SolarEdge site. */
+  created: ConnectAccountEntry[];
+  /** Existing arrays matched to a site (by site_id or exact name). */
+  matched: ConnectAccountEntry[];
+  message: string;
+}

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date
 
 from ..adapters import solaredge as _se
-from .base import InverterAuthError, InverterError, require_fields
+from .base import InverterAuthError, InverterError, InverterScopeError, require_fields
 
 CODE = "solaredge"
 LABEL = "SolarEdge"
@@ -50,6 +50,43 @@ def validate(config: dict) -> dict:
         "peak_power_kw": details.get("peak_kw"),
         "site_id": site_id,
     }
+
+
+def discover_sites(api_key: str) -> list[dict]:
+    """Every site an ACCOUNT-LEVEL key can read, for the "paste one credential,
+    attach all arrays" flow.
+
+    Returns [{site_id, name, peak_power_kw, status}, ...] (possibly empty for a
+    brand-new account). Paginates /sites/list under the hood.
+
+    Raises:
+      InverterScopeError — the key is valid but site-level (403 on /sites/list);
+        the caller should fall back to a known-site path or ask for an
+        account-level key.
+      InverterAuthError  — the key is bad/inactive (401).
+      InverterError      — any other SolarEdge failure (5xx, network, bad JSON).
+    """
+    key = str(api_key or "").strip()
+    if not key:
+        raise InverterError("api_key is required")
+    try:
+        raw = _se.list_all_sites(key)
+    except _se.SolarEdgeScopeError as exc:
+        raise InverterScopeError(str(exc)) from exc
+    except _se.SolarEdgeAuthError as exc:
+        raise InverterAuthError(str(exc)) from exc
+    except _se.SolarEdgeError as exc:
+        raise InverterError(str(exc)) from exc
+
+    return [
+        {
+            "site_id": s["site_id"],
+            "name": s.get("name") or "",
+            "peak_power_kw": s.get("peak_kw"),
+            "status": s.get("status") or "",
+        }
+        for s in raw
+    ]
 
 
 def fetch_live(config: dict) -> dict | None:

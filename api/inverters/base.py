@@ -24,7 +24,14 @@ class InverterError(Exception):
 
 
 class InverterAuthError(InverterError):
-    """Specifically a credential rejection (401/403) — bad/expired key/secret."""
+    """Specifically a credential rejection (401) — bad/expired key/secret."""
+
+
+class InverterScopeError(InverterAuthError):
+    """Credentials are VALID but lack the scope for an account-level call (403)
+    — e.g. a SolarEdge site-level key used against /sites/list. Callers can fall
+    back to a single-site path (when the site id is known) instead of treating
+    the key as bad."""
 
 
 def require_fields(config: dict, *names: str) -> None:

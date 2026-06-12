@@ -22,8 +22,9 @@ import httpx
 import pytest
 
 from api import inverters
-from api.inverters import InverterAuthError, InverterError
-from api.inverters import chint, fronius, sma, solaredge
+from api.inverters import InverterAuthError, InverterError, InverterScopeError
+from api.inverters import chint, fronius, locus, sma, solaredge
+from api.adapters import locus as locus_adapter
 from api.db import SessionLocal
 from api.models import Array, InverterConnection, Tenant
 
@@ -79,6 +80,13 @@ def _clear_sma_token_cache():
     sma._TOKEN_CACHE.clear()
     yield
     sma._TOKEN_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_locus_token_cache():
+    locus_adapter._TOKEN_CACHE.clear()
+    yield
+    locus_adapter._TOKEN_CACHE.clear()
 
 
 # ── solaredge wrapper ─────────────────────────────────────────────────────────
@@ -255,6 +263,125 @@ def test_sma_token_uses_refresh_grant(monkeypatch):
     assert captured["refresh_token"] == "rt-abc"
 
 
+# ── locus (Locus Energy / SolarNOC, OAuth2 password grant) ────────────────────
+
+def _locus_token_ok(*a, **k):
+    return _FakeResp(200, {
+        "access_token": "loc-tok", "refresh_token": "loc-refresh",
+        "token_type": "bearer", "expires_in": 3600,
+    })
+
+
+_LOCUS_CREDS = {
+    "client_id": "cid", "client_secret": "secret",
+    "username": "user", "password": "pw", "site_id": 123,
+}
+
+
+def test_locus_validate_success(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _locus_token_ok)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **k: _FakeResp(200, {
+            "id": 123, "name": "Test Site",
+            "locationTimezone": "America/Los_Angeles",
+            "address1": "657 Mission St", "locale3": "San Francisco",
+            "localeCode1": "CA", "postalCode": "94105",
+        }),
+    )
+    result = locus.validate(_LOCUS_CREDS)
+    assert result["site_name"] == "Test Site"
+    assert result["site_id"] == 123
+
+
+def test_locus_validate_auth_failure(monkeypatch):
+    # The token endpoint rejects the credentials -> InverterAuthError.
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResp(401, {"error": "bad"}))
+    with pytest.raises(InverterAuthError):
+        locus.validate(_LOCUS_CREDS)
+
+
+def test_locus_fetch_daily_parsing(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _locus_token_ok)
+    data_body = {
+        "statusCode": 200,
+        "data": [
+            {"id": 123, "ts": "2026-04-01T00:00:00-07:00", "Wh_sum": 25720},
+            {"id": 123, "ts": "2026-04-02T00:00:00-07:00", "Wh_sum": 0},     # skipped
+            {"id": 123, "ts": "2026-04-03T00:00:00-07:00", "Wh_sum": None},  # skipped
+            {"id": 123, "ts": "2026-04-04T00:00:00-07:00", "Wh_sum": 31000},
+        ],
+    }
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, data_body))
+    rows = locus.fetch_daily(_LOCUS_CREDS, date(2026, 4, 1), date(2026, 4, 4))
+    assert rows == [
+        {"day": date(2026, 4, 1), "kwh": 25.72},
+        {"day": date(2026, 4, 4), "kwh": 31.0},
+    ]
+
+
+def test_locus_fetch_live(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _locus_token_ok)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **k: _FakeResp(200, {
+            "data": [{"id": 123, "ts": "2026-06-12T13:00:00-07:00", "W_avg": 4830.5}]
+        }),
+    )
+    live = locus.fetch_live(_LOCUS_CREDS)
+    assert live == {"current_power_w": 4830.5, "as_of": "2026-06-12T13:00:00-07:00"}
+
+
+def test_locus_discover_sites(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _locus_token_ok)
+    sites_body = {
+        "statusCode": 200,
+        "sites": [
+            {"id": 123, "clientId": 456, "name": "Test Site",
+             "address1": "657 Mission St", "locale3": "San Francisco",
+             "localeCode1": "CA", "postalCode": "94105",
+             "locationTimezone": "America/Los_Angeles"},
+            {"id": 789, "clientId": 456, "name": "Second Site"},
+        ],
+    }
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, sites_body))
+    sites = locus.discover_sites({
+        "client_id": "cid", "client_secret": "secret",
+        "username": "user", "password": "pw", "partner_id": 659488,
+    })
+    assert [s["site_id"] for s in sites] == [123, 789]
+    assert sites[0]["name"] == "Test Site"
+    # Locus's site list has no peak power; the key is kept as None for UI parity.
+    assert sites[0]["peak_power_kw"] is None
+
+
+def test_locus_discover_sites_scope_failure(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _locus_token_ok)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(403, {"error": "forbidden"}))
+    with pytest.raises(InverterScopeError):
+        locus.discover_sites({
+            "client_id": "cid", "client_secret": "secret",
+            "username": "user", "password": "pw", "partner_id": 659488,
+        })
+
+
+def test_locus_token_cache(monkeypatch):
+    """A second call within the token TTL reuses the cached token — the OAuth
+    endpoint is hit exactly once."""
+    calls = {"post": 0}
+
+    def counting_post(*a, **k):
+        calls["post"] += 1
+        return _locus_token_ok()
+
+    monkeypatch.setattr(httpx, "post", counting_post)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, {"id": 123, "name": "S"}))
+
+    locus.validate(_LOCUS_CREDS)
+    locus.validate(_LOCUS_CREDS)
+    assert calls["post"] == 1
+
+
 # ── chint stub ────────────────────────────────────────────────────────────────
 
 def test_chint_stub_behavior():
@@ -273,11 +400,13 @@ def test_inverter_vendors_listing(client):
     resp = client.get("/v1/array-owners/inverter-vendors", headers=_auth(key))
     assert resp.status_code == 200, resp.text
     by_code = {v["code"]: v for v in resp.json()}
-    assert set(by_code) == {"solaredge", "fronius", "sma", "chint"}
-    # solaredge: 2 fields; fronius: 3; sma: 4; chint: unavailable + note
+    assert set(by_code) == {"solaredge", "locus", "fronius", "sma", "chint"}
+    # solaredge: 2 fields; fronius: 3; sma: 4; locus: 6; chint: unavailable + note
     assert len(by_code["solaredge"]["fields"]) == 2
     assert len(by_code["fronius"]["fields"]) == 3
     assert len(by_code["sma"]["fields"]) == 4
+    assert len(by_code["locus"]["fields"]) == 6
+    assert by_code["locus"]["available"] is True
     assert by_code["solaredge"]["available"] is True
     assert by_code["chint"]["available"] is False
     assert by_code["chint"]["note"]
