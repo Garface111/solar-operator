@@ -53,7 +53,17 @@ _overview_cache: dict[int, tuple[datetime, dict]] = {}
 
 
 def _tenant_from_bearer(authorization: str | None) -> Tenant:
-    """Lazy wrapper around api.app.tenant_from_bearer (circular-import dodge)."""
+    """Auth for dashboard calls: the SPA sends a short-lived SESSION token
+    (api.account login flow), not the raw tenant key. Accept the session
+    token first; fall back to the tenant-key bearer so programmatic/API
+    callers (and tests) keep working.
+    """
+    from .account import tenant_from_session
+
+    try:
+        return tenant_from_session(authorization)
+    except HTTPException:
+        pass
     from .app import tenant_from_bearer
 
     return tenant_from_bearer(authorization)

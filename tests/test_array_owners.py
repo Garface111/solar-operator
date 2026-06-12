@@ -341,3 +341,16 @@ def test_connect_solaredge_array_not_found(client):
 def test_overview_requires_auth(client):
     resp = client.get("/v1/array-owners/overview")
     assert resp.status_code == 401
+
+
+def test_overview_accepts_dashboard_session_token(client):
+    """The SPA authenticates with a signed session token, not the tenant key."""
+    from api.account import _sign_session
+    tid, _key = _make_tenant()
+    token = _sign_session(tid)
+    resp = client.get(
+        "/v1/array-owners/overview",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["arrays"] == []
