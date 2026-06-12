@@ -58,9 +58,11 @@ def test_seed_is_idempotent(client):
 def test_seed_shape_is_realistic(client):
     seed(today=FIXED_TODAY)
     snap = _snapshot()
-    # 4-6 clients, each NEPOOL id is 5 digits starting 99, accounts 10 digits
-    # starting 99, no future bills, every bill has positive generation.
-    assert 4 <= len(snap["clients"]) <= 6
+    # ~15 clients (seed sized to show off the operator's range — see
+    # scripts/seed_demo_tenant.py), each NEPOOL id is 5 digits starting 99,
+    # accounts 10 digits starting 99, no future bills, every bill has
+    # positive generation.
+    assert 12 <= len(snap["clients"]) <= 20
     assert snap["tenant"][1] is True  # is_demo
     for _name, nepool in snap["arrays"]:
         assert nepool.startswith("99") and len(nepool) == 5
