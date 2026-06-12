@@ -96,13 +96,15 @@ export function CommandPalette({ nodes, setNodes, onAddClient, onAutoArrange, on
         setActiveIdx(0);
         return;
       }
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && open) {
+        // Mark consumed so the fullscreen Esc handler in ClientsTab defers to us.
+        e.preventDefault();
         setOpen(false);
       }
     }
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [open]);
 
   // Focus input on open
   useEffect(() => {

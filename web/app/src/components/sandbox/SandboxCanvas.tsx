@@ -398,7 +398,14 @@ interface UndoEntry {
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-export default function SandboxCanvas() {
+interface SandboxCanvasProps {
+  /** Fullscreen state lives in ClientsTab (owns the wrapper classes); the
+   *  canvas only reads it and asks to toggle. CSS-based, so no remount. */
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
+}
+
+export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen }: SandboxCanvasProps) {
   const toast = useToast();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [loading, setLoading] = useState(true);
@@ -473,14 +480,31 @@ export default function SandboxCanvas() {
   // Snapshot of client IDs before the portal-picker modal opens
   const clientIdsBeforeModal = useRef<Set<number>>(new Set());
 
-  // Esc closes the context menu
+  // Esc closes the context menu. preventDefault marks the event consumed so
+  // the fullscreen Esc handler in ClientsTab knows not to also exit fullscreen.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextMenu(null);
+      if (e.key === 'Escape' && contextMenu) {
+        e.preventDefault();
+        setContextMenu(null);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [contextMenu]);
+
+  // Re-fit after entering/exiting fullscreen: the wrapper resizes to/from the
+  // viewport, so ReactFlow needs to re-measure and re-frame the graph. Skip the
+  // initial mount — the data-load effect already fits then.
+  const fsMounted = useRef(false);
+  useEffect(() => {
+    if (!fsMounted.current) {
+      fsMounted.current = true;
+      return;
+    }
+    const t = setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
+    return () => clearTimeout(t);
+  }, [isFullscreen, fitView]);
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
@@ -2297,6 +2321,11 @@ export default function SandboxCanvas() {
                 <ToolbarButton onClick={() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 })}>
                   Fit to view
                 </ToolbarButton>
+                {onToggleFullscreen && (
+                  <ToolbarButton onClick={onToggleFullscreen}>
+                    {isFullscreen ? '✕ Exit full screen' : '⛶ Full screen'}
+                  </ToolbarButton>
+                )}
                 <button
                   type="button"
                   disabled={!topUndo}

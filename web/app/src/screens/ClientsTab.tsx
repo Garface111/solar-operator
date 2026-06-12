@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { ReactFlowProvider } from "@xyflow/react";
 import { ClientsSection } from "../components/ClientsSection";
@@ -16,13 +17,54 @@ export default function ClientsTab() {
   // the list-view card. The canvas autopans to the same client on load.
   const { clientId } = useParams();
 
+  // CSS-based fullscreen — the canvas keeps its React tree (ReactFlow state,
+  // walkthrough, undo stack) and only the wrapper classes change, so toggling
+  // never remounts SandboxCanvas. State lives here because the wrapper does.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const toggleFullscreen = useCallback(() => setIsFullscreen((v) => !v), []);
+
+  // Lock body scroll while the overlay covers the viewport; restore on exit.
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [isFullscreen]);
+
+  // Esc exits fullscreen — but only if nothing else already handled it. The
+  // canvas's modal/palette/context-menu Esc consumers call preventDefault when
+  // they close something, and we skip events targeting inputs (inline renames),
+  // so we never steal Esc from an open dialog.
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (e.target instanceof HTMLElement) {
+        const tag = e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+      }
+      setIsFullscreen(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isFullscreen]);
+
   return (
     <div className="space-y-8">
       {/* Spatial canvas — full 560px on sm+; on mobile an overlay replaces the
-          canvas with a gentle notice (the list view below is the mobile UX). */}
+          canvas with a gentle notice (the list view below is the mobile UX).
+          Fullscreen swaps the rounded inline box for a fixed full-viewport
+          overlay (no remount — just different classes). */}
       <section
         aria-label="Clients sandbox"
-        className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 shadow-sm h-[220px] sm:h-[560px]"
+        className={[
+          "relative overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
+          isFullscreen
+            ? "fixed inset-0 z-[100] h-auto"
+            : "rounded-2xl h-[220px] sm:h-[560px]",
+        ].join(" ")}
       >
         {/* Mobile notice — overlays the canvas below 640px. The canvas still
             mounts so ReactFlow doesn't re-initialize on viewport resize. */}
@@ -55,7 +97,10 @@ export default function ClientsTab() {
         </div>
 
         <ReactFlowProvider>
-          <SandboxCanvas />
+          <SandboxCanvas
+            isFullscreen={isFullscreen}
+            onToggleFullscreen={toggleFullscreen}
+          />
         </ReactFlowProvider>
       </section>
 
