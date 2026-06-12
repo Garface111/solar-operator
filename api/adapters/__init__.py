@@ -15,6 +15,12 @@ for _code, _info in SMARTHUB_UTILITIES.items():
 
 def get_adapter(provider: str):
     key = provider.strip().lower()
-    if key not in ADAPTERS:
-        raise ValueError(f"Unknown provider: {provider}")
-    return ADAPTERS[key]
+    if key in ADAPTERS:
+        return ADAPTERS[key]
+    # Discovered SmartHub utilities ("sh_<subdomain>", minted on first capture
+    # from a not-yet-cataloged *.smarthub.coop host) all route to the universal
+    # smarthub adapter — that's what makes a brand-new co-op work on first
+    # login with zero code changes.
+    if key.startswith(smarthub.DISCOVERED_PREFIX):
+        return smarthub
+    raise ValueError(f"Unknown provider: {provider}")

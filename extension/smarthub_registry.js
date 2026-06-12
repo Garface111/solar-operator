@@ -1899,16 +1899,28 @@
   };
 
   // Detect provider from the current page's hostname.
-  // Falls back to "vec" (the first deployed utility) for unknown *.smarthub.coop hosts.
+  // Unknown *.smarthub.coop hosts get a DETERMINISTIC discovered code
+  // ("sh_<subdomain>") instead of masquerading as VEC — the backend mints
+  // the identical code from user.hostname (api/adapters/smarthub.py
+  // derive_provider_from_host), records the sighting, and alerts us to
+  // promote the utility to the catalog. Data flows correctly on the very
+  // first login from a brand-new co-op.
   function detectProvider(hostname) {
-    const entry = SMARTHUB_REGISTRY[hostname.toLowerCase()];
+    const host = hostname.toLowerCase();
+    const entry = SMARTHUB_REGISTRY[host];
     if (entry) return entry;
-    if (hostname.endsWith(".smarthub.coop")) {
-      console.warn(
-        `[Solar Operator] Unknown SmartHub host: ${hostname}. ` +
-          "Treating as VEC (vermontelectric). Add this host to a provider CSV."
+    if (host.endsWith(".smarthub.coop")) {
+      const sub = host.slice(0, -".smarthub.coop".length);
+      const code = sub.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 37);
+      console.info(
+        `[Solar Operator] New SmartHub host: ${host} — capturing under ` +
+          `discovered code sh_${code}. It will be promoted to the catalog automatically.`
       );
-      return { provider: "vec", name: "Unknown SmartHub Utility" };
+      return {
+        provider: "sh_" + code,
+        name: sub.replace(/[-.]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) + " (SmartHub)",
+        discovered: true,
+      };
     }
     return null;
   }

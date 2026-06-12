@@ -354,7 +354,7 @@
       if (creds && creds.userId && !capturedPrimaryUsername) {
         capturedPrimaryUsername = creds.userId;
       }
-      await sendCapture(bills, []);
+      await sendCapture(bills, [], "api");
       apiCaptureDone = true;
       return true;
     } finally {
@@ -393,11 +393,36 @@
       return;
     }
 
-    if (bills.length === 0 && usage.length === 0) return;
-    await sendCapture(bills, usage);
+    if (bills.length === 0 && usage.length === 0) {
+      // All three capture layers came up empty after MAX_POLLS — tell the
+      // backend so deployments our parsers can't read show up on the drift
+      // radar instead of failing silently. Best-effort, fires once per page.
+      reportEmptyScrape();
+      return;
+    }
+    await sendCapture(bills, usage, bills.length > 0 ? "dom" : "usage");
   }
 
-  async function sendCapture(bills, usage) {
+  // ─── Empty-scrape telemetry ──────────────────────────────────────────────
+  let emptyScrapeReported = false;
+  function reportEmptyScrape() {
+    if (emptyScrapeReported) return;
+    if (!(isOnBillingHistory() || isOnUsageExplorer())) return;
+    emptyScrapeReported = true;
+    chrome.runtime.sendMessage(
+      {
+        type: "SMARTHUB_SCRAPE_EMPTY",
+        provider: PROVIDER,
+        hostname: location.hostname,
+        page: location.pathname + location.hash,
+        extensionVersion: chrome.runtime.getManifest().version,
+        at: new Date().toISOString(),
+      },
+      () => { void chrome.runtime.lastError; }
+    );
+  }
+
+  async function sendCapture(bills, usage, method) {
     const accounts = extractAccounts(bills);
     const authBlock = capturedAuthToken
       ? {
@@ -408,6 +433,8 @@
 
     const payload = {
       provider: PROVIDER,
+      captureMethod: method || "dom",
+      extensionVersion: chrome.runtime.getManifest().version,
       capturedAt: new Date().toISOString(),
       pageUrl: location.href,
       user: {

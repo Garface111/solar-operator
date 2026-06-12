@@ -145,7 +145,7 @@ body {
 }
 .stat-row:last-child { border-bottom: none; }
 
-.stat-label { color: #71717a; font-size: 12px; }
+.stat-label { color: #52525b; font-size: 12px; }
 .stat-value { font-weight: 500; color: #18181b; font-size: 12px; }
 
 /* ── Primary button — leaf green, rounded-xl, wood ring on hover ────────── */
@@ -171,7 +171,8 @@ body {
 /* ── Footer ──────────────────────────────────────────────────────────────── */
 .footer {
   border-top: 1px solid #e8e2d9;
-  padding: 8px 14px;
+  padding: 9px 14px 10px;
+  background: #fdfcfa;
   display: flex;
   justify-content: space-between;
   align-items: center;

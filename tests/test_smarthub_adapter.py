@@ -309,8 +309,26 @@ def test_parse_extension_payload_vec_backward_compat():
     assert normalized["provider"] == "vec"
 
 
-def test_parse_extension_payload_unknown_host_falls_back_to_vec():
+def test_parse_extension_payload_unknown_code_resolves_via_hostname():
+    # v1.6.2: the page hostname is authoritative. An unknown provider code
+    # with a curated host resolves to that host's code (was: vec masquerade).
     payload = _smarthub_payload(provider="unknownutility")
+    normalized = parse_extension_payload(payload)
+    assert normalized["provider"] == "wec"
+
+
+def test_parse_extension_payload_unknown_host_mints_discovered_code():
+    payload = _smarthub_payload(provider="unknownutility")
+    payload["user"] = {"hostname": "mysterycoop.smarthub.coop"}
+    normalized = parse_extension_payload(payload)
+    assert normalized["provider"] == "sh_mysterycoop"
+    assert normalized["smarthub_discovered"] is True
+
+
+def test_parse_extension_payload_no_hostname_falls_back_to_vec():
+    # Legacy payloads with no usable hostname keep the old fallback.
+    payload = _smarthub_payload(provider="unknownutility")
+    payload["user"] = {}
     normalized = parse_extension_payload(payload)
     assert normalized["provider"] == "vec"
 

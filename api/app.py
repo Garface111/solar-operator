@@ -226,6 +226,61 @@ def extension_heartbeat(authorization: str | None = Header(default=None)):
     return {"ok": True, "at": datetime.utcnow().isoformat()}
 
 
+@app.post("/v1/extension/scrape-miss")
+async def extension_scrape_miss(request: Request, authorization: str | None = Header(default=None)):
+    """Drift radar: the extension reports when ALL capture layers (home-page
+    API, billing-history DOM, usage-explorer) came up empty on a SmartHub
+    billing/usage page. That means a deployment our parsers can't read —
+    exactly the signal we need to fix the parser BEFORE a customer churns.
+
+    Records the sighting on the DiscoveredUtility row (curated hosts get a
+    row minted here too — discovery rows double as drift telemetry) and
+    fires a one-time internal alert per host.
+    """
+    tenant = tenant_from_bearer(authorization)
+    require_not_demo(tenant)
+    body = await request.json()
+    hostname = (body.get("hostname") or "").strip().lower()
+    from .adapters.smarthub import derive_provider_from_host
+    derived = derive_provider_from_host(hostname)
+    if not derived:
+        return {"ok": False, "reason": "not a smarthub host"}
+
+    from .models import DiscoveredUtility
+    from .notify import send_internal_alert
+    with SessionLocal() as db:
+        disc = db.execute(
+            select(DiscoveredUtility).where(DiscoveredUtility.host == hostname)
+        ).scalar_one_or_none()
+        if disc is None:
+            disc = DiscoveredUtility(
+                host=hostname,
+                provider_code=derived["provider"],
+                display_name=derived["name"],
+            )
+            db.add(disc)
+        disc.last_seen_at = now()
+        disc.last_capture_method = "miss"
+        if body.get("extensionVersion"):
+            disc.last_extension_version = str(body["extensionVersion"])[:20]
+        if disc.alerted_at is None:
+            ok = send_internal_alert(
+                f"SmartHub scrape MISS: {hostname}",
+                f"The extension visited a billing/usage page on {hostname} and "
+                "ALL capture layers (API, DOM, usage-explorer) returned 0 rows.\n\n"
+                f"Provider: {derived['provider']}\n"
+                f"Page: {body.get('page')}\n"
+                f"Extension: v{body.get('extensionVersion') or '?'}\n"
+                f"Tenant: {tenant.id}\n\n"
+                "This deployment likely uses a layout our parsers don't know. "
+                "Capture a HAR/screenshot from this host and extend the parser.",
+            )
+            if ok:
+                disc.alerted_at = now()
+        db.commit()
+    return {"ok": True}
+
+
 # ---- helpers ------------------------------------------------------------
 
 def tenant_from_bearer(authorization: str | None) -> Tenant:
@@ -260,6 +315,53 @@ async def sync(request: Request, authorization: str | None = Header(default=None
     )
 
     with SessionLocal() as db:
+        # ── Fleet-learning: record sightings of SmartHub deployments ────
+        # Any *.smarthub.coop capture updates the sighting row for its host;
+        # hosts not yet in the CSV catalog (discovered=True) trigger a
+        # one-time internal alert so we promote them (one CSV line + regen)
+        # and the NEXT operator gets a properly-named, first-class utility.
+        if normalized.get("smarthub_host") and normalized.get("smarthub_discovered"):
+            from .models import DiscoveredUtility
+            from .notify import send_internal_alert
+            host = normalized["smarthub_host"]
+            disc = db.execute(
+                select(DiscoveredUtility).where(DiscoveredUtility.host == host)
+            ).scalar_one_or_none()
+            if disc is None:
+                disc = DiscoveredUtility(
+                    host=host,
+                    provider_code=normalized["provider"],
+                    display_name=normalized.get("smarthub_display_name"),
+                )
+                db.add(disc)
+            disc.last_seen_at = now()
+            disc.capture_count = (disc.capture_count or 0) + 1
+            if normalized.get("capture_method"):
+                disc.last_capture_method = normalized["capture_method"]
+            if normalized.get("extension_version"):
+                disc.last_extension_version = normalized["extension_version"]
+            if disc.alerted_at is None:
+                ok = send_internal_alert(
+                    f"New SmartHub utility discovered: {host}",
+                    f"A capture just landed from {host} (not in the provider catalog).\n\n"
+                    f"Provider code minted: {normalized['provider']}\n"
+                    f"Display name: {normalized.get('smarthub_display_name')}\n"
+                    f"Capture method: {normalized.get('capture_method') or 'unknown'}\n"
+                    f"Extension: v{normalized.get('extension_version') or '?'}\n"
+                    f"Accounts in payload: {len(normalized.get('accounts', []))}\n\n"
+                    "Data is flowing under the discovered code already. To promote:\n"
+                    f"  1. Add a row to api/data/providers/<STATE>.csv with smarthub_host={host}\n"
+                    "  2. python scripts/gen_smarthub_registry_js.py\n"
+                    "  3. python -m scripts.promote_discovered_utility " + host + "\n",
+                )
+                if ok:
+                    disc.alerted_at = now()
+            ctx.add(
+                "utility_discovered",
+                decision=f"unknown SmartHub host {host} → minted {normalized['provider']}",
+            )
+            db.commit()
+
         # store the session
         expires_at = None
         if normalized["auth"].get("apiTokenExpires"):

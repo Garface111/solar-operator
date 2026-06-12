@@ -196,6 +196,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     _handleSync(msg.payload, msg.tokenHash, sendResponse);
     return true; // keep channel open for async sendResponse
   }
+  // v1.6.2: all capture layers struck out on a billing/usage page — report
+  // the deployment to the drift radar (best-effort, fire and forget).
+  if (msg.type === "SMARTHUB_SCRAPE_EMPTY") {
+    (async () => {
+      try {
+        const { tenantKey, endpoint } = await getSettings();
+        if (!tenantKey) return;
+        const base = endpoint.replace(/\/v1\/sync$/, "");
+        await fetch(`${base}/v1/extension/scrape-miss`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${tenantKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(msg),
+        });
+      } catch (_) { /* telemetry is never fatal */ }
+    })();
+    sendResponse({ ok: true });
+    return;
+  }
   // v1.2.0: SPA asks the extension to open the utility portal in a
   // background tab — gives content.js a chance to capture without
   // stealing the operator's focus from solaroperator.org.

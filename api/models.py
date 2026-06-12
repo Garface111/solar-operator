@@ -514,6 +514,37 @@ class VerificationCheck(Base):
     )
 
 
+class DiscoveredUtility(Base):
+    """A SmartHub deployment seen in the wild that is not yet in the curated
+    CSV catalog (api/data/providers/*.csv).
+
+    Rows are minted automatically the first time any tenant's extension
+    captures from an unknown *.smarthub.coop host (provider code "sh_<sub>").
+    This is the fleet-learning loop: first login anywhere = the utility starts
+    working immediately under its discovered code AND we get a signal to
+    promote it to the catalog (one CSV line + registry regen) so the next
+    operator gets a proper name in the UI.
+
+    promoted_code is set when the utility graduates to the catalog; the
+    promotion script backfills UtilityAccount.provider sh_* rows then.
+    """
+    __tablename__ = "discovered_utilities"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    host: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    provider_code: Mapped[str] = mapped_column(String(40), index=True)
+    display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    capture_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Diagnostics from the wild: which capture layer worked (api | dom | usage)
+    # and the last extension version seen — tells us whether new deployments
+    # are drifting away from our parsers.
+    last_capture_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_extension_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    promoted_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class CaptureEvent(Base):
     """One stage in a capture pipeline run (/v1/sync).
 

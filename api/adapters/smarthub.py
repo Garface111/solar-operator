@@ -69,8 +69,58 @@ _ELECTRIC_KEY_FALLBACKS = ("ELEC", "1ELEC", "VELEC", "GELEC")
 
 
 def is_smarthub_provider(provider: str) -> bool:
-    """Return True if the provider code corresponds to a SmartHub utility."""
-    return provider.strip().lower() in ALL_SMARTHUB_PROVIDERS
+    """Return True if the provider code corresponds to a SmartHub utility.
+
+    Discovered codes (``sh_<subdomain>`` — minted by derive_provider_from_host
+    for hosts not yet in the CSV catalog) are SmartHub by construction.
+    """
+    p = provider.strip().lower()
+    return p in ALL_SMARTHUB_PROVIDERS or p.startswith(DISCOVERED_PREFIX)
+
+
+# Discovered-utility provider codes are minted as "sh_<subdomain>" so they are
+# (a) recognizable at a glance in the DB, (b) collision-free with curated CSV
+# codes, and (c) deterministic — the same host always mints the same code, on
+# both the extension and the backend.
+DISCOVERED_PREFIX = "sh_"
+_HOST_SUFFIX = ".smarthub.coop"
+
+
+def derive_provider_from_host(hostname: str) -> dict[str, Any] | None:
+    """Derive a deterministic provider entry for ANY *.smarthub.coop host.
+
+    Known hosts resolve through the CSV-derived registry. Unknown hosts mint
+    a discovered code ("sh_<subdomain>") instead of masquerading as VEC —
+    misattribution was the same bug class as the hardcoded-vec acct_map that
+    silently dropped WEC bills.
+
+    Returns {"provider", "name", "host", "discovered"} or None if the host
+    isn't a smarthub.coop deployment at all.
+    """
+    host = (hostname or "").strip().lower()
+    known = HOST_TO_PROVIDER.get(host)
+    if known:
+        return {
+            "provider": known,
+            "name": PROVIDER_TO_UTILITY[known]["name"],
+            "host": host,
+            "discovered": False,
+        }
+    if not host.endswith(_HOST_SUFFIX):
+        return None
+    sub = host[: -len(_HOST_SUFFIX)]
+    # Sanitize into a DB-safe code: lowercase alnum + underscores, ≤ 37 chars
+    # (provider column is VARCHAR(40), minus the 3-char prefix).
+    code = re.sub(r"[^a-z0-9]+", "_", sub).strip("_")[:37]
+    if not code:
+        return None
+    pretty = sub.replace("-", " ").replace(".", " ").title()
+    return {
+        "provider": f"{DISCOVERED_PREFIX}{code}",
+        "name": f"{pretty} (SmartHub)",
+        "host": host,
+        "discovered": True,
+    }
 
 
 def _base_url(host: str) -> str:
@@ -527,8 +577,18 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
     extension's fetch-intercept) enabling server-side generation pulls.
     """
     provider = (payload.get("provider") or "vec").strip().lower()
-    if provider not in ALL_SMARTHUB_PROVIDERS:
-        # Unrecognized smarthub.coop host — treat as VEC for backward compat
+    # The page hostname is AUTHORITATIVE when present: legacy extensions
+    # (and the registry's old fallback) claim "vec" for any unknown
+    # smarthub.coop host, which misattributes the capture — the same bug
+    # class as the hardcoded-vec acct_map that silently dropped WEC bills.
+    # Unknown hosts mint a deterministic discovered code ("sh_<subdomain>").
+    hostname = ((payload.get("user") or {}).get("hostname") or "").strip()
+    derived = derive_provider_from_host(hostname) if hostname else None
+    if derived:
+        provider = derived["provider"]
+    elif provider not in ALL_SMARTHUB_PROVIDERS and not provider.startswith(DISCOVERED_PREFIX):
+        # No usable hostname AND unrecognized code — last-resort VEC
+        # (pre-hostname extension payloads only).
         provider = "vec"
 
     raw_accounts = payload.get("accounts") or []
@@ -584,6 +644,12 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "provider": provider,
+        # Fleet-learning: set for any *.smarthub.coop host. discovered=True
+        # means the host isn't in the CSV catalog yet — /v1/sync upserts a
+        # DiscoveredUtility row and alerts us to promote it.
+        "smarthub_host": derived["host"] if derived else None,
+        "smarthub_discovered": bool(derived and derived["discovered"]),
+        "smarthub_display_name": derived["name"] if derived else None,
         "captured_at": payload.get("capturedAt"),
         "user": payload.get("user") or {},
         # Auth block: may contain apiToken if extension intercepted the login response
@@ -591,4 +657,8 @@ def parse_extension_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "accounts": accounts,
         "bills_raw": payload.get("bills") or [],
         "usage_raw": payload.get("usage") or [],
+        # Telemetry (v1.6.2+): which capture layer produced this payload
+        # (api | dom | usage) + extension version — drift radar for parsers.
+        "capture_method": (payload.get("captureMethod") or "").strip().lower() or None,
+        "extension_version": (payload.get("extensionVersion") or "").strip() or None,
     }
