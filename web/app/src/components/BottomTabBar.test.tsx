@@ -20,14 +20,19 @@ describe("BottomTabBar", () => {
     ).toBeTruthy();
   });
 
-  it("renders exactly three tab links", () => {
+  it("renders exactly four tab links", () => {
     renderWithRouter();
-    expect(screen.getAllByRole("link")).toHaveLength(3);
+    expect(screen.getAllByRole("link")).toHaveLength(4);
   });
 
   it("renders Clients tab", () => {
     renderWithRouter();
     expect(screen.getByTestId("bottom-tab-clients")).toBeTruthy();
+  });
+
+  it("renders Arrays tab", () => {
+    renderWithRouter();
+    expect(screen.getByTestId("bottom-tab-arrays")).toBeTruthy();
   });
 
   it("renders Reports tab", () => {
@@ -40,9 +45,10 @@ describe("BottomTabBar", () => {
     expect(screen.getByTestId("bottom-tab-account")).toBeTruthy();
   });
 
-  it("all three tab labels are visible", () => {
+  it("all tab labels are visible", () => {
     renderWithRouter();
     expect(screen.getByText("Clients")).toBeTruthy();
+    expect(screen.getByText("Arrays")).toBeTruthy();
     expect(screen.getByText("Reports")).toBeTruthy();
     expect(screen.getByText("Account")).toBeTruthy();
   });

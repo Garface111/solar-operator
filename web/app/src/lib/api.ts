@@ -8,6 +8,11 @@
 // On a 401 we clear the session and broadcast a window event so the app shell
 // can bounce to the login screen from anywhere.
 
+import type {
+  ArrayOwnersOverview,
+  ConnectSolarEdgeResult,
+} from "./arrayOwners";
+
 const SESSION_KEY = "so_session";
 export const UNAUTHORIZED_EVENT = "so-unauthorized";
 
@@ -1730,4 +1735,27 @@ export async function fetchVerificationSoWorkbook(
     throw new Error(msg);
   }
   return res.arrayBuffer();
+}
+
+// ─── array owners (EnergyAgent dashboard) ──────────────────────────────────
+// See docs/plans/ARRAY_OWNERS_API_CONTRACT.md and lib/arrayOwners.ts.
+
+/** Live value/health overview across every array the tenant owns. Polled by
+ *  the Arrays screen; cheap enough to hit every 60s. */
+export async function arrayOwnersOverview(): Promise<ArrayOwnersOverview> {
+  return request<ArrayOwnersOverview>("/v1/array-owners/overview");
+}
+
+/** Connect a SolarEdge inverter to an array. The backend validates the key
+ *  with a live SolarEdge overview call before saving — a bad key/site comes
+ *  back as a 400 (surfaced here as a thrown Error with the server's detail). */
+export async function connectSolarEdge(
+  arrayId: number,
+  apiKey: string,
+  siteId: number,
+): Promise<ConnectSolarEdgeResult> {
+  return request<ConnectSolarEdgeResult>(
+    `/v1/array-owners/arrays/${arrayId}/solaredge`,
+    { body: { api_key: apiKey, site_id: siteId } },
+  );
 }

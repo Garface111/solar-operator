@@ -18,6 +18,7 @@ const VerifyAccuracy = lazyWithRetry(() => import("./screens/VerifyAccuracy"));
 
 const AccountTab = lazyWithRetry(() => import("./screens/AccountTab"));
 const ReportsTab = lazyWithRetry(() => import("./screens/ReportsTab"));
+const ArrayOverview = lazyWithRetry(() => import("./screens/ArrayOverview"));
 import { useToast } from "./ui/Toast";
 import {
   getSession,
@@ -167,6 +168,14 @@ function AuthGate() {
           }
         />
         <Route path="/clients" element={<ClientsTab />} />
+        <Route
+          path="/arrays"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <ArrayOverview />
+            </Suspense>
+          }
+        />
         {/* Deep link that auto-expands a single client. */}
         <Route path="/clients/:clientId" element={<ClientsTab />} />
         <Route
