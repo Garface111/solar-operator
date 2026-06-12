@@ -4,8 +4,9 @@
 <meta charset="UTF-8">
 <title>Solar Operator — Settings</title>
 <style>
-  /* solarpunk palette: emerald-700 #064e3b | wood-300 #e6b470 | cream #faf8f5
-     cream-border #e8e2d9 | zinc-900 #18181b | zinc-500 #71717a */
+  /* solarpunk palette (R1 lock Jun 6 '26): primary-600 #10b981 | primary-700 #059669
+     primary-900 #065f46 | wood-300 #e6b470 | cream #faf8f5 | cream-border #e8e2d9
+     zinc-900 #18181b | zinc-500 #71717a */
   body {
     max-width: 520px;
     margin: 48px auto;
@@ -19,9 +20,9 @@
     background: #fff;
     border-radius: 12px;
     padding: 36px 40px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    box-shadow: 0 2px 8px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.04);
   }
-  h1 { color: #18181b; font-size: 22px; margin: 0 0 4px 0; }
+  h1 { color: #065f46; font-size: 22px; margin: 0 0 4px 0; }
   .sub {
     color: #71717a; font-size: 13px;
     padding-bottom: 20px; margin-bottom: 8px;
@@ -37,26 +38,26 @@
     border: 1px solid #e8e2d9; border-radius: 6px; font-size: 14px;
     font-family: ui-monospace, Menlo, Consolas, monospace;
   }
-  input[type="text"]:focus { outline: 2px solid #064e3b; border-color: #064e3b; }
+  input[type="text"]:focus { outline: 2px solid #34d399; border-color: #10b981; }
   .help { font-size: 12.5px; color: #71717a; margin-top: 6px; }
   button {
-    background: #064e3b; color: #fff; border: 0; border-radius: 6px;
+    background: #10b981; color: #fff; border: 0; border-radius: 10px;
     padding: 10px 20px; font-size: 14px; font-weight: 600;
     cursor: pointer; margin-top: 20px;
   }
-  button:hover { background: #053429; }
+  button:hover { background: #059669; box-shadow: 0 0 0 2px #e6b470; }
   .saved {
-    margin-top: 14px; padding: 10px 14px; background: #ecf5f0;
-    border-left: 3px solid #064e3b; color: #064e3b; border-radius: 4px;
+    margin-top: 14px; padding: 10px 14px; background: #ecfdf5;
+    border-left: 3px solid #10b981; color: #065f46; border-radius: 4px;
     font-size: 13px; display: none;
   }
   .return-setup {
     display: none; margin-top: 16px; text-align: center;
-    background: #064e3b; color: #fff; text-decoration: none;
-    padding: 11px 20px; border-radius: 6px;
+    background: #10b981; color: #fff; text-decoration: none;
+    padding: 11px 20px; border-radius: 10px;
     font-size: 14px; font-weight: 600;
   }
-  .return-setup:hover { background: #053429; }
+  .return-setup:hover { background: #059669; }
   .status-box {
     margin-top: 28px; padding: 16px 18px; border-radius: 8px;
     background: #faf8f5; border: 1px solid #e8e2d9;

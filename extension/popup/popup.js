@@ -46,9 +46,28 @@
     errorBlockEl.classList.remove("hidden");
   }
 
-  // Retry: open GMP so the user can trigger a fresh capture.
+  // ── Utility-aware portal link ─────────────────────────────────────────────
+  // The footer link + retry button open the LAST-CAPTURED utility's portal,
+  // not hardcoded GMP — a WEC/VEC operator should bounce back to SmartHub.
+  // smarthub_registry.js (loaded before this script) provides the host map.
+  const lastProvider = (lp && lp.provider) || "gmp";
+  let portalUrl = "https://greenmountainpower.com/";
+  let portalName = "GMP";
+  if (lastProvider !== "gmp" && window.SMARTHUB_REGISTRY) {
+    for (const [host, entry] of Object.entries(window.SMARTHUB_REGISTRY)) {
+      if (entry.provider === lastProvider) {
+        portalUrl = `https://${host}/`;
+        // Short label: first word of the utility name, or the code uppercased
+        portalName = (entry.name || lastProvider).split(" ")[0];
+        if (portalName.length <= 4) portalName = lastProvider.toUpperCase();
+        break;
+      }
+    }
+  }
+
+  // Retry: open the operator's utility portal to trigger a fresh capture.
   retryBtnEl.addEventListener("click", () => {
-    chrome.tabs.create({ url: "https://greenmountainpower.com/" });
+    chrome.tabs.create({ url: portalUrl });
     window.close();
   });
 
@@ -68,7 +87,9 @@
 
   // ── Buttons ───────────────────────────────────────────────────────────────
   document.getElementById("open-dashboard").addEventListener("click", () => {
-    chrome.tabs.create({ url: "https://solaroperator.org/app" });
+    // Dashboard SPA lives at solaroperator.org/accounts (Netlify 200-proxy to
+    // Railway /app/ — see solaroperator-site/_redirects). Plain /app 404s.
+    chrome.tabs.create({ url: "https://solaroperator.org/accounts" });
   });
 
   document.getElementById("open-options").addEventListener("click", (e) => {
@@ -76,9 +97,11 @@
     chrome.runtime.openOptionsPage();
   });
 
-  document.getElementById("open-gmp").addEventListener("click", (e) => {
+  const openPortalEl = document.getElementById("open-gmp");
+  openPortalEl.textContent = `Open ${portalName}`;
+  openPortalEl.addEventListener("click", (e) => {
     e.preventDefault();
-    chrome.tabs.create({ url: "https://greenmountainpower.com/" });
+    chrome.tabs.create({ url: portalUrl });
   });
 
   // ── Live toast on SO_CAPTURE_LANDED (while popup is open) ─────────────────

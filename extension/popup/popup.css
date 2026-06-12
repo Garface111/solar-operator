@@ -1,6 +1,8 @@
-/* popup.css — Solar Operator extension popup v1.5.1 (solarpunk palette)
-   emerald-700: #064e3b | wood-300: #e6b470 | cream: #faf8f5
-   cream-border: #e8e2d9 | zinc-900: #18181b | zinc-500: #71717a */
+/* popup.css — Solar Operator extension popup v1.6.1 (solarpunk palette, R1 lock Jun 6 '26)
+   primary-600: #10b981 | primary-700: #059669 | primary-500/leaf: #34d399
+   primary-900: #065f46 | wood-300: #e6b470 | wood-100: #faedd8
+   cream: #faf8f5 | cream-border: #e8e2d9 | zinc-900: #18181b | zinc-500: #71717a
+   Cards: white, radius 12px, soft shadow — mirrors web/app tokens.css */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -12,11 +14,11 @@ body {
   background: #faf8f5;
 }
 
-/* ── Header ─────────────────────────────────────────────────────────────── */
+/* ── Header — warm cream wordmark bar, wood accent rule ─────────────────── */
 .header {
-  background: #064e3b;
-  color: #fff;
-  padding: 11px 14px 10px;
+  background: #faf8f5;
+  color: #065f46;
+  padding: 12px 14px 10px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -25,9 +27,24 @@ body {
 
 .header-title {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 650;
   letter-spacing: 0.2px;
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Little leaf-green sun before the wordmark */
+.header-title::before {
+  content: "";
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 0 3px #d1fae5;
+  flex-shrink: 0;
 }
 
 /* ── Status pill ─────────────────────────────────────────────────────────── */
@@ -51,7 +68,7 @@ body {
   flex-shrink: 0;
 }
 .pill-connected  { background: #d1fae5; color: #065f46; }
-.pill-connected::before  { background: #047857; }
+.pill-connected::before  { background: #10b981; }
 .pill-not-paired { background: #faedd8; color: #8c4e1c; }
 .pill-not-paired::before { background: #d4914a; }
 .pill-offline    { background: #fee2e2; color: #991b1b; }
@@ -67,10 +84,10 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: #d1fae5;
+  background: #ecfdf5;
   color: #065f46;
   border: 1px solid #a7f3d0;
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 7px 10px;
   font-size: 12px;
   font-weight: 500;
@@ -84,7 +101,7 @@ body {
 .error-block {
   background: #fef2f2;
   border: 1px solid #fca5a5;
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 8px 10px;
   font-size: 12px;
   color: #991b1b;
@@ -100,7 +117,7 @@ body {
   background: #991b1b;
   color: #fff;
   border: 0;
-  border-radius: 4px;
+  border-radius: 8px;
   padding: 4px 8px;
   font-size: 11px;
   cursor: pointer;
@@ -109,14 +126,21 @@ body {
 }
 .retry-btn:hover { background: #7f1d1d; }
 
-/* ── Stats ───────────────────────────────────────────────────────────────── */
-.stats { margin-bottom: 12px; }
+/* ── Stats — white card, soft shadow (matches dashboard cards) ──────────── */
+.stats {
+  margin-bottom: 12px;
+  background: #fff;
+  border: 1px solid #e8e2d9;
+  border-radius: 12px;
+  padding: 4px 12px;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.07), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+}
 
 .stat-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 6px 0;
+  padding: 8px 0;
   border-bottom: 1px solid #e8e2d9;
 }
 .stat-row:last-child { border-bottom: none; }
@@ -124,20 +148,25 @@ body {
 .stat-label { color: #71717a; font-size: 12px; }
 .stat-value { font-weight: 500; color: #18181b; font-size: 12px; }
 
-/* ── Primary button ──────────────────────────────────────────────────────── */
+/* ── Primary button — leaf green, rounded-xl, wood ring on hover ────────── */
 .btn-primary {
   width: 100%;
-  background: #064e3b;
+  background: #10b981;
   color: #fff;
   border: 0;
-  border-radius: 6px;
-  padding: 9px 12px;
+  border-radius: 12px;
+  padding: 10px 12px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   letter-spacing: 0.1px;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.07), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
 }
-.btn-primary:hover { background: #053429; }
+.btn-primary:hover {
+  background: #059669;
+  box-shadow: 0 0 0 2px #e6b470, 0 2px 8px 0 rgb(0 0 0 / 0.06);
+}
 
 /* ── Footer ──────────────────────────────────────────────────────────────── */
 .footer {
@@ -149,5 +178,5 @@ body {
   font-size: 11.5px;
 }
 
-a { color: #064e3b; text-decoration: none; }
-a:hover { text-decoration: underline; }
+a { color: #059669; text-decoration: none; font-weight: 500; }
+a:hover { text-decoration: underline; color: #047857; }
