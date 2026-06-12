@@ -17,39 +17,41 @@ avoid a circular import — api.app imports many of this module's siblings).
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Optional
 
-import httpx
+import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.get
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
-from .adapters.solaredge import (
-    SOLAREDGE_API_BASE,
-    SolarEdgeAuthError,
-    SolarEdgeError,
-)
+from . import inverters
 from .db import SessionLocal
-from .models import Array, DailyGeneration, Tenant, UtilityAccount, now
+from .inverters import VENDORS, InverterAuthError, InverterError
+from .models import Array, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_TIMEOUT = 20.0  # seconds
-
 # An array is "stale" once its newest DailyGeneration row is older than this.
 STALE_DAYS = 3
 
-# ── live SolarEdge overview cache ─────────────────────────────────────────────
-# SolarEdge allows ~300 req/day per token, so we cache the /overview response
-# per site for 5 minutes. Keyed by site_id -> (fetched_at, overview_dict).
+# ── live power cache ──────────────────────────────────────────────────────────
+# Vendor live reads are rate-limited (SolarEdge ~300 req/day per token), so we
+# cache each connection's live result for 5 minutes. Keyed by a stable
+# (vendor, config) signature -> (fetched_at, live_dict|None).
 _CACHE_TTL = timedelta(minutes=5)
-_overview_cache: dict[int, tuple[datetime, dict]] = {}
+_overview_cache: dict[str, tuple[datetime, Optional[dict]]] = {}
+
+
+def _cache_key(vendor: str, config: dict) -> str:
+    return vendor + ":" + json.dumps(config, sort_keys=True, default=str)
 
 
 def _tenant_from_bearer(authorization: str | None) -> Tenant:
@@ -69,67 +71,70 @@ def _tenant_from_bearer(authorization: str | None) -> Tenant:
     return tenant_from_bearer(authorization)
 
 
-# ── SolarEdge HTTP helpers (all network goes through this module's httpx) ──────
+# ── inverter connection resolution ────────────────────────────────────────────
 
-def _fetch_overview(api_key: str, site_id: int, *, use_cache: bool = True) -> dict:
-    """Return the SolarEdge site `overview` block.
+def _resolve_connection(db, arr: Array):
+    """Return the array's inverter connection, or None.
 
-    Raises SolarEdgeAuthError on 401/403, SolarEdgeError on any other failure.
-    Successful responses are cached per site for _CACHE_TTL.
+    Prefers a real InverterConnection row. Falls back to a virtual
+    {vendor: "solaredge"} connection synthesized from the legacy
+    Array.solaredge_api_key/solaredge_site_id columns when no row exists, so
+    arrays connected before the InverterConnection table keep working.
     """
-    if use_cache:
-        cached = _overview_cache.get(site_id)
-        if cached is not None and (now() - cached[0]) < _CACHE_TTL:
-            return cached[1]
-
-    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/overview"
-    try:
-        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
-    except httpx.RequestError as exc:
-        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
-
-    if resp.status_code in (401, 403):
-        raise SolarEdgeAuthError(
-            f"SolarEdge API key rejected for site {site_id} (401/403). "
-            "Verify the key and site ID are correct."
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is not None:
+        return conn
+    if arr.solaredge_api_key and arr.solaredge_site_id:
+        return SimpleNamespace(
+            vendor="solaredge",
+            config={"api_key": arr.solaredge_api_key, "site_id": arr.solaredge_site_id},
+            status="ok",
         )
-    if not resp.is_success:
-        raise SolarEdgeError(
-            f"SolarEdge /site/{site_id}/overview returned {resp.status_code}: "
-            f"{resp.text[:200]}"
-        )
-
-    try:
-        body = resp.json()
-    except Exception as exc:  # noqa: BLE001 — any decode failure is a SolarEdge error
-        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
-
-    overview = body.get("overview", {}) or {}
-    _overview_cache[site_id] = (now(), overview)
-    return overview
+    return None
 
 
-def _fetch_site_meta(api_key: str, site_id: int) -> dict:
-    """Best-effort site name + peak kW for the connect confirmation screen.
+def _cached_fetch_live(vendor: str, config: dict) -> Optional[dict]:
+    """Vendor fetch_live with a short-TTL cache. Raises InverterError on failure."""
+    key = _cache_key(vendor, config)
+    cached = _overview_cache.get(key)
+    if cached is not None and (now() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    live = inverters.fetch_live(vendor, config)
+    _overview_cache[key] = (now(), live)
+    return live
 
-    Returns {"name": str | None, "peak_kw": float | None}. Never raises — the
-    key is already validated by the time we call this, so display metadata is
-    non-critical.
+
+def _connect_inverter(db, arr: Array, vendor: str, config: dict) -> dict:
+    """Validate `config` against the vendor's live API, then upsert the
+    connection. Raises InverterError/InverterAuthError on bad credentials —
+    nothing is persisted in that case (validate runs first).
+
+    Returns the vendor's validate() result (includes at least "site_name").
     """
-    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/details"
-    try:
-        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
-        if not resp.is_success:
-            return {"name": None, "peak_kw": None}
-        details = resp.json().get("details", {}) or {}
-    except (httpx.RequestError, ValueError, KeyError):
-        return {"name": None, "peak_kw": None}
+    result = inverters.validate(vendor, config)  # raises before any write
 
-    peak = details.get("peakPower")
-    return {
-        "name": details.get("name") or None,
-        "peak_kw": float(peak) if peak is not None else None,
-    }
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is None:
+        conn = InverterConnection(array_id=arr.id, vendor=vendor, config=config, status="ok")
+        db.add(conn)
+    else:
+        conn.vendor = vendor
+        conn.config = config
+        conn.status = "ok"
+        conn.last_error = None
+
+    # Backward compat: mirror SolarEdge creds onto the legacy columns so the
+    # daily-pull virtual-connection path and any legacy readers keep working.
+    if vendor == "solaredge":
+        arr.solaredge_api_key = str(config.get("api_key") or "").strip()
+        arr.solaredge_site_id = int(config["site_id"])
+
+    db.commit()
+    return result
 
 
 # ── aggregation helpers ───────────────────────────────────────────────────────
@@ -254,27 +259,30 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 ).where(DailyGeneration.array_id == arr.id)
             ).one()
 
-            has_live_source = bool(arr.solaredge_api_key and arr.solaredge_site_id)
+            conn = _resolve_connection(db, arr)
+            module = VENDORS.get(conn.vendor) if conn is not None else None
+            has_live_source = bool(
+                module is not None and getattr(module, "SUPPORTS_LIVE", False)
+            )
 
             live: dict | None = None
             overview_ok: bool | None = None
             if has_live_source:
                 try:
-                    ov = _fetch_overview(arr.solaredge_api_key, arr.solaredge_site_id)
-                    raw_power = (ov.get("currentPower") or {}).get("power")
-                    power_w = float(raw_power) if raw_power is not None else None
+                    live_raw = _cached_fetch_live(conn.vendor, conn.config)
+                    power_w = (live_raw or {}).get("current_power_w")
                     live = {
-                        "source": "solaredge",
+                        "source": conn.vendor,
                         "current_power_w": power_w,
-                        "as_of": ov.get("lastUpdateTime"),
+                        "as_of": (live_raw or {}).get("as_of"),
                     }
                     overview_ok = True
                     if power_w is not None:
                         tot_power += power_w
-                except SolarEdgeError:
+                except InverterError:
                     overview_ok = False
                     live = {
-                        "source": "solaredge",
+                        "source": conn.vendor,
                         "current_power_w": None,
                         "as_of": None,
                     }
@@ -318,6 +326,55 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
     }
 
 
+@router.get("/v1/array-owners/inverter-vendors")
+def inverter_vendors(authorization: str | None = Header(default=None)) -> list[dict]:
+    """The connect-form spec the dashboard renders: one entry per vendor.
+
+    Each entry: {code, label, fields:[{name,label,secret}], available, note}.
+    Chint comes back available=false with its manual-CSV note.
+    """
+    _tenant_from_bearer(authorization)
+    return inverters.vendor_catalog()
+
+
+class InverterConnectBody(BaseModel):
+    vendor: str
+    config: dict
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/inverter")
+def connect_inverter(
+    array_id: int,
+    body: InverterConnectBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Connect an inverter source of any vendor to an array.
+
+    Dispatches validate() for the vendor; on success upserts the
+    InverterConnection (status="ok"). Credential/validation errors return 400
+    and persist nothing.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    vendor = (body.vendor or "").strip().lower()
+    if vendor not in VENDORS:
+        raise HTTPException(400, f"Unknown inverter vendor: {vendor!r}")
+
+    with SessionLocal() as db:
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != tenant.id:
+            raise HTTPException(404, "Array not found")
+
+        try:
+            result = _connect_inverter(db, arr, vendor, dict(body.config or {}))
+        except InverterAuthError as exc:
+            raise HTTPException(400, str(exc))
+        except InverterError as exc:
+            raise HTTPException(400, str(exc))
+
+    return {"ok": True, "site_name": result.get("site_name")}
+
+
 class SolarEdgeConnectBody(BaseModel):
     api_key: str
     site_id: int
@@ -329,10 +386,12 @@ def connect_solaredge(
     body: SolarEdgeConnectBody,
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """Validate a SolarEdge key against a live overview call, then save it.
+    """Legacy SolarEdge connect — thin shim over the inverter framework.
 
-    A rejected key (401/403) or unreachable site returns 400 and persists
-    nothing.
+    Kept for backward compat (existing frontend + tests). Forwards to the
+    vendor-agnostic connect path and preserves the original response shape
+    (site_name + peak_power_kw + site_id). A rejected key (401/403) or
+    unreachable site returns 400 and persists nothing.
     """
     tenant = _tenant_from_bearer(authorization)
 
@@ -340,28 +399,23 @@ def connect_solaredge(
     if not api_key:
         raise HTTPException(400, "api_key is required")
 
+    config = {"api_key": api_key, "site_id": body.site_id}
+
     with SessionLocal() as db:
         arr = db.get(Array, array_id)
         if arr is None or arr.tenant_id != tenant.id:
             raise HTTPException(404, "Array not found")
 
-        # Validate before saving — fresh call, never the cache.
         try:
-            _fetch_overview(api_key, body.site_id, use_cache=False)
-        except SolarEdgeAuthError as exc:
+            result = _connect_inverter(db, arr, "solaredge", config)
+        except InverterAuthError as exc:
             raise HTTPException(400, str(exc))
-        except SolarEdgeError as exc:
+        except InverterError as exc:
             raise HTTPException(400, f"SolarEdge error: {exc}")
-
-        meta = _fetch_site_meta(api_key, body.site_id)
-
-        arr.solaredge_api_key = api_key
-        arr.solaredge_site_id = body.site_id
-        db.commit()
 
     return {
         "ok": True,
-        "site_name": meta["name"],
-        "peak_power_kw": meta["peak_kw"],
+        "site_name": result.get("site_name"),
+        "peak_power_kw": result.get("peak_power_kw"),
         "site_id": body.site_id,
     }

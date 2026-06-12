@@ -89,6 +89,38 @@ def fetch_daily_energy(
     return results
 
 
+def fetch_overview(api_key: str, site_id: int) -> dict:
+    """Return the SolarEdge site `overview` block (current power, last update).
+
+    Raises SolarEdgeAuthError on 401/403, SolarEdgeError on any other failure.
+    The inverter framework's solaredge.fetch_live() wraps this; array_owners
+    keeps its own short-TTL cache around it to stay inside the 300 req/day cap.
+    """
+    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/overview"
+    try:
+        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
+    except httpx.RequestError as exc:
+        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
+
+    if resp.status_code in (401, 403):
+        raise SolarEdgeAuthError(
+            f"SolarEdge API key rejected for site {site_id} (401/403). "
+            "Verify the key and site ID are correct."
+        )
+    if not resp.is_success:
+        raise SolarEdgeError(
+            f"SolarEdge /site/{site_id}/overview returned {resp.status_code}: "
+            f"{resp.text[:200]}"
+        )
+
+    try:
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — any decode failure is a SolarEdge error
+        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
+
+    return body.get("overview", {}) or {}
+
+
 def list_sites(api_key: str) -> list[dict]:
     """For an Account-level API key, list all sites the operator can read.
 

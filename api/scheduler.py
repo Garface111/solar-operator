@@ -446,29 +446,30 @@ def start():
         CronTrigger(hour=3, minute=15),
         id="synthetic_gmp_monitor", replace_existing=True,
     )
-    # Daily at 03:00 UTC: pull SolarEdge generation for all connected arrays.
-    # Rate-limit: 300 req/day per account token; N arrays = N requests, well inside.
-    # Errors per array are logged but don't crash the scheduler.
+    # Daily at 03:00 UTC: pull daily generation for ALL inverter connections
+    # (every vendor), iterating InverterConnection rows + legacy solaredge arrays.
+    # Rate-limit: 300 req/day per SolarEdge token; N arrays = N requests, well
+    # inside. Errors per connection are logged but don't crash the scheduler.
     scheduler.add_job(
-        _run_solaredge_pull,
+        _run_inverter_pull,
         CronTrigger(hour=3, minute=0),
-        id="solaredge_daily_pull", replace_existing=True,
+        id="inverter_daily_pull", replace_existing=True,
     )
     scheduler.start()
 
 
-def _run_solaredge_pull() -> None:
-    """Pull SolarEdge daily generation for all arrays with api keys configured."""
+def _run_inverter_pull() -> None:
+    """Pull daily generation for every inverter connection (all vendors)."""
     try:
-        from .jobs.solaredge_pull import pull_all_solaredge_arrays
-        result = pull_all_solaredge_arrays()
+        from .jobs.inverter_pull import pull_all_inverters
+        result = pull_all_inverters()
         logger.info(
-            "solaredge_daily_pull: processed=%d", result.get("arrays_processed", 0)
+            "inverter_daily_pull: processed=%d", result.get("connections_processed", 0)
         )
     except Exception as exc:
         send_internal_alert(
-            "SolarEdge daily pull: unhandled exception",
-            f"The SolarEdge daily pull job raised an unexpected error:\n{exc}",
+            "Inverter daily pull: unhandled exception",
+            f"The inverter daily pull job raised an unexpected error:\n{exc}",
         )
 
 
