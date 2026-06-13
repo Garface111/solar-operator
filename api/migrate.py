@@ -41,6 +41,7 @@ def main():
             ("report_frequency",       "ALTER TABLE tenants ADD COLUMN report_frequency VARCHAR(16) DEFAULT 'quarterly'"),
             ("last_pull_at",           "ALTER TABLE tenants ADD COLUMN last_pull_at TIMESTAMP"),
             ("last_delivery_at",       "ALTER TABLE tenants ADD COLUMN last_delivery_at TIMESTAMP"),
+            ("product",                "ALTER TABLE tenants ADD COLUMN product VARCHAR(32) DEFAULT 'nepool' NOT NULL"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):

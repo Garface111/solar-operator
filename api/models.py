@@ -46,6 +46,14 @@ class Tenant(Base):
     contact_email: Mapped[str] = mapped_column(String(200), index=True)
     tenant_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # sol_live_...
     plan: Mapped[str] = mapped_column(String(32), default="standard")  # standard | comped | legacy_* | demo
+    # Which EnergyAgent product this tenant pays for — drives which Stripe price
+    # their subscription uses (see stripe_helpers.array_price_id_for_product).
+    #   "nepool" → NEPOOL Operator verifier ($15/array graduated + $250 setup)
+    #   "array_operator" → Array Operator owner app (1st array free, $9/$8/$6.50)
+    # Default "nepool" so every existing tenant is unchanged.
+    product: Mapped[str] = mapped_column(
+        String(32), default="nepool", server_default="nepool", nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
