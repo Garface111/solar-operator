@@ -154,6 +154,10 @@ class StartRequest(BaseModel):
     company: Optional[str] = Field(None, max_length=200)
     password: Optional[str] = None
     array_count: Optional[int] = Field(None, ge=1)
+    # Which EnergyAgent product this signup is for. Defaults to the NEPOOL
+    # verifier; the Array Operator owner site posts "array_operator" so the
+    # tenant bills on the owner price. Same 14-day trial either way.
+    product: Optional[str] = Field("nepool", pattern="^(nepool|array_operator)$")
 
 
 class StartResponse(BaseModel):
@@ -240,6 +244,7 @@ def _line_items(quantity: int = 1) -> list[dict]:
 def _create_trial_tenant(
     *, email: str, full_name: str, company: Optional[str],
     password: Optional[str], array_count: Optional[int],
+    product: str = "nepool",
 ) -> tuple[str, str]:
     """Create a live, trialing tenant — no card, no Stripe call.
 
@@ -276,6 +281,7 @@ def _create_trial_tenant(
             operator_name=full_name.strip()[:120],
             company_name=(company or full_name).strip()[:200],
             tenant_key=tenant_key, plan="standard", active=True, created_at=now(),
+            product=product,
             subscription_status="trialing",
             trial_ends_at=now() + timedelta(days=14),
             onboarding_token=onboarding_token,
@@ -311,11 +317,13 @@ def start(req: StartRequest):
     onboarding_token, tenant_id = _create_trial_tenant(
         email=req.email, full_name=req.full_name, company=req.company,
         password=req.password, array_count=req.array_count,
+        product=req.product or "nepool",
     )
     send_internal_alert(
         "🌞 New trial started (no card)",
         f"Tenant {tenant_id} ({req.email.lower().strip()}) started a 14-day "
-        f"trial. No card on file. Array estimate: {req.array_count}."
+        f"trial. Product: {req.product or 'nepool'}. No card on file. "
+        f"Array estimate: {req.array_count}."
     )
     return StartResponse(onboarding_token=onboarding_token, tenant_id=tenant_id)
 

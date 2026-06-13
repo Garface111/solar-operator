@@ -127,6 +127,36 @@ def test_start_creates_trialing_tenant_no_stripe(client, mocks, monkeypatch):
         assert t.stripe_payment_method_id is None
         assert t.onboarding_array_estimate == 7
         assert t.contact_email == "start@example.com"
+        # Default product is the NEPOOL verifier.
+        assert t.product == "nepool"
+
+
+def test_start_array_operator_product_same_trial(client, mocks, monkeypatch):
+    """An Array Operator owner signup gets product='array_operator' and the
+    IDENTICAL 14-day no-card trial (trial is product-agnostic)."""
+    def _boom(**kwargs):
+        raise AssertionError("start must not call Stripe Checkout")
+    monkeypatch.setattr(onboarding.stripe.checkout.Session, "create", _boom)
+
+    resp = client.post("/v1/onboarding/start", json={
+        "email": "owner@example.com",
+        "full_name": "Olive Owner",
+        "company": "Owner Arrays",
+        "array_count": 3,
+        "product": "array_operator",
+    })
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["onboarding_token"]
+
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.onboarding_token == token)
+        ).scalar_one()
+        assert t.product == "array_operator"
+        # Same trial mechanics as NEPOOL — no card, trialing, 14-day clock.
+        assert t.subscription_status == "trialing"
+        assert t.trial_ends_at is not None
+        assert t.stripe_payment_method_id is None
 
 
 # ─── (a) checkout shim now creates a live trial (no card) ────────────────
