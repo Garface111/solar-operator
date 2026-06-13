@@ -1,6 +1,7 @@
 // so_bridge.js — page ↔ extension bridge for the EnergyAgent SPA.
 //
-// Runs on solaroperator.org + the Railway origin. The SPA cannot call
+// Runs on nepooloperator.com (+ solaroperator.org during transition) and the Railway
+// origin. The SPA cannot call
 // chrome.* directly (no chrome.* in page context), so it window.postMessage's
 // intents and we forward via chrome.runtime; broadcasts coming back from
 // background.js are reposted to the page so React effects can react live.

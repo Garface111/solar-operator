@@ -10,7 +10,10 @@
 // v1.1.0: added VEC / NISC SmartHub support (VEC_DATA_CAPTURED)
 // v1.0.2: primary endpoint on api.solaroperator.org with Railway fallback
 // during the CNAME transition window.
-const PROD_ENDPOINT = "https://api.solaroperator.org/v1/sync";
+// v1.7.1: primary endpoint moved to nepooloperator.com (apex proxies /v1/* -> Railway,
+// same-origin with the dashboard). Railway public domain kept as fallback. The old
+// api.solaroperator.org never resolved, so traffic was running on the fallback anyway.
+const PROD_ENDPOINT = "https://nepooloperator.com/v1/sync";
 const FALLBACK_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
 const STORAGE_KEYS = {
   ENDPOINT: "api_endpoint",
@@ -22,10 +25,14 @@ const STORAGE_KEYS = {
   CAPTURES_TODAY: "captures_today",      // v1.4.0 — { date: "YYYY-MM-DD", count: N }
 };
 
-// v1.3.0: broadcast a payload to every open solaroperator.org tab so the
+// v1.3.0: broadcast a payload to every open dashboard tab so the
 // SPA can react without polling. The so_bridge.js content script picks
 // these up via chrome.runtime.onMessage and re-posts to its window.
+// v1.7.1: nepooloperator.com is now the primary dashboard host; solaroperator.org
+// kept during the transition so in-flight users aren't cut off.
 const SO_TAB_URLS = [
+  "https://nepooloperator.com/*",
+  "https://*.nepooloperator.com/*",
   "https://solaroperator.org/*",
   "https://*.solaroperator.org/*",
   "https://web-production-49c83.up.railway.app/*",
