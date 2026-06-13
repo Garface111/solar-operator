@@ -1,8 +1,14 @@
 # Array Operator — Billing (handoff / go-live runbook)
 
-Status: **BUILT, NOT LIVE.** Sits on branch `feat/array-operator-billing`.
-Nothing pushed, nothing deployed, no Stripe price created. One command from live
-once Ford signs off on the price.
+Status: **LIVE (Jun 13 2026).** Option B is the live owner price; signups via
+`/v1/onboarding/start` with `product:"array_operator"` get the identical 14-day
+no-card trial and bill on the owner price when they add a card.
+
+- Live Stripe price: `price_1Thu2xC69Dj6DbzdllYcfKYc` (product `prod_UhIeV7EGkFR4uP`),
+  livemode=True, graduated monthly: 1 free / $9 (2–10) / $8 (11–50) / $6.50 (51+).
+- Railway env: `STRIPE_AO_ARRAY_PRICE_ID=price_1Thu2xC69Dj6DbzdllYcfKYc` set.
+- `tenants.product` column present in prod; migration ran.
+- Smoke-tested end-to-end (AO trial signup → product/trial verified → tenant deleted).
 
 ## The decision (pending Ford's final word)
 Audited Array Operator as a customer (owner-facing app: dollar-first verdict,
