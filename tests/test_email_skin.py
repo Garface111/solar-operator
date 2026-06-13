@@ -33,7 +33,7 @@ def test_skin_contains_wordmark_footer():
     html = render_email_skin(
         preheader="test pre", headline="X", intro_line="Y", body_html="<p>Z</p>"
     )
-    assert "Solar Operator · solaroperator.org" in html
+    assert "NEPOOL Operator · nepooloperator.com" in html  # rebranded from "Solar Operator · solaroperator.org"
 
 
 def test_skin_contains_preheader_mso_hide():
@@ -87,7 +87,7 @@ def test_skin_long_body_does_not_break():
     assert "#064e3b" in html
     assert "#e6b470" in html
     assert "#faf8f5" in html
-    assert "Solar Operator · solaroperator.org" in html
+    assert "NEPOOL Operator · nepooloperator.com" in html  # rebranded from "Solar Operator · solaroperator.org"
     assert "mso-hide:all" in html
 
 
@@ -107,7 +107,7 @@ def test_text_skin_contains_wordmark():
     text = render_email_skin_text(
         headline="H", intro_line="I", body_text="Body."
     )
-    assert "Solar Operator · solaroperator.org" in text
+    assert "NEPOOL Operator · nepooloperator.com" in text  # rebranded from "Solar Operator · solaroperator.org"
 
 
 def test_text_skin_cta_rendered_as_label_url():
@@ -148,10 +148,10 @@ def test_send_welcome_smoke():
     html = captured["html"]
     for color in ("#064e3b", "#e6b470", "#faf8f5", "#e8e2d9", "#022c22"):
         assert color in html, f"Brand color {color} missing from welcome email HTML"
-    assert "Solar Operator · solaroperator.org" in html
+    assert "NEPOOL Operator · nepooloperator.com" in html  # rebranded from "Solar Operator · solaroperator.org"
     assert "mso-hide:all" in html
 
     text = captured["text"]
     assert text is not None
-    assert "SOLAR OPERATOR" in text
-    assert "Solar Operator · solaroperator.org" in text
+    assert "NEPOOL OPERATOR" in text  # rebranded from "SOLAR OPERATOR"
+    assert "NEPOOL Operator · nepooloperator.com" in text  # rebranded from "Solar Operator · solaroperator.org"

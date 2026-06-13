@@ -14,7 +14,7 @@
 // for your first capture — log into a portal."
 //
 // Ford Jun 7'26: switched the redirect target from an absolute URL
-// (https://solaroperator.org/accounts/?fresh=1) to a same-origin relative
+// (https://nepooloperator.com/accounts/?fresh=1) to a same-origin relative
 // path (/accounts/?fresh=1). Hardcoding the production hostname meant
 // previews, staging, and any non-prod environment redirected off-host;
 // Netlify's redirect rules ALSO occasionally misbehaved on the absolute

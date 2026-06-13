@@ -1,4 +1,4 @@
-"""Single source of truth for Solar Operator per-array volume pricing.
+"""Single source of truth for NEPOOL Operator per-array volume pricing.
 
 Billing is graduated/tiered: each band of arrays is priced on the arrays that
 fall *within* that band (the way AWS / Stripe / Twilio volume pricing works),

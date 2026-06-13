@@ -152,7 +152,7 @@ export default function Login({ onLogin }: LoginProps) {
     <div className="mx-auto flex min-h-full max-w-md flex-col justify-center px-4 py-12">
       <div className="mb-8 text-center">
         <div className="text-xl font-semibold tracking-tight text-zinc-900">
-          <span className="text-primary-600">Solar</span> Operator
+          <span className="text-primary-600">NEPOOL</span> Operator
         </div>
       </div>
 

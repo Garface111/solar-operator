@@ -1,5 +1,5 @@
 """
-Solar Operator — Stripe webhook (extracted from signup.py at v1.1.0).
+NEPOOL Operator — Stripe webhook (extracted from signup.py at v1.1.0).
 
 The single-shot `POST /v1/signup` flow was retired in favor of the 5-screen
 onboarding wizard (`api/onboarding.py`). The Stripe *webhook*, however, is shared
@@ -193,7 +193,7 @@ def _process_checkout_completed(sess: dict) -> dict:
         )
 
     send_internal_alert(
-        "🌞 New Solar Operator signup",
+        "🌞 New NEPOOL Operator signup",
         f"Name: {sess.get('metadata',{}).get('name','?')}\n"
         f"Email: {snapshot['tenant_email']}\n"
         f"Company: {sess.get('metadata',{}).get('company','—')}\n"

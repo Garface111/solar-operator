@@ -25,7 +25,7 @@ def index_exists(conn, table: str, index: str) -> bool:
 
 
 def main():
-    print("=== Solar Operator schema migration ===")
+    print("=== NEPOOL Operator schema migration ===")
     # Create new tables (login_tokens, stripe_events) via metadata.create_all,
     # which is a no-op for existing tables.
     init_db()

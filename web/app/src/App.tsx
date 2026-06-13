@@ -35,7 +35,7 @@ function TabSpinner() {
   );
 }
 
-// basename matches Vite's `base` and the public URL solaroperator.org/accounts
+// basename matches Vite's `base` and the public URL nepooloperator.com/accounts
 // (Netlify proxies that to the FastAPI mount at /app/ on Railway).
 export default function App() {
   return (

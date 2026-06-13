@@ -1,5 +1,5 @@
 """
-Solar Operator — customer self-serve portal API.
+NEPOOL Operator — customer self-serve portal API.
 
 Magic-link auth. Browser flow:
   1. User visits /account.html, enters email.
@@ -70,8 +70,8 @@ def _iso_utc(dt: Optional[datetime]) -> Optional[str]:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
 
-APP_URL = os.getenv("APP_URL", "https://solaroperator.org").rstrip("/")
-# Public, buyer-facing dashboard URL. Netlify 200-proxies solaroperator.org/accounts
+APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
+# Public, buyer-facing dashboard URL. Netlify 200-proxies nepooloperator.com/accounts
 # to the FastAPI mount at /app/* on Railway, so magic-link emails and Stripe
 # return URLs use the clean marketing-domain path, never the raw Railway host.
 PUBLIC_DASHBOARD_URL = os.getenv("PUBLIC_DASHBOARD_URL", f"{APP_URL}/accounts").rstrip("/")
@@ -432,11 +432,11 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
 <table cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center">
 <table cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;background:white;border-radius:12px;overflow:hidden;">
 <tr><td style="background:#2e6b3a;padding:24px 32px;color:white;">
-  <div style="font-size:20px;font-weight:700;">Solar Operator</div>
+  <div style="font-size:20px;font-weight:700;">NEPOOL Operator</div>
   <div style="font-size:13px;color:#cfe4d3;margin-top:4px;">Sign-in link for {tenant_name or 'your account'}</div>
 </td></tr>
 <tr><td style="padding:32px;font-size:15px;line-height:1.6;">
-<p>Click the button below to sign in to your Solar Operator account:</p>
+<p>Click the button below to sign in to your NEPOOL Operator account:</p>
 <p style="text-align:center;margin:28px 0;">
   <a href="{link}" style="background:#2e6b3a;color:white;padding:13px 28px;border-radius:6px;text-decoration:none;font-weight:600;display:inline-block;">Sign in to my account</a>
 </p>
@@ -446,10 +446,10 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
 </table>
 </td></tr></table></body></html>
 """
-    text = f"Sign in to Solar Operator: {link}\n\nLink expires in 15 minutes."
+    text = f"Sign in to NEPOOL Operator: {link}\n\nLink expires in 15 minutes."
     sent = _send_via_resend(
         to=email,
-        subject="Sign in to Solar Operator",
+        subject="Sign in to NEPOOL Operator",
         html=html,
         text=text,
     )

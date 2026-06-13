@@ -1,5 +1,5 @@
 """
-Solar Operator — workbook delivery.
+NEPOOL Operator — workbook delivery.
 
 Single source of truth for "build workbook + email it." Always regenerates
 from solar.db, writes to a temp file, attaches via Resend, cleans up.

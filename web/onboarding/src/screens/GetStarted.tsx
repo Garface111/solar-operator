@@ -182,10 +182,10 @@ function ChromeInstallVisual() {
             Chrome Web Store
           </p>
           <p className="mt-1 text-sm font-semibold text-zinc-900">
-            Solar Operator Sync
+            NEPOOL Operator Sync
           </p>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Verified by Solar Operator · free
+            Verified by NEPOOL Operator · free
           </p>
         </div>
       </div>
@@ -265,7 +265,7 @@ const slides: SlideDef[] = [
       },
       {
         icon: "⚡",
-        text: "Solar Operator pulls every utility bill and builds the workbook for you — hundreds of utilities supported, coast to coast.",
+        text: "NEPOOL Operator pulls every utility bill and builds the workbook for you — hundreds of utilities supported, coast to coast.",
       },
       {
         icon: "🧩",
@@ -284,10 +284,10 @@ const slides: SlideDef[] = [
   },
   // 3 — Granularity on the mechanism.
   {
-    kicker: "How Solar Operator solves it",
+    kicker: "How NEPOOL Operator solves it",
     headline: "Connect once. Reports build themselves.",
     body:
-      "Solar Operator hooks into your utility logins — hundreds of utilities supported coast to coast — captures each bill the moment it posts, and renders the NEPOOL-GIS workbook on autopilot every quarter, formatted exactly the way ISO-NE expects.",
+      "NEPOOL Operator hooks into your utility logins — hundreds of utilities supported coast to coast — captures each bill the moment it posts, and renders the NEPOOL-GIS workbook on autopilot every quarter, formatted exactly the way ISO-NE expects.",
     visual: <PipelineVisual />,
   },
   // 4 — Granularity on the install.
@@ -304,7 +304,7 @@ const slides: SlideDef[] = [
     kicker: "What changes after setup",
     headline: "Every client. Every quarter. Without you.",
     body:
-      "Once you're set up, reports go out on their own. You stay focused on growing your book — Solar Operator handles the part that used to take a week.",
+      "Once you're set up, reports go out on their own. You stay focused on growing your book — NEPOOL Operator handles the part that used to take a week.",
     visual: <HappyOperatorVisual />,
     cta: { label: "Start my free setup", route: "/welcome" },
   },

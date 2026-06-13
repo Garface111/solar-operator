@@ -1,5 +1,5 @@
 """
-Solar Operator — database models.
+NEPOOL Operator — database models.
 
 Single SQLite file for now (data/solar.db). Schema is Postgres-compatible
 so when you outgrow SQLite, swap the URL and you're done. No ORM gymnastics:

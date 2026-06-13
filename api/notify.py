@@ -103,14 +103,14 @@ def send_workbook_email(to: str, subject: str, html: str, text: str,
     # as a subhead reads as a glitch (Ford Jun 8'26 fix).
     wrapped_html = render_email_skin(
         preheader="Your quarterly solar generation report is attached.",
-        headline="Solar Operator",
+        headline="NEPOOL Operator",
         intro_line="",  # falls back to brand tagline
         body_html=html,
         attachment_label=filename or p.name,
         attachment_size_bytes=p.stat().st_size,
     )
     wrapped_text = render_email_skin_text(
-        headline="Solar Operator",
+        headline="NEPOOL Operator",
         intro_line="",
         body_text=text,
         attachment_label=filename or p.name,
@@ -125,11 +125,11 @@ def send_workbook_email(to: str, subject: str, html: str, text: str,
             "Custom From %r failed (unverified domain?) — retrying from platform "
             "default with Reply-To preserved.", from_addr)
         fallback_reply = reply_to or _addr_only(from_addr)
-        # Build "Operator Name via Solar Operator <admin@solaroperator.org>"
+        # Build "Operator Name via NEPOOL Operator <admin@solaroperator.org>"
         # so the recipient sees the operator's name even when we can't send as them.
         op_name = _name_part(from_addr)
         fallback_from = (
-            f'"{op_name} via Solar Operator" <{_addr_only(FROM_ADDRESS)}>'
+            f'"{op_name} via NEPOOL Operator" <{_addr_only(FROM_ADDRESS)}>'
             if op_name else FROM_ADDRESS
         )
         ok = _send_via_resend(
@@ -155,7 +155,7 @@ def _name_part(from_header: str) -> str:
 
 # ─── customer-facing ─────────────────────────────────────────────────────
 
-PLAN_LABELS = {"standard": "Solar Operator", "comped": "Solar Operator (comped)",
+PLAN_LABELS = {"standard": "NEPOOL Operator", "comped": "NEPOOL Operator (comped)",
                "solo": "Solo", "manager": "Manager", "operator": "Operator"}
 
 
@@ -175,20 +175,20 @@ def _next_quarterly_date() -> str:
 
 def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
     import html as _html
-    plan_label = PLAN_LABELS.get(plan, "Solar Operator")
+    plan_label = PLAN_LABELS.get(plan, "NEPOOL Operator")
     first = _html.escape(name.split()[0] if name else "there")
     install_url = EXTENSION_INSTALL_URL
     next_q = _next_quarterly_date()
 
     body_html = (
-        f"<p>Your Solar Operator account is live on the <strong>{_html.escape(plan_label)}</strong> plan. "
+        f"<p>Your NEPOOL Operator account is live on the <strong>{_html.escape(plan_label)}</strong> plan. "
         f"You're a few minutes from automatic quarterly reporting.</p>"
         f"<p><strong>Setup, in three steps:</strong></p>"
         f'<ol style="padding-left:20px;margin:14px 0;">'
         f'<li style="margin:10px 0;"><strong>Install the Chrome extension</strong> — '
-        f'<a href="{install_url}" style="color:#047857;">Add Solar Operator Sync to Chrome</a></li>'
+        f'<a href="{install_url}" style="color:#047857;">Add NEPOOL Operator Sync to Chrome</a></li>'
         f'<li style="margin:10px 0;"><strong>The extension auto-pairs with your account</strong> — '
-        f'open your <a href="https://solaroperator.org/accounts" style="color:#047857;">Solar Operator dashboard</a> '
+        f'open your <a href="https://nepooloperator.com/accounts" style="color:#047857;">NEPOOL Operator dashboard</a> '
         f"once after installing and the extension links itself automatically. No codes to copy.</li>"
         f'<li style="margin:10px 0;"><strong>Sign into your utility portal once</strong> — visit '
         f'<a href="https://greenmountainpower.com" style="color:#047857;">greenmountainpower.com</a> '
@@ -209,13 +209,13 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
         f'<p style="margin-top:24px;color:#3a5a42;font-size:14px;">'
         f"Questions? Just reply — we read every email and respond same business day."
         f"</p>"
-        f"<p style=\"margin-top:24px;\">— The Solar Operator team</p>"
+        f"<p style=\"margin-top:24px;\">— The NEPOOL Operator team</p>"
     )
     body_text = (
         f"Your account is live on the {plan_label} plan.\n\n"
         f"Setup (3 steps):\n\n"
         f"  1. Install the Chrome extension: {install_url}\n"
-        f"  2. Open your Solar Operator dashboard (solaroperator.org/accounts) — the\n"
+        f"  2. Open your NEPOOL Operator dashboard (nepooloperator.com/accounts) — the\n"
         f"     extension auto-pairs with your account. No codes to copy.\n"
         f"  3. Sign into your utility portal once (greenmountainpower.com or Vermont\n"
         f"     Electric Co-op). The extension captures the rest.\n\n"
@@ -227,31 +227,31 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
         f"extension, click \"Enter code manually,\" and paste your activation code:\n"
         f"  {tenant_key}\n\n"
         f"Questions? Just reply.\n\n"
-        f"— The Solar Operator team"
+        f"— The NEPOOL Operator team"
     )
     html = render_email_skin(
         preheader="Your account is ready — 3 steps to go live.",
-        headline="Solar Operator",
+        headline="NEPOOL Operator",
         intro_line=f"Welcome aboard, {first}.",
         body_html=body_html,
         cta={"label": "Install the Chrome extension", "url": install_url},
     )
     text = render_email_skin_text(
-        headline="Solar Operator",
+        headline="NEPOOL Operator",
         intro_line=f"Welcome aboard, {name.split()[0] if name else 'there'}.",
         body_text=body_text,
         cta={"label": "Install the Chrome extension", "url": install_url},
     )
     return _send_via_resend(
         to=to,
-        subject="Welcome to Solar Operator — your activation code",
+        subject="Welcome to NEPOOL Operator — your activation code",
         html=html,
         text=text,
     )
 
 
 def send_sample_workbook_email(to: str, name: str,
-                               dashboard_url: str = "https://solaroperator.org/accounts") -> bool:
+                               dashboard_url: str = "https://nepooloperator.com/accounts") -> bool:
     """Email the generic demo workbook so a new operator sees what their
     quarterly reports will look like. Generates a fresh sample to a temp file
     and attaches it. Best-effort: returns False (and logs) on any failure."""
@@ -275,7 +275,7 @@ def send_sample_workbook_email(to: str, name: str,
         f"everything — clients, schedule, and recipients — from your "
         f'<a href="{dashboard_url}" style="color:#047857;">dashboard</a>.</p>'
         f'<p style="margin-top:24px;color:#3a5a42;font-size:14px;">Questions? Just reply — we read every email.</p>'
-        f"<p style=\"margin-top:24px;\">— The Solar Operator team</p>"
+        f"<p style=\"margin-top:24px;\">— The NEPOOL Operator team</p>"
     )
     body_text = (
         f"Hi {name.split()[0] if name else 'there'},\n\n"
@@ -288,14 +288,14 @@ def send_sample_workbook_email(to: str, name: str,
         f"and go out on the schedule you choose.\n\n"
         f"Manage everything at {dashboard_url}\n\n"
         f"Questions? Just reply.\n\n"
-        f"— The Solar Operator team"
+        f"— The NEPOOL Operator team"
     )
     try:
         with tempfile.TemporaryDirectory(prefix="so-sample-") as tmp:
             path = build_demo_workbook(_p.Path(tmp) / "sample.xlsx")
             return send_workbook_email(
                 to=to,
-                subject="Sample Solar Operator report — what to expect",
+                subject="Sample NEPOOL Operator report — what to expect",
                 html=body_html,
                 text=body_text,
                 workbook_path=str(path),
@@ -327,39 +327,39 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
     body_html = (
         f"<p>Hi {first},</p>"
         f"<p>We tried to charge your card <strong>${amount_dollars:.2f}</strong> for your "
-        f"Solar Operator subscription, but it was declined.{retry_line}</p>"
+        f"NEPOOL Operator subscription, but it was declined.{retry_line}</p>"
         f"<p>To keep your reports flowing, please update your card at "
-        f'<a href="https://solaroperator.org/accounts/" style="color:#047857;">your Solar Operator dashboard</a> — '
+        f'<a href="https://nepooloperator.com/accounts/" style="color:#047857;">your NEPOOL Operator dashboard</a> — '
         f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
         f"<p>If you don't update before our retries run out, your subscription will be "
         f"canceled and reports will stop.</p>"
         f"<p>Questions or need help? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
         f"We tried to charge your card ${amount_dollars:.2f} for "
-        f"Solar Operator, but it was declined.{retry_line}\n\n"
-        f"Update your card at https://solaroperator.org/accounts/ — "
+        f"NEPOOL Operator, but it was declined.{retry_line}\n\n"
+        f"Update your card at https://nepooloperator.com/accounts/ — "
         f"sign in, click Manage billing.\n\n"
-        f"Questions? Just reply.\n\n— Solar Operator"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader="Your subscription payment was declined — please update your card.",
         headline="Payment issue on your account",
         intro_line=f"We were unable to charge ${amount_dollars:.2f} for your subscription.",
         body_html=body_html,
-        cta={"label": "Update payment method", "url": "https://solaroperator.org/accounts/"},
+        cta={"label": "Update payment method", "url": "https://nepooloperator.com/accounts/"},
     )
     text = render_email_skin_text(
         headline="Payment issue on your account",
         intro_line=f"We were unable to charge ${amount_dollars:.2f} for your subscription.",
         body_text=body_text,
-        cta={"label": "Update payment method", "url": "https://solaroperator.org/accounts/"},
+        cta={"label": "Update payment method", "url": "https://nepooloperator.com/accounts/"},
     )
     return _send_via_resend(
         to=to,
-        subject="Your Solar Operator payment was declined",
+        subject="Your NEPOOL Operator payment was declined",
         html=html,
         text=text,
     )
@@ -368,7 +368,7 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
 def send_trial_charge_failed_email(
     to: str,
     name: str,
-    dashboard_url: str = "https://solaroperator.org/accounts",
+    dashboard_url: str = "https://nepooloperator.com/accounts",
 ) -> bool:
     """Notify operator their card was declined when we tried to activate their
     subscription at trial end. Different from send_payment_failed_email —
@@ -382,10 +382,10 @@ def send_trial_charge_failed_email(
         f"saved at signup — but it was declined.</p>"
         f"<p>Reports stay paused until your card is updated.</p>"
         f"<p>To get back up and running, please update your payment method at "
-        f'<a href="{dashboard_url}" style="color:#047857;">your Solar Operator dashboard</a> — '
+        f'<a href="{dashboard_url}" style="color:#047857;">your NEPOOL Operator dashboard</a> — '
         f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
         f"<p>Questions or need help? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -393,7 +393,7 @@ def send_trial_charge_failed_email(
         f"— but it was declined.\n\n"
         f"Reports stay paused until your card is updated.\n\n"
         f"Update your payment method at {dashboard_url} — sign in, click Manage billing.\n\n"
-        f"Questions or need help? Just reply.\n\n— Solar Operator"
+        f"Questions or need help? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader="Your card was declined at trial end — update to keep reports flowing.",
@@ -410,7 +410,7 @@ def send_trial_charge_failed_email(
     )
     return _send_via_resend(
         to=to,
-        subject="Card declined when activating your Solar Operator subscription",
+        subject="Card declined when activating your NEPOOL Operator subscription",
         html=html,
         text=text,
     )
@@ -420,7 +420,7 @@ def send_trial_welcome_email(
     to: str,
     name: str,
     trial_end_iso_date: str,
-    dashboard_url: str = "https://solaroperator.org/accounts",
+    dashboard_url: str = "https://nepooloperator.com/accounts",
 ) -> bool:
     """Welcome email sent immediately after onboarding completes. No-card reality:
     the trial is live with no payment method on file, so the copy primes the
@@ -447,7 +447,7 @@ def send_trial_welcome_email(
         f"plus $15/array/month. No card, no charge: we'll just pause reports and hold "
         f"all your data until you're ready.</p>"
         f'<p style="margin-top:24px;color:#3a5a42;font-size:14px;">Questions? Just reply — a real person reads every email.</p>'
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -462,24 +462,24 @@ def send_trial_welcome_email(
         f"When your trial ends on {trial_end_iso_date}, add a card from the Accounts tab "
         f"to keep your reports going — $250 one-time setup plus $15/array/month. No card, "
         f"no charge: we'll just pause reports and hold all your data until you're ready.\n\n"
-        f"Questions? Just reply — a real person reads every email.\n\n— Solar Operator"
+        f"Questions? Just reply — a real person reads every email.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
-        preheader="Your Solar Operator trial has started — no card needed today.",
-        headline="Solar Operator",
+        preheader="Your NEPOOL Operator trial has started — no card needed today.",
+        headline="NEPOOL Operator",
         intro_line="Welcome — your 14-day trial has started.",
         body_html=body_html,
         cta={"label": "Open your dashboard", "url": dashboard_url},
     )
     text = render_email_skin_text(
-        headline="Solar Operator",
+        headline="NEPOOL Operator",
         intro_line="Welcome — your 14-day trial has started.",
         body_text=body_text,
         cta={"label": "Open your dashboard", "url": dashboard_url},
     )
     return _send_via_resend(
         to=to,
-        subject="Welcome to Solar Operator — your 14-day trial has started",
+        subject="Welcome to NEPOOL Operator — your 14-day trial has started",
         html=html,
         text=text,
     )
@@ -488,7 +488,7 @@ def send_trial_welcome_email(
 def send_trial_paused_no_card_email(
     to: str,
     name: str,
-    dashboard_url: str = "https://solaroperator.org/accounts",
+    dashboard_url: str = "https://nepooloperator.com/accounts",
 ) -> bool:
     """Trial ended with no card on file — the account is paused (read-only).
     Tell the operator nothing was deleted and how to resume."""
@@ -505,7 +505,7 @@ def send_trial_paused_no_card_email(
         f"tab</a> and your reports pick right back up — $250 one-time setup plus "
         f"$15/array/month.</p>"
         f"<p>Questions? Just reply — a real person reads every email.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -515,7 +515,7 @@ def send_trial_paused_no_card_email(
         f"but we've paused sending new reports.\n\n"
         f"Add a card from the Accounts tab at {dashboard_url} — $250 one-time setup plus "
         f"$15/array/month — and your reports pick right back up.\n\n"
-        f"Questions? Just reply.\n\n— Solar Operator"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader="Your trial ended — add a card to resume reports. Nothing was deleted.",
@@ -532,7 +532,7 @@ def send_trial_paused_no_card_email(
     )
     return _send_via_resend(
         to=to,
-        subject="Add a card to resume your Solar Operator reports",
+        subject="Add a card to resume your NEPOOL Operator reports",
         html=html,
         text=text,
     )
@@ -542,7 +542,7 @@ def send_trial_ending_no_card_reminder_email(
     to: str,
     name: str,
     trial_end_date: str,
-    dashboard_url: str = "https://solaroperator.org/accounts",
+    dashboard_url: str = "https://nepooloperator.com/accounts",
 ) -> bool:
     """Sent ~3 days before a no-card trial ends. Nudge the operator to add a card
     so reports don't pause when the trial expires."""
@@ -559,7 +559,7 @@ def send_trial_ending_no_card_reminder_email(
         f"Accounts tab</a> — $250 one-time setup plus $15/array/month, charged when the "
         f"trial ends.</p>"
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -568,7 +568,7 @@ def send_trial_ending_no_card_reminder_email(
         f"stays safe, nothing is deleted).\n\n"
         f"Add a card from the Accounts tab at {dashboard_url} — $250 one-time setup plus "
         f"$15/array/month, charged when the trial ends.\n\n"
-        f"Questions? Just reply.\n\n— Solar Operator"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader=f"Your trial ends {trial_end_date} — add a card to keep reports flowing.",
@@ -585,7 +585,7 @@ def send_trial_ending_no_card_reminder_email(
     )
     return _send_via_resend(
         to=to,
-        subject="Add a card to keep your Solar Operator reports flowing",
+        subject="Add a card to keep your NEPOOL Operator reports flowing",
         html=html,
         text=text,
     )
@@ -602,60 +602,60 @@ def send_cancellation_email(to: str, name: str,
 
     body_html = (
         f"<p>Hi {first},</p>"
-        f"<p>Your Solar Operator subscription has been canceled. "
+        f"<p>Your NEPOOL Operator subscription has been canceled. "
         f"You won't be charged again, and we'll stop sending automatic reports.</p>"
         f"<p>Your historical data is still in our system. "
         f"You'll have access to your account and reports for 30 days — download "
         f"anything you need before <strong>{purge_str}</strong>. After that, your "
         f"data is permanently deleted.</p>"
         f"<p>If you change your mind, sign up again any time at "
-        f'<a href="https://solaroperator.org/signup.html" style="color:#047857;">solaroperator.org/signup</a> — '
+        f'<a href="https://nepooloperator.com/signup.html" style="color:#047857;">nepooloperator.com/signup</a> — '
         f"we'll restore your existing meters automatically.</p>"
         f"<p>If this cancellation was a mistake, or you'd like to share why "
         f"you're leaving, just reply. We read every email.</p>"
         f"<p>Thank you for being a customer.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"Your Solar Operator subscription is canceled. "
+        f"Your NEPOOL Operator subscription is canceled. "
         f"We'll stop sending reports and won't charge you again.\n\n"
         f"Your historical data is still in our system. You'll have access to your "
         f"account and reports for 30 days — download anything you need before "
         f"{purge_str}. After that, your data is permanently deleted.\n\n"
-        f"If you change your mind, sign up at https://solaroperator.org/signup.html — "
+        f"If you change your mind, sign up at https://nepooloperator.com/signup.html — "
         f"we'll restore your meters automatically.\n\n"
-        f"Questions or feedback? Just reply.\n\n— Solar Operator"
+        f"Questions or feedback? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader=f"Your subscription is canceled — download your data before {purge_str}.",
         headline="Subscription canceled",
         intro_line="You won't be charged again. Reports have stopped.",
         body_html=body_html,
-        cta={"label": "Sign up again", "url": "https://solaroperator.org/signup.html"},
+        cta={"label": "Sign up again", "url": "https://nepooloperator.com/signup.html"},
     )
     text = render_email_skin_text(
         headline="Subscription canceled",
         intro_line="You won't be charged again. Reports have stopped.",
         body_text=body_text,
-        cta={"label": "Sign up again", "url": "https://solaroperator.org/signup.html"},
+        cta={"label": "Sign up again", "url": "https://nepooloperator.com/signup.html"},
     )
     return _send_via_resend(
         to=to,
-        subject="Your Solar Operator subscription is canceled",
+        subject="Your NEPOOL Operator subscription is canceled",
         html=html,
         text=text,
     )
 
 
-def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https://solaroperator.org/accounts") -> bool:
+def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https://nepooloperator.com/accounts") -> bool:
     """Trial extended 3 more days — operator has no arrays yet."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
 
     body_html = (
         f"<p>Hi {first},</p>"
-        f"<p>You signed up for Solar Operator but haven't added any arrays yet. "
+        f"<p>You signed up for NEPOOL Operator but haven't added any arrays yet. "
         f"We've extended your trial by 3 more days so you have time to finish setup.</p>"
         f'<p>Head to your <a href="{dashboard_url}" style="color:#047857;">dashboard</a>, '
         f"install the Chrome extension, and log into your utility portal to pull your "
@@ -663,14 +663,14 @@ def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https:/
         f"<p>Once your trial ends, we'll bill you based on the arrays that are there. "
         f"If you still have zero, we'll charge the 1-array minimum.</p>"
         f"<p>Questions? Just reply — we read every email.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"You signed up for Solar Operator but haven't added any arrays yet. "
+        f"You signed up for NEPOOL Operator but haven't added any arrays yet. "
         f"We've extended your trial by 3 more days.\n\n"
         f"Head to {dashboard_url} to finish setup.\n\n"
-        f"Questions? Just reply.\n\n— Solar Operator"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader="Trial extended 3 days — add your first array before it ends.",
@@ -706,33 +706,33 @@ def send_trial_charged_email(to: str, name: str, array_count: int,
         f"<strong>${amount_dollars:.2f}</strong> for {array_count} {plural}.</p>"
         f"<p>You're all set — reports will continue running automatically on your schedule. "
         f"As you add or remove arrays, your next invoice will update to match.</p>"
-        f'<p>Manage your account at <a href="https://solaroperator.org/accounts" style="color:#047857;">solaroperator.org/accounts</a>.</p>'
+        f'<p>Manage your account at <a href="https://nepooloperator.com/accounts" style="color:#047857;">nepooloperator.com/accounts</a>.</p>'
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
         f"Your trial ended and your card was charged ${amount_dollars:.2f} "
         f"for {array_count} {plural}.\n\n"
-        f"Manage your account at https://solaroperator.org/accounts\n\n"
-        f"Questions? Just reply.\n\n— Solar Operator"
+        f"Manage your account at https://nepooloperator.com/accounts\n\n"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader=f"Your ${amount_dollars:.2f} charge was successful — subscription active.",
         headline="Subscription active",
         intro_line=f"Your trial ended and your card was charged ${amount_dollars:.2f}.",
         body_html=body_html,
-        cta={"label": "Manage your account", "url": "https://solaroperator.org/accounts"},
+        cta={"label": "Manage your account", "url": "https://nepooloperator.com/accounts"},
     )
     text = render_email_skin_text(
         headline="Subscription active",
         intro_line=f"Your trial ended and your card was charged ${amount_dollars:.2f}.",
         body_text=body_text,
-        cta={"label": "Manage your account", "url": "https://solaroperator.org/accounts"},
+        cta={"label": "Manage your account", "url": "https://nepooloperator.com/accounts"},
     )
     return _send_via_resend(
         to=to,
-        subject=f"Charged ${amount_dollars:.2f} — Solar Operator subscription active",
+        subject=f"Charged ${amount_dollars:.2f} — NEPOOL Operator subscription active",
         html=html,
         text=text,
     )
@@ -754,7 +754,7 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
         f"once — the extension will capture a fresh session and automatic bill pulls "
         f"will resume immediately.</p>"
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— Solar Operator</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -762,7 +762,7 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
         f"This usually means the session was revoked (e.g. a password change).\n\n"
         f"Please log into {gmp_url} once — the extension "
         f"will capture a fresh session and automatic bill pulls will resume.\n\n"
-        f"Questions? Just reply.\n\n— Solar Operator"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
     )
     html = render_email_skin(
         preheader="Your Green Mountain Power session needs reconnecting.",
@@ -798,7 +798,7 @@ def send_internal_alert(subject: str, body: str) -> bool:
     )
     return _send_via_resend(
         to=INTERNAL_ALERT_TO,
-        subject=f"[Solar Operator] {subject}",
+        subject=f"[NEPOOL Operator] {subject}",
         html=html,
         text=body,
     )

@@ -1,6 +1,6 @@
 # Provider catalog — how to add utilities (swarm-safe)
 
-Solar Operator's supported-utility catalog is **data, not code**. The single
+NEPOOL Operator's supported-utility catalog is **data, not code**. The single
 source of truth is the per-state CSV files in this directory:
 
     api/data/providers/<STATE>.csv     e.g. VT.csv, NH.csv, MA.csv, ME.csv

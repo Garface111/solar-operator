@@ -1,5 +1,5 @@
 """
-Solar Operator — onboarding wizard API (June 2026 rebuild).
+NEPOOL Operator — onboarding wizard API (June 2026 rebuild).
 
 Replaces the single-shot `POST /v1/signup` with a 5-screen flow:
 
@@ -57,9 +57,9 @@ logger = logging.getLogger(__name__)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_SETUP_PRICE_ID = os.getenv("STRIPE_SETUP_PRICE_ID", "")  # $250 one-time
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")  # $15/array/mo
-APP_URL = os.getenv("APP_URL", "https://solaroperator.org").rstrip("/")
+APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
 API_URL = os.getenv("API_URL", "https://web-production-49c83.up.railway.app").rstrip("/")
-# Public, buyer-facing onboarding URL. Netlify 200-proxies solaroperator.org/onboarding
+# Public, buyer-facing onboarding URL. Netlify 200-proxies nepooloperator.com/onboarding
 # to the FastAPI /onboarding/* mount on Railway, so Stripe return URLs keep the
 # operator on the marketing domain instead of the raw Railway host.
 PUBLIC_ONBOARDING_URL = os.getenv("PUBLIC_ONBOARDING_URL", f"{APP_URL}/onboarding").rstrip("/")
@@ -218,7 +218,7 @@ def _line_items(quantity: int = 1) -> list[dict]:
         {
             "price_data": {
                 "currency": "usd",
-                "product_data": {"name": "Solar Operator — one-time setup"},
+                "product_data": {"name": "NEPOOL Operator — one-time setup"},
                 "unit_amount": SETUP_FEE_CENTS,
             },
             "quantity": 1,
@@ -226,7 +226,7 @@ def _line_items(quantity: int = 1) -> list[dict]:
         {
             "price_data": {
                 "currency": "usd",
-                "product_data": {"name": "Solar Operator — monthly per-array fee"},
+                "product_data": {"name": "NEPOOL Operator — monthly per-array fee"},
                 "unit_amount": ARRAY_PRICE_CENTS,
                 "recurring": {"interval": "month"},
             },

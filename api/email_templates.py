@@ -1,5 +1,5 @@
 """
-Solar Operator — client report email rendering (V2, June 2026).
+NEPOOL Operator — client report email rendering (V2, June 2026).
 
 Single source of truth for how a per-client report email is composed: the
 built-in default subject/body, the merge-tag substitution, and the resolution

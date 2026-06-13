@@ -1,5 +1,5 @@
 """
-Solar Operator — LEGACY signup + Stripe checkout endpoints.
+NEPOOL Operator — LEGACY signup + Stripe checkout endpoints.
 
 ⚠️  RETIRED at v1.1.0. This module is no longer mounted (see api/app.py). It was
 renamed from `api/signup.py` when the single-shot `POST /v1/signup` flow was
@@ -41,10 +41,10 @@ logger = logging.getLogger(__name__)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")  # price_xxx — set in Stripe dashboard
-APP_URL = os.getenv("APP_URL", "https://solaroperator.org").rstrip("/")
+APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
 API_URL = os.getenv("API_URL", "https://web-production-49c83.up.railway.app").rstrip("/")
 PRICE_CENTS = int(os.getenv("PLAN_PRICE_CENTS", "7500"))  # $75/mo fallback
-PLAN_NAME = os.getenv("PLAN_NAME", "Solar Operator")
+PLAN_NAME = os.getenv("PLAN_NAME", "NEPOOL Operator")
 PLAN_DESCRIPTION = os.getenv("PLAN_DESCRIPTION", "Unlimited arrays · Automatic monthly reporting")
 
 stripe.api_key = STRIPE_SECRET_KEY

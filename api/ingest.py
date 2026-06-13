@@ -1,5 +1,5 @@
 """
-Solar Operator — AI spreadsheet ingest (Mega-Vector V4).
+NEPOOL Operator — AI spreadsheet ingest (Mega-Vector V4).
 
 A NEPOOL stamping-agent tenant already keeps a master roster of every operator
 they report for: operator name, array name, NEPOOL-GIS ID, sometimes a GMP

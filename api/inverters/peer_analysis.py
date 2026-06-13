@@ -7,7 +7,7 @@ whole cohort equally; a dead string dims only one.
 
 This module is UNIT-AGNOSTIC. A "unit" is anything that produces daily kWh and
 has a nameplate: in sun-mirror it was an *inverter* within one site; in the
-Solar Operator product it is an *array* within one Client/account cohort. The
+NEPOOL Operator product it is an *array* within one Client/account cohort. The
 same math applies because peer_index normalizes by nameplate share, not by any
 unit-specific assumption.
 

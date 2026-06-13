@@ -1,5 +1,5 @@
 """
-Solar Operator — Resend delivery webhook (W2-6, June 2026).
+NEPOOL Operator — Resend delivery webhook (W2-6, June 2026).
 
 The fire-and-forget send model gave the operator zero signal a report actually
 landed — the single most direct contradiction of the value prop ("your report

@@ -1,5 +1,5 @@
 """
-Shared pytest fixtures for the Solar Operator API.
+Shared pytest fixtures for the NEPOOL Operator API.
 
 Critically, the DB URL + Stripe env must be set BEFORE any `api.*` module is
 imported, because `api/db.py` and `api/onboarding.py` read them at import time.

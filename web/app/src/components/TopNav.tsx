@@ -13,7 +13,7 @@ export function TopNav({ email, onSignOut }: TopNavProps) {
           className="text-base font-semibold tracking-tight text-zinc-900"
           style={{ fontFamily: "'Georgia', ui-serif, serif" }}
         >
-          <span className="text-primary-600">Solar</span> Operator
+          <span className="text-primary-600">NEPOOL</span> Operator
         </div>
         <div className="flex items-center gap-3">
           {email && (

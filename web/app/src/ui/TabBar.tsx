@@ -21,7 +21,7 @@ interface TabBarProps {
 
 /**
  * Single sticky bar that consolidates wordmark + tabs + auth chrome:
- *   [ Solar Operator ]   [ Master account | Clients | Automatic reports ]   [ email · Sign out ]
+ *   [ NEPOOL Operator ]   [ Master account | Clients | Automatic reports ]   [ email · Sign out ]
  *
  * Active tab gets a 2px emerald (primary-500) underline with zinc-900 /
  * weight-600 text; inactive is zinc-500, hover zinc-700.
@@ -35,16 +35,16 @@ export function TabBar({ tabs, unvisited, email, onSignOut }: TabBarProps) {
       {/* py-3 sm:py-0 gives the bar height on mobile where tabs are hidden (moved to BottomTabBar) */}
       <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:gap-4 sm:py-0">
         {/* Left: wordmark — always visible. On mobile this anchors the compact top bar.
-            Links to the marketing landing page (solaroperator.org root). Plain <a>,
+            Links to the marketing landing page (nepooloperator.com root). Plain <a>,
             not a router NavLink, because the landing site is a separate deploy from
             this app (which is served under /accounts/). */}
         <a
-          href="https://solaroperator.org"
+          href="https://nepooloperator.com"
           className="shrink-0 rounded text-base font-semibold tracking-tight text-zinc-900 transition-opacity hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
           style={{ fontFamily: "'Georgia', ui-serif, serif" }}
-          title="Go to solaroperator.org"
+          title="Go to nepooloperator.com"
         >
-          <span className="text-primary-600">Solar</span> Operator
+          <span className="text-primary-600">NEPOOL</span> Operator
         </a>
 
         {/* Center: tabs — hidden on mobile (< 640px); those screens use BottomTabBar instead. */}

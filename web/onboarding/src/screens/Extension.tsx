@@ -610,7 +610,7 @@ export default function Extension() {
         {!extensionPresent && (
           <div className="mt-6 rounded-xl border border-zinc-200 bg-white px-4 py-4">
             <p className="text-sm text-zinc-700">
-              First, add Solar Operator Sync to Chrome — it&apos;s the little
+              First, add NEPOOL Operator Sync to Chrome — it&apos;s the little
               helper that watches your utility tab for bills.
             </p>
             <a
@@ -619,7 +619,7 @@ export default function Extension() {
               rel="noopener noreferrer"
               className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl bg-primary-500 px-5 py-3 text-sm font-medium text-white transition-colors duration-150 ease-in-out hover:bg-primary-600 active:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2"
             >
-              Add Solar Operator Sync to Chrome ↗
+              Add NEPOOL Operator Sync to Chrome ↗
             </a>
             <p className="mt-2 text-xs text-zinc-500">
               We&apos;ll notice it the moment it&apos;s installed — no need to
@@ -666,7 +666,7 @@ export default function Extension() {
               ))}
             </div>
             <p className="mt-2 text-xs text-zinc-500">
-              Don&apos;t see your utility? Add manually — Solar Operator works
+              Don&apos;t see your utility? Add manually — NEPOOL Operator works
               with any portal that emails or PDFs bills.
             </p>
           </div>
@@ -741,7 +741,7 @@ export default function Extension() {
         </p>
         <ul className="mt-4 flex flex-col gap-3">
           {[
-            "Solar Operator Sync is installed in Chrome (puzzle-piece icon → pinned)",
+            "NEPOOL Operator Sync is installed in Chrome (puzzle-piece icon → pinned)",
             "You opened your utility portal from one of the buttons above (not a bookmark in a different browser)",
             "You actually signed in — capture only fires once your account page loads",
           ].map((item, i) => (

@@ -1,5 +1,5 @@
 """
-Solar Operator email skin — shared HTML/text wrapper for all outbound emails.
+NEPOOL Operator email skin — shared HTML/text wrapper for all outbound emails.
 
 Design tokens mirror web/app/tailwind.config.js:
   primary-700  #064e3b  — header strip bg
@@ -72,10 +72,10 @@ def render_email_skin(
     attachment_label: str | None = None,
     attachment_size_bytes: int | None = None,
 ) -> str:
-    """Return a complete HTML email wrapped in Solar Operator's design.
+    """Return a complete HTML email wrapped in NEPOOL Operator's design.
 
     preheader: hidden inbox-preview line (15-90 chars).
-    headline: bold leading line in the emerald header strip — usually "Solar Operator".
+    headline: bold leading line in the emerald header strip — usually "NEPOOL Operator".
     intro_line: the quiet brand tagline under the headline.  Kept generic; do
         NOT pass the email subject here (the subject is already visible in
         the inbox row and shoehorning it under the headline reads as a glitch).
@@ -87,7 +87,7 @@ def render_email_skin(
         so the recipient sees the file even if their client hides attachments.
     attachment_size_bytes: optional, surfaced as a small muted suffix.
     """
-    _footer = footer_line or "Sent by Solar Operator — solar accounting for the rest of us."
+    _footer = footer_line or "Sent by NEPOOL Operator — solar accounting for the rest of us."
     _tagline = (intro_line or "").strip() or _DEFAULT_TAGLINE
 
     _cta_block = ""
@@ -140,7 +140,7 @@ def render_email_skin(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
-<title>Solar Operator</title>
+<title>NEPOOL Operator</title>
 </head>
 <body style="margin:0;padding:0;background:#faf8f5;">
 <span style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">{preheader}</span>
@@ -160,7 +160,7 @@ def render_email_skin(
 {_footer}
       </td></tr>
       <tr><td style="background:#022c22;padding:14px 36px;font-family:{_FONT};font-size:11px;color:#cfe4d3;text-align:center;border-radius:0 0 10px 10px;letter-spacing:0.04em;">
-Solar Operator · solaroperator.org
+NEPOOL Operator · nepooloperator.com
       </td></tr>
     </table>
   </td></tr>
@@ -188,5 +188,5 @@ def render_email_skin_text(
         parts += ["", f"{cta['label']}: {cta['url']}"]
     if attachment_label:
         parts += ["", f"📎 Attached: {attachment_label}"]
-    parts += ["", "—", "Solar Operator · solaroperator.org"]
+    parts += ["", "—", "NEPOOL Operator · nepooloperator.com"]
     return "\n".join(parts)

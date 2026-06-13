@@ -201,7 +201,7 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
             <p className="text-sm font-medium text-zinc-800">
               {account.company_name || account.operator_name || "Your account"}
             </p>
-            <p className="mt-0.5 text-xs text-zinc-400">Solar Operator</p>
+            <p className="mt-0.5 text-xs text-zinc-400">NEPOOL Operator</p>
           </div>
           <StatusBadge account={account} />
         </div>

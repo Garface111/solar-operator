@@ -110,7 +110,7 @@ function uuid(): string {
 }
 
 /**
- * Try to open `url` in a tab via the Solar Operator extension. When
+ * Try to open `url` in a tab via the NEPOOL Operator extension. When
  * `active` is true the new tab is foregrounded (use for flows where
  * the operator is about to interact, like Add Client → sign-in).
  * Defaults to background-tab for ambient captures.

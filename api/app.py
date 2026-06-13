@@ -1,5 +1,5 @@
 """
-Solar Operator — FastAPI app.
+NEPOOL Operator — FastAPI app.
 
 Endpoints:
   POST /v1/sync                 — extension sends captured session here
@@ -148,7 +148,7 @@ from .adapters.smarthub import SMARTHUB_UTILITIES as _SMARTHUB_UTILITIES
 for _sh_code, _sh_info in _SMARTHUB_UTILITIES.items():
     _PROVIDER_AUTOPOP_FIELDS[_sh_info["provider"]] = _SMARTHUB_AUTOPOP
 
-app = FastAPI(title="Solar Operator API", version="1.0.0")
+app = FastAPI(title="NEPOOL Operator API", version="1.0.0")
 
 # CORS — allow the EnergyAgent umbrella front-ends to call the shared backend.
 # Two products, one API: the NEPOOL Operator marketing/app (solaroperator.org)
@@ -1014,13 +1014,13 @@ def admin_run_jobs(_: None = Depends(_require_admin)):
 @app.get("/", response_class=HTMLResponse)
 def root():
     return """
-<!DOCTYPE html><html><head><title>Solar Operator API</title>
+<!DOCTYPE html><html><head><title>NEPOOL Operator API</title>
 <style>body{font-family:Georgia,serif;max-width:680px;margin:40px auto;padding:0 20px;color:#222}
 h1{color:#2e6b3a;border-bottom:2px solid #2e6b3a;padding-bottom:8px}
 code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
 .endpoint{background:#eef3ec;border-left:3px solid #2e6b3a;padding:8px 12px;margin:6px 0;font-family:ui-monospace,monospace;font-size:13px}
 </style></head><body>
-<h1>Solar Operator API</h1>
+<h1>NEPOOL Operator API</h1>
 <p>Backend for the Chrome extension. Receives captured utility sessions, pulls bills, drafts reports.</p>
 <h3>Ingest</h3>
 <div class="endpoint">POST /v1/sync — Chrome extension target</div>
@@ -1032,7 +1032,7 @@ code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
 <div class="endpoint">POST /admin/tenants    {"name":"...", "contact_email":"..."}</div>
 <div class="endpoint">GET  /admin/tenants</div>
 <div class="endpoint">POST /admin/jobs/run</div>
-<p style="margin-top:30px;color:#888;font-size:13px">Solar Operator · hundreds of utilities supported nationwide · multi-tenant</p>
+<p style="margin-top:30px;color:#888;font-size:13px">NEPOOL Operator · hundreds of utilities supported nationwide · multi-tenant</p>
 </body></html>
 """
 
@@ -1088,7 +1088,7 @@ def test_email(to: str | None = None, _: None = Depends(_require_admin)):
     target = to or INTERNAL_ALERT_TO
     ok = _send_via_resend(
         to=target,
-        subject="Solar Operator email pipeline test",
+        subject="NEPOOL Operator email pipeline test",
         html="<p>If you can read this, Resend → your inbox works.</p>",
         text="If you can read this, Resend → your inbox works.",
     )

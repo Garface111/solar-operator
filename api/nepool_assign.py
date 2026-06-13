@@ -1,5 +1,5 @@
 """
-Solar Operator — AI-assisted NEPOOL ID assignment from spreadsheet.
+NEPOOL Operator — AI-assisted NEPOOL ID assignment from spreadsheet.
 
 Unlike /v1/ingest/* (which creates new clients/arrays), this path ONLY assigns
 NEPOOL-GIS IDs to arrays that already exist in the tenant's account. It never

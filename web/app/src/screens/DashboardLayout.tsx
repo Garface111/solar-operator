@@ -240,9 +240,9 @@ export default function DashboardLayout({ onSignOut }: Props) {
       </main>
 
       <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
-        Solar Operator · admin@solaroperator.org ·{" "}
+        NEPOOL Operator · admin@solaroperator.org ·{" "}
         <a
-          href="https://solaroperator.org/privacy"
+          href="https://nepooloperator.com/privacy"
           target="_blank"
           rel="noopener noreferrer"
           className="underline-offset-2 hover:text-zinc-600 hover:underline"

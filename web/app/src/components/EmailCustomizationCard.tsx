@@ -201,7 +201,7 @@ export function EmailCustomizationCard({ account, onAccountChange }: Props) {
         <p className="-mt-3 text-xs text-zinc-400">
           Your email is prefilled. Replace it with a custom address on your own
           domain if you want — until the domain is verified, emails fall back
-          to our address automatically. Leave blank to use the Solar Operator
+          to our address automatically. Leave blank to use the NEPOOL Operator
           address.
         </p>
 

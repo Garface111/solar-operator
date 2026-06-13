@@ -404,7 +404,7 @@ export default function VerifyAccuracy() {
           {soError && (
             <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
               <p className="text-sm font-semibold text-amber-800">
-                ⚠ Solar Operator workbook unavailable
+                ⚠ NEPOOL Operator workbook unavailable
               </p>
               <p className="mt-1 text-sm text-amber-700">{soError}</p>
               <p className="mt-1 text-xs text-amber-600">
@@ -433,11 +433,11 @@ export default function VerifyAccuracy() {
             {/* Right: SO workbook */}
             <div className="space-y-2">
               <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
-                Solar Operator
+                NEPOOL Operator
               </h2>
               <FilePanel
                 check={null}
-                label="Solar Operator workbook"
+                label="NEPOOL Operator workbook"
                 blobUrl={soBlobUrl}
                 sheetHtml={soHtml}
                 error={null}

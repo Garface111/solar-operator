@@ -600,7 +600,7 @@ export function EmailTemplateStudio({ open, onClose }: Props) {
                           {templateData.from_email ?? "admin@solaroperator.org"}
                         </span>
                         <span className="ml-1.5 text-xs text-zinc-400">
-                          via Solar Operator
+                          via NEPOOL Operator
                         </span>
                       </p>
                       <p className="truncate text-xs text-zinc-500">

@@ -158,7 +158,7 @@ function RequestUtilityForm({ initialName }: { initialName: string }) {
           className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-zinc-300 text-primary-600 focus:ring-primary-500/40"
         />
         <span className="text-xs leading-relaxed text-zinc-600">
-          I'm willing to help expand Solar Operator's network — I can share my
+          I'm willing to help expand NEPOOL Operator's network — I can share my
           utility login so you can build support for it faster.
         </span>
       </label>
