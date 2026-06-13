@@ -1,5 +1,27 @@
 # Array Operator — Billing (handoff / go-live runbook)
 
+## DOMAIN MIGRATION (Jun 13 2026) — product-aware branding
+Two products, one backend. Brand/URL resolution now flows through
+`api/branding.py` (keyed on `tenant.product`):
+- `nepool` → "NEPOOL Operator" / nepooloperator.com  (default)
+- `array_operator` → "Array Operator" / arrayoperator.com
+Wired into: magic-link email (brand name + dashboard URL), Stripe billing-portal
++ add-card return URLs, onboarding sample/trial emails. The NEPOOL-GIS sample
+workbook email is SKIPPED for array_operator owners.
+**SAFE-BY-DEFAULT:** `AO_APP_URL` defaults to the NEPOOL domain because
+arrayoperator.com is NOT live/proxying yet (curl → 000). So AO magic-links work
+today (land on nepooloperator.com/accounts). **TO FINISH:** once the other
+agent's arrayoperator.com Netlify site + DNS resolve AND proxy /accounts (it has
+a public/_redirects mirroring the nepool proxy), set Railway env
+`AO_APP_URL=https://arrayoperator.com` — one var, no code change. Until then AO
+owners are correctly served from the nepool domain.
+Frontend domain work (NOT mine — other agent, was uncommitted): array-operator
+moving to arrayoperator.com (`API_BASE=""` + public/_redirects proxy);
+energyagent door → arrayoperator.com/onboarding.
+Mine (shipped): solaroperator-site `_redirects` 301s legacy user routes →
+nepooloperator.com (kept /accounts + /v1 dual-domain for the published
+extension); array-operator REC CTA → nepooloperator.com.
+
 Status: **LIVE (Jun 13 2026).** Option B is the live owner price; signups via
 `/v1/onboarding/start` with `product:"array_operator"` get the identical 14-day
 no-card trial and bill on the owner price when they add a card.
