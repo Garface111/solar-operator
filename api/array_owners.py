@@ -327,6 +327,9 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 "lifetime": {"kwh": round(lifetime_kwh, 3)},
                 "value": value,
                 "health": health,
+                # Daily kWh over the peer window (ascending) for the owner
+                # dashboard's sparkline. Kept lightweight (date+kwh only).
+                "_daily": daily_series,
             }
             arrays_out.append(entry)
             out_by_array_id[arr.id] = entry
