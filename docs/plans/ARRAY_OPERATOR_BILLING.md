@@ -45,6 +45,25 @@ The owner now sees their ACTUAL arrays + value before signing up:
   pins the exact measured figure once live. Copy says "estimated / we pin it once
   you're live" so it never overpromises.
 
+## All-vendor sublime preview (LIVE Jun 13 2026)
+The pre-signup real-arrays reveal now works for EVERY available vendor, not just
+SolarEdge:
+- `POST /v1/array-owners/public/preview` takes `{vendor, config}` (keeps
+  `{api_key}` → SolarEdge back-compat). SolarEdge + Locus(+partner_id) enumerate
+  the whole account/partner; Locus(no partner)/Fronius/SMA preview the one named
+  system via validate(). Per-vendor friendly auth/scope copy; missing fields and
+  AVAILABLE=False vendors (Chint) → friendly ok:false (never 5xx). Value estimate
+  where peak_kw is known (Fronius peakPower Wp→kW); SMA has no peak → array still
+  shows, value null, totals.annual_value_usd null (UI hides the $ hero).
+- Frontend: connectVendor() builds the per-vendor config from the collected
+  fields and routes ALL brands through /preview; the reveal lede uses the real
+  vendor label. SolarEdge still auto-attaches the key after signup via
+  connect-account; Locus/Fronius/SMA connect from the dashboard post-signup
+  (no account-level multi-attach endpoint for them yet).
+- Verified live: SolarEdge + Locus reveals (correct vendor lede, no JS errors),
+  Fronius single-system reveal (Wp→kW value), and friendly errors for bad creds /
+  missing fields / Chint. Tests: tests/test_public_preview.py (10).
+
 ## The decision (pending Ford's final word)
 Audited Array Operator as a customer (owner-facing app: dollar-first verdict,
 done-for-you warranty claims, peer-index ground truth, one-credential discovery).
