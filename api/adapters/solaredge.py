@@ -307,3 +307,124 @@ def site_details(api_key: str, site_id: int) -> dict:
         "address": address,
         "status": details.get("status", ""),
     }
+
+
+# ── per-inverter (equipment-level) ────────────────────────────────────────────
+import re as _re
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+
+def _nameplate_from_model(model: str | None) -> float | None:
+    """SolarEdge model strings encode nameplate, e.g. SE20K=20kW,
+    RSE33.3K-USR48BNU4=33.3kW. Return kW or None."""
+    m = _re.search(r"(\d+(?:\.\d+)?)K", model or "")
+    return float(m.group(1)) if m else None
+
+
+def fetch_inventory(api_key: str, site_id: int) -> list[dict]:
+    """Return the site's inverters: [{sn, name, model, nameplate_kw,
+    connected_optimizers}, ...].
+
+    Calls GET /site/{id}/inventory. Raises SolarEdgeAuthError on 401/403,
+    SolarEdgeError otherwise.
+    """
+    url = f"{SOLAREDGE_API_BASE}/site/{site_id}/inventory"
+    try:
+        resp = httpx.get(url, params={"api_key": api_key}, timeout=_TIMEOUT)
+    except httpx.RequestError as exc:
+        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
+
+    if resp.status_code in (401, 403):
+        raise SolarEdgeAuthError(
+            f"SolarEdge API key rejected for site {site_id} (401/403)."
+        )
+    if not resp.is_success:
+        raise SolarEdgeError(
+            f"SolarEdge /site/{site_id}/inventory returned {resp.status_code}: "
+            f"{resp.text[:200]}"
+        )
+    try:
+        body = resp.json()
+    except Exception as exc:
+        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
+
+    inverters = (body.get("Inventory", {}) or {}).get("inverters", []) or []
+    out: list[dict] = []
+    for it in inverters:
+        model = it.get("model", "")
+        out.append({
+            "sn": it.get("SN"),
+            "name": it.get("name") or it.get("SN") or "inverter",
+            "model": model,
+            "nameplate_kw": _nameplate_from_model(model),
+            "connected_optimizers": it.get("connectedOptimizers"),
+        })
+    return out
+
+
+_FAULT_MODES = {"FAULT", "ERROR", "SHUTDOWN", "LOCKED"}
+
+
+def fetch_inverter_telemetry(
+    api_key: str, site_id: int, sn: str, days_back: int = 7
+) -> dict:
+    """Per-inverter daily kWh + current mode over the last `days_back` days
+    (<=7; SolarEdge caps the equipment-data span at 7 days per call).
+
+    Returns {daily:[{date,kwh}], error_code, last_report, last_mode,
+    last_power_w}. error_code is set only when the latest mode is a fault state.
+    """
+    end = _dt.now(_tz.utc).replace(microsecond=0)
+    start = end - _td(days=min(max(days_back, 1), 7))
+    fmt = "%Y-%m-%d %H:%M:%S"
+    url = f"{SOLAREDGE_API_BASE}/equipment/{site_id}/{sn}/data"
+    params = {
+        "startTime": start.strftime(fmt),
+        "endTime": end.strftime(fmt),
+        "api_key": api_key,
+    }
+    try:
+        resp = httpx.get(url, params=params, timeout=_TIMEOUT)
+    except httpx.RequestError as exc:
+        raise SolarEdgeError(f"Network error contacting SolarEdge: {exc}") from exc
+
+    if resp.status_code in (401, 403):
+        raise SolarEdgeAuthError(
+            f"SolarEdge API key rejected for site {site_id} (401/403)."
+        )
+    if not resp.is_success:
+        raise SolarEdgeError(
+            f"SolarEdge /equipment/{site_id}/{sn}/data returned "
+            f"{resp.status_code}: {resp.text[:200]}"
+        )
+    try:
+        body = resp.json()
+    except Exception as exc:
+        raise SolarEdgeError(f"SolarEdge returned non-JSON response: {exc}") from exc
+
+    tel = (body.get("data", {}) or {}).get("telemetries", []) or []
+    by_day: dict[str, list[float]] = {}
+    last_mode = last_ts = None
+    last_power_w = None
+    for s in tel:
+        te = s.get("totalEnergy")
+        day = (s.get("date") or "")[:10]
+        if te is not None and day:
+            by_day.setdefault(day, []).append(float(te))
+        last_mode = s.get("inverterMode", last_mode)
+        last_ts = s.get("date", last_ts)
+        if s.get("totalActivePower") is not None:
+            last_power_w = float(s["totalActivePower"])
+
+    daily = [
+        {"date": day, "kwh": round((max(v) - min(v)) / 1000.0, 2) if len(v) >= 2 else 0.0}
+        for day, v in sorted(by_day.items())
+    ]
+    err = last_mode if (last_mode and last_mode.upper() in _FAULT_MODES) else None
+    return {
+        "daily": daily,
+        "error_code": err,
+        "last_mode": last_mode,
+        "last_report": (last_ts.replace(" ", "T") if last_ts else None),
+        "last_power_w": last_power_w,
+    }

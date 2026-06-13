@@ -400,6 +400,196 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
     }
 
 
+# ── fleet tree (sandbox) ──────────────────────────────────────────────────────
+# Per-inverter equipment reads are heavier (inventory + 1 telemetry call per
+# inverter), so cache the assembled tree per array for 10 minutes to respect the
+# 300 req/day SolarEdge budget. Keyed by (site_id) -> (fetched_at, inverters).
+_TREE_TTL = timedelta(minutes=10)
+_tree_cache: dict[str, tuple[datetime, list[dict]]] = {}
+
+
+def _se_inverters_for(api_key: str, site_id: int) -> list[dict]:
+    """Real per-inverter rows for one SolarEdge site, peer-analyzed within the
+    site. Returns [] on any SolarEdge failure (caller decides how to render).
+    Cached 10 min by site_id."""
+    ck = f"se:{site_id}"
+    hit = _tree_cache.get(ck)
+    if hit and (now() - hit[0]) < _TREE_TTL:
+        return hit[1]
+
+    from .adapters import solaredge as _se
+    try:
+        inv = _se.fetch_inventory(api_key, site_id)
+    except _se.SolarEdgeError:
+        return []
+
+    units = []
+    meta = {}
+    for it in inv:
+        sn = it.get("sn")
+        if not sn:
+            continue
+        try:
+            tel = _se.fetch_inverter_telemetry(api_key, site_id, sn, days_back=7)
+        except _se.SolarEdgeError:
+            tel = {"daily": [], "error_code": None, "last_report": None,
+                   "last_mode": None, "last_power_w": None}
+        units.append({
+            "id": sn,
+            "nameplate_kw": it.get("nameplate_kw"),
+            "daily": tel["daily"],
+            "error_code": tel["error_code"],
+            "last_report": tel["last_report"],
+        })
+        meta[sn] = {"name": it.get("name"), "model": it.get("model"),
+                    "nameplate_kw": it.get("nameplate_kw"),
+                    "last_mode": tel.get("last_mode"),
+                    "last_power_w": tel.get("last_power_w")}
+
+    analyzed = peer_analysis.analyze_cohort(units) if units else {"units": []}
+    rows: list[dict] = []
+    for u in analyzed["units"]:
+        m = meta.get(u["id"], {})
+        rows.append({
+            "sn": u["id"],
+            "name": m.get("name") or u["id"],
+            "model": m.get("model"),
+            "nameplate_kw": m.get("nameplate_kw"),
+            "peer_index": u.get("peer_index"),
+            "status": u.get("status"),
+            "diagnosis": u.get("diagnosis"),
+            "window_kwh": u.get("window_kwh"),
+            "last_mode": m.get("last_mode"),
+            "current_power_w": m.get("last_power_w"),
+            "last_report": u.get("last_report"),
+        })
+    _tree_cache[ck] = (now(), rows)
+    return rows
+
+
+_ALERT_PRIORITY = {"fault": 4, "dead": 4, "comm_gap": 3, "underperforming": 2, "ok": 0}
+
+
+def _array_alert(inverters: list[dict], array_status: str | None) -> dict:
+    """Roll the worst inverter state (plus the array-level peer status) into one
+    Alert node: {level: ok|info|warn|critical, count, headline}."""
+    worst = array_status or "ok"
+    worst_rank = _ALERT_PRIORITY.get(worst, 0)
+    bad = 0
+    for inv in inverters:
+        st = inv.get("status") or "ok"
+        r = _ALERT_PRIORITY.get(st, 0)
+        if r >= 2:
+            bad += 1
+        if r > worst_rank:
+            worst_rank, worst = r, st
+
+    level = ("critical" if worst_rank >= 4 else
+             "warn" if worst_rank >= 2 else
+             "ok")
+    headline = {
+        "fault": "Inverter fault — service drafted",
+        "dead": "An inverter stopped earning",
+        "comm_gap": "An inverter went quiet",
+        "underperforming": "A money leak caught early",
+        "ok": "All clear",
+    }.get(worst, "All clear")
+    return {"level": level, "count": bad, "status": worst, "headline": headline}
+
+
+@router.get("/v1/array-owners/fleet-tree")
+def fleet_tree(authorization: str | None = Header(default=None)) -> dict:
+    """The three-tier sandbox structure that mirrors the backend data model:
+
+        Alert  (per array, rolled-up worst state)
+          └─ Array  (one column)
+               └─ Inverters  (real per-inverter rows from the vendor)
+
+    Each column is one Array. Inverters are REAL where the vendor exposes them
+    (SolarEdge inventory + equipment telemetry, peer-analyzed within the site);
+    vendors without per-inverter capture yet return an array-as-single-unit leaf
+    so the tree is never empty. Built to be the literal picture of the schema.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    columns: list[dict] = []
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array)
+            .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+            .order_by(Array.id)
+        ).scalars().all()
+
+        for arr in arrays:
+            conn = _resolve_connection(db, arr)
+            vendor = conn.vendor if conn is not None else None
+
+            inverters: list[dict] = []
+            inverter_source = None
+            if vendor == "solaredge" and conn is not None:
+                cfg = conn.config or {}
+                api_key = cfg.get("api_key")
+                site_id = cfg.get("site_id")
+                if api_key and site_id:
+                    inverters = _se_inverters_for(api_key, int(site_id))
+                    inverter_source = "solaredge" if inverters else None
+
+            # Fallback leaf: no per-inverter capture for this vendor yet — show
+            # the array itself as a single inverter node so the comb is never
+            # empty and the structure still reads true.
+            if not inverters:
+                # array-level daily for a single-unit fallback
+                window_start = date.today() - timedelta(days=peer_analysis.WINDOW_DAYS)
+                rows = db.execute(
+                    select(DailyGeneration.day, DailyGeneration.kwh)
+                    .where(DailyGeneration.array_id == arr.id,
+                           DailyGeneration.day >= window_start)
+                    .order_by(DailyGeneration.day)
+                ).all()
+                wk = round(sum(float(k or 0) for _, k in rows), 1)
+                inverters = [{
+                    "sn": None,
+                    "name": arr.name,
+                    "model": None,
+                    "nameplate_kw": None,
+                    "peer_index": None,
+                    "status": "ok" if rows else "comm_gap",
+                    "diagnosis": ("No per-inverter data from this vendor yet — "
+                                  "showing the array as one unit."),
+                    "window_kwh": wk,
+                    "last_mode": None,
+                    "current_power_w": None,
+                    "last_report": rows[-1][0].isoformat() if rows else None,
+                }]
+                inverter_source = inverter_source or ("array" if rows else None)
+
+            # array-level peer status (reuse overview's per-Client cohort? here
+            # we keep it simple: array node status = worst inverter, surfaced via
+            # the alert; the array tile shows its own name + count).
+            alert = _array_alert(inverters, None)
+            columns.append({
+                "array_id": arr.id,
+                "array_name": arr.name,
+                "vendor": vendor,
+                "inverter_source": inverter_source,
+                "inverter_count": len(inverters),
+                "alert": alert,
+                "inverters": inverters,
+            })
+
+    fleet_attention = sum(c["alert"]["count"] for c in columns)
+    return {
+        "generated_at": now().replace(microsecond=0).isoformat() + "Z",
+        "tiers": ["alerts", "arrays", "inverters"],
+        "columns": columns,
+        "summary": {
+            "arrays_total": len(columns),
+            "inverters_total": sum(c["inverter_count"] for c in columns),
+            "attention": fleet_attention,
+        },
+    }
+
+
 @router.get("/v1/array-owners/inverter-vendors")
 def inverter_vendors(authorization: str | None = Header(default=None)) -> list[dict]:
     """The connect-form spec the dashboard renders: one entry per vendor.
