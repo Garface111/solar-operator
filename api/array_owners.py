@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.get
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -553,6 +553,117 @@ def solaredge_discover(
         "ok": True,
         "sites": sites,
         "message": None if sites else "No sites found on this SolarEdge account.",
+    }
+
+
+# ── public pre-signup preview ("paste your key, see your REAL arrays") ─────────
+# An UNAUTHENTICATED, rate-limited endpoint so a prospective owner can paste an
+# account-level SolarEdge key on the marketing site and instantly see their own
+# sites + an estimated annual value — BEFORE creating an account. Saves nothing.
+# Rate-limited per client IP to keep the open endpoint from being abused as a
+# free SolarEdge-key oracle / scraping proxy.
+
+# crude in-memory sliding-window limiter (per-process; Railway runs one web
+# replica today). {ip: [monotonic_ts, ...]} pruned on each call.
+_PREVIEW_HITS: dict[str, list[float]] = {}
+_PREVIEW_WINDOW_S = 300.0   # 5-minute window
+_PREVIEW_MAX = 8            # ≤8 preview attempts per IP per 5 min
+
+# Typical fixed-tilt PV capacity factor (annual kWh ≈ kW_dc × 8760 × CF). 0.14
+# is a conservative US/VT-ish blended figure for a quick pre-signup estimate;
+# the dashboard shows exact measured value once live.
+_EST_CAPACITY_FACTOR = 0.14
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP behind Railway's proxy (X-Forwarded-For first hop)."""
+    xff = request.headers.get("x-forwarded-for") or ""
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _preview_rate_ok(ip: str) -> bool:
+    import time
+    now_ts = time.monotonic()
+    hits = [t for t in _PREVIEW_HITS.get(ip, []) if now_ts - t < _PREVIEW_WINDOW_S]
+    if len(hits) >= _PREVIEW_MAX:
+        _PREVIEW_HITS[ip] = hits
+        return False
+    hits.append(now_ts)
+    _PREVIEW_HITS[ip] = hits
+    return True
+
+
+def _estimate_annual_value(peak_power_kw: float) -> dict:
+    """Rough annual $ value for a site of `peak_power_kw`, for the pre-signup
+    teaser. energy = kWh × default rate; REC = floored MWh × REC price. Clearly
+    an estimate — the dashboard pins the real number once connected."""
+    kw = max(float(peak_power_kw or 0.0), 0.0)
+    annual_kwh = kw * 8760.0 * _EST_CAPACITY_FACTOR
+    energy_usd = annual_kwh * get_energy_rate(None)
+    rec_usd = math.floor(annual_kwh / 1000.0) * REC_PRICE_USD_PER_MWH
+    return {
+        "annual_kwh": round(annual_kwh),
+        "annual_value_usd": round(energy_usd + rec_usd),
+    }
+
+
+class PublicPreviewBody(BaseModel):
+    api_key: str
+
+
+@router.post("/v1/array-owners/public/preview")
+def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
+    """UNAUTHENTICATED pre-signup preview: list the real SolarEdge sites an
+    account-level key can read + a rough annual value, so a prospective owner
+    sees THEIR arrays before signing up. Saves nothing. Rate-limited per IP.
+
+    Returns {ok, sites:[{site_id,name,peak_power_kw,annual_kwh,annual_value_usd}],
+    totals:{peak_power_kw, annual_value_usd}, message}. A site-level key, bad
+    key, or empty account each come back as ok:false with a friendly message
+    (never a 4xx that the static site would have to special-case) — EXCEPT the
+    rate limit (429) and SolarEdge 5xx (502)."""
+    ip = _client_ip(request)
+    if not _preview_rate_ok(ip):
+        raise HTTPException(429, "Too many preview attempts — give it a few minutes and try again.")
+
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        return {"ok": False, "sites": [], "message": "Paste your SolarEdge account API key first."}
+
+    try:
+        sites = inverters.solaredge.discover_sites(api_key)
+    except InverterScopeError:
+        return {"ok": False, "sites": [], "scope": "site",
+                "message": "That's a site-level key — it can't list your whole account. "
+                           "Paste an account-level key (SolarEdge Admin → Site Access → "
+                           "API Access) to see every array at once."}
+    except InverterAuthError:
+        return {"ok": False, "sites": [],
+                "message": "That key didn't work — make sure it's an active account-level API key."}
+    except InverterError as exc:
+        raise HTTPException(502, f"SolarEdge is unreachable right now: {exc}")
+
+    enriched = []
+    total_kw = 0.0
+    total_val = 0.0
+    for s in sites:
+        kw = float(s.get("peak_power_kw") or 0.0)
+        est = _estimate_annual_value(kw)
+        total_kw += kw
+        total_val += est["annual_value_usd"]
+        enriched.append({**s, **est})
+
+    return {
+        "ok": True,
+        "sites": enriched,
+        "totals": {
+            "count": len(enriched),
+            "peak_power_kw": round(total_kw, 1),
+            "annual_value_usd": round(total_val),
+        },
+        "message": None if enriched else "We reached your account but found no SolarEdge sites on it.",
     }
 
 
