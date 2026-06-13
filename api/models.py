@@ -183,6 +183,16 @@ class Client(Base):
     vec_autopopulate: Mapped[bool] = mapped_column(Boolean, default=True)
     vec_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # V2 (feat/v2-rec-fuels): the client's default generation fuel, captured in
+    # the onboarding wizard. Manually-entered arrays without their own fuel
+    # inherit it, and arrays auto-populated later by /v1/sync are tagged with it
+    # — so a wind/hydro/digester/storage operator who uses autopop (and thus
+    # enters no arrays at onboarding) still gets fuel-correct arrays + reports.
+    # Defaults to 'solar' so every existing client is byte-identical.
+    default_fuel_type: Mapped[str] = mapped_column(
+        String(20), default="solar", server_default="solar"
+    )
+
     # Per-client email delivery health (W2-6, June 2026). Populated by the Resend
     # webhook (api/resend_webhook.py) on bounced/delivered/complained events.
     # NOTE distinct from last_delivery_at (when WE sent): these reflect what

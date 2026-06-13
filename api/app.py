@@ -27,6 +27,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select, func, or_
 from .db import init_db, SessionLocal
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
+from .fuels import normalize_fuel
 from .adapters import get_adapter, is_smarthub_provider
 from .sync_filter import classify_residential
 import re as _re
@@ -565,6 +566,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 client_id=owner.id,
                                 name=arr_name,
                                 bill_offset_months=_autopop_cfg["bill_offset_months"],
+                                # Inherit the fuel the operator picked for this
+                                # client during onboarding (defaults to solar).
+                                fuel_type=normalize_fuel(
+                                    getattr(owner, "default_fuel_type", None)),
                             )
                             db.add(arr)
                         db.flush()  # assign arr.id before linking
@@ -760,6 +765,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                     client_id=target.id,
                                     name=arr_name,
                                     bill_offset_months=_autopop_cfg["bill_offset_months"],
+                                    # Inherit the fuel the operator picked for
+                                    # this client during onboarding (def. solar).
+                                    fuel_type=normalize_fuel(
+                                        getattr(target, "default_fuel_type", None)),
                                 )
                                 db.add(arr)
                             db.flush()

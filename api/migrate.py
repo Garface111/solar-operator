@@ -597,6 +597,21 @@ def main():
         if backfilled:
             print(f"  ↪ backfilled fuel_type='solar' on {backfilled} array(s)")
 
+        # 2026-06-13 V2 fuel on the Client (matches the onboarding wizard, which
+        # collects a per-client default fuel). Stored so arrays auto-populated
+        # later by /v1/sync inherit the operator's onboarding fuel choice.
+        # Defaults to 'solar' so existing clients stay byte-identical.
+        if not column_exists(conn, "clients", "default_fuel_type"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN default_fuel_type VARCHAR(20) DEFAULT 'solar'"
+            ))
+            print("  + clients.default_fuel_type")
+        backfilled = conn.execute(text(
+            "UPDATE clients SET default_fuel_type = 'solar' WHERE default_fuel_type IS NULL"
+        )).rowcount
+        if backfilled:
+            print(f"  ↪ backfilled default_fuel_type='solar' on {backfilled} client(s)")
+
         # 2026-06 Multi-vendor inverter framework (feat/inverter-framework).
         # The inverter_connections table comes free via Base.metadata.create_all
         # (init_db() above) — confirmed: it's a brand-new table, no pre-existing

@@ -426,3 +426,105 @@ def test_extension_installed_advances_without_payment(client, mocks):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["stage"] == "clients"
+
+
+# ─── (f) V2 fuel selection persists through onboarding ────────────────────
+# Regression: the wizard collects a per-client default fuel and a per-array
+# fuel (wind/hydro/digester/storage), but the backend used to drop both —
+# every onboarded array landed as 'solar'. These prove the backend now
+# matches the onboarding payload.
+
+def test_onboarding_persists_array_and_client_fuel(client, mocks):
+    """Per-array fuel wins; a fuel-less array inherits the client default; the
+    client's default_fuel_type is stored for the autopop path; garbage → solar."""
+    from api.models import Client, Array
+
+    token = _do_checkout(client, email="fuel@example.com")["onboarding_token"]
+    assert client.post("/v1/onboarding/extension-installed",
+                       params={"token": token}).status_code == 200
+
+    resp = client.post(
+        "/v1/onboarding/clients",
+        params={"token": token},
+        json=[
+            {
+                "name": "Ridgeline Wind",
+                "gmp_autopopulate": False,
+                "default_fuel_type": "wind",
+                "arrays": [
+                    # explicit per-array fuel overrides the client default
+                    {"name": "Ridge Turbine A", "fuel_type": "hydro"},
+                    # no per-array fuel → inherits the client's 'wind' default
+                    {"name": "Ridge Turbine B"},
+                    # garbage per-array fuel → falls back down the chain to the
+                    # client's 'wind' default (never breaks the request)
+                    {"name": "Ridge Turbine C", "fuel_type": "plutonium"},
+                ],
+            },
+            {
+                # No client default + garbage array fuel → floors at solar, so
+                # report dispatch is never broken by bad input.
+                "name": "Garbage In",
+                "gmp_autopopulate": False,
+                "arrays": [{"name": "Junk Array", "fuel_type": "plutonium"}],
+            },
+            {
+                # Autopop client: sends NO arrays, only a default fuel. The
+                # default must be stored so /v1/sync-created arrays inherit it.
+                "name": "Otter Creek Hydro",
+                "gmp_autopopulate": True,
+                "gmp_email": "otter@example.com",
+                "default_fuel_type": "digester",
+                "arrays": [],
+            },
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        arrays = {
+            a.name: a.fuel_type
+            for a in db.execute(select(Array)).scalars().all()
+        }
+        assert arrays["Ridge Turbine A"] == "hydro"   # per-array wins
+        assert arrays["Ridge Turbine B"] == "wind"    # inherits client default
+        assert arrays["Ridge Turbine C"] == "wind"    # garbage → client default
+        assert arrays["Junk Array"] == "solar"        # garbage, no default → solar
+
+        wind_client = db.execute(
+            select(Client).where(Client.name == "Ridgeline Wind")
+        ).scalar_one()
+        assert wind_client.default_fuel_type == "wind"
+
+        autopop_client = db.execute(
+            select(Client).where(Client.name == "Otter Creek Hydro")
+        ).scalar_one()
+        # Stored for the autopop path even though no arrays were sent here.
+        assert autopop_client.default_fuel_type == "digester"
+
+
+def test_onboarding_solar_default_unchanged(client, mocks):
+    """Omitting fuel entirely (the common solar case) still yields solar — the
+    pre-V2 payload shape is byte-identical."""
+    from api.models import Array
+
+    token = _do_checkout(client, email="solar@example.com")["onboarding_token"]
+    assert client.post("/v1/onboarding/extension-installed",
+                       params={"token": token}).status_code == 200
+
+    resp = client.post(
+        "/v1/onboarding/clients",
+        params={"token": token},
+        json=[{
+            "name": "Sunny Fields",
+            "gmp_autopopulate": False,
+            "arrays": [{"name": "South Roof", "nepool_gis_id": "53984"}],
+        }],
+    )
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(Array.name == "South Roof")
+        ).scalar_one()
+        assert arr.fuel_type == "solar"

@@ -41,6 +41,7 @@ from sqlalchemy import select, func, or_
 from . import branding
 from .bill_attribution import distribute_kwh_by_calendar_day
 from .db import SessionLocal
+from .fuels import normalize_fuel
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
@@ -356,6 +357,9 @@ class ArrayCreate(BaseModel):
     notes: Optional[str] = None
     accounts: Optional[list[ArrayAccountInput]] = None
     # optional list of utility logins / account numbers powering this array
+    # V2: generation source (solar|wind|hydro|digester|storage). Normalized
+    # server-side; an unknown/omitted value becomes solar.
+    fuel_type: Optional[str] = None
 
 
 class ArrayUpdate(BaseModel):
@@ -365,6 +369,7 @@ class ArrayUpdate(BaseModel):
     bill_offset_months: Optional[int] = None
     notes: Optional[str] = None
     excluded: Optional[bool] = None
+    fuel_type: Optional[str] = None
 
 
 HARD_DELETE_GRACE_DAYS = 30
@@ -379,6 +384,7 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
         "bill_offset_months": a.bill_offset_months,
         "notes": a.notes,
         "excluded": bool(a.excluded),
+        "fuel_type": getattr(a, "fuel_type", None) or "solar",
         # SolarEdge: expose connected status + site_id, never the raw key.
         "solaredge_connected": bool(a.solaredge_api_key),
         "solaredge_site_id": a.solaredge_site_id,
@@ -3060,6 +3066,9 @@ def create_array(client_id: int, body: ArrayCreate,
             bill_offset_months=body.bill_offset_months
                 if body.bill_offset_months is not None else 1,
             notes=body.notes,
+            # Per-array fuel wins; else inherit the client's onboarding default.
+            fuel_type=normalize_fuel(
+                body.fuel_type, getattr(c, "default_fuel_type", None) or "solar"),
         )
         db.add(arr); db.flush()
         # Add accounts (each is a sub-meter login)
@@ -3114,6 +3123,9 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
                       "bill_offset_months", "notes", "excluded"):
             if field in body.model_fields_set:
                 setattr(a, field, getattr(body, field))
+        # Fuel is normalized (unknown → solar) rather than written raw.
+        if "fuel_type" in body.model_fields_set:
+            a.fuel_type = normalize_fuel(body.fuel_type)
         db.commit()
         accts = db.execute(
             select(UtilityAccount).where(UtilityAccount.array_id == a.id)

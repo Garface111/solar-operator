@@ -35,6 +35,7 @@ from sqlalchemy import select, func
 
 from . import branding
 from .db import SessionLocal
+from .fuels import normalize_fuel
 from .models import Tenant, Client, Array, UtilitySession, now
 from .notify import (
     send_welcome_email, send_internal_alert, send_sample_workbook_email,
@@ -170,6 +171,10 @@ class ArrayInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     nepool_gis_id: Optional[str] = Field(None, max_length=20)
     bill_offset_months: Optional[int] = 1
+    # V2 (feat/v2-rec-fuels): generation source — solar|wind|hydro|digester|
+    # storage. Omitted by the wizard for solar (the byte-identical default).
+    # Normalized server-side, so an unknown value degrades to solar.
+    fuel_type: Optional[str] = Field(None, max_length=20)
 
 
 class ClientInput(BaseModel):
@@ -178,6 +183,11 @@ class ClientInput(BaseModel):
     gmp_email: Optional[EmailStr] = None
     gmp_username: Optional[str] = Field(None, max_length=120)
     gmp_autopopulate: bool = False
+    # V2: the client's default fuel. Applied to manually-entered arrays that
+    # don't carry their own fuel_type, and persisted on the Client so arrays
+    # auto-populated later by /v1/sync (the autopop path, which sends no arrays
+    # here) inherit the fuel the operator picked during onboarding.
+    default_fuel_type: Optional[str] = Field(None, max_length=20)
     arrays: list[ArrayInput] = Field(default_factory=list)
 
 
@@ -569,6 +579,10 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
             ).scalar_one_or_none()
             if dupe:
                 raise HTTPException(409, f"A client named '{name}' already exists")
+            # The client's default fuel seeds manually-entered arrays below and
+            # is stored on the Client so autopop arrays (created later by
+            # /v1/sync) inherit the operator's onboarding fuel choice.
+            client_fuel = normalize_fuel(ci.default_fuel_type)
             c = Client(
                 tenant_id=t.id,
                 name=name,
@@ -576,6 +590,7 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
                 gmp_email=(ci.gmp_email.lower().strip() if ci.gmp_email else None),
                 gmp_username=(ci.gmp_username.strip() if ci.gmp_username and ci.gmp_username.strip() else None),
                 gmp_autopopulate=bool(ci.gmp_autopopulate),
+                default_fuel_type=client_fuel,
                 active=True,
             )
             db.add(c); db.flush()
@@ -595,6 +610,8 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
                     nepool_gis_id=ai.nepool_gis_id,
                     bill_offset_months=(ai.bill_offset_months
                                         if ai.bill_offset_months is not None else 1),
+                    # Per-array fuel wins; otherwise inherit the client default.
+                    fuel_type=normalize_fuel(ai.fuel_type, client_fuel),
                 ))
 
         # ── Drop the seed placeholder Client(s) (Path A activation) ─────
