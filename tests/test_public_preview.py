@@ -109,6 +109,15 @@ def test_preview_vendor_sma_no_peak_no_value(monkeypatch):
     assert data["totals"]["annual_value_usd"] is None  # nothing to estimate
 
 
+def test_preview_unavailable_vendor_friendly():
+    """Chint is AVAILABLE=False — defensive friendly message, not a 502."""
+    r = client.post("/v1/array-owners/public/preview", json={"vendor": "chint", "config": {}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "CSV" in body["message"] or "doesn't offer" in body["message"]
+
+
 def test_preview_missing_fields_friendly(monkeypatch):
     """Missing credential fields → friendly ok:false, not a 500."""
     r = client.post("/v1/array-owners/public/preview", json={

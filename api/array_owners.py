@@ -710,6 +710,11 @@ def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
     if vendor not in inverters.VENDORS:
         return {"ok": False, "vendor": vendor, "sites": [],
                 "message": "We don't support that inverter brand yet."}
+    if not getattr(inverters.VENDORS[vendor], "AVAILABLE", True):
+        # e.g. Chint/CPS — no API; the UI shouldn't offer it, but be defensive.
+        return {"ok": False, "vendor": vendor, "sites": [],
+                "message": f"{inverters.VENDORS[vendor].LABEL} doesn't offer a live "
+                           "connection yet — you can add it by CSV after signing up."}
 
     # Required fields present? (cheap pre-check so we return friendly copy, not 500)
     needs = {
