@@ -49,7 +49,7 @@ from .account import (
     _hash_password,
     _validate_password_strength,
 )
-from .stripe_helpers import reconcile_subscription_quantity
+from .stripe_helpers import reconcile_subscription_quantity, billable_array_count
 
 logger = logging.getLogger(__name__)
 
@@ -635,12 +635,12 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
         db.commit()
 
         # Snapshot what we need for billing while the session is still open.
+        # Use the canonical billable count (not soft-deleted, not excluded) so
+        # the reconciled Stripe quantity matches the dashboard estimate.
         subscription_id = t.stripe_subscription_id
         tenant_id = t.id
         tenant_email = t.contact_email
-        array_count = len(db.execute(
-            select(Array).where(Array.tenant_id == t.id)
-        ).scalars().all())
+        array_count = billable_array_count(db, t.id)
 
     # Now that every client + array is persisted, bring Stripe in line with the
     # real array count. This runs SYNCHRONOUSLY before we return (W2-11) so the

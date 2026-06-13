@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from .db import SessionLocal
+from .fuels import normalize_fuel
 from .models import Client, Array, UtilityAccount
 from .account import tenant_from_session, require_not_demo, require_not_demo
 from .import_examples import EXAMPLE_GMCS_STYLE, EXAMPLE_RESIDENTIAL_PORTFOLIO
@@ -976,6 +977,10 @@ def ingest_commit(
                     name=array_name,
                     nepool_gis_id=r["nepool_gis_id"],
                     notes=r["notes"],
+                    # Inherit the client's fuel so a wind/hydro operator importing
+                    # their fleet via spreadsheet doesn't get all-solar arrays.
+                    fuel_type=normalize_fuel(
+                        None, getattr(client, "default_fuel_type", None)),
                 )
                 db.add(arr)
                 db.flush()

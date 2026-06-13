@@ -56,6 +56,28 @@ def is_array_operator(product: str | None) -> bool:
     return (product or "nepool") == "array_operator"
 
 
+def billable_array_count(db, tenant_id: str) -> int:
+    """The canonical "how many arrays does this tenant pay for" count.
+
+    Billable = NOT soft-deleted AND NOT excluded (see Array.excluded:
+    "excluded from reports AND billing"). This is the single source of truth so
+    the Stripe quantity, the dashboard "next charge" estimate
+    (_billing_summary_arrays), and the original subscription
+    (create_subscription_for_tenant) can never disagree. EVERY
+    reconcile_subscription_quantity callsite must feed its count through here —
+    callers that counted only `deleted_at IS NULL` (or nothing) were billing
+    excluded/soft-deleted arrays, overcharging the customer (fixed June 2026).
+    """
+    from .models import Array
+    return int(db.execute(
+        select(func.count()).select_from(Array).where(
+            Array.tenant_id == tenant_id,
+            Array.deleted_at.is_(None),
+            Array.excluded.is_(False),
+        )
+    ).scalar() or 0)
+
+
 def array_price_id_for_product(product: str | None) -> str:
     """Return the recurring Stripe price id for a tenant's product.
 

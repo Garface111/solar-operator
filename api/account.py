@@ -45,7 +45,7 @@ from .fuels import normalize_fuel
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
-from .stripe_helpers import reconcile_subscription_quantity, create_subscription_for_tenant
+from .stripe_helpers import reconcile_subscription_quantity, create_subscription_for_tenant, billable_array_count
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_SIGNOFF,
     MERGE_TAGS, build_context, render_email,
@@ -1524,13 +1524,9 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
 def _billing_summary_arrays(t: Tenant) -> dict:
     """Per-array (NEPOOL) billing summary — the original behavior."""
     with SessionLocal() as db:
-        billable = db.execute(
-            select(func.count()).select_from(Array).where(
-                Array.tenant_id == t.id,
-                Array.deleted_at.is_(None),
-                Array.excluded.is_(False),
-            )
-        ).scalar() or 0
+        # Same canonical billable count the reconcile callsites use, so this
+        # "next charge" estimate always matches the real Stripe quantity.
+        billable = billable_array_count(db, t.id)
     _cents, currency = _array_price_cents()
     billable = int(billable)
     # Volume/graduated pricing: total is the sum across tier bands, NOT a flat
@@ -2485,7 +2481,14 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
 
         db.commit()
         db.refresh(dst)
-        return {
+        # Merging soft-deletes src, dropping the billable count by one (unless
+        # src was already excluded). Reconcile Stripe — merging duplicate
+        # sub-meter arrays is a routine cleanup, and it used to leave billing at
+        # the pre-merge quantity forever (June 2026 fix).
+        new_count = billable_array_count(db, t.id)
+        sub_id = t.stripe_subscription_id
+        tenant_email = t.contact_email
+        result = {
             "ok": True,
             "merged_from_id": src.id,
             "dst_array": {
@@ -2506,6 +2509,9 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
             },
             "reparented_utility_accounts": n_uas,
         }
+
+    reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return result
 
 
 @router.post("/v1/account/arrays/{array_id}/dismiss-merge/{other_id}")
@@ -2645,11 +2651,7 @@ def delete_client(client_id: int,
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
-        new_count = db.execute(
-            select(func.count()).select_from(Array).where(
-                Array.tenant_id == t.id, Array.deleted_at.is_(None)
-            )
-        ).scalar() or 0
+        new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
 
@@ -3083,9 +3085,7 @@ def create_array(client_id: int, body: ArrayCreate,
         accts = db.execute(
             select(UtilityAccount).where(UtilityAccount.array_id == arr.id)
         ).scalars().all()
-        new_array_count = db.execute(
-            select(func.count()).select_from(Array).where(Array.tenant_id == t.id)
-        ).scalar() or 0
+        new_array_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
         result = {"ok": True, "array": _array_to_dict(arr, accts)}
@@ -3119,6 +3119,10 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
                     raise HTTPException(409,
                         "Another array already has that name")
                 a.name = new_name
+        # Track whether the billable status flips — excluding/including an
+        # array changes the Stripe quantity and must be reconciled (it wasn't,
+        # so toggling Exclude had no billing effect — June 2026 fix).
+        was_excluded = bool(a.excluded)
         for field in ("nepool_gis_id", "region",
                       "bill_offset_months", "notes", "excluded"):
             if field in body.model_fields_set:
@@ -3127,10 +3131,21 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
         if "fuel_type" in body.model_fields_set:
             a.fuel_type = normalize_fuel(body.fuel_type)
         db.commit()
+        excluded_changed = bool(a.excluded) != was_excluded
+        if excluded_changed:
+            new_count = billable_array_count(db, t.id)
+            sub_id = t.stripe_subscription_id
+            tenant_email = t.contact_email
         accts = db.execute(
             select(UtilityAccount).where(UtilityAccount.array_id == a.id)
         ).scalars().all()
-        return {"ok": True, "array": _array_to_dict(a, accts)}
+        result = {"ok": True, "array": _array_to_dict(a, accts)}
+
+    # Excluding an array is the one edit whose purpose is to stop billing it,
+    # so bring Stripe in line with the new billable count (outside the session).
+    if excluded_changed:
+        reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)
+    return result
 
 
 @router.delete("/v1/account/clients/{client_id}/arrays/{array_id}")
@@ -3169,11 +3184,7 @@ def delete_array(client_id: int, array_id: int,
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
-        new_count = db.execute(
-            select(func.count()).select_from(Array).where(
-                Array.tenant_id == t.id, Array.deleted_at.is_(None)
-            )
-        ).scalar() or 0
+        new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
 
@@ -3313,11 +3324,7 @@ def bulk_delete_arrays(
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
-        new_count = db.execute(
-            select(func.count()).select_from(Array).where(
-                Array.tenant_id == t.id, Array.deleted_at.is_(None)
-            )
-        ).scalar() or 0
+        new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
 
@@ -3382,11 +3389,7 @@ def bulk_delete_clients(
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
-        new_count = db.execute(
-            select(func.count()).select_from(Array).where(
-                Array.tenant_id == t.id, Array.deleted_at.is_(None)
-            )
-        ).scalar() or 0
+        new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
 
@@ -3445,11 +3448,7 @@ def undo_delete(
 
         history.consumed_at = now_ts
         db.commit()
-        new_count = db.execute(
-            select(func.count()).select_from(Array).where(
-                Array.tenant_id == t.id, Array.deleted_at.is_(None)
-            )
-        ).scalar() or 0
+        new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
 

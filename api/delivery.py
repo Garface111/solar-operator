@@ -96,9 +96,16 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         subject_template = tenant.email_subject_template
         body_template = tenant.email_body_template
         signoff_template = tenant.email_signoff
+        # Count only arrays that actually appear in the workbook (not soft-
+        # deleted, not excluded) so the {{arrays_count}} merge tag in the email
+        # body matches what the client sees in the attachment.
         arrays_count = db.execute(
             select(func.count()).select_from(Array)
-            .where(Array.client_id == client_id)
+            .where(
+                Array.client_id == client_id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
         ).scalar() or 0
 
     if not is_active and triggered_by != "ops":
@@ -135,7 +142,9 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
 
     safe_client = client_name.replace(" ", "_").replace("/", "-")
     with tempfile.TemporaryDirectory(prefix=f"so-deliver-c{client_id}-") as tmpdir:
-        out_path = pathlib.Path(tmpdir) / f"{safe_client}-GMCS-report.xlsx"
+        # Neutral filename — "GMCS" is the solar report's name, but a wind/hydro
+        # client gets a fuel-correct REC workbook, so don't brand it solar.
+        out_path = pathlib.Path(tmpdir) / f"{safe_client}-report.xlsx"
         try:
             path = build_workbook(client_id=client_id, year=year,
                                   out_path=out_path)
@@ -166,7 +175,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         )
         if subject_prefix:
             subject = f"{subject_prefix}{subject}"
-        filename = f"{safe_client}-GMCS-report.xlsx"
+        filename = f"{safe_client}-report.xlsx"
         # Send to primary; cc the extras. from_header carries the tenant's
         # "send as me" address (send_workbook_email falls back to the platform
         # default if Resend rejects an unverified domain).

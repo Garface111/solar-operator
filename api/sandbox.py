@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from .account import tenant_from_session, require_not_demo, require_not_demo
 from .db import SessionLocal
+from .fuels import normalize_fuel
 from .models import Array, Bill, Client, UtilityAccount, now
 from .email_templates import quarter_context
 
@@ -40,6 +41,9 @@ def _fmt_account(acc: UtilityAccount, arr: Optional[Array], mwh_per_qtr: Optiona
         "array_id": arr.id if arr else None,
         "array_name": arr.name if arr else None,
         "nepool_gis_id": arr.nepool_gis_id if arr else None,
+        # V2 fuel so the canvas FuelBadge can show non-solar arrays (it was
+        # never emitted, so every array rendered as solar — June 2026 fix).
+        "fuel_type": (getattr(arr, "fuel_type", None) or "solar") if arr else None,
         # MWh/qtr — most recent complete quarter, summed across all Bill rows
         # whose account_id points at this UtilityAccount. None when no
         # generation data has landed yet (clean dash in the UI, not "0 MWh").
@@ -441,6 +445,10 @@ def sandbox_account_reassign(
                 name=candidate,
                 nepool_gis_id=None,
                 bill_offset_months=1,
+                # Inherit the holder client's fuel so splitting an account into a
+                # fresh array under a non-solar client doesn't silently make solar.
+                fuel_type=normalize_fuel(
+                    None, getattr(target_client, "default_fuel_type", None)),
             )
             db.add(new_array)
             db.flush()
