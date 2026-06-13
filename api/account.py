@@ -38,6 +38,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
 
+from . import branding
 from .bill_attribution import distribute_kwh_by_calendar_day
 from .db import SessionLocal
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
@@ -424,19 +425,24 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
         db.add(LoginToken(token=token, tenant_id=t.id, email=email, expires_at=expires, persist_session=persist))
         db.commit()
         tenant_name = t.operator_name or t.company_name or t.name
+        product = t.product
     # Magic link lands on the dashboard SPA, which exchanges this one-time login
     # token for a session via POST /v1/auth/verify (see web/app AuthGate).
-    link = f"{PUBLIC_DASHBOARD_URL}/?token={token}"
+    # Product-aware so an Array Operator owner gets their brand's domain + name,
+    # not NEPOOL's. (Defaults safely to the working NEPOOL domain until
+    # arrayoperator.com is live — see api/branding.py.)
+    brand = branding.brand_name(product)
+    link = f"{branding.dashboard_url(product)}/?token={token}"
     html = f"""\
 <!DOCTYPE html><html><body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f4;padding:30px 0;color:#1a2a1f;">
 <table cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center">
 <table cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;background:white;border-radius:12px;overflow:hidden;">
 <tr><td style="background:#2e6b3a;padding:24px 32px;color:white;">
-  <div style="font-size:20px;font-weight:700;">NEPOOL Operator</div>
+  <div style="font-size:20px;font-weight:700;">{brand}</div>
   <div style="font-size:13px;color:#cfe4d3;margin-top:4px;">Sign-in link for {tenant_name or 'your account'}</div>
 </td></tr>
 <tr><td style="padding:32px;font-size:15px;line-height:1.6;">
-<p>Click the button below to sign in to your NEPOOL Operator account:</p>
+<p>Click the button below to sign in to your {brand} account:</p>
 <p style="text-align:center;margin:28px 0;">
   <a href="{link}" style="background:#2e6b3a;color:white;padding:13px 28px;border-radius:6px;text-decoration:none;font-weight:600;display:inline-block;">Sign in to my account</a>
 </p>
@@ -446,10 +452,10 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
 </table>
 </td></tr></table></body></html>
 """
-    text = f"Sign in to NEPOOL Operator: {link}\n\nLink expires in 15 minutes."
+    text = f"Sign in to {brand}: {link}\n\nLink expires in 15 minutes."
     sent = _send_via_resend(
         to=email,
-        subject="Sign in to NEPOOL Operator",
+        subject=f"Sign in to {brand}",
         html=html,
         text=text,
     )
@@ -1574,7 +1580,7 @@ def billing_portal(authorization: Optional[str] = Header(default=None)):
     try:
         session = stripe.billing_portal.Session.create(
             customer=t.stripe_customer_id,
-            return_url=f"{PUBLIC_DASHBOARD_URL}/",
+            return_url=f"{branding.dashboard_url(t.product)}/",
         )
         return {"url": session.url}
     except stripe.error.StripeError as e:
@@ -1620,8 +1626,8 @@ def add_payment_method(authorization: Optional[str] = Header(default=None)):
             mode="setup",
             payment_method_types=["card"],
             customer=customer_id,
-            success_url=f"{APP_URL}/accounts/?card_added=1",
-            cancel_url=f"{APP_URL}/accounts/?card_cancelled=1",
+            success_url=f"{branding.app_url(t.product)}/accounts/?card_added=1",
+            cancel_url=f"{branding.app_url(t.product)}/accounts/?card_cancelled=1",
             setup_intent_data={"metadata": {"tenant_id": t.id}},
             metadata={"tenant_id": t.id},
         )

@@ -33,6 +33,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, func
 
+from . import branding
 from .db import SessionLocal
 from .models import Tenant, Client, Array, UtilitySession, now
 from .notify import (
@@ -671,6 +672,7 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
         plan = t.plan
         tenant_id = t.id
         trial_ends_at = t.trial_ends_at
+        product = t.product
 
     # Deferred welcome email (NOT sent by the webhook for onboarding-flow tenants).
     try:
@@ -693,8 +695,12 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
 
     # Second email: a sample report so they see what their clients will receive.
     # Best-effort — already swallows its own exceptions, never blocks completion.
-    sample_email_sent = send_sample_workbook_email(
-        to=email, name=name, dashboard_url=f"{APP_URL}/accounts")
+    # NEPOOL-only: the sample is a quarterly NEPOOL-GIS *client* workbook, which
+    # an Array Operator owner has no use for (no clients, no quarterly filings).
+    sample_email_sent = False
+    if (product or "nepool") != "array_operator":
+        sample_email_sent = send_sample_workbook_email(
+            to=email, name=name, dashboard_url=f"{branding.dashboard_url(product)}")
 
     # Third email: trial welcome — explains the 14-day trial and primes them
     # to add clients/arrays. trial_ends_at is set by the Stripe webhook;
@@ -706,7 +712,7 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
         trial_welcome_sent = send_trial_welcome_email(
             to=email, name=name,
             trial_end_iso_date=_trial_end_str,
-            dashboard_url=f"{APP_URL}/accounts",
+            dashboard_url=f"{branding.dashboard_url(product)}",
         )
         if trial_welcome_sent:
             logger.info("Trial welcome email sent to %s", email)
