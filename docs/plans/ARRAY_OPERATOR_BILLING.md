@@ -64,6 +64,23 @@ SolarEdge:
   Fronius single-system reveal (Wp→kW value), and friendly errors for bad creds /
   missing fields / Chint. Tests: tests/test_public_preview.py (10).
 
+## One-click post-signup attach for ALL vendors (LIVE Jun 13 2026)
+Auto-attach after signup now works for every brand, not just SolarEdge:
+- SolarEdge → `/v1/array-owners/solaredge/connect-account` (attach all sites)
+- Locus(+partner_id) → `/v1/array-owners/locus/connect-account` (attach all)
+- Fronius / SMA / Locus(no partner) → NEW `POST /v1/array-owners/connect-single`
+  — validates the one named system (validate-first; bad creds 400 + no write),
+  attaches to a matched-by-name or freshly-created array. Idempotent by name.
+- Frontend finish() routes each vendor to the right endpoint using the
+  freshly-minted onboarding session; sets state.arraysConnected for the done
+  screen. Best-effort — a failure never blocks the trial. Added an optional
+  Locus "Partner ID" field (enables account-wide discovery; without it Locus
+  previews/attaches the single named site).
+- Verified: connect-single unit tests (create / match-existing / bad-creds-no-
+  write / unavailable-vendor), full suite 817; live E2E (Fronius signup →
+  start/complete/connect-single fire; bad creds 400 without blocking trial;
+  tenant array_operator/trialing; nothing orphaned).
+
 ## The decision (pending Ford's final word)
 Audited Array Operator as a customer (owner-facing app: dollar-first verdict,
 done-for-you warranty claims, peer-index ground truth, one-credential discovery).
