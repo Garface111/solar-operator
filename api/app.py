@@ -150,17 +150,35 @@ for _sh_code, _sh_info in _SMARTHUB_UTILITIES.items():
 
 app = FastAPI(title="Solar Operator API", version="1.0.0")
 
-# CORS — allow the marketing site to call /v1/signup, and any Chrome
-# extension to call /v1/sync (extensions identify with chrome-extension://
-# origins; we authenticate them per-request via tenant_key bearer token).
+# CORS — allow the EnergyAgent umbrella front-ends to call the shared backend.
+# Two products, one API: the NEPOOL Operator marketing/app (solaroperator.org)
+# and the Array Operator owner site (array-operator-ea.netlify.app, and the
+# future arrayoperator.com / app.yourenergyagent.com). Any Chrome extension may
+# call /v1/sync (chrome-extension:// origins) — all authenticate per-request via
+# tenant_key bearer, so the origin list is a courtesy gate, not the security boundary.
 ALLOWED_ORIGINS = os.getenv(
     "CORS_ALLOWED_ORIGINS",
-    "https://solaroperator.org,https://www.solaroperator.org,http://localhost:3000"
+    ",".join([
+        "https://solaroperator.org",
+        "https://www.solaroperator.org",
+        # EnergyAgent umbrella brand + Array Operator owner site
+        "https://yourenergyagent.com",
+        "https://www.yourenergyagent.com",
+        "https://array-operator-ea.netlify.app",
+        "https://arrayoperator.com",
+        "https://www.arrayoperator.com",
+        "https://app.yourenergyagent.com",
+        "http://localhost:3000",
+        "http://localhost:8088",  # local Array Operator static preview
+    ])
 ).split(",")
+# Allow Netlify deploy-preview / branch subdomains for both sites
+# (e.g. https://<hash>--array-operator-ea.netlify.app, energyagent-250 previews).
+_NETLIFY_PREVIEW_RE = r"^https://([a-z0-9-]+--)?(array-operator-ea|energyagent-250)\.netlify\.app$"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in ALLOWED_ORIGINS if o.strip()],
-    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$",
+    allow_origin_regex=r"^chrome-extension://[a-z0-9]+$|" + _NETLIFY_PREVIEW_RE,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["*"],
     allow_credentials=False,
