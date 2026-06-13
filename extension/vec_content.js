@@ -22,7 +22,7 @@
   const KNOWN_HOST = "vermontelectric.smarthub.coop";
   if (location.hostname !== KNOWN_HOST) {
     console.warn(
-      `[Solar Operator] Untested SmartHub host: ${location.hostname}. ` +
+      `[EnergyAgent] Untested SmartHub host: ${location.hostname}. ` +
         `Treating as NISC SmartHub (same as ${KNOWN_HOST}). Data shape may differ.`
     );
   }
@@ -198,18 +198,18 @@
       (response) => {
         if (chrome.runtime.lastError) {
           console.warn(
-            "[Solar Operator VEC] sendMessage failed:",
+            "[EnergyAgent VEC] sendMessage failed:",
             chrome.runtime.lastError
           );
           return;
         }
         if (response && response.ok) {
           console.log(
-            `[Solar Operator VEC] Synced: ${accounts.length} account(s), ` +
+            `[EnergyAgent VEC] Synced: ${accounts.length} account(s), ` +
               `${bills.length} bill row(s), ${usage.length} usage row(s) → ${response.endpoint}`
           );
         } else if (response && response.error) {
-          console.warn("[Solar Operator VEC] Sync error:", response.error);
+          console.warn("[EnergyAgent VEC] Sync error:", response.error);
         }
       }
     );

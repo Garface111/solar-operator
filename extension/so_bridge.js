@@ -1,4 +1,4 @@
-// so_bridge.js — page ↔ extension bridge for the Solar Operator SPA.
+// so_bridge.js — page ↔ extension bridge for the EnergyAgent SPA.
 //
 // Runs on solaroperator.org + the Railway origin. The SPA cannot call
 // chrome.* directly (no chrome.* in page context), so it window.postMessage's

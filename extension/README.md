@@ -1,24 +1,24 @@
-# Solar Operator Sync — Chrome Extension
+# EnergyAgent Sync — Chrome Extension
 
 A Manifest V3 Chrome extension that captures the user's utility-portal session
 (Green Mountain Power and any NISC SmartHub utility) and forwards it to the
-Solar Operator API so quarterly investor reports can be drafted automatically.
+EnergyAgent API so quarterly investor reports can be drafted automatically.
 
 ## Design
 
-![Solar Operator icon](icons/icon128.png)
+![EnergyAgent icon](icons/icon128.png)
 
 Cream background (`#FAF8F5`), emerald-700 action button, a single wood-300 gold
 hairline under the header strip, zinc body text. The popup shows connection
 status, last capture timestamp, today's capture count, and a one-click link to
-the Solar Operator dashboard.
+the EnergyAgent dashboard.
 
 ## What it does
 
 When the user logs into greenmountainpower.com, the content script reads the
 `gmp-vue` entry from `localStorage`, extracts the API token + account map (all
 arrays under the login, with direct bill-PDF URLs), and POSTs it to the
-Solar Operator backend. The user never sees DevTools, never copies JSON.
+EnergyAgent backend. The user never sees DevTools, never copies JSON.
 
 While the API isn't live yet, the extension runs in **local-only mode** — it
 captures the payload to `chrome.storage.local` and shows it in the popup. Set a
@@ -57,7 +57,7 @@ extension/
 Two settings live in `chrome.storage.local`:
 
 - `api_endpoint` — defaults to `https://web-production-49c83.up.railway.app/v1/sync`
-- `tenant_key`   — issued per customer from the Solar Operator admin dashboard
+- `tenant_key`   — issued per customer from the EnergyAgent admin dashboard
 
 Without a tenant key the extension is capture-only (no network requests
 besides what the user already makes to greenmountainpower.com). With a tenant

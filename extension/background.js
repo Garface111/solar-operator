@@ -1,6 +1,6 @@
 // background.js — service worker.
 // Receives captured tokens from content.js (GMP) and vec_content.js (VEC),
-// persists locally, and POSTs to the Solar Operator API.
+// persists locally, and POSTs to the EnergyAgent API.
 
 // v1.3.0: SO_PAIR / SO_STATUS_REQUEST handlers + SO_CAPTURE_LANDED +
 //         SO_LOGIN_STATE broadcasts to every solaroperator.org tab so the
@@ -44,7 +44,7 @@ function broadcastToSoTabs(message) {
       }
     });
   } catch (e) {
-    console.warn("[Solar Operator] broadcastToSoTabs failed:", e);
+    console.warn("[EnergyAgent] broadcastToSoTabs failed:", e);
   }
 }
 
@@ -83,7 +83,7 @@ async function postSync(payload) {
     // — covers the pre-CNAME window and DNS hiccups. Only retry if endpoint
     // is the default PROD_ENDPOINT (user-customized endpoints don't fall back).
     if (endpoint === PROD_ENDPOINT && FALLBACK_ENDPOINT !== endpoint) {
-      console.warn("[Solar Operator] primary endpoint failed, retrying fallback:", e.message);
+      console.warn("[EnergyAgent] primary endpoint failed, retrying fallback:", e.message);
       return await tryPost(FALLBACK_ENDPOINT);
     }
     throw e;
@@ -385,7 +385,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await chrome.storage.local.set({ [STORAGE_KEYS.LAST_LOGIN_STATE]: merged });
         broadcastToSoTabs({ type: "SO_LOGIN_STATE", ...payload });
       } catch (e) {
-        console.warn("[Solar Operator] LOGIN_STATE_DETECTED handling failed:", e);
+        console.warn("[EnergyAgent] LOGIN_STATE_DETECTED handling failed:", e);
       }
     })();
     return false;
@@ -430,7 +430,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     chrome.notifications.create({
       type: "basic",
       iconUrl: "icons/icon128.png",
-      title: "Solar Operator: reconnect needed",
+      title: "EnergyAgent: reconnect needed",
       message: `Your GMP session expires in ${Math.ceil(daysLeft)} day(s). Log in to greenmountainpower.com to refresh.`,
     });
   }
@@ -447,7 +447,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const s = await chrome.storage.local.get(STORAGE_KEYS.ENDPOINT);
     if (s[STORAGE_KEYS.ENDPOINT] === FALLBACK_ENDPOINT) {
       await chrome.storage.local.remove(STORAGE_KEYS.ENDPOINT);
-      console.log("[Solar Operator] v1.0.2 migration: cleared stale Railway endpoint, now defaulting to", PROD_ENDPOINT);
+      console.log("[EnergyAgent] v1.0.2 migration: cleared stale Railway endpoint, now defaulting to", PROD_ENDPOINT);
     }
   }
 
@@ -466,11 +466,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         }).catch((e) => {
           // Tab may be in a state that doesn't accept injection (e.g. chrome://
           // redirect) — non-fatal, swallow.
-          console.warn("[Solar Operator] so_bridge inject skipped for tab", t.id, e && e.message);
+          console.warn("[EnergyAgent] so_bridge inject skipped for tab", t.id, e && e.message);
         });
       }
     });
   } catch (e) {
-    console.warn("[Solar Operator] retro-inject failed:", e);
+    console.warn("[EnergyAgent] retro-inject failed:", e);
   }
 });

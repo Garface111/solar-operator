@@ -1,6 +1,6 @@
 // content.js — runs on greenmountainpower.com pages
 // Reads the gmp-vue localStorage payload (where the JWT + account map live),
-// extracts what Solar Operator needs, and hands it to the service worker.
+// extracts what EnergyAgent needs, and hands it to the service worker.
 //
 // IMPORTANT: this script runs in an isolated world by default, which means
 // it CAN see the DOM but CANNOT see the page's window.* JavaScript variables.
@@ -84,7 +84,7 @@
       if (!outer || !outer.user || !outer.user.apitoken) return null;
       return outer;
     } catch (e) {
-      console.warn("[Solar Operator] Failed to parse gmp-vue:", e);
+      console.warn("[EnergyAgent] Failed to parse gmp-vue:", e);
       return null;
     }
   }
@@ -155,13 +155,13 @@
       { type: "GMP_TOKEN_CAPTURED", payload: sync, tokenHash },
       (response) => {
         if (chrome.runtime.lastError) {
-          console.warn("[Solar Operator] sendMessage failed:", chrome.runtime.lastError);
+          console.warn("[EnergyAgent] sendMessage failed:", chrome.runtime.lastError);
           return;
         }
         if (response && response.ok) {
-          console.log(`[Solar Operator] Synced ${sync.accounts.length} accounts to ${response.endpoint}`);
+          console.log(`[EnergyAgent] Synced ${sync.accounts.length} accounts to ${response.endpoint}`);
         } else if (response && response.error) {
-          console.warn("[Solar Operator] Sync error:", response.error);
+          console.warn("[EnergyAgent] Sync error:", response.error);
         }
       }
     );

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Solar Operator toolbar icon — v1.5.0 (tournament-final Jun 6'26)
+  <!-- EnergyAgent toolbar icon — v1.5.0 (tournament-final Jun 6'26)
        bg: emerald-500 #10B981 | sun: amber #F59E0B | highlight: cream #FEF3C7@55%
        sun_r=36, ray_w=11, ray_len=24, ray_off=60 (rays reach near canvas edge) -->
   <rect x="0" y="0" width="128" height="128" rx="18" ry="18" fill="#10B981"/>

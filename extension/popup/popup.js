@@ -32,7 +32,7 @@
   } else if (isRecentError) {
     setPill("API offline", "pill-offline");
   } else {
-    setPill("Connected to Solar Operator", "pill-connected");
+    setPill("Connected to EnergyAgent", "pill-connected");
   }
 
   function setPill(text, cls) {

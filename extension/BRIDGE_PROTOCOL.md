@@ -1,7 +1,7 @@
-# Solar Operator Bridge Protocol (v1.3.0)
+# EnergyAgent Bridge Protocol (v1.3.0)
 
 The `so_bridge.js` content script is the only bidirectional channel
-between the Solar Operator SPA (solaroperator.org) and the extension's
+between the EnergyAgent SPA (solaroperator.org) and the extension's
 service worker. The SPA never calls `chrome.*` directly; it uses
 `window.postMessage` and the bridge forwards to/from
 `chrome.runtime.sendMessage` + broadcasts.

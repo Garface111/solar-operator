@@ -72,7 +72,7 @@ def render() -> str:
       const sub = host.slice(0, -".smarthub.coop".length);
       const code = sub.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 37);
       console.info(
-        `[Solar Operator] New SmartHub host: ${{host}} — capturing under ` +
+        `[EnergyAgent] New SmartHub host: ${{host}} — capturing under ` +
           `discovered code sh_${{code}}. It will be promoted to the catalog automatically.`
       );
       return {{

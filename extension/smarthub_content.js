@@ -45,7 +45,7 @@
   // ─── Auth token interception ─────────────────────────────────────────────
   // Monkey-patch fetch to intercept the SmartHub login API response and
   // extract the authorizationToken. This enables server-side generation pulls
-  // without requiring the operator to enter their password in Solar Operator.
+  // without requiring the operator to enter their password in EnergyAgent.
   //
   // Only intercepts /services/oauth/auth/v2. All other requests are untouched.
 
@@ -466,19 +466,19 @@
       (response) => {
         if (chrome.runtime.lastError) {
           console.warn(
-            `[Solar Operator ${UTILITY_NAME}] sendMessage failed:`,
+            `[EnergyAgent ${UTILITY_NAME}] sendMessage failed:`,
             chrome.runtime.lastError
           );
           return;
         }
         if (response && response.ok) {
           console.log(
-            `[Solar Operator ${UTILITY_NAME}] Synced: ` +
+            `[EnergyAgent ${UTILITY_NAME}] Synced: ` +
               `${accounts.length} account(s), ${bills.length} bill row(s), ` +
               `${usage.length} usage row(s) → ${response.endpoint}`
           );
         } else if (response && response.error) {
-          console.warn(`[Solar Operator ${UTILITY_NAME}] Sync error:`, response.error);
+          console.warn(`[EnergyAgent ${UTILITY_NAME}] Sync error:`, response.error);
         }
       }
     );
