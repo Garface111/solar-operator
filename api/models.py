@@ -530,6 +530,70 @@ class InverterConnection(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Inverter(Base):
+    """A persisted, owner-arrangeable inverter — the FIRST-CLASS unit behind the
+    Array Operator sandbox.
+
+    Why this table exists (the integration that makes the sandbox real): an owner
+    does not think in vendor "sites". They think in the physical reality on their
+    roofs — "the six inverters at Londonderry: two on the south barn, three on the
+    field, one on the garage". The vendor's site grouping is an artifact of how the
+    installer registered the hardware and often does NOT match that mental model.
+    This table lets the owner REPRODUCE THEIR MODEL: drag an inverter and it really
+    moves to the array they put it in, which changes its peer cohort, its reports,
+    and its per-array billing rollup.
+
+    Two concerns are kept deliberately separate:
+
+      * TELEMETRY SOURCE (immutable) — where this inverter's data physically comes
+        from. `vendor` + `source_site_id` + `serial` identify the exact equipment
+        feed (e.g. SolarEdge site 416160, inverter SN 7F1C-...). You cannot re-wire
+        which site a panel reports to from a web canvas, so these never change on a
+        move. `source_connection_id` points at the InverterConnection we pull through.
+
+      * OWNER GROUPING (mutable) — `array_id` is which Array the owner has placed
+        this inverter under. THIS is what a drag edits. Seeded on discovery to the
+        Array that owns the source site, then freely reassignable. `position`
+        orders inverters within an array for a stable canvas layout.
+
+    Discovery is idempotent: keyed by (tenant_id, vendor, serial). Re-running
+    discovery updates nameplate/model/last_seen but NEVER clobbers the owner's
+    array_id/position (their arrangement is sacred). Soft-delete via deleted_at so
+    an inverter that drops off the vendor for a few days doesn't vanish from the
+    owner's layout.
+    """
+    __tablename__ = "inverters"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    # Owner grouping — the mutable bit a drag edits.
+    array_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    # Telemetry source — immutable origin of the data feed.
+    vendor: Mapped[str] = mapped_column(String(20))                       # solaredge | locus | ...
+    serial: Mapped[str] = mapped_column(String(128), index=True)          # vendor inverter SN
+    source_site_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_connection_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("inverter_connections.id"), nullable=True
+    )
+    # The Array whose connection originally surfaced this inverter — lets us pull
+    # telemetry even after the owner regroups it under a different array, and lets
+    # "reset layout" snap back to the discovered (source) grouping.
+    source_array_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("arrays.id"), nullable=True
+    )
+    # Display / analysis metadata (refreshed on discovery).
+    name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    nameplate_kw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "vendor", "serial", name="uq_inverter_tenant_vendor_serial"),
+    )
+
+
 class VerificationCheck(Base):
     """Operator uploads their own records to compare against the SO-generated workbook."""
     __tablename__ = "verification_checks"

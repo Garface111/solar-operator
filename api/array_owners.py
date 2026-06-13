@@ -498,96 +498,95 @@ def _array_alert(inverters: list[dict], array_status: str | None) -> dict:
 
 
 @router.get("/v1/array-owners/fleet-tree")
-def fleet_tree(authorization: str | None = Header(default=None)) -> dict:
-    """The three-tier sandbox structure that mirrors the backend data model:
+def fleet_tree(force: int = 0, authorization: str | None = Header(default=None)) -> dict:
+    """Owner-grouped three-tier sandbox structure — the REAL integrated model:
 
         Alert  (per array, rolled-up worst state)
-          └─ Array  (one column)
-               └─ Inverters  (real per-inverter rows from the vendor)
+          └─ Array  (an OWNER-DEFINED group)
+               └─ Inverters  (persisted, owner-arranged; telemetry by source)
 
-    Each column is one Array. Inverters are REAL where the vendor exposes them
-    (SolarEdge inventory + equipment telemetry, peer-analyzed within the site);
-    vendors without per-inverter capture yet return an array-as-single-unit leaf
-    so the tree is never empty. Built to be the literal picture of the schema.
+    Inverters are persisted `Inverter` rows the owner can drag between arrays.
+    Each inverter's telemetry is pulled from its fixed SOURCE site; peer analysis
+    runs within each OWNER group — so moving an inverter genuinely changes its
+    cohort. Pass ?force=1 to bypass the 10-min telemetry cache.
+
+    See api/inverter_fleet.py for the model rationale (owners reproduce the model
+    in their head; the vendor's site grouping is just the starting point).
     """
     tenant = _tenant_from_bearer(authorization)
-    columns: list[dict] = []
-
+    from . import inverter_fleet
     with SessionLocal() as db:
-        arrays = db.execute(
-            select(Array)
-            .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
-            .order_by(Array.id)
-        ).scalars().all()
+        return inverter_fleet.build_fleet_tree(db, tenant, force_refresh=bool(force))
 
-        for arr in arrays:
-            conn = _resolve_connection(db, arr)
-            vendor = conn.vendor if conn is not None else None
 
-            inverters: list[dict] = []
-            inverter_source = None
-            if vendor == "solaredge" and conn is not None:
-                cfg = conn.config or {}
-                api_key = cfg.get("api_key")
-                site_id = cfg.get("site_id")
-                if api_key and site_id:
-                    inverters = _se_inverters_for(api_key, int(site_id))
-                    inverter_source = "solaredge" if inverters else None
+class ReassignInverterBody(BaseModel):
+    inverter_id: int
+    target_array_id: int
+    position: Optional[int] = None
 
-            # Fallback leaf: no per-inverter capture for this vendor yet — show
-            # the array itself as a single inverter node so the comb is never
-            # empty and the structure still reads true.
-            if not inverters:
-                # array-level daily for a single-unit fallback
-                window_start = date.today() - timedelta(days=peer_analysis.WINDOW_DAYS)
-                rows = db.execute(
-                    select(DailyGeneration.day, DailyGeneration.kwh)
-                    .where(DailyGeneration.array_id == arr.id,
-                           DailyGeneration.day >= window_start)
-                    .order_by(DailyGeneration.day)
-                ).all()
-                wk = round(sum(float(k or 0) for _, k in rows), 1)
-                inverters = [{
-                    "sn": None,
-                    "name": arr.name,
-                    "model": None,
-                    "nameplate_kw": None,
-                    "peer_index": None,
-                    "status": "ok" if rows else "comm_gap",
-                    "diagnosis": ("No per-inverter data from this vendor yet — "
-                                  "showing the array as one unit."),
-                    "window_kwh": wk,
-                    "last_mode": None,
-                    "current_power_w": None,
-                    "last_report": rows[-1][0].isoformat() if rows else None,
-                }]
-                inverter_source = inverter_source or ("array" if rows else None)
 
-            # array-level peer status (reuse overview's per-Client cohort? here
-            # we keep it simple: array node status = worst inverter, surfaced via
-            # the alert; the array tile shows its own name + count).
-            alert = _array_alert(inverters, None)
-            columns.append({
-                "array_id": arr.id,
-                "array_name": arr.name,
-                "vendor": vendor,
-                "inverter_source": inverter_source,
-                "inverter_count": len(inverters),
-                "alert": alert,
-                "inverters": inverters,
-            })
+@router.post("/v1/array-owners/inverters/reassign")
+def reassign_inverter_ep(body: ReassignInverterBody,
+                         authorization: str | None = Header(default=None)) -> dict:
+    """Move an inverter into a different array (the owner's drag, persisted).
+    Telemetry source is untouched — only the owner grouping changes."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            iv = inverter_fleet.reassign_inverter(
+                db, tenant, body.inverter_id, body.target_array_id, body.position
+            )
+        except inverter_fleet.FleetError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True, "inverter_id": iv.id, "array_id": iv.array_id,
+                "position": iv.position}
 
-    fleet_attention = sum(c["alert"]["count"] for c in columns)
-    return {
-        "generated_at": now().replace(microsecond=0).isoformat() + "Z",
-        "tiers": ["alerts", "arrays", "inverters"],
-        "columns": columns,
-        "summary": {
-            "arrays_total": len(columns),
-            "inverters_total": sum(c["inverter_count"] for c in columns),
-            "attention": fleet_attention,
-        },
-    }
+
+class ReorderInvertersBody(BaseModel):
+    array_id: int
+    ordered_inverter_ids: list[int]
+
+
+@router.post("/v1/array-owners/inverters/reorder")
+def reorder_inverters_ep(body: ReorderInvertersBody,
+                         authorization: str | None = Header(default=None)) -> dict:
+    """Persist inverter order within one array (drag-to-reorder)."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            inverter_fleet.reorder_within_array(
+                db, tenant, body.array_id, body.ordered_inverter_ids
+            )
+        except inverter_fleet.FleetError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True}
+
+
+class CreateArrayBody(BaseModel):
+    name: str
+
+
+@router.post("/v1/array-owners/arrays")
+def create_array_ep(body: CreateArrayBody,
+                    authorization: str | None = Header(default=None)) -> dict:
+    """Create a new owner-defined array (an empty group to drag inverters into)."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        arr = inverter_fleet.create_array(db, tenant, body.name)
+        return {"ok": True, "array_id": arr.id, "array_name": arr.name}
+
+
+@router.post("/v1/array-owners/layout/reset")
+def reset_layout_ep(authorization: str | None = Header(default=None)) -> dict:
+    """Snap every inverter back to its discovered (source) array grouping."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        n = inverter_fleet.reset_layout(db, tenant)
+        return {"ok": True, "reset": n}
 
 
 @router.get("/v1/array-owners/inverter-vendors")
