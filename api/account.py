@@ -1498,13 +1498,25 @@ def save_email_signoff(body: _SignoffBody,
 
 @router.get("/v1/account/billing-summary")
 def billing_summary(authorization: Optional[str] = Header(default=None)):
-    """What the tenant is actually billed for: the array count that drives the
-    Stripe per-array quantity (every Array row under the tenant — the same count
-    api/onboarding._reconcile_subscription_quantity reconciles), times the
-    per-array price. Lets the operator verify their own invoice on the Account
-    tab instead of inferring it from utility-account / bill counts that don't
-    drive billing."""
+    """What the tenant is actually billed for.
+
+    NEPOOL Operator (verifier): the billable ARRAY count that drives the Stripe
+    per-array quantity, times the per-array price (graduated).
+
+    Array Operator (owner): billed per kWh GENERATED. We return the
+    month-to-date kWh across the owner's billable arrays and the graduated
+    per-kWh estimate, so the owner can verify their own invoice on the Account
+    tab. `billing_basis` tells the UI which shape to render.
+    """
     t = tenant_from_session(authorization)
+    from .stripe_helpers import is_array_operator
+    if is_array_operator(getattr(t, "product", "nepool")):
+        return _billing_summary_kwh(t)
+    return _billing_summary_arrays(t)
+
+
+def _billing_summary_arrays(t: Tenant) -> dict:
+    """Per-array (NEPOOL) billing summary — the original behavior."""
     with SessionLocal() as db:
         billable = db.execute(
             select(func.count()).select_from(Array).where(
@@ -1517,13 +1529,11 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
     billable = int(billable)
     # Volume/graduated pricing: total is the sum across tier bands, NOT a flat
     # billable * unit. compute_monthly_cents mirrors the live Stripe graduated
-    # price so this estimate matches the actual invoice to the penny. price_cents
-    # is the *blended* (average) per-array rate, kept for display continuity with
-    # the old flat-rate field; full_unit_cents exposes the undiscounted $15 so
-    # the UI can show "$15/array, volume discounts past 50".
+    # price so this estimate matches the actual invoice to the penny.
     from .pricing import compute_monthly_cents, blended_unit_cents, FULL_UNIT_CENTS
     total_cents = compute_monthly_cents(billable)
     return {
+        "billing_basis": "array",
         "billable_arrays": billable,
         "price_cents": blended_unit_cents(billable),
         "full_unit_cents": FULL_UNIT_CENTS,
@@ -1531,6 +1541,55 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
         "currency": currency,
         # Drives the dashboard "Add payment method" CTA + paused-no-card banner.
         # No-upfront-payment: a tenant can be live (trialing) with no card yet.
+        "has_payment_method": t.stripe_payment_method_id is not None,
+    }
+
+
+def _billing_summary_kwh(t: Tenant) -> dict:
+    """Per-kWh (Array Operator) billing summary.
+
+    Sums month-to-date generation across the owner's billable arrays and applies
+    the graduated per-kWh tiers. Amounts are returned in DECIMAL cents (a float,
+    possibly fractional — e.g. 900 kWh × 0.5¢ = 450.0¢ = $4.50) since the rate is
+    sub-cent. The UI should format from these decimal-cent values.
+    """
+    from datetime import timezone
+    from . import pricing_array_operator as ao_pricing
+    from .models import DailyGeneration
+
+    today = datetime.now(tz=timezone.utc).date()
+    month_start = today.replace(day=1)
+    with SessionLocal() as db:
+        billable_arrays = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
+        ).scalar() or 0
+        mtd_kwh = db.execute(
+            select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+            .select_from(DailyGeneration)
+            .join(Array, Array.id == DailyGeneration.array_id)
+            .where(
+                DailyGeneration.tenant_id == t.id,
+                DailyGeneration.day >= month_start,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
+        ).scalar() or 0.0
+    mtd_kwh = float(mtd_kwh)
+    total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
+    return {
+        "billing_basis": "kwh",
+        "billable_arrays": int(billable_arrays),
+        "mtd_kwh": round(mtd_kwh, 1),
+        "period_start": month_start.isoformat(),
+        # Decimal cents per kWh (sub-cent): headline rate + blended actual.
+        "rate_cents_per_kwh": ao_pricing.FULL_UNIT_CENTS,
+        "blended_cents_per_kwh": ao_pricing.blended_unit_cents(mtd_kwh),
+        "total_cents": total_cents,  # month-to-date estimate, decimal cents
+        "currency": "usd",
         "has_payment_method": t.stripe_payment_method_id is not None,
     }
 

@@ -4,6 +4,16 @@ Shared Stripe helpers.
 Kept separate to avoid circular imports: both api/onboarding.py and
 api/account.py need reconcile_subscription_quantity, but onboarding
 already imports from account (for mint_session_for_tenant).
+
+Two billing meters live here:
+  - NEPOOL Operator (product != "array_operator"): per-ARRAY licensed price.
+    Stripe quantity = array count; reconcile_subscription_quantity keeps it in
+    sync; create_subscription_for_tenant adds a $250 one-time setup item.
+  - Array Operator (product == "array_operator"): per-kWh METERED price. The
+    subscription item carries NO quantity — a usage-reporting job
+    (api/jobs/usage_report.py) reports each tenant's monthly kWh to Stripe and
+    Stripe applies the graduated tiers. reconcile is a no-op for these (there is
+    no array quantity to reconcile), and there is NO setup fee.
 """
 from __future__ import annotations
 
@@ -18,30 +28,51 @@ from .notify import send_internal_alert
 logger = logging.getLogger(__name__)
 
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
-# Array Operator (owner-side) per-array price. Separate Stripe price from the
-# NEPOOL one above; set once scripts/create_array_operator_prices.py has minted
-# it. When blank, AO tenants fall back to the NEPOOL price so billing never
-# silently bills $0 — but the fallback fires an alert.
-STRIPE_AO_ARRAY_PRICE_ID = os.getenv("STRIPE_AO_ARRAY_PRICE_ID", "")
+# Array Operator (owner-side) per-kWh METERED price. Separate Stripe price from
+# the NEPOOL per-array price above; set once
+# scripts/create_array_operator_prices.py has minted it. When blank, AO tenants
+# fall back to the NEPOOL price so billing never silently bills $0 — but the
+# fallback fires an alert.
+#
+# NOTE: renamed from STRIPE_AO_ARRAY_PRICE_ID → STRIPE_AO_KWH_PRICE_ID when owner
+# billing moved from per-array to per-kWh (Jun 2026). The old env var is still
+# read as a fallback so a half-migrated environment never bills $0.
+STRIPE_AO_KWH_PRICE_ID = (
+    os.getenv("STRIPE_AO_KWH_PRICE_ID", "")
+    or os.getenv("STRIPE_AO_ARRAY_PRICE_ID", "")
+)
+
+
+def _ao_kwh_price_id() -> str:
+    """Resolve the AO per-kWh metered price id from env at call time."""
+    return (
+        os.getenv("STRIPE_AO_KWH_PRICE_ID", "")
+        or os.getenv("STRIPE_AO_ARRAY_PRICE_ID", "")
+    )
+
+
+def is_array_operator(product: str | None) -> bool:
+    """True when a tenant bills on the Array Operator per-kWh meter."""
+    return (product or "nepool") == "array_operator"
 
 
 def array_price_id_for_product(product: str | None) -> str:
-    """Return the recurring per-array Stripe price id for a tenant's product.
+    """Return the recurring Stripe price id for a tenant's product.
 
-    "array_operator" → STRIPE_AO_ARRAY_PRICE_ID (owner pricing).
-    anything else ("nepool"/None/legacy) → STRIPE_ARRAY_PRICE_ID.
+    "array_operator" → the per-kWh METERED price (STRIPE_AO_KWH_PRICE_ID).
+    anything else ("nepool"/None/legacy) → the per-array price (STRIPE_ARRAY_PRICE_ID).
 
     Reads env at call time so tests can monkeypatch. If an Array Operator tenant
     is hit before the AO price exists, we fall back to the NEPOOL price AND
     alert, rather than create a broken/empty subscription.
     """
-    if (product or "nepool") == "array_operator":
-        ao = os.getenv("STRIPE_AO_ARRAY_PRICE_ID", "")
+    if is_array_operator(product):
+        ao = _ao_kwh_price_id()
         if ao:
             return ao
         send_internal_alert(
-            "⚠️ Array Operator price id missing",
-            "An array_operator tenant needs billing but STRIPE_AO_ARRAY_PRICE_ID "
+            "⚠️ Array Operator per-kWh price id missing",
+            "An array_operator tenant needs billing but STRIPE_AO_KWH_PRICE_ID "
             "is not set. Falling back to the NEPOOL price. Run "
             "scripts/create_array_operator_prices.py and set the env var.",
         )
@@ -51,9 +82,12 @@ def array_price_id_for_product(product: str | None) -> str:
 def create_subscription_for_tenant(tenant_id: str) -> dict:
     """Create the live Stripe subscription for a tenant that has a card on file.
 
-    Builds the subscription items (one-time setup fee + per-array line at the
-    current billable array count, minimum 1) on the tenant's stored payment
-    method, then flips the tenant to active/'active' and clears the trial clock.
+    NEPOOL: items = [one-time setup fee, per-array line at current billable
+    array count (min 1)].
+    Array Operator: items = [per-kWh METERED line with NO quantity] — usage is
+    reported separately by the usage-report job; no setup fee.
+
+    Then flips the tenant to active/'active' and clears the trial clock.
 
     Shared by:
       - account.resume-from-pause (operator-/webhook-driven resume after a
@@ -68,7 +102,6 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
     from .models import Tenant, Array
 
     setup_price_id = os.getenv("STRIPE_SETUP_PRICE_ID", "")
-    array_price_id = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
     if not os.getenv("STRIPE_SECRET_KEY"):
         return {"ok": False, "error": "stripe-not-configured"}
     stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
@@ -95,17 +128,21 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         email = t.contact_email
         product = getattr(t, "product", "nepool")
 
-    # Product-aware per-array price: Array Operator owners bill on the AO price
-    # (1st array free, $9/$8/$6.50) with NO setup fee; NEPOOL keeps $15 + setup.
     array_price_id = array_price_id_for_product(product)
-    is_array_operator = (product or "nepool") == "array_operator"
+    ao = is_array_operator(product)
 
     quantity = max(int(array_count), 1)
     items: list[dict] = []
-    if setup_price_id and not is_array_operator:
-        items.append({"price": setup_price_id, "quantity": 1})
-    if array_price_id:
-        items.append({"price": array_price_id, "quantity": quantity})
+    if ao:
+        # Per-kWh metered line — Stripe REJECTS `quantity` on a metered price.
+        # No setup fee on the owner side. Usage is reported by the usage-report job.
+        if array_price_id:
+            items.append({"price": array_price_id})
+    else:
+        if setup_price_id:
+            items.append({"price": setup_price_id, "quantity": 1})
+        if array_price_id:
+            items.append({"price": array_price_id, "quantity": quantity})
 
     try:
         sub = stripe.Subscription.create(
@@ -134,13 +171,14 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
             t.trial_ends_at = None
             db.commit()
 
+    meter = "per-kWh (metered)" if ao else f"per-array qty {quantity}"
     send_internal_alert(
         f"✅ Subscription resumed: {tenant_id}",
         f"Tenant {tenant_id} ({email}) added a card and resumed. "
-        f"Arrays: {array_count}, billed qty: {quantity}. Subscription: {sub_id}"
+        f"Arrays: {array_count}, billed: {meter}. Subscription: {sub_id}"
     )
     return {"ok": True, "subscription_id": sub_id, "array_count": int(array_count),
-            "quantity": quantity}
+            "quantity": (None if ao else quantity), "metered": ao}
 
 
 def reconcile_subscription_quantity(
@@ -148,10 +186,15 @@ def reconcile_subscription_quantity(
 ) -> None:
     """Bring the recurring per-array Stripe line item to match array_count.
 
-    Finds the subscription item matching STRIPE_ARRAY_PRICE_ID and sets its
-    quantity, prorating the current billing period. Best-effort — never raises
-    so callers are never blocked by a Stripe hiccup. Fires an internal alert on
-    failure so Ford can fix the quantity manually.
+    Per-ARRAY (NEPOOL) only: finds the subscription item matching the per-array
+    price and sets its quantity, prorating the current period. Best-effort —
+    never raises so callers are never blocked by a Stripe hiccup. Fires an
+    internal alert on failure.
+
+    For Array Operator (per-kWh METERED) tenants this is a NO-OP: a metered line
+    has no quantity (Stripe rejects SubscriptionItem.modify(quantity=...) on it),
+    and billing volume is driven by the usage-report job, not the array count.
+    We detect a metered line on the subscription and skip silently.
 
     Also a no-op when array_count is 0 (comped/free accounts) or when
     subscription_id is blank (no Stripe subscription on record).
@@ -167,25 +210,35 @@ def reconcile_subscription_quantity(
         )
         return
 
-    # Match against EITHER per-array price (NEPOOL or Array Operator) so this
-    # works regardless of which product the tenant is on. Read module globals
-    # (which tests monkeypatch) AND env (prod) so both paths resolve.
+    # Match against the per-array price (NEPOOL). The AO per-kWh price is metered
+    # and intentionally NOT in this set — an AO subscription has no licensed
+    # per-array line to reconcile.
     known_price_ids = {
         pid for pid in (
             STRIPE_ARRAY_PRICE_ID,
-            STRIPE_AO_ARRAY_PRICE_ID,
             os.getenv("STRIPE_ARRAY_PRICE_ID", ""),
-            os.getenv("STRIPE_AO_ARRAY_PRICE_ID", ""),
         ) if pid
     }
-    if not known_price_ids:
-        logger.warning(
-            "No per-array Stripe price ids set — skipping quantity reconciliation "
-            "for tenant %s (array_count=%d)", tenant_id, array_count)
-        return
 
     try:
         sub = stripe.Subscription.retrieve(subscription_id)
+
+        # If ANY line on this subscription is metered, this tenant is billed by
+        # usage (Array Operator) — array-count reconciliation does not apply.
+        for item in sub["items"]["data"]:
+            recurring = item["price"].get("recurring") or {}
+            if recurring.get("usage_type") == "metered":
+                logger.info(
+                    "reconcile: subscription %s for tenant %s is metered (per-kWh) "
+                    "— skipping array-quantity reconciliation", subscription_id, tenant_id)
+                return
+
+        if not known_price_ids:
+            logger.warning(
+                "No per-array Stripe price ids set — skipping quantity reconciliation "
+                "for tenant %s (array_count=%d)", tenant_id, array_count)
+            return
+
         recurring_item = None
         for item in sub["items"]["data"]:
             if item["price"]["id"] in known_price_ids:

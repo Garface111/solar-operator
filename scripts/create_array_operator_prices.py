@@ -1,10 +1,16 @@
-"""One-shot: create ARRAY OPERATOR (owner-side) Stripe price.
+"""One-shot: create the ARRAY OPERATOR (owner-side) per-kWh METERED Stripe price.
 
 This is the EnergyAgent owner product — separate from the NEPOOL Operator
 prices created by scripts/create_stripe_prices.py. It creates:
   - Product "Array Operator — Monitoring"
-  - A graduated tiered recurring price from api/pricing_array_operator.TIERS
-    (first array free, then $9 / $8 / $6.50 bands)
+  - A graduated, METERED, recurring price from api/pricing_array_operator.TIERS
+    (0.5¢ / 0.45¢ / 0.40¢ per kWh bands)
+
+Owners are billed by kWh GENERATED, not by array count, so the price is:
+  - usage_type="metered"      → no fixed quantity; usage is reported each period
+  - aggregate_usage="last_during_period" → the usage-report job sets month-to-date
+    cumulative kWh each day; Stripe bills the LAST value reported in the period
+  - billing_scheme="tiered", tiers_mode="graduated", unit_amount_decimal (sub-cent)
 
 There is NO setup-fee product on the owner side.
 
@@ -32,27 +38,30 @@ def _band_labels() -> str:
     parts = []
     for i, (up_to, unit) in enumerate(TIERS):
         if i == 0:
-            lo, hi = 1, up_to
+            lo, hi = 0, up_to
         else:
             prev = TIERS[i - 1][0]
-            lo = (prev + 1) if prev is not None else 1
+            lo = prev if prev is not None else 0
             hi = up_to
-        rng = f"{lo}+" if hi is None else (f"{lo}" if lo == hi else f"{lo}-{hi}")
-        price = "FREE" if unit == 0 else f"${unit/100:.2f}"
-        parts.append(f"{rng} @ {price}")
+        if hi is None:
+            rng = f"{lo:,}+ kWh"
+        else:
+            rng = f"{lo:,}-{hi:,} kWh"
+        parts.append(f"{rng} @ {unit:g}\u00a2/kWh")
     return ", ".join(parts)
 
 
 def main() -> None:
-    print("Array Operator pricing bands: " + _band_labels())
+    print("Array Operator per-kWh pricing bands: " + _band_labels())
     print()
 
     if DRY_RUN:
         print("[--dry-run] Would create:")
         print('  Product: "Array Operator — Monitoring"')
-        print("  Graduated tiered monthly price with tiers:")
+        print("  Graduated METERED monthly price (usage_type=metered,")
+        print("  aggregate_usage=last_during_period) with tiers:")
         for t in stripe_tiers():
-            print(f"    up_to={t['up_to']!r:>5}  unit_amount={t['unit_amount']}")
+            print(f"    up_to={t['up_to']!r:>7}  unit_amount_decimal={t['unit_amount_decimal']!r} cents/kWh")
         print("\nNo Stripe calls made. Re-run without --dry-run against a real key.")
         return
 
@@ -62,8 +71,8 @@ def main() -> None:
     if key.startswith("sk_live_") and not CONFIRM_LIVE:
         sys.exit(
             "REFUSING to create a LIVE price without --confirm-live.\n"
-            "This is the owner-facing PUBLIC price. Re-run with --confirm-live\n"
-            "only after the price point is signed off."
+            "This is the owner-facing PUBLIC per-kWh price. Re-run with\n"
+            "--confirm-live only after the price point is signed off."
         )
 
     import stripe
@@ -81,14 +90,14 @@ def main() -> None:
         product = stripe.Product.create(
             name=name,
             description="Always-on, dollar-first monitoring for solar array owners "
-                        "(EnergyAgent — Array Operator). First array free.",
+                        "(EnergyAgent — Array Operator). Billed per kWh generated.",
         )
         print(f"  created product: {product.id}")
 
-    # Reuse a graduated price whose tiers match, else create one.
+    # Reuse a metered graduated price whose tiers match, else create one.
     def norm(ts):
-        return [(("inf" if t.get("up_to") in (None, "inf") else int(t["up_to"])),
-                 int(t["unit_amount"])) for t in ts]
+        return [((  "inf" if t.get("up_to") in (None, "inf") else int(t["up_to"])),
+                 str(t["unit_amount_decimal"])) for t in ts]
     want = norm(stripe_tiers())
     found = None
     for p in stripe.Price.list(product=product.id, active=True, limit=100, expand=["data.tiers"]).data:
@@ -96,27 +105,33 @@ def main() -> None:
             continue
         if p.recurring is None or p.recurring.interval != "month":
             continue
-        have = norm([{"up_to": t.up_to, "unit_amount": t.unit_amount} for t in (p.tiers or [])])
+        if getattr(p.recurring, "usage_type", None) != "metered":
+            continue
+        have = norm([
+            {"up_to": t.up_to,
+             "unit_amount_decimal": t.unit_amount_decimal} for t in (p.tiers or [])
+        ])
         if have == want:
             found = p
             break
     if found:
         price = found
-        print(f"  found existing tiered price: {price.id}")
+        print(f"  found existing metered tiered price: {price.id}")
     else:
         price = stripe.Price.create(
             product=product.id, currency="usd",
             billing_scheme="tiered", tiers_mode="graduated",
             tiers=stripe_tiers(),
-            recurring={"interval": "month", "usage_type": "licensed"},
+            recurring={"interval": "month", "usage_type": "metered",
+                       "aggregate_usage": "last_during_period"},
             expand=["tiers"],
         )
-        print(f"  created tiered price: {price.id}")
+        print(f"  created metered tiered price: {price.id}")
 
     print()
     print("=" * 60)
-    print("Set this on Railway (Array Operator owner billing):")
-    print(f"  STRIPE_AO_ARRAY_PRICE_ID={price.id}")
+    print("Set this on Railway (Array Operator owner per-kWh billing):")
+    print(f"  STRIPE_AO_KWH_PRICE_ID={price.id}")
     print("=" * 60)
 
 

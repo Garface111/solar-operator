@@ -118,7 +118,9 @@ def finalize_expired_trials():
     """
     stripe_secret = os.getenv("STRIPE_SECRET_KEY", "")
     setup_price_id = os.getenv("STRIPE_SETUP_PRICE_ID", "")
-    array_price_id = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
+    # Per-array price id is resolved per-tenant by product below
+    # (array_price_id_for_product) — NEPOOL gets the per-array price, Array
+    # Operator gets the per-kWh metered price.
 
     if not stripe_secret:
         return  # not configured — skip silently
@@ -186,12 +188,24 @@ def finalize_expired_trials():
 
             # Charge the card.
             quantity = max(array_count, 1)
+            product = getattr(t, "product", "nepool")
             try:
+                from .stripe_helpers import (
+                    array_price_id_for_product, is_array_operator,
+                )
+                ao = is_array_operator(product)
+                price_id = array_price_id_for_product(product)
                 items = []
-                if setup_price_id:
-                    items.append({"price": setup_price_id, "quantity": 1})
-                if array_price_id:
-                    items.append({"price": array_price_id, "quantity": quantity})
+                if ao:
+                    # Array Operator = per-kWh METERED line, NO quantity, NO setup
+                    # fee. Usage is reported by report_usage_for_all_owners().
+                    if price_id:
+                        items.append({"price": price_id})
+                else:
+                    if setup_price_id:
+                        items.append({"price": setup_price_id, "quantity": 1})
+                    if price_id:
+                        items.append({"price": price_id, "quantity": quantity})
                 sub = stripe.Subscription.create(
                     customer=t.stripe_customer_id,
                     items=items if items else None,
@@ -455,7 +469,31 @@ def start():
         CronTrigger(hour=3, minute=0),
         id="inverter_daily_pull", replace_existing=True,
     )
+    # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (metered
+    # billing). Runs AFTER the 03:00 inverter pull so the day's kWh are landed.
+    scheduler.add_job(
+        _run_usage_report,
+        CronTrigger(hour=4, minute=0),
+        id="ao_usage_report", replace_existing=True,
+    )
     scheduler.start()
+
+
+def _run_usage_report() -> None:
+    """Report per-kWh usage for all Array Operator owners (metered billing)."""
+    try:
+        from .jobs.usage_report import report_usage_for_all_owners
+        result = report_usage_for_all_owners()
+        logger.info(
+            "ao_usage_report: reported=%d skipped=%d errors=%d",
+            len(result.get("reported", [])), result.get("skipped", 0),
+            len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Array Operator usage report: unhandled exception",
+            f"The per-kWh usage-report job raised an unexpected error:\n{exc}",
+        )
 
 
 def _run_inverter_pull() -> None:
