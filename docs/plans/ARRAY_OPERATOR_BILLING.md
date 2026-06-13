@@ -27,6 +27,24 @@ The array-operator-ea site now has the signup surface:
   unauthenticated "validate key + list sites" endpoint (rate-limited) OR collect
   the key during onboarding and attach it server-side right after tenant create.
 
+## Pre-signup REAL preview (LIVE Jun 13 2026 — resolves the limitation above)
+The owner now sees their ACTUAL arrays + value before signing up:
+- Backend: `POST /v1/array-owners/public/preview` — UNAUTHENTICATED, rate-limited
+  (8 / 5 min per IP), lists real SolarEdge sites + per-site & total annual $
+  estimate (peak_kw × 0.14 CF × rate + REC). Saves nothing. Bad/site-level/empty
+  key → friendly ok:false; 429 on abuse; 502 on SolarEdge 5xx. CORS already
+  allows array-operator-ea. Tests: tests/test_public_preview.py (5).
+- Frontend onboarding step 2 → calls /preview, step 3 shows real array names +
+  per-array $/yr + a value hero that counts up to the total. On finish, the real
+  key is attached via /v1/array-owners/solaredge/connect-account using the
+  freshly-minted session (best-effort; a bad key 400s but never blocks the trial).
+  Falls back to demo cascade only when the backend is unreachable.
+- Verified E2E on prod: preview 200 → start 200 → complete 200 → connect-account
+  (200 real key / 400 fake) → trial live; tenant product=array_operator/trialing.
+- Value estimate is intentionally rough (0.14 capacity factor); the dashboard
+  pins the exact measured figure once live. Copy says "estimated / we pin it once
+  you're live" so it never overpromises.
+
 ## The decision (pending Ford's final word)
 Audited Array Operator as a customer (owner-facing app: dollar-first verdict,
 done-for-you warranty claims, peer-index ground truth, one-credential discovery).
