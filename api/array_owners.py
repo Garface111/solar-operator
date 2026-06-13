@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 from . import inverters
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
+from .inverters import peer_analysis
 from .models import Array, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
@@ -218,11 +219,20 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
 
     today = date.today()
     month_start = today.replace(day=1)
+    # Peer analysis compares each array against its cohort over a rolling window.
+    window_start = today - timedelta(days=peer_analysis.WINDOW_DAYS)
 
     arrays_out: list[dict] = []
     tot_power = 0.0
     tot_today = tot_month = tot_life = 0.0
     tot_today_usd = tot_month_usd = tot_life_usd = 0.0
+
+    # Cohort = the arrays under one Client (the account/fleet, e.g. Bruce's 7
+    # arrays on one SolarEdge login). Arrays with no client share a per-tenant
+    # default cohort. We collect each array's daily-kWh window here and run the
+    # peer-relative analysis after the main loop, then attach a `peer` block.
+    peer_inputs_by_client: dict[object, list[dict]] = defaultdict(list)
+    out_by_array_id: dict[int, dict] = {}
 
     with SessionLocal() as db:
         arrays = db.execute(
@@ -260,6 +270,20 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 ).where(DailyGeneration.array_id == arr.id)
             ).one()
 
+            # Daily series over the peer window (ascending) — the raw signal the
+            # cohort analysis runs on.
+            window_rows = db.execute(
+                select(DailyGeneration.day, DailyGeneration.kwh)
+                .where(
+                    DailyGeneration.array_id == arr.id,
+                    DailyGeneration.day >= window_start,
+                )
+                .order_by(DailyGeneration.day)
+            ).all()
+            daily_series = [
+                {"date": d.isoformat(), "kwh": float(k or 0.0)} for d, k in window_rows
+            ]
+
             conn = _resolve_connection(db, arr)
             module = VENDORS.get(conn.vendor) if conn is not None else None
             has_live_source = bool(
@@ -292,7 +316,7 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             value = _value_model(today_kwh, month_kwh, lifetime_kwh, rate)
             health = _health(has_live_source, last_day, overview_ok, today)
 
-            arrays_out.append({
+            entry = {
                 "array_id": arr.id,
                 "name": arr.name,
                 "client_name": arr.client.name if arr.client else None,
@@ -303,6 +327,22 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 "lifetime": {"kwh": round(lifetime_kwh, 3)},
                 "value": value,
                 "health": health,
+            }
+            arrays_out.append(entry)
+            out_by_array_id[arr.id] = entry
+
+            # Collect cohort input. error_code/last_report are left None at the
+            # array level: we have no per-inverter fault codes, and daily-grain
+            # staleness is already covered by `health` (STALE_DAYS), so the
+            # array-level peer status resolves to ok | dead | underperforming —
+            # the comparative "is it pulling its weight" signal. Per-inverter
+            # capture will later light up the fault/comm_gap paths natively.
+            peer_inputs_by_client[arr.client_id].append({
+                "id": arr.id,
+                "nameplate_kw": None,   # inferred from observed peak in-module
+                "daily": daily_series,
+                "error_code": None,
+                "last_report": None,
             })
 
             tot_today += today_kwh
@@ -311,6 +351,29 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             tot_today_usd += value["today_usd"]
             tot_month_usd += value["month_usd"]
             tot_life_usd += value["lifetime_usd"]
+
+    # ── peer-relative cohort pass ─────────────────────────────────────────────
+    peer_attention = 0
+    peer_loss = 0.0
+    cohorts_with_peers = 0
+    for _client_id, units in peer_inputs_by_client.items():
+        result = peer_analysis.analyze_cohort(units)
+        if result["summary"]["peer_analysis_available"]:
+            cohorts_with_peers += 1
+        peer_attention += result["summary"]["units_attention"]
+        peer_loss += result["summary"]["estimated_loss_kwh_window"]
+        for u in result["units"]:
+            entry = out_by_array_id.get(u["id"])
+            if entry is None:
+                continue
+            entry["peer"] = {
+                "peer_index": u["peer_index"],
+                "status": u["status"],
+                "diagnosis": u["diagnosis"],
+                "window_kwh": u["window_kwh"],
+                "cohort_size": result["cohort_size"],
+                "peer_analysis_available": result["summary"]["peer_analysis_available"],
+            }
 
     return {
         "generated_at": now().replace(microsecond=0).isoformat() + "Z",
@@ -323,6 +386,13 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             "today_usd": round(tot_today_usd, 2),
             "month_usd": round(tot_month_usd, 2),
             "lifetime_usd": round(tot_life_usd, 2),
+        },
+        "peer_summary": {
+            "arrays_attention": peer_attention,
+            "arrays_total": len(arrays_out),
+            "estimated_loss_kwh_window": round(peer_loss, 1),
+            "cohorts_with_peer_signal": cohorts_with_peers,
+            "window_days": peer_analysis.WINDOW_DAYS,
         },
     }
 
