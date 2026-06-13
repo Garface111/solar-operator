@@ -18,6 +18,34 @@ from .notify import send_internal_alert
 logger = logging.getLogger(__name__)
 
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")
+# Array Operator (owner-side) per-array price. Separate Stripe price from the
+# NEPOOL one above; set once scripts/create_array_operator_prices.py has minted
+# it. When blank, AO tenants fall back to the NEPOOL price so billing never
+# silently bills $0 — but the fallback fires an alert.
+STRIPE_AO_ARRAY_PRICE_ID = os.getenv("STRIPE_AO_ARRAY_PRICE_ID", "")
+
+
+def array_price_id_for_product(product: str | None) -> str:
+    """Return the recurring per-array Stripe price id for a tenant's product.
+
+    "array_operator" → STRIPE_AO_ARRAY_PRICE_ID (owner pricing).
+    anything else ("nepool"/None/legacy) → STRIPE_ARRAY_PRICE_ID.
+
+    Reads env at call time so tests can monkeypatch. If an Array Operator tenant
+    is hit before the AO price exists, we fall back to the NEPOOL price AND
+    alert, rather than create a broken/empty subscription.
+    """
+    if (product or "nepool") == "array_operator":
+        ao = os.getenv("STRIPE_AO_ARRAY_PRICE_ID", "")
+        if ao:
+            return ao
+        send_internal_alert(
+            "⚠️ Array Operator price id missing",
+            "An array_operator tenant needs billing but STRIPE_AO_ARRAY_PRICE_ID "
+            "is not set. Falling back to the NEPOOL price. Run "
+            "scripts/create_array_operator_prices.py and set the env var.",
+        )
+    return os.getenv("STRIPE_ARRAY_PRICE_ID", "")
 
 
 def create_subscription_for_tenant(tenant_id: str) -> dict:
@@ -65,10 +93,16 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         customer_id = t.stripe_customer_id
         pm_id = t.stripe_payment_method_id
         email = t.contact_email
+        product = getattr(t, "product", "nepool")
+
+    # Product-aware per-array price: Array Operator owners bill on the AO price
+    # (1st array free, $9/$8/$6.50) with NO setup fee; NEPOOL keeps $15 + setup.
+    array_price_id = array_price_id_for_product(product)
+    is_array_operator = (product or "nepool") == "array_operator"
 
     quantity = max(int(array_count), 1)
     items: list[dict] = []
-    if setup_price_id:
+    if setup_price_id and not is_array_operator:
         items.append({"price": setup_price_id, "quantity": 1})
     if array_price_id:
         items.append({"price": array_price_id, "quantity": quantity})
@@ -133,9 +167,20 @@ def reconcile_subscription_quantity(
         )
         return
 
-    if not STRIPE_ARRAY_PRICE_ID:
+    # Match against EITHER per-array price (NEPOOL or Array Operator) so this
+    # works regardless of which product the tenant is on. Read module globals
+    # (which tests monkeypatch) AND env (prod) so both paths resolve.
+    known_price_ids = {
+        pid for pid in (
+            STRIPE_ARRAY_PRICE_ID,
+            STRIPE_AO_ARRAY_PRICE_ID,
+            os.getenv("STRIPE_ARRAY_PRICE_ID", ""),
+            os.getenv("STRIPE_AO_ARRAY_PRICE_ID", ""),
+        ) if pid
+    }
+    if not known_price_ids:
         logger.warning(
-            "STRIPE_ARRAY_PRICE_ID not set — skipping quantity reconciliation "
+            "No per-array Stripe price ids set — skipping quantity reconciliation "
             "for tenant %s (array_count=%d)", tenant_id, array_count)
         return
 
@@ -143,13 +188,13 @@ def reconcile_subscription_quantity(
         sub = stripe.Subscription.retrieve(subscription_id)
         recurring_item = None
         for item in sub["items"]["data"]:
-            if item["price"]["id"] == STRIPE_ARRAY_PRICE_ID:
+            if item["price"]["id"] in known_price_ids:
                 recurring_item = item
                 break
         if recurring_item is None:
             raise RuntimeError(
-                f"no line item matching STRIPE_ARRAY_PRICE_ID="
-                f"{STRIPE_ARRAY_PRICE_ID!r} on subscription {subscription_id}")
+                f"no line item matching a known per-array price "
+                f"{known_price_ids!r} on subscription {subscription_id}")
 
         target_qty = max(array_count, 1)  # Stripe requires quantity >= 1
         current_qty = recurring_item.get("quantity", 0)
