@@ -610,60 +610,155 @@ def _estimate_annual_value(peak_power_kw: float) -> dict:
 
 
 class PublicPreviewBody(BaseModel):
-    api_key: str
+    # Back-compat: a bare api_key means SolarEdge. New callers send vendor +
+    # config (the per-vendor credential field dict the connect form collects).
+    api_key: Optional[str] = None
+    vendor: Optional[str] = None
+    config: Optional[dict] = None
+
+
+# Per-vendor friendly copy for the two recoverable failures (bad creds / scope).
+_PREVIEW_AUTH_MSG = {
+    "solaredge": "That key didn't work — make sure it's an active account-level API key.",
+    "locus": "Those Locus credentials didn't work — double-check the client ID/secret and your SolarNOC login.",
+    "fronius": "Those Solar.web keys didn't work — check the Access Key ID/Value and PV System ID.",
+    "sma": "Those SMA credentials didn't work — check the client ID/secret and Plant/System ID.",
+}
+_PREVIEW_SCOPE_MSG = {
+    "solaredge": "That's a site-level key — it can't list your whole account. Paste an "
+                 "account-level key (SolarEdge Admin → Site Access → API Access) to see "
+                 "every array at once.",
+    "locus": "Those credentials can't list the partner's sites. Add your Partner ID, or "
+             "enter a single Site ID to preview just that array.",
+}
+
+
+def _normalize_preview_site(vendor: str, raw: dict) -> dict:
+    """Coerce a vendor's site/validate result into the UI's site shape +
+    attach a value estimate when a peak_power_kw is known."""
+    # peak: SolarEdge/Locus discovery already give peak_power_kw; Fronius
+    # validate() gives peak_power in Wp (→kW); SMA gives none.
+    kw = raw.get("peak_power_kw")
+    if kw is None and raw.get("peak_power") is not None:
+        try:
+            kw = float(raw["peak_power"]) / 1000.0  # Solar.web Wp → kW
+        except (TypeError, ValueError):
+            kw = None
+    site = {
+        "site_id": raw.get("site_id") or raw.get("id") or "",
+        "name": raw.get("name") or raw.get("site_name") or "",
+        "peak_power_kw": round(kw, 2) if kw else None,
+        "status": raw.get("status") or "",
+    }
+    if kw:
+        site.update(_estimate_annual_value(kw))
+    else:
+        site.update({"annual_kwh": None, "annual_value_usd": None})
+    return site
+
+
+def _preview_sites_for_vendor(vendor: str, config: dict) -> list[dict]:
+    """List the sites a credential can see for `vendor`, normalized for the UI.
+
+    SolarEdge + Locus enumerate the whole account/partner (discover_sites);
+    Fronius + SMA have no discovery, so we validate the one system the owner
+    named and return it as a single site. Raises the InverterError family on
+    auth/scope/transport failures (the caller turns those into friendly copy).
+    """
+    mod = inverters.VENDORS.get(vendor)
+    if mod is None or not getattr(mod, "AVAILABLE", True):
+        raise InverterError(f"{vendor} can't be previewed.")
+
+    if vendor == "solaredge":
+        key = (config.get("api_key") or config.get("apiKey") or "").strip()
+        if not key:
+            raise InverterError("api_key is required")
+        raw = mod.discover_sites(key)
+        return [_normalize_preview_site(vendor, s) for s in raw]
+
+    if vendor == "locus":
+        # Account-wide discovery needs a partner_id; otherwise preview the one
+        # named site via validate().
+        if (config.get("partner_id") or "").strip():
+            raw = mod.discover_sites(config)
+            return [_normalize_preview_site(vendor, s) for s in raw]
+        return [_normalize_preview_site(vendor, mod.validate(config))]
+
+    # Fronius / SMA: single-system validate.
+    return [_normalize_preview_site(vendor, mod.validate(config))]
 
 
 @router.post("/v1/array-owners/public/preview")
 def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
-    """UNAUTHENTICATED pre-signup preview: list the real SolarEdge sites an
-    account-level key can read + a rough annual value, so a prospective owner
-    sees THEIR arrays before signing up. Saves nothing. Rate-limited per IP.
+    """UNAUTHENTICATED pre-signup preview for ANY supported vendor: list the
+    real sites a credential can read + a rough annual value, so a prospective
+    owner sees THEIR arrays before signing up. Saves nothing. Rate-limited per IP.
 
-    Returns {ok, sites:[{site_id,name,peak_power_kw,annual_kwh,annual_value_usd}],
-    totals:{peak_power_kw, annual_value_usd}, message}. A site-level key, bad
-    key, or empty account each come back as ok:false with a friendly message
-    (never a 4xx that the static site would have to special-case) — EXCEPT the
-    rate limit (429) and SolarEdge 5xx (502)."""
+    Accepts either {api_key} (legacy → SolarEdge) or {vendor, config}. Returns
+    {ok, vendor, sites:[{site_id,name,peak_power_kw,annual_kwh,annual_value_usd}],
+    totals, message}. Recoverable failures (bad creds, scope, empty) come back
+    as ok:false + friendly message; rate limit → 429; vendor 5xx → 502."""
     ip = _client_ip(request)
     if not _preview_rate_ok(ip):
         raise HTTPException(429, "Too many preview attempts — give it a few minutes and try again.")
 
-    api_key = (body.api_key or "").strip()
-    if not api_key:
-        return {"ok": False, "sites": [], "message": "Paste your SolarEdge account API key first."}
+    # Resolve vendor + config (back-compat: a bare api_key is SolarEdge).
+    vendor = (body.vendor or "").strip().lower() or "solaredge"
+    config = dict(body.config or {})
+    if body.api_key and not config.get("api_key"):
+        config["api_key"] = body.api_key
+    if vendor not in inverters.VENDORS:
+        return {"ok": False, "vendor": vendor, "sites": [],
+                "message": "We don't support that inverter brand yet."}
+
+    # Required fields present? (cheap pre-check so we return friendly copy, not 500)
+    needs = {
+        "solaredge": ["api_key"],
+        "locus": ["client_id", "client_secret", "username", "password"],
+        "fronius": ["access_key_id", "access_key_value", "pv_system_id"],
+        "sma": ["client_id", "client_secret", "system_id"],
+    }.get(vendor, [])
+    missing = [n for n in needs if not str(config.get(n) or "").strip()]
+    if vendor == "solaredge" and not str(config.get("api_key") or config.get("apiKey") or "").strip():
+        missing = ["api_key"]
+    if missing:
+        return {"ok": False, "vendor": vendor, "sites": [],
+                "message": "Fill in your credentials first."}
 
     try:
-        sites = inverters.solaredge.discover_sites(api_key)
+        sites = _preview_sites_for_vendor(vendor, config)
     except InverterScopeError:
-        return {"ok": False, "sites": [], "scope": "site",
-                "message": "That's a site-level key — it can't list your whole account. "
-                           "Paste an account-level key (SolarEdge Admin → Site Access → "
-                           "API Access) to see every array at once."}
+        return {"ok": False, "vendor": vendor, "sites": [], "scope": "site",
+                "message": _PREVIEW_SCOPE_MSG.get(vendor, _PREVIEW_AUTH_MSG.get(vendor, "Those credentials lack access."))}
     except InverterAuthError:
-        return {"ok": False, "sites": [],
-                "message": "That key didn't work — make sure it's an active account-level API key."}
+        return {"ok": False, "vendor": vendor, "sites": [],
+                "message": _PREVIEW_AUTH_MSG.get(vendor, "Those credentials didn't work.")}
     except InverterError as exc:
-        raise HTTPException(502, f"SolarEdge is unreachable right now: {exc}")
+        raise HTTPException(502, f"{inverters.VENDORS[vendor].LABEL} is unreachable right now: {exc}")
 
-    enriched = []
     total_kw = 0.0
     total_val = 0.0
+    any_value = False
     for s in sites:
-        kw = float(s.get("peak_power_kw") or 0.0)
-        est = _estimate_annual_value(kw)
-        total_kw += kw
-        total_val += est["annual_value_usd"]
-        enriched.append({**s, **est})
+        if s.get("peak_power_kw"):
+            total_kw += float(s["peak_power_kw"])
+        if s.get("annual_value_usd"):
+            total_val += float(s["annual_value_usd"])
+            any_value = True
 
+    label = inverters.VENDORS[vendor].LABEL
     return {
         "ok": True,
-        "sites": enriched,
+        "vendor": vendor,
+        "sites": sites,
         "totals": {
-            "count": len(enriched),
+            "count": len(sites),
             "peak_power_kw": round(total_kw, 1),
-            "annual_value_usd": round(total_val),
+            # None when we couldn't estimate any value (e.g. SMA gives no peak) —
+            # the UI then shows the arrays without the dollar hero.
+            "annual_value_usd": round(total_val) if any_value else None,
         },
-        "message": None if enriched else "We reached your account but found no SolarEdge sites on it.",
+        "message": None if sites else f"We reached {label} but found no sites on it.",
     }
 
 

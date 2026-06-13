@@ -49,6 +49,76 @@ def test_preview_needs_no_auth():
     assert r.json()["ok"] is False  # empty key → friendly false, not an error
 
 
+def test_preview_vendor_locus_partner_discovery(monkeypatch):
+    """A Locus credential with a partner_id enumerates the partner's sites."""
+    monkeypatch.setattr(
+        ao.inverters.VENDORS["locus"], "discover_sites",
+        lambda config: [
+            {"site_id": 11, "name": "Co-op A", "peak_power_kw": 25.0, "status": ""},
+            {"site_id": 12, "name": "Co-op B", "peak_power_kw": None, "status": ""},
+        ],
+    )
+    r = client.post("/v1/array-owners/public/preview", json={
+        "vendor": "locus",
+        "config": {"client_id": "c", "client_secret": "s", "username": "u",
+                   "password": "p", "partner_id": "99"},
+    })
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["ok"] is True and data["vendor"] == "locus"
+    assert len(data["sites"]) == 2
+    # site with peak gets a value; the one without is None (no estimate)
+    assert data["sites"][0]["annual_value_usd"] > 0
+    assert data["sites"][1]["annual_value_usd"] is None
+    assert data["totals"]["annual_value_usd"] > 0
+
+
+def test_preview_vendor_fronius_single_system(monkeypatch):
+    """Fronius has no discovery — validate the one system, peak in Wp→kW."""
+    monkeypatch.setattr(
+        ao.inverters.VENDORS["fronius"], "validate",
+        lambda config: {"site_name": "Rooftop", "peak_power": 8200.0},  # 8.2 kWp
+    )
+    r = client.post("/v1/array-owners/public/preview", json={
+        "vendor": "fronius",
+        "config": {"access_key_id": "a", "access_key_value": "b", "pv_system_id": "P1"},
+    })
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["ok"] is True and data["vendor"] == "fronius"
+    assert len(data["sites"]) == 1
+    assert data["sites"][0]["peak_power_kw"] == 8.2
+    assert data["sites"][0]["annual_value_usd"] > 0
+
+
+def test_preview_vendor_sma_no_peak_no_value(monkeypatch):
+    """SMA gives no peak power — the array still previews, value is None."""
+    monkeypatch.setattr(
+        ao.inverters.VENDORS["sma"], "validate",
+        lambda config: {"site_name": "Plant 7"},
+    )
+    r = client.post("/v1/array-owners/public/preview", json={
+        "vendor": "sma",
+        "config": {"client_id": "c", "client_secret": "s", "system_id": "7"},
+    })
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["ok"] is True and data["vendor"] == "sma"
+    assert data["sites"][0]["name"] == "Plant 7"
+    assert data["sites"][0]["annual_value_usd"] is None
+    assert data["totals"]["annual_value_usd"] is None  # nothing to estimate
+
+
+def test_preview_missing_fields_friendly(monkeypatch):
+    """Missing credential fields → friendly ok:false, not a 500."""
+    r = client.post("/v1/array-owners/public/preview", json={
+        "vendor": "locus", "config": {"client_id": "only"},
+    })
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "credentials" in r.json()["message"].lower()
+
+
 def test_preview_bad_key_is_friendly(monkeypatch):
     def _boom(key):
         raise ao.InverterAuthError("401 bad key")
