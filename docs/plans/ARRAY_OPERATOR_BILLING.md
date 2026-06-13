@@ -10,6 +10,23 @@ no-card trial and bill on the owner price when they add a card.
 - `tenants.product` column present in prod; migration ran.
 - Smoke-tested end-to-end (AO trial signup → product/trial verified → tenant deleted).
 
+## Owner front door (LIVE Jun 13 2026)
+The array-operator-ea site now has the signup surface:
+- `index.html`: black/green Pricing section (first array free, $9/$8/$6.50
+  graduated, 14-day trial, no setup fee) + "Get started" nav CTA → onboarding.html.
+- `onboarding.html`: final step calls `/v1/onboarding/start` with
+  `product:"array_operator"` → `/v1/onboarding/complete` (mints session +
+  magic-link email) → inline "Add a card" via `/v1/account/add-payment-method`
+  (Stripe Checkout setup mode). Verified E2E against prod (start 200, complete
+  200, tenant created with product=array_operator/trialing, then deleted).
+- KNOWN LIMITATION: the SolarEdge `/discover` endpoint is auth-gated (needs a
+  bearer token / signed-in tenant), so during pre-signup onboarding it returns
+  401 and we fall through to the DEMO cascade. The owner's real key is NOT
+  verified or attached during onboarding — it must be connected after sign-in
+  from the dashboard. TODO if we want true pre-signup discovery: add an
+  unauthenticated "validate key + list sites" endpoint (rate-limited) OR collect
+  the key during onboarding and attach it server-side right after tenant create.
+
 ## The decision (pending Ford's final word)
 Audited Array Operator as a customer (owner-facing app: dollar-first verdict,
 done-for-you warranty claims, peer-index ground truth, one-credential discovery).
