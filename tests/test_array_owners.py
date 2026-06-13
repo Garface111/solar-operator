@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 import api.array_owners as array_owners
 from api.db import SessionLocal
-from api.models import Array, Client, DailyGeneration, Tenant, UtilityAccount
+from api.models import Array, Client, DailyGeneration, InverterConnection, Tenant, UtilityAccount
 from api.rates import REC_PRICE_USD_PER_MWH
 
 
@@ -354,3 +354,84 @@ def test_overview_accepts_dashboard_session_token(client):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["arrays"] == []
+
+
+# ── connect-single (Fronius / SMA one-system attach) ──────────────────────────
+
+def test_connect_single_creates_array_and_attaches(client, monkeypatch):
+    from api.inverters import VENDORS
+    tid, key = _make_tenant()
+    monkeypatch.setattr(VENDORS["fronius"], "validate",
+                        lambda config: {"site_name": "Hilltop house", "peak_power": 8200.0})
+
+    resp = client.post(
+        "/v1/array-owners/connect-single",
+        json={"vendor": "fronius",
+              "config": {"access_key_id": "a", "access_key_value": "b", "pv_system_id": "P1"}},
+        headers=_auth(key),
+    )
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["ok"] is True and out["vendor"] == "fronius"
+    assert out["created"] is True
+    assert out["name"] == "Hilltop house"
+
+    # The InverterConnection was persisted on a new array for this tenant.
+    with SessionLocal() as db:
+        arr = db.get(Array, out["array_id"])
+        assert arr is not None and arr.tenant_id == tid
+        conn = db.execute(
+            select(InverterConnection).where(InverterConnection.array_id == arr.id)
+        ).scalar_one()
+        assert conn.vendor == "fronius" and conn.status == "ok"
+
+
+def test_connect_single_matches_existing_array_by_name(client, monkeypatch):
+    from api.inverters import VENDORS
+    tid, key = _make_tenant()
+    existing = _make_array(tid, "Plant 7")
+    monkeypatch.setattr(VENDORS["sma"], "validate",
+                        lambda config: {"site_name": "Plant 7"})
+
+    resp = client.post(
+        "/v1/array-owners/connect-single",
+        json={"vendor": "sma",
+              "config": {"client_id": "c", "client_secret": "s", "system_id": "7"}},
+        headers=_auth(key),
+    )
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["created"] is False
+    assert out["array_id"] == existing  # matched the existing array, no dup
+
+
+def test_connect_single_bad_creds_400_and_no_write(client, monkeypatch):
+    from api.inverters import VENDORS
+    from api.inverters.base import InverterAuthError
+    tid, key = _make_tenant()
+
+    def _boom(config):
+        raise InverterAuthError("401 bad creds")
+    monkeypatch.setattr(VENDORS["fronius"], "validate", _boom)
+
+    resp = client.post(
+        "/v1/array-owners/connect-single",
+        json={"vendor": "fronius",
+              "config": {"access_key_id": "x", "access_key_value": "y", "pv_system_id": "z"}},
+        headers=_auth(key),
+    )
+    assert resp.status_code == 400
+    # Nothing was created.
+    with SessionLocal() as db:
+        n = db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all()
+        assert n == []
+
+
+def test_connect_single_unavailable_vendor_400(client):
+    _tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/connect-single",
+        json={"vendor": "chint", "config": {}},
+        headers=_auth(key),
+    )
+    assert resp.status_code == 400

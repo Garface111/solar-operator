@@ -1203,3 +1203,94 @@ def locus_connect_account(
             f"{len(created)} new, {len(matched)} matched."
         ),
     }
+
+
+# ── single-system connect (Fronius / SMA / any one-system vendor) ──────────────
+# Fronius and SMA have no account-level discovery (one credential = one system),
+# so "attach all" doesn't apply. This endpoint validates the one named system
+# and attaches it to a matched-or-created array — the one-click post-signup
+# attach for those vendors, mirroring connect-account's match/create behavior.
+
+class ConnectSingleBody(BaseModel):
+    vendor: str
+    config: dict
+    # Optional friendly name for a freshly-created array; defaults to the
+    # vendor's validated site name, then the system id.
+    name: Optional[str] = None
+
+
+@router.post("/v1/array-owners/connect-single")
+def connect_single(
+    body: ConnectSingleBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Validate a single-system vendor credential and attach it to ONE array
+    (matched by exact name, else created). For Fronius / SMA / Locus-single —
+    vendors with no account-level enumeration. Idempotent by array name.
+
+    Returns {ok, array_id, name, created, site_name, vendor}. Bad credentials
+    return 400 and persist nothing (validate runs before any write)."""
+    tenant = _tenant_from_bearer(authorization)
+
+    vendor = (body.vendor or "").strip().lower()
+    mod = VENDORS.get(vendor)
+    if mod is None:
+        raise HTTPException(400, f"Unknown inverter vendor: {vendor!r}")
+    if not getattr(mod, "AVAILABLE", True):
+        raise HTTPException(400, f"{mod.LABEL} can't be connected via API.")
+
+    config = dict(body.config or {})
+
+    # Validate FIRST (raises before any DB write) — the real credential check,
+    # and it gives us the site name for matching/creation.
+    try:
+        result = inverters.validate(vendor, config)
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(400, str(exc))
+
+    site_name = (body.name or result.get("site_name") or "").strip()
+    if not site_name:
+        sysid = config.get("system_id") or config.get("pv_system_id") or config.get("site_id") or "site"
+        site_name = f"{mod.LABEL} {sysid}"
+
+    created = False
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        names_lower = {a.name.strip().lower(): a for a in arrays}
+
+        target = names_lower.get(site_name.lower())
+        if target is None:
+            target = Array(
+                tenant_id=tenant.id, name=site_name, client_id=None, fuel_type="solar",
+            )
+            db.add(target)
+            db.flush()
+            created = True
+
+        # _connect_inverter re-validates (cheap second call) and upserts — keeps
+        # the write path identical to the per-array connect endpoint.
+        try:
+            _connect_inverter(db, target, vendor, config)
+        except InverterAuthError as exc:
+            raise HTTPException(400, str(exc))
+        except InverterError as exc:
+            raise HTTPException(400, str(exc))
+
+        array_id = target.id
+        array_name = target.name
+
+    return {
+        "ok": True,
+        "vendor": vendor,
+        "array_id": array_id,
+        "name": array_name,
+        "created": created,
+        "site_name": result.get("site_name"),
+        "message": f"{mod.LABEL} system connected to “{array_name}”.",
+    }
