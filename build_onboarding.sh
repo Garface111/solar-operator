@@ -10,5 +10,6 @@ cp -r web/onboarding/dist api/onboarding_dist
 echo "✓ api/onboarding_dist/ refreshed from web/onboarding/dist/"
 # Regenerate the public demo workbook the `rm -rf` above just wiped, so
 # /onboarding/sample.xlsx keeps serving after a frontend rebuild.
-python3 -m scripts.regen_demo_workbook
+# Use the venv python (needs sqlalchemy); fall back to python3 if no venv.
+"${PYTHON:-.venv/bin/python}" -m scripts.regen_demo_workbook
 echo "✓ api/onboarding_dist/sample.xlsx regenerated"
