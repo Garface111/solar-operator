@@ -356,8 +356,35 @@ def reorder_within_array(db, tenant: Tenant, array_id: int, ordered_ids: list[in
 
 def create_array(db, tenant: Tenant, name: str) -> Array:
     """Create a new owner-defined array (empty group to drag inverters into).
-    No utility/connection — purely an owner grouping that inverters reference."""
+    No utility/connection — purely an owner grouping that inverters reference.
+
+    Array names are unique per tenant (uq_array_per_tenant), so if the requested
+    name collides we auto-suffix (" 2", " 3", …) rather than 500. Also revives a
+    soft-deleted array of the same name instead of colliding with its row."""
     nm = (name or "").strip() or "New array"
+
+    # Revive a soft-deleted same-name array if one exists (the unique constraint
+    # spans deleted rows too, so we can't just insert a duplicate).
+    existing = db.execute(
+        select(Array).where(Array.tenant_id == tenant.id, Array.name == nm)
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.deleted_at is not None:
+            existing.deleted_at = None
+            db.commit()
+            db.refresh(existing)
+            return existing
+        # live array already has this name — auto-suffix to keep it unique
+        base = nm
+        for i in range(2, 100):
+            cand = f"{base} {i}"
+            clash = db.execute(
+                select(Array).where(Array.tenant_id == tenant.id, Array.name == cand)
+            ).scalar_one_or_none()
+            if clash is None:
+                nm = cand
+                break
+
     arr = Array(tenant_id=tenant.id, name=nm, fuel_type="solar")
     db.add(arr)
     db.commit()
