@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
@@ -45,6 +45,7 @@ from .fuels import normalize_fuel
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .email_skin import render_email_skin, render_email_skin_text
+from . import ratelimit
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity, create_subscription_for_tenant, billable_array_count
 from .email_templates import (
@@ -479,9 +480,17 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
 
 
 @router.post("/v1/auth/request")
-def auth_request(req: AuthRequest):
+def auth_request(req: AuthRequest, request: Request):
     """Email a one-time login link to a known customer. Always returns OK
     (don't leak which emails are registered)."""
+    # Each call SENDS an email — throttle per-IP (broad abuse) AND per-email
+    # (so a victim's inbox can't be bombed from rotating IPs).
+    email = (req.email or "").lower().strip()
+    ratelimit.enforce(request, "auth_request_ip", max_hits=8, window_s=600,
+                      message="Too many sign-in link requests — try again in a few minutes.")
+    ratelimit.enforce(request, "auth_request_email", max_hits=4, window_s=900,
+                      key_extra=email,
+                      message="We've already sent a few sign-in links to that address — check your inbox, or try again shortly.")
     issue_magic_link(req.email, persist=req.persist)
     return {"ok": True, "delivered": True}
 
@@ -583,12 +592,17 @@ def _verify_password(pw: str, hashed: str) -> bool:
 
 
 @router.post("/v1/auth/password-login")
-def password_login(body: PasswordLoginBody):
+def password_login(body: PasswordLoginBody, request: Request):
     """Exchange email + password for a session token.
 
     Returns 401 with a generic message on any failure to prevent email enumeration.
     Mints the same session token shape as /v1/auth/verify so downstream is identical."""
     email = body.email.lower().strip()
+    # Throttle brute-force guessing: per-IP (broad) and per-email (targeted).
+    ratelimit.enforce(request, "pwlogin_ip", max_hits=15, window_s=300,
+                      message="Too many sign-in attempts — wait a few minutes and try again.")
+    ratelimit.enforce(request, "pwlogin_email", max_hits=10, window_s=300, key_extra=email,
+                      message="Too many sign-in attempts for that account — wait a few minutes and try again.")
     _GENERIC_ERROR = "Invalid email or password"
     with SessionLocal() as db:
         t = db.execute(

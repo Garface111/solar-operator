@@ -29,7 +29,7 @@ from datetime import timedelta
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, func
 
@@ -324,13 +324,18 @@ def _create_trial_tenant(
 
 
 @router.post("/start", response_model=StartResponse)
-def start(req: StartRequest):
+def start(req: StartRequest, request: Request):
     """Begin onboarding with NO upfront payment.
 
     Creates a live, trialing tenant and returns its onboarding token. No card is
     collected — the 14-day trial starts immediately and the operator adds a
     payment method later from the Accounts tab.
     """
+    # Each signup creates a tenant + fires welcome/trial emails — throttle per-IP
+    # so the endpoint can't be used to mass-create accounts or spam emails.
+    from . import ratelimit
+    ratelimit.enforce(request, "onboarding_start_ip", max_hits=10, window_s=600,
+                      message="Too many signups from your network — please try again in a few minutes.")
     onboarding_token, tenant_id = _create_trial_tenant(
         email=req.email, full_name=req.full_name, company=req.company,
         password=req.password, array_count=req.array_count,
