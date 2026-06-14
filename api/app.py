@@ -1006,13 +1006,28 @@ def tenant_pull(tid: str, authorization: str | None = Header(default=None)):
 # ---- admin -------------------------------------------------------------
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+# Are we running on Railway (i.e. in production)? Any of these are injected by
+# the platform at runtime; none exist on a local dev box.
+_ON_RAILWAY = bool(
+    os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+    or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+)
 
 
 def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
-    """Guard admin endpoints with ADMIN_API_KEY. If the env var is unset (local
-    dev), all requests are allowed so the local tooling keeps working. In prod
-    the key must match."""
-    if ADMIN_API_KEY and x_admin_key != ADMIN_API_KEY:
+    """Guard admin endpoints with ADMIN_API_KEY.
+
+    Fail CLOSED in production. Previously, if ADMIN_API_KEY was unset the guard
+    fell OPEN — which left every /admin/* route (including tenant_key listing)
+    reachable unauthenticated in prod. Now: if we're on Railway and no key is
+    configured, deny everything (503). Locally (no Railway env) an unset key
+    still allows requests so dev tooling/tests keep working.
+    """
+    if not ADMIN_API_KEY:
+        if _ON_RAILWAY:
+            raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
+        return  # local dev only — open
+    if x_admin_key != ADMIN_API_KEY:
         raise HTTPException(403, "Invalid or missing X-Admin-Key")
 
 
