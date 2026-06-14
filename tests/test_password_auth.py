@@ -113,6 +113,25 @@ class TestPasswordLogin:
         assert "session_token" in body
         assert isinstance(body["session_token"], str)
         assert len(body["session_token"]) > 20
+        # product lets a per-product login route a wrong-brand account home.
+        assert body.get("product") == "nepool"  # default product
+
+    def test_login_returns_array_operator_product(self, client):
+        tid, auth = _make_tenant()
+        with SessionLocal() as db:
+            db.get(Tenant, tid).product = "array_operator"
+            db.commit()
+        client.post(
+            "/v1/auth/set-password",
+            json={"password": "TestPassword1"},
+            headers={"Authorization": auth},
+        )
+        resp = client.post(
+            "/v1/auth/password-login",
+            json={"email": _tenant_email(tid), "password": "TestPassword1"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["product"] == "array_operator"
 
     def test_wrong_password_returns_401(self, client):
         tid, auth = _make_tenant()

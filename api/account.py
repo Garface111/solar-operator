@@ -595,10 +595,14 @@ def password_login(body: PasswordLoginBody):
         if not _verify_password(body.password, t.password_hash):
             raise HTTPException(401, _GENERIC_ERROR)
         tenant_id = t.id
+        product = t.product or "nepool"
 
     session_token = _sign_session(tenant_id)
     logger.info("password_login_success: email=%s tenant=%s", email, tenant_id)
-    return {"ok": True, "session_token": session_token, "expires_in": SESSION_TTL_SECONDS}
+    # `product` lets a per-product login page bounce a wrong-brand account to its
+    # real home (e.g. an Array Operator login getting a NEPOOL account).
+    return {"ok": True, "session_token": session_token,
+            "expires_in": SESSION_TTL_SECONDS, "product": product}
 
 
 @router.post("/v1/auth/set-password")
@@ -708,6 +712,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "operator_name": t.operator_name,
             "company_name": t.company_name or t.name,
             "email": t.contact_email,
+            "product": t.product or "nepool",
             "plan": t.plan,
             "active": t.active,
             # Shared read-only demo tenant flag. Drives the SPA demo banner and
