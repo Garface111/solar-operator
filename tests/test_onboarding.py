@@ -159,6 +159,45 @@ def test_start_array_operator_product_same_trial(client, mocks, monkeypatch):
         assert t.stripe_payment_method_id is None
 
 
+def test_start_with_duplicate_active_email_returns_409_not_500(client, mocks):
+    """Regression: legacy/raced data can leave >1 ACTIVE tenant on one email.
+
+    The duplicate-email guard must not use scalar_one_or_none() (which raises
+    MultipleResultsFound -> 500 and wedges signup permanently for that email).
+    A second active row simply means the account is taken -> clean 409.
+    """
+    from datetime import timedelta
+    from api.onboarding import (
+        gen_tenant_id, gen_tenant_key, gen_onboarding_token, now,
+    )
+
+    email = "dupe@example.com"
+    # Seed TWO active tenants on the same email (what production drifted into).
+    with SessionLocal() as db:
+        for _ in range(2):
+            db.add(Tenant(
+                id=gen_tenant_id(), name="Dupe Co", contact_email=email,
+                operator_name="Dupe Owner", company_name="Dupe Co",
+                tenant_key=gen_tenant_key(), plan="standard", active=True,
+                created_at=now(), product="array_operator",
+                subscription_status="trialing",
+                trial_ends_at=now() + timedelta(days=14),
+                onboarding_token=gen_onboarding_token(),
+                onboarding_stage="extension",
+            ))
+        db.commit()
+
+    resp = client.post("/v1/onboarding/start", json={
+        "email": email,
+        "full_name": "Dexter Dupe",
+        "company": "Dupe Co",
+        "array_count": 2,
+        "product": "array_operator",
+    })
+    assert resp.status_code == 409, resp.text
+    assert "already exists" in resp.json()["detail"].lower()
+
+
 # ─── (a) checkout shim now creates a live trial (no card) ────────────────
 
 def test_checkout_shim_creates_trialing_tenant(client, mocks):

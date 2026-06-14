@@ -279,9 +279,15 @@ def _create_trial_tenant(
     onboarding_token = gen_onboarding_token()
 
     with SessionLocal() as db:
+        # NOTE: .first() (not scalar_one_or_none) on purpose — legacy/raced data
+        # can leave >1 active tenant on the same email, and scalar_one_or_none()
+        # raises MultipleResultsFound -> 500, wedging signup permanently for that
+        # email. Any existing active row means the account is taken; return 409.
         existing = db.execute(
-            select(Tenant).where(Tenant.contact_email == email, Tenant.active == True)
-        ).scalar_one_or_none()
+            select(Tenant)
+            .where(Tenant.contact_email == email, Tenant.active == True)
+            .order_by(Tenant.created_at.desc())
+        ).scalars().first()
         if existing:
             raise HTTPException(409,
                 "An account already exists for this email. "
