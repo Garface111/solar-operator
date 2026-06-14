@@ -85,6 +85,29 @@ def magic_link_url(product: str | None, token: str) -> str:
     return f"{_AO_APP_URL}/login?token={token}"
 
 
+def from_address(product: str | None) -> str:
+    """Product-correct email From header (display name + sender).
+
+    Resend only sends from VERIFIED domains. As of 2026-06-14:
+      - nepooloperator.com IS verified → NEPOOL sends from its own domain.
+      - arrayoperator.com is NOT verified yet → Array Operator falls back to the
+        verified platform domain (solaroperator.org) with the AO display name.
+    To flip AO to its own domain: verify arrayoperator.com in Resend, then set
+    MAIL_FROM_AO='Array Operator <hello@arrayoperator.com>' (no code change).
+    Replies are routed to the monitored inbox via reply_to_address() regardless
+    of the From domain, so changing the From never strands a customer reply.
+    """
+    if _key(product) == "array_operator":
+        return os.getenv("MAIL_FROM_AO", "Array Operator <hello@solaroperator.org>")
+    return (os.getenv("MAIL_FROM_NEPOOL")
+            or os.getenv("MAIL_FROM", "NEPOOL Operator <hello@nepooloperator.com>"))
+
+
+def reply_to_address(product: str | None = None) -> str:
+    """The monitored support inbox replies should reach, whatever the From is."""
+    return os.getenv("SUPPORT_EMAIL", "admin@solaroperator.org")
+
+
 def pricing_blurb(product: str | None) -> str:
     """One-sentence, brand-correct pricing phrase for email copy.
 

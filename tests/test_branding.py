@@ -83,3 +83,33 @@ def test_trailing_slashes_stripped(monkeypatch):
     b = _fresh_branding(monkeypatch, AO_APP_URL="https://arrayoperator.com/")
     assert b.app_url("array_operator") == "https://arrayoperator.com"
     assert b.dashboard_url("array_operator") == "https://arrayoperator.com"
+
+
+# ── product-correct From / Reply-To ───────────────────────────────────────────
+
+def test_from_address_is_product_correct(monkeypatch):
+    b = _fresh_branding(monkeypatch)
+    # NEPOOL sends from its own (Resend-verified) domain.
+    assert b.from_address("nepool") == "NEPOOL Operator <hello@nepooloperator.com>"
+    # Array Operator falls back to the verified platform domain until
+    # arrayoperator.com is verified — but keeps the AO display name.
+    ao = b.from_address("array_operator")
+    assert ao.startswith("Array Operator <")
+    assert "solaroperator.org" in ao  # verified fallback domain
+    assert "arrayoperator.com" not in ao  # not verified yet
+
+
+def test_from_address_env_overrides(monkeypatch):
+    b = _fresh_branding(
+        monkeypatch,
+        MAIL_FROM_AO="Array Operator <hello@arrayoperator.com>",
+        MAIL_FROM_NEPOOL="NEPOOL Operator <reports@nepooloperator.com>",
+    )
+    assert b.from_address("array_operator") == "Array Operator <hello@arrayoperator.com>"
+    assert b.from_address("nepool") == "NEPOOL Operator <reports@nepooloperator.com>"
+
+
+def test_reply_to_is_monitored_inbox(monkeypatch):
+    b = _fresh_branding(monkeypatch)
+    assert b.reply_to_address("array_operator") == "admin@solaroperator.org"
+    assert b.reply_to_address("nepool") == "admin@solaroperator.org"

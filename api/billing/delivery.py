@@ -225,6 +225,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         ok = _send_via_resend(
             to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
             attachments=attachments, from_addr=from_addr,
+            product=getattr(tenant, "product", "array_operator"),
         )
 
     result = {"ok": bool(ok), "to": to, "cc": cc,

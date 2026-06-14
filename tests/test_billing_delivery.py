@@ -160,8 +160,9 @@ def test_send_now_test_goes_to_operator(client, monkeypatch):
 
     captured = {}
 
-    def fake_send(to, subject, html, text, attachments=None, from_addr=None, reply_to=None):
-        captured.update(to=to, subject=subject, attachments=attachments)
+    def fake_send(to, subject, html, text, attachments=None, from_addr=None,
+                  reply_to=None, product="nepool"):
+        captured.update(to=to, subject=subject, attachments=attachments, product=product)
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)

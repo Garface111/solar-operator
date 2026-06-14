@@ -31,7 +31,8 @@ EXTENSION_INSTALL_URL = os.getenv(
 def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      attachments: list[dict] | None = None,
                      from_addr: str | None = None,
-                     reply_to: str | None = None) -> bool:
+                     reply_to: str | None = None,
+                     product: str = "nepool") -> bool:
     """Returns True on success, False otherwise. Uses the official Resend
     SDK so we play nice with their Cloudflare bot rules.
 
@@ -52,15 +53,17 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         return False
 
     params: dict = {
-        "from": from_addr or FROM_ADDRESS,
+        "from": from_addr or branding.from_address(product),
         "to": [to] if isinstance(to, str) else list(to),
         "subject": subject,
         "html": html,
     }
     if text:
         params["text"] = text
-    if reply_to:
-        params["reply_to"] = reply_to
+    # Always set a Reply-To to the monitored support inbox so a brand-domain
+    # From (whose mailbox may not receive) never strands a customer reply.
+    # An explicit reply_to (e.g. report "send as me") is respected as-is.
+    params["reply_to"] = reply_to or branding.reply_to_address(product)
     if attachments:
         params["attachments"] = attachments
 
@@ -368,6 +371,7 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
         subject=f"Your {_brand} payment was declined",
         html=html,
         text=text,
+        product=product,
     )
 
 
@@ -425,6 +429,7 @@ def send_trial_charge_failed_email(
         subject=f"Card declined when activating your {_brand} subscription",
         html=html,
         text=text,
+        product=product,
     )
 
 
@@ -536,7 +541,7 @@ def send_trial_welcome_email(
         cta={"label": "Open your dashboard", "url": dashboard_url},
         product=product,
     )
-    return _send_via_resend(to=to, subject=subject, html=html, text=text)
+    return _send_via_resend(to=to, subject=subject, html=html, text=text, product=product)
 
 
 def send_trial_paused_no_card_email(
@@ -598,6 +603,7 @@ def send_trial_paused_no_card_email(
         subject=f"Add a card to stay on {_brand}",
         html=html,
         text=text,
+        product=product,
     )
 
 
@@ -657,6 +663,7 @@ def send_trial_ending_no_card_reminder_email(
         subject=f"Add a card to stay on {_brand}",
         html=html,
         text=text,
+        product=product,
     )
 
 
@@ -720,6 +727,7 @@ def send_cancellation_email(to: str, name: str,
         subject=f"Your {_brand} subscription is canceled",
         html=html,
         text=text,
+        product=product,
     )
 
 
@@ -823,6 +831,7 @@ def send_trial_charged_email(to: str, name: str, array_count: int,
         subject=f"Charged ${amount_dollars:.2f} — {_brand} subscription active",
         html=html,
         text=text,
+        product=product,
     )
 
 

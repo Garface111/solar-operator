@@ -469,6 +469,7 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
         subject=f"Sign in to {brand}",
         html=html,
         text=text,
+        product=product,
     )
     if not sent:
         logger.error(
