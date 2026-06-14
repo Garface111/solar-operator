@@ -620,6 +620,19 @@ function ArrayRow({
             />
           </div>
 
+          {/* Generation type — lets an operator CORRECT the fuel after the
+              fact. Autopop / import / sandbox create solar by default, so
+              without this a wrong fuel was stuck routing to the solar (GMCS)
+              writer with no recovery. Saves through the same updateArray patch. */}
+          <div>
+            <FieldLabel>Generation type</FieldLabel>
+            <FuelPicker
+              value={(array.fuel_type as FuelType) ?? DEFAULT_FUEL}
+              label=""
+              onChange={(f) => save({ fuel_type: f })}
+            />
+          </div>
+
           <div>
             <FieldLabel>
               {array.accounts.length} utility{" "}
