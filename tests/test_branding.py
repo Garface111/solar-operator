@@ -1,8 +1,11 @@
 """Tests for product-aware branding (api/branding.py) and its use in the
 magic-link + onboarding email URLs.
 
-Safe-by-default contract: with no AO_APP_URL set, array_operator falls back to
-the working NEPOOL domain (never a dead arrayoperator.com link).
+Contract: arrayoperator.com is LIVE, so Array Operator defaults to its own
+domain (no env flip needed), and its owner dashboard is the SITE ROOT — its
+/accounts path proxies to the NEPOOL verifier SPA, so /accounts is wrong for an
+array owner. Magic-link sign-in tokens land on a page that exchanges them:
+NEPOOL → /accounts, Array Operator → /login.
 """
 import importlib
 
@@ -32,21 +35,42 @@ def test_array_operator_brand_name(monkeypatch):
     assert b.brand_name("array_operator") == "Array Operator"
 
 
-def test_array_operator_falls_back_to_working_domain_by_default(monkeypatch):
-    """CRITICAL: with no AO_APP_URL, AO must NOT emit a dead arrayoperator.com
-    link — it falls back to the NEPOOL domain which proxies /accounts today."""
+def test_array_operator_defaults_to_its_own_live_domain(monkeypatch):
+    """AO now defaults to arrayoperator.com (no env flip), and its owner
+    dashboard is the ROOT — NOT /accounts (which is the NEPOOL SPA proxy)."""
     b = _fresh_branding(monkeypatch)
-    assert b.app_url("array_operator") == "https://nepooloperator.com"
-    assert b.dashboard_url("array_operator") == "https://nepooloperator.com/accounts"
-
-
-def test_array_operator_flips_with_env(monkeypatch):
-    """One env var flips AO to its own domain once it's live."""
-    b = _fresh_branding(monkeypatch, AO_APP_URL="https://arrayoperator.com")
     assert b.app_url("array_operator") == "https://arrayoperator.com"
-    assert b.dashboard_url("array_operator") == "https://arrayoperator.com/accounts"
+    assert b.dashboard_url("array_operator") == "https://arrayoperator.com"
+
+
+def test_array_operator_env_override(monkeypatch):
+    """AO_APP_URL still overrides (e.g. staging/preview). Dashboard stays root."""
+    b = _fresh_branding(monkeypatch, AO_APP_URL="https://staging.arrayoperator.com")
+    assert b.app_url("array_operator") == "https://staging.arrayoperator.com"
+    assert b.dashboard_url("array_operator") == "https://staging.arrayoperator.com"
     # NEPOOL unaffected.
     assert b.dashboard_url("nepool") == "https://nepooloperator.com/accounts"
+
+
+def test_magic_link_url_is_product_correct(monkeypatch):
+    """The sign-in token must land on each product's OWN brand + a page that
+    exchanges it: NEPOOL /accounts, Array Operator /login."""
+    b = _fresh_branding(monkeypatch)
+    assert b.magic_link_url("nepool", "TOK123") == \
+        "https://nepooloperator.com/accounts/?token=TOK123"
+    assert b.magic_link_url("array_operator", "TOK123") == \
+        "https://arrayoperator.com/login?token=TOK123"
+    # Unknown/blank product is treated as NEPOOL.
+    assert b.magic_link_url(None, "T").startswith("https://nepooloperator.com/accounts/?token=")
+
+
+def test_magic_link_honors_overrides(monkeypatch):
+    b = _fresh_branding(
+        monkeypatch,
+        PUBLIC_DASHBOARD_URL="https://nepooloperator.com/accounts",
+        AO_APP_URL="https://arrayoperator.com",
+    )
+    assert b.magic_link_url("array_operator", "X") == "https://arrayoperator.com/login?token=X"
 
 
 def test_unknown_product_defaults_to_nepool(monkeypatch):
@@ -58,4 +82,4 @@ def test_unknown_product_defaults_to_nepool(monkeypatch):
 def test_trailing_slashes_stripped(monkeypatch):
     b = _fresh_branding(monkeypatch, AO_APP_URL="https://arrayoperator.com/")
     assert b.app_url("array_operator") == "https://arrayoperator.com"
-    assert b.dashboard_url("array_operator") == "https://arrayoperator.com/accounts"
+    assert b.dashboard_url("array_operator") == "https://arrayoperator.com"

@@ -434,11 +434,11 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
         product = t.product
     # Magic link lands on the dashboard SPA, which exchanges this one-time login
     # token for a session via POST /v1/auth/verify (see web/app AuthGate).
-    # Product-aware so an Array Operator owner gets their brand's domain + name,
-    # not NEPOOL's. (Defaults safely to the working NEPOOL domain until
-    # arrayoperator.com is live — see api/branding.py.)
+    # Product-aware so an Array Operator owner gets their brand's domain + the
+    # right landing page (arrayoperator.com/login), and a NEPOOL operator gets
+    # nepooloperator.com/accounts — keyed off the TENANT's product. See branding.
     brand = branding.brand_name(product)
-    link = f"{branding.dashboard_url(product)}/?token={token}"
+    link = branding.magic_link_url(product, token)
     html = f"""\
 <!DOCTYPE html><html><body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f4;padding:30px 0;color:#1a2a1f;">
 <table cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center">

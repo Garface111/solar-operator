@@ -21,9 +21,9 @@ import os
 # brand/url resolution flows through one module.
 _NEPOOL_APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
 
-# Array Operator. DEFAULTS to the NEPOOL domain (which works today) — override
-# with AO_APP_URL once arrayoperator.com is live and proxying /accounts.
-_AO_APP_URL = os.getenv("AO_APP_URL", _NEPOOL_APP_URL).rstrip("/")
+# Array Operator. arrayoperator.com is live + proxying, so it is the default now
+# (no env flip needed). AO_APP_URL can still override for staging/preview.
+_AO_APP_URL = os.getenv("AO_APP_URL", "https://arrayoperator.com").rstrip("/")
 
 _BRANDS = {
     "nepool": {
@@ -52,13 +52,34 @@ def app_url(product: str | None) -> str:
 
 
 def dashboard_url(product: str | None) -> str:
-    """Public buyer-facing dashboard URL (…/accounts), no trailing slash.
+    """Public buyer-facing dashboard URL, no trailing slash.
 
-    Honors PUBLIC_DASHBOARD_URL for the NEPOOL default (back-compat with the
-    existing override) so this never regresses current behavior.
+    PER-PRODUCT, because the two products serve their owner dashboard at
+    DIFFERENT paths:
+      - NEPOOL Operator → nepooloperator.com/accounts (the React SPA, honoring
+        the PUBLIC_DASHBOARD_URL override for back-compat).
+      - Array Operator  → arrayoperator.com  (the owner dashboard is the SITE
+        ROOT / app.js). Its /accounts path proxies to the NEPOOL verifier SPA,
+        so /accounts is WRONG for an array owner.
     """
     if _key(product) == "nepool":
         return os.getenv(
             "PUBLIC_DASHBOARD_URL", f"{_NEPOOL_APP_URL}/accounts"
         ).rstrip("/")
-    return f"{_AO_APP_URL}/accounts"
+    return _AO_APP_URL
+
+
+def magic_link_url(product: str | None, token: str) -> str:
+    """Where a one-time sign-in token should LAND for this product — a page that
+    exchanges it via POST /v1/auth/verify.
+
+      - NEPOOL → /accounts/?token=…  (the SPA AuthGate verifies + shows errors).
+      - Array Operator → /login?token=…  (login.html verifies, shows errors, and
+        redirects into the owner dashboard on success).
+
+    Product-correct by the TENANT's product, so whichever login page the email
+    was requested from, the link always lands on the owner's real brand.
+    """
+    if _key(product) == "nepool":
+        return f"{dashboard_url('nepool')}/?token={token}"
+    return f"{_AO_APP_URL}/login?token={token}"
