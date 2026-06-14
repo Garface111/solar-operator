@@ -102,8 +102,10 @@ from .account import router as account_router
 from .account import require_not_demo
 from .onboarding import router as onboarding_router
 from .ingest import router as ingest_router
+from .billing.routes import router as billing_router
 from .daily_generation import router as daily_generation_router
 from .array_owners import router as array_owners_router
+from .warranty_claims import router as warranty_claims_router
 from .solaredge import router as solaredge_router
 from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
@@ -193,10 +195,12 @@ app.include_router(account_router)
 app.include_router(onboarding_router)
 # V4: AI spreadsheet ingest for arrays + NEPOOL IDs.
 app.include_router(ingest_router)
+app.include_router(billing_router)
 # Phase 2 daily generation CSV ingest + coverage.
 app.include_router(daily_generation_router)
 
 app.include_router(array_owners_router)
+app.include_router(warranty_claims_router)
 # SolarEdge Monitoring API integration (feat/solaredge-adapter).
 app.include_router(solaredge_router)
 # AI-assisted NEPOOL ID assignment from spreadsheet (pure assignment, no array creation).

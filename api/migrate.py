@@ -42,6 +42,9 @@ def main():
             ("last_pull_at",           "ALTER TABLE tenants ADD COLUMN last_pull_at TIMESTAMP"),
             ("last_delivery_at",       "ALTER TABLE tenants ADD COLUMN last_delivery_at TIMESTAMP"),
             ("product",                "ALTER TABLE tenants ADD COLUMN product VARCHAR(32) DEFAULT 'nepool' NOT NULL"),
+            # Array Operator automatic warranty-claims send policy (Jun 2026)
+            ("claim_send_mode",        "ALTER TABLE tenants ADD COLUMN claim_send_mode VARCHAR(16) DEFAULT 'manual' NOT NULL"),
+            ("claim_grace_hours",      "ALTER TABLE tenants ADD COLUMN claim_grace_hours INTEGER DEFAULT 24 NOT NULL"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):
@@ -640,6 +643,22 @@ def main():
         ]:
             conn.execute(text(idx_sql))
         print("  ✓ inverter_connections table + index ensured")
+
+        # 2026-06-13 Array Operator automatic billing reports
+        # (feat/array-operator-reports). The billing_report_subscriptions table
+        # is created by init_db() (create_all) above — it's brand new, nothing to
+        # migrate. Ensure its indexes idempotently in case the table predated
+        # them on an environment that ran create_all before this block existed.
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_billing_report_subscriptions_tenant_id "
+            "ON billing_report_subscriptions (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_billing_sub_tenant_enabled "
+            "ON billing_report_subscriptions (tenant_id, enabled)",
+            "CREATE INDEX IF NOT EXISTS ix_billing_report_subscriptions_next_send_at "
+            "ON billing_report_subscriptions (next_send_at)",
+        ]:
+            conn.execute(text(idx_sql))
+        print("  ✓ billing_report_subscriptions table + indexes ensured")
 
     print("=== Migration complete ===")
 

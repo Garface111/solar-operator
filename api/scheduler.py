@@ -45,6 +45,37 @@ def enqueue_pull_for_all_tenants():
     return len(tenants)
 
 
+def reconcile_warranty_claims() -> dict:
+    """Watch every Array Operator owner's fleet: auto-open claims for newly
+    dead/faulted inverters, auto-close ones that recovered, and fire any
+    grace-timer auto-sends that have come due. This is what makes the claims
+    'automatic' — the owner never has to open the tab for the agent to act."""
+    from . import warranty_claims
+    opened = closed = sent = touched = 0
+    errors = 0
+    with SessionLocal() as db:
+        tenants = db.execute(
+            select(Tenant).where(Tenant.active == True, Tenant.product == "array_operator")
+        ).scalars().all()
+    for t in tenants:
+        try:
+            with SessionLocal() as db:
+                tenant = db.get(Tenant, t.id)
+                tally = warranty_claims.reconcile(db, tenant)
+                sent += warranty_claims.process_due(db, tenant)
+                opened += tally["opened"]
+                closed += tally["closed"]
+                touched += 1
+        except Exception as exc:  # one bad fleet pull must not stall the rest
+            errors += 1
+            logger.warning("warranty reconcile failed for %s: %s", t.id, exc)
+    result = {"tenants": touched, "opened": opened, "closed": closed,
+              "auto_sent": sent, "errors": errors}
+    if opened or sent:
+        logger.info("warranty claims: %s", result)
+    return result
+
+
 def _deliver_clients_with_frequency(frequency: str) -> dict:
     """Send the workbook to every active CLIENT whose effective frequency
     matches. Effective = client.report_frequency if set, else
@@ -104,6 +135,77 @@ def deliver_monthly_reports():
 
 def deliver_quarterly_reports():
     return _deliver_clients_with_frequency("quarterly")
+
+
+def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
+    """Array Operator automatic billing reports — deliver every enabled
+    BillingReportSubscription whose cadence matches (or, for the annual run,
+    every sub with annual_trueup set).
+
+    Mirrors _deliver_clients_with_frequency: skips subs of inactive non-comped
+    tenants, internal-alerts on failure, exactly-once stamping happens inside
+    deliver_subscription (it sets last_sent_at / next_send_at on success only)."""
+    from .models import BillingReportSubscription
+    from .billing.delivery import deliver_subscription
+
+    sent: list[int] = []
+    failed: list[int] = []
+    with SessionLocal() as db:
+        q = (
+            select(BillingReportSubscription, Tenant)
+            .join(Tenant, BillingReportSubscription.tenant_id == Tenant.id)
+            .where(BillingReportSubscription.enabled == True)  # noqa: E712
+            .where(BillingReportSubscription.deleted_at.is_(None))
+        )
+        if trueup_only:
+            q = q.where(BillingReportSubscription.annual_trueup == True)  # noqa: E712
+        else:
+            q = q.where(BillingReportSubscription.cadence == cadence)
+        rows = db.execute(q).all()
+        candidates = [
+            sub.id for (sub, t) in rows
+            if (t.active or t.subscription_status in ("comped", "trialing"))
+        ]
+
+        for sid in candidates:
+            sub = db.get(BillingReportSubscription, sid)
+            tenant = db.get(Tenant, sub.tenant_id) if sub else None
+            if sub is None or tenant is None:
+                continue
+            try:
+                result = deliver_subscription(
+                    db, sub, tenant,
+                    triggered_by=f"sched-billing-{'trueup' if trueup_only else cadence}")
+                (sent if result.get("ok") else failed).append(sid)
+                if not result.get("ok"):
+                    logger.warning("billing delivery skipped sub %s: %s",
+                                   sid, result.get("error"))
+            except Exception as e:  # noqa: BLE001
+                failed.append(sid)
+                send_internal_alert(
+                    f"Array Operator billing delivery failed ({cadence})",
+                    f"Subscription: {sid}\nError: {e}",
+                )
+
+    if failed:
+        send_internal_alert(
+            f"Array Operator billing — partial failures ({cadence})",
+            f"Sent OK: {sent}\nFailed/skipped: {failed}",
+        )
+    return {"cadence": cadence, "trueup_only": trueup_only,
+            "sent": sent, "failed": failed}
+
+
+def deliver_monthly_billing_reports() -> dict:
+    return deliver_billing_reports("monthly")
+
+
+def deliver_quarterly_billing_reports() -> dict:
+    return deliver_billing_reports("quarterly")
+
+
+def deliver_annual_billing_trueups() -> dict:
+    return deliver_billing_reports("annual", trueup_only=True)
 
 
 def finalize_expired_trials():
@@ -430,6 +532,12 @@ def start():
     scheduler.add_job(
         run_pending_jobs, "interval", minutes=1, id="run_pending_jobs", replace_existing=True,
     )
+    # Every 15 min: watch Array Operator fleets — auto-open warranty claims for
+    # newly failed inverters, close recovered ones, fire due grace-timer sends.
+    scheduler.add_job(
+        reconcile_warranty_claims,
+        "interval", minutes=15, id="reconcile_warranty_claims", replace_existing=True,
+    )
     # Weekly: Mondays at 09:00 UTC
     scheduler.add_job(
         deliver_weekly_reports,
@@ -447,6 +555,24 @@ def start():
         deliver_quarterly_reports,
         CronTrigger(month="1,4,7,10", day=1, hour=9, minute=0),
         id="deliver_quarterly", replace_existing=True,
+    )
+    # Array Operator automatic billing reports (invoice + summary), on the
+    # cadence each subscription chose. 1st of month / 1st of quarter / Sept 1
+    # for annual true-ups — all 09:00 UTC, matching the NEPOOL cadence above.
+    scheduler.add_job(
+        deliver_monthly_billing_reports,
+        CronTrigger(day=1, hour=9, minute=0),
+        id="deliver_billing_monthly", replace_existing=True,
+    )
+    scheduler.add_job(
+        deliver_quarterly_billing_reports,
+        CronTrigger(month="1,4,7,10", day=1, hour=9, minute=0),
+        id="deliver_billing_quarterly", replace_existing=True,
+    )
+    scheduler.add_job(
+        deliver_annual_billing_trueups,
+        CronTrigger(month="9", day=1, hour=9, minute=0),
+        id="deliver_billing_trueup", replace_existing=True,
     )
     # Daily at 03:00 UTC: hard-delete rows soft-deleted > 30 days ago
     scheduler.add_job(

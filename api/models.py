@@ -11,7 +11,8 @@ tenant_id and queries are scoped through helpers in db.py.
 from __future__ import annotations
 from datetime import datetime, date
 from sqlalchemy import (
-    String, Integer, Float, Boolean, DateTime, Date, ForeignKey, JSON, Text, UniqueConstraint, Index
+    String, Integer, Float, Boolean, DateTime, Date, ForeignKey, JSON, Text,
+    LargeBinary, UniqueConstraint, Index
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -78,6 +79,19 @@ class Tenant(Base):
     # When True, the operator gets a "[copy]" of every client report email that
     # goes out (records / QA). Wired in delivery.deliver_for_client.
     cc_on_reports: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ── Automatic warranty claims policy (Array Operator, June 2026) ──────
+    # The owner's send policy for auto-drafted warranty claims. Full control:
+    #   "manual" → agent drafts, owner approves each send (default — safe)
+    #   "auto"   → agent files the instant a failure is confirmed
+    #   "delay"  → agent queues and files after `claim_grace_hours` unless cancelled
+    # Overridable per-claim via WarrantyClaim.send_mode. See api/warranty_claims.py.
+    claim_send_mode: Mapped[str] = mapped_column(
+        String(16), default="manual", server_default="manual", nullable=False
+    )
+    claim_grace_hours: Mapped[int] = mapped_column(
+        Integer, default=24, server_default="24", nullable=False
+    )
 
     # ── Email customization (V2, June 2026) ──────────────────────────────
     # Let the tenant (a NEPOOL stamping agent) control how reports go out
@@ -616,6 +630,72 @@ class Inverter(Base):
     )
 
 
+class WarrantyClaim(Base):
+    """An automatic warranty / service claim — the paperwork arm of Array
+    Operator. The agent watches the fleet and the MOMENT an inverter goes DEAD
+    or throws a hardware FAULT (the two warrantable failures), it opens one of
+    these rows: drafts the manufacturer email, snapshots the peer-measured
+    evidence (so weather can't be blamed), and runs it through a lifecycle the
+    owner controls.
+
+    Lifecycle (`stage`):
+        ready     — drafted, awaiting the owner's approval to file
+        queued    — auto-send scheduled; `send_at` is when the grace timer fires
+        sent      — filed with the manufacturer (or emailed to the owner to
+                    forward — see warranty_claims.file_claim)
+        resolved  — repaired/replaced; `recovered_usd` banked
+        dismissed — owner waved it off (false alarm / handled elsewhere)
+        cleared   — the inverter recovered on its own before we ever filed
+
+    Evidence + draft are JSON snapshots captured at detection time so the claim
+    stays faithful even after the inverter is regrouped, renamed, or drops off
+    the vendor feed. The display columns (serial/inv_name/model/...) are likewise
+    snapshots, not joins, for the same reason.
+
+    Episode model: at most ONE active claim (stage in ready/queued/sent) per
+    inverter. resolved/dismissed/cleared rows are history — if the same inverter
+    fails again later, reconcile opens a fresh claim.
+    """
+    __tablename__ = "warranty_claims"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    inverter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("inverters.id"), nullable=True, index=True)
+
+    # Display snapshots — kept even if the inverter later moves/disappears.
+    serial: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    inv_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    vendor: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    nameplate_kw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    site_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    fail_type: Mapped[str] = mapped_column(String(12))                    # dead | fault
+    stage: Mapped[str] = mapped_column(String(12), default="ready", index=True)
+    send_mode: Mapped[str | None] = mapped_column(String(12), nullable=True)  # per-claim override of tenant default
+
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)            # peer-measured snapshot
+    draft: Mapped[dict] = mapped_column(JSON, default=dict)              # {to, subject, body}
+    recovered_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+    send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)     # queued → fire time
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_via: Mapped[str | None] = mapped_column(String(12), nullable=True)       # owner | auto
+    sent_to: Mapped[str | None] = mapped_column(String(200), nullable=True)       # actual recipient
+    sent_direct: Mapped[bool] = mapped_column(Boolean, default=False)             # True = straight to manufacturer
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    auto_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_warranty_claims_tenant_stage", "tenant_id", "stage"),
+    )
+
+
 class VerificationCheck(Base):
     """Operator uploads their own records to compare against the SO-generated workbook."""
     __tablename__ = "verification_checks"
@@ -668,6 +748,64 @@ class DiscoveredUtility(Base):
     last_extension_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
     promoted_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
     alerted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class BillingReportSubscription(Base):
+    """An Array Operator automatic-report schedule for ONE customer.
+
+    Created from the Reports tab: the operator uploads a billing workbook, the
+    matcher recognizes it, and this row remembers (a) the source workbook bytes
+    so each cycle regenerates from the same source of truth, (b) the parsed
+    field map, (c) the cadence + recipient slider + format choices.
+
+    The scheduler (api/scheduler.py deliver_billing_reports) walks enabled rows
+    whose cadence matches and emails the regenerated invoice + summary per
+    send_mode. New rows default send_mode='to_me' so nothing reaches a real
+    customer until the operator deliberately moves the slider — customer email
+    is outward-facing and hard to recall.
+    """
+    __tablename__ = "billing_report_subscriptions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    # The customer "underneath" the operator. Reuses the Client table; nullable
+    # so a subscription can exist before a Client row is linked.
+    client_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("clients.id"), nullable=True, index=True)
+    customer_name: Mapped[str] = mapped_column(String(200))
+
+    # The uploaded workbook — the per-cycle source of truth (Railway disk is
+    # ephemeral, so the bytes live in-row). + the parsed match snapshot.
+    source_workbook: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    source_filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    parsed_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    billing_model: Mapped[str] = mapped_column(String(24), default="percent_of_array")
+
+    # Schedule
+    cadence: Mapped[str] = mapped_column(String(16), default="monthly")  # monthly | quarterly
+    annual_trueup: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Recipient slider (Ford: to me / to my client / to both)
+    send_mode: Mapped[str] = mapped_column(String(20), default="to_me")
+    # to_me | to_client | to_both
+    client_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operator_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # Format choices (Ford: "you should be able to choose")
+    formats: Mapped[dict | None] = mapped_column(JSON, default=lambda: ["pdf"])
+    include_summary: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_invoice_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+    __table_args__ = (
+        Index("ix_billing_sub_tenant_enabled", "tenant_id", "enabled"),
+    )
 
 
 class CaptureEvent(Base):

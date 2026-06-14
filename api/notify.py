@@ -785,6 +785,43 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
     )
 
 
+# ─── warranty claims (Array Operator) ────────────────────────────────────
+
+def send_warranty_claim_email(
+    to: str,
+    subject: str,
+    body_text: str,
+    *,
+    reply_to: str | None = None,
+    from_name: str | None = None,
+) -> bool:
+    """Send one auto-drafted warranty/service claim.
+
+    `body_text` is the plain-text claim the engine composed (manufacturer
+    address, evidence, peer-index, lost-value). We wrap it in a light monospace
+    HTML shell so it's readable in any client but stays copy-paste faithful, and
+    set Reply-To to the owner so the manufacturer's reply reaches THEM, not us,
+    even when we send from the platform From address.
+    """
+    html = (
+        "<div style='font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;"
+        "background:#f6f8f7;padding:18px 22px;border-left:3px solid #3fd68a;max-width:680px;'>"
+        f"<pre style='margin:0;white-space:pre-wrap;color:#10231a;'>{_escape(body_text)}</pre>"
+        "</div>"
+    )
+    from_addr = None
+    if from_name:
+        from_addr = f"{from_name} <{_addr_only(FROM_ADDRESS)}>"
+    return _send_via_resend(
+        to=to,
+        subject=subject,
+        html=html,
+        text=body_text,
+        from_addr=from_addr,
+        reply_to=reply_to,
+    )
+
+
 # ─── internal ───────────────────────────────────────────────────────────
 
 def send_internal_alert(subject: str, body: str) -> bool:
