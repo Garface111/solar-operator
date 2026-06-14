@@ -612,6 +612,20 @@ def main():
         if backfilled:
             print(f"  ↪ backfilled default_fuel_type='solar' on {backfilled} client(s)")
 
+        # 2026-06-13 Per-login session persistence. Bind each captured
+        # UtilitySession to its login identity (customer_number) so an operator
+        # who logs into multiple distinct utility customers (one login per
+        # client) keeps EVERY login independently usable for scraping — not just
+        # the most recently captured one. Nullable; legacy rows stay NULL and
+        # fall back to latest-per-provider until the next capture re-binds them
+        # (no backfill — the customer identity isn't reliably recoverable from
+        # old rows, and the fallback keeps single-login tenants working).
+        if not column_exists(conn, "utility_sessions", "customer_number"):
+            conn.execute(text(
+                "ALTER TABLE utility_sessions ADD COLUMN customer_number VARCHAR(40)"
+            ))
+            print("  + utility_sessions.customer_number")
+
         # 2026-06 Multi-vendor inverter framework (feat/inverter-framework).
         # The inverter_connections table comes free via Base.metadata.create_all
         # (init_db() above) — confirmed: it's a brand-new table, no pre-existing

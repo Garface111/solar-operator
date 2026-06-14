@@ -30,6 +30,7 @@ from ..adapters.smarthub import (
 )
 from ..db import SessionLocal
 from ..models import Array, DailyGeneration, UtilityAccount, UtilitySession, now
+from ..sessions import session_for_account
 
 log = logging.getLogger("solar_operator.jobs.smarthub_pull")
 
@@ -134,7 +135,10 @@ def pull_daily_generation_for_account(
                 "reason": f"unknown SmartHub provider {provider!r}",
             }
 
-        sess_row = _latest_smarthub_session(db, tenant_id, provider)
+        # Bound to THIS account's login identity (customer_number), falling back
+        # to the latest session for the provider — so an operator with separate
+        # SmartHub logins per client keeps every login usable.
+        sess_row = session_for_account(db, acct)
         if sess_row is None:
             return {
                 "array_id": array_id,

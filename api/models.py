@@ -342,12 +342,24 @@ class UtilityAccount(Base):
 
 
 class UtilitySession(Base):
-    """A captured auth session for a (tenant, provider). Latest row wins.
-    Stores the JWT (or whatever the provider uses) for downstream API calls."""
+    """A captured auth session for one utility LOGIN.
+
+    Stores the JWT (or whatever the provider uses) for downstream API calls.
+    Keyed by `(tenant, provider, customer_number)` — the login's identity — so
+    an operator who logs into multiple distinct utility customers (e.g. a
+    separate GMP login per client) keeps EVERY login independently usable for
+    ongoing scraping. Selection is per-account by customer_number (see
+    api/sessions.py); a capture re-binds (upserts) its identity's row in place.
+    Rows whose customer_number is NULL (legacy captures, or providers that don't
+    expose a customer id) fall back to the latest-per-provider behavior."""
     __tablename__ = "utility_sessions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
     provider: Mapped[str] = mapped_column(String(40))
+    # The login identity this session belongs to (GMP personId / SmartHub
+    # custNbr), shared by all accounts captured under this login. NULL for
+    # legacy rows / providers without a customer id → latest-per-provider.
+    customer_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     api_token: Mapped[str] = mapped_column(Text)
     refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)

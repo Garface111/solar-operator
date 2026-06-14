@@ -384,22 +384,51 @@ async def sync(request: Request, authorization: str | None = Header(default=None
             )
             db.commit()
 
-        # store the session
+        # store the session — keyed by the captured login's identity
+        # (customer_number) so an operator who logs into multiple distinct
+        # utility customers (one login per client) keeps EVERY login usable, not
+        # just the latest. Re-capturing the same login upserts its row in place;
+        # a capture with no single customer identity is stored unkeyed and
+        # selection falls back to latest-per-provider (legacy behavior).
         expires_at = None
         if normalized["auth"].get("apiTokenExpires"):
             try:
                 expires_at = datetime.fromisoformat(normalized["auth"]["apiTokenExpires"].replace("Z","+00:00")).replace(tzinfo=None)
             except Exception:
                 pass
-        sess = UtilitySession(
-            tenant_id=tenant.id,
-            provider=normalized["provider"],
-            api_token=normalized["auth"].get("apiToken", ""),
-            refresh_token=normalized["auth"].get("refreshToken"),
-            expires_at=expires_at,
-            raw_payload={"user": normalized["user"]},
-        )
-        db.add(sess)
+        from .sessions import session_customer_number
+        session_customer = session_customer_number(normalized["accounts"])
+        api_token = normalized["auth"].get("apiToken", "")
+        refresh_token = normalized["auth"].get("refreshToken")
+        raw_payload = {"user": normalized["user"]}
+        existing_sess = None
+        if session_customer:
+            existing_sess = db.execute(
+                select(UtilitySession)
+                .where(UtilitySession.tenant_id == tenant.id,
+                       UtilitySession.provider == normalized["provider"],
+                       UtilitySession.customer_number == session_customer)
+                .order_by(UtilitySession.captured_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        if existing_sess is not None:
+            existing_sess.api_token = api_token
+            existing_sess.refresh_token = refresh_token
+            existing_sess.expires_at = expires_at
+            existing_sess.captured_at = now()
+            existing_sess.raw_payload = raw_payload
+            existing_sess.refresh_failures = 0
+        else:
+            sess = UtilitySession(
+                tenant_id=tenant.id,
+                provider=normalized["provider"],
+                customer_number=session_customer,
+                api_token=api_token,
+                refresh_token=refresh_token,
+                expires_at=expires_at,
+                raw_payload=raw_payload,
+            )
+            db.add(sess)
 
         # upsert accounts
         provider = normalized["provider"]

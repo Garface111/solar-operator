@@ -24,6 +24,7 @@ from sqlalchemy import select
 from .db import SessionLocal, DATA_DIR
 from .models import Tenant, UtilityAccount, UtilitySession, Bill, Job, now
 from .adapters import get_adapter
+from .sessions import token_for_account
 
 
 BILLS_DIR = DATA_DIR / "bills"
@@ -153,7 +154,10 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
 
         for acc in accounts:
             adapter = get_adapter(acc.provider)
-            jwt = _latest_session_token(db, tenant_id, acc.provider)
+            # Pick the token bound to THIS account's login identity, not just
+            # the tenant's latest capture — so every client's login keeps
+            # scraping even after the operator logs in as a different client.
+            jwt = token_for_account(db, acc)
 
             # Try JSON path first
             json_attempted = False
