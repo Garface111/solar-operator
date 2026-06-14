@@ -422,8 +422,12 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
     """
     email = email.lower().strip()
     with SessionLocal() as db:
+        # An email can have several tenant rows (legacy dupes, deactivated
+        # accounts). Prefer the ACTIVE, most-recent one so the sign-in link
+        # lands on the account the owner actually uses — not a dormant row.
         t = db.execute(
             select(Tenant).where(Tenant.contact_email == email)
+            .order_by(Tenant.active.desc(), Tenant.created_at.desc())
         ).scalars().first()
         if not t:
             return False
