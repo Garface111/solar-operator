@@ -269,3 +269,38 @@ class TestHasPasswordFlag:
         resp = client.get("/v1/account", headers={"Authorization": auth})
         assert resp.status_code == 200
         assert resp.json()["has_password"] is True
+
+
+# ── magic-link email lands on the correct PRODUCT site ────────────────────────
+
+class TestMagicLinkTarget:
+    def _capture_link(self, monkeypatch, product):
+        import api.account as account
+        captured = {}
+        def _fake(to, subject, html, text=None, **kw):
+            captured["html"] = html
+            captured["text"] = text
+            return True
+        monkeypatch.setattr(account, "_send_via_resend", _fake)
+        tid = "ten_" + secrets.token_hex(6)
+        with SessionLocal() as db:
+            db.add(Tenant(
+                id=tid, name="ML Co", contact_email=f"{tid}@example.com",
+                operator_name="ML Owner", tenant_key="sol_live_" + secrets.token_urlsafe(12),
+                plan="standard", active=True, subscription_status="trialing",
+                product=product))
+            db.commit()
+            email = f"{tid}@example.com"
+        account.issue_magic_link(email)
+        return captured
+
+    def test_array_operator_magic_link_targets_arrayoperator_login(self, monkeypatch):
+        cap = self._capture_link(monkeypatch, "array_operator")
+        assert "arrayoperator.com/login?token=" in cap["html"]
+        assert "arrayoperator.com/login?token=" in cap["text"]
+        assert "nepooloperator.com" not in cap["html"]
+
+    def test_nepool_magic_link_targets_nepool_accounts(self, monkeypatch):
+        cap = self._capture_link(monkeypatch, "nepool")
+        assert "nepooloperator.com/accounts/?token=" in cap["html"]
+        assert "arrayoperator.com" not in cap["html"]

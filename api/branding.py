@@ -83,3 +83,15 @@ def magic_link_url(product: str | None, token: str) -> str:
     if _key(product) == "nepool":
         return f"{dashboard_url('nepool')}/?token={token}"
     return f"{_AO_APP_URL}/login?token={token}"
+
+
+def pricing_blurb(product: str | None) -> str:
+    """One-sentence, brand-correct pricing phrase for email copy.
+
+    Single source so every lifecycle email quotes the SAME numbers as the
+    billing engine (api/pricing.py, api/pricing_array_operator.py)."""
+    if _key(product) == "array_operator":
+        return ("just 0.5¢ per kWh your arrays generate — no setup fee and no "
+                "per-panel charge, so you only ever pay in proportion to what they make "
+                "(a typical home array is about $4–$5/month)")
+    return "$250 one-time setup plus $15/array/month"

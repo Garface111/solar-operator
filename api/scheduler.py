@@ -277,7 +277,8 @@ def finalize_expired_trials():
                 try:
                     send_trial_paused_no_card_email(
                         to=t.contact_email,
-                        name=t.operator_name or t.company_name or t.name)
+                        name=t.operator_name or t.company_name or t.name,
+                        product=getattr(t, "product", "nepool"))
                 except Exception as mail_err:
                     logger.warning("send_trial_paused_no_card_email failed: %s", mail_err)
                 send_internal_alert(
@@ -337,7 +338,7 @@ def finalize_expired_trials():
                 try:
                     send_trial_charged_email(
                         to=t.contact_email, name=t.operator_name or t.company_name or t.name,
-                        array_count=quantity, amount_dollars=amount_dollars)
+                        array_count=quantity, amount_dollars=amount_dollars, product=product)
                 except Exception:
                     pass
                 send_internal_alert(
@@ -355,7 +356,8 @@ def finalize_expired_trials():
                 )
                 try:
                     send_trial_charge_failed_email(
-                        to=t.contact_email, name=t.operator_name or t.company_name or t.name)
+                        to=t.contact_email, name=t.operator_name or t.company_name or t.name,
+                        product=product)
                 except Exception as mail_err:
                     logger.warning("send_trial_charge_failed_email failed: %s", mail_err)
 
@@ -387,14 +389,14 @@ def send_trial_ending_reminders() -> dict:
         ).scalars().all()
         targets = [(t.id, t.contact_email,
                     t.operator_name or t.company_name or t.name,
-                    t.trial_ends_at) for t in rows]
+                    t.trial_ends_at, getattr(t, "product", "nepool")) for t in rows]
 
-        for tid, email, name, trial_ends_at in targets:
+        for tid, email, name, trial_ends_at, product in targets:
             try:
                 end_str = trial_ends_at.strftime(
                     f"%B {trial_ends_at.day}, {trial_ends_at.year}")
                 send_trial_ending_no_card_reminder_email(
-                    to=email, name=name, trial_end_date=end_str)
+                    to=email, name=name, trial_end_date=end_str, product=product)
                 # Stamp only on a successful send so a transient email failure
                 # leaves the tenant eligible for the next tick (at-least-once on
                 # failure, exactly-once on success).

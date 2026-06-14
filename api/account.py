@@ -1696,8 +1696,10 @@ def add_payment_method(authorization: Optional[str] = Header(default=None)):
             mode="setup",
             payment_method_types=["card"],
             customer=customer_id,
-            success_url=f"{branding.app_url(t.product)}/accounts/?card_added=1",
-            cancel_url=f"{branding.app_url(t.product)}/accounts/?card_cancelled=1",
+            # Return to the product's OWN dashboard. NEPOOL = /accounts (its SPA);
+            # Array Operator = site root (its /accounts proxies to the NEPOOL SPA).
+            success_url=f"{branding.dashboard_url(t.product)}/?card_added=1",
+            cancel_url=f"{branding.dashboard_url(t.product)}/?card_cancelled=1",
             setup_intent_data={"metadata": {"tenant_id": t.id}},
             metadata={"tenant_id": t.id},
         )

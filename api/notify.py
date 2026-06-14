@@ -375,48 +375,54 @@ def send_trial_charge_failed_email(
     to: str,
     name: str,
     dashboard_url: str = "https://nepooloperator.com/accounts",
+    product: str = "nepool",
 ) -> bool:
     """Notify operator their card was declined when we tried to activate their
     subscription at trial end. Different from send_payment_failed_email —
     no retry timeline, and the context is the trial-end charge specifically."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    _brand = branding.brand_name(product)
+    _link = link_color(product)
+    _what = "watching your arrays stays paused" if product == "array_operator" else "reports stay paused"
 
     body_html = (
         f"<p>Hi {first},</p>"
         f"<p>Your 14-day free trial just ended, and we tried to charge the card you "
         f"saved at signup — but it was declined.</p>"
-        f"<p>Reports stay paused until your card is updated.</p>"
+        f"<p>Your account is paused until your card is updated.</p>"
         f"<p>To get back up and running, please update your payment method at "
-        f'<a href="{dashboard_url}" style="color:#047857;">your NEPOOL Operator dashboard</a> — '
+        f'<a href="{dashboard_url}" style="color:{_link};">your {_brand} dashboard</a> — '
         f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
         f"<p>Questions or need help? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
         f"Your 14-day free trial just ended, and we tried to charge the card you saved at signup "
         f"— but it was declined.\n\n"
-        f"Reports stay paused until your card is updated.\n\n"
+        f"Your account is paused until your card is updated.\n\n"
         f"Update your payment method at {dashboard_url} — sign in, click Manage billing.\n\n"
-        f"Questions or need help? Just reply.\n\n— NEPOOL Operator"
+        f"Questions or need help? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
-        preheader="Your card was declined at trial end — update to keep reports flowing.",
+        preheader="Your card was declined at trial end — update to stay on.",
         headline="Card declined at trial end",
         intro_line="Update your payment method to activate your subscription.",
         body_html=body_html,
         cta={"label": "Update payment method", "url": dashboard_url},
+        product=product,
     )
     text = render_email_skin_text(
         headline="Card declined at trial end",
         intro_line="Update your payment method to activate your subscription.",
         body_text=body_text,
         cta={"label": "Update payment method", "url": dashboard_url},
+        product=product,
     )
     return _send_via_resend(
         to=to,
-        subject="Card declined when activating your NEPOOL Operator subscription",
+        subject=f"Card declined when activating your {_brand} subscription",
         html=html,
         text=text,
     )
@@ -427,118 +433,169 @@ def send_trial_welcome_email(
     name: str,
     trial_end_iso_date: str,
     dashboard_url: str = "https://nepooloperator.com/accounts",
+    product: str = "nepool",
 ) -> bool:
     """Welcome email sent immediately after onboarding completes. No-card reality:
-    the trial is live with no payment method on file, so the copy primes the
-    operator to add clients/arrays and add a card whenever they're ready."""
+    the trial is live with no payment method on file. Product-aware — Array
+    Operator owners get owner-side copy (per-kWh, connect arrays, no extension),
+    NEPOOL operators get verifier-side copy (clients, GMP, $250+$15/array)."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
     trial_end_escaped = _html.escape(trial_end_iso_date)
+    _brand = branding.brand_name(product)
+    _link = link_color(product)
+    _pricing = branding.pricing_blurb(product)
 
-    body_html = (
-        f"<p>Hi {first},</p>"
-        f"<p>Your 14-day trial is live — <strong>no card required.</strong> "
-        f"Add a payment method whenever you're ready, and we'll remind you a few "
-        f"days before the trial ends so reports keep flowing.</p>"
-        f"<p>Two things to do while the trial runs so you're ready when reports start going out:</p>"
-        f'<ol style="padding-left:20px;">'
-        f'<li style="margin-bottom:12px;"><strong>Add your clients</strong> — '
-        f'<a href="{dashboard_url}" style="color:#047857;">open your dashboard</a> '
-        f"and create a client for each solar subscriber you manage.</li>"
-        f'<li style="margin-bottom:12px;"><strong>Add each client\'s NEPOOL arrays</strong> — '
-        f"or sign into Green Mountain Power once and we'll auto-detect them.</li>"
-        f"</ol>"
-        f"<p>When your trial ends on <strong>{trial_end_escaped}</strong>, add a card "
-        f"from the Accounts tab to keep your reports going — it's $250 one-time setup "
-        f"plus $15/array/month. No card, no charge: we'll just pause reports and hold "
-        f"all your data until you're ready.</p>"
-        f'<p style="margin-top:24px;color:#3a5a42;font-size:14px;">Questions? Just reply — a real person reads every email.</p>'
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
-    )
-    body_text = (
-        f"Hi {(name or 'there').split()[0]},\n\n"
-        f"Your 14-day trial is live — no card required. Add a payment method "
-        f"whenever you're ready, and we'll remind you a few days before the trial "
-        f"ends so reports keep flowing.\n\n"
-        f"Two things to do while the trial runs so you're ready when reports start going out:\n\n"
-        f"1. Add your clients — open your dashboard at {dashboard_url} and create a client "
-        f"for each solar subscriber you manage.\n\n"
-        f"2. Add each client's NEPOOL arrays — or sign into Green Mountain Power once "
-        f"and we'll auto-detect them.\n\n"
-        f"When your trial ends on {trial_end_iso_date}, add a card from the Accounts tab "
-        f"to keep your reports going — $250 one-time setup plus $15/array/month. No card, "
-        f"no charge: we'll just pause reports and hold all your data until you're ready.\n\n"
-        f"Questions? Just reply — a real person reads every email.\n\n— NEPOOL Operator"
-    )
+    if product == "array_operator":
+        # ── Array Operator (owner-side) ──────────────────────────────────────
+        body_html = (
+            f"<p>Hi {first},</p>"
+            f"<p>Your Array Operator account is live, and your <strong>14-day trial "
+            f"has started — no card required.</strong> Your agent is already watching "
+            f"every panel: weather-normalized, per-inverter, in dollars.</p>"
+            f"<p>From here on, we'll catch a quiet underperformer the day it starts, "
+            f"draft the warranty claim when a panel dies, and show you what your array "
+            f"is really worth — in plain language, not installer jargon.</p>"
+            f"<p>One thing worth doing while the trial runs:</p>"
+            f'<ul style="padding-left:20px;">'
+            f'<li style="margin-bottom:10px;"><strong>Connect the rest of your fleet</strong> — '
+            f'<a href="{dashboard_url}" style="color:{_link};">open your dashboard</a> '
+            f"and add any other arrays or inverter brands so your whole portfolio is watched.</li>"
+            f"</ul>"
+            f"<p>When your trial ends on <strong>{trial_end_escaped}</strong>, add a card "
+            f"to stay on — Array Operator is {_pricing}. No card, no charge: we'll just "
+            f"pause and hold all your data until you're ready.</p>"
+            f'<p style="margin-top:24px;font-size:14px;opacity:.8;">Questions? Just reply — a real person reads every email.</p>'
+            f"<p style=\"margin-top:24px;\">— Array Operator</p>"
+        )
+        body_text = (
+            f"Hi {(name or 'there').split()[0]},\n\n"
+            f"Your Array Operator account is live, and your 14-day trial has started — "
+            f"no card required. Your agent is already watching every panel: "
+            f"weather-normalized, per-inverter, in dollars.\n\n"
+            f"We'll catch a quiet underperformer the day it starts, draft the warranty "
+            f"claim when a panel dies, and show you what your array is really worth.\n\n"
+            f"While the trial runs, connect the rest of your fleet: open your dashboard "
+            f"at {dashboard_url} and add any other arrays or inverter brands.\n\n"
+            f"When your trial ends on {trial_end_iso_date}, add a card to stay on — "
+            f"Array Operator is {_pricing}. No card, no charge: we'll pause and hold "
+            f"all your data until you're ready.\n\n"
+            f"Questions? Just reply.\n\n— Array Operator"
+        )
+        preheader = "Your Array Operator trial has started — no card needed today."
+        subject = "Welcome to Array Operator — your 14-day trial has started"
+    else:
+        # ── NEPOOL Operator (verifier-side) ──────────────────────────────────
+        body_html = (
+            f"<p>Hi {first},</p>"
+            f"<p>Your 14-day trial is live — <strong>no card required.</strong> "
+            f"Add a payment method whenever you're ready, and we'll remind you a few "
+            f"days before the trial ends so reports keep flowing.</p>"
+            f"<p>Two things to do while the trial runs so you're ready when reports start going out:</p>"
+            f'<ol style="padding-left:20px;">'
+            f'<li style="margin-bottom:12px;"><strong>Add your clients</strong> — '
+            f'<a href="{dashboard_url}" style="color:{_link};">open your dashboard</a> '
+            f"and create a client for each solar subscriber you manage.</li>"
+            f'<li style="margin-bottom:12px;"><strong>Add each client\'s NEPOOL arrays</strong> — '
+            f"or sign into Green Mountain Power once and we'll auto-detect them.</li>"
+            f"</ol>"
+            f"<p>When your trial ends on <strong>{trial_end_escaped}</strong>, add a card "
+            f"from the Accounts tab to keep your reports going — it's {_pricing}. No card, "
+            f"no charge: we'll just pause reports and hold all your data until you're ready.</p>"
+            f'<p style="margin-top:24px;font-size:14px;opacity:.8;">Questions? Just reply — a real person reads every email.</p>'
+            f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        )
+        body_text = (
+            f"Hi {(name or 'there').split()[0]},\n\n"
+            f"Your 14-day trial is live — no card required. Add a payment method "
+            f"whenever you're ready, and we'll remind you a few days before the trial "
+            f"ends so reports keep flowing.\n\n"
+            f"Two things to do while the trial runs so you're ready when reports start going out:\n\n"
+            f"1. Add your clients — open your dashboard at {dashboard_url} and create a client "
+            f"for each solar subscriber you manage.\n\n"
+            f"2. Add each client's NEPOOL arrays — or sign into Green Mountain Power once "
+            f"and we'll auto-detect them.\n\n"
+            f"When your trial ends on {trial_end_iso_date}, add a card from the Accounts tab "
+            f"to keep your reports going — {_pricing}. No card, no charge: we'll just pause "
+            f"reports and hold all your data until you're ready.\n\n"
+            f"Questions? Just reply — a real person reads every email.\n\n— NEPOOL Operator"
+        )
+        preheader = "Your NEPOOL Operator trial has started — no card needed today."
+        subject = "Welcome to NEPOOL Operator — your 14-day trial has started"
+
     html = render_email_skin(
-        preheader="Your NEPOOL Operator trial has started — no card needed today.",
-        headline="NEPOOL Operator",
+        preheader=preheader,
         intro_line="Welcome — your 14-day trial has started.",
         body_html=body_html,
         cta={"label": "Open your dashboard", "url": dashboard_url},
+        product=product,
     )
     text = render_email_skin_text(
-        headline="NEPOOL Operator",
         intro_line="Welcome — your 14-day trial has started.",
         body_text=body_text,
         cta={"label": "Open your dashboard", "url": dashboard_url},
+        product=product,
     )
-    return _send_via_resend(
-        to=to,
-        subject="Welcome to NEPOOL Operator — your 14-day trial has started",
-        html=html,
-        text=text,
-    )
+    return _send_via_resend(to=to, subject=subject, html=html, text=text)
 
 
 def send_trial_paused_no_card_email(
     to: str,
     name: str,
     dashboard_url: str = "https://nepooloperator.com/accounts",
+    product: str = "nepool",
 ) -> bool:
     """Trial ended with no card on file — the account is paused (read-only).
     Tell the operator nothing was deleted and how to resume."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    _brand = branding.brand_name(product)
+    _link = link_color(product)
+    _pricing = branding.pricing_blurb(product)
+    _ao = product == "array_operator"
+    _resume = "we resume watching your arrays" if _ao else "your reports pick right back up"
+    _paused_what = ("you can still see your whole fleet and its history, but we've paused "
+                    "the live alerts and reports") if _ao else \
+                   ("you can still see all your clients, arrays, and past reports, but "
+                    "we've paused sending new ones")
 
     body_html = (
         f"<p>Hi {first},</p>"
-        f"<p>Your trial ended. Add a payment method from your dashboard to resume "
-        f"reports — we've held all your data, and <strong>nothing is deleted.</strong></p>"
-        f"<p>Until you add a card, your account is read-only: you can still see all "
-        f"your clients, arrays, and past reports, but we've paused sending new ones.</p>"
-        f'<p>Add a card from the <a href="{dashboard_url}" style="color:#047857;">Accounts '
-        f"tab</a> and your reports pick right back up — $250 one-time setup plus "
-        f"$15/array/month.</p>"
+        f"<p>Your trial ended. Add a payment method from your dashboard to resume — "
+        f"we've held all your data, and <strong>nothing is deleted.</strong></p>"
+        f"<p>Until you add a card, your account is read-only: {_paused_what}.</p>"
+        f'<p>Add a card from the <a href="{dashboard_url}" style="color:{_link};">Accounts '
+        f"tab</a> and {_resume} — {_pricing}.</p>"
         f"<p>Questions? Just reply — a real person reads every email.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"Your trial ended. Add a payment method from your dashboard to resume reports. "
+        f"Your trial ended. Add a payment method from your dashboard to resume. "
         f"We've held all your data — nothing is deleted.\n\n"
-        f"Until you add a card, your account is read-only: you can still see everything, "
-        f"but we've paused sending new reports.\n\n"
-        f"Add a card from the Accounts tab at {dashboard_url} — $250 one-time setup plus "
-        f"$15/array/month — and your reports pick right back up.\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"Until you add a card, your account is read-only.\n\n"
+        f"Add a card from the Accounts tab at {dashboard_url} — {_pricing} — "
+        f"and {_resume}.\n\n"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
-        preheader="Your trial ended — add a card to resume reports. Nothing was deleted.",
-        headline="Add a card to resume reports",
+        preheader="Your trial ended — add a card to stay on. Nothing was deleted.",
+        headline="Add a card to stay on",
         intro_line="Your trial ended — we've held all your data.",
         body_html=body_html,
         cta={"label": "Add a payment method", "url": dashboard_url},
+        product=product,
     )
     text = render_email_skin_text(
-        headline="Add a card to resume reports",
+        headline="Add a card to stay on",
         intro_line="Your trial ended — we've held all your data.",
         body_text=body_text,
         cta={"label": "Add a payment method", "url": dashboard_url},
+        product=product,
     )
     return _send_via_resend(
         to=to,
-        subject="Add a card to resume your NEPOOL Operator reports",
+        subject=f"Add a card to stay on {_brand}",
         html=html,
         text=text,
     )
@@ -549,49 +606,55 @@ def send_trial_ending_no_card_reminder_email(
     name: str,
     trial_end_date: str,
     dashboard_url: str = "https://nepooloperator.com/accounts",
+    product: str = "nepool",
 ) -> bool:
     """Sent ~3 days before a no-card trial ends. Nudge the operator to add a card
-    so reports don't pause when the trial expires."""
+    so they don't get paused when the trial expires."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
     end_escaped = _html.escape(trial_end_date)
+    _brand = branding.brand_name(product)
+    _link = link_color(product)
+    _pricing = branding.pricing_blurb(product)
+    _keep = "keep your fleet watched" if product == "array_operator" else "keep your reports flowing"
+    _pause = "we'll pause the live alerts and reports" if product == "array_operator" else "we'll pause reports"
 
     body_html = (
         f"<p>Hi {first},</p>"
         f"<p>Your free trial ends on <strong>{end_escaped}</strong>. Add a card to "
-        f"keep your reports flowing — without one, we'll pause reports when the trial "
-        f"ends (your data stays safe, nothing is deleted).</p>"
-        f'<p>It takes a minute from the <a href="{dashboard_url}" style="color:#047857;">'
-        f"Accounts tab</a> — $250 one-time setup plus $15/array/month, charged when the "
-        f"trial ends.</p>"
+        f"{_keep} — without one, {_pause} when the trial ends (your data stays safe, "
+        f"nothing is deleted).</p>"
+        f'<p>It takes a minute from the <a href="{dashboard_url}" style="color:{_link};">'
+        f"Accounts tab</a> — {_pricing}, charged after the trial ends.</p>"
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"Your free trial ends on {trial_end_date}. Add a card to keep your reports "
-        f"flowing — without one, we'll pause reports when the trial ends (your data "
-        f"stays safe, nothing is deleted).\n\n"
-        f"Add a card from the Accounts tab at {dashboard_url} — $250 one-time setup plus "
-        f"$15/array/month, charged when the trial ends.\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"Your free trial ends on {trial_end_date}. Add a card to {_keep} — without "
+        f"one, {_pause} when the trial ends (your data stays safe, nothing is deleted).\n\n"
+        f"Add a card from the Accounts tab at {dashboard_url} — {_pricing}, charged "
+        f"after the trial ends.\n\n"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
-        preheader=f"Your trial ends {trial_end_date} — add a card to keep reports flowing.",
-        headline="Add a card to keep reports flowing",
+        preheader=f"Your trial ends {trial_end_date} — add a card to stay on.",
+        headline="Add a card to stay on",
         intro_line=f"Your free trial ends on {trial_end_date}.",
         body_html=body_html,
         cta={"label": "Add a payment method", "url": dashboard_url},
+        product=product,
     )
     text = render_email_skin_text(
-        headline="Add a card to keep reports flowing",
+        headline="Add a card to stay on",
         intro_line=f"Your free trial ends on {trial_end_date}.",
         body_text=body_text,
         cta={"label": "Add a payment method", "url": dashboard_url},
+        product=product,
     )
     return _send_via_resend(
         to=to,
-        subject="Add a card to keep your NEPOOL Operator reports flowing",
+        subject=f"Add a card to stay on {_brand}",
         html=html,
         text=text,
     )
@@ -706,45 +769,58 @@ def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https:/
 
 
 def send_trial_charged_email(to: str, name: str, array_count: int,
-                              amount_dollars: float) -> bool:
+                              amount_dollars: float,
+                              product: str = "nepool") -> bool:
     """Trial ended and subscription created — confirm what was charged."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
-    plural = "array" if array_count == 1 else "arrays"
+    _brand = branding.brand_name(product)
+    _dash = branding.dashboard_url(product)
+    _link = link_color(product)
+    if product == "array_operator":
+        _for = "for the energy your arrays generated this period"
+        _continue = ("You're all set — your agent keeps watching every panel, and your "
+                     "next invoice tracks the kWh your fleet actually makes.")
+    else:
+        plural = "array" if array_count == 1 else "arrays"
+        _for = f"for {array_count} {plural}"
+        _continue = ("You're all set — reports will continue running automatically on "
+                     "your schedule. As you add or remove arrays, your next invoice "
+                     "will update to match.")
 
     body_html = (
         f"<p>Hi {first},</p>"
         f"<p>Your 14-day trial just ended and your card was charged "
-        f"<strong>${amount_dollars:.2f}</strong> for {array_count} {plural}.</p>"
-        f"<p>You're all set — reports will continue running automatically on your schedule. "
-        f"As you add or remove arrays, your next invoice will update to match.</p>"
-        f'<p>Manage your account at <a href="https://nepooloperator.com/accounts" style="color:#047857;">nepooloperator.com/accounts</a>.</p>'
+        f"<strong>${amount_dollars:.2f}</strong> {_for}.</p>"
+        f"<p>{_continue}</p>"
+        f'<p>Manage your account at <a href="{_dash}" style="color:{_link};">your {_brand} dashboard</a>.</p>'
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"Your trial ended and your card was charged ${amount_dollars:.2f} "
-        f"for {array_count} {plural}.\n\n"
-        f"Manage your account at https://nepooloperator.com/accounts\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"Your trial ended and your card was charged ${amount_dollars:.2f} {_for}.\n\n"
+        f"Manage your account at {_dash}\n\n"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
         preheader=f"Your ${amount_dollars:.2f} charge was successful — subscription active.",
         headline="Subscription active",
         intro_line=f"Your trial ended and your card was charged ${amount_dollars:.2f}.",
         body_html=body_html,
-        cta={"label": "Manage your account", "url": "https://nepooloperator.com/accounts"},
+        cta={"label": "Manage your account", "url": _dash},
+        product=product,
     )
     text = render_email_skin_text(
         headline="Subscription active",
         intro_line=f"Your trial ended and your card was charged ${amount_dollars:.2f}.",
         body_text=body_text,
-        cta={"label": "Manage your account", "url": "https://nepooloperator.com/accounts"},
+        cta={"label": "Manage your account", "url": _dash},
+        product=product,
     )
     return _send_via_resend(
         to=to,
-        subject=f"Charged ${amount_dollars:.2f} — NEPOOL Operator subscription active",
+        subject=f"Charged ${amount_dollars:.2f} — {_brand} subscription active",
         html=html,
         text=text,
     )

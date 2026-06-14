@@ -698,14 +698,18 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
         product = t.product
 
     # Deferred welcome email (NOT sent by the webhook for onboarding-flow tenants).
-    try:
-        send_welcome_email(to=email, name=name, tenant_key=tenant_key, plan=plan)
-    except Exception as e:
-        send_internal_alert(
-            "Onboarding welcome email failed",
-            f"Tenant {tenant_id} ({email}) finished onboarding but the welcome "
-            f"email failed: {e}. Send manually."
-        )
+    # NEPOOL-only: this email is about the Chrome extension + activation code +
+    # utility-portal capture — none of which exist for an Array Operator owner.
+    # AO's single welcome is the product-aware trial-welcome email below.
+    if (product or "nepool") != "array_operator":
+        try:
+            send_welcome_email(to=email, name=name, tenant_key=tenant_key, plan=plan)
+        except Exception as e:
+            send_internal_alert(
+                "Onboarding welcome email failed",
+                f"Tenant {tenant_id} ({email}) finished onboarding but the welcome "
+                f"email failed: {e}. Send manually."
+            )
 
     # Log them straight into the dashboard: mint a session bound to this tenant
     # and hand it back so the SPA can stash it in localStorage. The user just
@@ -736,6 +740,7 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
             to=email, name=name,
             trial_end_iso_date=_trial_end_str,
             dashboard_url=f"{branding.dashboard_url(product)}",
+            product=product,
         )
         if trial_welcome_sent:
             logger.info("Trial welcome email sent to %s", email)
