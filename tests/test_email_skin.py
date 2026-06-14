@@ -155,3 +155,51 @@ def test_send_welcome_smoke():
     assert text is not None
     assert "NEPOOL OPERATOR" in text  # rebranded from "SOLAR OPERATOR"
     assert "NEPOOL Operator · nepooloperator.com" in text  # rebranded from "Solar Operator · solaroperator.org"
+
+
+# ── Array Operator (dark) theme ───────────────────────────────────────────────
+
+def test_ao_theme_uses_dark_palette():
+    html = render_email_skin(
+        preheader="p", intro_line="Y", body_html="<p>Z</p>",
+        product="array_operator",
+    )
+    # AO dark tokens present, NEPOOL light tokens absent.
+    for c in ("#0a0e14", "#11161f", "#3fd68a", "#7ff0bb"):
+        assert c in html, f"AO color {c} missing"
+    assert "#faf8f5" not in html  # no NEPOOL cream page bg
+    assert "Array Operator · arrayoperator.com" in html
+    assert "NEPOOL Operator · nepooloperator.com" not in html
+
+
+def test_ao_theme_default_headline_is_brand():
+    html = render_email_skin(
+        preheader="p", intro_line="Y", body_html="<p>Z</p>",
+        product="array_operator",
+    )
+    assert "Array Operator" in html  # headline falls back to brand
+
+
+def test_ao_cta_uses_green_on_dark_ink():
+    html = render_email_skin(
+        preheader="p", intro_line="Y", body_html="<p>b</p>",
+        cta={"label": "Sign in", "url": "https://arrayoperator.com/login?token=x"},
+        product="array_operator",
+    )
+    assert "#3fd68a" in html       # green CTA bg
+    assert "#06140d" in html       # dark ink CTA text
+
+
+def test_nepool_remains_default_and_light():
+    html = render_email_skin(preheader="p", intro_line="Y", body_html="<p>Z</p>")
+    assert "#faf8f5" in html
+    assert "NEPOOL Operator · nepooloperator.com" in html
+    assert "#0a0e14" not in html
+
+
+def test_text_skin_is_product_aware():
+    text = render_email_skin_text(
+        intro_line="Welcome.", body_text="hello", product="array_operator",
+    )
+    assert "ARRAY OPERATOR" in text
+    assert "Array Operator · arrayoperator.com" in text

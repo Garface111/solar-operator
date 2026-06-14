@@ -137,38 +137,47 @@ def _email_html(match: BillingMatch, sub, is_test: bool) -> tuple[str, str, str]
         period = f"{inv['period_start']} → {inv['period_end']}"
     amount = inv.get("amount_owed")
     amount_str = f"${amount:,.2f}" if isinstance(amount, (int, float)) else "—"
+    from ..email_skin import render_email_skin, render_email_skin_text
+    kwh = (inv.get("kwh") or 0)
     test_banner = (
-        '<div style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;'
-        'padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;">'
-        'Test send — this went to you, not the customer.</div>' if is_test else "")
+        '<p style="background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.35);'
+        'color:#ffb454;padding:10px 14px;border-radius:8px;margin:0 0 16px;font-size:13px;">'
+        'Test send — this went to you, not the customer.</p>' if is_test else "")
     subject = f"Solar invoice — {cust}" + (f" ({inv.get('invoice_number')})" if inv.get("invoice_number") else "")
-    html = (
-        f'<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;'
-        f'max-width:560px;margin:0 auto;color:#1a2a1f;">'
-        f'{test_banner}'
-        f'<h2 style="color:#047857;margin:0 0 4px;">Array Operator</h2>'
-        f'<p style="color:#555;margin:0 0 18px;font-size:14px;">'
-        f'Automatic solar report for <strong>{cust}</strong></p>'
-        f'<table style="width:100%;font-size:14px;border-collapse:collapse;">'
-        f'<tr><td style="padding:6px 0;color:#555;">Period</td>'
-        f'<td style="padding:6px 0;text-align:right;">{period or "—"}</td></tr>'
-        f'<tr><td style="padding:6px 0;color:#555;">Generation</td>'
-        f'<td style="padding:6px 0;text-align:right;">{(inv.get("kwh") or 0):,.0f} kWh</td></tr>'
-        f'<tr><td style="padding:10px 0;font-weight:700;">Amount due</td>'
-        f'<td style="padding:10px 0;text-align:right;font-weight:700;color:#047857;">{amount_str}</td></tr>'
-        f'</table>'
-        f'<p style="font-size:14px;margin-top:18px;">The full invoice'
+
+    def _row(label, val, strong=False):
+        pad = "10px" if strong else "6px"
+        valstyle = "font-weight:700;color:#3fd68a;" if strong else ""
+        return (f'<tr><td style="padding:{pad} 0;opacity:.65;">{label}</td>'
+                f'<td style="padding:{pad} 0;text-align:right;{valstyle}">{val}</td></tr>')
+
+    body_html = (
+        f"{test_banner}"
+        f"<p>Automatic solar report for <strong>{cust}</strong>.</p>"
+        f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
+        f'{_row("Period", period or "—")}'
+        f'{_row("Generation", f"{kwh:,.0f} kWh")}'
+        f'{_row("Amount due", amount_str, strong=True)}'
+        f"</table>"
+        f'<p style="margin-top:18px;">The full invoice'
         f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
-        f'<p style="color:#9aa;font-size:12px;margin-top:24px;">'
-        f'Sent automatically by Array Operator on your chosen schedule.</p>'
-        f'</div>'
     )
-    text = (
-        f"Array Operator — solar report for {cust}\n\n"
-        f"Period: {period or '—'}\n"
-        f"Generation: {(inv.get('kwh') or 0):,.0f} kWh\n"
-        f"Amount due: {amount_str}\n\n"
-        f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n"
+    html = render_email_skin(
+        preheader=f"Your automatic solar report for {cust} is attached.",
+        intro_line=f"Automatic solar report for {cust}",
+        body_html=body_html,
+        product="array_operator",
+    )
+    text = render_email_skin_text(
+        intro_line=f"Automatic solar report for {cust}",
+        body_text=(
+            f"Solar report for {cust}\n\n"
+            f"Period: {period or '—'}\n"
+            f"Generation: {kwh:,.0f} kWh\n"
+            f"Amount due: {amount_str}\n\n"
+            f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached."
+        ),
+        product="array_operator",
     )
     return subject, html, text
 

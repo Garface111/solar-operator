@@ -14,7 +14,8 @@ import json
 import urllib.request
 import urllib.error
 
-from .email_skin import render_email_skin, render_email_skin_text
+from .email_skin import render_email_skin, render_email_skin_text, link_color
+from . import branding
 
 logger = logging.getLogger(__name__)
 
@@ -308,11 +309,15 @@ def send_sample_workbook_email(to: str, name: str,
 
 
 def send_payment_failed_email(to: str, name: str, amount_dollars: float,
-                              next_attempt_unix: int | None) -> bool:
+                              next_attempt_unix: int | None,
+                              product: str = "nepool") -> bool:
     """Warn the customer their card was declined. Stripe will retry; we just
-    want them to update the card before the retries run out."""
+    want them to update the card before the retries run out. Brand-aware."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    _brand = branding.brand_name(product)
+    _dash = branding.dashboard_url(product)
+    _link = link_color(product)
     from datetime import datetime as _dt
     retry_line = ""
     if next_attempt_unix:
@@ -327,39 +332,40 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
     body_html = (
         f"<p>Hi {first},</p>"
         f"<p>We tried to charge your card <strong>${amount_dollars:.2f}</strong> for your "
-        f"NEPOOL Operator subscription, but it was declined.{retry_line}</p>"
-        f"<p>To keep your reports flowing, please update your card at "
-        f'<a href="https://nepooloperator.com/accounts/" style="color:#047857;">your NEPOOL Operator dashboard</a> — '
+        f"{_brand} subscription, but it was declined.{retry_line}</p>"
+        f"<p>To keep things running, please update your card at "
+        f'<a href="{_dash}/" style="color:{_link};">your {_brand} dashboard</a> — '
         f"sign in, click <strong>Manage billing</strong>, update your payment method.</p>"
         f"<p>If you don't update before our retries run out, your subscription will be "
-        f"canceled and reports will stop.</p>"
+        f"canceled.</p>"
         f"<p>Questions or need help? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
         f"We tried to charge your card ${amount_dollars:.2f} for "
-        f"NEPOOL Operator, but it was declined.{retry_line}\n\n"
-        f"Update your card at https://nepooloperator.com/accounts/ — "
-        f"sign in, click Manage billing.\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"{_brand}, but it was declined.{retry_line}\n\n"
+        f"Update your card at {_dash}/ — sign in, click Manage billing.\n\n"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
         preheader="Your subscription payment was declined — please update your card.",
         headline="Payment issue on your account",
         intro_line=f"We were unable to charge ${amount_dollars:.2f} for your subscription.",
         body_html=body_html,
-        cta={"label": "Update payment method", "url": "https://nepooloperator.com/accounts/"},
+        cta={"label": "Update payment method", "url": f"{_dash}/"},
+        product=product,
     )
     text = render_email_skin_text(
         headline="Payment issue on your account",
         intro_line=f"We were unable to charge ${amount_dollars:.2f} for your subscription.",
         body_text=body_text,
-        cta={"label": "Update payment method", "url": "https://nepooloperator.com/accounts/"},
+        cta={"label": "Update payment method", "url": f"{_dash}/"},
+        product=product,
     )
     return _send_via_resend(
         to=to,
-        subject="Your NEPOOL Operator payment was declined",
+        subject=f"Your {_brand} payment was declined",
         html=html,
         text=text,
     )
@@ -592,57 +598,63 @@ def send_trial_ending_no_card_reminder_email(
 
 
 def send_cancellation_email(to: str, name: str,
-                             cancel_date: "datetime | None" = None) -> bool:
+                             cancel_date: "datetime | None" = None,
+                             product: str = "nepool") -> bool:
     import html as _html
     from datetime import datetime, timedelta
     first = _html.escape((name or "there").split()[0])
+    _brand = branding.brand_name(product)
+    _link = link_color(product)
+    _signup = f"{branding.app_url(product)}/onboarding"
     base = cancel_date if cancel_date is not None else datetime.utcnow()
     purge_date = base + timedelta(days=30)
     purge_str = purge_date.strftime(f"%B {purge_date.day}, {purge_date.year}")
 
     body_html = (
         f"<p>Hi {first},</p>"
-        f"<p>Your NEPOOL Operator subscription has been canceled. "
+        f"<p>Your {_brand} subscription has been canceled. "
         f"You won't be charged again, and we'll stop sending automatic reports.</p>"
         f"<p>Your historical data is still in our system. "
-        f"You'll have access to your account and reports for 30 days — download "
+        f"You'll have access to your account for 30 days — download "
         f"anything you need before <strong>{purge_str}</strong>. After that, your "
         f"data is permanently deleted.</p>"
         f"<p>If you change your mind, sign up again any time at "
-        f'<a href="https://nepooloperator.com/signup.html" style="color:#047857;">nepooloperator.com/signup</a> — '
-        f"we'll restore your existing meters automatically.</p>"
+        f'<a href="{_signup}" style="color:{_link};">{_brand}</a> — '
+        f"we'll restore your account automatically.</p>"
         f"<p>If this cancellation was a mistake, or you'd like to share why "
         f"you're leaving, just reply. We read every email.</p>"
         f"<p>Thank you for being a customer.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"Your NEPOOL Operator subscription is canceled. "
+        f"Your {_brand} subscription is canceled. "
         f"We'll stop sending reports and won't charge you again.\n\n"
         f"Your historical data is still in our system. You'll have access to your "
-        f"account and reports for 30 days — download anything you need before "
+        f"account for 30 days — download anything you need before "
         f"{purge_str}. After that, your data is permanently deleted.\n\n"
-        f"If you change your mind, sign up at https://nepooloperator.com/signup.html — "
-        f"we'll restore your meters automatically.\n\n"
-        f"Questions or feedback? Just reply.\n\n— NEPOOL Operator"
+        f"If you change your mind, sign up at {_signup} — "
+        f"we'll restore your account automatically.\n\n"
+        f"Questions or feedback? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
         preheader=f"Your subscription is canceled — download your data before {purge_str}.",
         headline="Subscription canceled",
         intro_line="You won't be charged again. Reports have stopped.",
         body_html=body_html,
-        cta={"label": "Sign up again", "url": "https://nepooloperator.com/signup.html"},
+        cta={"label": "Sign up again", "url": _signup},
+        product=product,
     )
     text = render_email_skin_text(
         headline="Subscription canceled",
         intro_line="You won't be charged again. Reports have stopped.",
         body_text=body_text,
-        cta={"label": "Sign up again", "url": "https://nepooloperator.com/signup.html"},
+        cta={"label": "Sign up again", "url": _signup},
+        product=product,
     )
     return _send_via_resend(
         to=to,
-        subject="Your NEPOOL Operator subscription is canceled",
+        subject=f"Your {_brand} subscription is canceled",
         html=html,
         text=text,
     )

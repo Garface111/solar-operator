@@ -44,6 +44,7 @@ from .db import SessionLocal
 from .fuels import normalize_fuel
 from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
+from .email_skin import render_email_skin, render_email_skin_text
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity, create_subscription_for_tenant, billable_array_count
 from .email_templates import (
@@ -439,26 +440,29 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
     # nepooloperator.com/accounts — keyed off the TENANT's product. See branding.
     brand = branding.brand_name(product)
     link = branding.magic_link_url(product, token)
-    html = f"""\
-<!DOCTYPE html><html><body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6f4;padding:30px 0;color:#1a2a1f;">
-<table cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td align="center">
-<table cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;background:white;border-radius:12px;overflow:hidden;">
-<tr><td style="background:#2e6b3a;padding:24px 32px;color:white;">
-  <div style="font-size:20px;font-weight:700;">{brand}</div>
-  <div style="font-size:13px;color:#cfe4d3;margin-top:4px;">Sign-in link for {tenant_name or 'your account'}</div>
-</td></tr>
-<tr><td style="padding:32px;font-size:15px;line-height:1.6;">
-<p>Click the button below to sign in to your {brand} account:</p>
-<p style="text-align:center;margin:28px 0;">
-  <a href="{link}" style="background:#2e6b3a;color:white;padding:13px 28px;border-radius:6px;text-decoration:none;font-weight:600;display:inline-block;">Sign in to my account</a>
-</p>
-<p style="font-size:13px;color:#667;">This link expires in 15 minutes and can only be used once. If you didn't request it, you can ignore this email — no one can sign in without it.</p>
-<p style="font-size:12px;color:#aaa;word-break:break-all;margin-top:24px;">Or paste this link into your browser:<br>{link}</p>
-</td></tr>
-</table>
-</td></tr></table></body></html>
-"""
-    text = f"Sign in to {brand}: {link}\n\nLink expires in 15 minutes."
+    # Render in the tenant's brand skin (NEPOOL light / Array Operator dark).
+    body_html = (
+        f"<p>Click below to sign in to your <strong>{brand}</strong> account. "
+        f"This link expires in 15 minutes and can only be used once.</p>"
+        f'<p style="font-size:12px;word-break:break-all;margin-top:20px;opacity:.6;">'
+        f"Or paste this link into your browser:<br>{link}</p>"
+    )
+    html = render_email_skin(
+        preheader=f"Your secure {brand} sign-in link — expires in 15 minutes.",
+        intro_line=f"Sign-in link for {tenant_name or 'your account'}",
+        body_html=body_html,
+        cta={"label": "Sign in to my account", "url": link},
+        footer_line="If you didn't request this, you can ignore it — no one can sign in without the link.",
+        product=product,
+    )
+    text = render_email_skin_text(
+        intro_line=f"Sign-in link for {tenant_name or 'your account'}",
+        body_text=(
+            f"Sign in to your {brand} account (expires in 15 minutes, single use):\n\n{link}"
+        ),
+        cta={"label": "Sign in", "url": link},
+        product=product,
+    )
     sent = _send_via_resend(
         to=email,
         subject=f"Sign in to {brand}",

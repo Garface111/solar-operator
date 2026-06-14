@@ -1,51 +1,110 @@
 """
-NEPOOL Operator email skin — shared HTML/text wrapper for all outbound emails.
+Product-aware email skin — shared HTML/text wrapper for all outbound emails.
 
-Design tokens mirror web/app/tailwind.config.js:
-  primary-700  #064e3b  — header strip bg
-  primary-500  #047857  — CTA button bg
-  primary-100  #d1fae5  — header intro text
-  cream        #faf8f5  — page bg
-  cream-border #e8e2d9  — card border hairline
-  wood-300     #e6b470  — gold underline accent (the solarpunk touch)
-  text-body    #1a2a1f  — body copy
-  text-muted   #3a5a42  — secondary / footer copy
-  primary-950  #022c22  — wordmark strip bg
+Two brands share one backend (see models.Tenant.product / api.branding):
 
-Layout (Jun 8 2026 redesign):
+  • NEPOOL Operator (nepooloperator.com) — LIGHT theme, mirrors the cream +
+    emerald + gold design language of the NEPOOL site/landing.
+      page #faf8f5 · card #ffffff · header #064e3b · gold underline #e6b470
+      CTA #047857 · wordmark strip #022c22
+
+  • Array Operator (arrayoperator.com) — DARK theme, mirrors the deep-navy +
+    octarine-green "solarpunk" design language of the AO onboarding/dashboard.
+      page #0a0e14 · card #11161f · header #0e1620 · green underline #3fd68a
+      CTA #3fd68a on dark ink #06140d · wordmark strip #070b11
+
+Pass product="array_operator" to render in the AO theme; anything else (incl.
+None) renders NEPOOL. bgcolor attributes sit alongside style backgrounds so the
+dark theme survives Outlook's Word engine and dark-mode-naive clients.
+
+Layout (unchanged across themes):
   ┌────────────────────────────────────────┐
-  │  emerald header                        │   wordmark + tagline (no duplication
-  │  ─ gold hairline ─                     │   of subject — that's already in the
-  │                                        │   inbox preview)
+  │  brand header  ─ accent hairline ─     │   wordmark + quiet tagline
   ├────────────────────────────────────────┤
-  │                                        │
-  │  operator's rendered email body        │   plain prose, the way they wrote it
-  │                                        │
+  │  email body (caller-supplied HTML)     │
+  │  [ optional CTA button ]               │
+  │  [ optional attachment chip ]          │
   ├────────────────────────────────────────┤
-  │  ┌──────────────────────────────────┐  │   ← OPTIONAL attachment chip:
-  │  │ 📎  filename.xlsx  · size kb     │  │     surfaced visually so the
-  │  └──────────────────────────────────┘  │     workbook isn't lost in the
-  │                                        │     attachment dropdown.
-  ├────────────────────────────────────────┤
-  │  small muted tagline                   │
-  ├────────────────────────────────────────┤
-  │  dark wordmark strip (single copy)     │
+  │  small muted footer line               │
+  │  dark wordmark strip (brand · domain)  │
   └────────────────────────────────────────┘
 """
 from __future__ import annotations
 
 # Font names use SINGLE quotes — these strings are interpolated into
 # double-quoted style="..." attributes, so double-quoted font names
-# ("Segoe UI") would prematurely close the attribute and silently drop
-# every declaration after font-family (color, font-size, etc.). That bug
-# rendered header + wordmark text dark-on-dark. Single quotes are valid
-# CSS and safe inside a double-quoted attribute.
+# ("Segoe UI") would prematurely close the attribute and silently drop every
+# declaration after font-family. Single quotes are valid CSS and attribute-safe.
 _FONT = "-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif"
 
-# The tagline that sits as a quiet subhead in the emerald header strip.
-# Static + brand-y — not a per-email value — so it never collides with the
-# subject text the inbox already shows alongside the From row.
-_DEFAULT_TAGLINE = "Quarterly NEPOOL-GIS generation reports, made simple."
+_ARRAY = "array_operator"
+
+
+# ── Per-product design tokens ────────────────────────────────────────────────
+_THEMES = {
+    "nepool": {
+        "page_bg": "#faf8f5",
+        "card_bg": "#ffffff",
+        "card_border": "#e8e2d9",
+        "header_bg": "#064e3b",
+        "header_text": "#ffffff",
+        "header_sub": "#d1fae5",
+        "accent": "#e6b470",          # gold hairline under the header
+        "body_text": "#1a2a1f",
+        "muted_text": "#6b7c6e",
+        "footer_border": "#f0ead9",
+        "cta_bg": "#047857",
+        "cta_text": "#ffffff",
+        "wordmark_bg": "#022c22",
+        "wordmark_text": "#cfe4d3",
+        "chip_bg": "#f6f1e9",
+        "chip_border": "#e8e2d9",
+        "chip_icon_bg": "#047857",
+        "chip_icon_text": "#ffffff",
+        "link": "#047857",
+        "brand": "NEPOOL Operator",
+        "wordmark": "NEPOOL Operator · nepooloperator.com",
+        "default_tagline": "Quarterly NEPOOL-GIS generation reports, made simple.",
+        "footer_default": "Sent by NEPOOL Operator — solar accounting for the rest of us.",
+        "chip_caption": "NEPOOL-GIS generation workbook",
+    },
+    "array_operator": {
+        "page_bg": "#0a0e14",
+        "card_bg": "#11161f",
+        "card_border": "#1e2733",
+        "header_bg": "#0e1620",
+        "header_text": "#ffffff",
+        "header_sub": "#7ff0bb",      # green tagline
+        "accent": "#3fd68a",          # octarine-green hairline under the header
+        "body_text": "#dfe7f0",
+        "muted_text": "#7d8a9b",
+        "footer_border": "#1a2330",
+        "cta_bg": "#3fd68a",
+        "cta_text": "#06140d",
+        "wordmark_bg": "#070b11",
+        "wordmark_text": "#7d8a9b",
+        "chip_bg": "#161c26",
+        "chip_border": "#243042",
+        "chip_icon_bg": "#3fd68a",
+        "chip_icon_text": "#06140d",
+        "link": "#3fd68a",
+        "brand": "Array Operator",
+        "wordmark": "Array Operator · arrayoperator.com",
+        "default_tagline": "Your array, measured at its true worth — watched, valued, in dollars.",
+        "footer_default": "Sent by Array Operator — an agent watching every panel for you.",
+        "chip_caption": "Array performance report",
+    },
+}
+
+
+def _theme(product: str | None) -> dict:
+    return _THEMES[_ARRAY] if (product or "") == _ARRAY else _THEMES["nepool"]
+
+
+def link_color(product: str | None) -> str:
+    """Accent color for inline <a> links inside body_html, so callers can match
+    the brand (NEPOOL emerald vs AO green) without hard-coding hex."""
+    return _theme(product)["link"]
 
 
 def _human_filesize(num_bytes: int | None) -> str:
@@ -64,31 +123,31 @@ def _human_filesize(num_bytes: int | None) -> str:
 def render_email_skin(
     *,
     preheader: str,
-    headline: str,
+    headline: str | None = None,
     intro_line: str,
     body_html: str,
     cta: dict | None = None,
     footer_line: str | None = None,
     attachment_label: str | None = None,
     attachment_size_bytes: int | None = None,
+    attachment_caption: str | None = None,
+    product: str | None = "nepool",
 ) -> str:
-    """Return a complete HTML email wrapped in NEPOOL Operator's design.
+    """Return a complete HTML email wrapped in the product's brand design.
 
+    product: "array_operator" → AO dark theme; anything else → NEPOOL light.
     preheader: hidden inbox-preview line (15-90 chars).
-    headline: bold leading line in the emerald header strip — usually "NEPOOL Operator".
-    intro_line: the quiet brand tagline under the headline.  Kept generic; do
-        NOT pass the email subject here (the subject is already visible in
-        the inbox row and shoehorning it under the headline reads as a glitch).
-    body_html: SAFE HTML — caller is responsible for escaping operator-supplied content.
-    cta: optional {label: str, url: str} for a single button (deep emerald).
-    footer_line: small line above the wordmark strip (defaults to quiet tagline).
-    attachment_label: optional filename, e.g. "Catamount-GMCS-report.xlsx". When
-        provided, an attachment chip is rendered between the body and footer
-        so the recipient sees the file even if their client hides attachments.
-    attachment_size_bytes: optional, surfaced as a small muted suffix.
+    headline: bold leading line in the header strip. Defaults to the brand name.
+    intro_line: quiet tagline under the headline (do NOT pass the subject here).
+    body_html: SAFE HTML — caller escapes any operator-supplied content.
+    cta: optional {label, url} for a single brand button.
+    footer_line: small line above the wordmark strip (defaults to brand tagline).
+    attachment_label / _size_bytes / _caption: optional attachment chip.
     """
-    _footer = footer_line or "Sent by NEPOOL Operator — solar accounting for the rest of us."
-    _tagline = (intro_line or "").strip() or _DEFAULT_TAGLINE
+    t = _theme(product)
+    _headline = headline or t["brand"]
+    _footer = footer_line or t["footer_default"]
+    _tagline = (intro_line or "").strip() or t["default_tagline"]
 
     _cta_block = ""
     if cta:
@@ -96,9 +155,10 @@ def render_email_skin(
             '\n<table cellpadding="0" cellspacing="0" border="0" role="presentation"'
             ' style="margin-top:24px;">'
             "<tr><td"
-            ' style="background:#047857;border-radius:6px;mso-padding-alt:12px 22px;">'
+            f' bgcolor="{t["cta_bg"]}"'
+            f' style="background:{t["cta_bg"]};border-radius:6px;mso-padding-alt:12px 22px;">'
             f'<a href="{cta["url"]}"'
-            f' style="display:inline-block;padding:12px 22px;color:#ffffff;'
+            f' style="display:inline-block;padding:12px 22px;color:{t["cta_text"]};'
             f"text-decoration:none;font-family:{_FONT};font-size:14px;"
             f'font-weight:600;border-radius:6px;letter-spacing:.01em;">'
             f'{cta["label"]}</a></td></tr></table>'
@@ -108,27 +168,29 @@ def render_email_skin(
     if attachment_label:
         size = _human_filesize(attachment_size_bytes)
         size_html = (
-            f'<span style="color:#6b7c6e;font-weight:400;margin-left:8px;">· {size}</span>'
+            f'<span style="color:{t["muted_text"]};font-weight:400;margin-left:8px;">· {size}</span>'
             if size else ""
         )
+        caption = attachment_caption or t["chip_caption"]
         _attachment_block = (
             '\n<table cellpadding="0" cellspacing="0" border="0" width="100%" role="presentation"'
             ' style="margin-top:28px;border-collapse:separate;">'
             '<tr><td'
-            ' style="background:#f6f1e9;border:1px solid #e8e2d9;border-radius:8px;'
+            f' bgcolor="{t["chip_bg"]}"'
+            f' style="background:{t["chip_bg"]};border:1px solid {t["chip_border"]};border-radius:8px;'
             'padding:14px 18px;">'
             f'<table cellpadding="0" cellspacing="0" border="0" role="presentation" width="100%">'
             f'<tr>'
             f'<td width="32" valign="middle" style="padding-right:12px;">'
-            f'<div style="width:32px;height:32px;border-radius:6px;background:#047857;'
-            f'color:#ffffff;font-family:{_FONT};font-size:14px;font-weight:600;'
+            f'<div style="width:32px;height:32px;border-radius:6px;background:{t["chip_icon_bg"]};'
+            f'color:{t["chip_icon_text"]};font-family:{_FONT};font-size:14px;font-weight:600;'
             f'text-align:center;line-height:32px;">XLS</div>'
             f'</td>'
             f'<td valign="middle">'
-            f'<div style="font-family:{_FONT};font-size:13px;font-weight:600;color:#1a2a1f;">'
+            f'<div style="font-family:{_FONT};font-size:13px;font-weight:600;color:{t["body_text"]};">'
             f'{attachment_label}{size_html}</div>'
-            f'<div style="font-family:{_FONT};font-size:11px;color:#3a5a42;margin-top:2px;">'
-            f'Attached · NEPOOL-GIS generation workbook</div>'
+            f'<div style="font-family:{_FONT};font-size:11px;color:{t["muted_text"]};margin-top:2px;">'
+            f'Attached · {caption}</div>'
             f'</td>'
             f'</tr></table>'
             '</td></tr></table>'
@@ -140,27 +202,28 @@ def render_email_skin(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
-<title>NEPOOL Operator</title>
+<meta name="color-scheme" content="light dark">
+<title>{t["brand"]}</title>
 </head>
-<body style="margin:0;padding:0;background:#faf8f5;">
+<body style="margin:0;padding:0;background:{t["page_bg"]};" bgcolor="{t["page_bg"]}">
 <span style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">{preheader}</span>
 <table cellpadding="0" cellspacing="0" border="0" width="100%" role="presentation"
-  style="background:#faf8f5;padding:36px 0;">
+  bgcolor="{t["page_bg"]}" style="background:{t["page_bg"]};padding:36px 0;">
   <tr><td align="center">
     <table cellpadding="0" cellspacing="0" border="0" width="580" role="presentation"
-      style="max-width:580px;width:100%;background:#ffffff;border:1px solid #e8e2d9;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">
-      <tr><td style="background:#064e3b;padding:28px 36px;border-radius:10px 10px 0 0;border-bottom:3px solid #e6b470;">
-        <div style="font-family:{_FONT};font-size:22px;font-weight:600;color:#ffffff;line-height:1.25;letter-spacing:-0.01em;">{headline}</div>
-        <div style="font-family:{_FONT};font-size:13px;color:#d1fae5;margin-top:8px;line-height:1.45;">{_tagline}</div>
+      bgcolor="{t["card_bg"]}" style="max-width:580px;width:100%;background:{t["card_bg"]};border:1px solid {t["card_border"]};border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+      <tr><td bgcolor="{t["header_bg"]}" style="background:{t["header_bg"]};padding:28px 36px;border-radius:10px 10px 0 0;border-bottom:3px solid {t["accent"]};">
+        <div style="font-family:{_FONT};font-size:22px;font-weight:600;color:{t["header_text"]};line-height:1.25;letter-spacing:-0.01em;">{_headline}</div>
+        <div style="font-family:{_FONT};font-size:13px;color:{t["header_sub"]};margin-top:8px;line-height:1.45;">{_tagline}</div>
       </td></tr>
-      <tr><td style="padding:32px 36px 8px 36px;font-family:{_FONT};font-size:15px;line-height:1.65;color:#1a2a1f;">
+      <tr><td bgcolor="{t["card_bg"]}" style="background:{t["card_bg"]};padding:32px 36px 8px 36px;font-family:{_FONT};font-size:15px;line-height:1.65;color:{t["body_text"]};">
 {body_html}{_cta_block}{_attachment_block}
       </td></tr>
-      <tr><td style="padding:20px 36px 24px 36px;font-family:{_FONT};font-size:12px;color:#6b7c6e;line-height:1.5;border-top:1px solid #f0ead9;">
+      <tr><td bgcolor="{t["card_bg"]}" style="background:{t["card_bg"]};padding:20px 36px 24px 36px;font-family:{_FONT};font-size:12px;color:{t["muted_text"]};line-height:1.5;border-top:1px solid {t["footer_border"]};">
 {_footer}
       </td></tr>
-      <tr><td style="background:#022c22;padding:14px 36px;font-family:{_FONT};font-size:11px;color:#cfe4d3;text-align:center;border-radius:0 0 10px 10px;letter-spacing:0.04em;">
-NEPOOL Operator · nepooloperator.com
+      <tr><td bgcolor="{t["wordmark_bg"]}" style="background:{t["wordmark_bg"]};padding:14px 36px;font-family:{_FONT};font-size:11px;color:{t["wordmark_text"]};text-align:center;border-radius:0 0 10px 10px;letter-spacing:0.04em;">
+{t["wordmark"]}
       </td></tr>
     </table>
   </td></tr>
@@ -171,16 +234,18 @@ NEPOOL Operator · nepooloperator.com
 
 def render_email_skin_text(
     *,
-    headline: str,
+    headline: str | None = None,
     intro_line: str,
     body_text: str,
     cta: dict | None = None,
     attachment_label: str | None = None,
+    product: str | None = "nepool",
 ) -> str:
     """Return a clean plain-text fallback. Headline in ALL CAPS, CTA as label: url."""
+    t = _theme(product)
     parts = [
-        headline.upper(),
-        (intro_line or "").strip() or _DEFAULT_TAGLINE,
+        (headline or t["brand"]).upper(),
+        (intro_line or "").strip() or t["default_tagline"],
         "",
         body_text,
     ]
@@ -188,5 +253,5 @@ def render_email_skin_text(
         parts += ["", f"{cta['label']}: {cta['url']}"]
     if attachment_label:
         parts += ["", f"📎 Attached: {attachment_label}"]
-    parts += ["", "—", "NEPOOL Operator · nepooloperator.com"]
+    parts += ["", "—", t["wordmark"]]
     return "\n".join(parts)

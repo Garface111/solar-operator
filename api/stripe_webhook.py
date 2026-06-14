@@ -259,10 +259,12 @@ def _process_subscription_deleted(sub: dict) -> dict:
         db.commit()
         tid, email = t.id, t.contact_email
         name = t.operator_name or t.company_name or t.name
+        product = t.product
 
     from datetime import datetime as _dt
     try:
-        send_cancellation_email(to=email, name=name, cancel_date=_dt.utcnow())
+        send_cancellation_email(to=email, name=name, cancel_date=_dt.utcnow(),
+                                product=product)
     except Exception as e:
         logger.warning("cancellation email failed: %s", e)
 
@@ -290,12 +292,14 @@ def _process_invoice_payment_failed(invoice: dict) -> dict:
             return {"ignored": f"no tenant for customer={customer_id}"}
         tid, email = t.id, t.contact_email
         name = t.operator_name or t.company_name or t.name
+        product = t.product
 
     try:
         send_payment_failed_email(
             to=email, name=name,
             amount_dollars=amount_due_cents / 100,
             next_attempt_unix=next_attempt,
+            product=product,
         )
     except Exception as e:
         logger.warning("payment-failed email failed: %s", e)
