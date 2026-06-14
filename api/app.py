@@ -1016,6 +1016,22 @@ def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
         raise HTTPException(403, "Invalid or missing X-Admin-Key")
 
 
+@app.get("/admin/verify-smarthub")
+def admin_verify_smarthub(
+    days: int = 120,
+    account: str | None = None,
+    tenant: str | None = None,
+    _: None = Depends(_require_admin),
+):
+    """Diagnostic: pull the raw SmartHub net-metering channel breakdown
+    (FORWARD/RETURN/NET kWh) for captured account(s), so we can confirm which
+    channel is real solar generation — the one unverified assumption gating the
+    ~471 SmartHub utilities. Admin-gated; never returns auth tokens. Same logic
+    as scripts/verify_smarthub_generation.py on the CLI."""
+    from scripts.verify_smarthub_generation import run_verification
+    return {"results": run_verification(account=account, tenant=tenant, days=days)}
+
+
 @app.post("/admin/tenants")
 def admin_create_tenant(body: dict, _: None = Depends(_require_admin)):
     name = body.get("name")

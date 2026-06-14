@@ -167,65 +167,101 @@ def _verdict(raw: dict) -> str:
     return "❓ UNCLEAR — no FORWARD/RETURN/NET channels found; inspect the raw meters above."
 
 
-def verify_account(db, acct: UtilityAccount, days: int) -> None:
-    print(f"\n=== {acct.provider} · account {acct.account_number} "
-          f"(tenant {acct.tenant_id}, customer {acct.customer_number}) ===")
+def verify_account_data(db, acct: UtilityAccount, days: int) -> dict:
+    """Structured verification result for one account (no printing).
+
+    Shared by the CLI printer and the /admin/verify-smarthub endpoint. Never
+    includes the auth token in the output."""
+    out: dict = {
+        "provider": acct.provider, "account_number": acct.account_number,
+        "tenant_id": acct.tenant_id, "customer_number": acct.customer_number,
+    }
     host = _get_smarthub_host(acct.provider)
+    out["host"] = host
     sess_row = session_for_account(db, acct)
     if sess_row is None:
-        print("  SKIP: no stored session — sign into this co-op's SmartHub via the extension first.")
-        return
+        return {**out, "status": "skip",
+                "reason": "no stored session — sign into this SmartHub via the extension first"}
     session = _build_session_dict(sess_row)
     if session is None:
-        print("  SKIP: stored session has no usable auth token.")
-        return
-    print(f"  host={host}  session.customer_number={sess_row.customer_number}  "
-          f"login={session.get('email')}")
+        return {**out, "status": "skip", "reason": "stored session has no usable auth token"}
+    out["session_customer_number"] = sess_row.customer_number
+    out["login"] = session.get("email")
 
     sl = _resolve_service_location(db, acct, host, session)
     if not sl:
-        print("  SKIP: could not resolve serviceLocationNumber.")
-        return
-    print(f"  serviceLocationNumber={sl}")
+        return {**out, "status": "skip", "reason": "could not resolve serviceLocationNumber"}
+    out["service_location"] = sl
 
     end = date.today()
     start = end - timedelta(days=days)
+    out["raw"] = _raw_channel_breakdown(host, session, sl, acct.account_number, start, end)
+    try:
+        parsed = fetch_daily_generation(host, session, sl, acct.account_number, start, end)
+        out["parsed"] = {
+            "generation_return": round(sum(d["kwh_generated"] for d in parsed), 2),
+            "consumption_forward": round(sum(d["kwh_consumed"] for d in parsed), 2),
+            "net_export": round(sum(d["kwh_net_export"] for d in parsed), 2),
+            "days": len(parsed),
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["parsed_error"] = f"{type(exc).__name__}: {exc}"
+    out["billing_total_usage_avg"] = _billing_total_usage(host, session, acct.account_number)
+    out["status"] = "ok"
+    out["verdict"] = _verdict(out["raw"])
+    return out
 
-    # 1) RAW channel breakdown — the thing we actually need to see.
-    raw = _raw_channel_breakdown(host, session, sl, acct.account_number, start, end)
+
+def run_verification(account: str | None = None, tenant: str | None = None,
+                     days: int = 120) -> list[dict]:
+    """Verify every matching captured SmartHub account; return structured results.
+    Shared entrypoint for the CLI and the admin endpoint."""
+    with SessionLocal() as db:
+        accts = _smarthub_accounts(db, account=account, tenant=tenant)
+        results = [verify_account_data(db, a, days) for a in accts]
+        db.commit()  # persist any discovered serviceLocationNumber caching
+    return results
+
+
+def verify_account(db, acct: UtilityAccount, days: int) -> None:
+    """CLI pretty-printer over verify_account_data."""
+    d = verify_account_data(db, acct, days)
+    print(f"\n=== {d['provider']} · account {d['account_number']} "
+          f"(tenant {d['tenant_id']}, customer {d['customer_number']}) ===")
+    if d.get("status") == "skip":
+        print(f"  SKIP: {d['reason']}")
+        return
+    print(f"  host={d['host']}  session.customer_number={d.get('session_customer_number')}  "
+          f"login={d.get('login')}")
+    print(f"  serviceLocationNumber={d.get('service_location')}")
+    raw = d["raw"]
     print(f"\n  RAW utility-usage poll  (status={raw.get('status')}, last {days}d):")
     for m in raw["meters"]:
         print(f"    meter {m['meter']:<14} flow={m['flow']:<8} "
               f"total={m['total_kwh']:>12,.2f} kWh   days_with_data={m['days_with_data']}")
     print(f"    flow totals: {raw['flow_totals']}")
-
-    # 2) Adapter's parsed view (what the live job persists).
-    try:
-        parsed = fetch_daily_generation(host, session, sl, acct.account_number, start, end)
-        gen = round(sum(d["kwh_generated"] for d in parsed), 2)
-        con = round(sum(d["kwh_consumed"] for d in parsed), 2)
-        net = round(sum(d["kwh_net_export"] for d in parsed), 2)
+    if "parsed" in d:
+        p = d["parsed"]
         print(f"\n  ADAPTER parsed (fetch_daily_generation): "
-              f"generation(RETURN)={gen:,.2f}  consumption(FORWARD)={con:,.2f}  "
-              f"net_export={net:,.2f}  over {len(parsed)} days")
-    except Exception as exc:  # noqa: BLE001
-        print(f"\n  ADAPTER parse failed: {type(exc).__name__}: {exc}")
-
-    # 3) Billing-overview cross-check (consumption).
-    tu = _billing_total_usage(host, session, acct.account_number)
-    if tu is not None:
-        print(f"  billing-overview totalUsage (≈ consumption): {tu:,.1f} kWh/bill avg")
-
-    print(f"\n  VERDICT: {_verdict(raw)}")
+              f"generation(RETURN)={p['generation_return']:,.2f}  "
+              f"consumption(FORWARD)={p['consumption_forward']:,.2f}  "
+              f"net_export={p['net_export']:,.2f}  over {p['days']} days")
+    elif "parsed_error" in d:
+        print(f"\n  ADAPTER parse failed: {d['parsed_error']}")
+    if d.get("billing_total_usage_avg") is not None:
+        print(f"  billing-overview totalUsage (≈ consumption): {d['billing_total_usage_avg']:,.1f} kWh/bill avg")
+    print(f"\n  VERDICT: {d['verdict']}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify the SmartHub generation channel on a real account.")
-    g = ap.add_mutually_exclusive_group(required=True)
+    g = ap.add_mutually_exclusive_group(required=False)
     g.add_argument("--account", help="utility account number to verify")
     g.add_argument("--tenant", help="verify every SmartHub account for this tenant id")
     ap.add_argument("--days", type=int, default=120, help="look-back window (default 120)")
     args = ap.parse_args()
+    # No filter → scan every captured SmartHub account (handy when you don't yet
+    # know which account/tenant the operator just captured).
 
     with SessionLocal() as db:
         accts = _smarthub_accounts(db, account=args.account, tenant=args.tenant)
