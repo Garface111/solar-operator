@@ -15,6 +15,42 @@
 // api.solaroperator.org never resolved, so traffic was running on the fallback anyway.
 const PROD_ENDPOINT = "https://nepooloperator.com/v1/sync";
 const FALLBACK_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
+
+// ── Whole-system error capture (v1.9.10) ─────────────────────────────────────
+// Report extension errors to the shared backend /v1/client-error so they land in
+// the same Sentry + alert pipeline as server + frontend errors. The SMA debugging
+// saga (v1.9.2→1.9.8) would have been near-instant with this. Best-effort,
+// deduped, capped — an error reporter must never itself throw or flood.
+const SO_ERROR_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/client-error";
+const _soErrSeen = {};
+let _soErrCount = 0;
+function soReportError(message, stack, kind) {
+  try {
+    if (_soErrCount >= 25) return;
+    message = String(message || "").slice(0, 500);
+    stack = String(stack || "").slice(0, 4000);
+    if (!message && !stack) return;
+    const sig = (kind || "") + "|" + message;
+    const now = Date.now();
+    if (_soErrSeen[sig] && now - _soErrSeen[sig] < 60000) return;
+    _soErrSeen[sig] = now;
+    _soErrCount++;
+    fetch(SO_ERROR_ENDPOINT, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "extension", message, stack, url: kind || "background", kind: kind || "error" }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (_) { /* never throw from the reporter */ }
+}
+try {
+  self.addEventListener("error", (e) =>
+    soReportError(e && e.message, e && e.error && e.error.stack, "sw-error"));
+  self.addEventListener("unhandledrejection", (e) => {
+    const r = e && e.reason;
+    soReportError(r && r.message ? r.message : String(r), r && r.stack, "sw-rejection");
+  });
+} catch (_) {}
+
 const STORAGE_KEYS = {
   ENDPOINT: "api_endpoint",
   TENANT_KEY: "tenant_key",

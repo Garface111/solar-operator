@@ -158,6 +158,7 @@ app = FastAPI(title="NEPOOL Operator API", version="1.0.0")
 # tests are unaffected. This single backend serves BOTH products (NEPOOL Operator
 # and Array Operator), so this one init covers server-side errors system-wide.
 from .observability import init_sentry, capture_exception  # noqa: E402
+from . import observability  # noqa: E402
 init_sentry()
 
 # CORS — allow the EnergyAgent umbrella front-ends to call the shared backend.
@@ -315,6 +316,70 @@ def health():
         "sentry_configured": bool(os.getenv("SENTRY_DSN")),
         "web_concurrency": int(os.getenv("WEB_CONCURRENCY", "1")),
     }
+
+
+@app.post("/v1/client-error")
+async def client_error(request: Request):
+    """Receive a browser/extension JS error and route it through the SAME
+    server-side monitoring pipeline (Sentry capture + throttled internal alert).
+
+    This gives whole-system error coverage with ONE config (the backend's
+    SENTRY_DSN): arrayoperator.com, the NEPOOL frontend, and the Chrome extension
+    all POST here instead of each needing their own Sentry project. Best-effort,
+    unauthenticated (errors can happen pre-login), rate-limited per-IP, and the
+    payload is capped + scrubbed so it can't be abused as a spam vector or leak.
+    """
+    from . import ratelimit
+    # Cheap public endpoint — cap abuse. 30 reports / 5 min / IP is plenty for a
+    # real user yet stops a tab stuck in an error loop from hammering us.
+    if not ratelimit.allow("client_error", ratelimit.client_ip(request),
+                            max_hits=30, window_s=300):
+        return {"ok": True, "throttled": True}
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad json"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "bad payload"})
+
+    def _clip(v, n):
+        return (str(v)[:n] if v is not None else "")
+    source = _clip(body.get("source"), 40) or "browser"      # "arrayoperator" | "nepool" | "extension"
+    message = _clip(body.get("message"), 500)
+    stack = _clip(body.get("stack"), 4000)
+    url = _clip(body.get("url"), 300)
+    ua = _clip(request.headers.get("user-agent"), 300)
+    if not message and not stack:
+        return {"ok": True, "ignored": "empty"}
+
+    log.warning("client_error[%s] %s | url=%s", source, message, url)
+
+    # Forward to Sentry (no-op if unconfigured) with client context.
+    try:
+        if observability.is_enabled():
+            import sentry_sdk
+            with sentry_sdk.push_scope() as scope:
+                scope.set_tag("client_source", source)
+                scope.set_context("client", {"url": url, "user_agent": ua, "stack": stack})
+                sentry_sdk.capture_message(f"[{source}] {message}", level="error")
+    except Exception:
+        log.exception("client_error sentry forward failed")
+
+    # Throttled internal email — reuse the same cooldown table as the 500 handler
+    # so a flood of client errors can't spam the inbox.
+    try:
+        sig = f"client:{source}|{message[:80]}"
+        now = _time.monotonic()
+        if now - _LAST_ALERT.get(sig, 0.0) >= _ALERT_COOLDOWN_S:
+            _LAST_ALERT[sig] = now
+            from .notify import send_internal_alert
+            send_internal_alert(
+                f"Client error [{source}]: {message[:80]}",
+                f"Source: {source}\nURL: {url}\nUA: {ua}\n\n{message}\n\n{stack}",
+            )
+    except Exception:
+        log.exception("client_error internal alert failed")
+    return {"ok": True}
 
 
 @app.post("/v1/extension/heartbeat")

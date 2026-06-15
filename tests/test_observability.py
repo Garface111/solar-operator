@@ -131,3 +131,42 @@ def test_health_reports_sentry_configured(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert "sentry_configured" in r.json()
+
+
+# ─── /v1/client-error (browser/extension → backend pipeline) ────────────────────
+
+def test_client_error_accepts_and_alerts(client, monkeypatch):
+    sent = {}
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda s, b: sent.update(subject=s, body=b) or True)
+    import api.app as appmod
+    appmod._LAST_ALERT.clear()
+    r = client.post("/v1/client-error", json={
+        "source": "arrayoperator", "message": "TypeError: x is undefined",
+        "stack": "at foo (sandbox.js:10)", "url": "https://arrayoperator.com/",
+    })
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert "arrayoperator" in sent.get("subject", "")
+    assert "TypeError" in sent.get("subject", "")
+
+
+def test_client_error_ignores_empty(client):
+    r = client.post("/v1/client-error", json={"source": "extension"})
+    assert r.status_code == 200
+    assert r.json().get("ignored") == "empty"
+
+
+def test_client_error_caps_payload(client, monkeypatch):
+    body_seen = {}
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda s, b: body_seen.update(b=b) or True)
+    import api.app as appmod
+    appmod._LAST_ALERT.clear()
+    huge = "A" * 9000
+    r = client.post("/v1/client-error", json={"source": "x", "message": huge, "stack": huge})
+    assert r.status_code == 200
+    # message capped at 500, stack at 4000 → never the full 9000 (small slack for
+    # any boilerplate; the point is the 9000-char flood is clipped to ~4500).
+    assert body_seen["b"].count("A") <= 500 + 4000 + 50
+
