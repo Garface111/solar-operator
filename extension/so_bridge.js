@@ -116,7 +116,7 @@
   // ── Background → bridge → page broadcasts ────────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || typeof msg !== "object") return;
-    if (msg.type === "SO_LOGIN_STATE" || msg.type === "SO_CAPTURE_LANDED") {
+    if (msg.type === "SO_LOGIN_STATE" || msg.type === "SO_CAPTURE_LANDED" || msg.type === "SO_CAPTURE_FAILED") {
       window.postMessage(msg, "*");
     }
     // We don't need to keep the channel open for an async response —

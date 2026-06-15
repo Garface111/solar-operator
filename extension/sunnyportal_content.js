@@ -200,16 +200,28 @@
   }
   function clearIntent() { try { chrome.storage.local.remove(INTENT_KEY); } catch (_) {} }
 
+  let lastErr = null;   // most recent failure reason, surfaced to the AO page on give-up
+  function reportFailure(reason) {
+    chrome.runtime.sendMessage(
+      { type: "SMA_CAPTURE_FAILED", reason: String(reason || "unknown"), url: location.href },
+      () => void chrome.runtime.lastError,
+    );
+  }
+
   async function tick() {
     if (done) return;
     polls++;
-    if (!(await hasIntent())) return;
-    if (!(await isSignedIn())) { broadcastLoginState("login_required"); return; }
+    if (!(await hasIntent())) { lastErr = "capture not requested from Array Operator (open Add array → Log in with SMA)"; return; }
+    let signedIn;
+    try { signedIn = await isSignedIn(); }
+    catch (e) { lastErr = "auth-check failed: " + (e && e.message || e); return; }
+    if (!signedIn) { lastErr = "not signed in to SMA (or the API rejected the session cookie)"; broadcastLoginState("login_required"); return; }
     broadcastLoginState("signed_in");
     let payload;
-    try { payload = await captureFlow(); } catch (_) { return; }   // retry next tick
+    try { payload = await captureFlow(); }
+    catch (e) { lastErr = "capture failed: " + (e && e.message || e); return; }   // retry next tick
     const sites = payload.sites || [];
-    if (!sites.length) return;
+    if (!sites.length) { lastErr = "signed in, but no plants/inverters returned"; return; }
     const sig = sites.map((s) =>
       s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
     ).join("||");
@@ -223,7 +235,14 @@
 
   tick();
   const iv = setInterval(() => {
-    if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+    if (done) { clearInterval(iv); return; }
+    if (polls >= MAX_POLLS) {
+      clearInterval(iv);
+      // Out of retries with no capture — tell the AO page WHY instead of leaving
+      // its spinner hanging forever.
+      reportFailure(lastErr || "timed out with no data");
+      return;
+    }
     tick();
   }, POLL_INTERVAL_MS);
 })();

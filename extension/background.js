@@ -270,7 +270,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous response
   }
-  // v1.9.4: SMA cross-origin proxy. The SMA portal (ennexos.sunnyportal.com) and
+  // v1.9.5: SMA capture gave up — relay the REASON to the AO page so its spinner
+  // resolves into a real error instead of hanging forever.
+  if (msg.type === "SMA_CAPTURE_FAILED") {
+    const failed = {
+      type: "SO_CAPTURE_FAILED",
+      ok: false,
+      provider: "sma",
+      reason: String(msg.reason || "unknown"),
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(failed);
+    chrome.runtime.sendMessage(failed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous
+  }
   // its API (uiapi.sunnyportal.com) are DIFFERENT origins, and uiapi answers with
   // Access-Control-Allow-Origin:* — which the browser refuses to pair with a
   // credentialed content-script fetch (CORS block → the capture stalled). The
