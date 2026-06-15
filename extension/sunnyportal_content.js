@@ -33,6 +33,10 @@
   const INTENT_TTL_MS = 10 * 60 * 1000;
   const POLL_INTERVAL_MS = 4000;
   const MAX_POLLS = 30;
+  // Diagnostic trace — flip SMA_DEBUG to true to re-enable the [EnergyAgent SMA]
+  // console play-by-play (kept from the v1.9.x debugging saga; silent in prod).
+  const SMA_DEBUG = false;
+  const LOG = (...a) => { if (!SMA_DEBUG) return; try { console.log("[EnergyAgent SMA]", ...a); } catch (_) {} };
   let polls = 0;
   let lastHash = null;
   let lastLoginState = null;
@@ -63,10 +67,10 @@
         // default credentials mode ("same-origin") → no cookies cross-origin → CORS ok with ACAO:*
       });
     } catch (e) {
-      try { console.log("[EnergyAgent SMA] GET", url, "-> NETWORK/CORS FAIL", e && e.message); } catch (_) {}
+      try { if (SMA_DEBUG) console.log("[EnergyAgent SMA] GET", url, "-> NETWORK/CORS FAIL", e && e.message); } catch (_) {}
       throw e;
     }
-    try { console.log("[EnergyAgent SMA] GET", url, "->", r.ok ? "ok " + r.status : "FAIL status=" + r.status); } catch (_) {}
+    try { if (SMA_DEBUG) console.log("[EnergyAgent SMA] GET", url, "->", r.ok ? "ok " + r.status : "FAIL status=" + r.status); } catch (_) {}
     if (!r.ok) throw new Error("api " + r.status);
     return r.json();
   }
@@ -223,8 +227,8 @@
   }
 
   // Loud, prefixed console trace so the SMA tab's console shows EXACTLY how far
-  // each attempt gets. Search the console for "[EnergyAgent SMA]".
-  const LOG = (...a) => { try { console.log("[EnergyAgent SMA]", ...a); } catch (_) {} };
+  // each attempt gets. Search the console for "[EnergyAgent SMA]". (Gated by
+  // SMA_DEBUG, declared at top — silent in prod.)
   LOG("content script loaded on", location.href);
 
   async function tick() {
