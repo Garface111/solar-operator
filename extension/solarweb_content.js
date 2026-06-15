@@ -91,6 +91,86 @@
     return "idle"; // online, no error, zero power (night / not producing)
   }
 
+  // Parse Fronius model string -> nameplate kW. "Primo 12.5-1 208-240" -> 12.5,
+  // "Symo 20.0-3-M" -> 20.0. The first decimal after the family name is the kW.
+  function nameplateFromModel(displayName) {
+    if (typeof displayName !== "string") return null;
+    const m = displayName.match(/\b(\d+(?:\.\d+)?)\b/);  // first number = kW rating
+    return m ? Math.round(parseFloat(m[1]) * 10) / 10 : null;
+  }
+
+  // Trapezoidal integral of a [ts_ms, kW] power series -> kWh for the day.
+  // Skips None gaps and any interval > 1h (data gap guard).
+  function integrateKwh(data) {
+    const pts = (data || [])
+      .filter((p) => Array.isArray(p) && p.length === 2 && typeof p[1] === "number")
+      .sort((a, b) => a[0] - b[0]);
+    let kwh = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const dtH = (pts[i][0] - pts[i - 1][0]) / 3600000;
+      if (dtH <= 0 || dtH > 1) continue;
+      kwh += ((pts[i - 1][1] + pts[i][1]) / 2) * dtH;
+    }
+    return Math.round(kwh * 100) / 100;
+  }
+
+  // Per-inverter capture for ONE system via the analysis-chart endpoint.
+  // Step A: GET the device list (deviceChannels.devices[] = each inverter).
+  // Step B: GET the per-device "devwork" (Total Power) series and integrate
+  // each inverter's curve to a daily kWh. Returns [] on any failure (the
+  // system-level capture still stands).
+  async function captureInverters(pvSystemId) {
+    const now = new Date();
+    const dateQs = "year=" + now.getFullYear() + "&month=" + (now.getMonth() + 1) +
+      "&day=" + now.getDate() + "&interval=day";
+    let meta;
+    try {
+      meta = await getJson("/Chart/GetAnalysisChart?pvSystemId=" + encodeURIComponent(pvSystemId) +
+        "&" + dateQs + "&compareView=false&kwhkwpView=false&_=" + Date.now());
+    } catch (_) { return []; }
+    const devices = (((meta || {}).deviceChannels || {}).devices) || [];
+    const invDevices = devices.filter((d) => d && d.isActiveDevice !== false &&
+      !d.isMeterOrConsumerDevice && d.deviceId);
+    if (!invDevices.length) return [];
+
+    const ids = invDevices.map((d) => d.deviceId);
+    let dataResp;
+    try {
+      const devQs = ids.map((id) => "devices=" + encodeURIComponent(id)).join("&");
+      dataResp = await getJson("/Chart/GetAnalysisChart?pvSystemId=" + encodeURIComponent(pvSystemId) +
+        "&" + dateQs + "&channels=devwork&" + devQs + "&compareView=false&kwhkwpView=false&_=" + Date.now());
+    } catch (_) { return []; }
+
+    // Map each "Total Power | <displayName>" series back to its device by name.
+    const series = (((dataResp || {}).settings || {}).series) || [];
+    const kwhByName = {};
+    const peakByName = {};
+    for (const s of series) {
+      const nm = String(s.name || "");
+      if (!/Total Power\s*\|/.test(nm)) continue;       // skip the PV-production total series
+      const disp = nm.replace(/^.*\|\s*/, "").trim();
+      kwhByName[disp] = integrateKwh(s.data);
+      const ys = (s.data || []).filter((p) => Array.isArray(p) && typeof p[1] === "number").map((p) => p[1]);
+      peakByName[disp] = ys.length ? Math.max(...ys) : null;
+    }
+
+    return invDevices.map((d, i) => {
+      const disp = String(d.displayName || ("Inverter " + (i + 1)));
+      const peak = peakByName[disp] != null ? peakByName[disp] : null;
+      return {
+        serial: String(d.deviceId),               // stable Fronius device GUID = our serial
+        name: disp,
+        model: disp,
+        nameplate_kw: nameplateFromModel(disp),
+        energy_today_kwh: kwhByName[disp] != null ? kwhByName[disp] : null,
+        peak_power_kw: peak,
+        // No per-inverter fault code in this channel; system-level errors are
+        // carried on the site. A zero-energy inverter while peers produce will
+        // be flagged "dead" by the peer engine downstream.
+      };
+    });
+  }
+
   async function captureFlow() {
     // 1. System list — names, inverter counts, today's energy, specific yield.
     const listResp = await getJson("/PvSystems/GetPvSystemsForListView?_=" + Date.now());
@@ -112,10 +192,15 @@
       }
     }
 
-    const sites = systems.map((s) => {
+    // 3. Per-system + per-INVERTER drill-down (the sandbox comb). Each system's
+    // analysis chart yields every inverter's daily kWh. Best-effort per system.
+    const sites = [];
+    for (const s of systems) {
       const live = liveMap[s.PvSystemId] || {};
       const energyToday = typeof s.EnergyTodayInkWh === "number" ? s.EnergyTodayInkWh : null;
-      return {
+      let inverters = [];
+      try { inverters = await captureInverters(s.PvSystemId); } catch (_) { inverters = []; }
+      sites.push({
         site_id: s.PvSystemId,
         name: s.PvSystemName || null,
         peak_power_kw: deriveNameplateKw(energyToday, s.KwhPerKwp),
@@ -128,8 +213,9 @@
         status: deriveStatus(live.power_w, s.ErrorCntToday, live.online),
         last_report: parseAspNetDate(s.LastImport) || null,
         last_report_disp: s.LastImportDisp || null,
-      };
-    });
+        inverters,                                  // [] if drill-down unavailable
+      });
+    }
 
     return {
       provider: "fronius",

@@ -630,6 +630,38 @@ class Inverter(Base):
     )
 
 
+class InverterDaily(Base):
+    """One row per (inverter, calendar day) of generated kWh — the per-inverter
+    analog of DailyGeneration (which is per-ARRAY).
+
+    Why this exists: vendors we reach via the official API (SolarEdge) are
+    pulled live in build_fleet_tree, so their per-inverter telemetry is fetched
+    on demand and never needs persisting. But vendors captured through the
+    EXTENSION (Fronius Solar.web — its Query API is paid and not sold in the USA)
+    have NO connection the backend can pull through; the browser ships the
+    readings once and they must be STORED. This table is that store: the fleet
+    tree reads it as a telemetry fallback so a Fronius array shows its real
+    per-inverter comb (peer-analyzed) exactly like an API-connected one.
+
+    Keyed by (inverter_id, day) so a re-capture upserts in place. `kwh` is the
+    day's energy for that single inverter (integrated from the portal's power
+    curve at capture time).
+    """
+    __tablename__ = "inverter_daily"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    inverter_id: Mapped[int] = mapped_column(Integer, ForeignKey("inverters.id"), index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    kwh: Mapped[float] = mapped_column(Float)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), default="extension_pull")
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("inverter_id", "day", name="uq_inverter_daily_inv_day"),
+    )
+
+
 class WarrantyClaim(Base):
     """An automatic warranty / service claim — the paperwork arm of Array
     Operator. The agent watches the fleet and the MOMENT an inverter goes DEAD

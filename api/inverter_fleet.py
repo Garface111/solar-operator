@@ -31,7 +31,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import Array, Inverter, InverterConnection, Tenant, now
+from .models import Array, Inverter, InverterConnection, InverterDaily, Tenant, now
 from .inverters import peer_analysis
 
 log = logging.getLogger(__name__)
@@ -98,6 +98,24 @@ def _telemetry_for_site(vendor: str, api_key: str, site_id, *, force: bool = Fal
             }
     _site_cache[ck] = (now(), out)
     return out
+
+
+def _stored_inverter_daily(db, inverter_id: int) -> list[dict]:
+    """Read persisted per-inverter daily kWh (InverterDaily) for vendors captured
+    via the extension (Fronius) that have no live API connection to pull through.
+    Returns peer_analysis's expected shape: [{"date": "YYYY-MM-DD", "kwh": float}]
+    ascending, last 14 days.
+    """
+    rows = db.execute(
+        select(InverterDaily)
+        .where(InverterDaily.inverter_id == inverter_id)
+        .order_by(InverterDaily.day.desc())
+        .limit(14)
+    ).scalars().all()
+    return [
+        {"date": r.day.isoformat(), "kwh": r.kwh}
+        for r in sorted(rows, key=lambda x: x.day)
+    ]
 
 
 # ─────────────────────────── discovery / persistence ─────────────────────────
@@ -245,6 +263,13 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 tel_map = _telemetry_for_site(conn_vendor, conn.config["api_key"],
                                               conn.config["site_id"], force=force_refresh)
             m = tel_map.get(iv.serial, {})
+            # Fallback for extension-captured vendors (Fronius): no API connection
+            # to pull through, so read the persisted per-inverter daily rows.
+            if not m.get("daily"):
+                stored = _stored_inverter_daily(db, iv.id)
+                if stored:
+                    m = dict(m)
+                    m["daily"] = stored
             meta_by_serial[iv.serial] = m
             units.append({
                 "id": iv.serial,

@@ -562,3 +562,93 @@ def test_inverter_capture_empty_sites_400(client):
         headers=_auth(key),
     )
     assert resp.status_code == 400
+
+
+# ── per-inverter capture → real sandbox comb ──────────────────────────────────
+
+def _fronius_payload_with_inverters():
+    """One system with 3 inverters — one clearly underproducing (the peer signal)."""
+    return {
+        "provider": "fronius",
+        "sites": [{
+            "site_id": "6c97d4a9-25c3-4ab3-9ab9-a62f0107c53a",
+            "name": "Waterford",
+            "energy_today_kwh": 120.0,
+            "current_power_w": 30000.0,
+            "error_count_today": 0,
+            "online": True,
+            "status": "producing",
+            "inverters": [
+                {"serial": "dev-1", "name": "Primo 12.5-1 (1)", "model": "Primo 12.5-1",
+                 "nameplate_kw": 12.5, "energy_today_kwh": 41.5},
+                {"serial": "dev-2", "name": "Primo 12.5-1 (2)", "model": "Primo 12.5-1",
+                 "nameplate_kw": 12.5, "energy_today_kwh": 41.0},
+                {"serial": "dev-3", "name": "Primo 12.5-1 (3)", "model": "Primo 12.5-1",
+                 "nameplate_kw": 12.5, "energy_today_kwh": 6.0},  # laggard
+            ],
+        }],
+    }
+
+
+def test_inverter_capture_persists_per_inverter_rows(client):
+    from api.models import Inverter, InverterDaily
+    tid, key = _make_tenant()
+    resp = client.post("/v1/array-owners/inverter-capture",
+                       json=_fronius_payload_with_inverters(), headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["inverters_persisted"] == 3
+
+    with SessionLocal() as db:
+        invs = db.execute(select(Inverter).where(Inverter.tenant_id == tid)).scalars().all()
+        assert len(invs) == 3
+        assert all(iv.vendor == "fronius" for iv in invs)
+        assert sorted(iv.serial for iv in invs) == ["dev-1", "dev-2", "dev-3"]
+        assert all(iv.nameplate_kw == 12.5 for iv in invs)
+        daily = db.execute(select(InverterDaily).where(InverterDaily.tenant_id == tid)).scalars().all()
+        assert len(daily) == 3
+        assert math.isclose(sorted(d.kwh for d in daily)[0], 6.0)
+
+
+def test_inverter_capture_per_inverter_idempotent(client):
+    """Re-capture must not duplicate Inverter or InverterDaily rows."""
+    from api.models import Inverter, InverterDaily
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+    # second capture, laggard climbed a bit
+    p2 = _fronius_payload_with_inverters()
+    p2["sites"][0]["inverters"][2]["energy_today_kwh"] = 9.0
+    client.post("/v1/array-owners/inverter-capture", json=p2, headers=_auth(key))
+    with SessionLocal() as db:
+        invs = db.execute(select(Inverter).where(Inverter.tenant_id == tid)).scalars().all()
+        assert len(invs) == 3  # no dup inverters
+        daily = db.execute(select(InverterDaily).where(InverterDaily.tenant_id == tid)).scalars().all()
+        assert len(daily) == 3  # no dup day rows
+        lag = db.execute(
+            select(InverterDaily).join(Inverter).where(
+                Inverter.tenant_id == tid, Inverter.serial == "dev-3"
+            )
+        ).scalar_one()
+        assert math.isclose(lag.kwh, 9.0)  # max(6,9)
+
+
+def test_fleet_tree_renders_fronius_comb(client):
+    """The sandbox fleet tree shows the captured Fronius inverters as a real comb,
+    peer-analyzed — the laggard flagged, fed from InverterDaily (no API conn)."""
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+    resp = client.get("/v1/array-owners/fleet-tree", headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    tree = resp.json()
+    assert tree["summary"]["inverters_total"] == 3
+    col = next(c for c in tree["columns"] if c["array_name"] == "Waterford")
+    assert col["inverter_count"] == 3
+    serials = sorted(i["sn"] for i in col["inverters"])
+    assert serials == ["dev-1", "dev-2", "dev-3"]
+    # The laggard (dev-3, 6 kWh vs ~41) must have a low peer_index / attention.
+    lag = next(i for i in col["inverters"] if i["sn"] == "dev-3")
+    healthy = next(i for i in col["inverters"] if i["sn"] == "dev-1")
+    assert lag["peer_index"] is not None
+    assert lag["peer_index"] < healthy["peer_index"]

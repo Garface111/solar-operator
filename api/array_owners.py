@@ -35,6 +35,7 @@ from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
 from .models import Array, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
+from .models import Inverter, InverterDaily
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
@@ -1498,6 +1499,15 @@ def connect_single(
 # and today's energy as a DailyGeneration row so the existing /overview value +
 # peer model lights up with zero further wiring.
 
+class CaptureInverter(BaseModel):
+    serial: str                       # vendor device id (Fronius deviceId GUID)
+    name: Optional[str] = None
+    model: Optional[str] = None
+    nameplate_kw: Optional[float] = None
+    energy_today_kwh: Optional[float] = None
+    peak_power_kw: Optional[float] = None
+
+
 class CaptureSite(BaseModel):
     site_id: str
     name: Optional[str] = None
@@ -1511,6 +1521,7 @@ class CaptureSite(BaseModel):
     status: Optional[str] = None
     last_report: Optional[str] = None
     last_report_disp: Optional[str] = None
+    inverters: list[CaptureInverter] = []
 
 
 class InverterCaptureBody(BaseModel):
@@ -1602,6 +1613,71 @@ def inverter_capture(
                     row.source = "extension_pull"
                     row.uploaded_at = now()
 
+            # ── Per-inverter persistence (the sandbox comb) ──────────────────
+            # When the capture drilled into a system's analysis chart, we get one
+            # entry per real inverter. Persist each as an Inverter row (idempotent
+            # by tenant+vendor+serial, owner arrangement preserved) and store its
+            # day's kWh in InverterDaily so build_fleet_tree can peer-analyze the
+            # real comb — no API connection needed.
+            inv_persisted = 0
+            for ci in (site.inverters or []):
+                serial = str(ci.serial or "").strip()
+                if not serial:
+                    continue
+                iv = db.execute(
+                    select(Inverter).where(
+                        Inverter.tenant_id == tenant.id,
+                        Inverter.vendor == provider,
+                        Inverter.serial == serial,
+                    )
+                ).scalar_one_or_none()
+                if iv is None:
+                    maxpos = db.execute(
+                        select(Inverter.position).where(
+                            Inverter.tenant_id == tenant.id,
+                            Inverter.array_id == arr.id,
+                            Inverter.deleted_at.is_(None),
+                        ).order_by(Inverter.position.desc())
+                    ).scalars().first()
+                    iv = Inverter(
+                        tenant_id=tenant.id, array_id=arr.id,
+                        position=(maxpos or 0) + 1,
+                        vendor=provider, serial=serial,
+                        source_site_id=site.site_id, source_array_id=arr.id,
+                    )
+                    db.add(iv)
+                    db.flush()
+                else:
+                    # Refresh source pointer; NEVER clobber owner array_id/position.
+                    iv.source_site_id = site.site_id
+                    if iv.source_array_id is None:
+                        iv.source_array_id = arr.id
+                    if iv.deleted_at is not None:
+                        iv.deleted_at = None
+                iv.name = ci.name or iv.name or serial
+                iv.model = ci.model or iv.model
+                if ci.nameplate_kw is not None:
+                    iv.nameplate_kw = ci.nameplate_kw
+                iv.last_seen_at = now()
+
+                if ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0:
+                    ikwh = float(ci.energy_today_kwh)
+                    drow = db.execute(
+                        select(InverterDaily).where(
+                            InverterDaily.inverter_id == iv.id,
+                            InverterDaily.day == today,
+                        )
+                    ).scalar_one_or_none()
+                    if drow is None:
+                        db.add(InverterDaily(
+                            tenant_id=tenant.id, inverter_id=iv.id, day=today,
+                            kwh=ikwh, source="extension_pull",
+                        ))
+                    else:
+                        drow.kwh = max(drow.kwh, ikwh)  # climbs through the day
+                        drow.uploaded_at = now()
+                inv_persisted += 1
+
             results.append({
                 "site_id": site.site_id,
                 "array_id": arr.id,
@@ -1611,6 +1687,7 @@ def inverter_capture(
                 "current_power_w": site.current_power_w,
                 "status": site.status,
                 "error_count_today": site.error_count_today or 0,
+                "inverters_persisted": inv_persisted,
             })
 
         db.commit()
@@ -1621,6 +1698,7 @@ def inverter_capture(
         "provider": provider,
         "sites_captured": len(results),
         "arrays_created": sum(1 for r in results if r["created"]),
+        "inverters_persisted": sum(r["inverters_persisted"] for r in results),
         "faults_detected": fault_count,
         "sites": results,
     }
