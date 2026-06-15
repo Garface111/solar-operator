@@ -43,34 +43,37 @@
     const d = await crypto.subtle.digest("SHA-1", buf);
     return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  // ennexos.sunnyportal.com and uiapi.sunnyportal.com are DIFFERENT origins, and
-  // uiapi sends Access-Control-Allow-Origin:* — which the browser won't pair with
-  // a credentialed content-script fetch (it CORS-blocks, and the capture stalls).
-  // So we route every uiapi GET through the background service worker, which holds
-  // host_permissions for uiapi and can make the credentialed call CORS-free.
-  function smaApiGet(url) {
-    return new Promise((resolve, reject) => {
-      try {
-        chrome.runtime.sendMessage({ type: "SMA_API_GET", url }, (resp) => {
-          if (chrome.runtime.lastError) {
-            try { console.log("[EnergyAgent SMA] proxy msg error", url, chrome.runtime.lastError.message); } catch (_) {}
-            reject(new Error(chrome.runtime.lastError.message)); return;
-          }
-          try { console.log("[EnergyAgent SMA] GET", url, "->", resp && (resp.ok ? "ok" : ("FAIL status=" + resp.status + " err=" + resp.error))); } catch (_) {}
-          if (!resp || !resp.ok) { reject(new Error("api " + (resp && (resp.status || resp.error)))); return; }
-          resolve(resp.data);
-        });
-      } catch (e) { reject(e); }
-    });
+  // ennexOS authenticates to uiapi.sunnyportal.com with a Keycloak OAuth Bearer
+  // token (NOT a cookie). The token lives in the page's localStorage under
+  // "access_token" — content scripts share localStorage with the host page, so
+  // we read it directly and send it as `Authorization: Bearer …`, exactly like
+  // SMA's own SPA. Crucially we do NOT use credentials:"include" — that combined
+  // with the API's Access-Control-Allow-Origin:* is what the browser CORS-blocks.
+  // No-credentials + Bearer header matches the SPA and passes CORS cleanly.
+  function getAccessToken() {
+    try { return localStorage.getItem("access_token"); } catch (_) { return null; }
   }
   async function getJson(url) {
-    return smaApiGet(url);   // throws if the background fetch failed / non-2xx
+    const tok = getAccessToken();
+    if (!tok) throw new Error("no access_token in localStorage (not logged in?)");
+    let r;
+    try {
+      r = await fetch(url, {
+        headers: { "Authorization": "Bearer " + tok, "Accept": "application/json" },
+        // default credentials mode ("same-origin") → no cookies cross-origin → CORS ok with ACAO:*
+      });
+    } catch (e) {
+      try { console.log("[EnergyAgent SMA] GET", url, "-> NETWORK/CORS FAIL", e && e.message); } catch (_) {}
+      throw e;
+    }
+    try { console.log("[EnergyAgent SMA] GET", url, "->", r.ok ? "ok " + r.status : "FAIL status=" + r.status); } catch (_) {}
+    if (!r.ok) throw new Error("api " + r.status);
+    return r.json();
   }
-  // navigation/menuitems returns 200 JSON when signed in; the proxy rejects on
-  // 401/403 (non-ok), so a successful resolve = signed in.
+  // navigation/menuitems returns 200 JSON when the Bearer token is valid.
   async function isSignedIn() {
     try {
-      await smaApiGet(UIAPI + "/api/v1/navigation/menuitems");
+      await getJson(UIAPI + "/api/v1/navigation/menuitems");
       return true;
     } catch (_) { return false; }
   }

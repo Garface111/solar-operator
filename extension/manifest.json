@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.9.6",
+  "version": "1.9.7",
   "description": "Captures Green Mountain Power and SmartHub utility bills for NEPOOL reports, and links SolarEdge + Fronius + SMA (per-inverter) accounts for Array Operator.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",
