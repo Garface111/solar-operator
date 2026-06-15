@@ -80,37 +80,51 @@
     return "idle";
   }
 
-  // Find the plant id: prefer the SPA URL path (/<plantId>/...), else the
-  // navigation menu's Plant componentId.
-  async function resolvePlantId() {
+  // Discover which plant(s) to capture. ennexOS /navigation is a tree-walker:
+  //   /navigation/menuitems            -> Portfolio (componentId null) at root
+  //   /navigation/menuitems?componentId=X -> that Plant
+  //   /navigation?parentId=X           -> children (devices) of plant X
+  //   /navigation        (no param)    -> root children = the owner's Plant(s)
+  // Returns an array of {id, name}. Handles: (a) the owner sitting ON a plant
+  // (URL has the id), and (b) the owner on the portfolio root (enumerate all).
+  async function resolvePlants() {
+    // (a) URL is scoped to one plant: ennexos.sunnyportal.com/<plantId>/...
     const m = location.pathname.match(/\/(\d{4,})\b/);
-    if (m) return m[1];
+    if (m) return [{ id: m[1], name: null }];
+
+    const out = [];
+    // (b) Portfolio root — enumerate top-level components (the Plants).
+    try {
+      const roots = await getJson(UIAPI + "/api/v1/navigation");
+      if (Array.isArray(roots)) {
+        for (const c of roots) {
+          if (c && c.componentType === "Plant" && c.componentId) {
+            out.push({ id: String(c.componentId), name: c.name || null });
+          }
+        }
+      }
+    } catch (_) { /* fall through to menuitems */ }
+    if (out.length) return out;
+
+    // Single-plant accounts may resolve straight to their plant via menuitems.
     try {
       const nav = await getJson(UIAPI + "/api/v1/navigation/menuitems");
-      if (nav && nav.componentType === "Plant" && nav.componentId) return String(nav.componentId);
-    } catch (_) { /* fall through */ }
-    return null;
+      if (nav && nav.componentType === "Plant" && nav.componentId) {
+        return [{ id: String(nav.componentId), name: nav.name || null }];
+      }
+    } catch (_) { /* none */ }
+    return out;   // possibly empty — caller retries next poll (SPA may still load)
   }
 
-  async function captureFlow() {
-    const plantId = await resolvePlantId();
-    if (!plantId) throw new Error("no plant id");
-
-    let plantName = null;
-    try {
-      const plant = await getJson(UIAPI + "/api/v1/plants/" + plantId);
-      plantName = (plant && plant.name) || null;   // plants/{id} carries no name field reliably
-    } catch (_) { /* name is a bonus */ }
-    // The navigation menu reliably carries the plant display name ("Timberworks").
+  // Capture one plant's per-inverter comb. Returns a site object or null.
+  async function captureOnePlant(plantId, hintName) {
+    let plantName = hintName || null;
     if (!plantName) {
       try {
-        const nav = await getJson(UIAPI + "/api/v1/navigation/menuitems");
+        const nav = await getJson(UIAPI + "/api/v1/navigation/menuitems?componentId=" + encodeURIComponent(plantId));
         if (nav && nav.name) plantName = nav.name;
       } catch (_) {}
     }
-
-    // Per-inverter overview — the comb. One call, every device with live power +
-    // today's energy directly (no curve integration needed).
     const devices = await getJson(UIAPI + "/api/v1/overview/" + plantId + "/devices");
     const inverters = (devices || [])
       .filter((d) => d && d.componentType === "Device" && d.pvPower !== null && d.pvPower !== undefined)
@@ -123,18 +137,15 @@
         current_power_w: typeof d.pvPower === "number" ? d.pvPower : null,
         status: deriveStatus(d),
       }));
+    if (!inverters.length) return null;
 
-    if (!inverters.length) throw new Error("no producing inverters");
-
-    // System totals = sum of the inverters (ennexOS gives per-device Wh directly).
     let energyToday = 0, liveW = 0, peakKw = 0;
     inverters.forEach((iv) => {
       if (iv.energy_today_kwh) energyToday += iv.energy_today_kwh;
       if (iv.current_power_w) liveW += iv.current_power_w;
       if (iv.nameplate_kw) peakKw += iv.nameplate_kw;
     });
-
-    const site = {
+    return {
       site_id: String(plantId),
       name: plantName || ("SMA plant " + plantId),
       peak_power_kw: peakKw || null,
@@ -145,8 +156,21 @@
       status: liveW > 0 ? "producing" : "idle",
       inverters,
     };
+  }
 
-    return { provider: "sma", capturedAt: new Date().toISOString(), sites: [site] };
+  async function captureFlow() {
+    const plants = await resolvePlants();
+    if (!plants.length) throw new Error("no plants found");
+
+    const sites = [];
+    for (const p of plants) {
+      try {
+        const site = await captureOnePlant(p.id, p.name);
+        if (site) sites.push(site);
+      } catch (_) { /* skip a plant that errored; others still ship */ }
+    }
+    if (!sites.length) throw new Error("no producing inverters");
+    return { provider: "sma", capturedAt: new Date().toISOString(), sites };
   }
 
   function hasIntent() {
@@ -169,9 +193,11 @@
     broadcastLoginState("signed_in");
     let payload;
     try { payload = await captureFlow(); } catch (_) { return; }   // retry next tick
-    const site = (payload.sites || [])[0];
-    if (!site || !(site.inverters || []).length) return;
-    const sig = site.site_id + "|" + site.inverters.map((i) => i.serial + ":" + i.energy_today_kwh).join(",");
+    const sites = payload.sites || [];
+    if (!sites.length) return;
+    const sig = sites.map((s) =>
+      s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
+    ).join("||");
     const h = await hashString(sig);
     if (h === lastHash) return;
     lastHash = h;
