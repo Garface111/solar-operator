@@ -229,6 +229,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous response
   }
+  // v1.9.0: Fronius (Solar.web) inverter capture for Array Operator. Fronius's
+  // Solar.web Query API is a paid business API NOT offered in the USA, so there
+  // is no key for the backend to pull with. Instead solarweb_content.js reads
+  // the owner's LIVE READINGS from the logged-in portal and we hand them to the
+  // AO page via SO_CAPTURE_LANDED. The page POSTs them to
+  // /v1/array-owners/inverter-capture with its session token (page-side auth,
+  // same as the SolarEdge connect flow).
+  if (msg.type === "FRONIUS_CAPTURED") {
+    const p = msg.payload || {};
+    const landed = {
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: "fronius",
+      sites: Array.isArray(p.sites) ? p.sites : [],
+      accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(landed);
+    chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
   // v1.6.2: all capture layers struck out on a billing/usage page — report
   // the deployment to the drift radar (best-effort, fire and forget).
   if (msg.type === "SMARTHUB_SCRAPE_EMPTY") {
@@ -295,6 +317,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try {
             await chrome.storage.local.set({
               so_capture_intent: { vendor: "solaredge", ts: Date.now() },
+            });
+          } catch (_) { /* non-fatal */ }
+        }
+        // v1.9.0: same for Fronius Solar.web — arm the fronius capture intent so
+        // solarweb_content.js reads the owner's live readings on this explicit
+        // "Connect Fronius" visit. Solar.web is NOT in the wipe list either
+        // (we want their existing session to ride — zero extra logins).
+        if (host.endsWith("solarweb.com")) {
+          try {
+            await chrome.storage.local.set({
+              so_capture_intent: { vendor: "fronius", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
         }

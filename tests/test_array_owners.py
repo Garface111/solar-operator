@@ -435,3 +435,130 @@ def test_connect_single_unavailable_vendor_400(client):
         headers=_auth(key),
     )
     assert resp.status_code == 400
+
+
+# ── inverter-capture (extension readings ingest: Fronius) ─────────────────────
+
+def _fronius_payload():
+    return {
+        "provider": "fronius",
+        "sites": [
+            {
+                "site_id": "6c97d4a9-25c3-4ab3-9ab9-a62f0107c53a",
+                "name": "Waterford",
+                "peak_power_kw": 157.2,
+                "inverter_count": 12,
+                "energy_today_kwh": 488.82,
+                "current_power_w": 57017.0,
+                "error_count_today": 0,
+                "online": True,
+                "status": "producing",
+            },
+            {
+                "site_id": "3d6d03aa-3acf-4dbb-b853-a4de015d5731",
+                "name": "west chester",
+                "peak_power_kw": 151.2,
+                "inverter_count": 20,
+                "energy_today_kwh": 98.25,
+                "current_power_w": 0.0,
+                "error_count_today": 1,
+                "online": True,
+                "status": "fault",
+            },
+        ],
+    }
+
+
+def test_inverter_capture_creates_arrays_and_records_kwh(client):
+    """A Fronius extension capture creates one Array per system and writes
+    today's energy as a DailyGeneration row the overview value model reads."""
+    tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/inverter-capture",
+        json=_fronius_payload(),
+        headers=_auth(key),
+    )
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["ok"] is True
+    assert out["sites_captured"] == 2
+    assert out["arrays_created"] == 2
+    assert out["faults_detected"] == 1  # west chester had error_count_today=1
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(Array.tenant_id == tid)
+        ).scalars().all()
+        names = sorted(a.name for a in arrays)
+        assert names == ["Waterford", "west chester"]
+        # Today's energy recorded as extension_pull DailyGeneration.
+        rows = db.execute(
+            select(DailyGeneration).where(DailyGeneration.tenant_id == tid)
+        ).scalars().all()
+        assert len(rows) == 2
+        assert all(r.source == "extension_pull" for r in rows)
+        by_kwh = sorted(r.kwh for r in rows)
+        assert math.isclose(by_kwh[0], 98.25) and math.isclose(by_kwh[1], 488.82)
+
+
+def test_inverter_capture_is_idempotent_and_takes_max_kwh(client):
+    """Re-capturing the same day must NOT duplicate arrays/rows, and the daily
+    kWh takes the max (Solar.web's EnergyTodayInkWh climbs through the day)."""
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload(), headers=_auth(key))
+    # Second capture later in the day: Waterford climbed, a re-read of others same.
+    p2 = _fronius_payload()
+    p2["sites"][0]["energy_today_kwh"] = 510.40  # climbed
+    p2["sites"][1]["energy_today_kwh"] = 50.00   # bogus drop — must be ignored
+    resp = client.post("/v1/array-owners/inverter-capture",
+                       json=p2, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["arrays_created"] == 0  # matched existing by name
+
+    with SessionLocal() as db:
+        arrays = db.execute(select(Array).where(Array.tenant_id == tid)).scalars().all()
+        assert len(arrays) == 2  # no duplicates
+        rows = db.execute(
+            select(DailyGeneration).where(DailyGeneration.tenant_id == tid)
+        ).scalars().all()
+        assert len(rows) == 2  # no duplicate day rows
+        kwhs = sorted(r.kwh for r in rows)
+        # Waterford -> max(488.82, 510.40)=510.40; west chester -> max(98.25,50)=98.25
+        assert math.isclose(kwhs[0], 98.25) and math.isclose(kwhs[1], 510.40)
+
+
+def test_inverter_capture_accepts_dashboard_session_token(client):
+    """Dual-auth: the AO page authenticates with a signed session token."""
+    from api.account import _sign_session
+    tid, _key = _make_tenant()
+    token = _sign_session(tid)
+    resp = client.post(
+        "/v1/array-owners/inverter-capture",
+        json=_fronius_payload(),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sites_captured"] == 2
+
+
+def test_inverter_capture_rejects_non_capture_vendor(client):
+    """SolarEdge has a real API key path — it must NOT use the readings-ingest
+    endpoint (guards against a cred-bearing vendor sneaking through)."""
+    _tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/inverter-capture",
+        json={"provider": "solaredge", "sites": [{"site_id": "1", "name": "x"}]},
+        headers=_auth(key),
+    )
+    assert resp.status_code == 400
+
+
+def test_inverter_capture_empty_sites_400(client):
+    _tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/inverter-capture",
+        json={"provider": "fronius", "sites": []},
+        headers=_auth(key),
+    )
+    assert resp.status_code == 400

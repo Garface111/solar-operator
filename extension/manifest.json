@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.8.0",
-  "description": "Captures Green Mountain Power and SmartHub utility bills for NEPOOL reports, and links SolarEdge inverter accounts for Array Operator.",
+  "version": "1.9.0",
+  "description": "Captures Green Mountain Power and SmartHub utility bills for NEPOOL reports, and links SolarEdge + Fronius inverter accounts for Array Operator.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",
   "permissions": [
@@ -19,6 +19,8 @@
     "https://vermontelectric.smarthub.coop/*",
     "https://*.smarthub.coop/*",
     "https://monitoring.solaredge.com/*",
+    "https://www.solarweb.com/*",
+    "https://*.solarweb.com/*",
     "https://nepooloperator.com/*",
     "https://*.nepooloperator.com/*",
     "https://arrayoperator.com/*",
@@ -69,6 +71,16 @@
       ],
       "js": [
         "solaredge_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.solarweb.com/*",
+        "https://*.solarweb.com/*"
+      ],
+      "js": [
+        "solarweb_content.js"
       ],
       "run_at": "document_idle"
     },

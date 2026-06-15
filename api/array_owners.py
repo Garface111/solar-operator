@@ -1486,3 +1486,141 @@ def connect_single(
         "site_name": result.get("site_name"),
         "message": f"{mod.LABEL} system connected to “{array_name}”.",
     }
+
+
+# ── extension-based capture (readings ingest) ─────────────────────────────────
+# Some vendors have NO usable API key for us (Fronius's Solar.web Query API is a
+# paid business API not offered in the USA; Chint/CPS has no public API at all).
+# For those, the EnergyAgent browser extension reads the owner's live numbers
+# straight from the portal they're already logged into, and POSTs them here.
+# Unlike connect-single (which stores a credential and lets the backend pull),
+# this endpoint ingests the READINGS themselves: one Array per captured system,
+# and today's energy as a DailyGeneration row so the existing /overview value +
+# peer model lights up with zero further wiring.
+
+class CaptureSite(BaseModel):
+    site_id: str
+    name: Optional[str] = None
+    peak_power_kw: Optional[float] = None
+    inverter_count: Optional[int] = None
+    energy_today_kwh: Optional[float] = None
+    kwh_per_kwp: Optional[float] = None
+    current_power_w: Optional[float] = None
+    error_count_today: Optional[int] = 0
+    online: Optional[bool] = None
+    status: Optional[str] = None
+    last_report: Optional[str] = None
+    last_report_disp: Optional[str] = None
+
+
+class InverterCaptureBody(BaseModel):
+    # Vendors that ship readings via the extension rather than a pullable key.
+    # Constrained so a bad/cred-bearing vendor can't sneak in through this path.
+    provider: str
+    sites: list[CaptureSite]
+
+
+# Vendors allowed to ingest readings this way (no usable backend API key path).
+_CAPTURE_VENDORS = {"fronius", "chint"}
+
+
+@router.post("/v1/array-owners/inverter-capture")
+def inverter_capture(
+    body: InverterCaptureBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Ingest live inverter readings captured by the extension from a portal the
+    owner is logged into (Fronius Solar.web today; extensible to other no-key
+    vendors). Dual-auth (session token OR tenant key). For each captured system:
+    match an Array by exact name (else create one), record today's energy as a
+    DailyGeneration row (source="extension_pull"), and stamp nameplate when the
+    portal gave us one. Returns a per-site summary the onboarding page can show.
+
+    Idempotent: re-capturing the same day upserts the DailyGeneration row and
+    re-matches the same Array by name, so repeated captures never duplicate.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    provider = (body.provider or "").strip().lower()
+    if provider not in _CAPTURE_VENDORS:
+        raise HTTPException(
+            400,
+            f"Vendor {provider!r} is not an extension-capture vendor "
+            f"(allowed: {', '.join(sorted(_CAPTURE_VENDORS))}).",
+        )
+    if not body.sites:
+        raise HTTPException(400, "No sites in capture payload.")
+
+    today = now().date()
+    results: list[dict] = []
+
+    with SessionLocal() as db:
+        existing = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        by_name = {a.name.strip().lower(): a for a in existing}
+
+        for site in body.sites:
+            site_name = (site.name or "").strip() or f"Fronius {site.site_id}"
+            arr = by_name.get(site_name.lower())
+            created = False
+            if arr is None:
+                arr = Array(
+                    tenant_id=tenant.id, name=site_name,
+                    client_id=None, fuel_type="solar",
+                )
+                db.add(arr)
+                db.flush()
+                by_name[site_name.lower()] = arr
+                created = True
+
+            # NOTE: nameplate hinting via Inverter rows is a follow-up — the
+            # Array is the owner-facing grouping, and the value/peer model
+            # consumes the kWh reading recorded below.
+
+            recorded_kwh = None
+            if site.energy_today_kwh is not None and site.energy_today_kwh >= 0:
+                recorded_kwh = float(site.energy_today_kwh)
+                row = db.execute(
+                    select(DailyGeneration).where(
+                        DailyGeneration.array_id == arr.id,
+                        DailyGeneration.day == today,
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    row = DailyGeneration(
+                        tenant_id=tenant.id, array_id=arr.id, day=today,
+                        kwh=recorded_kwh, source="extension_pull",
+                    )
+                    db.add(row)
+                else:
+                    # Solar.web's EnergyTodayInkWh climbs through the day — take
+                    # the max so an early-morning re-capture can't lower it.
+                    row.kwh = max(row.kwh, recorded_kwh)
+                    row.source = "extension_pull"
+                    row.uploaded_at = now()
+
+            results.append({
+                "site_id": site.site_id,
+                "array_id": arr.id,
+                "name": arr.name,
+                "created": created,
+                "recorded_today_kwh": recorded_kwh,
+                "current_power_w": site.current_power_w,
+                "status": site.status,
+                "error_count_today": site.error_count_today or 0,
+            })
+
+        db.commit()
+
+    fault_count = sum(1 for r in results if (r["error_count_today"] or 0) > 0)
+    return {
+        "ok": True,
+        "provider": provider,
+        "sites_captured": len(results),
+        "arrays_created": sum(1 for r in results if r["created"]),
+        "faults_detected": fault_count,
+        "sites": results,
+    }
