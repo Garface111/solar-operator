@@ -29,7 +29,7 @@ from datetime import timedelta
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, func
 
@@ -324,7 +324,7 @@ def _create_trial_tenant(
 
 
 @router.post("/start", response_model=StartResponse)
-def start(req: StartRequest, request: Request):
+def start(req: StartRequest, request: Request, background_tasks: BackgroundTasks):
     """Begin onboarding with NO upfront payment.
 
     Creates a live, trialing tenant and returns its onboarding token. No card is
@@ -341,11 +341,14 @@ def start(req: StartRequest, request: Request):
         password=req.password, array_count=req.array_count,
         product=req.product or "nepool",
     )
-    send_internal_alert(
+    # Internal alert is non-critical — send it AFTER the response so the Resend
+    # round-trip doesn't hold a request thread under a signup burst.
+    background_tasks.add_task(
+        send_internal_alert,
         "🌞 New trial started (no card)",
         f"Tenant {tenant_id} ({req.email.lower().strip()}) started a 14-day "
         f"trial. Product: {req.product or 'nepool'}. No card on file. "
-        f"Array estimate: {req.array_count}."
+        f"Array estimate: {req.array_count}.",
     )
     return StartResponse(onboarding_token=onboarding_token, tenant_id=tenant_id)
 
@@ -676,7 +679,7 @@ class CompleteBody(BaseModel):
 
 
 @router.post("/complete")
-def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
+def complete(background_tasks: BackgroundTasks, token: str = Query(...), body: Optional[CompleteBody] = None):
     """Finish onboarding: mark stage='done', send the deferred welcome email,
     and fire a magic-link sign-in email so the operator can reach the
     dashboard (reuses account.py's auth flow)."""
@@ -737,27 +740,28 @@ def complete(token: str = Query(...), body: Optional[CompleteBody] = None):
     # Third email: trial welcome — explains the 14-day trial and primes them
     # to add clients/arrays. trial_ends_at is set by the Stripe webhook;
     # fall back to now+14 if it hasn't landed yet.
+    # Non-critical to the response, so queue the trial-welcome email and the
+    # internal alert as background work — keeps completion fast under a signup
+    # burst (the magic link above stays synchronous since its status is returned).
+    # trial_ends_at falls back to now+14 if the Stripe webhook lagged.
     try:
         from datetime import datetime as _dt, timedelta as _td
         _trial_end = trial_ends_at if trial_ends_at else _dt.utcnow() + _td(days=14)
         _trial_end_str = _trial_end.strftime("%B %-d, %Y")
-        trial_welcome_sent = send_trial_welcome_email(
+        background_tasks.add_task(
+            send_trial_welcome_email,
             to=email, name=name,
             trial_end_iso_date=_trial_end_str,
             dashboard_url=f"{branding.dashboard_url(product)}",
             product=product,
         )
-        if trial_welcome_sent:
-            logger.info("Trial welcome email sent to %s", email)
-        else:
-            logger.warning("Trial welcome email returned False for %s", email)
     except Exception as e:
-        logger.warning("send_trial_welcome_email failed for %s: %s", email, e)
-        trial_welcome_sent = False
+        logger.warning("Could not queue trial welcome email for %s: %s", email, e)
 
-    send_internal_alert(
+    background_tasks.add_task(
+        send_internal_alert,
         "🌞 Onboarding complete",
-        f"Tenant {tenant_id} ({email}) finished the onboarding wizard."
+        f"Tenant {tenant_id} ({email}) finished the onboarding wizard.",
     )
 
     return {"ok": True, "session_token": session_token,

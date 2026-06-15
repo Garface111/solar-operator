@@ -229,11 +229,40 @@ if _SO_DEV_ENABLED:
 def _startup():
     init_db()
     scheduler.start()
+    # Raise the threadpool that FastAPI runs sync routes in (default 40). Sign-up
+    # and most account routes are sync (blocking DB + Resend calls), so under a
+    # burst they queue here; lift the ceiling so more run concurrently. They're
+    # still bounded by the DB pool, so keep this near pool size + a buffer.
+    try:
+        import anyio
+        anyio.to_thread.current_default_thread_limiter().total_tokens = int(
+            os.environ.get("THREADPOOL_TOKENS", "64"))
+    except Exception:
+        pass  # non-fatal — fall back to the default limiter
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "solar-operator-api"}
+    # Additive, non-secret readiness diagnostics so we can verify at a glance that
+    # prod is on Postgres (not the SQLite fallback) and that email/billing are
+    # wired. Booleans only — no keys or values are exposed. Still returns ok:true
+    # so the Railway healthcheck contract is unchanged.
+    try:
+        from .db import engine
+        dialect = engine.dialect.name
+        pool_max = engine.pool.size() + engine.pool._max_overflow if dialect != "sqlite" else None
+    except Exception:
+        dialect, pool_max = "unknown", None
+    return {
+        "ok": True,
+        "service": "solar-operator-api",
+        "db": dialect,                       # "postgresql" = good; "sqlite" = NOT production-ready
+        "db_pool_max": pool_max,
+        "email_configured": bool(os.getenv("RESEND_API_KEY")),
+        "stripe_configured": bool(os.getenv("STRIPE_SECRET_KEY")),
+        "stripe_array_price_set": bool(os.getenv("STRIPE_ARRAY_PRICE_ID")),
+        "web_concurrency": int(os.getenv("WEB_CONCURRENCY", "1")),
+    }
 
 
 @app.post("/v1/extension/heartbeat")

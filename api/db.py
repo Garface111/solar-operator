@@ -18,12 +18,27 @@ if not DB_URL:
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
+# Connection pool. SQLite ignores pool sizing (single-writer), so only tune it
+# for Postgres. Defaults raise the ceiling from SQLAlchemy's stock 5+10=15 to
+# 15+15=30 concurrent connections per web process — enough to absorb a burst of
+# sign-ups through the sync-route threadpool without exhausting the pool. Both
+# knobs are env-tunable; keep total (size+overflow) * WEB_CONCURRENCY under the
+# Postgres max_connections limit. pool_recycle avoids stale-conn errors after
+# Postgres idle timeouts.
+_is_sqlite = DB_URL.startswith("sqlite")
+_pool_kwargs = {} if _is_sqlite else {
+    "pool_size": int(os.environ.get("DB_POOL_SIZE", "15")),
+    "max_overflow": int(os.environ.get("DB_MAX_OVERFLOW", "15")),
+    "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE", "1800")),
+    "pool_timeout": int(os.environ.get("DB_POOL_TIMEOUT", "30")),
+}
 engine = create_engine(
     DB_URL,
     echo=False,
     future=True,
     pool_pre_ping=True,
-    connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {},
+    connect_args={"check_same_thread": False} if _is_sqlite else {},
+    **_pool_kwargs,
 )
 
 # SQLite-specific: enable FK enforcement
