@@ -1532,7 +1532,7 @@ class InverterCaptureBody(BaseModel):
 
 
 # Vendors allowed to ingest readings this way (no usable backend API key path).
-_CAPTURE_VENDORS = {"fronius", "chint"}
+_CAPTURE_VENDORS = {"fronius", "chint", "sma"}
 
 
 @router.post("/v1/array-owners/inverter-capture")

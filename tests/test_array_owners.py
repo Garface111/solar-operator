@@ -652,3 +652,41 @@ def test_fleet_tree_renders_fronius_comb(client):
     healthy = next(i for i in col["inverters"] if i["sn"] == "dev-1")
     assert lag["peer_index"] is not None
     assert lag["peer_index"] < healthy["peer_index"]
+
+
+# ── SMA (ennexOS) per-inverter capture — same ingest path as Fronius ──────────
+
+def test_inverter_capture_sma_persists_per_inverter(client):
+    """SMA ingests through the same readings endpoint; per-inverter rows persist
+    and the fleet tree renders the comb (grounded on Bruce's real STP inverters)."""
+    from api.models import Inverter, InverterDaily
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "sma",
+        "sites": [{
+            "site_id": "8296660", "name": "Timberworks",
+            "energy_today_kwh": 496.9, "current_power_w": 92571,
+            "error_count_today": 0, "status": "producing",
+            "inverters": [
+                {"serial": "191245395", "name": "#4 24kW", "model": "STP 24kTL-US-10",
+                 "nameplate_kw": 24.0, "energy_today_kwh": 80.0},
+                {"serial": "191218141", "name": "#7 15kW", "model": "STP 15kTL-US-10",
+                 "nameplate_kw": 15.0, "energy_today_kwh": 49.1},
+                {"serial": "191217427", "name": "#6 15kW", "model": "STP 15kTL-US-10",
+                 "nameplate_kw": 15.0, "energy_today_kwh": 51.5},
+            ],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["inverters_persisted"] == 3
+    with SessionLocal() as db:
+        invs = db.execute(select(Inverter).where(Inverter.tenant_id == tid)).scalars().all()
+        assert len(invs) == 3
+        assert all(iv.vendor == "sma" for iv in invs)
+        assert {iv.serial for iv in invs} == {"191245395", "191218141", "191217427"}
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    assert tree["summary"]["inverters_total"] == 3
+    col = next(c for c in tree["columns"] if c["array_name"] == "Timberworks")
+    assert col["vendor"] == "sma"
+

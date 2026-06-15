@@ -251,6 +251,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous response
   }
+  // v1.9.2: SMA (ennexOS / Sunny Portal) per-inverter capture for Array Operator.
+  // SMA's official API needs developer-app registration + owner consent, so we
+  // read the owner's per-inverter readings from the logged-in portal instead and
+  // hand them to the AO page via SO_CAPTURE_LANDED (same shape as Fronius).
+  if (msg.type === "SMA_CAPTURED") {
+    const p = msg.payload || {};
+    const landed = {
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: "sma",
+      sites: Array.isArray(p.sites) ? p.sites : [],
+      accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(landed);
+    chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
   // v1.6.2: all capture layers struck out on a billing/usage page — report
   // the deployment to the drift radar (best-effort, fire and forget).
   if (msg.type === "SMARTHUB_SCRAPE_EMPTY") {
@@ -328,6 +347,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try {
             await chrome.storage.local.set({
               so_capture_intent: { vendor: "fronius", ts: Date.now() },
+            });
+          } catch (_) { /* non-fatal */ }
+        }
+        // v1.9.2: same for SMA ennexOS (Sunny Portal). Not in the wipe list —
+        // ride the owner's existing session.
+        if (host.endsWith("sunnyportal.com")) {
+          try {
+            await chrome.storage.local.set({
+              so_capture_intent: { vendor: "sma", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
         }
