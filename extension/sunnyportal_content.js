@@ -147,7 +147,14 @@
         if (nav && nav.name) plantName = nav.name;
       } catch (_) {}
     }
-    const devices = await getJson(UIAPI + "/api/v1/overview/" + plantId + "/devices");
+    // The devices endpoint 500s WITHOUT ?todayDate=YYYY-MM-DD (it's a required
+    // query param — confirmed against the working portal call). Use the browser's
+    // LOCAL date, matching what the SPA sends (the plant's "today").
+    const _now = new Date();
+    const todayDate = _now.getFullYear() + "-" +
+      String(_now.getMonth() + 1).padStart(2, "0") + "-" +
+      String(_now.getDate()).padStart(2, "0");
+    const devices = await getJson(UIAPI + "/api/v1/overview/" + plantId + "/devices?todayDate=" + todayDate);
     const inverters = (devices || [])
       .filter((d) => d && d.componentType === "Device" && d.pvPower !== null && d.pvPower !== undefined)
       .map((d) => ({
