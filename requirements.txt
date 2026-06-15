@@ -17,3 +17,8 @@ passlib[bcrypt]>=1.7.4
 # was removed in bcrypt 4.1. Until passlib ships a fix (issue #190), pin
 # the bcrypt backend to keep password auth working in prod + tests.
 bcrypt<4.1
+# Error monitoring (June 2026, launch readiness). Optional at runtime: the app
+# only initializes Sentry when SENTRY_DSN is set, so this dependency being present
+# never changes behavior without explicit configuration. FastAPI integration is
+# pulled in automatically by sentry-sdk when fastapi/starlette are installed.
+sentry-sdk[fastapi]>=2.0.0

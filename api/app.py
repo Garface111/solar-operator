@@ -153,6 +153,13 @@ for _sh_code, _sh_info in _SMARTHUB_UTILITIES.items():
 
 app = FastAPI(title="NEPOOL Operator API", version="1.0.0")
 
+# Error monitoring (launch readiness). Initialized as early as possible so any
+# startup or request error is captured. No-op unless SENTRY_DSN is set, so dev +
+# tests are unaffected. This single backend serves BOTH products (NEPOOL Operator
+# and Array Operator), so this one init covers server-side errors system-wide.
+from .observability import init_sentry, capture_exception  # noqa: E402
+init_sentry()
+
 # CORS — allow the EnergyAgent umbrella front-ends to call the shared backend.
 # Two products, one API: the NEPOOL Operator marketing/app (solaroperator.org)
 # and the Array Operator owner site (array-operator-ea.netlify.app, and the
@@ -186,6 +193,50 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+# ── Global exception handler (launch readiness) ──────────────────────────────
+# Defense in depth so an unhandled 500 in prod is NEVER fully silent, even if
+# Sentry is unconfigured or down:
+#   1. forward to Sentry (no-op if disabled),
+#   2. email an internal alert (throttled so an error storm can't spam us),
+#   3. return a clean JSON 500 (no stack trace leaked to the client).
+# HTTPException / Starlette's own HTTP errors are intentionally NOT caught here —
+# those are normal control flow (401/404/etc.) and have their own handlers.
+import time as _time
+_LAST_ALERT: dict[str, float] = {}
+_ALERT_COOLDOWN_S = 300  # at most one email per error signature per 5 min
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    # Let HTTP exceptions fall through to their normal handlers.
+    if isinstance(exc, (HTTPException, StarletteHTTPException)):
+        raise exc
+    path = request.url.path
+    log.exception("Unhandled error on %s", path)
+    try:
+        capture_exception(exc)
+    except Exception:
+        log.exception("capture_exception failed")
+    # Throttled email fallback, keyed by path + exception type.
+    try:
+        sig = f"{path}|{type(exc).__name__}"
+        now = _time.monotonic()
+        last = _LAST_ALERT.get(sig, 0.0)
+        if now - last >= _ALERT_COOLDOWN_S:
+            _LAST_ALERT[sig] = now
+            from .notify import send_internal_alert
+            send_internal_alert(
+                f"500 error: {type(exc).__name__} on {path}",
+                f"Path: {request.method} {path}\nError: {type(exc).__name__}: {exc}",
+            )
+    except Exception:
+        log.exception("internal alert send failed")
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "error": "Something went wrong on our end. Please try again."},
+    )
+
 
 # v1.1.0: replaced by onboarding.router. Webhook handler still active via the new onboarding flow.
 # app.include_router(signup_router)
@@ -261,6 +312,7 @@ def health():
         "email_configured": bool(os.getenv("RESEND_API_KEY")),
         "stripe_configured": bool(os.getenv("STRIPE_SECRET_KEY")),
         "stripe_array_price_set": bool(os.getenv("STRIPE_ARRAY_PRICE_ID")),
+        "sentry_configured": bool(os.getenv("SENTRY_DSN")),
         "web_concurrency": int(os.getenv("WEB_CONCURRENCY", "1")),
     }
 
