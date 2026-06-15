@@ -14,7 +14,20 @@
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png" />
     <link rel="shortcut icon" href="favicon.ico" />
     <link rel="apple-touch-icon" sizes="256x256" href="favicon-256.png" />
-    <title>NEPOOL Operator — Account</title>
+    <title>Account · EnergyAgent</title>
+    <!-- One SPA serves both products (NEPOOL Operator + Array Operator). Brand the
+         tab title by the host the user actually came in on. The Netlify 200-proxy
+         preserves the address-bar hostname, so location.hostname is reliable here.
+         Runs before paint so there's no NEPOOL→AO title flash on arrayoperator.com. -->
+    <script>
+      (function () {
+        try {
+          var h = location.hostname || "";
+          var isAO = /(^|\.)arrayoperator\.com$/.test(h) || h.indexOf("array-operator") !== -1;
+          document.title = isAO ? "Account · Array Operator" : "Account · NEPOOL Operator";
+        } catch (e) {}
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
