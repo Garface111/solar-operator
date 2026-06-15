@@ -280,18 +280,24 @@ def _create_trial_tenant(
 
     with SessionLocal() as db:
         # NOTE: .first() (not scalar_one_or_none) on purpose — legacy/raced data
-        # can leave >1 active tenant on the same email, and scalar_one_or_none()
-        # raises MultipleResultsFound -> 500, wedging signup permanently for that
-        # email. Any existing active row means the account is taken; return 409.
+        # can leave >1 tenant on the same email, and scalar_one_or_none() raises
+        # MultipleResultsFound -> 500, wedging signup permanently for that email.
+        #
+        # Block a duplicate within the SAME product whether it's active OR
+        # inactive: a second signup on an email that already has (say) an
+        # array_operator tenant must 409, not silently mint a second one — that
+        # duplication is the root cause of the magic-link/password "wrong account"
+        # glitches. A different product on the same email is allowed (one person
+        # can legitimately own a NEPOOL account AND an Array Operator account).
         existing = db.execute(
             select(Tenant)
-            .where(Tenant.contact_email == email, Tenant.active == True)
-            .order_by(Tenant.created_at.desc())
+            .where(Tenant.contact_email == email, Tenant.product == product)
+            .order_by(Tenant.active.desc(), Tenant.created_at.desc())
         ).scalars().first()
         if existing:
             raise HTTPException(409,
                 "An account already exists for this email. "
-                "Email admin@solaroperator.org if you've lost access.")
+                "Sign in instead, or email admin@solaroperator.org if you've lost access.")
 
         t = Tenant(
             id=tenant_id, name=display_name, contact_email=email,

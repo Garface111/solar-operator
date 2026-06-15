@@ -244,6 +244,7 @@ def require_active_subscription(t: Tenant) -> None:
 class AuthRequest(BaseModel):
     email: EmailStr
     persist: bool = True  # if True, mint 30-day session; if False, mint 1-day session
+    product: Optional[str] = None  # disambiguates an email owning tenants in >1 product
 
 
 class AuthVerify(BaseModel):
@@ -412,7 +413,7 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
 
 # ─── magic-link auth ────────────────────────────────────────────────────
 
-def issue_magic_link(email: str, persist: bool = True) -> bool:
+def issue_magic_link(email: str, persist: bool = True, product: str | None = None) -> bool:
     """Create a single-use login token for `email` and email the sign-in link.
 
     Returns True if a matching tenant existed and an email was attempted,
@@ -429,6 +430,18 @@ def issue_magic_link(email: str, persist: bool = True) -> bool:
             select(Tenant).where(Tenant.contact_email == email)
             .order_by(Tenant.active.desc(), Tenant.created_at.desc())
         ).scalars().first()
+        # When the caller knows the product (a per-brand login page), prefer the
+        # tenant in THAT product so a NEPOOL+AO shared email lands in the right
+        # dashboard instead of whichever happens to be active/newest.
+        if product:
+            want = product.strip().lower()
+            scoped = db.execute(
+                select(Tenant).where(
+                    Tenant.contact_email == email, Tenant.product == want
+                ).order_by(Tenant.active.desc(), Tenant.created_at.desc())
+            ).scalars().first()
+            if scoped is not None:
+                t = scoped
         if not t:
             return False
 
@@ -496,7 +509,7 @@ def auth_request(req: AuthRequest, request: Request):
     ratelimit.enforce(request, "auth_request_email", max_hits=4, window_s=900,
                       key_extra=email,
                       message="We've already sent a few sign-in links to that address — check your inbox, or try again shortly.")
-    issue_magic_link(req.email, persist=req.persist)
+    issue_magic_link(req.email, persist=req.persist, product=req.product)
     return {"ok": True, "delivered": True}
 
 
@@ -573,6 +586,8 @@ class SetPasswordBody(BaseModel):
 class PasswordLoginBody(BaseModel):
     email: EmailStr
     password: str
+    product: Optional[str] = None  # when set (e.g. "array_operator"), disambiguates
+                                   # an email that owns tenants in >1 product.
 
 
 def _validate_password_strength(pw: str) -> None:
@@ -609,19 +624,35 @@ def password_login(body: PasswordLoginBody, request: Request):
     ratelimit.enforce(request, "pwlogin_email", max_hits=10, window_s=300, key_extra=email,
                       message="Too many sign-in attempts for that account — wait a few minutes and try again.")
     _GENERIC_ERROR = "Invalid email or password"
+    want_product = (body.product or "").strip().lower() or None
     with SessionLocal() as db:
-        t = db.execute(
+        # An email can own >1 tenant (e.g. a NEPOOL account AND an Array Operator
+        # account). Verify the password against EVERY tenant for the email — not
+        # just an arbitrary first() — or a correct password silently fails because
+        # we checked it against the wrong account. Pick the match deterministically:
+        # requested product first, then active, then newest.
+        candidates = db.execute(
             select(Tenant).where(Tenant.contact_email == email)
-        ).scalars().first()
-        if not t or not t.password_hash:
+        ).scalars().all()
+        matches = [
+            t for t in candidates
+            if t.password_hash and _verify_password(body.password, t.password_hash)
+        ]
+        if not matches:
             raise HTTPException(401, _GENERIC_ERROR)
-        if not _verify_password(body.password, t.password_hash):
-            raise HTTPException(401, _GENERIC_ERROR)
-        tenant_id = t.id
-        product = t.product or "nepool"
+
+        def _rank(t: Tenant):
+            return (
+                0 if (want_product and (t.product or "nepool") == want_product) else 1,
+                0 if t.active else 1,
+                -(t.created_at.timestamp() if t.created_at else 0),
+            )
+        chosen = sorted(matches, key=_rank)[0]
+        tenant_id = chosen.id
+        product = chosen.product or "nepool"
 
     session_token = _sign_session(tenant_id)
-    logger.info("password_login_success: email=%s tenant=%s", email, tenant_id)
+    logger.info("password_login_success: email=%s tenant=%s product=%s", email, tenant_id, product)
     # `product` lets a per-product login page bounce a wrong-brand account to its
     # real home (e.g. an Array Operator login getting a NEPOOL account).
     return {"ok": True, "session_token": session_token,

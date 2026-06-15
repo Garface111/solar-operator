@@ -304,3 +304,58 @@ class TestMagicLinkTarget:
         cap = self._capture_link(monkeypatch, "nepool")
         assert "nepooloperator.com/accounts/?token=" in cap["html"]
         assert "arrayoperator.com" not in cap["html"]
+
+
+# ─── multi-tenant-per-email disambiguation (the login whack-a-mole fix) ─────────
+
+class TestMultiTenantEmail:
+    """One email can own a NEPOOL tenant AND an Array Operator tenant. Login must
+    not fail or land in the wrong one."""
+
+    def _two_accounts(self, email: str, nepool_pw: str, ao_pw: str):
+        from api.account import _hash_password
+        ids = {}
+        with SessionLocal() as db:
+            for product, pw in (("nepool", nepool_pw), ("array_operator", ao_pw)):
+                tid = "ten_" + secrets.token_hex(6)
+                db.add(Tenant(
+                    id=tid, name=f"{product} Co", contact_email=email,
+                    tenant_key="sol_live_" + secrets.token_urlsafe(12),
+                    plan="standard", active=True, subscription_status="trialing",
+                    product=product, password_hash=_hash_password(pw)))
+                ids[product] = tid
+            db.commit()
+        return ids
+
+    def test_correct_password_for_second_account_succeeds(self, client):
+        """The AO password must work even though a NEPOOL tenant on the same email
+        sorts first — the old code checked only one arbitrary tenant and 401'd."""
+        email = f"dual_{secrets.token_hex(4)}@example.com"
+        self._two_accounts(email, "NepoolPass1", "ArrayPass2")
+        resp = client.post("/v1/auth/password-login",
+                           json={"email": email, "password": "ArrayPass2"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ok"] is True
+
+    def test_product_hint_routes_to_right_tenant(self, client):
+        """When passwords match and product is given, the chosen tenant's product
+        comes back as requested."""
+        email = f"dual_{secrets.token_hex(4)}@example.com"
+        ids = self._two_accounts(email, "SharedPass1", "SharedPass1")  # same pw both
+        resp = client.post("/v1/auth/password-login",
+                           json={"email": email, "password": "SharedPass1",
+                                 "product": "array_operator"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["product"] == "array_operator"
+        resp2 = client.post("/v1/auth/password-login",
+                            json={"email": email, "password": "SharedPass1",
+                                  "product": "nepool"})
+        assert resp2.json()["product"] == "nepool"
+
+    def test_wrong_password_still_401(self, client):
+        email = f"dual_{secrets.token_hex(4)}@example.com"
+        self._two_accounts(email, "NepoolPass1", "ArrayPass2")
+        resp = client.post("/v1/auth/password-login",
+                           json={"email": email, "password": "totallywrong9"})
+        assert resp.status_code == 401
+

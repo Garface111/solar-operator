@@ -198,6 +198,53 @@ def test_start_with_duplicate_active_email_returns_409_not_500(client, mocks):
     assert "already exists" in resp.json()["detail"].lower()
 
 
+def test_start_blocks_inactive_duplicate_same_product(client, mocks):
+    """The duplicate guard must fire even when the existing tenant is INACTIVE.
+    Before this fix it only checked active==True, so an email with an inactive
+    AO tenant could mint a SECOND AO tenant — the multi-account root cause behind
+    the magic-link/password 'wrong account' glitches."""
+    from datetime import timedelta
+    from api.onboarding import gen_tenant_id, gen_tenant_key, gen_onboarding_token, now
+    email = "inactive_dupe@example.com"
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=gen_tenant_id(), name="Inactive Co", contact_email=email,
+            tenant_key=gen_tenant_key(), plan="standard", active=False,
+            created_at=now(), product="array_operator",
+            subscription_status="canceled",
+            onboarding_token=gen_onboarding_token(), onboarding_stage="extension",
+        ))
+        db.commit()
+    resp = client.post("/v1/onboarding/start", json={
+        "email": email, "full_name": "Iris Inactive", "array_count": 1,
+        "product": "array_operator",
+    })
+    assert resp.status_code == 409, resp.text
+
+
+def test_start_allows_same_email_different_product(client, mocks):
+    """One person can legitimately own a NEPOOL account AND an Array Operator
+    account on the same email — the guard is per-product, not per-email."""
+    from datetime import timedelta
+    from api.onboarding import gen_tenant_id, gen_tenant_key, gen_onboarding_token, now
+    email = "crossproduct@example.com"
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=gen_tenant_id(), name="NEPOOL Co", contact_email=email,
+            tenant_key=gen_tenant_key(), plan="standard", active=True,
+            created_at=now(), product="nepool", subscription_status="trialing",
+            trial_ends_at=now() + timedelta(days=14),
+            onboarding_token=gen_onboarding_token(), onboarding_stage="extension",
+        ))
+        db.commit()
+    # Signing up for array_operator on the SAME email must succeed.
+    resp = client.post("/v1/onboarding/start", json={
+        "email": email, "full_name": "Cross Product", "array_count": 1,
+        "product": "array_operator",
+    })
+    assert resp.status_code == 200, resp.text
+
+
 # ─── (a) checkout shim now creates a live trial (no card) ────────────────
 
 def test_checkout_shim_creates_trialing_tenant(client, mocks):
