@@ -14,3 +14,6 @@ web/app/node_modules
 # Stripe key bundles
 .stripe-keys-*.env
 dist/
+
+# Auto-fix system kill-switch (create to pause; never commit)
+.autofix_disabled
