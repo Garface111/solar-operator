@@ -33,6 +33,8 @@ const STORAGE_KEYS = {
 const SO_TAB_URLS = [
   "https://nepooloperator.com/*",
   "https://*.nepooloperator.com/*",
+  "https://arrayoperator.com/*",
+  "https://*.arrayoperator.com/*",
   "https://solaroperator.org/*",
   "https://*.solaroperator.org/*",
   "https://web-production-49c83.up.railway.app/*",
@@ -203,6 +205,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     _handleSync(msg.payload, msg.tokenHash, sendResponse);
     return true; // keep channel open for async sendResponse
   }
+
+  // v1.8.0: SolarEdge inverter capture for Array Operator. Unlike the utility
+  // captures, this does NOT POST to /v1/sync — solaredge_content.js read the
+  // owner's DURABLE account API key + site list from the logged-in portal, and
+  // we hand them straight to the AO onboarding page via SO_CAPTURE_LANDED. The
+  // page then runs its existing /public/preview + /solaredge/connect-account
+  // flow. (Reuses the array-operator backend untouched.)
+  if (msg.type === "SOLAREDGE_CAPTURED") {
+    const p = msg.payload || {};
+    const landed = {
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: "solaredge",
+      apiKey: p.apiKey || null,
+      sites: Array.isArray(p.sites) ? p.sites : [],
+      accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
+      accountName: p.accountName || null,
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(landed);
+    chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
   // v1.6.2: all capture layers struck out on a billing/usage page — report
   // the deployment to the drift radar (best-effort, fire and forget).
   if (msg.type === "SMARTHUB_SCRAPE_EMPTY") {
@@ -259,6 +285,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               url: cookieUrl, name: c.name, storeId: c.storeId,
             });
           }));
+        }
+        // v1.8.0: SolarEdge is intentionally NOT in the wipe list — for a
+        // single-owner connect we WANT their existing monitoring session to
+        // ride (zero extra logins). Instead, arm the capture-intent flag so
+        // solaredge_content.js knows this visit came from an explicit AO
+        // "Connect SolarEdge" click and may read the durable key.
+        if (host.endsWith("solaredge.com")) {
+          try {
+            await chrome.storage.local.set({
+              so_capture_intent: { vendor: "solaredge", ts: Date.now() },
+            });
+          } catch (_) { /* non-fatal */ }
         }
       } catch (e) {
         // Cookie wipe is best-effort; opening the tab still proceeds.

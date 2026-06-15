@@ -97,6 +97,56 @@ The SmartHub adapter is the template. Per inverter brand:
 3. Expand to Chint + SMA once the pattern + the capture→engine→UI loop is proven.
 
 ## Dependencies to unblock a build
-- [ ] Ford decision: which brand to spike first
-- [ ] A real inverter-portal login OR saved portal HTML/JSON sample to inspect (REQUIRED)
+- [x] Ford decision: which brand to spike first → **SolarEdge** (2026-06-14)
+- [x] A real inverter-portal login OR saved portal HTML/JSON sample to inspect → **inspected Bruce's live account 2026-06-14** (grounded contract below)
 - [ ] Confirm the Array Overview UI is the render target (peer bars exist, need live feed)
+
+---
+
+## SolarEdge extraction — GROUNDED CONTRACT (inspected Bruce's live account, 2026-06-14)
+
+Inspected `monitoring.solaredge.com` (the new "one" SPA) while logged in as Bruce
+(account "Green Mountain Community Solar", 3 sites). Every endpoint below is
+**session-cookie authed** (the content script calls them with `credentials:'include'`),
+returns JSON, and was verified live. No guessing remains.
+
+**The capture chain (what `solaredge_content.js` runs on `monitoring.solaredge.com`):**
+
+1. **Identity** — `GET /services/cni/ui-api/user-info`
+   → `{ accountId, email, firstname, lastname, userId, monitoringId }`
+2. **Account GUID** — `GET /services/account-admin/accounts?page=1&size=20`
+   → `{ pagination, items:[ { accountUuid, accountName, … } ] }`  (`accountUuid` = the GUID)
+3. **Durable API key** — `GET /services/account-admin/accounts/{accountUuid}/api-key`
+   → the account's **already-generated** public API key.
+   **READ-ONLY GET. NEVER POST/PUT/regenerate** — a new key invalidates the old one and
+   would break the owner's existing integrations (possibly our own backend's stored key).
+   If 404/empty, the account has no key yet → fall back to asking the owner (or a
+   guarded generate-with-consent); do NOT silently mint one.
+4. **Instant site list (zero-key preview)** — `POST /services/sitelist/searchSites?v=<ts>`
+   body `{}` (empty works) → `{ totalSitesInSearch, page:[ {
+     solarFieldId,   // <-- the SolarEdge SITE ID the public API + our backend use
+     name, peakPower (kW), status, inverterCount, optimizerCount, accountId,
+     accountName, city, state, installationDate, latitude, longitude, … } ] }`
+
+**Flow (clones the GMP/SmartHub pattern + reuses the EXISTING array-operator backend):**
+- AO onboarding (extension present + SolarEdge chosen) → `SO_OPEN_PORTAL { url: monitoring.solaredge.com }`
+  (background opens a bg tab; cookie-wipe list must add `solaredge.com`).
+- `solaredge_content.js` detects logged-in (user-info 200), runs steps 1–4, posts a capture
+  `{ provider:"solaredge", apiKey, sites:[…], user:{…} }` to background.
+- background broadcasts `SO_CAPTURE_LANDED { provider:"solaredge", apiKey, sites }`
+  (extend `broadcastToSoTabs` SO_TAB_URLS + manifest to include arrayoperator.com).
+- AO page consumes it: drops `apiKey` into `state.apiKey` and runs its EXISTING code paths —
+  `/v1/array-owners/public/preview` (the value reveal), then post-signup
+  `/v1/array-owners/solaredge/connect-account`. **Zero backend changes.**
+
+**Manifest changes (batch into ONE Web Store review):**
+- host_permissions + a `content_scripts` entry for `https://monitoring.solaredge.com/*` → `solaredge_content.js`.
+- Add `https://arrayoperator.com/*` + `https://*.arrayoperator.com/*` to host_permissions,
+  the `so_bridge.js` content_scripts match, and background `SO_TAB_URLS` (today the bridge
+  can't reach AO at all).
+- Add `solaredge.com` to the cookie-wipe allow-lists in `OPEN_UTILITY_PORTAL` / `SO_WIPE_COOKIES`.
+
+**Login-state:** user-info 200 = signed_in; 401 / redirect to `/mfe/auth/` = login_required.
+
+**Safety:** the api-key value is a live secret — never log/persist it beyond the in-memory
+hand-off; the durable-key endpoint is GET-only by our rule (no regeneration).

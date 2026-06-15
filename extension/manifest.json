@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.7.1",
-  "description": "Captures Green Mountain Power and SmartHub utility bills for EnergyAgent quarterly NEPOOL reports.",
+  "version": "1.8.0",
+  "description": "Captures Green Mountain Power and SmartHub utility bills for NEPOOL reports, and links SolarEdge inverter accounts for Array Operator.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",
   "permissions": [
@@ -18,8 +18,11 @@
     "https://api.greenmountainpower.com/*",
     "https://vermontelectric.smarthub.coop/*",
     "https://*.smarthub.coop/*",
+    "https://monitoring.solaredge.com/*",
     "https://nepooloperator.com/*",
     "https://*.nepooloperator.com/*",
+    "https://arrayoperator.com/*",
+    "https://*.arrayoperator.com/*",
     "https://api.solaroperator.org/*",
     "https://solaroperator.org/*",
     "https://*.solaroperator.org/*",
@@ -62,8 +65,19 @@
     },
     {
       "matches": [
+        "https://monitoring.solaredge.com/*"
+      ],
+      "js": [
+        "solaredge_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
         "https://nepooloperator.com/*",
         "https://*.nepooloperator.com/*",
+        "https://arrayoperator.com/*",
+        "https://*.arrayoperator.com/*",
         "https://solaroperator.org/*",
         "https://*.solaroperator.org/*",
         "https://web-production-49c83.up.railway.app/*"
