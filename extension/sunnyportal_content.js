@@ -43,16 +43,31 @@
     const d = await crypto.subtle.digest("SHA-1", buf);
     return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  async function getJson(url, opts) {
-    const r = await fetch(url, Object.assign({ credentials: "include" }, opts || {}));
-    if (!r.ok) throw new Error(url + " -> " + r.status);
-    return r.json();
+  // ennexos.sunnyportal.com and uiapi.sunnyportal.com are DIFFERENT origins, and
+  // uiapi sends Access-Control-Allow-Origin:* — which the browser won't pair with
+  // a credentialed content-script fetch (it CORS-blocks, and the capture stalls).
+  // So we route every uiapi GET through the background service worker, which holds
+  // host_permissions for uiapi and can make the credentialed call CORS-free.
+  function smaApiGet(url) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage({ type: "SMA_API_GET", url }, (resp) => {
+          if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+          if (!resp || !resp.ok) { reject(new Error("api " + (resp && (resp.status || resp.error)))); return; }
+          resolve(resp.data);
+        });
+      } catch (e) { reject(e); }
+    });
   }
-  // 200 on the lightweight menu call = signed in; 401/403 = not.
+  async function getJson(url) {
+    return smaApiGet(url);   // throws if the background fetch failed / non-2xx
+  }
+  // navigation/menuitems returns 200 JSON when signed in; the proxy rejects on
+  // 401/403 (non-ok), so a successful resolve = signed in.
   async function isSignedIn() {
     try {
-      const r = await fetch(UIAPI + "/api/v1/navigation/menuitems", { credentials: "include" });
-      return r.ok;
+      await smaApiGet(UIAPI + "/api/v1/navigation/menuitems");
+      return true;
     } catch (_) { return false; }
   }
   function broadcastLoginState(state) {

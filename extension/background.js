@@ -270,7 +270,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous response
   }
-  // v1.6.2: all capture layers struck out on a billing/usage page — report
+  // v1.9.4: SMA cross-origin proxy. The SMA portal (ennexos.sunnyportal.com) and
+  // its API (uiapi.sunnyportal.com) are DIFFERENT origins, and uiapi answers with
+  // Access-Control-Allow-Origin:* — which the browser refuses to pair with a
+  // credentialed content-script fetch (CORS block → the capture stalled). The
+  // service worker, holding host_permissions for uiapi.sunnyportal.com, can make
+  // the credentialed cross-origin request CORS-free. So sunnyportal_content.js
+  // routes every uiapi GET through here.
+  if (msg.type === "SMA_API_GET") {
+    const url = String(msg.url || "");
+    // Hard allowlist — only ever proxy the SMA UI API, never an arbitrary URL.
+    if (!/^https:\/\/uiapi\.sunnyportal\.com\//.test(url)) {
+      sendResponse({ ok: false, error: "url-not-allowed" });
+      return; // sync
+    }
+    (async () => {
+      try {
+        const r = await fetch(url, {
+          credentials: "include",
+          headers: { "Accept": "application/json" },
+        });
+        if (!r.ok) { sendResponse({ ok: false, status: r.status }); return; }
+        const data = await r.json().catch(() => null);
+        sendResponse({ ok: true, status: r.status, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String((e && e.message) || e) });
+      }
+    })();
+    return true; // async sendResponse
+  }
   // the deployment to the drift radar (best-effort, fire and forget).
   if (msg.type === "SMARTHUB_SCRAPE_EMPTY") {
     (async () => {
