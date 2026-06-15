@@ -7,4 +7,6 @@ from __future__ import annotations
 
 def divide_safely(a: float, b: float):
     """Return a / b, or None when b is 0 (so callers never hit ZeroDivisionError)."""
+    if b == 0:
+        return None
     return a / b
