@@ -52,7 +52,11 @@
     return new Promise((resolve, reject) => {
       try {
         chrome.runtime.sendMessage({ type: "SMA_API_GET", url }, (resp) => {
-          if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+          if (chrome.runtime.lastError) {
+            try { console.log("[EnergyAgent SMA] proxy msg error", url, chrome.runtime.lastError.message); } catch (_) {}
+            reject(new Error(chrome.runtime.lastError.message)); return;
+          }
+          try { console.log("[EnergyAgent SMA] GET", url, "->", resp && (resp.ok ? "ok" : ("FAIL status=" + resp.status + " err=" + resp.error))); } catch (_) {}
           if (!resp || !resp.ok) { reject(new Error("api " + (resp && (resp.status || resp.error)))); return; }
           resolve(resp.data);
         });
@@ -208,19 +212,29 @@
     );
   }
 
+  // Loud, prefixed console trace so the SMA tab's console shows EXACTLY how far
+  // each attempt gets. Search the console for "[EnergyAgent SMA]".
+  const LOG = (...a) => { try { console.log("[EnergyAgent SMA]", ...a); } catch (_) {} };
+  LOG("content script loaded on", location.href);
+
   async function tick() {
     if (done) return;
     polls++;
-    if (!(await hasIntent())) { lastErr = "capture not requested from Array Operator (open Add array → Log in with SMA)"; return; }
+    LOG("tick #" + polls);
+    const intent = await hasIntent();
+    LOG("hasIntent:", intent);
+    if (!intent) { lastErr = "capture not requested from Array Operator (open Add array → Log in with SMA)"; return; }
     let signedIn;
     try { signedIn = await isSignedIn(); }
-    catch (e) { lastErr = "auth-check failed: " + (e && e.message || e); return; }
+    catch (e) { lastErr = "auth-check failed: " + (e && e.message || e); LOG("isSignedIn threw:", e); return; }
+    LOG("signedIn:", signedIn);
     if (!signedIn) { lastErr = "not signed in to SMA (or the API rejected the session cookie)"; broadcastLoginState("login_required"); return; }
     broadcastLoginState("signed_in");
     let payload;
     try { payload = await captureFlow(); }
-    catch (e) { lastErr = "capture failed: " + (e && e.message || e); return; }   // retry next tick
+    catch (e) { lastErr = "capture failed: " + (e && e.message || e); LOG("captureFlow threw:", e); return; }   // retry next tick
     const sites = payload.sites || [];
+    LOG("captureFlow returned sites:", sites.length, sites.map((s) => s.name + "(" + (s.inverters || []).length + ")"));
     if (!sites.length) { lastErr = "signed in, but no plants/inverters returned"; return; }
     const sig = sites.map((s) =>
       s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
@@ -230,6 +244,7 @@
     lastHash = h;
     done = true;
     clearIntent();
+    LOG("CAPTURED — sending to Array Operator:", sites.length, "plant(s)");
     chrome.runtime.sendMessage({ type: "SMA_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
