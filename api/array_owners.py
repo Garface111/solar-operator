@@ -582,6 +582,29 @@ def create_array_ep(body: CreateArrayBody,
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
+@router.delete("/v1/array-owners/arrays/{array_id}")
+def delete_array_ep(array_id: int,
+                    authorization: str | None = Header(default=None)) -> dict:
+    """Soft-delete an owner array (the owner's "remove card") and its inverters.
+
+    SOFT-delete only: sets `deleted_at` on the Array and its Inverter rows so the
+    array disappears from GET /v1/array-owners/fleet-tree immediately (that tree
+    filters Array.deleted_at.is_(None)). 404 if the array isn't found or belongs
+    to another tenant. The shared read-only DEMO tenant can never delete (403).
+    AO billing is per-kWh metered, so this does NOT touch Stripe.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            arr = inverter_fleet.delete_array(db, tenant, array_id)
+        except inverter_fleet.FleetError:
+            raise HTTPException(404, "Array not found")
+        return {"ok": True, "array_id": arr.id}
+
+
 @router.post("/v1/array-owners/layout/reset")
 def reset_layout_ep(authorization: str | None = Header(default=None)) -> dict:
     """Snap every inverter back to its discovered (source) array grouping."""
@@ -1621,6 +1644,25 @@ def inverter_capture(
             # by tenant+vendor+serial, owner arrangement preserved) and store its
             # day's kWh in InverterDaily so build_fleet_tree can peer-analyze the
             # real comb — no API connection needed.
+            # Basis for allocating the site's live instantaneous power across its
+            # inverters (the portal exposes only a site-level "now" reading, not a
+            # per-inverter one). We split that REAL aggregate by each inverter's
+            # share of TODAY's energy so the per-inverter values sum to the measured
+            # site total — a principled split, never an invented number. Falls back
+            # to nameplate share, then an even split, only if no energy is reported;
+            # stamps nothing when the site didn't report live power (card shows "—").
+            site_power_w = (
+                float(site.current_power_w)
+                if site.current_power_w is not None and site.current_power_w >= 0
+                else None
+            )
+            _site_invs = [c for c in (site.inverters or []) if str(c.serial or "").strip()]
+            _energy_sum = sum(
+                float(c.energy_today_kwh) for c in _site_invs
+                if c.energy_today_kwh and c.energy_today_kwh > 0
+            )
+            _np_sum = sum(float(c.nameplate_kw) for c in _site_invs if c.nameplate_kw)
+
             inv_persisted = 0
             for ci in (site.inverters or []):
                 serial = str(ci.serial or "").strip()
@@ -1661,6 +1703,18 @@ def inverter_capture(
                 if ci.nameplate_kw is not None:
                     iv.nameplate_kw = ci.nameplate_kw
                 iv.last_seen_at = now()
+
+                # Live current power = this inverter's share of the site's real
+                # instantaneous reading (basis computed above the loop).
+                if site_power_w is not None and _site_invs:
+                    if _energy_sum > 0:
+                        e = float(ci.energy_today_kwh) if (ci.energy_today_kwh and ci.energy_today_kwh > 0) else 0.0
+                        iv.last_power_w = round(site_power_w * (e / _energy_sum), 1)
+                    elif _np_sum > 0 and ci.nameplate_kw:
+                        iv.last_power_w = round(site_power_w * (float(ci.nameplate_kw) / _np_sum), 1)
+                    else:
+                        iv.last_power_w = round(site_power_w / len(_site_invs), 1)
+                    iv.last_power_at = now()
 
                 if ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0:
                     ikwh = float(ci.energy_today_kwh)

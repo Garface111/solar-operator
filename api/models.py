@@ -622,6 +622,15 @@ class Inverter(Base):
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     nameplate_kw: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Last instantaneous AC power (W) and when it was observed. API-pulled vendors
+    # (SolarEdge) are fetched live in build_fleet_tree so they never use these.
+    # Extension-captured vendors (Fronius/SMA/Chint) have NO pullable feed, so the
+    # browser ships the portal's live SITE power at capture time; we allocate it
+    # per inverter by today's energy share and stamp it here. build_fleet_tree only
+    # surfaces it while fresh (see _POWER_FRESH) so a stale capture ages back to
+    # "—" instead of implying the panels are producing hours later / at night.
+    last_power_w: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_power_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 

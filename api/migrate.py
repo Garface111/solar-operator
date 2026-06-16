@@ -660,6 +660,20 @@ def main():
             conn.execute(text(idx_sql))
         print("  ✓ billing_report_subscriptions table + indexes ensured")
 
+        # 2026-06-16 Live current power for extension-captured inverters.
+        # The inverters table came free via create_all, but an EXISTING prod table
+        # won't gain new columns from create_all — add them explicitly so the
+        # capture path can stamp the portal's live power (Fronius/SMA/Chint), which
+        # build_fleet_tree surfaces as the card's "Current kW".
+        for col, sql in [
+            ("last_power_w",  "ALTER TABLE inverters ADD COLUMN last_power_w DOUBLE PRECISION"),
+            ("last_power_at", "ALTER TABLE inverters ADD COLUMN last_power_at TIMESTAMP"),
+        ]:
+            if not column_exists(conn, "inverters", col):
+                conn.execute(text(sql))
+                added.append(col)
+                print(f"  + inverters.{col}")
+
     print("=== Migration complete ===")
 
 

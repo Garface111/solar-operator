@@ -41,6 +41,12 @@ log = logging.getLogger(__name__)
 _SITE_TTL = timedelta(minutes=10)
 _site_cache: dict[str, tuple] = {}
 
+# A capture-time instantaneous power is only "current" for a few hours — after
+# that the sun has moved and showing it would be a lie. Extension-captured cards
+# revert to "—" once their stamped power is older than this. API-pulled vendors
+# (SolarEdge) refresh on every fetch, so this never applies to them.
+_POWER_FRESH = timedelta(hours=3)
+
 # Vendor monitoring portals — the "origin site" that sources each inverter's data.
 # Owners click an array/inverter to jump to the vendor's deep-link for analysis.
 _PORTAL_BASE = {
@@ -256,6 +262,21 @@ def _array_alert(inv_rows: list[dict]) -> dict:
             "headline": _ALERT_HEADLINE.get(worst, "All clear")}
 
 
+def _live_power_w(iv: Inverter, m: dict):
+    """The card's "Current kW". API-pulled vendors (SolarEdge) carry a live
+    instantaneous power in their telemetry (m["last_power_w"]) — prefer it. For
+    extension-captured vendors there is no live feed, so fall back to the power
+    stamped at capture time, but ONLY while fresh (see _POWER_FRESH) so a capture
+    from hours ago doesn't keep claiming the panels are producing right now."""
+    pw = m.get("last_power_w")
+    if pw is not None:
+        return pw
+    if (iv.last_power_w is not None and iv.last_power_at is not None
+            and (now() - iv.last_power_at) <= _POWER_FRESH):
+        return iv.last_power_w
+    return None
+
+
 def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict:
     """Owner-grouped 3-tier tree. Inverters are read from the persisted table
     (owner's arrangement), telemetry pulled from each one's SOURCE site, then
@@ -343,7 +364,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "min_kwh": min_kwh,                   # lowest daily output in the window (real)
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
-                "current_power_w": m.get("last_power_w"),
+                "current_power_w": _live_power_w(iv, m),
                 "last_report": u.get("last_report") or m.get("last_report"),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,
@@ -475,6 +496,42 @@ def create_array(db, tenant: Tenant, name: str) -> Array:
 
     arr = Array(tenant_id=tenant.id, name=nm, fuel_type="solar")
     db.add(arr)
+    db.commit()
+    db.refresh(arr)
+    return arr
+
+
+def delete_array(db, tenant: Tenant, array_id: int) -> Array:
+    """Soft-delete an owner array and its inverters (the owner's "remove card").
+
+    SOFT-delete only — sets `deleted_at` on the Array AND every Inverter that
+    references it, so the array vanishes from build_fleet_tree (which filters
+    `Array.deleted_at.is_(None)`) and its inverters don't dangle pointing at a
+    dead array. NEVER hard-deletes (an undo / restore can revive the rows).
+
+    Ownership: the array must belong to `tenant`; otherwise raises FleetError
+    (which the route turns into a 404), so a cross-tenant id leaks nothing.
+    Idempotent: an already-deleted array is treated as not-found.
+
+    AO arrays have client_id=None and AO billing is per-kWh metered (not
+    per-array), so this deliberately does NOT touch Stripe / subscription
+    reconcile — unlike api.account.delete_array for operator client arrays.
+    """
+    arr = db.get(Array, array_id)
+    if arr is None or arr.tenant_id != tenant.id or arr.deleted_at is not None:
+        raise FleetError("Array not found")
+
+    ts = now()
+    arr.deleted_at = ts
+    invs = db.execute(
+        select(Inverter).where(
+            Inverter.tenant_id == tenant.id,
+            Inverter.array_id == array_id,
+            Inverter.deleted_at.is_(None),
+        )
+    ).scalars().all()
+    for iv in invs:
+        iv.deleted_at = ts
     db.commit()
     db.refresh(arr)
     return arr
