@@ -417,6 +417,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
       return r.json();
     };
+    // GMP usage local-time format for the date-range query params (no tz suffix
+    // needed; the API interprets them in the account's local time).
+    const fmtDate = (d) => d.toISOString().slice(0, 19);
     (async () => {
       try {
         const current = await gmpGet("/users/current");
@@ -437,11 +440,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             console.warn("[so] GMP summary fetch failed for", acctNum, String(e && e.message));
             summary = {};
           }
+          // Only the SOLAR accounts produce generation — Bruce has 48 GMP accounts
+          // and most are non-solar homes/pumps. Skip the extra /daily call unless
+          // the summary shows real generation (isNetMetered OR a positive
+          // grossGenerated / returnedGeneration), so we don't fire 48 daily calls.
+          const grossGen = Number(summary && summary.totalGrossGenerated) || 0;
+          const sentGrid = Number(summary && summary.totalGenerationSentToGrid) || 0;
+          const usedHome = Number(summary && summary.totalGenerationUsedByHome) || 0;
+          const isSolar = !!(summary && (summary.isNetMetered || grossGen > 0 || sentGrid > 0 || usedHome > 0));
+
+          let daily = [];
+          if (isSolar) {
+            try {
+              // Pull ~35 days of daily generation. GMP's daily endpoint shares the
+              // /monthly schema: intervals[].values[] each with { date, consumed,
+              // returnedGeneration }. returnedGeneration = the array's daily solar
+              // production (grounded against Bruce's 1a_Chester account, Jun 2026).
+              const end = new Date();
+              const start = new Date(end.getTime() - 35 * 24 * 3600 * 1000);
+              const dResp = await gmpGet(
+                `/usage/${acctNum}/daily?startDate=${fmtDate(start)}&endDate=${fmtDate(end)}&temp=f`
+              );
+              const intervals = (dResp && Array.isArray(dResp.intervals)) ? dResp.intervals : [];
+              for (const iv of intervals) {
+                for (const v of (iv.values || [])) {
+                  const g = (v && v.returnedGeneration != null) ? Number(v.returnedGeneration) : null;
+                  if (g != null && isFinite(g) && g > 0 && v.date) {
+                    daily.push({ date: v.date, generated_kwh: g });
+                  }
+                }
+              }
+            } catch (e) {
+              // Daily is best-effort — fall back to the billing-period summary
+              // total (the backend uses parsed.kwh_generated when daily is empty).
+              console.warn("[so] GMP daily fetch failed for", acctNum, String(e && e.message));
+              daily = [];
+            }
+          }
           accounts.push({
             account_number: acctNum,
             nickname: ea.nickname || null,
             summary,
-            daily: [],   // per-day generation series — see note in deliverable report
+            daily,
           });
         }
         sendResponse({ ok: true, accounts });
