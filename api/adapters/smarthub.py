@@ -301,34 +301,33 @@ def fetch_daily_generation(
     start: date,
     end: date,
 ) -> list[dict[str, Any]]:
-    """Pull daily kWh totals from SmartHub for a net-metering account.
+    """Pull daily kWh generation from SmartHub for a net-metering account.
 
-    Polls POST /services/secured/utility-usage/poll with DAILY timeFrame.
-    Retries up to 3 times (5s apart) while status is PENDING.
+    GROUNDED against a LIVE VEC solar account (West Glover Roaring Brook Solar
+    LLC, vermontelectric.smarthub.coop, acct 6578300, Jun 2026 HAR). The real
+    contract differs from the old HA-integration assumptions:
 
-    Returns list of dicts, one per day with data:
-        {
-            "day": date,
-            "kwh_generated": float,   # energy returned to grid (RETURN channel)
-            "kwh_consumed": float,    # energy consumed from grid (FORWARD channel)
-            "kwh_net_export": float,  # positive = net exporter that day
-        }
+      • Endpoint is POST /services/secured/utility-usage  (NOT .../poll).
+      • Response is the data object DIRECTLY: {"ELECTRIC": [ {
+            "series": [ {"name", "data": [ {"x": epoch_ms, "y": kWh}, ... ]} ],
+            "meters": [ {"seriesId", "flowDirection", "isNetMeter", ...} ],
+            "hasDaily": bool, ...
+        } ]}  — there is NO {"status":"COMPLETE","data":...} envelope.
+      • GENERATION SIGNAL: a net-metered location's daily series carries the NET
+        flow as a single value per day — NEGATIVE y = net export to grid (the
+        meter ran backward, i.e. the array produced more than the site used).
+        Verified: West Glover's 31 daily points were ALL negative (e.g. -368.64),
+        summing to ~7,258 kWh exported over the month. So daily generation =
+        abs(min(y, 0)) per day. (Positive y = net import/consumption that day.)
+      • An explicit RETURN flowDirection channel may also appear on some
+        deployments — if a series' meter is flowDirection==RETURN we take its y
+        directly as generation. Both paths are handled.
 
-    For solar net-metering customers the relevant channel is RETURN (generation
-    credited back) or NET (combined; negative = export). FORWARD = consumption.
-
-    UNVERIFIED: flowDirection channel names for each VT co-op. VEC confirmed
-    to expose FORWARD + RETURN. WEC and others need live verification.
-
-    UNVERIFIED: timestamp format for x in response series data points.
-    Assuming milliseconds (standard JS epoch). HA integration source notes
-    suggest dividing by 1000 to get seconds — implemented below.
+    Returns [{day, kwh_generated, kwh_consumed, kwh_net_export}], generation-only
+    days included. Best-effort: an unparseable/empty response returns [].
     """
-    url = f"{_base_url(host)}/services/secured/utility-usage/poll"
-    # Epoch milliseconds for the date range
-    start_ms = int(
-        datetime(start.year, start.month, start.day).timestamp() * 1000
-    )
+    url = f"{_base_url(host)}/services/secured/utility-usage"
+    start_ms = int(datetime(start.year, start.month, start.day).timestamp() * 1000)
     end_ms = int(
         datetime(end.year, end.month, end.day, 23, 59, 59).timestamp() * 1000
     )
@@ -336,80 +335,78 @@ def fetch_daily_generation(
     body: dict[str, Any] = {
         "timeFrame": "DAILY",
         "userId": session["email"],
-        "screen": "USAGE_EXPLORER",
+        "screen": "USAGE_COMPARISON",
         "includeDemand": False,
         "serviceLocationNumber": service_location,
         "accountNumber": account_number,
         "industries": ["ELECTRIC"],
-        # UNVERIFIED: HA integration sends as string; Go implementation sends as int64.
-        # Both appear accepted by the API.
-        "startDateTime": str(start_ms),
-        "endDateTime": str(end_ms),
+        "startDateTime": start_ms,
+        "endDateTime": end_ms,
     }
 
     headers = _auth_headers(session["email"], session["auth_token"])
-    data: dict[str, Any] = {}
-    for attempt in range(3):
-        resp = httpx.post(
-            url, json=body, headers=headers, follow_redirects=True, timeout=60.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("status") == "COMPLETE":
-            break
-        if attempt < 2:
-            time.sleep(5)
+    resp = httpx.post(
+        url, json=body, headers=headers, follow_redirects=True, timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
-    electric_entries: list[dict] = (data.get("data") or {}).get("ELECTRIC") or []
-
-    usage_entry: dict[str, Any] | None = None
-    for entry in electric_entries:
-        if entry.get("type") == "USAGE":
-            usage_entry = entry
-            break
-
-    if usage_entry is None:
+    # Response is the data object directly: {"ELECTRIC": [entry, ...]}.
+    electric_entries: list[dict] = (
+        data.get("ELECTRIC") if isinstance(data, dict) else None
+    ) or []
+    if not electric_entries:
         return []
 
-    # Build series name → data-point list
-    series_map: dict[str, list] = {}
-    for s in (usage_entry.get("series") or []):
-        name = s.get("name")
-        if name:
-            series_map[name] = s.get("data") or []
+    day_forward: dict[date, float] = {}   # consumption (positive net import)
+    day_return: dict[date, float] = {}     # generation (export)
 
-    day_forward: dict[date, float] = {}
-    day_return: dict[date, float] = {}
-    day_net: dict[date, float] = {}
+    for entry in electric_entries:
+        # Map seriesId/name → its data points, and meter → flowDirection/isNetMeter.
+        series_map: dict[str, list] = {}
+        for s in (entry.get("series") or []):
+            name = s.get("name") or s.get("seriesId")
+            if name is not None:
+                series_map[str(name)] = s.get("data") or []
 
-    for meter in (usage_entry.get("meters") or []):
-        series_id: str = meter.get("seriesId") or ""
-        flow: str = (meter.get("flowDirection") or "").upper()
-        points: list = series_map.get(series_id) or []
+        meters = entry.get("meters") or []
+        # If no meter metadata, still parse the lone series as a net series.
+        if not meters and series_map:
+            meters = [{"seriesId": k, "flowDirection": "NET", "isNetMeter": True}
+                      for k in series_map]
 
-        for pt in points:
-            x = pt.get("x")
-            y = pt.get("y")
-            if x is None or y is None:
-                continue
-            # UNVERIFIED: x unit. Treating as milliseconds (ms → s → date).
-            day = datetime.utcfromtimestamp(x / 1000.0).date()
-            kwh = float(y)
+        for meter in meters:
+            series_id = str(meter.get("seriesId") or meter.get("meterName") or "")
+            flow = (meter.get("flowDirection") or "").upper()
+            points = series_map.get(series_id) or []
+            # Fall back to the only series when the id doesn't line up.
+            if not points and len(series_map) == 1:
+                points = next(iter(series_map.values()))
 
-            if flow == "FORWARD":
-                day_forward[day] = day_forward.get(day, 0.0) + max(0.0, kwh)
-            elif flow == "RETURN":
-                day_return[day] = day_return.get(day, 0.0) + max(0.0, kwh)
-            elif flow == "NET":
-                day_net[day] = day_net.get(day, 0.0) + kwh
-
-    # If NET is present (NET takes priority per HA integration), derive FORWARD/RETURN
-    if day_net:
-        for d, kwh in day_net.items():
-            if kwh >= 0:
-                day_forward.setdefault(d, kwh)
-            else:
-                day_return[d] = day_return.get(d, 0.0) + abs(kwh)
+            for pt in points:
+                x = pt.get("x")
+                y = pt.get("y")
+                if x is None or y is None:
+                    continue
+                day = datetime.utcfromtimestamp(x / 1000.0).date()
+                kwh = float(y)
+                if flow == "RETURN":
+                    # Explicit generation channel: y is the exported energy.
+                    day_return[day] = day_return.get(day, 0.0) + max(0.0, kwh)
+                elif flow == "FORWARD" and kwh >= 0:
+                    # Pure consumption reading (positive on a forward meter).
+                    day_forward[day] = day_forward.get(day, 0.0) + kwh
+                else:
+                    # The signal that actually matters (grounded on VEC West
+                    # Glover): NEGATIVE daily kWh = net EXPORT = generation —
+                    # REGARDLESS of the meter's flowDirection/isNetMeter flags
+                    # (West Glover's meter is tagged FORWARD + isNetMeter=false yet
+                    # every daily value is negative because the array net-exports
+                    # on rate 10NET:COOP). Positive = net consumption that day.
+                    if kwh < 0:
+                        day_return[day] = day_return.get(day, 0.0) + abs(kwh)
+                    else:
+                        day_forward[day] = day_forward.get(day, 0.0) + kwh
 
     all_days = sorted(set(list(day_forward.keys()) + list(day_return.keys())))
     return [

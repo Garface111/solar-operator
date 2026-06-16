@@ -53,30 +53,34 @@ def _mock_401():
 
 
 def _daily_poll_response(days: list[date], kwh_per_day: float = 5.0) -> dict:
-    """Build a fake utility-usage/poll COMPLETE response with DAILY RETURN data."""
+    """Fake POST /services/secured/utility-usage DAILY response.
+
+    GROUNDED shape (live VEC West Glover HAR, Jun 2026): the response IS the data
+    object directly — {"ELECTRIC": [ {series, meters, ...} ]} — with NO
+    {"status":"COMPLETE","data":...} envelope and NO type=="USAGE" marker. This
+    helper exercises the explicit RETURN(generation)+FORWARD(consumption) channel
+    shape some deployments expose.
+    """
     series_data = [
         {"x": int(datetime(d.year, d.month, d.day).timestamp() * 1000), "y": kwh_per_day}
         for d in days
     ]
     return {
-        "status": "COMPLETE",
-        "data": {
-            "ELECTRIC": [
-                {
-                    "type": "USAGE",
-                    "meters": [
-                        {"seriesId": "series_return", "flowDirection": "RETURN"},
-                        {"seriesId": "series_forward", "flowDirection": "FORWARD"},
-                    ],
-                    "series": [
-                        {"name": "series_return", "data": series_data},
-                        {"name": "series_forward", "data": [
-                            {"x": pt["x"], "y": 2.0} for pt in series_data
-                        ]},
-                    ],
-                }
-            ]
-        },
+        "ELECTRIC": [
+            {
+                "unitOfMeasure": "KWH",
+                "meters": [
+                    {"seriesId": "series_return", "flowDirection": "RETURN"},
+                    {"seriesId": "series_forward", "flowDirection": "FORWARD"},
+                ],
+                "series": [
+                    {"name": "series_return", "data": series_data},
+                    {"name": "series_forward", "data": [
+                        {"x": pt["x"], "y": 2.0} for pt in series_data
+                    ]},
+                ],
+            }
+        ]
     }
 
 
@@ -185,7 +189,7 @@ def test_fetch_daily_generation_wec_host():
 def test_fetch_daily_generation_empty_data():
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.raise_for_status = MagicMock()
-    mock_resp.json.return_value = {"status": "COMPLETE", "data": {}}
+    mock_resp.json.return_value = {}   # no ELECTRIC key → no rows
 
     with patch("httpx.post", return_value=mock_resp):
         result = fetch_daily_generation(
@@ -200,12 +204,12 @@ def test_fetch_daily_generation_empty_data():
     assert result == []
 
 
-def test_fetch_daily_generation_no_usage_entry():
+def test_fetch_daily_generation_no_series():
+    # ELECTRIC entry with no series/meters → no rows (honest empty).
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {
-        "status": "COMPLETE",
-        "data": {"ELECTRIC": [{"type": "DEMAND"}]},  # no USAGE entry
+        "ELECTRIC": [{"unitOfMeasure": "KWH", "series": [], "meters": []}],
     }
 
     with patch("httpx.post", return_value=mock_resp):
@@ -222,7 +226,8 @@ def test_fetch_daily_generation_no_usage_entry():
 
 
 def test_fetch_daily_generation_net_flow():
-    """NET flow: negative = export, positive = consumption."""
+    """Net-metered VEC meter: NEGATIVE daily y = export/generation (the real West
+    Glover signal), positive y = net consumption — regardless of flow flags."""
     net_data = [
         {"x": int(datetime(2024, 5, 1).timestamp() * 1000), "y": -8.0},  # exported 8 kWh
         {"x": int(datetime(2024, 5, 2).timestamp() * 1000), "y": 3.0},   # consumed 3 kWh
@@ -230,16 +235,15 @@ def test_fetch_daily_generation_net_flow():
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {
-        "status": "COMPLETE",
-        "data": {
-            "ELECTRIC": [
-                {
-                    "type": "USAGE",
-                    "meters": [{"seriesId": "net", "flowDirection": "NET"}],
-                    "series": [{"name": "net", "data": net_data}],
-                }
-            ]
-        },
+        "ELECTRIC": [
+            {
+                "unitOfMeasure": "KWH",
+                # West Glover's meter is tagged FORWARD + isNetMeter=false yet
+                # net-exports (negative values) — the sign is the source of truth.
+                "meters": [{"seriesId": "65783", "flowDirection": "FORWARD", "isNetMeter": False}],
+                "series": [{"name": "65783", "data": net_data}],
+            }
+        ],
     }
 
     with patch("httpx.post", return_value=mock_resp):
@@ -255,9 +259,9 @@ def test_fetch_daily_generation_net_flow():
     assert len(result) == 2
     may1 = next(r for r in result if r["day"] == date(2024, 5, 1))
     may2 = next(r for r in result if r["day"] == date(2024, 5, 2))
-    assert may1["kwh_generated"] == pytest.approx(8.0)   # abs(NET=-8)
-    assert may1["kwh_consumed"] == pytest.approx(0.0)    # no FORWARD
-    assert may2["kwh_consumed"] == pytest.approx(3.0)    # NET=+3 → forward
+    assert may1["kwh_generated"] == pytest.approx(8.0)   # abs(-8) = generation
+    assert may1["kwh_consumed"] == pytest.approx(0.0)
+    assert may2["kwh_consumed"] == pytest.approx(3.0)    # +3 = net consumption
     assert may2["kwh_generated"] == pytest.approx(0.0)
 
 
