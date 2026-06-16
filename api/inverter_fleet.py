@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import timedelta
+from datetime import timedelta, date as _date, datetime
 from typing import Optional
 
 from sqlalchemy import select
@@ -152,6 +152,98 @@ def _stored_inverter_daily(db, inverter_id: int) -> list[dict]:
         {"date": r.day.isoformat(), "kwh": r.kwh}
         for r in sorted(rows, key=lambda x: x.day)
     ]
+
+
+def _persist_daily_series(db, tenant_id: str, inverter_id: int,
+                          series: list[dict], *, source: str) -> int:
+    """Snapshot a per-inverter daily kWh series into InverterDaily so the graph's
+    history SURVIVES regardless of whether the vendor API answers next time.
+
+    This is the heart of the API-independent history store: whenever build_fleet_tree
+    sees daily readings for an inverter — from a LIVE vendor API (SolarEdge) or any
+    other source — we upsert them here, keyed by (inverter_id, day). Idempotent:
+    re-seeing a day keeps the LARGER kWh (a day's energy only climbs / settles up),
+    so cached/partial reads never clobber a fuller value. Returns rows written.
+
+    `series` is the [{"date": "YYYY-MM-DD"|date, "kwh": float}, ...] shape.
+    """
+    if not series:
+        return 0
+    # existing rows for this inverter, keyed by day, so we upsert in one pass
+    existing = {
+        r.day: r
+        for r in db.execute(
+            select(InverterDaily).where(InverterDaily.inverter_id == inverter_id)
+        ).scalars().all()
+    }
+    written = 0
+    for pt in series:
+        raw_day = pt.get("date")
+        kwh = pt.get("kwh")
+        if raw_day is None or kwh is None:
+            continue
+        try:
+            kwh = float(kwh)
+        except (TypeError, ValueError):
+            continue
+        if kwh < 0:
+            continue
+        # accept ISO string or a date/datetime
+        if isinstance(raw_day, str):
+            try:
+                day = _date.fromisoformat(raw_day[:10])
+            except ValueError:
+                continue
+        elif isinstance(raw_day, datetime):
+            day = raw_day.date()
+        elif isinstance(raw_day, _date):
+            day = raw_day
+        else:
+            continue
+        row = existing.get(day)
+        if row is None:
+            db.add(InverterDaily(tenant_id=tenant_id, inverter_id=inverter_id,
+                                 day=day, kwh=round(kwh, 3), source=source))
+            written += 1
+        elif kwh > (row.kwh or 0):
+            row.kwh = round(kwh, 3)
+            row.source = source
+            row.uploaded_at = now()
+            written += 1
+    return written
+
+
+def _merged_daily(db, inverter_id: int, live_series: list[dict]) -> list[dict]:
+    """The graph's authoritative daily series: STORAGE is the source of truth, with
+    any fresh live readings merged on top. Reading from storage (not the live API)
+    is exactly what makes a graph never vanish when an API is slow/down/rate-limited.
+
+    Merge rule per day: keep the LARGER kWh between stored and live (a day's energy
+    only climbs). Returns ascending [{"date","kwh"}], last 14 days.
+    """
+    merged: dict[str, float] = {}
+    for pt in _stored_inverter_daily(db, inverter_id):
+        merged[pt["date"]] = float(pt["kwh"] or 0)
+    for pt in (live_series or []):
+        d = pt.get("date")
+        if isinstance(d, datetime):
+            d = d.date().isoformat()
+        elif isinstance(d, _date):
+            d = d.isoformat()
+        elif isinstance(d, str):
+            d = d[:10]
+        else:
+            continue
+        k = pt.get("kwh")
+        if k is None:
+            continue
+        try:
+            k = float(k)
+        except (TypeError, ValueError):
+            continue
+        merged[d] = max(merged.get(d, 0), k)
+    out = [{"date": d, "kwh": round(v, 3)} for d, v in sorted(merged.items())]
+    return out[-14:]
 
 
 # ─────────────────────────── discovery / persistence ─────────────────────────
@@ -314,13 +406,24 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 tel_map = _telemetry_for_site(conn_vendor, conn.config["api_key"],
                                               conn.config["site_id"], force=force_refresh)
             m = tel_map.get(iv.serial, {})
-            # Fallback for extension-captured vendors (Fronius): no API connection
-            # to pull through, so read the persisted per-inverter daily rows.
-            if not m.get("daily"):
-                stored = _stored_inverter_daily(db, iv.id)
-                if stored:
-                    m = dict(m)
-                    m["daily"] = stored
+            # --- API-INDEPENDENT HISTORY STORE ---
+            # 1) Whatever daily readings we just saw LIVE (e.g. SolarEdge's API),
+            #    snapshot them into InverterDaily so the graph survives the next
+            #    time that API is slow/down/off-peak. (Extension vendors already
+            #    persisted their readings at capture time.)
+            live_daily = m.get("daily") or []
+            if live_daily:
+                try:
+                    _persist_daily_series(db, tenant.id, iv.id, live_daily,
+                                          source=f"{conn_vendor or 'api'}_live")
+                except Exception:
+                    log.warning("fleet: failed to persist daily for inv %s", iv.id, exc_info=True)
+            # 2) The graph's series is now STORAGE-authoritative (stored history with
+            #    any fresh live readings merged on top) — never a bare live read that
+            #    can vanish. Falls back gracefully to whatever live gave us.
+            merged = _merged_daily(db, iv.id, live_daily)
+            m = dict(m)
+            m["daily"] = merged if merged else live_daily
             meta_by_serial[iv.serial] = m
             units.append({
                 "id": iv.serial,
@@ -403,6 +506,13 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
         })
 
     attention = sum(c["alert"]["count"] for c in columns)
+    # Commit the daily history we snapshotted into InverterDaily during the build
+    # (persist-on-read). Never let a storage hiccup break the tree the owner sees.
+    try:
+        db.commit()
+    except Exception:
+        log.warning("fleet: daily-history commit failed", exc_info=True)
+        db.rollback()
     return {
         "generated_at": now().replace(microsecond=0).isoformat() + "Z",
         "tiers": ["alerts", "arrays", "inverters"],

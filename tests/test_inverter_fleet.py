@@ -157,6 +157,88 @@ def test_inverter_daily_series_and_min_peak(monkeypatch):
         print("PASS daily series + min/peak")
 
 
+def test_persist_on_read_survives_api_outage(monkeypatch):
+    """Live daily readings are snapshotted into InverterDaily on read, so the graph
+    keeps its history even when the API later returns nothing (the SolarEdge case)."""
+    from api.models import InverterDaily
+    from sqlalchemy import select as _select, func as _func
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Persist Roof", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        iv = Inverter(tenant_id=t.id, array_id=a.id, position=1, vendor="solaredge",
+                      serial="SN-P", source_site_id="416160", source_array_id=a.id,
+                      nameplate_kw=10.0, name="Persist 1")
+        db.add(iv); db.commit(); db.refresh(iv)
+        a.solaredge_api_key = "fake_key"; a.solaredge_site_id = 416160; db.commit()
+        inv_id = iv.id
+
+        series = [
+            {"date": "2026-06-10", "kwh": 40.0},
+            {"date": "2026-06-11", "kwh": 50.0},
+            {"date": "2026-06-12", "kwh": 45.0},
+        ]
+        # FIRST read: API returns the series → should persist into InverterDaily
+        def _tel_live(vendor, api_key, site_id, *, force=False):
+            return {"SN-P": {"name": "Persist 1", "model": "SE10K", "nameplate_kw": 10.0,
+                             "daily": series, "error_code": None,
+                             "last_report": "2026-06-12T12:00:00",
+                             "last_mode": "PRODUCING", "last_power_w": 6000}}
+        monkeypatch.setattr(IF, "_telemetry_for_site", _tel_live)
+        tree1 = IF.build_fleet_tree(db, t, force_refresh=True)
+        row1 = next(r for c in tree1["columns"] for r in c["inverters"] if r["sn"] == "SN-P")
+        assert len(row1["daily"]) == 3
+
+        # storage now holds the 3 days
+        with SessionLocal() as db2:
+            stored = db2.execute(_select(_func.count()).select_from(InverterDaily)
+                                 .where(InverterDaily.inverter_id == inv_id)).scalar()
+            assert stored == 3, f"expected 3 persisted days, got {stored}"
+
+        # SECOND read: API now returns NOTHING (outage / off-peak) → graph must STILL
+        # have its history from storage. This is the whole point.
+        def _tel_dead(vendor, api_key, site_id, *, force=False):
+            return {}
+        monkeypatch.setattr(IF, "_telemetry_for_site", _tel_dead)
+        tree2 = IF.build_fleet_tree(db, t, force_refresh=True)
+        row2 = next(r for c in tree2["columns"] for r in c["inverters"] if r["sn"] == "SN-P")
+        assert len(row2["daily"]) == 3, "graph history vanished on API outage — store failed"
+        assert row2["min_kwh"] == 40.0 and row2["peak_kwh"] == 50.0
+        print("PASS persist-on-read survives API outage")
+
+
+def test_persist_keeps_larger_kwh_on_reread(monkeypatch):
+    """A day's energy only climbs — re-seeing a smaller (cached/partial) value must
+    NOT clobber a fuller one already stored."""
+    from api.models import InverterDaily
+    from sqlalchemy import select as _select
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Climb Roof", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        iv = Inverter(tenant_id=t.id, array_id=a.id, position=1, vendor="solaredge",
+                      serial="SN-C", source_site_id="416160", source_array_id=a.id,
+                      nameplate_kw=10.0, name="Climb 1")
+        db.add(iv); db.commit(); db.refresh(iv)
+        a.solaredge_api_key = "fake_key"; a.solaredge_site_id = 416160; db.commit()
+        inv_id = iv.id
+
+        def mk(kwh):
+            def _tel(vendor, api_key, site_id, *, force=False):
+                return {"SN-C": {"name": "Climb 1", "nameplate_kw": 10.0,
+                                 "daily": [{"date": "2026-06-12", "kwh": kwh}],
+                                 "error_code": None, "last_report": None,
+                                 "last_mode": "PRODUCING", "last_power_w": 5000}}
+            return _tel
+        monkeypatch.setattr(IF, "_telemetry_for_site", mk(55.0)); IF.build_fleet_tree(db, t, force_refresh=True)
+        monkeypatch.setattr(IF, "_telemetry_for_site", mk(20.0)); IF.build_fleet_tree(db, t, force_refresh=True)
+        with SessionLocal() as db2:
+            row = db2.execute(_select(InverterDaily).where(
+                InverterDaily.inverter_id == inv_id)).scalars().one()
+            assert row.kwh == 55.0, f"smaller re-read clobbered stored value: {row.kwh}"
+        print("PASS persist keeps larger kwh")
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()

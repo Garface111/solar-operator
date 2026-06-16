@@ -597,6 +597,15 @@ def start():
         CronTrigger(hour=3, minute=0),
         id="inverter_daily_pull", replace_existing=True,
     )
+    # Daily at 03:30 UTC: snapshot per-inverter daily history into InverterDaily for
+    # every owner (persist-on-read forced on a schedule) so the per-inverter graphs
+    # keep accumulating real history even when nobody opens the dashboard. Critical
+    # for SolarEdge, whose per-inverter telemetry is otherwise live-API-only.
+    scheduler.add_job(
+        _run_inverter_history_snapshot,
+        CronTrigger(hour=3, minute=30),
+        id="inverter_history_snapshot", replace_existing=True,
+    )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (metered
     # billing). Runs AFTER the 03:00 inverter pull so the day's kWh are landed.
     scheduler.add_job(
@@ -636,6 +645,25 @@ def _run_inverter_pull() -> None:
         send_internal_alert(
             "Inverter daily pull: unhandled exception",
             f"The inverter daily pull job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_inverter_history_snapshot() -> None:
+    """Snapshot per-inverter daily history into InverterDaily for every owner so the
+    graphs keep accumulating real history (API-independent) even with no dashboard
+    traffic. Critical for SolarEdge (otherwise live-API-only per-inverter telemetry)."""
+    try:
+        from .jobs.inverter_history_snapshot import snapshot_all_inverter_history
+        result = snapshot_all_inverter_history()
+        logger.info(
+            "inverter_history_snapshot: tenants=%d inverters=%d errors=%d",
+            result.get("tenants_processed", 0), result.get("inverters_seen", 0),
+            len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Inverter history snapshot: unhandled exception",
+            f"The per-inverter history snapshot job raised an unexpected error:\n{exc}",
         )
 
 
