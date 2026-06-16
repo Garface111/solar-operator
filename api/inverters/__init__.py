@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from . import chint, fronius, locus, sma, solaredge
+from . import alsoenergy, chint, fronius, locus, sma, solaredge
 from .base import InverterAuthError, InverterError, InverterScopeError, require_fields
 
 # Insertion order is the order the connect UI lists vendors in.
@@ -20,6 +20,7 @@ VENDORS = {
     "fronius": fronius,
     "sma": sma,
     "chint": chint,
+    "alsoenergy": alsoenergy,
 }
 
 __all__ = [
