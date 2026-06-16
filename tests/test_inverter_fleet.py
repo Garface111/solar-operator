@@ -84,9 +84,45 @@ def test_peer_cohort_follows_owner_grouping():
         print("PASS cohort grouping")
 
 
+def test_origin_links_deep_link_to_vendor_portal():
+    """Owners click an array/inverter to jump to the vendor's origin site."""
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Origin Roof", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        # SolarEdge inverter with a known site -> site-specific deep link.
+        se = Inverter(tenant_id=t.id, array_id=a.id, position=1, vendor="solaredge",
+                      serial="SN-SE", source_site_id="416160", source_array_id=a.id,
+                      nameplate_kw=33.3, name="SE 1")
+        # SMA inverter with no site -> vendor base URL (not None).
+        sma = Inverter(tenant_id=t.id, array_id=a.id, position=2, vendor="sma",
+                       serial="SN-SMA", source_site_id=None, source_array_id=a.id,
+                       nameplate_kw=20.0, name="SMA 1")
+        db.add_all([se, sma]); db.commit()
+
+        tree = IF.build_fleet_tree(db, t)
+        col = next(c for c in tree["columns"] if c["array_id"] == a.id)
+        rows = {iv["sn"]: iv for iv in col["inverters"]}
+
+        assert rows["SN-SE"]["origin_url"] == \
+            "https://monitoring.solaredge.com/solaredge-web/p/site/416160/#/dashboard"
+        assert rows["SN-SE"]["origin_label"] == "SolarEdge"
+        # SMA: key-less vendor falls back to the base URL, never None.
+        assert rows["SN-SMA"]["origin_url"] == "https://ennexos.sunnyportal.com/"
+
+        # Distinct origin links on the column, deduped by (vendor, site_id).
+        links = col["origin_links"]
+        se_links = [l for l in links if l["url"].startswith("https://monitoring.solaredge.com")]
+        assert len(se_links) == 1
+        assert se_links[0]["url"] == \
+            "https://monitoring.solaredge.com/solaredge-web/p/site/416160/#/dashboard"
+        print("PASS origin links")
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()
     test_create_array_and_cross_tenant_guard()
     test_peer_cohort_follows_owner_grouping()
+    test_origin_links_deep_link_to_vendor_portal()
     print("ALL PASS")

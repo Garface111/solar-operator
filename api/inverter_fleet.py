@@ -41,6 +41,36 @@ log = logging.getLogger(__name__)
 _SITE_TTL = timedelta(minutes=10)
 _site_cache: dict[str, tuple] = {}
 
+# Vendor monitoring portals — the "origin site" that sources each inverter's data.
+# Owners click an array/inverter to jump to the vendor's deep-link for analysis.
+_PORTAL_BASE = {
+    "solaredge": "https://monitoring.solaredge.com/",
+    "fronius":   "https://www.solarweb.com/",
+    "sma":       "https://ennexos.sunnyportal.com/",
+    "locus":     "https://hmi.alsoenergy.com/",
+    "chint":     "https://monitor.chintpowersystems.com/",
+}
+_VENDOR_LABEL = {"solaredge": "SolarEdge", "fronius": "Fronius", "sma": "SMA",
+                 "locus": "Locus / AlsoEnergy", "chint": "Chint / CPS"}
+
+
+def _portal_link(vendor: str | None, site_id: str | None) -> str | None:
+    """Deep link into the vendor's monitoring portal for a given source site.
+    Known key-based vendors get a site-specific URL; others (and key-less cases)
+    fall back to the vendor's base URL. Returns None for unknown vendors."""
+    if not vendor:
+        return None
+    v = vendor.lower()
+    base = _PORTAL_BASE.get(v)
+    if not base:
+        return None
+    sid = (str(site_id).strip() if site_id else "")
+    if v == "solaredge" and sid:
+        return f"https://monitoring.solaredge.com/solaredge-web/p/site/{sid}/#/dashboard"
+    if v == "fronius" and sid:
+        return f"https://www.solarweb.com/PvSystems/PvSystem?pvSystemId={sid}"
+    return base  # sma/locus/chint and key-less cases -> vendor base URL
+
 
 def _resolve_connection(db, arr: Array):
     """The array's inverter connection (real row, or virtual from legacy
@@ -302,11 +332,28 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "last_report": u.get("last_report") or m.get("last_report"),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,
+                "origin_url": _portal_link(iv.vendor, iv.source_site_id),
+                "origin_label": _VENDOR_LABEL.get((iv.vendor or "").lower()) or (iv.vendor or None),
             })
         inv_total += len(inv_rows)
 
         # vendor mix for the array chip
         vendors = sorted({iv.vendor for iv in ivs})
+
+        # Distinct origin-site deep links among this array's inverters.
+        seen: dict[tuple, dict] = {}
+        for iv in ivs:
+            url = _portal_link(iv.vendor, iv.source_site_id)
+            if not url:
+                continue
+            key = (iv.vendor, iv.source_site_id or "")
+            if key in seen:
+                continue
+            seen[key] = {"vendor": iv.vendor,
+                         "label": _VENDOR_LABEL.get((iv.vendor or "").lower()) or iv.vendor,
+                         "site_id": iv.source_site_id, "url": url}
+        origin_links = [seen[k] for k in sorted(seen, key=lambda t: (str(t[0] or ""), str(t[1] or "")))]
+
         columns.append({
             "array_id": arr.id,
             "array_name": arr.name,
@@ -316,6 +363,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             "inverter_count": len(inv_rows),
             "alert": _array_alert(inv_rows),
             "inverters": inv_rows,
+            "origin_links": origin_links,
         })
 
     attention = sum(c["alert"]["count"] for c in columns)
