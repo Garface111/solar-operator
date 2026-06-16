@@ -36,6 +36,8 @@
   const PROVIDER = registryEntry.provider; // e.g. "vec", "wec"
   const UTILITY_NAME = registryEntry.name;
 
+  const LOG = (...a) => { try { console.log(`[EnergyAgent ${UTILITY_NAME}]`, ...a); } catch (_) {} };
+
   const POLL_INTERVAL_MS = 2000;
   const MAX_POLLS = 30; // 60 seconds before giving up
 
@@ -81,39 +83,151 @@
     };
   })();
 
-  // ─── Array-Operator meter-production capture (v1.9.25) ───────────────────
+  // ─── Array-Operator meter-production capture (v1.9.26 — CLIENT-SIDE pull) ──
   // Gated on an armed AO meter intent (chrome.storage.local so_capture_intent
-  // {vendor:<provider>}), mirroring the GMP meter-production flow. When the AO
-  // page opened this SmartHub portal to connect a co-op meter, it set the
-  // intent; we then forward the captured short-lived SmartHub session to
-  // background.js, which relays it to the AO page (SO_CAPTURE_LANDED). The AO
-  // page POSTs it to /v1/array-owners/smarthub-meter-capture and the BACKEND
-  // pulls daily generation. We send NO generation from here — only the session.
+  // {vendor:<provider>}). The SmartHub data API authenticates with the owner's
+  // httpOnly SESSION COOKIE — which the backend CANNOT replay (the v1.9.25
+  // server-side-pull design was wrong; proven by the live VEC HAR). So we pull
+  // the daily generation HERE, same-origin (credentials:"include" rides the
+  // cookie), assemble the per-account daily[] series the backend already ingests
+  // (utility-meter-capture, the proven GMP path), and ship it via background →
+  // SO_CAPTURE_LANDED. GROUNDED on West Glover (vermontelectric, acct 6578300):
+  //   GET  /services/secured/user-data          → accounts + serviceLocation + address
+  //   POST /services/secured/utility-usage       → {ELECTRIC:[{series:[{data:[{x,y}]}]}]}
+  //   NEGATIVE daily y = net export = generation (regardless of meter flags).
   let meterCaptureSent = false;
 
-  function maybeSendMeterCapture() {
+  function meterIntentArmed() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get("so_capture_intent", (res) => {
+          if (chrome.runtime.lastError) { void chrome.runtime.lastError; return resolve(false); }
+          const intent = res && res.so_capture_intent;
+          resolve(!!(intent && intent.vendor === PROVIDER &&
+            (Date.now() - (intent.ts || 0)) < 10 * 60 * 1000));
+        });
+      } catch (_) { resolve(false); }
+    });
+  }
+
+  // Same-origin authenticated GET/POST — the session cookie rides automatically.
+  async function shGet(path) {
+    const r = await fetch(path, { credentials: "include", headers: { "Accept": "application/json" } });
+    if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
+    return r.json();
+  }
+  async function shPost(path, body) {
+    const r = await fetch(path, {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
+    return r.json();
+  }
+
+  // Pull ~35 days of DAILY usage for one (account, serviceLocation) and reduce
+  // the negative-y export signal into per-day generation rows. Grounded contract.
+  async function fetchDailyGeneration(userId, accountNumber, serviceLocation) {
+    const end = new Date();
+    const start = new Date(end.getTime() - 35 * 24 * 3600 * 1000);
+    const body = {
+      timeFrame: "DAILY",
+      userId: userId,
+      screen: "USAGE_COMPARISON",
+      includeDemand: false,
+      serviceLocationNumber: String(serviceLocation),
+      accountNumber: String(accountNumber),
+      industries: ["ELECTRIC"],
+      startDateTime: start.getTime(),
+      endDateTime: end.getTime(),
+    };
+    let data;
+    try { data = await shPost("/services/secured/utility-usage", body); }
+    catch (e) { LOG("usage fetch failed for", accountNumber, e && e.message); return []; }
+
+    const electric = (data && Array.isArray(data.ELECTRIC)) ? data.ELECTRIC : [];
+    const byDay = {};   // isoDay -> generated kWh
+    for (const entry of electric) {
+      const seriesMap = {};
+      for (const s of (entry.series || [])) {
+        const name = (s.name != null ? s.name : s.seriesId);
+        if (name != null) seriesMap[String(name)] = s.data || [];
+      }
+      let meters = entry.meters || [];
+      if (!meters.length && Object.keys(seriesMap).length) {
+        meters = Object.keys(seriesMap).map((k) => ({ seriesId: k, flowDirection: "NET" }));
+      }
+      for (const m of meters) {
+        const sid = String(m.seriesId || m.meterName || "");
+        const flow = String(m.flowDirection || "").toUpperCase();
+        let pts = seriesMap[sid] || [];
+        if (!pts.length && Object.keys(seriesMap).length === 1) pts = Object.values(seriesMap)[0];
+        for (const pt of pts) {
+          const x = pt.x, y = pt.y;
+          if (x == null || y == null) continue;
+          const day = new Date(x).toISOString().slice(0, 10);
+          const kwh = Number(y);
+          // Grounded signal: NEGATIVE daily y = export = generation (West Glover's
+          // meter is tagged FORWARD/isNetMeter=false yet net-exports). RETURN flow,
+          // if present, is generation directly.
+          let gen = 0;
+          if (flow === "RETURN") gen = Math.max(0, kwh);
+          else if (kwh < 0) gen = Math.abs(kwh);
+          if (gen > 0) byDay[day] = (byDay[day] || 0) + gen;
+        }
+      }
+    }
+    return Object.keys(byDay).sort().map((d) => ({ date: d, generated_kwh: Math.round(byDay[d] * 1000) / 1000 }));
+  }
+
+  async function maybeSendMeterCapture() {
     if (meterCaptureSent) return;
-    if (!capturedAuthToken) return;
+    if (!(await meterIntentArmed())) return;
+    meterCaptureSent = true;
+    LOG("meter intent armed — pulling daily generation client-side");
     try {
-      chrome.storage.local.get("so_capture_intent", (res) => {
-        if (chrome.runtime.lastError) { void chrome.runtime.lastError; return; }
-        const intent = res && res.so_capture_intent;
-        // Only fire when an AO meter intent is armed for THIS provider.
-        if (!intent || intent.vendor !== PROVIDER) return;
-        if (meterCaptureSent) return;
-        meterCaptureSent = true;
-        chrome.runtime.sendMessage(
-          {
-            type: "SMARTHUB_METER_CAPTURED",
-            provider: PROVIDER,
-            host: location.hostname,
-            email: capturedPrimaryUsername || null,
-            auth_token: capturedAuthToken,
-          },
-          () => { void chrome.runtime.lastError; }
-        );
-      });
-    } catch (_) { /* non-fatal */ }
+      // user-data lists every account with its service location + address.
+      let userData;
+      try { userData = await shGet("/services/secured/user-data"); }
+      catch (e) {
+        LOG("user-data failed", e && e.message);
+        chrome.runtime.sendMessage({ type: "SMARTHUB_METER_FAILED", provider: PROVIDER,
+          reason: "couldn't read your accounts — try again" }, () => void chrome.runtime.lastError);
+        return;
+      }
+      const list = Array.isArray(userData) ? userData : [userData];
+      const accounts = [];
+      for (const obj of list) {
+        if (!obj || typeof obj !== "object") continue;
+        const userId = obj.email || capturedPrimaryUsername || "";
+        const acctNum = String(obj.account || obj.accountNumber || "").trim();
+        const locMap = obj.serviceLocationToUserDataServiceLocationSummaries || {};
+        for (const locId of Object.keys(locMap)) {
+          const summaries = locMap[locId];
+          const summary = Array.isArray(summaries) ? summaries[0] : summaries;
+          const services = (summary && summary.services) || [];
+          if (services.length && !services.some((s) => String(s).toUpperCase().startsWith("ELEC"))) continue;
+          const addr = (summary && summary.address) || {};
+          const nickname =
+            [addr.addr1, addr.city, addr.state].filter(Boolean).join(", ") ||
+            obj.customerName || `${PROVIDER.toUpperCase()} ${acctNum}`;
+          const daily = await fetchDailyGeneration(userId, acctNum, locId);
+          accounts.push({ account_number: acctNum, nickname, summary: {}, daily });
+        }
+      }
+      const totalGenDays = accounts.reduce((t, a) => t + a.daily.length, 0);
+      LOG("EMIT meter capture:", accounts.length, "account(s),", totalGenDays, "generation day(s)");
+      chrome.runtime.sendMessage({
+        type: "SMARTHUB_METER_GEN_CAPTURED",
+        provider: PROVIDER,
+        accounts,
+      }, () => void chrome.runtime.lastError);
+    } catch (e) {
+      LOG("meter capture error", e && e.message);
+      chrome.runtime.sendMessage({ type: "SMARTHUB_METER_FAILED", provider: PROVIDER,
+        reason: "couldn't read your production data" }, () => void chrome.runtime.lastError);
+    }
   }
 
   // ─── Utility helpers ─────────────────────────────────────────────────────
@@ -407,6 +521,13 @@
 
   async function tryScrape() {
     pollCount++;
+
+    // Array-Operator meter-production capture: fire on every scrape pass (initial
+    // load + each SPA nav). Self-guarded — only runs once, and only when an AO
+    // vec/wec meter intent is armed. This does NOT depend on a fresh login firing
+    // the auth-fetch hook (an already-signed-in owner never re-hits oauth/auth/v2),
+    // which is why the v1.9.25 hook-only trigger silently never ran.
+    maybeSendMeterCapture();
 
     let bills = [];
     let usage = [];

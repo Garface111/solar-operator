@@ -379,26 +379,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous response
   }
-  // v1.9.25: SmartHub (VEC / WEC) utility-meter PRODUCTION capture for Array
-  // Operator. Mirrors GMP_METER_CAPTURED but server-side-pull: smarthub_content.js
-  // captured only the owner's short-lived SmartHub session (email + auth token);
-  // we relay it to the AO page via SO_CAPTURE_LANDED. The page POSTs it to
-  // /v1/array-owners/smarthub-meter-capture and the BACKEND pulls generation.
-  if (msg.type === "SMARTHUB_METER_CAPTURED") {
+  // v1.9.26: SmartHub (VEC / WEC) utility-meter PRODUCTION capture for Array
+  // Operator — CLIENT-SIDE pull. smarthub_content.js pulled the daily generation
+  // itself (same-origin, riding the owner's session cookie — the backend can't
+  // replay an httpOnly cookie, which is why the v1.9.25 token-relay design failed)
+  // and hands us the assembled per-account daily[] series. We relay it to the AO
+  // page via SO_CAPTURE_LANDED; the page POSTs the accounts to the EXISTING
+  // /v1/array-owners/utility-meter-capture endpoint (the proven GMP daily path).
+  if (msg.type === "SMARTHUB_METER_GEN_CAPTURED") {
     const landed = {
       type: "SO_CAPTURE_LANDED",
       ok: true,
       provider: msg.provider || "vec",
       kind: "utility_meter",
-      host: msg.host || null,
-      email: msg.email || null,
-      auth_token: msg.auth_token || null,
+      accounts: Array.isArray(msg.accounts) ? msg.accounts : [],
       at: new Date().toISOString(),
     };
     broadcastToSoTabs(landed);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
+  }
+  // SmartHub meter capture gave up — relay the REASON so the AO spinner resolves
+  // into a real error instead of hanging forever.
+  if (msg.type === "SMARTHUB_METER_FAILED") {
+    const failed = {
+      type: "SO_CAPTURE_FAILED",
+      ok: false,
+      provider: msg.provider || "vec",
+      kind: "utility_meter",
+      reason: String(msg.reason || "unknown"),
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(failed);
+    chrome.runtime.sendMessage(failed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous
   }
   // v1.9.23: GMP meter capture gave up — relay the REASON to the AO page so its
   // spinner resolves into a real error instead of hanging forever.
