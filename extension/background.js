@@ -908,3 +908,184 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     console.warn("[EnergyAgent] retro-inject failed:", e);
   }
 });
+
+// ============================================================================
+// v1.9.30: SILENT AUTO-RECAPTURE for inverter live power (Fronius / SMA / Chint)
+// ----------------------------------------------------------------------------
+// Why: unlike SolarEdge (polled live by the backend on every dashboard load),
+// the extension-captured vendors only refresh their live AC power when a capture
+// runs — so the production bar would freeze at the last manual capture. This makes
+// it SLICK: on a slow timer (while Chrome is open) we silently open each portal in
+// a BACKGROUND (inactive) tab, let the existing content script ride the owner's
+// logged-in session and grab fresh power, POST it straight to the backend with the
+// stored tenant key (the /inverter-capture endpoint is dual-auth: session OR key),
+// then auto-close the tab. The owner sees nothing. If a portal session has expired
+// (capture can't ride it), we degrade to ONE gentle "reconnect" notification per
+// vendor per day instead of nagging. Reuses the existing intent + *_CAPTURED wiring.
+// ============================================================================
+(() => {
+  const RECAP_VENDORS = {
+    fronius: "https://www.solarweb.com/",
+    sma: "https://ennexos.sunnyportal.com/",
+    chint: "https://monitor.chintpowersystems.com/",
+  };
+  const RECAP_ALARM = "inverter-recapture";
+  const RECAP_PERIOD_MIN = 180;          // every 3h while the browser is running
+  const TAB_BUDGET_MS = 90 * 1000;       // give a portal up to 90s to capture
+  const NUDGE_KEY = "so_recap_nudges";   // { fronius:"YYYY-MM-DD", ... } 1 nudge/vendor/day
+  const STATE_KEY = "so_recap_state";    // { running, vendor, tabId, startedAt }
+  const LAST_KEY = "so_recap_last";      // { fronius:{at,ok,sites}, ... } diagnostics
+
+  function rlog(...a) { try { console.log("[EnergyAgent/recap]", ...a); } catch (_) {} }
+
+  async function recapSettings() {
+    const s = await chrome.storage.local.get([STORAGE_KEYS.TENANT_KEY, STORAGE_KEYS.ENDPOINT]);
+    return {
+      tenantKey: s[STORAGE_KEYS.TENANT_KEY] || "",
+      base: (s[STORAGE_KEYS.ENDPOINT] || PROD_ENDPOINT).replace(/\/v1\/sync$/, ""),
+    };
+  }
+
+  // POST a captured inverter payload straight to the backend (no open page needed).
+  // The endpoint is dual-auth, so the extension's stored tenant key authenticates it.
+  async function recapPost(provider, sites) {
+    const { tenantKey, base } = await recapSettings();
+    if (!tenantKey) { rlog("no tenant key — skipping POST"); return false; }
+    if (!Array.isArray(sites) || !sites.length) return false;
+    try {
+      const r = await fetch(`${base}/v1/array-owners/inverter-capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tenantKey}` },
+        body: JSON.stringify({ provider, sites }),
+      });
+      rlog("POST", provider, "->", r.status, r.ok ? "ok" : "FAIL");
+      return r.ok;
+    } catch (e) {
+      rlog("POST threw", provider, e && e.message || e);
+      return false;
+    }
+  }
+
+  async function recapSetState(st) { try { await chrome.storage.local.set({ [STATE_KEY]: st }); } catch (_) {} }
+  async function recapGetState() { const s = await chrome.storage.local.get(STATE_KEY); return s[STATE_KEY] || null; }
+  async function recapClearState() { try { await chrome.storage.local.remove(STATE_KEY); } catch (_) {} }
+
+  async function recapRecordLast(vendor, ok, sites) {
+    try {
+      const s = await chrome.storage.local.get(LAST_KEY);
+      const m = s[LAST_KEY] || {};
+      m[vendor] = { at: new Date().toISOString(), ok, sites: Array.isArray(sites) ? sites.length : 0 };
+      await chrome.storage.local.set({ [LAST_KEY]: m });
+    } catch (_) {}
+  }
+
+  // One gentle reconnect nudge per vendor per day, only when a silent recap failed
+  // (almost always an expired portal session the owner must re-auth once).
+  async function recapMaybeNudge(vendor) {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const s = await chrome.storage.local.get(NUDGE_KEY);
+      const m = s[NUDGE_KEY] || {};
+      if (m[vendor] === today) return;          // already nudged today
+      m[vendor] = today;
+      await chrome.storage.local.set({ [NUDGE_KEY]: m });
+      const label = vendor === "fronius" ? "Fronius Solar.web"
+        : vendor === "sma" ? "SMA Sunny Portal" : "Chint";
+      chrome.notifications.create(`recap-${vendor}-${today}`, {
+        type: "basic",
+        iconUrl: "icons/icon128.png",
+        title: "EnergyAgent: quick reconnect",
+        message: `Sign in to ${label} once to keep your live production numbers fresh.`,
+      });
+    } catch (_) {}
+  }
+
+  // Close a background recap tab and clear the in-flight state.
+  async function recapFinish(vendor, ok, sites) {
+    const st = await recapGetState();
+    await recapRecordLast(vendor, ok, sites);
+    if (!ok) await recapMaybeNudge(vendor);
+    if (st && typeof st.tabId === "number") {
+      try { chrome.tabs.remove(st.tabId, () => void chrome.runtime.lastError); } catch (_) {}
+    }
+    await recapClearState();
+  }
+
+  // Open ONE vendor's portal in a background tab, arm the capture intent, and let
+  // the existing content script do its thing. A watchdog closes the tab if the
+  // capture never lands (expired session) and fires the gentle nudge.
+  async function recaptureVendor(vendor) {
+    const url = RECAP_VENDORS[vendor];
+    if (!url) return;
+    try { await chrome.storage.local.set({ so_capture_intent: { vendor, ts: Date.now() } }); } catch (_) {}
+    await new Promise((resolve) => {
+      chrome.tabs.create({ url, active: false }, async (tab) => {   // background tab — invisible
+        if (chrome.runtime.lastError || !tab) { await recapMaybeNudge(vendor); resolve(); return; }
+        await recapSetState({ running: true, vendor, tabId: tab.id, startedAt: Date.now() });
+        setTimeout(async () => {
+          const st = await recapGetState();
+          if (st && st.running && st.vendor === vendor && st.tabId === tab.id) {
+            rlog("watchdog timeout for", vendor, "(likely expired session)");
+            await recapFinish(vendor, false, []);
+          }
+          resolve();
+        }, TAB_BUDGET_MS);
+      });
+    });
+  }
+
+  // Run the vendors the owner actually has, one at a time (a single background tab
+  // at a time keeps it invisible and cheap). After the first cycle we only refresh
+  // vendors that have captured before — never open portals the owner doesn't use.
+  async function runRecaptureCycle() {
+    const { tenantKey } = await recapSettings();
+    if (!tenantKey) { rlog("no tenant key — owner not connected; skip"); return; }
+    const s = await chrome.storage.local.get(LAST_KEY);
+    const known = s[LAST_KEY] || {};
+    const vendors = Object.keys(RECAP_VENDORS).filter(
+      (v) => Object.keys(known).length === 0 || known[v]
+    );
+    if (!vendors.length) return;
+    const st = await recapGetState();
+    if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) {
+      rlog("cycle already running — skip"); return;
+    }
+    rlog("recapture cycle:", vendors.join(", "));
+    for (const v of vendors) {
+      await recaptureVendor(v);   // resolves when that vendor finishes/timeouts
+    }
+  }
+
+  // Hook the existing *_CAPTURED messages: when a silent recap is in flight, POST
+  // the captured sites straight to the backend and close the tab. The normal
+  // page-driven flow still works untouched — we only act when STATE_KEY is set.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || !msg.type) return;
+    const okMap = { FRONIUS_CAPTURED: "fronius", SMA_CAPTURED: "sma", CHINT_CAPTURED: "chint" };
+    const failMap = { FRONIUS_CAPTURE_FAILED: "fronius", SMA_CAPTURE_FAILED: "sma", CHINT_CAPTURE_FAILED: "chint" };
+    (async () => {
+      const st = await recapGetState();
+      if (!st || !st.running) return;            // no silent recap in flight → ignore
+      if (okMap[msg.type] && okMap[msg.type] === st.vendor) {
+        const sites = (msg.payload && Array.isArray(msg.payload.sites)) ? msg.payload.sites : [];
+        const ok = await recapPost(st.vendor, sites);
+        await recapFinish(st.vendor, ok, sites);
+      } else if (failMap[msg.type] && failMap[msg.type] === st.vendor) {
+        await recapFinish(st.vendor, false, []);
+      }
+    })();
+  });
+
+  // Timer: fire the cycle every RECAP_PERIOD_MIN while Chrome runs. Alarms persist
+  // across service-worker sleeps, so this keeps working without a live page.
+  chrome.alarms.create(RECAP_ALARM, { periodInMinutes: RECAP_PERIOD_MIN, delayInMinutes: 2 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === RECAP_ALARM) {
+      runRecaptureCycle().catch((e) => rlog("cycle error", e && e.message || e));
+    }
+  });
+  // Kick one shortly after install/update so the bars freshen without waiting 3h.
+  chrome.runtime.onInstalled.addListener(() => {
+    setTimeout(() => runRecaptureCycle().catch(() => {}), 8000);
+  });
+})();
