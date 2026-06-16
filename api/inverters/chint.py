@@ -28,8 +28,9 @@ LABEL = "Chint / CPS"
 AVAILABLE = False
 NOTE = (
     "Chint/CPS has no public API and no key to paste — connect with one click via "
-    "the EnergyAgent extension (log into your Chint Connect portal). Extension "
-    "capture is in final verification against live accounts."
+    "the EnergyAgent extension (log into your Chint Power Monitor portal at "
+    "monitor.chintpowersystems.com). Extension capture is grounded against live "
+    "accounts as of June 2026."
 )
 SUPPORTS_LIVE = False
 SUPPORTS_DAILY = False

@@ -1,36 +1,46 @@
-// chint_content.js — runs on solar.chintpower.com (Chint Connect / CPS portal).
+// chint_content.js — runs on monitor.chintpowersystems.com (Chint Power Systems
+// / CPS "Monitor" portal — the real owner-facing monitoring site).
 //
 // Array Operator PER-INVERTER capture for CHINT / CPS. Like Fronius and SMA,
-// Chint/CPS exposes no usable owner-facing API key (the cloud is a Fomware-built
-// white-label — contact on the portal's privacy page is how@fomware.com, and
-// CHINT publishes no public API docs). So, exactly like the Fronius/SMA paths,
-// this content script reads the owner's live readings straight from the logged-in
-// portal's own JSON endpoints (first-party session, credentials:"include") and
-// ships them to the AO ingest path.
+// Chint/CPS exposes no usable owner-facing API key, so this content script reads
+// the owner's live readings straight from the logged-in portal's own JSON API
+// and ships them to the AO ingest path.
 //
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║ LOUD CAVEAT — NOT YET GROUNDED AGAINST A LIVE CHINT ACCOUNT.               ║
-// ║                                                                            ║
-// ║ SolarEdge, Fronius and SMA were each grounded against a real login (HAR    ║
-// ║ capture → verified endpoints). We have NO live CHINT account to inspect,   ║
-// ║ and CHINT/CPS ship no API docs. The CANDIDATE_* endpoints below are        ║
-// ║ best-effort guesses for the Fomware portal's internal API — they are       ║
-// ║ UNVERIFIED. The script is written to FAIL GRACEFULLY: if none of the       ║
-// ║ candidates return usable data it reports CHINT_CAPTURE_FAILED with a clear ║
-// ║ reason (the AO spinner resolves honestly — it never hangs and never        ║
-// ║ pretends success). To finish CHINT: open solar.chintpower.com logged in,   ║
-// ║ grab the station-list + device-list XHRs from DevTools/HAR, and replace    ║
-// ║ the CANDIDATE_* lists + mapping below with the real paths/shapes.          ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// ── GROUNDED CONTRACT (HAR-captured against Bruce's live account, 2026-06-16) ──
+// Inspected monitor.chintpowersystems.com while logged in as the GMCS Manager
+// account (e.g. site "Londonderry 186", 186 kW, 4× SCA50KTL inverters). Every
+// endpoint below is REAL and verified live — no guessing remains.
+//
+//   API BASE:  https://monitor.chintpowersystems.com:8443
+//   AUTH:      custom request headers (NOT cookies):
+//                token        ← localStorage["_token"]
+//                loginuserid  ← localStorage["userIdByLogin"]
+//                platformcode: 3
+//                request-origin: web
+//              CORS: the API answers ACAO=<page origin> (specific, not "*"), so
+//              a content-script fetch works directly with the extension's
+//              host_permissions — no background proxy needed (unlike SMA's uiapi).
+//
+//   1. whoami : GET /api/users/user/getUserInfo?appKey=WEB
+//        → { code:"0", data:{ userId, email, userName } }
+//   2. sites  : GET /api/asset/site/retrieve?page=1&limit=999&...(blank params)
+//        → { code:"0", data:[ { id, siteName, installedCapacity(kW string),
+//                               currentPower(W string), onlineCount, totalCount } ] }
+//   3. devices: GET /api/asset/site/busTypeDevices?siteId=<id>
+//        → { code:"0", data:{ gwDevices:[ { commDevices:[ {
+//              assetTypeName:"Inverter", sn, assetAlias, model,
+//              currentPower(W string), eToday(kWh number), statusName } ] } ] } }
 //
 // PRIVACY: capture runs ONLY when a recent, explicit AO "Connect Chint" click set
-// the intent flag — never on a casual visit. SAFETY: read-only GETs; the
+// the intent flag — never on a casual visit. SAFETY: read-only GETs; the token is
+// read from the page's own localStorage and sent only to the Chint API; the
 // extension persists nothing beyond the in-memory hand-off.
 
 (function () {
   "use strict";
-  if (!/(^|\.)chintpower\.com$/.test(location.hostname)) return;
+  if (!/(^|\.)chintpowersystems\.com$/.test(location.hostname)) return;
 
+  const API = "https://monitor.chintpowersystems.com:8443";
   const INTENT_KEY = "so_capture_intent";
   const INTENT_TTL_MS = 10 * 60 * 1000;
   const POLL_INTERVAL_MS = 4000;
@@ -46,81 +56,68 @@
     const d = await crypto.subtle.digest("SHA-1", buf);
     return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  // Same-origin credentialed GET (the portal SPA's session cookie rides). If
-  // grounding reveals the Chint API lives on a DIFFERENT host with ACAO:* (as
-  // SMA's uiapi did), route these through a background CHINT_API_GET proxy the
-  // way sunnyportal_content.js does — add it then.
-  async function getJson(url) {
-    const r = await fetch(url, { credentials: "include", headers: { "Accept": "application/json" } });
-    if (!r.ok) throw new Error(url + " -> " + r.status);
-    const ct = r.headers.get("content-type") || "";
-    if (!/json/i.test(ct)) throw new Error(url + " -> non-json (" + ct + ")");
-    return r.json();
-  }
-  // Try a list of CANDIDATE endpoints; return the first that yields JSON. Honest
-  // about being a probe — every candidate is wrapped so a 404/login-redirect just
-  // moves to the next, and an all-miss is reported, not swallowed.
-  async function firstJson(candidates) {
-    for (const path of candidates) {
-      try { return { path, data: await getJson(path) }; } catch (_) { /* next candidate */ }
+
+  // Read a localStorage value, tolerating JSON-string wrapping (some SPA stores
+  // JSON.stringify the raw token, leaving surrounding quotes).
+  function lsRaw(key) {
+    let v = null;
+    try { v = window.localStorage.getItem(key); } catch (_) { return null; }
+    if (v == null) return null;
+    if (v.length >= 2 && v[0] === '"' && v[v.length - 1] === '"') {
+      try { return JSON.parse(v); } catch (_) { return v.slice(1, -1); }
     }
-    return null;
+    return v;
+  }
+  function authHeaders() {
+    const token = lsRaw("_token");
+    const uid = lsRaw("userIdByLogin");
+    const h = {
+      "Accept": "application/json, text/plain, */*",
+      "platformcode": "3",
+      "request-origin": "web",
+    };
+    if (token) h["token"] = token;
+    if (uid) h["loginuserid"] = uid;
+    return h;
+  }
+  function userId() { return lsRaw("userIdByLogin"); }
+
+  // Credentialed-by-header GET against the Chint API. Cross-origin (page :443 →
+  // API :8443) but the extension's host_permissions + the API's specific ACAO
+  // make this work without a background proxy.
+  async function getJson(path) {
+    const url = API + path;
+    const r = await fetch(url, { method: "GET", headers: authHeaders() });
+    if (!r.ok) throw new Error(path + " -> " + r.status);
+    const ct = r.headers.get("content-type") || "";
+    if (!/json/i.test(ct)) throw new Error(path + " -> non-json (" + ct + ")");
+    const j = await r.json();
+    if (j && j.code != null && String(j.code) !== "0") {
+      throw new Error(path + " -> api code " + j.code + " (" + (j.msg || "?") + ")");
+    }
+    return j;
   }
 
-  // ── CANDIDATE endpoints — UNVERIFIED guesses for the Fomware/Chint Connect API.
-  // Replace with the real paths from a live-account HAR capture. Kept same-origin
-  // (relative) so the page's session cookie authenticates them.
-  const CANDIDATE_WHOAMI = [
-    "/maxweb/proxy/account/getUserInfo",
-    "/proxyApp/proxy/api/user/info",
-    "/api/user/info",
-    "/cps/api/user/current",
-  ];
-  const CANDIDATE_STATION_LIST = [
-    "/maxweb/proxy/station/getStationList",
-    "/proxyApp/proxy/api/station/list",
-    "/api/station/list",
-    "/cps/api/plant/list",
-  ];
-  // Per-station device list; {sid} is replaced with the station id.
-  const CANDIDATE_DEVICE_LIST = [
-    "/maxweb/proxy/device/getDeviceList?stationId={sid}",
-    "/proxyApp/proxy/api/device/list?stationId={sid}",
-    "/api/device/list?stationId={sid}",
-    "/cps/api/inverter/list?plantId={sid}",
-  ];
+  function num(v) { const n = Number(v); return isFinite(n) ? n : null; }
+  function kwFromStr(v) { const n = Number(v); return isFinite(n) ? Math.round(n * 1000) / 1000 : null; }
 
-  // Defensive field pluckers — these portals vary the casing/keys, so reach for
-  // several common names before giving up on a value.
-  function pick(obj, keys) {
-    for (const k of keys) { if (obj && obj[k] != null) return obj[k]; }
-    return null;
-  }
-  function asArray(resp) {
-    if (Array.isArray(resp)) return resp;
-    // Common envelope shapes: {data:[...]}, {data:{records:[...]}}, {result:{list:[...]}}
-    const d = resp && (resp.data || resp.result || resp.records || resp.list);
-    if (Array.isArray(d)) return d;
-    if (d && Array.isArray(d.records)) return d.records;
-    if (d && Array.isArray(d.list)) return d.list;
-    if (d && Array.isArray(d.rows)) return d.rows;
-    return [];
-  }
-  function toKw(v) {
-    const n = Number(v);
-    return isFinite(n) ? Math.round(n * 10) / 10 : null;
+  // Map a Chint inverter status to our coarse states.
+  function mapStatus(statusName, powerW) {
+    const s = String(statusName || "").toLowerCase();
+    if (/fault|error|alarm|warn/.test(s)) return "fault";
+    if (/off|disconnect|standby|stop/.test(s)) return "offline";
+    return (powerW || 0) > 0 ? "producing" : "idle";
   }
 
-  // A logged-in portal answers one of the whoami candidates with JSON. The login
-  // page does not (it redirects/returns HTML). Also treat being off the index/
-  // login route as a weak positive so a fresh dashboard load isn't a false miss.
+  // A logged-in portal answers getUserInfo with code:"0" + a userId. The login
+  // page does not (401 / redirect / HTML).
   async function isSignedIn() {
-    const who = await firstJson(CANDIDATE_WHOAMI);
-    if (who) return true;
-    // No whoami candidate matched — fall back to: are we past the login screen?
-    const p = location.pathname.toLowerCase();
-    const onLogin = /login|signin|index(en)?\.html$|^\/$/.test(p);
-    return !onLogin;   // best-effort; capture still has to find a station list to succeed
+    try {
+      const who = await getJson("/api/users/user/getUserInfo?appKey=WEB");
+      return !!(who && who.data && who.data.userId);
+    } catch (_) {
+      return false;
+    }
   }
   function broadcastLoginState(state) {
     if (state === lastLoginState) return;
@@ -132,39 +129,58 @@
   }
 
   async function captureFlow() {
-    const stationResp = await firstJson(CANDIDATE_STATION_LIST);
-    if (!stationResp) throw new Error("no station-list endpoint responded (chint endpoints unverified — needs live-account grounding)");
-    const stations = asArray(stationResp.data);
-    if (!stations.length) throw new Error("station list returned no stations");
+    // 1) Site list — blank-param shape mirrors the portal's own call.
+    const siteResp = await getJson(
+      "/api/asset/site/retrieve?page=1&limit=999&key=&customerAdminId=&customerId=" +
+      "&endUserId=&installerId=&acPlcSite=&projectId=&asc=true&sortKey=&selfParty="
+    );
+    const stations = Array.isArray(siteResp.data) ? siteResp.data : [];
+    if (!stations.length) throw new Error("site list returned no sites");
 
     const sites = [];
     for (const st of stations) {
-      const sid = pick(st, ["stationId", "id", "plantId", "stationGuid", "uid"]);
-      const name = pick(st, ["stationName", "name", "plantName", "title"]) || (sid ? "Chint station " + sid : "Chint station");
-      const capacityKw = toKw(pick(st, ["capacity", "installedCapacity", "nameplate", "totalPower", "kwp"]));
-      const liveW = (() => { const n = Number(pick(st, ["currentPower", "power", "acPower"])); return isFinite(n) ? n : null; })();
-      const energyToday = (() => { const n = Number(pick(st, ["todayEnergy", "energyToday", "dayEnergy", "etoday"])); return isFinite(n) ? n : null; })();
+      const sid = st.id;
+      const name = st.siteName || (sid ? "Chint site " + sid : "Chint site");
+      const capacityKw = kwFromStr(st.installedCapacity);
+      const liveW = num(st.currentPower);
 
-      // Per-inverter drill-down (best-effort — the site still ships without it).
+      // 2) Per-site devices → inverters live under gwDevices[].commDevices[].
       let inverters = [];
       if (sid != null) {
-        const devResp = await firstJson(CANDIDATE_DEVICE_LIST.map((p) => p.replace("{sid}", encodeURIComponent(sid))));
-        const devs = devResp ? asArray(devResp.data) : [];
-        inverters = devs.map((d, i) => ({
-          serial: String(pick(d, ["sn", "serial", "deviceSn", "deviceId", "id"]) || (sid + "-" + i)),
-          name: String(pick(d, ["deviceName", "name", "alias"]) || ("Inverter " + (i + 1))),
-          model: pick(d, ["deviceType", "model", "type"]) || null,
-          nameplate_kw: toKw(pick(d, ["capacity", "ratedPower", "nameplate"])),
-          energy_today_kwh: (() => { const n = Number(pick(d, ["todayEnergy", "energyToday", "etoday"])); return isFinite(n) ? n : null; })(),
-          current_power_w: (() => { const n = Number(pick(d, ["power", "acPower", "currentPower"])); return isFinite(n) ? n : null; })(),
-          status: (() => {
-            const s = String(pick(d, ["status", "state", "runState"]) || "").toLowerCase();
-            if (/fault|error|alarm/.test(s)) return "fault";
-            if (/off|disconnect/.test(s)) return "offline";
-            const p = Number(pick(d, ["power", "acPower", "currentPower"]));
-            return isFinite(p) && p > 0 ? "producing" : "idle";
-          })(),
-        }));
+        try {
+          const devResp = await getJson("/api/asset/site/busTypeDevices?siteId=" + encodeURIComponent(sid));
+          const gws = (devResp && devResp.data && Array.isArray(devResp.data.gwDevices)) ? devResp.data.gwDevices : [];
+          for (const gw of gws) {
+            const comm = Array.isArray(gw.commDevices) ? gw.commDevices : [];
+            for (const dvc of comm) {
+              const isInv = dvc.assetTypeName === "Inverter" || dvc.assetType === 2;
+              if (!isInv) continue;
+              const serial = String(dvc.sn || dvc.assetAlias || dvc.id || "").trim();
+              if (!serial) continue;
+              const powerW = num(dvc.currentPower);
+              inverters.push({
+                serial,
+                name: String(dvc.assetAlias || dvc.sn || serial),
+                model: dvc.model || null,
+                nameplate_kw: null,                       // not exposed per-device by Chint
+                energy_today_kwh: num(dvc.eToday),
+                current_power_w: powerW,
+                status: mapStatus(dvc.statusName, powerW),
+              });
+            }
+          }
+        } catch (e) {
+          // Per-site device fetch failed — keep the site (with site-level power)
+          // rather than dropping it; the comb just won't have per-inverter rows.
+          lastErr = "device fetch failed for site " + sid + ": " + ((e && e.message) || e);
+        }
+      }
+
+      // Site's energy-today = sum of its inverters' eToday (per-inverter truth).
+      let energyToday = null;
+      if (inverters.length) {
+        energyToday = inverters.reduce((t, iv) => t + (iv.energy_today_kwh || 0), 0);
+        energyToday = Math.round(energyToday * 1000) / 1000;
       }
 
       sites.push({
@@ -179,7 +195,7 @@
         inverters,
       });
     }
-    if (!sites.length) throw new Error("no usable stations parsed");
+    if (!sites.length) throw new Error("no usable sites parsed");
     return { provider: "chint", capturedAt: new Date().toISOString(), sites };
   }
 
@@ -206,16 +222,19 @@
     if (done) return;
     polls++;
     if (!(await hasIntent())) { lastErr = "capture not requested from Array Operator (click “Log in with Chint” there first)"; return; }
+    // Auth comes from localStorage — if it's not there yet the owner hasn't
+    // finished signing in (the SPA writes _token/userIdByLogin post-login).
+    if (!lsRaw("_token") || !userId()) { lastErr = "not signed in to Chint yet (no session token on the page)"; broadcastLoginState("login_required"); return; }
     let signedIn;
     try { signedIn = await isSignedIn(); }
     catch (e) { lastErr = "auth-check failed: " + ((e && e.message) || e); return; }
-    if (!signedIn) { lastErr = "not signed in to Chint Connect yet"; broadcastLoginState("login_required"); return; }
+    if (!signedIn) { lastErr = "not signed in to Chint Monitor yet"; broadcastLoginState("login_required"); return; }
     broadcastLoginState("signed_in");
     let payload;
     try { payload = await captureFlow(); }
     catch (e) { lastErr = "capture failed: " + ((e && e.message) || e); return; }   // retry next tick
     const sites = payload.sites || [];
-    if (!sites.length) { lastErr = "signed in, but no stations/inverters returned"; return; }
+    if (!sites.length) { lastErr = "signed in, but no sites/inverters returned"; return; }
     const sig = sites.map((s) =>
       s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
     ).join("||");
@@ -232,9 +251,7 @@
     if (done) { clearInterval(iv); return; }
     if (polls >= MAX_POLLS) {
       clearInterval(iv);
-      // Out of retries with no capture — tell the AO page WHY (honest, ungrounded)
-      // instead of leaving its spinner hanging forever.
-      reportFailure(lastErr || "timed out with no data (chint endpoints not yet verified)");
+      reportFailure(lastErr || "timed out with no data");
       return;
     }
     tick();

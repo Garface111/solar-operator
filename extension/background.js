@@ -473,9 +473,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             });
           } catch (_) { /* non-fatal */ }
         }
-        // v1.9.11: same for Chint / CPS (solar.chintpower.com). Not in the wipe
-        // list — ride the owner's existing monitoring session (zero extra logins).
-        if (host.endsWith("chintpower.com")) {
+        // v1.9.12: Chint / CPS — the real owner portal is
+        // monitor.chintpowersystems.com (HAR-grounded 2026-06-16); the older
+        // solar.chintpower.com guess is kept for safety. Not in the wipe list —
+        // ride the owner's existing monitoring session (zero extra logins).
+        if (host.endsWith("chintpowersystems.com") || host.endsWith("chintpower.com")) {
           try {
             await chrome.storage.local.set({
               so_capture_intent: { vendor: "chint", ts: Date.now() },
