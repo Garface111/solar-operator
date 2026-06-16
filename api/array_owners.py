@@ -1797,6 +1797,39 @@ def utility_meter_capture(
             acct_num = (acct.account_number or parsed.get("account_number") or "").strip()
             name = (acct.nickname or "").strip() or f"GMP {acct_num or 'account'}"
 
+            # Determine generation BEFORE creating anything. Bruce has 48 GMP
+            # accounts but only a handful are solar arrays — the rest are homes/
+            # pumps/meters with zero generation. We must NOT spawn an empty array
+            # for every non-solar account (that would bury the real arrays). So an
+            # account only gets an Array when it actually has production: either a
+            # per-day generation series, OR a positive billing-period total.
+            daily_rows = [
+                d for d in (acct.daily or [])
+                if d.generated_kwh is not None and d.generated_kwh >= 0
+            ]
+            period_gen = parsed.get("kwh_generated")
+            period_end = _meter_day(parsed.get("period_end"))
+            has_any_generation = bool(
+                any(d.generated_kwh and d.generated_kwh > 0 for d in daily_rows)
+                or (period_gen is not None and period_gen > 0 and period_end is not None)
+            )
+
+            if not has_any_generation:
+                # Record the account honestly as no-solar — but create NO array and
+                # write NO rows. The UI uses has_generation=false to tell the owner
+                # "this GMP account has no solar production."
+                results.append({
+                    "account_number": acct_num,
+                    "array_id": None,
+                    "name": name,
+                    "created": False,
+                    "kwh_recorded": 0.0,
+                    "days_written": 0,
+                    "is_net_metered": bool(parsed.get("is_net_metered")),
+                    "has_generation": False,
+                })
+                continue
+
             arr = by_name.get(name.lower())
             created = False
             if arr is None:
@@ -1813,7 +1846,6 @@ def utility_meter_capture(
             days_written = 0
 
             # ── Per-day series (preferred when present) ──────────────────────
-            daily_rows = [d for d in (acct.daily or []) if d.generated_kwh is not None]
             if daily_rows:
                 for d in daily_rows:
                     day = _meter_day(d.date)
@@ -1840,8 +1872,7 @@ def utility_meter_capture(
                     days_written += 1
             else:
                 # ── Billing-period total → one representative row ────────────
-                gen = parsed.get("kwh_generated")
-                period_end = _meter_day(parsed.get("period_end"))
+                gen = period_gen
                 if gen is not None and gen > 0 and period_end is not None:
                     gk = float(gen)
                     row = db.execute(
