@@ -31,7 +31,7 @@
   "use strict";
   if (!/(^|\.)chintpowersystems\.com$/.test(location.hostname)) return;
 
-  const CHINT_DEBUG = true;
+  const CHINT_DEBUG = false;
   const LOG = (...a) => { if (CHINT_DEBUG) { try { console.log("[EnergyAgent CHINT]", ...a); } catch (_) {} } };
   LOG("content script LOADED on", location.href);
 
@@ -45,6 +45,7 @@
   let lastErr = null;
   let done = false;
   let _warnedNoList = false;
+  let emittedAny = false;
 
   // Observed response bodies, relayed by chint_inject.js (MAIN world).
   let siteListJson = null;                     // parsed /api/asset/site/retrieve
@@ -188,6 +189,7 @@
 
     const sites = payload.sites || [];
     const withInv = sites.filter((s) => (s.inverters || []).length > 0).length;
+    const totalInv = sites.reduce((t, s) => t + (s.inverters || []).length, 0);
     // Hold out a few ticks for the owner to click into sites so we get per-inverter
     // data — but don't wait forever: after ~5 polls (~15s) with a site list but no
     // devices, ship what we have (site-level) so the flow completes honestly.
@@ -196,17 +198,22 @@
       return;
     }
 
+    // Signature includes EVERY site's inverters, so opening a NEW site changes the
+    // hash and triggers a fresh emit. We do NOT stop after the first site — Bruce
+    // (and any multi-site owner) opens sites one at a time, and each must be
+    // captured. The backend upserts idempotently, so progressive re-emits are safe
+    // and additive. We only stop on intent timeout (MAX_POLLS), never on "got one".
     const sig = sites.map((s) =>
       s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
     ).join("||");
     const h = await hashString(sig);
     if (h === lastHash) return;             // nothing new since last emit
     lastHash = h;
-    LOG("EMIT payload:", sites.length, "site(s),", withInv, "with inverters");
-    // Emit progressively: each time we learn about more inverters we re-send, and
-    // the backend upserts idempotently. Mark done once at least one site has
-    // inverters (the meaningful capture) so we stop re-emitting.
-    if (withInv > 0) { done = true; clearIntent(); }
+    LOG("EMIT payload:", sites.length, "site(s),", withInv, "with inverters,", totalInv, "inverters total");
+    // Progressive emit: ship the full current snapshot every time we learn about
+    // more inverters (a newly-opened site). NEVER set done here — keep listening so
+    // later site-opens are captured too. clearIntent stays armed until timeout.
+    if (totalInv > 0) emittedAny = true;
     chrome.runtime.sendMessage({ type: "CHINT_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
@@ -215,7 +222,12 @@
     if (done) { clearInterval(iv); return; }
     if (polls >= MAX_POLLS) {
       clearInterval(iv);
-      reportFailure(lastErr || "timed out with no data");
+      // Only report failure if we NEVER captured anything. If we already emitted
+      // real inverters (the progressive multi-site path), timing out is the normal
+      // end of the capture window — stay silent so we don't overwrite a good result
+      // with a spurious "failed" toast.
+      if (!emittedAny) reportFailure(lastErr || "timed out with no data");
+      else LOG("capture window ended — emitted", "inverters across the session");
       return;
     }
     tick();
