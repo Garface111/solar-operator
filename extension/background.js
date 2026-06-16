@@ -379,6 +379,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous response
   }
+  // v1.9.25: SmartHub (VEC / WEC) utility-meter PRODUCTION capture for Array
+  // Operator. Mirrors GMP_METER_CAPTURED but server-side-pull: smarthub_content.js
+  // captured only the owner's short-lived SmartHub session (email + auth token);
+  // we relay it to the AO page via SO_CAPTURE_LANDED. The page POSTs it to
+  // /v1/array-owners/smarthub-meter-capture and the BACKEND pulls generation.
+  if (msg.type === "SMARTHUB_METER_CAPTURED") {
+    const landed = {
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: msg.provider || "vec",
+      kind: "utility_meter",
+      host: msg.host || null,
+      email: msg.email || null,
+      auth_token: msg.auth_token || null,
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(landed);
+    chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
   // v1.9.23: GMP meter capture gave up — relay the REASON to the AO page so its
   // spinner resolves into a real error instead of hanging forever.
   if (msg.type === "GMP_METER_CAPTURE_FAILED") {
@@ -630,6 +651,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               so_capture_intent: { vendor: "gmp", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
+        }
+        // v1.9.25: SmartHub co-op (VEC / WEC) utility-meter PRODUCTION capture —
+        // arm the matching intent so smarthub_content.js forwards the owner's
+        // short-lived SmartHub session for a server-side generation pull. The
+        // vendor code mirrors the per-host provider (vec/wec); NOTE smarthub.coop
+        // IS in the cookie-wipe list above, so each connect is a fresh sign-in —
+        // the intent flag survives the wipe (extension storage, not site cookies).
+        if (host.endsWith("smarthub.coop")) {
+          const shVendor =
+            host === "vermontelectric.smarthub.coop" ? "vec"
+            : host === "washingtonelectric.smarthub.coop" ? "wec"
+            : (msg.provider || msg.vendor || "").toLowerCase();
+          if (shVendor === "vec" || shVendor === "wec") {
+            try {
+              await chrome.storage.local.set({
+                so_capture_intent: { vendor: shVendor, ts: Date.now() },
+              });
+            } catch (_) { /* non-fatal */ }
+          }
         }
       } catch (e) {
         // Cookie wipe is best-effort; opening the tab still proceeds.

@@ -67,6 +67,12 @@
             if (token) {
               capturedAuthToken = token;
               capturedPrimaryUsername = username || null;
+              // v1.9.25: Array-Operator meter-production capture. When the AO
+              // page armed a meter intent for THIS SmartHub provider (vec/wec),
+              // hand the short-lived SmartHub session to the backend so it can
+              // pull daily generation server-side. ADDITIVE — the bill capture
+              // (SMARTHUB_DATA_CAPTURED) path below is untouched and still runs.
+              maybeSendMeterCapture();
             }
           }).catch(() => {});
         } catch (_) {}
@@ -74,6 +80,41 @@
       return resp;
     };
   })();
+
+  // ─── Array-Operator meter-production capture (v1.9.25) ───────────────────
+  // Gated on an armed AO meter intent (chrome.storage.local so_capture_intent
+  // {vendor:<provider>}), mirroring the GMP meter-production flow. When the AO
+  // page opened this SmartHub portal to connect a co-op meter, it set the
+  // intent; we then forward the captured short-lived SmartHub session to
+  // background.js, which relays it to the AO page (SO_CAPTURE_LANDED). The AO
+  // page POSTs it to /v1/array-owners/smarthub-meter-capture and the BACKEND
+  // pulls daily generation. We send NO generation from here — only the session.
+  let meterCaptureSent = false;
+
+  function maybeSendMeterCapture() {
+    if (meterCaptureSent) return;
+    if (!capturedAuthToken) return;
+    try {
+      chrome.storage.local.get("so_capture_intent", (res) => {
+        if (chrome.runtime.lastError) { void chrome.runtime.lastError; return; }
+        const intent = res && res.so_capture_intent;
+        // Only fire when an AO meter intent is armed for THIS provider.
+        if (!intent || intent.vendor !== PROVIDER) return;
+        if (meterCaptureSent) return;
+        meterCaptureSent = true;
+        chrome.runtime.sendMessage(
+          {
+            type: "SMARTHUB_METER_CAPTURED",
+            provider: PROVIDER,
+            host: location.hostname,
+            email: capturedPrimaryUsername || null,
+            auth_token: capturedAuthToken,
+          },
+          () => { void chrome.runtime.lastError; }
+        );
+      });
+    } catch (_) { /* non-fatal */ }
+  }
 
   // ─── Utility helpers ─────────────────────────────────────────────────────
 

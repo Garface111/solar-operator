@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 
 from . import inverters
 from .adapters import gmp as gmp_adapter
+from .adapters import smarthub as smarthub_adapter
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
@@ -1731,7 +1732,13 @@ class UtilityMeterCaptureBody(BaseModel):
 
 # Utilities allowed to ingest GENERATION via the meter-capture path. Kept
 # separate from _CAPTURE_VENDORS (inverter vendors) — utilities are adapters.
-_UTILITY_CAPTURE_VENDORS = {"gmp"}
+#   gmp = Green Mountain Power (bespoke REST API, carries a GMP-style summary).
+#   vec = Vermont Electric Coop, wec = Washington Electric Coop (both NISC
+#   SmartHub — the extension supplies daily[] generation directly, no GMP summary).
+_UTILITY_CAPTURE_VENDORS = {"gmp", "vec", "wec"}
+
+# Human label per utility for the default array name when no nickname is given.
+_UTILITY_LABEL = {"gmp": "GMP", "vec": "VEC", "wec": "WEC"}
 
 
 def _meter_day(value: str | None):
@@ -1782,20 +1789,57 @@ def utility_meter_capture(
     if not body.accounts:
         raise HTTPException(400, "No accounts in capture payload.")
 
+    with SessionLocal() as db:
+        results = _persist_meter_accounts(db, tenant, provider, body.accounts)
+        db.commit()
+
+    return {
+        "ok": True,
+        "provider": provider,
+        "accounts_captured": len(results),
+        "arrays_created": sum(1 for r in results if r["created"]),
+        "accounts_with_generation": sum(1 for r in results if r["has_generation"]),
+        "accounts": results,
+    }
+
+
+def _persist_meter_accounts(
+    db,
+    tenant: Tenant,
+    provider: str,
+    accounts: list[UtilityMeterAccount],
+) -> list[dict]:
+    """Shared per-account persistence for utility-meter GENERATION capture.
+
+    Used by BOTH the extension-push path (utility_meter_capture) and the
+    server-side-pull path (smarthub_meter_capture). For each account: match an
+    Array by name (nickname, else "<LABEL> <account>"), else create one — but
+    ONLY when the account actually has solar generation. Records generation as
+    DailyGeneration rows with source="utility_meter" (idempotent per
+    (array, day), max-kWh). Does NOT commit — the caller owns the transaction.
+
+    Returns one result dict per account with the same shape across both paths.
+    """
     results: list[dict] = []
 
-    with SessionLocal() as db:
-        existing = db.execute(
-            select(Array).where(
-                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
-            )
-        ).scalars().all()
-        by_name = {a.name.strip().lower(): a for a in existing}
+    existing = db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+        )
+    ).scalars().all()
+    by_name = {a.name.strip().lower(): a for a in existing}
 
-        for acct in body.accounts:
-            parsed = gmp_adapter.parse_usage_summary(acct.summary or {})
+    for acct in accounts:
+            # GMP accounts carry a GMP-style /usage summary; SmartHub utilities
+            # (vec/wec) supply daily[] generation directly with no summary. Only
+            # parse the GMP summary for gmp so a missing/foreign summary is a no-op.
+            parsed = (
+                gmp_adapter.parse_usage_summary(acct.summary or {})
+                if provider == "gmp" else {}
+            )
             acct_num = (acct.account_number or parsed.get("account_number") or "").strip()
-            name = (acct.nickname or "").strip() or f"GMP {acct_num or 'account'}"
+            label = _UTILITY_LABEL.get(provider, provider.upper())
+            name = (acct.nickname or "").strip() or f"{label} {acct_num or 'account'}"
 
             # Determine generation BEFORE creating anything. Bruce has 48 GMP
             # accounts but only a handful are solar arrays — the rest are homes/
@@ -1905,6 +1949,132 @@ def utility_meter_capture(
                 "has_generation": has_generation,
             })
 
+    return results
+
+
+# ── SmartHub server-side-pull meter capture (VEC / WEC solar generation) ───────
+# Distinct from utility_meter_capture (extension PUSHES the parsed accounts):
+# here the extension only hands us a short-lived SmartHub session (email +
+# authorizationToken captured from /services/oauth/auth/v2), and the BACKEND
+# pulls the daily generation itself via api.adapters.smarthub. This keeps the
+# heavy NISC SmartHub poll logic server-side and out of the content script.
+
+class SmartHubMeterCaptureBody(BaseModel):
+    provider: str          # "vec" | "wec"
+    host: str              # e.g. "vermontelectric.smarthub.coop"
+    email: str             # SmartHub primaryUsername / login email
+    auth_token: str        # authorizationToken from /services/oauth/auth/v2
+
+
+# Window of daily generation to pull on each capture (covers a full billing
+# cycle + slack so a re-capture backfills any gaps idempotently).
+_SMARTHUB_PULL_DAYS = 35
+
+
+@router.post("/v1/array-owners/smarthub-meter-capture")
+def smarthub_meter_capture(
+    body: SmartHubMeterCaptureBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Server-side-pull SOLAR GENERATION for a NISC SmartHub co-op (VEC / WEC).
+
+    The extension captures a short-lived SmartHub session (email +
+    authorizationToken) and POSTs it here. The BACKEND then pulls each meter's
+    daily generation directly from SmartHub (no generation crosses the wire from
+    the extension), and persists it via the SAME _persist_meter_accounts helper
+    used by utility_meter_capture (DRY). Dual-auth (session token OR tenant key).
+
+    UNVERIFIED CAVEAT (flag loudly, do NOT bury): the RETURN-channel generation
+    this reads is UNVERIFIED on a real WEC solar meter. VEC is confirmed to
+    expose FORWARD + RETURN flow directions; WEC still needs LIVE verification
+    against a real WEC solar (net-metering) HAR before its generation numbers
+    can be trusted. We never fabricate: if a co-op exposes no RETURN channel or
+    all-zero generation, this returns accounts_with_generation=0 honestly.
+
+    Idempotent: re-capturing re-matches the same Array by name (service address
+    if SmartHub exposes one, else the account number) and upserts the same
+    DailyGeneration rows, so repeated captures never duplicate.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    provider = (body.provider or "").strip().lower()
+    host = (body.host or "").strip().lower()
+    if provider not in {"vec", "wec"}:
+        raise HTTPException(
+            400, f"Provider {provider!r} is not a SmartHub meter provider (vec/wec)."
+        )
+    if not host.endswith(".smarthub.coop"):
+        raise HTTPException(400, f"Host {host!r} is not a *.smarthub.coop deployment.")
+    if not body.email or not body.auth_token:
+        raise HTTPException(400, "Missing SmartHub session (email/auth_token).")
+
+    label = _UTILITY_LABEL.get(provider, provider.upper())
+    # The smarthub adapter's session shape: email + auth_token + primary_username
+    # (fetch_account_list reads primary_username for the userId param; default
+    # it to the email when the extension only captured the login address).
+    session = {
+        "email": body.email,
+        "auth_token": body.auth_token,
+        "primary_username": body.email,
+    }
+
+    today = date.today()
+    start = today - timedelta(days=_SMARTHUB_PULL_DAYS)
+
+    try:
+        accounts_meta = smarthub_adapter.fetch_account_list(host, session)
+        accounts_payload: list[UtilityMeterAccount] = []
+        for meta in accounts_meta:
+            service_location = str(meta.get("service_location_number") or "")
+            account_number = str(meta.get("account_number") or "")
+            if not service_location or not account_number:
+                continue
+            rows = smarthub_adapter.fetch_daily_generation(
+                host, session, service_location, account_number,
+                start=start, end=today,
+            )
+            daily = [
+                UtilityMeterDaily(
+                    date=row["day"].isoformat(),
+                    generated_kwh=row["kwh_generated"],
+                )
+                for row in rows
+                if (row.get("kwh_generated") or 0) > 0
+            ]
+            # Account nickname = SmartHub service address if available, else acct#.
+            nickname = (meta.get("description") or "").strip() or account_number
+            accounts_payload.append(UtilityMeterAccount(
+                account_number=account_number,
+                nickname=nickname,
+                summary={},
+                daily=daily,
+            ))
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            raise HTTPException(
+                401, f"Your {label} session expired — sign in again."
+            ) from e
+        raise HTTPException(
+            502, f"Couldn't reach {label} — try again."
+        ) from e
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Couldn't reach {label} — try again.") from e
+
+    # No accounts at all (or none with a usable location/account number): honest
+    # empty result — never fabricate an array or generation.
+    if not accounts_payload:
+        return {
+            "ok": True,
+            "provider": provider,
+            "accounts_captured": 0,
+            "arrays_created": 0,
+            "accounts_with_generation": 0,
+            "accounts": [],
+        }
+
+    with SessionLocal() as db:
+        results = _persist_meter_accounts(db, tenant, provider, accounts_payload)
         db.commit()
 
     return {

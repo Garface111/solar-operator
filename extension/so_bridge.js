@@ -39,11 +39,14 @@
       const reqId = data.reqId || null;
       const url = String(data.url || "").trim();
       const active = data.active === true;
+      // Forward the provider/vendor hint so background.js can arm the matching
+      // capture intent (e.g. vec vs wec on a shared smarthub.coop host).
+      const provider = (data.provider || data.vendor || "") + "";
       if (!url || !/^https:\/\//i.test(url)) {
         window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, "*");
         return;
       }
-      chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url, active }, (resp) => {
+      chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url, active, provider, vendor: provider }, (resp) => {
         const ok = !chrome.runtime.lastError && resp && resp.ok;
         window.postMessage({
           type: "SO_OPEN_PORTAL_ACK",
