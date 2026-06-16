@@ -110,16 +110,58 @@
     });
   }
 
+  // Resolve the SmartHub username/email needed by user-data + utility-usage.
+  // SmartHub passes it BOTH as a ?userId= query param (user-data) AND as the
+  // x-nisc-smarthub-username header (both calls) — grounded on Paul's VEC HAR.
+  // Source it the same way the working bill capture does: the home-page URL hash
+  // (#/home?<base64 ...userId=...>), then the auth-intercept username, as fallbacks.
+  function resolveUsername() {
+    // 1) Auth-intercept captured it from a login/refresh response (most reliable).
+    if (capturedPrimaryUsername) return capturedPrimaryUsername;
+    // 2) Home-page URL hash: #/home?<base64 ...userId=...>.
+    try {
+      const creds = decodeHashCreds();
+      if (creds && creds.userId) return creds.userId;
+    } catch (_) {}
+    // 3) SmartHub caches the login in web storage — scan for an email-looking value
+    //    under common NISC keys (verified key names vary across deployments).
+    try {
+      for (const store of [localStorage, sessionStorage]) {
+        for (let i = 0; i < store.length; i++) {
+          const k = store.key(i);
+          const v = store.getItem(k) || "";
+          // direct email value
+          const m = v.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+          if (m && /user|name|login|email|primary|nisc|smarthub/i.test(k)) return m[0];
+          // JSON blob with a username/primaryUsername field
+          if (v && (v[0] === "{" || v[0] === "[")) {
+            try {
+              const j = JSON.parse(v);
+              const cand = j && (j.primaryUsername || j.username || j.userId || j.email);
+              if (cand && /@/.test(cand)) return cand;
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
   // Same-origin authenticated GET/POST — the session cookie rides automatically.
-  async function shGet(path) {
-    const r = await fetch(path, { credentials: "include", headers: { "Accept": "application/json" } });
+  // SmartHub additionally requires the x-nisc-smarthub-username header on secured
+  // data calls (verified: without it user-data 401s → "couldn't read accounts").
+  async function shGet(path, username) {
+    const headers = { "Accept": "application/json" };
+    if (username) headers["x-nisc-smarthub-username"] = username;
+    const r = await fetch(path, { credentials: "include", headers });
     if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
     return r.json();
   }
-  async function shPost(path, body) {
+  async function shPost(path, body, username) {
+    const headers = { "Content-Type": "application/json", "Accept": "application/json" };
+    if (username) headers["x-nisc-smarthub-username"] = username;
     const r = await fetch(path, {
-      method: "POST", credentials: "include",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      method: "POST", credentials: "include", headers,
       body: JSON.stringify(body),
     });
     if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
@@ -143,7 +185,7 @@
       endDateTime: end.getTime(),
     };
     let data;
-    try { data = await shPost("/services/secured/utility-usage", body); }
+    try { data = await shPost("/services/secured/utility-usage", body, userId); }
     catch (e) { LOG("usage fetch failed for", accountNumber, e && e.message); return []; }
 
     const electric = (data && Array.isArray(data.ELECTRIC)) ? data.ELECTRIC : [];
@@ -187,9 +229,21 @@
     meterCaptureSent = true;
     LOG("meter intent armed — pulling daily generation client-side");
     try {
+      // SmartHub needs the username on secured calls (query param + nisc header).
+      const sessionUser = resolveUsername();
+      if (!sessionUser) {
+        LOG("no username yet (hash creds not present) — will retry next scrape");
+        meterCaptureSent = false;   // allow a later pass once the home hash is set
+        return;
+      }
       // user-data lists every account with its service location + address.
       let userData;
-      try { userData = await shGet("/services/secured/user-data"); }
+      try {
+        userData = await shGet(
+          "/services/secured/user-data?userId=" + encodeURIComponent(sessionUser),
+          sessionUser
+        );
+      }
       catch (e) {
         LOG("user-data failed", e && e.message);
         chrome.runtime.sendMessage({ type: "SMARTHUB_METER_FAILED", provider: PROVIDER,
@@ -200,7 +254,7 @@
       const accounts = [];
       for (const obj of list) {
         if (!obj || typeof obj !== "object") continue;
-        const userId = obj.email || capturedPrimaryUsername || "";
+        const userId = obj.email || sessionUser;
         const acctNum = String(obj.account || obj.accountNumber || "").trim();
         const locMap = obj.serviceLocationToUserDataServiceLocationSummaries || {};
         for (const locId of Object.keys(locMap)) {
