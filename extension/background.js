@@ -2,6 +2,11 @@
 // Receives captured tokens from content.js (GMP) and vec_content.js (VEC),
 // persists locally, and POSTs to the EnergyAgent API.
 
+// v1.9.33: client-side encrypted credential vault for portal auto-login (SoVault).
+// Loaded first so it's available to all handlers. Creds are AES-GCM encrypted and
+// stored ONLY in chrome.storage.local — never sent to our backend.
+try { importScripts("vault.js"); } catch (e) { console.warn("[EnergyAgent] vault load failed", e); }
+
 // v1.3.0: SO_PAIR / SO_STATUS_REQUEST handlers + SO_CAPTURE_LANDED +
 //         SO_LOGIN_STATE broadcasts to every solaroperator.org tab so the
 //         onboarding wizard can mirror live state without polling.
@@ -818,12 +823,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const merged = { ...(s[STORAGE_KEYS.LAST_LOGIN_STATE] || {}), [payload.provider]: payload };
         await chrome.storage.local.set({ [STORAGE_KEYS.LAST_LOGIN_STATE]: merged });
         broadcastToSoTabs({ type: "SO_LOGIN_STATE", ...payload });
+        // v1.9.33: if a silent recapture is in flight for this vendor and its
+        // session just lapsed, attempt client-side auto-login (opt-out + creds gate
+        // are enforced inside). sender.tab.id is the recap's background tab.
+        try {
+          const tabId = sender && sender.tab && sender.tab.id;
+          if (typeof self.__soRecapTryAutoLogin === "function") {
+            self.__soRecapTryAutoLogin(payload.provider, tabId, payload.state);
+          }
+        } catch (_) {}
       } catch (e) {
         console.warn("[EnergyAgent] LOGIN_STATE_DETECTED handling failed:", e);
       }
     })();
     return false;
   }
+});
+
+// v1.9.33: vault message API for the popup UI — set/clear creds + toggle opt-out +
+// status. Secrets only ever flow popup -> background (to be encrypted at rest); the
+// status reply NEVER includes the actual password.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("SO_VAULT_")) return;
+  (async () => {
+    try {
+      if (typeof SoVault === "undefined") { sendResponse({ ok: false, error: "vault-unavailable" }); return; }
+      if (msg.type === "SO_VAULT_STATUS") {
+        sendResponse({ ok: true, status: await SoVault.status() });
+      } else if (msg.type === "SO_VAULT_SET") {
+        const ok = await SoVault.set(msg.vendor, msg.username, msg.password);
+        sendResponse({ ok });
+      } else if (msg.type === "SO_VAULT_CLEAR") {
+        await SoVault.clear(msg.vendor);
+        sendResponse({ ok: true });
+      } else if (msg.type === "SO_VAULT_OPTOUT") {
+        await SoVault.setOptOut(msg.vendor, !!msg.optedOut);
+        sendResponse({ ok: true });
+      } else {
+        sendResponse({ ok: false, error: "unknown" });
+      }
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e && e.message || e) });
+    }
+  })();
+  return true; // async sendResponse
 });
 
 // Heartbeat — ping the server every 60s so the onboarding screen can
@@ -931,7 +974,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   };
   const RECAP_ALARM = "inverter-recapture";
   const RECAP_PERIOD_MIN = 60;           // hourly while the browser is running
-  const TAB_BUDGET_MS = 90 * 1000;       // give a portal up to 90s to capture
+  const TAB_BUDGET_MS = 150 * 1000;      // up to 2.5min — room for an auto-login + re-poll + capture
   const NUDGE_KEY = "so_recap_nudges";   // { fronius:"YYYY-MM-DD", ... } 1 nudge/vendor/day
   const STATE_KEY = "so_recap_state";    // { running, vendor, tabId, startedAt }
   const LAST_KEY = "so_recap_last";      // { fronius:{at,ok,sites}, ... } diagnostics
@@ -1055,6 +1098,86 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       });
     });
   }
+
+  // ----- AUTO-LOGIN (client-side creds, opt-out) -----------------------------
+  // The injected function that drives the portal's OWN login form. Returns
+  // "submitted" | "no-form" | "already-in". Defined here (not a file) so
+  // executeScript({func,args}) can pass the decrypted creds straight into the page
+  // without writing them to disk. The creds live only in the worker's memory for
+  // this call and are NEVER sent to our backend — we just type into the real form.
+  function soFillLoginForm(username, password) {
+    if (!username || !password) return "no-form";
+    const pwFields = Array.from(document.querySelectorAll('input[type="password"]'))
+      .filter((el) => el.offsetParent !== null && !el.disabled);
+    if (!pwFields.length) return "already-in";
+    const pw = pwFields[0];
+    const form = pw.form || document;
+    const candidates = Array.from(form.querySelectorAll(
+      'input[type="text"], input[type="email"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i]'
+    )).filter((el) => el.offsetParent !== null && !el.disabled && el.type !== "password");
+    const user = candidates[0] || null;
+    if (!user) return "no-form";
+    function setVal(el, val) {
+      const proto = el.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+      setter.call(el, val);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    try {
+      user.focus(); setVal(user, username);
+      pw.focus(); setVal(pw, password);
+    } catch (_) { return "no-form"; }
+    const btn = (pw.form || document).querySelector(
+      'button[type="submit"], input[type="submit"], button[name*="login" i], button[id*="login" i], button[id*="signin" i]'
+    );
+    setTimeout(() => {
+      try {
+        if (btn && btn.offsetParent !== null) { btn.click(); return; }
+        if (pw.form && pw.form.requestSubmit) { pw.form.requestSubmit(); return; }
+        pw.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+      } catch (_) {}
+    }, 350);
+    return "submitted";
+  }
+
+  // Once per in-flight recap, attempt auto-login when a content script reports the
+  // session is gone. Guards: vault must hold creds for the vendor, auto-login must
+  // be enabled (opt-out), and we only try ONCE per recap tab (so a wrong password
+  // can't loop-submit and lock the account). On submit the existing content-script
+  // poll rides the new session and captures normally.
+  const _autoLoginTried = new Set();   // tabIds we've already tried, this SW lifetime
+  async function recapTryAutoLogin(vendor, tabId, state) {
+    try {
+      if (state !== "login_required") return;
+      if (typeof tabId !== "number") return;
+      const st = await recapGetState();
+      if (!st || !st.running || st.vendor !== vendor || st.tabId !== tabId) return; // only during OUR recap
+      if (_autoLoginTried.has(tabId)) return;            // never resubmit on the same tab
+      if (typeof SoVault === "undefined") return;
+      if (!(await SoVault.isEnabled(vendor))) { rlog("auto-login opted out for", vendor); return; }
+      const creds = await SoVault.get(vendor);
+      if (!creds) { rlog("no stored creds for", vendor, "(one-click recovery will nudge)"); return; }
+      _autoLoginTried.add(tabId);
+      rlog("auto-login: filling login form for", vendor, "tab", tabId);
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: soFillLoginForm,
+        args: [creds.username, creds.password],
+        world: "MAIN",   // run in page context so the portal framework sees the input events
+      });
+      const outcome = res && res[0] && res[0].result;
+      rlog("auto-login outcome for", vendor, "=>", outcome);
+      // After a submit the page navigates + the content script re-polls; the normal
+      // capture path takes over. If "no-form"/"already-in", we do nothing further and
+      // the watchdog/one-click recovery handles it.
+    } catch (e) {
+      rlog("auto-login error", vendor, e && e.message || e);
+    }
+  }
+  // Expose for the LOGIN_STATE_DETECTED handler (outside this IIFE).
+  self.__soRecapTryAutoLogin = recapTryAutoLogin;
 
   // Run the vendors the owner actually has, one at a time (a single background tab
   // at a time keeps it invisible and cheap). After the first cycle we only refresh

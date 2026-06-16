@@ -130,4 +130,72 @@
     const d = Math.round(h / 24);
     return `${d} day${d === 1 ? "" : "s"} ago`;
   }
+
+  // ── Auto-login section ────────────────────────────────────────────────────
+  const AL_VENDORS = [
+    { id: "fronius", label: "Fronius (Solar.web)" },
+    { id: "sma", label: "SMA (Sunny Portal)" },
+    { id: "chint", label: "Chint" },
+  ];
+  const alToggle = document.getElementById("al-toggle");
+  const alBody = document.getElementById("al-body");
+  const alChev = document.getElementById("al-chev");
+  const alRows = document.getElementById("al-rows");
+  const alTpl = document.getElementById("al-row-tpl");
+
+  function vaultMsg(payload) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(payload, (resp) => {
+        void chrome.runtime.lastError; resolve(resp || { ok: false });
+      });
+    });
+  }
+
+  if (alToggle) {
+    alToggle.addEventListener("click", () => {
+      const open = alBody.classList.toggle("hidden") === false;
+      alChev.textContent = open ? "▾" : "▸";
+      if (open) renderAutoLogin();
+    });
+  }
+
+  async function renderAutoLogin() {
+    const resp = await vaultMsg({ type: "SO_VAULT_STATUS" });
+    const status = (resp && resp.status) || {};
+    alRows.innerHTML = "";
+    for (const v of AL_VENDORS) {
+      const st = status[v.id] || { hasCreds: false, enabled: true };
+      const node = alTpl.content.cloneNode(true);
+      const row = node.querySelector(".al-row");
+      row.querySelector(".al-vendor").textContent = v.label;
+      const stateEl = row.querySelector(".al-state");
+      stateEl.textContent = st.hasCreds ? (st.enabled ? "● saved · on" : "● saved · off") : "not set";
+      stateEl.className = "al-state " + (st.hasCreds && st.enabled ? "on" : st.hasCreds ? "off" : "");
+      const userEl = row.querySelector(".al-user");
+      const passEl = row.querySelector(".al-pass");
+      const saveBtn = row.querySelector(".al-save");
+      const clearBtn = row.querySelector(".al-clear");
+      const optCb = row.querySelector(".al-optout-cb");
+      if (st.hasCreds) { passEl.placeholder = "•••••••• (saved — type to replace)"; clearBtn.classList.remove("hidden"); }
+      optCb.checked = !st.enabled;   // checkbox = "off" (opted out)
+      saveBtn.addEventListener("click", async () => {
+        const u = userEl.value.trim(); const p = passEl.value;
+        if (!u || !p) { saveBtn.textContent = "enter both"; setTimeout(() => saveBtn.textContent = "Save", 1500); return; }
+        saveBtn.textContent = "Saving…";
+        const r = await vaultMsg({ type: "SO_VAULT_SET", vendor: v.id, username: u, password: p });
+        saveBtn.textContent = r.ok ? "✓ Saved" : "failed";
+        passEl.value = "";
+        setTimeout(renderAutoLogin, 900);
+      });
+      clearBtn.addEventListener("click", async () => {
+        await vaultMsg({ type: "SO_VAULT_CLEAR", vendor: v.id });
+        renderAutoLogin();
+      });
+      optCb.addEventListener("change", async () => {
+        await vaultMsg({ type: "SO_VAULT_OPTOUT", vendor: v.id, optedOut: optCb.checked });
+        renderAutoLogin();
+      });
+      alRows.appendChild(node);
+    }
+  }
 })();

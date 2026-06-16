@@ -181,3 +181,38 @@ body {
 
 a { color: #059669; text-decoration: none; font-weight: 500; }
 a:hover { text-decoration: underline; color: #047857; }
+
+/* ── Auto-login section (v1.9.33) ───────────────────────────────────────── */
+.autol0gin { margin-top: 10px; border-top: 1px solid #e8e2d9; padding-top: 8px; }
+.al-head {
+  width: 100%; display: flex; justify-content: space-between; align-items: center;
+  background: none; border: 0; cursor: pointer; font-size: 12.5px; font-weight: 600;
+  color: #18181b; padding: 4px 0;
+}
+.al-chev { color: #71717a; font-size: 11px; }
+.al-body { margin-top: 6px; }
+.al-note { font-size: 10.5px; color: #71717a; line-height: 1.4; margin-bottom: 8px; }
+.al-note b { color: #059669; }
+.al-row { border: 1px solid #e8e2d9; border-radius: 9px; padding: 8px; margin-bottom: 7px; background: #faf8f5; }
+.al-row-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.al-vendor { font-size: 11.5px; font-weight: 600; color: #18181b; }
+.al-state { font-size: 10px; color: #a1a1aa; font-weight: 600; }
+.al-state.on { color: #059669; }
+.al-state.off { color: #d97706; }
+.al-fields { display: flex; flex-direction: column; gap: 5px; }
+.al-fields input[type="text"], .al-fields input[type="password"] {
+  width: 100%; font-size: 11.5px; padding: 6px 8px; border: 1px solid #e8e2d9;
+  border-radius: 7px; background: #fff; color: #18181b;
+}
+.al-fields input:focus { outline: none; border-color: #34d399; }
+.al-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.al-save, .al-clear {
+  font-size: 11px; font-weight: 600; padding: 5px 10px; border-radius: 7px;
+  border: 0; cursor: pointer;
+}
+.al-save { background: #10b981; color: #fff; }
+.al-save:hover { background: #059669; }
+.al-clear { background: #fef2f2; color: #b91c1c; }
+.al-clear:hover { background: #fee2e2; }
+.al-optout { margin-left: auto; font-size: 10.5px; color: #71717a; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.hidden { display: none !important; }

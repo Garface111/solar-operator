@@ -27,11 +27,41 @@
       </div>
     </div>
     <button id="open-dashboard" class="btn-primary">Open dashboard</button>
+
+    <!-- v1.9.33: client-side auto-login for inverter portals. Creds are encrypted
+         and stored ONLY on this device — never sent to EnergyAgent's servers. -->
+    <div class="autol0gin">
+      <button id="al-toggle" class="al-head" type="button">
+        <span>Auto-login (keeps live power fresh)</span>
+        <span id="al-chev" class="al-chev">▸</span>
+      </button>
+      <div id="al-body" class="al-body hidden">
+        <p class="al-note">Saved <b>only on this device</b>, encrypted. Never sent to our servers. So we can refresh your live numbers without you signing in.</p>
+        <div id="al-rows"></div>
+      </div>
+    </div>
   </div>
   <div class="footer">
     <a href="#" id="open-options">Settings</a>
     <a href="#" id="open-gmp">Open GMP</a>
   </div>
+  <template id="al-row-tpl">
+    <div class="al-row">
+      <div class="al-row-head">
+        <span class="al-vendor"></span>
+        <span class="al-state"></span>
+      </div>
+      <div class="al-fields">
+        <input class="al-user" type="text" autocomplete="off" placeholder="Portal username / email">
+        <input class="al-pass" type="password" autocomplete="off" placeholder="Portal password">
+        <div class="al-actions">
+          <button class="al-save" type="button">Save</button>
+          <button class="al-clear hidden" type="button">Remove</button>
+          <label class="al-optout"><input class="al-optout-cb" type="checkbox"> off</label>
+        </div>
+      </div>
+    </div>
+  </template>
   <script src="../smarthub_registry.js"></script>
   <script src="popup.js"></script>
 </body>
