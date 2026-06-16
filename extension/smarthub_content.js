@@ -185,8 +185,12 @@
       endDateTime: end.getTime(),
     };
     let data;
-    try { data = await shPost("/services/secured/utility-usage", body, userId); }
-    catch (e) { LOG("usage fetch failed for", accountNumber, e && e.message); return []; }
+    try { data = await shPost("/services/secured/utility-usage", body); }   // cookie-only first (matches the working billing call)
+    catch (e1) {
+      // Retry WITH the nisc username header in case this deployment requires it.
+      try { data = await shPost("/services/secured/utility-usage", body, userId); }
+      catch (e2) { LOG("usage fetch failed for", accountNumber, e1 && e1.message, "/", e2 && e2.message); return []; }
+    }
 
     const electric = (data && Array.isArray(data.ELECTRIC)) ? data.ELECTRIC : [];
     const byDay = {};   // isoDay -> generated kWh
@@ -229,46 +233,51 @@
     meterCaptureSent = true;
     LOG("meter intent armed — pulling daily generation client-side");
     try {
-      // SmartHub needs the username on secured calls (query param + nisc header).
-      const sessionUser = resolveUsername();
-      if (!sessionUser) {
-        LOG("no username yet (hash creds not present) — will retry next scrape");
-        meterCaptureSent = false;   // allow a later pass once the home hash is set
+      // Discover accounts the SAME WAY the WORKING bill capture does — via
+      // /services/secured/billing/history/overview (cookie-only, NO nisc header,
+      // proven 200 in the live test). The 401-ing /user-data call is GONE. The
+      // overview response carries everything the usage call needs per account:
+      //   acctNbr, custNbr, servLocs[0].id.srvLocNbr (service location), address.
+      const creds = decodeHashCreds();
+      const sessionUser = resolveUsername();   // for the usage body userId + (fallback) header
+      const domAccts = acctsFromDom();
+      const acctNbrs = new Set(domAccts.keys());
+      if (creds && creds.acctNbr) acctNbrs.add(creds.acctNbr);
+      if (acctNbrs.size === 0) {
+        LOG("no accounts discoverable yet — will retry next scrape");
+        meterCaptureSent = false;
         return;
       }
-      // user-data lists every account with its service location + address.
-      let userData;
-      try {
-        userData = await shGet(
-          "/services/secured/user-data?userId=" + encodeURIComponent(sessionUser),
-          sessionUser
-        );
+
+      const accounts = [];
+      for (const acctNbr of acctNbrs) {
+        let overview;
+        try {
+          const res = await fetch(
+            `/services/secured/billing/history/overview?acctNbr=${encodeURIComponent(acctNbr)}`,
+            { credentials: "include", headers: { "Accept": "application/json" } }
+          );
+          if (!res.ok) { LOG("overview failed for", acctNbr, "HTTP " + res.status); continue; }
+          overview = await res.json();
+        } catch (e) { LOG("overview error for", acctNbr, e && e.message); continue; }
+
+        const rowsArr = Array.isArray(overview) ? overview : (overview ? [overview] : []);
+        const first = rowsArr[0] || {};
+        const sl = (first.servLocs && first.servLocs[0]) || {};
+        const srvLocNbr = (sl.id && (sl.id.srvLocNbr || sl.id.serviceLocation)) || null;
+        const addr = sl.address || {};
+        const addrStr = [addr.addr1, addr.city, addr.state].filter(Boolean).join(", ") ||
+          domAccts.get(acctNbr) || `${PROVIDER.toUpperCase()} ${acctNbr}`;
+        if (srvLocNbr == null) { LOG("no service location for", acctNbr, "— skipping usage pull"); continue; }
+
+        const daily = await fetchDailyGeneration(sessionUser || "", acctNbr, srvLocNbr);
+        accounts.push({ account_number: String(acctNbr), nickname: addrStr, summary: {}, daily });
       }
-      catch (e) {
-        LOG("user-data failed", e && e.message);
+
+      if (accounts.length === 0) {
         chrome.runtime.sendMessage({ type: "SMARTHUB_METER_FAILED", provider: PROVIDER,
           reason: "couldn't read your accounts — try again" }, () => void chrome.runtime.lastError);
         return;
-      }
-      const list = Array.isArray(userData) ? userData : [userData];
-      const accounts = [];
-      for (const obj of list) {
-        if (!obj || typeof obj !== "object") continue;
-        const userId = obj.email || sessionUser;
-        const acctNum = String(obj.account || obj.accountNumber || "").trim();
-        const locMap = obj.serviceLocationToUserDataServiceLocationSummaries || {};
-        for (const locId of Object.keys(locMap)) {
-          const summaries = locMap[locId];
-          const summary = Array.isArray(summaries) ? summaries[0] : summaries;
-          const services = (summary && summary.services) || [];
-          if (services.length && !services.some((s) => String(s).toUpperCase().startsWith("ELEC"))) continue;
-          const addr = (summary && summary.address) || {};
-          const nickname =
-            [addr.addr1, addr.city, addr.state].filter(Boolean).join(", ") ||
-            obj.customerName || `${PROVIDER.toUpperCase()} ${acctNum}`;
-          const daily = await fetchDailyGeneration(userId, acctNum, locId);
-          accounts.push({ account_number: acctNum, nickname, summary: {}, daily });
-        }
       }
       const totalGenDays = accounts.reduce((t, a) => t + a.daily.length, 0);
       LOG("EMIT meter capture:", accounts.length, "account(s),", totalGenDays, "generation day(s)");
