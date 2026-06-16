@@ -316,6 +316,18 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
         for iv in ivs:
             u = an_by_id.get(iv.serial, {})
             m = meta_by_serial.get(iv.serial, {})
+            # Per-inverter daily kWh series (last ~14 days, ascending) drives the
+            # card's output graph + the real Min/Max daily-output figures. SolarEdge
+            # gives 7 days of equipment telemetry; extension-captured vendors store
+            # their own InverterDaily rows (read above into m["daily"]).
+            daily = [
+                {"date": d.get("date"), "kwh": round(float(d.get("kwh") or 0.0), 2)}
+                for d in (m.get("daily") or [])
+                if d.get("kwh") is not None
+            ]
+            kwh_vals = [d["kwh"] for d in daily]
+            min_kwh = round(min(kwh_vals), 2) if kwh_vals else None
+            peak_kwh = round(max(kwh_vals), 2) if kwh_vals else None
             inv_rows.append({
                 "inverter_id": iv.id,
                 "sn": iv.serial,
@@ -327,6 +339,9 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "status": u.get("status", "ok"),
                 "diagnosis": u.get("diagnosis"),
                 "window_kwh": u.get("window_kwh"),
+                "daily": daily,                       # ascending [{date,kwh}] for the sparkline
+                "min_kwh": min_kwh,                   # lowest daily output in the window (real)
+                "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
                 "current_power_w": m.get("last_power_w"),
                 "last_report": u.get("last_report") or m.get("last_report"),

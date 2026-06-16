@@ -119,6 +119,44 @@ def test_origin_links_deep_link_to_vendor_portal():
         print("PASS origin links")
 
 
+def test_inverter_daily_series_and_min_peak(monkeypatch):
+    """Each inverter row carries a real daily kWh series + min/peak derived from it."""
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Telemetry Roof", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        iv = Inverter(tenant_id=t.id, array_id=a.id, position=1, vendor="solaredge",
+                      serial="SN-D", source_site_id="416160", source_array_id=a.id,
+                      nameplate_kw=10.0, name="Daily 1")
+        db.add(iv); db.commit()
+
+        # Stub the per-site telemetry so we feed a known daily series (no real creds).
+        series = [
+            {"date": "2026-06-09", "kwh": 41.2},
+            {"date": "2026-06-10", "kwh": 8.5},      # the min
+            {"date": "2026-06-11", "kwh": 52.7},     # the peak
+            {"date": "2026-06-12", "kwh": 47.0},
+        ]
+        def _fake_tel(vendor, api_key, site_id, *, force=False):
+            return {"SN-D": {"name": "Daily 1", "model": "SE10K", "nameplate_kw": 10.0,
+                             "daily": series, "error_code": None,
+                             "last_report": "2026-06-12T12:00:00",
+                             "last_mode": "PRODUCING", "last_power_w": 6400}}
+        monkeypatch.setattr(IF, "_telemetry_for_site", _fake_tel)
+        # ensure a resolvable connection so telemetry is pulled
+        a.solaredge_api_key = "fake_key"; a.solaredge_site_id = 416160; db.commit()
+
+        tree = IF.build_fleet_tree(db, t, force_refresh=True)
+        col = next(c for c in tree["columns"] if c["array_id"] == a.id)
+        row = next(iv for iv in col["inverters"] if iv["sn"] == "SN-D")
+
+        assert [d["kwh"] for d in row["daily"]] == [41.2, 8.5, 52.7, 47.0]
+        assert row["min_kwh"] == 8.5
+        assert row["peak_kwh"] == 52.7
+        assert row["current_power_w"] == 6400
+        print("PASS daily series + min/peak")
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()
