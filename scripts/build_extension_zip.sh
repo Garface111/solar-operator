@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build a Chrome Web Store-ready zip of the extension at its current version.
 #
-# Output: ~/Solar Operator/Archives - Extension Builds/solar-operator-extension-vX.Y.Z.zip
-# (also copied to /mnt/c/Users/fordg/Desktop/... on WSL)
+# Output: Desktop/Energy Agent/Archives - Extension Builds/energyagent-extension-vX.Y.Z.zip
+# and ALSO copied to BOTH Desktop ROOTS (C: and OneDrive) so Ford can grab the
+# current build directly without digging into the Archives subfolder.
 #
 # Reads the version from extension/manifest.json so bumping the manifest is
 # the only thing you need to do — never hand-rename zips again.
@@ -16,10 +17,10 @@ if [[ ! -f extension/manifest.json ]]; then
 fi
 
 VERSION="$(python3 -c "import json; print(json.load(open('extension/manifest.json'))['version'])")"
-NAME="solar-operator-extension-v${VERSION}"
+NAME="energyagent-extension-v${VERSION}"
 
 # Prefer the Windows Desktop archive dir (WSL); fall back to a local builds/
-ARCHIVE_DIR_WIN="/mnt/c/Users/fordg/Desktop/Solar Operator/Archives - Extension Builds"
+ARCHIVE_DIR_WIN="/mnt/c/Users/fordg/Desktop/Energy Agent/Archives - Extension Builds"
 ARCHIVE_DIR_LOCAL="$PWD/builds"
 if [[ -d "$ARCHIVE_DIR_WIN" ]]; then
   ARCHIVE_DIR="$ARCHIVE_DIR_WIN"
@@ -64,6 +65,17 @@ cp -R "$STAGE_DIR/extension" "$UNZIPPED_DIR"
 SIZE_KB=$(($(stat -c%s "$ZIP_PATH") / 1024))
 echo "✓ Built: $ZIP_PATH (${SIZE_KB}KB)"
 echo "✓ Unpacked copy: $UNZIPPED_DIR"
+
+# Copy the current build to BOTH Desktop ROOTS so it's grabbable without digging
+# into the Archives subfolder (Ford repeatedly couldn't find zips left only in
+# Archives). Non-fatal if a root doesn't exist (e.g. no OneDrive on this machine).
+for ROOT in "/mnt/c/Users/fordg/Desktop" "/mnt/c/Users/fordg/OneDrive/Desktop"; do
+  if [[ -d "$ROOT" ]]; then
+    cp -f "$ZIP_PATH" "$ROOT/" 2>/dev/null \
+      && echo "✓ Copied to Desktop root: $ROOT/$NAME.zip" \
+      || echo "⚠ Could not copy to $ROOT (skipped)"
+  fi
+done
 echo ""
 echo "Next steps:"
 echo "  1. https://chrome.google.com/webstore/devconsole — upload the .zip"
