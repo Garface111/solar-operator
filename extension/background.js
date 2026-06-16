@@ -915,7 +915,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // Why: unlike SolarEdge (polled live by the backend on every dashboard load),
 // the extension-captured vendors only refresh their live AC power when a capture
 // runs — so the production bar would freeze at the last manual capture. This makes
-// it SLICK: on a slow timer (while Chrome is open) we silently open each portal in
+// it SLICK: on an hourly timer (while Chrome is open) we silently open each portal in
 // a BACKGROUND (inactive) tab, let the existing content script ride the owner's
 // logged-in session and grab fresh power, POST it straight to the backend with the
 // stored tenant key (the /inverter-capture endpoint is dual-auth: session OR key),
@@ -930,7 +930,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     chint: "https://monitor.chintpowersystems.com/",
   };
   const RECAP_ALARM = "inverter-recapture";
-  const RECAP_PERIOD_MIN = 180;          // every 3h while the browser is running
+  const RECAP_PERIOD_MIN = 60;           // hourly while the browser is running
   const TAB_BUDGET_MS = 90 * 1000;       // give a portal up to 90s to capture
   const NUDGE_KEY = "so_recap_nudges";   // { fronius:"YYYY-MM-DD", ... } 1 nudge/vendor/day
   const STATE_KEY = "so_recap_state";    // { running, vendor, tabId, startedAt }
