@@ -357,7 +357,100 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous
   }
-  // its API (uiapi.sunnyportal.com) are DIFFERENT origins, and uiapi answers with
+  // v1.9.23: GMP utility-meter PRODUCTION capture for Array Operator. Distinct
+  // from the GMP bill capture (GMP_TOKEN_CAPTURED → /v1/sync). gmp_meter_content.js
+  // read the owner's SOLAR GENERATION from the GMP usage API (via GMP_FETCH_USAGE
+  // below) and hands it to the AO page via SO_CAPTURE_LANDED. The page POSTs the
+  // accounts to /v1/array-owners/utility-meter-capture with its session token.
+  if (msg.type === "GMP_METER_CAPTURED") {
+    const p = msg.payload || {};
+    const accounts = Array.isArray(p.accounts) ? p.accounts : [];
+    const landed = {
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: "gmp",
+      kind: "utility_meter",
+      accounts,
+      accountCount: accounts.length,
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(landed);
+    chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
+  // v1.9.23: GMP meter capture gave up — relay the REASON to the AO page so its
+  // spinner resolves into a real error instead of hanging forever.
+  if (msg.type === "GMP_METER_CAPTURE_FAILED") {
+    const failed = {
+      type: "SO_CAPTURE_FAILED",
+      ok: false,
+      provider: "gmp",
+      kind: "utility_meter",
+      reason: String(msg.reason || "unknown"),
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(failed);
+    chrome.runtime.sendMessage(failed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous
+  }
+  // v1.9.23: cross-origin proxy for the GMP usage API. The page is
+  // greenmountainpower.com but the API is api.greenmountainpower.com — a
+  // credentialed content-script fetch can CORS-block. The service worker holds
+  // host_permissions for api.greenmountainpower.com, so it makes the
+  // authenticated GETs CORS-free. gmp_meter_content.js passes the owner's JWT
+  // (from localStorage gmp-vue.user.apitoken); we enumerate energyAccounts then
+  // read each account's usage summary (the solar-generation signal). Mirrors the
+  // SMA_API_GET proxy. Read-only: we only ever GET the GMP usage API.
+  if (msg.type === "GMP_FETCH_USAGE") {
+    const jwt = String(msg.jwt || "");
+    if (!jwt) { sendResponse({ ok: false, error: "missing-jwt" }); return; }
+    const API = "https://api.greenmountainpower.com/api/v2";
+    const headers = {
+      "Authorization": `Bearer ${jwt}`,
+      "Accept": "application/json",
+      "GMP-Source": "web",
+    };
+    const gmpGet = async (path) => {
+      const r = await fetch(`${API}${path}`, { headers });
+      if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
+      return r.json();
+    };
+    (async () => {
+      try {
+        const current = await gmpGet("/users/current");
+        // energyAccounts live under customData on /users/current.
+        const cd = (current && current.customData) || {};
+        const energyAccounts = Array.isArray(cd.energyAccounts) ? cd.energyAccounts
+          : (Array.isArray(current.energyAccounts) ? current.energyAccounts : []);
+        const accounts = [];
+        for (const ea of energyAccounts) {
+          const acctNum = String(ea.accountNumber || "").trim();
+          if (!acctNum) continue;
+          let summary = {};
+          try {
+            summary = await gmpGet(`/usage/${acctNum}/summary`);
+          } catch (e) {
+            // A single account 401/404 shouldn't sink the whole capture — record
+            // it with an empty summary so the backend marks it no-generation.
+            console.warn("[so] GMP summary fetch failed for", acctNum, String(e && e.message));
+            summary = {};
+          }
+          accounts.push({
+            account_number: acctNum,
+            nickname: ea.nickname || null,
+            summary,
+            daily: [],   // per-day generation series — see note in deliverable report
+          });
+        }
+        sendResponse({ ok: true, accounts });
+      } catch (e) {
+        sendResponse({ ok: false, status: e && e.status, error: String((e && e.message) || e) });
+      }
+    })();
+    return true; // async sendResponse
+  }
   // Access-Control-Allow-Origin:* — which the browser refuses to pair with a
   // credentialed content-script fetch (CORS block → the capture stalled). The
   // service worker, holding host_permissions for uiapi.sunnyportal.com, can make
@@ -481,6 +574,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try {
             await chrome.storage.local.set({
               so_capture_intent: { vendor: "chint", ts: Date.now() },
+            });
+          } catch (_) { /* non-fatal */ }
+        }
+        // v1.9.23: GMP utility-meter PRODUCTION capture — arm the gmp intent so
+        // gmp_meter_content.js reads the owner's solar generation on this explicit
+        // "Connect GMP" visit. NOTE: greenmountainpower.com IS in the cookie-wipe
+        // list above (each bill capture is a fresh stateless visit), so for a
+        // meter-production connect the owner signs in again on this visit — that's
+        // expected; the intent flag survives the wipe (it lives in extension
+        // storage, not site cookies).
+        if (host.endsWith("greenmountainpower.com")) {
+          try {
+            await chrome.storage.local.set({
+              so_capture_intent: { vendor: "gmp", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
         }

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.9.22",
-  "description": "Captures GMP & SmartHub utility bills for NEPOOL reports, and links SolarEdge, Fronius, SMA & Chint inverters for Array Operator.",
+  "version": "1.9.23",
+  "description": "Captures GMP & SmartHub bills + GMP solar production for NEPOOL/Array Operator, and links SolarEdge, Fronius, SMA & Chint inverters.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",
   "permissions": [
@@ -59,6 +59,16 @@
       ],
       "js": [
         "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://greenmountainpower.com/*",
+        "https://*.greenmountainpower.com/*"
+      ],
+      "js": [
+        "gmp_meter_content.js"
       ],
       "run_at": "document_idle"
     },

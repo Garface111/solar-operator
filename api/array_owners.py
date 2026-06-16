@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from . import inverters
+from .adapters import gmp as gmp_adapter
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
@@ -1701,4 +1702,185 @@ def inverter_capture(
         "inverters_persisted": sum(r["inverters_persisted"] for r in results),
         "faults_detected": fault_count,
         "sites": results,
+    }
+
+
+# ── Utility-meter capture (GMP solar generation via the extension) ────────────
+# DISTINCT from inverter-capture: utilities are ADAPTERS, not inverter VENDORS.
+# The extension reads the owner's GMP usage *summary* (kWh the array produced /
+# sent to grid) and POSTs it here. We persist it as DailyGeneration rows with
+# source="utility_meter" so the Array Operator value/peer model lights up even
+# for owners whose only production signal is their utility meter.
+
+class UtilityMeterDaily(BaseModel):
+    date: str                          # ISO date (YYYY-MM-DD or full timestamp)
+    generated_kwh: Optional[float] = None
+
+
+class UtilityMeterAccount(BaseModel):
+    account_number: str
+    nickname: Optional[str] = None
+    summary: dict = {}                 # raw GMP /usage/{acct}/summary body
+    daily: list[UtilityMeterDaily] = []  # optional per-day generation series
+
+
+class UtilityMeterCaptureBody(BaseModel):
+    provider: str
+    accounts: list[UtilityMeterAccount]
+
+
+# Utilities allowed to ingest GENERATION via the meter-capture path. Kept
+# separate from _CAPTURE_VENDORS (inverter vendors) — utilities are adapters.
+_UTILITY_CAPTURE_VENDORS = {"gmp"}
+
+
+def _meter_day(value: str | None):
+    """Parse an ISO date/timestamp string into a date, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+    except Exception:
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+
+@router.post("/v1/array-owners/utility-meter-capture")
+def utility_meter_capture(
+    body: UtilityMeterCaptureBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Ingest SOLAR GENERATION read from a utility meter (GMP today) by the
+    extension. Dual-auth (session token OR tenant key), same as inverter_capture.
+
+    For each account: match an Array by name (nickname, else "GMP <account>"),
+    else create one. Then record generation as DailyGeneration rows with
+    source="utility_meter":
+      • If daily[] is supplied, upsert one row per day (idempotent per
+        (array, day), max-kWh — same rule as inverter_capture).
+      • Otherwise persist the billing-period total as ONE representative row
+        keyed on the period_end date.
+
+    An account with isNetMetered=false / zero generation is VALID — it just has
+    no solar. We still record it (created/matched) but flag has_generation=false
+    so the UI can honestly tell the owner "this account has no solar production".
+
+    Idempotent: re-capturing re-matches the same Array by name and upserts the
+    same DailyGeneration rows, so repeated captures never duplicate.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    provider = (body.provider or "").strip().lower()
+    if provider not in _UTILITY_CAPTURE_VENDORS:
+        raise HTTPException(
+            400,
+            f"Provider {provider!r} is not a utility-meter capture provider "
+            f"(allowed: {', '.join(sorted(_UTILITY_CAPTURE_VENDORS))}).",
+        )
+    if not body.accounts:
+        raise HTTPException(400, "No accounts in capture payload.")
+
+    results: list[dict] = []
+
+    with SessionLocal() as db:
+        existing = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        by_name = {a.name.strip().lower(): a for a in existing}
+
+        for acct in body.accounts:
+            parsed = gmp_adapter.parse_usage_summary(acct.summary or {})
+            acct_num = (acct.account_number or parsed.get("account_number") or "").strip()
+            name = (acct.nickname or "").strip() or f"GMP {acct_num or 'account'}"
+
+            arr = by_name.get(name.lower())
+            created = False
+            if arr is None:
+                arr = Array(
+                    tenant_id=tenant.id, name=name,
+                    client_id=None, fuel_type="solar",
+                )
+                db.add(arr)
+                db.flush()
+                by_name[name.lower()] = arr
+                created = True
+
+            kwh_recorded = 0.0
+            days_written = 0
+
+            # ── Per-day series (preferred when present) ──────────────────────
+            daily_rows = [d for d in (acct.daily or []) if d.generated_kwh is not None]
+            if daily_rows:
+                for d in daily_rows:
+                    day = _meter_day(d.date)
+                    if day is None or d.generated_kwh is None or d.generated_kwh < 0:
+                        continue
+                    dk = float(d.generated_kwh)
+                    row = db.execute(
+                        select(DailyGeneration).where(
+                            DailyGeneration.array_id == arr.id,
+                            DailyGeneration.day == day,
+                        )
+                    ).scalar_one_or_none()
+                    if row is None:
+                        db.add(DailyGeneration(
+                            tenant_id=tenant.id, array_id=arr.id, day=day,
+                            kwh=dk, source="utility_meter",
+                        ))
+                    else:
+                        # Same idempotency as inverter_capture: never lower a row.
+                        row.kwh = max(row.kwh, dk)
+                        row.source = "utility_meter"
+                        row.uploaded_at = now()
+                    kwh_recorded += dk
+                    days_written += 1
+            else:
+                # ── Billing-period total → one representative row ────────────
+                gen = parsed.get("kwh_generated")
+                period_end = _meter_day(parsed.get("period_end"))
+                if gen is not None and gen > 0 and period_end is not None:
+                    gk = float(gen)
+                    row = db.execute(
+                        select(DailyGeneration).where(
+                            DailyGeneration.array_id == arr.id,
+                            DailyGeneration.day == period_end,
+                        )
+                    ).scalar_one_or_none()
+                    if row is None:
+                        db.add(DailyGeneration(
+                            tenant_id=tenant.id, array_id=arr.id, day=period_end,
+                            kwh=gk, source="utility_meter",
+                        ))
+                    else:
+                        row.kwh = max(row.kwh, gk)
+                        row.source = "utility_meter"
+                        row.uploaded_at = now()
+                    kwh_recorded = gk
+                    days_written = 1
+
+            has_generation = kwh_recorded > 0
+            results.append({
+                "account_number": acct_num,
+                "array_id": arr.id,
+                "name": arr.name,
+                "created": created,
+                "kwh_recorded": kwh_recorded,
+                "days_written": days_written,
+                "is_net_metered": bool(parsed.get("is_net_metered")),
+                "has_generation": has_generation,
+            })
+
+        db.commit()
+
+    return {
+        "ok": True,
+        "provider": provider,
+        "accounts_captured": len(results),
+        "arrays_created": sum(1 for r in results if r["created"]),
+        "accounts_with_generation": sum(1 for r in results if r["has_generation"]),
+        "accounts": results,
     }

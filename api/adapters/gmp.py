@@ -183,6 +183,61 @@ def _segment_dates(bill: dict) -> tuple[datetime | None, datetime | None]:
     return None, None
 
 
+def _to_float(v: Any) -> float | None:
+    """Coerce a JSON number/string into a float, or None if not parseable."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_usage_summary(summary: dict) -> dict[str, Any]:
+    """Normalize a GMP /usage/{acct}/summary body into the generation signal we
+    persist for Array Operator (kWh the array produced / sent to grid).
+
+    Defensive about missing keys — GMP omits or nulls fields for accounts with no
+    solar (isNetMetered=false), so every numeric read is coerced and may be None.
+
+    Returns:
+        account_number   — str | None
+        is_net_metered   — bool (truthy => the meter participates in net metering)
+        period_start     — ISO str | None (billingPeriodStartDate)
+        period_end       — ISO str | None (billingPeriodEndDate)
+        kwh_generated    — float | None  (totalGrossGenerated; falls back to
+                           totalGenerationSentToGrid when gross is 0/None)
+        kwh_sent_to_grid — float | None  (totalGenerationSentToGrid)
+        kwh_consumed     — float | None  (totalConsumption)
+    """
+    summary = summary or {}
+
+    gross = _to_float(summary.get("totalGrossGenerated"))
+    sent = _to_float(summary.get("totalGenerationSentToGrid"))
+
+    # Prefer gross generation (what the array actually produced). For a
+    # net-metered account that under-reports gross (0/None) we fall back to the
+    # energy exported to the grid so we never lose a real solar signal.
+    if gross is not None and gross > 0:
+        kwh_generated = gross
+    elif sent is not None and sent > 0:
+        kwh_generated = sent
+    else:
+        # Both zero/None — keep gross's value (0.0 or None) so the caller can
+        # honestly distinguish "no solar" from "missing data".
+        kwh_generated = gross if gross is not None else sent
+
+    return {
+        "account_number": summary.get("accountNumber"),
+        "is_net_metered": bool(summary.get("isNetMetered")),
+        "period_start": summary.get("billingPeriodStartDate"),
+        "period_end": summary.get("billingPeriodEndDate"),
+        "kwh_generated": kwh_generated,
+        "kwh_sent_to_grid": sent,
+        "kwh_consumed": _to_float(summary.get("totalConsumption")),
+    }
+
+
 def bill_json_to_metrics(bill: dict) -> dict[str, Any]:
     """Convert a single bill JSON entry into the same metrics dict shape as
     extract_bill_metrics() so worker.py can persist either uniformly."""
