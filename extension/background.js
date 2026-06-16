@@ -994,11 +994,33 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       chrome.notifications.create(`recap-${vendor}-${today}`, {
         type: "basic",
         iconUrl: "icons/icon128.png",
-        title: "EnergyAgent: quick reconnect",
-        message: `Sign in to ${label} once to keep your live production numbers fresh.`,
+        title: "EnergyAgent: one-tap reconnect",
+        message: `Click here to open ${label} and refresh your live production — one sign-in keeps it fresh for weeks.`,
+        requireInteraction: true,   // stay until he acts; this is his one-click recovery
       });
     } catch (_) {}
   }
+
+  // ONE-CLICK RECOVERY: clicking the reconnect notification opens that vendor's
+  // portal as an ACTIVE tab with capture already armed. He signs in once; the
+  // content script rides the fresh session, captures, and we're silent again for
+  // weeks. No stored passwords — just a frictionless re-auth when a session lapses.
+  chrome.notifications.onClicked.addListener((notifId) => {
+    const m = String(notifId || "").match(/^recap-(fronius|sma|chint)-/);
+    if (!m) return;
+    const vendor = m[1];
+    const url = RECAP_VENDORS[vendor];
+    if (!url) return;
+    (async () => {
+      try { await chrome.storage.local.set({ so_capture_intent: { vendor, ts: Date.now() } }); } catch (_) {}
+      // Mark a recap in flight (no tabId — it's a foreground tab he controls) so the
+      // existing *_CAPTURED hook POSTs the result with the tenant key even if no AO
+      // dashboard page is open. recapFinish won't try to close his tab (tabId absent).
+      await recapSetState({ running: true, vendor, tabId: null, startedAt: Date.now() });
+      chrome.tabs.create({ url, active: true }, () => void chrome.runtime.lastError);  // foreground so he can log in
+      try { chrome.notifications.clear(notifId, () => void chrome.runtime.lastError); } catch (_) {}
+    })();
+  });
 
   // Close a background recap tab and clear the in-flight state.
   async function recapFinish(vendor, ok, sites) {
@@ -1066,6 +1088,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     (async () => {
       const st = await recapGetState();
       if (!st || !st.running) return;            // no silent recap in flight → ignore
+      // Guard against a stale state (e.g. a click-recovery he never completed): only
+      // honor captures within 30 min of arming, then self-clear.
+      if ((Date.now() - (st.startedAt || 0)) > 30 * 60 * 1000) { await recapClearState(); return; }
       if (okMap[msg.type] && okMap[msg.type] === st.vendor) {
         const sites = (msg.payload && Array.isArray(msg.payload.sites)) ? msg.payload.sites : [];
         const ok = await recapPost(st.vendor, sites);
