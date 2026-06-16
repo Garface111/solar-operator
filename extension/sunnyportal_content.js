@@ -74,6 +74,32 @@
     if (!r.ok) throw new Error("api " + r.status);
     return r.json();
   }
+  // POST counterpart to getJson — same Bearer auth + no-credentials style (the
+  // measurements/search endpoint is a POST with a JSON body). Used for the
+  // site-level live-power query.
+  async function postJson(url, body) {
+    const tok = getAccessToken();
+    if (!tok) throw new Error("no access_token in localStorage (not logged in?)");
+    let r;
+    try {
+      r = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + tok,
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        // default credentials mode ("same-origin") → no cookies cross-origin → CORS ok with ACAO:*
+      });
+    } catch (e) {
+      try { if (SMA_DEBUG) console.log("[EnergyAgent SMA] POST", url, "-> NETWORK/CORS FAIL", e && e.message); } catch (_) {}
+      throw e;
+    }
+    try { if (SMA_DEBUG) console.log("[EnergyAgent SMA] POST", url, "->", r.ok ? "ok " + r.status : "FAIL status=" + r.status); } catch (_) {}
+    if (!r.ok) throw new Error("api " + r.status);
+    return r.json();
+  }
   // navigation/menuitems returns 200 JSON when the Bearer token is valid.
   async function isSignedIn() {
     try {
@@ -104,6 +130,55 @@
     if (d.state != null && d.state !== 307) return "fault";
     if (p > 0) return "producing";
     return "idle";
+  }
+
+  // Live whole-site AC power. The /overview/.../devices endpoint DRIFTED — its
+  // d.pvPower is now null. Live power moved to POST /api/v1/measurements/search:
+  // query channel Measurement.GridMs.TotW.Pv at the PLANT-level component (the
+  // plantId itself) gives whole-site AC power in WATTS, 15-min buckets. The LAST
+  // entry with a finite numeric value is "now". Returns a number (W) or null.
+  async function fetchSiteLivePowerW(plantId) {
+    // PRIMARY: the portal's own live-power gauge — a single clean watts number.
+    // GET /api/v1/widgets/gauge/power?componentId=<plantId>&type=PvProduction
+    //   -> {"value":40691,"timestamp":"...","min":0,"max":140000}  (watts)
+    // This is exactly what Sunny Portal's live gauge reads; grounded in the HAR.
+    try {
+      const g = await getJson(UIAPI + "/api/v1/widgets/gauge/power?componentId="
+        + encodeURIComponent(String(plantId)) + "&type=PvProduction");
+      if (g && typeof g.value === "number" && isFinite(g.value)) return g.value;
+    } catch (e) {
+      LOG("gauge/power fetch failed, trying measurements/search:", e && e.message || e);
+    }
+    // FALLBACK: the 15-min measurement series — take the last finite sample.
+    // Day window in UTC: today 04:00Z → tomorrow 04:00Z (covers an EDT/EST day).
+    const _now = new Date();
+    const begin = new Date(Date.UTC(_now.getUTCFullYear(), _now.getUTCMonth(), _now.getUTCDate(), 4, 0, 0, 0));
+    if (_now.getTime() < begin.getTime()) begin.setUTCDate(begin.getUTCDate() - 1);
+    const end = new Date(begin.getTime() + 24 * 60 * 60 * 1000);
+    const body = {
+      queryItems: [{
+        componentId: String(plantId),
+        channelId: "Measurement.GridMs.TotW.Pv",
+        resolution: "FifteenMinutes",
+        timezone: "America/New_York",
+        aggregate: "Avg",
+        multiAggregate: "Sum",
+      }],
+      dateTimeBegin: begin.toISOString(),
+      dateTimeEnd: end.toISOString(),
+    };
+    const res = await postJson(UIAPI + "/api/v1/measurements/search", body);
+    const series = Array.isArray(res)
+      ? res.find((s) => s && s.channelId === "Measurement.GridMs.TotW.Pv"
+          && String(s.componentId) === String(plantId))
+        || res.find((s) => s && Array.isArray(s.values))
+      : null;
+    const values = (series && Array.isArray(series.values)) ? series.values : [];
+    for (let i = values.length - 1; i >= 0; i--) {
+      const v = values[i] && values[i].value;
+      if (typeof v === "number" && isFinite(v)) return v;
+    }
+    return null;
   }
 
   // Discover which plant(s) to capture. ennexOS /navigation is a tree-walker:
@@ -172,21 +247,38 @@
       }));
     if (!inverters.length) return null;
 
-    let energyToday = 0, liveW = 0, peakKw = 0;
+    let energyToday = 0, sumW = 0, peakKw = 0, haveSumW = false;
     inverters.forEach((iv) => {
       if (iv.energy_today_kwh) energyToday += iv.energy_today_kwh;
-      if (iv.current_power_w) liveW += iv.current_power_w;
+      if (typeof iv.current_power_w === "number") { sumW += iv.current_power_w; haveSumW = true; }
       if (iv.nameplate_kw) peakKw += iv.nameplate_kw;
     });
+
+    // Live site AC power now comes from a dedicated measurements/search POST (the
+    // devices endpoint's pvPower drifted to null). Never let this break capture —
+    // energy_today must still land even if the live query fails.
+    let siteW = null;
+    try {
+      siteW = await fetchSiteLivePowerW(plantId);
+    } catch (e) {
+      LOG("site live-power fetch failed (energy still captured):", e && e.message || e);
+    }
+    // Prefer the authoritative site-level measurement; fall back to the
+    // per-inverter sum only when devices actually reported numeric power.
+    // Use a real null check — a legit 0 W is valid, only null when no data.
+    let currentPowerW = null;
+    if (typeof siteW === "number") currentPowerW = siteW;
+    else if (haveSumW) currentPowerW = sumW;
+
     return {
       site_id: String(plantId),
       name: plantName || ("SMA plant " + plantId),
       peak_power_kw: peakKw || null,
       inverter_count: inverters.length,
       energy_today_kwh: Math.round(energyToday * 100) / 100,
-      current_power_w: liveW || null,
+      current_power_w: currentPowerW,
       error_count_today: inverters.filter((iv) => iv.status === "fault").length,
-      status: liveW > 0 ? "producing" : "idle",
+      status: (typeof currentPowerW === "number" && currentPowerW > 0) ? "producing" : "idle",
       inverters,
     };
   }

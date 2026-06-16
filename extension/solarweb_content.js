@@ -22,7 +22,7 @@
 //     -> { data: [ { PvSystemId, PvSystemName, EnergyTodayInkWh, InverterCount,
 //                    KwhPerKwp, LastImport:"/Date(ms)/", LastImportDisp,
 //                    ErrorCntToday, OnlineStatus } ] }
-//   /ActualData/GetActualValues?withOnlineState=True&_=<ts>
+//   /ActualData/GetActualValues?withOnlineState=False&_=<ts>
 //     -> [ { PvSystemId, TotalPower (WATTS), DalosOnline:[..], DalosOffline:[..] } ]
 //   /Messages/GetUnreadMessageCountForUser?_=<ts>   (200 when signed in)
 
@@ -43,6 +43,10 @@
     const buf = new TextEncoder().encode(String(s));
     const d = await crypto.subtle.digest("SHA-1", buf);
     return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  function LOG() {
+    // Surface capture diagnostics in the page console (prefixed for grep-ability).
+    try { console.warn.apply(console, ["[solar-operator/fronius]"].concat([].slice.call(arguments))); } catch (_) {}
   }
   async function getJson(url, opts) {
     const r = await fetch(url, Object.assign({ credentials: "include" }, opts || {}));
@@ -178,12 +182,23 @@
     if (!systems.length) throw new Error("no pv systems");
 
     // 2. Live values — current AC power (WATTS) + online state, keyed by PvSystemId.
+    //    Use withOnlineState=False (the proven-working variant from live HAR capture);
+    //    online state is best-effort. NEVER silently swallow a live-call failure —
+    //    log it loudly so a blank production bar is traceable, but keep capture going
+    //    (energy from the list still lands even when live power is unavailable).
     let liveArr = [];
     try {
-      liveArr = await getJson("/ActualData/GetActualValues?withOnlineState=True&_=" + Date.now());
-    } catch (_) { liveArr = []; }    // live is a bonus; the list alone is still useful
+      liveArr = await getJson("/ActualData/GetActualValues?withOnlineState=False&_=" + Date.now());
+      if (!Array.isArray(liveArr)) {
+        LOG("GetActualValues returned non-array; live power unavailable:", liveArr);
+        liveArr = [];
+      }
+    } catch (e) {
+      LOG("GetActualValues live-power fetch failed; production bar will be blank:", e && e.message ? e.message : e);
+      liveArr = [];
+    }
     const liveMap = {};
-    for (const lv of (liveArr || [])) {
+    for (const lv of liveArr) {
       if (lv && lv.PvSystemId) {
         liveMap[lv.PvSystemId] = {
           power_w: typeof lv.TotalPower === "number" ? lv.TotalPower : null,

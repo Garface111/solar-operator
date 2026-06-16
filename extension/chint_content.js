@@ -81,6 +81,18 @@
   }
   function num(v) { const n = Number(v); return isFinite(n) ? n : null; }
   function kwFromStr(v) { const n = Number(v); return isFinite(n) ? Math.round(n * 1000) / 1000 : null; }
+  // Parse a power string with unit into WATTS, e.g. "72.7 KW" -> 72700.
+  // Units (case-insensitive): W=1, KW/kW=1000, MW=1e6. Returns null if unparseable.
+  function parsePowerToW(v) {
+    if (v == null) return null;
+    const m = String(v).trim().match(/^(-?[\d.]+)\s*([kKmM]?[wW])$/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (!isFinite(n)) return null;
+    const unit = m[2].toLowerCase();
+    const mult = unit === "mw" ? 1e6 : unit === "kw" ? 1000 : 1;
+    return Math.round(n * mult);
+  }
   function mapStatus(statusName, powerW) {
     const s = String(statusName || "").toLowerCase();
     if (/fault|error|alarm|warn/.test(s)) return "fault";
@@ -131,9 +143,14 @@
     for (const st of siteListJson.data) {
       const sid = st.id;
       const name = st.siteName || (sid ? "Chint site " + sid : "Chint site");
-      const liveW = num(st.currentPower);
-      const inverters = sid != null && deviceJsonBySite.has(String(sid))
-        ? invertersFrom(deviceJsonBySite.get(String(sid))) : [];
+      const devJson = sid != null && deviceJsonBySite.has(String(sid))
+        ? deviceJsonBySite.get(String(sid)) : null;
+      const inverters = devJson ? invertersFrom(devJson) : [];
+      // Prefer the site's live power from the busTypeDevices response field
+      // `currentPowerWithUnit` (e.g. "72.7 KW" -> 72700 W); the old numeric
+      // `currentPower` field on the site list has drifted/gone missing.
+      const liveFromDev = devJson && devJson.data ? parsePowerToW(devJson.data.currentPowerWithUnit) : null;
+      const liveW = liveFromDev != null ? liveFromDev : num(st.currentPower);
       let energyToday = null;
       if (inverters.length) {
         energyToday = Math.round(inverters.reduce((t, iv) => t + (iv.energy_today_kwh || 0), 0) * 1000) / 1000;
