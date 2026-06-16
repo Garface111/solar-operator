@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.9.10",
-  "description": "Captures Green Mountain Power and SmartHub utility bills for NEPOOL reports, and links SolarEdge + Fronius + SMA (per-inverter) accounts for Array Operator.",
+  "version": "1.9.11",
+  "description": "Captures Green Mountain Power and SmartHub utility bills for NEPOOL reports, and links SolarEdge + Fronius + SMA + Chint/CPS (per-inverter) accounts for Array Operator.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",
   "permissions": [
@@ -23,6 +23,8 @@
     "https://*.solarweb.com/*",
     "https://ennexos.sunnyportal.com/*",
     "https://uiapi.sunnyportal.com/*",
+    "https://solar.chintpower.com/*",
+    "https://*.chintpower.com/*",
     "https://nepooloperator.com/*",
     "https://*.nepooloperator.com/*",
     "https://arrayoperator.com/*",
@@ -92,6 +94,15 @@
       ],
       "js": [
         "sunnyportal_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://solar.chintpower.com/*"
+      ],
+      "js": [
+        "chint_content.js"
       ],
       "run_at": "document_idle"
     },

@@ -321,6 +321,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous
   }
+  // v1.9.11: Chint / CPS (solar.chintpower.com, a Fomware white-label) per-inverter
+  // capture for Array Operator. CHINT publishes no owner API key, so chint_content.js
+  // reads the owner's live readings from the logged-in portal and we hand them to the
+  // AO page via SO_CAPTURE_LANDED (same shape as Fronius/SMA). NOTE: the chint
+  // extraction endpoints are not yet grounded against a live account — the content
+  // script fails gracefully (CHINT_CAPTURE_FAILED) until they're verified.
+  if (msg.type === "CHINT_CAPTURED") {
+    const p = msg.payload || {};
+    const landed = {
+      type: "SO_CAPTURE_LANDED",
+      ok: true,
+      provider: "chint",
+      sites: Array.isArray(p.sites) ? p.sites : [],
+      accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(landed);
+    chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous response
+  }
+  // v1.9.11: Chint capture gave up — relay the REASON to the AO page so its spinner
+  // resolves into a real (honest) error instead of hanging forever.
+  if (msg.type === "CHINT_CAPTURE_FAILED") {
+    const failed = {
+      type: "SO_CAPTURE_FAILED",
+      ok: false,
+      provider: "chint",
+      reason: String(msg.reason || "unknown"),
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(failed);
+    chrome.runtime.sendMessage(failed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous
+  }
   // its API (uiapi.sunnyportal.com) are DIFFERENT origins, and uiapi answers with
   // Access-Control-Allow-Origin:* — which the browser refuses to pair with a
   // credentialed content-script fetch (CORS block → the capture stalled). The
@@ -434,6 +470,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try {
             await chrome.storage.local.set({
               so_capture_intent: { vendor: "sma", ts: Date.now() },
+            });
+          } catch (_) { /* non-fatal */ }
+        }
+        // v1.9.11: same for Chint / CPS (solar.chintpower.com). Not in the wipe
+        // list — ride the owner's existing monitoring session (zero extra logins).
+        if (host.endsWith("chintpower.com")) {
+          try {
+            await chrome.storage.local.set({
+              so_capture_intent: { vendor: "chint", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
         }
