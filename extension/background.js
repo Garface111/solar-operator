@@ -1105,18 +1105,40 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // executeScript({func,args}) can pass the decrypted creds straight into the page
   // without writing them to disk. The creds live only in the worker's memory for
   // this call and are NEVER sent to our backend — we just type into the real form.
-  function soFillLoginForm(username, password) {
+  function soFillLoginForm(username, password, vendor) {
     if (!username || !password) return "no-form";
-    const pwFields = Array.from(document.querySelectorAll('input[type="password"]'))
-      .filter((el) => el.offsetParent !== null && !el.disabled);
-    if (!pwFields.length) return "already-in";
-    const pw = pwFields[0];
-    const form = pw.form || document;
-    const candidates = Array.from(form.querySelectorAll(
-      'input[type="text"], input[type="email"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i]'
-    )).filter((el) => el.offsetParent !== null && !el.disabled && el.type !== "password");
-    const user = candidates[0] || null;
-    if (!user) return "no-form";
+    // Grounded per-vendor selectors (verified 2026-06-16 against the live login
+    // DOMs): SMA Keycloak login.sma.energy → #username/#password; Fronius WSO2
+    // login.fronius.com → #usernameUserInput/#password. These are the PRIMARY path;
+    // the generic matcher below is the fallback if a portal reworks its form.
+    const HINTS = {
+      sma: { user: "#username", pass: "#password", btn: "button[type=\"submit\"]" },
+      fronius: { user: "#usernameUserInput", pass: "#password", btn: "#login-button, [data-testid=\"login-page-continue-login-button\"], button[type=\"submit\"]" },
+    };
+    function vis(el) { return el && el.offsetParent !== null && !el.disabled; }
+
+    let pw = null, user = null, btn = null;
+    const hint = HINTS[vendor];
+    if (hint) {
+      const hp = document.querySelector(hint.pass);
+      const hu = document.querySelector(hint.user);
+      if (vis(hp) && vis(hu)) { pw = hp; user = hu; btn = document.querySelector(hint.btn); }
+    }
+
+    // Generic fallback (vendor-agnostic): first visible password field + nearest
+    // username/email field in the same form.
+    if (!pw || !user) {
+      const pwFields = Array.from(document.querySelectorAll('input[type="password"]')).filter(vis);
+      if (!pwFields.length) return "already-in";
+      pw = pwFields[0];
+      const form = pw.form || document;
+      const candidates = Array.from(form.querySelectorAll(
+        'input[type="text"], input[type="email"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i]'
+      )).filter((el) => vis(el) && el.type !== "password");
+      user = candidates[0] || null;
+      if (!user) return "no-form";
+    }
+
     function setVal(el, val) {
       const proto = el.tagName === "TEXTAREA"
         ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -1129,9 +1151,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       user.focus(); setVal(user, username);
       pw.focus(); setVal(pw, password);
     } catch (_) { return "no-form"; }
-    const btn = (pw.form || document).querySelector(
-      'button[type="submit"], input[type="submit"], button[name*="login" i], button[id*="login" i], button[id*="signin" i]'
-    );
+    if (!btn || !vis(btn)) {
+      btn = (pw.form || document).querySelector(
+        'button[type="submit"], input[type="submit"], button[name*="login" i], button[id*="login" i], button[id*="signin" i]'
+      );
+    }
     setTimeout(() => {
       try {
         if (btn && btn.offsetParent !== null) { btn.click(); return; }
@@ -1164,7 +1188,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const res = await chrome.scripting.executeScript({
         target: { tabId },
         func: soFillLoginForm,
-        args: [creds.username, creds.password],
+        args: [creds.username, creds.password, vendor],
         world: "MAIN",   // run in page context so the portal framework sees the input events
       });
       const outcome = res && res[0] && res[0].result;
