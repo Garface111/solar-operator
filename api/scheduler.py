@@ -613,6 +613,15 @@ def start():
         CronTrigger(hour=4, minute=0),
         id="ao_usage_report", replace_existing=True,
     )
+    # Hourly: inverter down/underperformance email-alert sweep (Array Operator).
+    # Safe to run frequently — the per-incident grace window + de-dup state
+    # (InverterAlertState) ensure one email per incident, not one per tick.
+    # Hourly keeps incident detection responsive without spamming owners.
+    scheduler.add_job(
+        _run_inverter_alert_sweep,
+        CronTrigger(minute=20),
+        id="inverter_alert_sweep", replace_existing=True,
+    )
     scheduler.start()
 
 
@@ -630,6 +639,28 @@ def _run_usage_report() -> None:
         send_internal_alert(
             "Array Operator usage report: unhandled exception",
             f"The per-kWh usage-report job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_inverter_alert_sweep() -> None:
+    """Email Array Operator owners about down/underperforming inverters.
+
+    Reuses build_fleet_tree truth and de-dups via InverterAlertState so each
+    incident emails once (after the owner's grace window), then stays quiet
+    until the inverter recovers and trips again.
+    """
+    try:
+        from .inverter_alert_sweep import run_sweep
+        result = run_sweep()
+        logger.info(
+            "inverter_alert_sweep: tenants_swept=%d inverters_emailed=%d",
+            result.get("tenants_swept", 0), result.get("inverters_emailed", 0),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Inverter alert sweep: unhandled exception",
+            f"The inverter down/underperformance alert sweep raised an "
+            f"unexpected error:\n{exc}",
         )
 
 
