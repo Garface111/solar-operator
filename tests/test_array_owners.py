@@ -728,7 +728,65 @@ def test_delete_then_restore_array_roundtrips(client):
     assert r.status_code == 404
 
 
-# ── Chint per-inverter LIVE POWER (regression: schema used to drop it) ─────────
+# ── Site-level daily history backfill (instant graph on connect) ──────────────
+
+def test_inverter_capture_backfills_site_daily_history(client):
+    """REGRESSION/feat (Jun 2026): Chint exposes ~7 days of site daily kWh
+    (weekETrend). Capturing it must backfill DailyGeneration so the array graph
+    renders REAL history the instant the owner connects (not after days of the
+    snapshot job). Idempotent + max-wins per (array, day)."""
+    from api.models import DailyGeneration
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "chint",
+        "sites": [{
+            "site_id": "5e15c66df12588458ffc011a",
+            "name": "Londonderry 186",
+            "current_power_w": 150000.0,
+            "daily": [
+                {"date": "2026-06-11", "kwh": 380.0},
+                {"date": "2026-06-12", "kwh": 412.5},
+                {"date": "2026-06-13", "kwh": 0.0},      # a quiet day — must persist as 0
+                {"date": "2026-06-14", "kwh": 401.2},
+            ],
+            "inverters": [
+                {"serial": "0001013791738041", "name": "Inv 1",
+                 "energy_today_kwh": 98.6, "current_power_w": 51000.0},
+            ],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        rows = {r.day.isoformat(): r.kwh for r in db.execute(
+            select(DailyGeneration).where(DailyGeneration.tenant_id == tid)
+        ).scalars().all()}
+        # all 4 backfilled days landed (incl. the literal 0-output day)
+        assert rows["2026-06-11"] == 380.0
+        assert rows["2026-06-12"] == 412.5
+        assert rows["2026-06-13"] == 0.0
+        assert rows["2026-06-14"] == 401.2
+
+    # Re-capture with a higher value for one day → max-wins, no duplicate row.
+    payload["sites"][0]["daily"][0]["kwh"] = 395.0   # 2026-06-11 climbs
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        d11 = db.execute(
+            select(DailyGeneration).where(
+                DailyGeneration.tenant_id == tid,
+                DailyGeneration.day == date.fromisoformat("2026-06-11"),
+            )
+        ).scalars().all()
+        assert len(d11) == 1                 # no duplicate
+        assert d11[0].kwh == 395.0           # max(380, 395)
+
+    # And the array graph series surfaces on the fleet tree column.
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    col = next(c for c in tree["columns"] if c["array_name"] == "Londonderry 186")
+    dates = {d["date"] for d in col["daily"]}
+    assert {"2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14"} <= dates
 
 def test_inverter_capture_chint_keeps_per_inverter_live_power(client):
     """REGRESSION (Jun 2026): Chint's portal reports live AC power PER inverter

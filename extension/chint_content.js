@@ -125,6 +125,26 @@
   }
   function countInverters(devJson) { return invertersFrom(devJson).length; }
 
+  // Chint's site/retrieve response carries weekETrend[] — the site's daily energy
+  // for the last ~7 days: [{name:"20260610", value:"996.2"}, ...] (kWh). We map it
+  // to a {date:"YYYY-MM-DD", kwh} series so the backend can backfill DailyGeneration
+  // and the array graph renders REAL history the instant the owner connects, instead
+  // of waiting days for the daily snapshot job to accumulate it. Site-level only —
+  // Chint exposes no per-inverter history, so we never split this across inverters.
+  function dailyFromTrend(st) {
+    const trend = (st && Array.isArray(st.weekETrend)) ? st.weekETrend : [];
+    const out = [];
+    for (const pt of trend) {
+      const raw = String((pt && pt.name) || "");
+      const m = raw.match(/^(\d{4})(\d{2})(\d{2})$/);   // "20260610" -> 2026-06-10
+      if (!m) continue;
+      const kwh = Number(pt.value);
+      if (!isFinite(kwh) || kwh < 0) continue;
+      out.push({ date: m[1] + "-" + m[2] + "-" + m[3], kwh: Math.round(kwh * 1000) / 1000 });
+    }
+    return out;
+  }
+
   function broadcastLoginState(state) {
     if (state === lastLoginState) return;
     lastLoginState = state;
@@ -164,6 +184,7 @@
         current_power_w: liveW,
         error_count_today: inverters.filter((iv) => iv.status === "fault").length,
         status: (liveW || 0) > 0 ? "producing" : "idle",
+        daily: dailyFromTrend(st),       // ~7 days of site daily kWh for instant history
         inverters,
       });
     }

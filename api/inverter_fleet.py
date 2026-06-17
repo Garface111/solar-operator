@@ -31,7 +31,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import Array, Inverter, InverterConnection, InverterDaily, Tenant, now
+from .models import Array, DailyGeneration, Inverter, InverterConnection, InverterDaily, Tenant, now
 from .inverters import peer_analysis
 
 log = logging.getLogger(__name__)
@@ -369,6 +369,23 @@ def _live_power_w(iv: Inverter, m: dict):
     return None
 
 
+def _array_daily(db, array_id: int, days: int = 14) -> list[dict]:
+    """Array-level daily kWh (DailyGeneration), ascending, last `days`. This is
+    the array's OWN production history — used by the front-end array graph as a
+    fallback/primary when the vendor gives site-level history but no per-inverter
+    series (e.g. Chint's weekETrend backfill). Returns [{"date","kwh"}]."""
+    rows = db.execute(
+        select(DailyGeneration)
+        .where(DailyGeneration.array_id == array_id)
+        .order_by(DailyGeneration.day.desc())
+        .limit(days)
+    ).scalars().all()
+    return [
+        {"date": r.day.isoformat(), "kwh": round(float(r.kwh or 0.0), 2)}
+        for r in sorted(rows, key=lambda x: x.day)
+    ]
+
+
 def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict:
     """Owner-grouped 3-tier tree. Inverters are read from the persisted table
     (owner's arrangement), telemetry pulled from each one's SOURCE site, then
@@ -503,6 +520,10 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             "alert": _array_alert(inv_rows),
             "inverters": inv_rows,
             "origin_links": origin_links,
+            # Array-level production history (DailyGeneration). Drives the array
+            # graph when the vendor gives site-level history but no per-inverter
+            # series (Chint weekETrend backfill); ascending [{date,kwh}].
+            "daily": _array_daily(db, arr.id),
         })
 
     attention = sum(c["alert"]["count"] for c in columns)

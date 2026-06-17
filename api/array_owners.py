@@ -1615,6 +1615,11 @@ class CaptureInverter(BaseModel):
     current_power_w: Optional[float] = None
 
 
+class CaptureDaily(BaseModel):
+    date: str                         # ISO date YYYY-MM-DD
+    kwh: Optional[float] = None
+
+
 class CaptureSite(BaseModel):
     site_id: str
     name: Optional[str] = None
@@ -1628,6 +1633,9 @@ class CaptureSite(BaseModel):
     status: Optional[str] = None
     last_report: Optional[str] = None
     last_report_disp: Optional[str] = None
+    # Optional site-level daily-kWh history for instant graph backfill on connect
+    # (Chint weekETrend → ~7 days). Site-level only; never split per inverter.
+    daily: list[CaptureDaily] = []
     inverters: list[CaptureInverter] = []
 
 
@@ -1719,6 +1727,41 @@ def inverter_capture(
                     row.kwh = max(row.kwh, recorded_kwh)
                     row.source = "extension_pull"
                     row.uploaded_at = now()
+
+            # ── Site-level daily-kWh history backfill (instant graph) ────────
+            # When the portal exposes a few days of array history (Chint's
+            # weekETrend → site.daily), persist each day as a DailyGeneration row
+            # so the array's production graph renders REAL history the moment the
+            # owner connects, instead of waiting for the daily snapshot job to
+            # accumulate it. Idempotent + max-wins per (array, day): re-capturing
+            # never lowers a day, and today's row (set above) is preserved if the
+            # history's value for today is smaller/partial.
+            backfilled_days = 0
+            for pt in (site.daily or []):
+                if pt.kwh is None or pt.kwh < 0:
+                    continue
+                try:
+                    d = date.fromisoformat(str(pt.date)[:10])
+                except (TypeError, ValueError):
+                    continue
+                dkwh = float(pt.kwh)
+                drow = db.execute(
+                    select(DailyGeneration).where(
+                        DailyGeneration.array_id == arr.id,
+                        DailyGeneration.day == d,
+                    )
+                ).scalar_one_or_none()
+                if drow is None:
+                    db.add(DailyGeneration(
+                        tenant_id=tenant.id, array_id=arr.id, day=d,
+                        kwh=dkwh, source="extension_pull",
+                    ))
+                    backfilled_days += 1
+                elif dkwh > (drow.kwh or 0):
+                    drow.kwh = dkwh
+                    drow.source = "extension_pull"
+                    drow.uploaded_at = now()
+                    backfilled_days += 1
 
             # ── Per-inverter persistence (the sandbox comb) ──────────────────
             # When the capture drilled into a system's analysis chart, we get one
