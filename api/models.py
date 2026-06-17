@@ -125,6 +125,20 @@ class Tenant(Base):
     trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     stripe_payment_method_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     trial_extended: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ── Inverter down/underperformance email alerts (Array Operator, Jun 2026) ──
+    # Owner-controlled: when ON, the alert sweep emails inverter_alert_email (or
+    # contact_email) whenever an inverter goes dark OR drops below
+    # inverter_alert_threshold_pct of its array peers for at least the grace window.
+    # threshold = sensitivity slider (e.g. 50 → alert under 50% of peers); a fully
+    # dark inverter always trips regardless. De-dup so we email once per incident.
+    inverter_alerts_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
+    inverter_alert_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    inverter_alert_threshold_pct: Mapped[int] = mapped_column(
+        Integer, default=50, server_default="50", nullable=False)
+    inverter_alert_grace_hours: Mapped[int] = mapped_column(
+        Integer, default=12, server_default="12", nullable=False)
     # No-upfront-payment: set the moment the ~3-day "trial ending, no card on
     # file" reminder is sent, so the scheduler fires it exactly once regardless
     # of tick cadence (replaces the fragile 1-day rolling window). NULL = not
@@ -152,6 +166,20 @@ class Tenant(Base):
     clients: Mapped[list["Client"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     sessions: Mapped[list["UtilitySession"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+
+
+class InverterAlertState(Base):
+    """Tracks open inverter-down incidents so the email sweep alerts ONCE per
+    incident (not every tick) and honors the per-tenant grace window. A row exists
+    while an inverter is flagged; it's deleted when the inverter recovers, so the
+    next failure is a fresh incident. See api/inverter_alert_sweep.py."""
+    __tablename__ = "inverter_alert_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), index=True)
+    # "<array_id>|<inverter_id-or-name>" — stable per inverter within an array
+    incident_key: Mapped[str] = mapped_column(String(200), index=True)
+    first_flagged_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    last_alerted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Client(Base):

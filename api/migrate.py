@@ -328,6 +328,22 @@ def main():
             "ON tenants (stripe_payment_method_id)"
         ))
 
+        # 2026-06 Array Operator inverter down/underperformance email alerts.
+        inverter_alert_cols = [
+            ("inverter_alerts_enabled",
+             "ALTER TABLE tenants ADD COLUMN inverter_alerts_enabled BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("inverter_alert_email",
+             "ALTER TABLE tenants ADD COLUMN inverter_alert_email VARCHAR(200)"),
+            ("inverter_alert_threshold_pct",
+             "ALTER TABLE tenants ADD COLUMN inverter_alert_threshold_pct INTEGER NOT NULL DEFAULT 50"),
+            ("inverter_alert_grace_hours",
+             "ALTER TABLE tenants ADD COLUMN inverter_alert_grace_hours INTEGER NOT NULL DEFAULT 12"),
+        ]
+        for col, sql in inverter_alert_cols:
+            if not column_exists(conn, "tenants", col):
+                conn.execute(text(sql))
+                print(f"  + tenants.{col}")
+
         # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
         # signups (last 7 days) that still carry the old 'monthly' engineer-default
         # over to 'quarterly'. We deliberately bound this to created_at > now-7d so

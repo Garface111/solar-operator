@@ -582,6 +582,61 @@ def create_array_ep(body: CreateArrayBody,
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
+# ── Inverter down/underperformance email alerts ──────────────────────────────
+class AlertSettingsBody(BaseModel):
+    """All optional → only provided fields are updated."""
+    enabled: bool | None = None
+    email: str | None = None
+    threshold_pct: int | None = None      # 10–95 sensitivity (alert under this % of peers)
+    grace_hours: int | None = None        # 0–168 hours an inverter must stay down before emailing
+
+
+def _alert_settings_dict(tenant) -> dict:
+    return {
+        "enabled": bool(getattr(tenant, "inverter_alerts_enabled", False)),
+        "email": getattr(tenant, "inverter_alert_email", None) or tenant.contact_email,
+        "email_is_default": not getattr(tenant, "inverter_alert_email", None),
+        "threshold_pct": int(getattr(tenant, "inverter_alert_threshold_pct", 50) or 50),
+        "grace_hours": int(getattr(tenant, "inverter_alert_grace_hours", 12) or 12),
+    }
+
+
+@router.get("/v1/array-owners/alert-settings")
+def get_alert_settings(authorization: str | None = Header(default=None)) -> dict:
+    """The owner's inverter-alert preferences (used by the sandbox settings panel)."""
+    tenant = _tenant_from_bearer(authorization)
+    return _alert_settings_dict(tenant)
+
+
+@router.put("/v1/array-owners/alert-settings")
+def put_alert_settings(body: AlertSettingsBody,
+                       authorization: str | None = Header(default=None)) -> dict:
+    """Update inverter-alert preferences. Validates the email + clamps the
+    threshold (10–95%) and grace window (0–168h)."""
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    if body.email is not None:
+        e = body.email.strip()
+        if e and ("@" not in e or " " in e or "." not in e.split("@")[-1]):
+            raise HTTPException(400, "email must be a valid email address")
+    with SessionLocal() as db:
+        t = db.get(type(tenant), tenant.id)
+        if t is None:
+            raise HTTPException(404, "Tenant not found")
+        if body.enabled is not None:
+            t.inverter_alerts_enabled = bool(body.enabled)
+        if body.email is not None:
+            t.inverter_alert_email = body.email.strip() or None
+        if body.threshold_pct is not None:
+            t.inverter_alert_threshold_pct = max(10, min(95, int(body.threshold_pct)))
+        if body.grace_hours is not None:
+            t.inverter_alert_grace_hours = max(0, min(168, int(body.grace_hours)))
+        db.commit()
+        db.refresh(t)
+        return _alert_settings_dict(t)
+
+
 @router.delete("/v1/array-owners/arrays/{array_id}")
 def delete_array_ep(array_id: int,
                     authorization: str | None = Header(default=None)) -> dict:
