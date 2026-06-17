@@ -690,3 +690,41 @@ def test_inverter_capture_sma_persists_per_inverter(client):
     col = next(c for c in tree["columns"] if c["array_name"] == "Timberworks")
     assert col["vendor"] == "sma"
 
+
+def test_delete_then_restore_array_roundtrips(client):
+    """DELETE soft-deletes an array + its inverters; POST .../restore revives exactly
+    those rows. Powers the sandbox 'Undo delete'."""
+    from api.models import Inverter
+    tid, key = _make_tenant()
+    aid = _make_array(tid, "Undo Me")
+    with SessionLocal() as db:
+        db.add_all([
+            Inverter(tenant_id=tid, array_id=aid, name="Inv A", vendor="solaredge", serial="UNDO-A"),
+            Inverter(tenant_id=tid, array_id=aid, name="Inv B", vendor="solaredge", serial="UNDO-B"),
+        ])
+        db.commit()
+
+    # Present in the tree before delete.
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    assert any(c["array_id"] == aid for c in tree["columns"])
+
+    # DELETE → gone from the tree.
+    r = client.delete(f"/v1/array-owners/arrays/{aid}", headers=_auth(key))
+    assert r.status_code == 200, r.text
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    assert not any(c["array_id"] == aid for c in tree["columns"])
+
+    # RESTORE → back in the tree with both inverters.
+    r = client.post(f"/v1/array-owners/arrays/{aid}/restore", headers=_auth(key))
+    assert r.status_code == 200, r.text
+    assert r.json()["array_id"] == aid
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    col = next((c for c in tree["columns"] if c["array_id"] == aid), None)
+    assert col is not None
+    assert {iv["name"] for iv in col["inverters"]} == {"Inv A", "Inv B"}
+
+    # Restoring a non-deleted array now 404s (idempotent guard).
+    r = client.post(f"/v1/array-owners/arrays/{aid}/restore", headers=_auth(key))
+    assert r.status_code == 404
+
+

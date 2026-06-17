@@ -647,6 +647,37 @@ def delete_array(db, tenant: Tenant, array_id: int) -> Array:
     return arr
 
 
+def restore_array(db, tenant: Tenant, array_id: int) -> Array:
+    """Un-delete (restore) a soft-deleted owner array and the inverters that were
+    deleted ALONGSIDE it (same deleted_at timestamp).
+
+    The inverse of delete_array: clears `deleted_at` on the Array and on exactly the
+    Inverter rows that shared the array's deletion timestamp — so inverters that were
+    already removed BEFORE the array was deleted stay removed, and we don't revive
+    stragglers. Powers the sandbox "Undo delete". Ownership-checked (cross-tenant or
+    unknown id raises FleetError → 404). Idempotent: a not-currently-deleted array
+    is treated as not-found.
+    """
+    arr = db.get(Array, array_id)
+    if arr is None or arr.tenant_id != tenant.id or arr.deleted_at is None:
+        raise FleetError("Array not found")
+
+    ts = arr.deleted_at
+    arr.deleted_at = None
+    invs = db.execute(
+        select(Inverter).where(
+            Inverter.tenant_id == tenant.id,
+            Inverter.array_id == array_id,
+            Inverter.deleted_at == ts,
+        )
+    ).scalars().all()
+    for iv in invs:
+        iv.deleted_at = None
+    db.commit()
+    db.refresh(arr)
+    return arr
+
+
 def reset_layout(db, tenant: Tenant) -> int:
     """Snap every inverter back to its discovered (source) array grouping.
     Returns count reset. Empty owner-created arrays are left in place."""

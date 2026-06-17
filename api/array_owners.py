@@ -605,6 +605,28 @@ def delete_array_ep(array_id: int,
         return {"ok": True, "array_id": arr.id}
 
 
+@router.post("/v1/array-owners/arrays/{array_id}/restore")
+def restore_array_ep(array_id: int,
+                     authorization: str | None = Header(default=None)) -> dict:
+    """Un-delete a soft-deleted owner array + the inverters removed with it.
+
+    The inverse of DELETE /v1/array-owners/arrays/{array_id} — powers the sandbox
+    "Undo delete". Clears `deleted_at` so the array reappears in the fleet tree.
+    404 if the array isn't found, isn't currently deleted, or belongs to another
+    tenant. The shared read-only DEMO tenant can never mutate (403).
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            arr = inverter_fleet.restore_array(db, tenant, array_id)
+        except inverter_fleet.FleetError:
+            raise HTTPException(404, "Array not found")
+        return {"ok": True, "array_id": arr.id, "array_name": arr.name}
+
+
 @router.post("/v1/array-owners/layout/reset")
 def reset_layout_ep(authorization: str | None = Header(default=None)) -> dict:
     """Snap every inverter back to its discovered (source) array grouping."""
