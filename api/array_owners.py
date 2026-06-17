@@ -1862,28 +1862,18 @@ def inverter_capture(
                         iv.last_power_w = round(site_power_w / len(_site_invs), 1)
                     iv.last_power_at = now()
 
+                # Per-inverter daily kWh → InverterDaily, driving BOTH today's
+                # reading and the per-inverter SPARKLINE history (needs >=2 days,
+                # else "no history yet"). Build ONE deduped {day: kwh} map (today's
+                # energy_today_kwh + any ci.daily history, max-wins), then load
+                # existing rows ONCE and update-or-insert. This is robust against a
+                # re-capture of an already-linked account, duplicate dates in
+                # ci.daily, and today appearing in both — the SELECT-then-INSERT-
+                # per-row version raised UniqueViolation on uq_inverter_daily_inv_day
+                # (Sentry PYTHON-FASTAPI-3) exactly in those cases.
+                want: dict = {}
                 if ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0:
-                    ikwh = float(ci.energy_today_kwh)
-                    drow = db.execute(
-                        select(InverterDaily).where(
-                            InverterDaily.inverter_id == iv.id,
-                            InverterDaily.day == today,
-                        )
-                    ).scalar_one_or_none()
-                    if drow is None:
-                        db.add(InverterDaily(
-                            tenant_id=tenant.id, inverter_id=iv.id, day=today,
-                            kwh=ikwh, source="extension_pull",
-                        ))
-                    else:
-                        drow.kwh = max(drow.kwh, ikwh)  # climbs through the day
-                        drow.uploaded_at = now()
-
-                # PER-INVERTER history backfill → InverterDaily, so the per-inverter
-                # SPARKLINE renders real history on connect (needs >=2 days) instead
-                # of "no history yet". Idempotent + max-wins per (inverter, day).
-                # Vendors that expose per-device history (Fronius/SMA) populate
-                # ci.daily; Chint has none so this loop is a no-op for it.
+                    want[today] = float(ci.energy_today_kwh)
                 for pt in (ci.daily or []):
                     if pt.kwh is None or pt.kwh < 0:
                         continue
@@ -1891,21 +1881,28 @@ def inverter_capture(
                         dd = date.fromisoformat(str(pt.date)[:10])
                     except (TypeError, ValueError):
                         continue
-                    dkwh = float(pt.kwh)
-                    hrow = db.execute(
-                        select(InverterDaily).where(
-                            InverterDaily.inverter_id == iv.id,
-                            InverterDaily.day == dd,
-                        )
-                    ).scalar_one_or_none()
-                    if hrow is None:
-                        db.add(InverterDaily(
-                            tenant_id=tenant.id, inverter_id=iv.id, day=dd,
-                            kwh=dkwh, source="extension_pull",
-                        ))
-                    elif dkwh > (hrow.kwh or 0):
-                        hrow.kwh = dkwh
-                        hrow.uploaded_at = now()
+                    v = float(pt.kwh)
+                    if dd not in want or v > want[dd]:   # max-wins on dup dates
+                        want[dd] = v
+                if want:
+                    existing = {
+                        r.day: r for r in db.execute(
+                            select(InverterDaily).where(
+                                InverterDaily.inverter_id == iv.id,
+                                InverterDaily.day.in_(list(want.keys())),
+                            )
+                        ).scalars().all()
+                    }
+                    for dd, v in want.items():
+                        row = existing.get(dd)
+                        if row is None:
+                            db.add(InverterDaily(
+                                tenant_id=tenant.id, inverter_id=iv.id, day=dd,
+                                kwh=v, source="extension_pull",
+                            ))
+                        elif v > (row.kwh or 0):         # climbs through the day / never regresses
+                            row.kwh = v
+                            row.uploaded_at = now()
                 inv_persisted += 1
 
             results.append({

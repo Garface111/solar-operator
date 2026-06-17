@@ -830,6 +830,21 @@ def test_inverter_capture_backfills_per_inverter_history(client):
         assert rows["2026-06-16"] == 0.0
         assert len(rows) >= 3
 
+    # RE-CAPTURE the SAME account (user did exactly this — "add Fronius again
+    # without deleting") → must NOT 500 on uq_inverter_daily_inv_day. The
+    # SELECT-then-INSERT-per-row version raised IntegrityError at db.commit()
+    # (Sentry PYTHON-FASTAPI-3). Also send a higher kwh to prove max-wins update.
+    payload["sites"][0]["inverters"][0]["daily"][0]["kwh"] = 99.9   # 06-14 climbs
+    resp2 = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp2.status_code == 200, resp2.text
+    with SessionLocal() as db:
+        iv = db.execute(_sel(Inverter).where(Inverter.tenant_id == tid)).scalars().first()
+        rows = {r.day.isoformat(): r.kwh for r in db.execute(
+            _sel(InverterDaily).where(InverterDaily.inverter_id == iv.id)
+        ).scalars().all()}
+        assert rows["2026-06-14"] == 99.9   # max-wins applied, no duplicate row
+        assert rows["2026-06-15"] == 55.3
+
 
 def test_inverter_capture_backfills_site_daily_history(client):
     """REGRESSION/feat (Jun 2026): the Chint extension integrates the production
