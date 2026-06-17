@@ -606,6 +606,15 @@ def start():
         CronTrigger(hour=3, minute=30),
         id="inverter_history_snapshot", replace_existing=True,
     )
+    # Daily at 03:45 UTC: billing-safety watchdog — alert if any physically
+    # impossible kWh row exists in DailyGeneration (billing meter) or
+    # InverterDaily. Runs AFTER the 03:30 snapshot and BEFORE the 04:00 usage
+    # report, so a bad row is caught and alerted before it can bill.
+    scheduler.add_job(
+        _run_generation_watchdog,
+        CronTrigger(hour=3, minute=45),
+        id="generation_watchdog", replace_existing=True,
+    )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (metered
     # billing). Runs AFTER the 03:00 inverter pull so the day's kWh are landed.
     scheduler.add_job(
@@ -623,6 +632,20 @@ def start():
         id="inverter_alert_sweep", replace_existing=True,
     )
     scheduler.start()
+
+
+def _run_generation_watchdog() -> None:
+    """Daily billing-safety watchdog: alert if any physically impossible kWh row
+    exists in DailyGeneration (billing meter) or InverterDaily. Read-only —
+    alerts, never mutates."""
+    try:
+        from .jobs.generation_watchdog import run_generation_watchdog
+        run_generation_watchdog()
+    except Exception as exc:
+        send_internal_alert(
+            "Generation watchdog: unhandled exception",
+            f"The billing-safety generation watchdog raised an error:\n{exc}",
+        )
 
 
 def _run_usage_report() -> None:
