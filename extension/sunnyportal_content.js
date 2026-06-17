@@ -217,18 +217,21 @@
     return out;   // possibly empty — caller retries next poll (SPA may still load)
   }
 
-  // Site-level daily-kWh HISTORY for instant graph backfill on connect. SMA
-  // exposes historical daily energy via POST /measurements/search with the
-  // metering channel at OneDay resolution + Dif aggregate (Wh per day). Best-
-  // effort: any failure or unexpected shape just returns [] (graph builds up
-  // naturally) — we never fabricate values. Plant-level (summed), not per-inverter.
-  async function fetchSiteHistory(plantId, days) {
+  // Daily-kWh HISTORY for any component (plant OR device) for instant graph
+  // backfill on connect. SMA exposes historical daily energy via POST
+  // /measurements/search with the metering channel at OneDay + Dif (Wh/day).
+  // Plant componentId → array graph; device componentId → per-inverter sparkline.
+  // Best-effort: any failure/unexpected shape → [] (graph builds up naturally),
+  // never fabricate. NOTE: the PLANT query is grounded; the per-DEVICE query
+  // reuses the same channel/shape and is best-effort (empty if SMA scopes the
+  // metering channel plant-only — harmless, just leaves sparklines to accumulate).
+  async function fetchHistory(componentId, days) {
     const _now = new Date();
     const end = new Date(Date.UTC(_now.getUTCFullYear(), _now.getUTCMonth(), _now.getUTCDate(), 4, 0, 0, 0));
     const begin = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
     const body = {
       queryItems: [{
-        componentId: String(plantId),
+        componentId: String(componentId),
         channelId: "Measurement.Metering.TotWhOut.Pv",
         resolution: "OneDay",
         timezone: "America/New_York",
@@ -239,7 +242,7 @@
     };
     let res;
     try { res = await postJson(UIAPI + "/api/v1/measurements/search", body); }
-    catch (e) { LOG("history search failed (skipped):", e && e.message || e); return []; }
+    catch (e) { LOG("history search failed (skipped):", componentId, e && e.message || e); return []; }
     const series = Array.isArray(res)
       ? (res.find((s) => s && s.channelId === "Measurement.Metering.TotWhOut.Pv")
           || res.find((s) => s && Array.isArray(s.values)))
@@ -257,7 +260,6 @@
         "-" + String(d.getDate()).padStart(2, "0");
       out.push({ date: iso, kwh: Math.round((wh / 1000) * 100) / 100 });
     }
-    LOG("site history backfill:", plantId, out.length, "day(s)");
     return out;
   }
 
@@ -288,6 +290,7 @@
         energy_today_kwh: typeof d.totWhOutToday === "number" ? d.totWhOutToday / 1000.0 : null,
         current_power_w: typeof d.pvPower === "number" ? d.pvPower : null,
         status: deriveStatus(d),
+        _componentId: d.componentId != null ? String(d.componentId) : null,  // for per-device history (stripped before send)
       }));
     if (!inverters.length) return null;
 
@@ -314,9 +317,21 @@
     if (typeof siteW === "number") currentPowerW = siteW;
     else if (haveSumW) currentPowerW = sumW;
 
-    // Site-level history backfill (best-effort; empty just lets the graph build up).
+    // History backfill (best-effort; empty just lets the graph build up).
+    // Plant-level → array graph. Per-device → each inverter's sparkline.
     let daily = [];
-    try { daily = await fetchSiteHistory(plantId, 7); } catch (_) { daily = []; }
+    try { daily = await fetchHistory(plantId, 7); } catch (_) { daily = []; }
+    for (const iv of inverters) {
+      if (iv._componentId) {
+        try {
+          const dh = await fetchHistory(iv._componentId, 7);
+          if (dh && dh.length) iv.daily = dh;        // per-inverter sparkline history
+        } catch (_) { /* best-effort */ }
+      }
+      delete iv._componentId;                         // strip temp field before send
+    }
+    LOG("SMA history:", plantId, daily.length, "site-day(s);",
+        inverters.filter((iv) => (iv.daily || []).length).length, "inv w/ history");
 
     return {
       site_id: String(plantId),

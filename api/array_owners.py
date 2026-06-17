@@ -1601,6 +1601,11 @@ def connect_single(
 # and today's energy as a DailyGeneration row so the existing /overview value +
 # peer model lights up with zero further wiring.
 
+class CaptureDaily(BaseModel):
+    date: str                         # ISO date YYYY-MM-DD
+    kwh: Optional[float] = None
+
+
 class CaptureInverter(BaseModel):
     serial: str                       # vendor device id (Fronius deviceId GUID)
     name: Optional[str] = None
@@ -1613,11 +1618,13 @@ class CaptureInverter(BaseModel):
     # site-level reading, so its inverters leave this None and the backend
     # allocates the site total across them by energy share — see ingest).
     current_power_w: Optional[float] = None
-
-
-class CaptureDaily(BaseModel):
-    date: str                         # ISO date YYYY-MM-DD
-    kwh: Optional[float] = None
+    # Optional PER-INVERTER daily-kWh history → persisted to InverterDaily so the
+    # per-inverter SPARKLINE renders real history on connect (needs >=2 days),
+    # not just "no history yet". Distinct from CaptureSite.daily (array-level →
+    # DailyGeneration, drives the array graph). Vendors that expose per-device
+    # history (Fronius devwork curves, SMA per-device measurements) populate this;
+    # Chint has no per-inverter history so it stays empty.
+    daily: list[CaptureDaily] = []
 
 
 class CaptureSite(BaseModel):
@@ -1871,6 +1878,34 @@ def inverter_capture(
                     else:
                         drow.kwh = max(drow.kwh, ikwh)  # climbs through the day
                         drow.uploaded_at = now()
+
+                # PER-INVERTER history backfill → InverterDaily, so the per-inverter
+                # SPARKLINE renders real history on connect (needs >=2 days) instead
+                # of "no history yet". Idempotent + max-wins per (inverter, day).
+                # Vendors that expose per-device history (Fronius/SMA) populate
+                # ci.daily; Chint has none so this loop is a no-op for it.
+                for pt in (ci.daily or []):
+                    if pt.kwh is None or pt.kwh < 0:
+                        continue
+                    try:
+                        dd = date.fromisoformat(str(pt.date)[:10])
+                    except (TypeError, ValueError):
+                        continue
+                    dkwh = float(pt.kwh)
+                    hrow = db.execute(
+                        select(InverterDaily).where(
+                            InverterDaily.inverter_id == iv.id,
+                            InverterDaily.day == dd,
+                        )
+                    ).scalar_one_or_none()
+                    if hrow is None:
+                        db.add(InverterDaily(
+                            tenant_id=tenant.id, inverter_id=iv.id, day=dd,
+                            kwh=dkwh, source="extension_pull",
+                        ))
+                    elif dkwh > (hrow.kwh or 0):
+                        hrow.kwh = dkwh
+                        hrow.uploaded_at = now()
                 inv_persisted += 1
 
             results.append({

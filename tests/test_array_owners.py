@@ -794,11 +794,48 @@ def test_solar_elevation_is_seasonally_correct():
     assert _is_daylight(when=dt.datetime(2026, 12, 17, 17, 0)) is True   # Dec ~noon EST — up
 
 
+def test_inverter_capture_backfills_per_inverter_history(client):
+    """REGRESSION/feat (Jun 2026): the per-inverter SPARKLINE needs >=2 days of
+    InverterDaily or it shows 'no history yet'. Vendors with per-device history
+    (Fronius devwork, SMA per-device measurements) send a per-inverter daily[];
+    capturing it must persist each day to InverterDaily (idempotent, max-wins)."""
+    from api.models import InverterDaily, Inverter
+    from sqlalchemy import select as _sel
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "fronius",
+        "sites": [{
+            "site_id": "sysX", "name": "Waterford",
+            "inverters": [{
+                "serial": "dev-1", "name": "Primo 12.5 (1)", "energy_today_kwh": 49.4,
+                "current_power_w": 6700.0,
+                "daily": [
+                    {"date": "2026-06-14", "kwh": 60.1},
+                    {"date": "2026-06-15", "kwh": 55.3},
+                    {"date": "2026-06-16", "kwh": 0.0},     # quiet day persists as 0
+                ],
+            }],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        iv = db.execute(_sel(Inverter).where(Inverter.tenant_id == tid)).scalars().first()
+        rows = {r.day.isoformat(): r.kwh for r in db.execute(
+            _sel(InverterDaily).where(InverterDaily.inverter_id == iv.id)
+        ).scalars().all()}
+        # 3 backfilled days + today's row from energy_today_kwh = >=2 → sparkline renders
+        assert rows["2026-06-14"] == 60.1
+        assert rows["2026-06-15"] == 55.3
+        assert rows["2026-06-16"] == 0.0
+        assert len(rows) >= 3
+
+
 def test_inverter_capture_backfills_site_daily_history(client):
-    """REGRESSION/feat (Jun 2026): Chint exposes ~7 days of site daily kWh
-    (weekETrend). Capturing it must backfill DailyGeneration so the array graph
-    renders REAL history the instant the owner connects (not after days of the
-    snapshot job). Idempotent + max-wins per (array, day)."""
+    """REGRESSION/feat (Jun 2026): the Chint extension integrates the production
+    chart's 30-min PV power curve into daily kWh (getSiteTimeSharingChart2) and
+    sends site.daily[]. Capturing it must backfill DailyGeneration so the array
+    graph renders REAL history on connect. Idempotent + max-wins per (array,day)."""
     from api.models import DailyGeneration
     tid, key = _make_tenant()
     payload = {
