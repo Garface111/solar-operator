@@ -728,3 +728,48 @@ def test_delete_then_restore_array_roundtrips(client):
     assert r.status_code == 404
 
 
+# ── Chint per-inverter LIVE POWER (regression: schema used to drop it) ─────────
+
+def test_inverter_capture_chint_keeps_per_inverter_live_power(client):
+    """REGRESSION (Jun 2026): Chint's portal reports live AC power PER inverter
+    (commDevice.currentPower), but CaptureInverter had no current_power_w field,
+    so Pydantic silently dropped it — every card showed 'not producing right now'
+    even mid-day. The real per-inverter watts must now persist as Inverter.last_power_w
+    and surface on the fleet tree (NOT a site-allocated estimate).
+    """
+    from api.models import Inverter
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "chint",
+        "sites": [{
+            "site_id": "5e15c66df12588458ffc011a",
+            "name": "Londonderry 186",
+            "current_power_w": 150000.0,   # site total (would drive the OLD split path)
+            "inverters": [
+                {"serial": "0001013791738041", "name": "Inv 1",
+                 "energy_today_kwh": 98.6, "current_power_w": 51000.0},
+                {"serial": "0001013791738043", "name": "Inv 2",
+                 "energy_today_kwh": 105.6, "current_power_w": 54000.0},
+            ],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["inverters_persisted"] == 2
+
+    # Each inverter keeps its OWN measured watts, not a derived share of the site.
+    with SessionLocal() as db:
+        rows = {iv.serial: iv for iv in db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid)
+        ).scalars().all()}
+        assert rows["0001013791738041"].last_power_w == 51000.0
+        assert rows["0001013791738043"].last_power_w == 54000.0
+
+    # And it surfaces live on the fleet tree (the card's "Current kW").
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    col = next(c for c in tree["columns"] if c["array_name"] == "Londonderry 186")
+    powers = {i["sn"]: i["current_power_w"] for i in col["inverters"]}
+    assert powers["0001013791738041"] == 51000.0
+    assert powers["0001013791738043"] == 54000.0
+
+

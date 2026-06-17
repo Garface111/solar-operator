@@ -1608,6 +1608,11 @@ class CaptureInverter(BaseModel):
     nameplate_kw: Optional[float] = None
     energy_today_kwh: Optional[float] = None
     peak_power_kw: Optional[float] = None
+    # Live instantaneous AC power in WATTS, when the portal exposes it PER
+    # inverter (Chint's commDevice.currentPower does; Fronius only gives a
+    # site-level reading, so its inverters leave this None and the backend
+    # allocates the site total across them by energy share — see ingest).
+    current_power_w: Optional[float] = None
 
 
 class CaptureSite(BaseModel):
@@ -1781,9 +1786,16 @@ def inverter_capture(
                     iv.nameplate_kw = ci.nameplate_kw
                 iv.last_seen_at = now()
 
-                # Live current power = this inverter's share of the site's real
-                # instantaneous reading (basis computed above the loop).
-                if site_power_w is not None and _site_invs:
+                # Live current power. PREFER the inverter's OWN reading when the
+                # portal exposed it per device (Chint commDevice.currentPower) —
+                # that's the real measured value, not a derived split. Only when
+                # the inverter carries no per-unit reading do we fall back to
+                # allocating the site's instantaneous total by energy share (the
+                # only option for Fronius, whose portal gives power site-wide only).
+                if ci.current_power_w is not None and ci.current_power_w >= 0:
+                    iv.last_power_w = round(float(ci.current_power_w), 1)
+                    iv.last_power_at = now()
+                elif site_power_w is not None and _site_invs:
                     if _energy_sum > 0:
                         e = float(ci.energy_today_kwh) if (ci.energy_today_kwh and ci.energy_today_kwh > 0) else 0.0
                         iv.last_power_w = round(site_power_w * (e / _energy_sum), 1)
