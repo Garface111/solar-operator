@@ -11,6 +11,7 @@ same session bearer used everywhere else (account.tenant_from_session).
   DELETE /subscriptions/{id}             soft-delete a schedule
   POST   /subscriptions/{id}/send-now    test/manual send (test=1 forces to_me)
   GET    /subscriptions/{id}/preview     stream invoice|summary as pdf|xlsx
+  GET    /subscriptions/{id}/trends      multi-year billing trends (JSON, CONTRACT 1)
 """
 from __future__ import annotations
 
@@ -297,6 +298,27 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
     fname = f"{sub.customer_name.replace(' ', '_')}_{kind}.{fmt}"
     return StreamingResponse(io.BytesIO(blob), media_type=media,
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@router.get("/subscriptions/{sub_id}/trends")
+def subscription_trends(sub_id: int,
+                        authorization: Optional[str] = Header(default=None)):
+    """Multi-year billing trends for a subscription (CONTRACT 1). Tenant-scoped:
+    404 if the sub isn't owned. Thin/unreadable workbook → 200 with empty
+    collections + null scalars; never 500 on real data."""
+    t = tenant_from_session(authorization)
+    from . import summary as summ
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        try:
+            match = build_match(sub)
+            trends = summ.build_trends(match)
+        except Exception:  # noqa: BLE001 — thin/missing/corrupt workbook
+            logger.warning("trends build failed for sub %s", sub_id, exc_info=True)
+            trends = summ._empty_trends(sub.customer_name)
+        if not trends.get("customer_name"):
+            trends["customer_name"] = sub.customer_name
+        return trends
 
 
 def _get_owned(db, tenant_id: str, sub_id: int) -> BillingReportSubscription:

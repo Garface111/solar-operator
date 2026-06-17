@@ -849,6 +849,11 @@ class BillingReportSubscription(Base):
     parsed_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     billing_model: Mapped[str] = mapped_column(String(24), default="percent_of_array")
 
+    # Dormant hook (Paul's reporting build): the utility's GMP invoice PDF, fed
+    # later by the GMP-detection backend. When present, delivery attaches it
+    # alongside the customer invoice; null (the norm today) changes nothing.
+    gmp_invoice_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+
     # Schedule
     cadence: Mapped[str] = mapped_column(String(16), default="monthly")  # monthly | quarterly
     annual_trueup: Mapped[bool] = mapped_column(Boolean, default=False)

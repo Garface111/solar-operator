@@ -676,6 +676,17 @@ def main():
             conn.execute(text(idx_sql))
         print("  ✓ billing_report_subscriptions table + indexes ensured")
 
+        # 2026-06-17 Paul's reporting build: dormant GMP invoice PDF attachment.
+        # Additive nullable blob — create_all adds it on fresh DBs, but an
+        # EXISTING prod billing_report_subscriptions table won't gain it that way.
+        # (No "IF NOT EXISTS" — Postgres-only; column_exists() keeps it idempotent
+        # on both sqlite dev and Postgres prod.)
+        if not column_exists(conn, "billing_report_subscriptions", "gmp_invoice_pdf"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions ADD COLUMN gmp_invoice_pdf BYTEA"
+            ))
+            print("  + billing_report_subscriptions.gmp_invoice_pdf")
+
         # 2026-06-16 Live current power for extension-captured inverters.
         # The inverters table came free via create_all, but an EXISTING prod table
         # won't gain new columns from create_all — add them explicitly so the

@@ -62,8 +62,13 @@ def build_match(sub) -> BillingMatch:
 
 def generate_files(match: BillingMatch, formats: list[str], include_summary: bool,
                    out_dir: pathlib.Path, invoice_date: Optional[date] = None,
-                   peer: Optional[dict] = None) -> list[pathlib.Path]:
-    """Render the chosen attachment files into out_dir. Returns their paths."""
+                   peer: Optional[dict] = None, sub=None) -> list[pathlib.Path]:
+    """Render the chosen attachment files into out_dir. Returns their paths.
+
+    When `sub` carries a stored GMP invoice PDF (Paul's dormant hook), it's
+    written out and appended so it rides the same email. `sub` is optional and
+    defaults to None, keeping the signature back-compatible.
+    """
     invoice_date = invoice_date or date.today()
     safe = (match.customer.get("name") or "customer").replace(" ", "_").replace("/", "-")
     inv_no = (match.computed_invoice or {}).get("invoice_number") or invoice_date.strftime("%Y-%m")
@@ -83,6 +88,11 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
         elif "xlsx" in fmts:
             paths.append(summary_mod.render_summary_xlsx(
                 match, out_dir / f"{stem}_summary.xlsx", peer=peer))
+    # Dormant GMP-invoice hook: attach the utility's PDF when present (null today).
+    if sub is not None and getattr(sub, "gmp_invoice_pdf", None):
+        gmp_path = out_dir / f"{safe}_GMP_invoice.pdf"
+        gmp_path.write_bytes(bytes(sub.gmp_invoice_pdf))
+        paths.append(gmp_path)
     return paths
 
 
@@ -210,7 +220,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
         try:
             paths = generate_files(match, formats, sub.include_summary,
-                                   pathlib.Path(tmp), invoice_date=invoice_date)
+                                   pathlib.Path(tmp), invoice_date=invoice_date,
+                                   sub=sub)
         except Exception as e:  # noqa: BLE001
             logger.exception("billing render failed")
             return {"ok": False, "error": f"render failed: {e}"}
