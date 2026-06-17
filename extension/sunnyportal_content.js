@@ -217,6 +217,50 @@
     return out;   // possibly empty — caller retries next poll (SPA may still load)
   }
 
+  // Site-level daily-kWh HISTORY for instant graph backfill on connect. SMA
+  // exposes historical daily energy via POST /measurements/search with the
+  // metering channel at OneDay resolution + Dif aggregate (Wh per day). Best-
+  // effort: any failure or unexpected shape just returns [] (graph builds up
+  // naturally) — we never fabricate values. Plant-level (summed), not per-inverter.
+  async function fetchSiteHistory(plantId, days) {
+    const _now = new Date();
+    const end = new Date(Date.UTC(_now.getUTCFullYear(), _now.getUTCMonth(), _now.getUTCDate(), 4, 0, 0, 0));
+    const begin = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+    const body = {
+      queryItems: [{
+        componentId: String(plantId),
+        channelId: "Measurement.Metering.TotWhOut.Pv",
+        resolution: "OneDay",
+        timezone: "America/New_York",
+        aggregate: "Dif",
+      }],
+      dateTimeBegin: begin.toISOString(),
+      dateTimeEnd: end.toISOString(),
+    };
+    let res;
+    try { res = await postJson(UIAPI + "/api/v1/measurements/search", body); }
+    catch (e) { LOG("history search failed (skipped):", e && e.message || e); return []; }
+    const series = Array.isArray(res)
+      ? (res.find((s) => s && s.channelId === "Measurement.Metering.TotWhOut.Pv")
+          || res.find((s) => s && Array.isArray(s.values)))
+      : null;
+    const values = (series && Array.isArray(series.values)) ? series.values : [];
+    const out = [];
+    for (const v of values) {
+      const wh = v && v.value;
+      if (typeof wh !== "number" || !isFinite(wh) || wh < 0) continue;
+      const ts = v.time || v.timestamp || v.date;
+      if (!ts) continue;
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) continue;
+      const iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+        "-" + String(d.getDate()).padStart(2, "0");
+      out.push({ date: iso, kwh: Math.round((wh / 1000) * 100) / 100 });
+    }
+    LOG("site history backfill:", plantId, out.length, "day(s)");
+    return out;
+  }
+
   // Capture one plant's per-inverter comb. Returns a site object or null.
   async function captureOnePlant(plantId, hintName) {
     let plantName = hintName || null;
@@ -270,6 +314,10 @@
     if (typeof siteW === "number") currentPowerW = siteW;
     else if (haveSumW) currentPowerW = sumW;
 
+    // Site-level history backfill (best-effort; empty just lets the graph build up).
+    let daily = [];
+    try { daily = await fetchSiteHistory(plantId, 7); } catch (_) { daily = []; }
+
     return {
       site_id: String(plantId),
       name: plantName || ("SMA plant " + plantId),
@@ -279,6 +327,7 @@
       current_power_w: currentPowerW,
       error_count_today: inverters.filter((iv) => iv.status === "fault").length,
       status: (typeof currentPowerW === "number" && currentPowerW > 0) ? "producing" : "idle",
+      daily,                                      // ~7 days site history for instant graph
       inverters,
     };
   }

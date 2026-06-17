@@ -175,6 +175,40 @@
     });
   }
 
+  // Site-level daily-kWh HISTORY for instant graph backfill on connect. Reuses
+  // the SAME proven /Chart/GetAnalysisChart endpoint (only the date varies) for
+  // the last `days` days, integrating every device's "Total Power" curve and
+  // summing to one site daily kWh per day. Site-level (summed) — we do NOT split
+  // it per inverter. Best-effort: any day that fails is skipped, never throws.
+  async function captureSiteHistory(pvSystemId, deviceIds, days) {
+    if (!deviceIds || !deviceIds.length) return [];
+    const out = [];
+    const devQs = deviceIds.map((id) => "devices=" + encodeURIComponent(id)).join("&");
+    for (let back = 1; back <= days; back++) {        // back=0 (today) already recorded via energy_today_kwh
+      const d = new Date();
+      d.setDate(d.getDate() - back);
+      const dateQs = "year=" + d.getFullYear() + "&month=" + (d.getMonth() + 1) +
+        "&day=" + d.getDate() + "&interval=day";
+      let resp;
+      try {
+        resp = await getJson("/Chart/GetAnalysisChart?pvSystemId=" + encodeURIComponent(pvSystemId) +
+          "&" + dateQs + "&channels=devwork&" + devQs + "&compareView=false&kwhkwpView=false&_=" + Date.now());
+      } catch (e) { LOG("history day fetch failed (skipped):", back, e && e.message); continue; }
+      const series = (((resp || {}).settings || {}).series) || [];
+      let dayKwh = 0, any = false;
+      for (const s of series) {
+        if (!/Total Power\s*\|/.test(String(s.name || ""))) continue;  // per-device only
+        dayKwh += integrateKwh(s.data); any = true;
+      }
+      if (!any) continue;                              // no data that day → don't fabricate a 0
+      const iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+        "-" + String(d.getDate()).padStart(2, "0");
+      out.push({ date: iso, kwh: Math.round(dayKwh * 100) / 100 });
+    }
+    LOG("site history backfill:", pvSystemId, out.length, "day(s)");
+    return out;
+  }
+
   async function captureFlow() {
     // 1. System list — names, inverter counts, today's energy, specific yield.
     const listResp = await getJson("/PvSystems/GetPvSystemsForListView?_=" + Date.now());
@@ -215,6 +249,14 @@
       const energyToday = typeof s.EnergyTodayInkWh === "number" ? s.EnergyTodayInkWh : null;
       let inverters = [];
       try { inverters = await captureInverters(s.PvSystemId); } catch (_) { inverters = []; }
+      // Site-level history backfill: the inverters' serials ARE the Fronius
+      // deviceIds, so reuse them to pull the last ~7 days from the same chart
+      // endpoint. Best-effort; an empty result just leaves the graph to build up.
+      let daily = [];
+      try {
+        const devIds = inverters.map((iv) => iv.serial).filter(Boolean);
+        daily = await captureSiteHistory(s.PvSystemId, devIds, 7);
+      } catch (_) { daily = []; }
       sites.push({
         site_id: s.PvSystemId,
         name: s.PvSystemName || null,
@@ -228,6 +270,7 @@
         status: deriveStatus(live.power_w, s.ErrorCntToday, live.online),
         last_report: parseAspNetDate(s.LastImport) || null,
         last_report_disp: s.LastImportDisp || null,
+        daily,                                      // ~7 days site history for instant graph
         inverters,                                  // [] if drill-down unavailable
       });
     }
