@@ -31,7 +31,7 @@
   "use strict";
   if (!/(^|\.)chintpowersystems\.com$/.test(location.hostname)) return;
 
-  const CHINT_DEBUG = false;
+  const CHINT_DEBUG = true;
   const LOG = (...a) => { if (CHINT_DEBUG) { try { console.log("[EnergyAgent CHINT]", ...a); } catch (_) {} } };
   LOG("content script LOADED on", location.href);
 
@@ -227,6 +227,13 @@
     if (h === lastHash) return;             // nothing new since last emit
     lastHash = h;
     LOG("EMIT payload:", sites.length, "site(s),", withInv, "with inverters,", totalInv, "inverters total");
+    // Decisive diagnostic: dump each inverter's serial + live watts + today kWh so
+    // the console alone tells us whether per-inverter power is flowing (the field
+    // the backend needs for the "Output now" card).
+    try {
+      sites.forEach((s) => (s.inverters || []).forEach((iv) =>
+        LOG("  inv", iv.serial, "power_w=", iv.current_power_w, "today_kwh=", iv.energy_today_kwh, "status=", iv.status)));
+    } catch (_) {}
     // Progressive emit: ship the full current snapshot every time we learn about
     // more inverters (a newly-opened site). NEVER set done here — keep listening so
     // later site-opens are captured too. clearIntent stays armed until timeout.

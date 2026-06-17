@@ -14,7 +14,7 @@
   if (!/(^|\.)chintpowersystems\.com$/.test(location.hostname)) return;
 
   var DBG = true;
-  var DBG_VERBOSE = false;   // flip true to log EVERY api response path (noisy diagnostic)
+  var DBG_VERBOSE = true;    // diagnostic: log EVERY api response path so we can see if busTypeDevices fires
   function L() { if (DBG) { try { console.log.apply(console, ["[EnergyAgent CHINT inject]"].concat([].slice.call(arguments))); } catch (e) {} } }
   L("LOADED (MAIN world) on", location.href);
 
