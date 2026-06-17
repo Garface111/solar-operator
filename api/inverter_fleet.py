@@ -36,6 +36,83 @@ from .inverters import peer_analysis
 
 log = logging.getLogger(__name__)
 
+# ── Daylight (for the card "Sleeping" night state) ────────────────────────────
+# The liquid-fill cards must distinguish "zero output because the sun is down"
+# (calm "Sleeping" pool) from "zero output because of a fault" (alarming). That
+# decision MUST gate on sun position, never on output==0 alone — a noon fault
+# that zeroes every inverter would otherwise be mislabeled "Sleeping" and hide a
+# real outage. We compute it ONCE here server-side (the spec's preferred place)
+# so 40+ cards don't each recompute it.
+#
+# We have NO stored lat/long per array yet (no model column, no adapter supplies
+# one), so a precise per-array sunrise is impossible today. Instead of the spec's
+# fixed-hour fallback (h<5||h>=21 — badly wrong seasonally: VT sunrise swings
+# ~5:05am Jun → ~7:25am Dec), we compute the REAL solar elevation via the NOAA
+# algorithm at a regional default (central Vermont) — accurate to the day/season,
+# dependency-free. If we ever capture a per-array lat/long, pass it through and
+# this lights up exactly per site with zero further change.
+import math as _math
+
+_VT_LAT, _VT_LON = 44.26, -72.58   # central Vermont regional default (Montpelier-ish)
+# Sun is "up" for production purposes a touch below the horizon (civil-ish): a
+# panel still trickles at -2° elevation. Below this we call it night.
+_DAYLIGHT_MIN_ELEVATION_DEG = -2.0
+
+
+def _solar_elevation_deg(when: datetime, lat: float, lon: float) -> float:
+    """Solar elevation angle (degrees above horizon) at a UTC instant + location.
+    Standard NOAA solar-position approximation; good to a fraction of a degree —
+    far more than enough to decide day vs night. Dependency-free."""
+    # fractional day-of-year + time
+    ts = when
+    # day of year
+    doy = ts.timetuple().tm_yday
+    hour = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
+    # fractional year (radians)
+    gamma = 2.0 * _math.pi / 365.0 * (doy - 1 + (hour - 12) / 24.0)
+    # equation of time (minutes) + solar declination (radians)
+    eqtime = 229.18 * (
+        0.000075 + 0.001868 * _math.cos(gamma) - 0.032077 * _math.sin(gamma)
+        - 0.014615 * _math.cos(2 * gamma) - 0.040849 * _math.sin(2 * gamma)
+    )
+    decl = (
+        0.006918 - 0.399912 * _math.cos(gamma) + 0.070257 * _math.sin(gamma)
+        - 0.006758 * _math.cos(2 * gamma) + 0.000907 * _math.sin(2 * gamma)
+        - 0.002697 * _math.cos(3 * gamma) + 0.00148 * _math.sin(3 * gamma)
+    )
+    # true solar time (minutes), then hour angle (degrees)
+    time_offset = eqtime + 4.0 * lon  # lon in degrees; UTC time used so no tz term
+    tst = hour * 60.0 + time_offset
+    ha = tst / 4.0 - 180.0
+    ha_rad = _math.radians(ha)
+    lat_rad = _math.radians(lat)
+    cos_zenith = (
+        _math.sin(lat_rad) * _math.sin(decl)
+        + _math.cos(lat_rad) * _math.cos(decl) * _math.cos(ha_rad)
+    )
+    cos_zenith = max(-1.0, min(1.0, cos_zenith))
+    zenith = _math.acos(cos_zenith)
+    return 90.0 - _math.degrees(zenith)
+
+
+def _is_daylight(lat: float | None = None, lon: float | None = None,
+                 when: datetime | None = None) -> bool:
+    """True when the sun is up at the given location (UTC `when`, default now).
+    Falls back to the central-Vermont regional default when no per-array
+    coordinates are known (current state — no lat/long stored yet)."""
+    import datetime as _dt
+    w = when or _dt.datetime.now(_dt.timezone.utc)
+    # the helper does its own UTC math; ensure naive UTC for timetuple/hour reads
+    if w.tzinfo is not None:
+        w = w.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    try:
+        elev = _solar_elevation_deg(w, lat if lat is not None else _VT_LAT,
+                                    lon if lon is not None else _VT_LON)
+    except Exception:
+        return True   # never let a sun-calc error hide a real card — default to "day"
+    return elev > _DAYLIGHT_MIN_ELEVATION_DEG
+
+
 # Per-site telemetry cache (inventory + N equipment calls is heavy; SolarEdge is
 # 300 req/day). Keyed by "vendor:site" -> (fetched_at, {serial: row}).
 _SITE_TTL = timedelta(minutes=10)
@@ -406,6 +483,9 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
 
     columns: list[dict] = []
     inv_total = 0
+    # Compute sun-up ONCE per fleet build (regional default; all arrays share it
+    # until per-array lat/long exists). The card uses this for the "Sleeping" state.
+    daylight = _is_daylight()
     for arr in arrays:
         ivs = sorted(by_array.get(arr.id, []), key=lambda x: (x.position, x.id))
 
@@ -524,6 +604,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             # graph when the vendor gives site-level history but no per-inverter
             # series (Chint weekETrend backfill); ascending [{date,kwh}].
             "daily": _array_daily(db, arr.id),
+            # Sun-up flag for the card "Sleeping" night state. The card gates
+            # "Sleeping" on (is_daylight==False AND output==0) so a daytime fault
+            # that zeroes output never reads as "asleep". Regional (central VT)
+            # until a per-array lat/long exists; recomputed each fetch.
+            "is_daylight": daylight,
         })
 
     attention = sum(c["alert"]["count"] for c in columns)
@@ -542,6 +627,9 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             "arrays_total": len(columns),
             "inverters_total": inv_total,
             "attention": attention,
+            # Board-wide sun-up flag (regional default). The card layer ANDs this
+            # with per-inverter output==0 to pick the calm "Sleeping" state.
+            "is_daylight": daylight,
         },
     }
 

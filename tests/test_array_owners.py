@@ -760,6 +760,40 @@ def test_delete_then_restore_array_roundtrips(client):
 
 # ── Site-level daily history backfill (instant graph on connect) ──────────────
 
+# ── Daylight flag for the card "Sleeping" night state ─────────────────────────
+
+def test_fleet_tree_exposes_is_daylight_flag(client):
+    """The card layer needs a server-computed sun-up flag to gate the calm
+    'Sleeping' state on (night AND zero output) — never zero-output alone, which
+    would mask a daytime fault. fleet-tree must expose is_daylight per column +
+    in the summary."""
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json={"provider": "chint", "sites": [{
+                    "site_id": "s1", "name": "Sun Test Array",
+                    "current_power_w": 5000.0,
+                    "inverters": [{"serial": "ST-1", "name": "I1",
+                                   "energy_today_kwh": 10.0, "current_power_w": 5000.0}],
+                }]}, headers=_auth(key))
+    tree = client.get("/v1/array-owners/fleet-tree", headers=_auth(key)).json()
+    assert isinstance(tree["summary"]["is_daylight"], bool)
+    col = next(c for c in tree["columns"] if c["array_name"] == "Sun Test Array")
+    assert isinstance(col["is_daylight"], bool)
+
+
+def test_solar_elevation_is_seasonally_correct():
+    """The daylight calc uses real solar elevation (NOAA), not a fixed-hour rule —
+    so it's right across seasons. The key win over a fixed h<5||h>=21 fallback:
+    a VT winter 6am is correctly NIGHT (the fallback would call it day)."""
+    import datetime as dt
+    from api.inverter_fleet import _is_daylight
+    # Vermont = UTC-4 (EDT) summer, UTC-5 (EST) winter.
+    assert _is_daylight(when=dt.datetime(2026, 6, 17, 16, 0)) is True    # Jun local noon
+    assert _is_daylight(when=dt.datetime(2026, 6, 17, 4, 0)) is False    # Jun local midnight
+    assert _is_daylight(when=dt.datetime(2026, 12, 17, 11, 0)) is False  # Dec ~6am EST — dark
+    assert _is_daylight(when=dt.datetime(2026, 12, 17, 17, 0)) is True   # Dec ~noon EST — up
+
+
 def test_inverter_capture_backfills_site_daily_history(client):
     """REGRESSION/feat (Jun 2026): Chint exposes ~7 days of site daily kWh
     (weekETrend). Capturing it must backfill DailyGeneration so the array graph
