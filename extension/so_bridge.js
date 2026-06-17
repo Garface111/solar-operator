@@ -114,6 +114,29 @@
       });
       return;
     }
+
+    // v1.9.34: auto-login vault relay. The Master Account tab manages auto-refresh
+    // credentials + opt-out through these; secrets only ever go page → background to
+    // be encrypted at rest, and the status reply NEVER includes a password.
+    if (data.type === "SO_VAULT") {
+      const reqId = data.reqId || null;
+      const op = String(data.op || "");                 // status | set | clear | optout
+      const msg = { type: "SO_VAULT_" + op.toUpperCase(), vendor: data.vendor };
+      if (op === "set") { msg.username = data.username; msg.password = data.password; }
+      if (op === "optout") { msg.optedOut = !!data.optedOut; }
+      chrome.runtime.sendMessage(msg, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_VAULT_ACK",
+          reqId,
+          op,
+          ok: !!(resp && resp.ok),
+          status: resp ? resp.status : undefined,   // only for op==="status"
+          error: err,
+        }, "*");
+      });
+      return;
+    }
   });
 
   // ── Background → bridge → page broadcasts ────────────────────────────
