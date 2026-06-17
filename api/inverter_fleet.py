@@ -118,11 +118,13 @@ def _is_daylight(lat: float | None = None, lon: float | None = None,
 _SITE_TTL = timedelta(minutes=10)
 _site_cache: dict[str, tuple] = {}
 
-# A capture-time instantaneous power is only "current" for a few hours — after
-# that the sun has moved and showing it would be a lie. Extension-captured cards
-# revert to "—" once their stamped power is older than this. API-pulled vendors
-# (SolarEdge) refresh on every fetch, so this never applies to them.
-_POWER_FRESH = timedelta(hours=3)
+# A capture-time instantaneous power stays shown for up to a day for
+# extension-captured vendors (Fronius/SMA), which only update on a manual
+# capture — blanking it to "—" after just a few hours made healthy fleets look
+# dead between captures (esp. evenings). We keep the last real reading and label
+# the card with its capture time ("as of …") so it's honest, not misleading.
+# API-pulled vendors (SolarEdge) refresh on every fetch, so this never applies.
+_POWER_FRESH = timedelta(hours=24)
 
 # Vendor monitoring portals — the "origin site" that sources each inverter's data.
 # Owners click an array/inverter to jump to the vendor's deep-link for analysis.
