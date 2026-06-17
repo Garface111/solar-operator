@@ -528,6 +528,36 @@ def test_inverter_capture_is_idempotent_and_takes_max_kwh(client):
         assert math.isclose(kwhs[0], 98.25) and math.isclose(kwhs[1], 510.40)
 
 
+def test_inverter_capture_reuses_soft_deleted_array_by_name(client):
+    """uq_array_per_tenant spans (tenant_id, name) including soft-deleted rows.
+    A re-capture of a previously-deleted array must reactivate it by name — not
+    INSERT a colliding name (which raised IntegrityError on every retry)."""
+    from datetime import datetime
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload(), headers=_auth(key))
+
+    # Owner soft-deletes "Waterford"; its name stays reserved by the constraint.
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.name == "Waterford")
+        ).scalar_one()
+        arr.deleted_at = datetime(2026, 6, 1, 12, 0, 0)
+        db.commit()
+
+    # Re-capturing must not crash and must not duplicate the array.
+    resp = client.post("/v1/array-owners/inverter-capture",
+                       json=_fronius_payload(), headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        arrs = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.name == "Waterford")
+        ).scalars().all()
+        assert len(arrs) == 1  # reused, not duplicated
+        assert arrs[0].deleted_at is None  # reactivated
+
+
 def test_inverter_capture_accepts_dashboard_session_token(client):
     """Dual-auth: the AO page authenticates with a signed session token."""
     from api.account import _sign_session

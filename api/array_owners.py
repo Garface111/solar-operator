@@ -1681,10 +1681,12 @@ def inverter_capture(
     results: list[dict] = []
 
     with SessionLocal() as db:
+        # Match by name across ALL arrays, including soft-deleted ones:
+        # uq_array_per_tenant spans (tenant_id, name) with no deleted_at, so a
+        # soft-deleted array still owns its name. Filtering deleted rows out here
+        # made us INSERT a colliding name → UniqueViolation on every retry.
         existing = db.execute(
-            select(Array).where(
-                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
-            )
+            select(Array).where(Array.tenant_id == tenant.id)
         ).scalars().all()
         by_name = {a.name.strip().lower(): a for a in existing}
 
@@ -1701,6 +1703,11 @@ def inverter_capture(
                 db.flush()
                 by_name[site_name.lower()] = arr
                 created = True
+            elif arr.deleted_at is not None:
+                # Re-capturing a previously-deleted array reactivates it (the
+                # constraint kept its name reserved). Mirrors the Inverter
+                # undelete below — live data is flowing again.
+                arr.deleted_at = None
 
             # NOTE: nameplate hinting via Inverter rows is a follow-up — the
             # Array is the owner-facing grouping, and the value/peer model
