@@ -977,6 +977,40 @@ def test_inverter_capture_rejects_implausible_daily_kwh(client):
         assert all(v <= 3456.0 for v in rows.values())  # nothing above the ceiling
 
 
+def test_inverter_capture_rejects_implausible_per_inverter_kwh(client):
+    """BILLING/peer-analysis (Jun 2026): the same Fronius cumulative glitch wrote
+    ~36,000 kWh into each 7.6 kW inverter's daily slot (cap ≈ 182). The
+    per-inverter write must drop any InverterDaily value above nameplate×24h so
+    the sparkline + peer engine never see impossible spikes."""
+    from api.models import InverterDaily, Inverter
+    from sqlalchemy import select as _sel
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "fronius",
+        "sites": [{
+            "site_id": "wc", "name": "west chester",
+            "inverters": [{
+                "serial": "wc-inv-1", "name": "Primo 7.6 (1)", "nameplate_kw": 7.6,
+                "energy_today_kwh": 40.0,
+                "daily": [
+                    {"date": "2026-06-13", "kwh": 38.0},      # real, kept
+                    {"date": "2026-06-14", "kwh": 36411.0},   # impossible, dropped
+                ],
+            }],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        iv = db.execute(_sel(Inverter).where(Inverter.tenant_id == tid)).scalars().first()
+        rows = {r.day.isoformat(): r.kwh for r in db.execute(
+            _sel(InverterDaily).where(InverterDaily.inverter_id == iv.id)
+        ).scalars().all()}
+        assert rows.get("2026-06-13") == 38.0           # real day kept
+        assert "2026-06-14" not in rows                 # impossible day dropped
+        assert all(v <= 7.6 * 24 for v in rows.values())
+
+
 def test_inverter_capture_readd_with_today_in_site_daily(client):
     """REGRESSION (Jun 2026): re-adding an SMA array 500'd on uq_daily_array_day
     (Sentry PYTHON-FASTAPI-3, Key (array_id, day)=(…, today)). Root cause: the

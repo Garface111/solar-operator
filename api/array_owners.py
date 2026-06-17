@@ -1935,8 +1935,22 @@ def inverter_capture(
                 # ci.daily, and today appearing in both — the SELECT-then-INSERT-
                 # per-row version raised UniqueViolation on uq_inverter_daily_inv_day
                 # (Sentry PYTHON-FASTAPI-3) exactly in those cases.
+                # PHYSICAL-PLAUSIBILITY GUARD (same class as the array-level one):
+                # a per-inverter daily kWh can never exceed its nameplate × 24h.
+                # The same Fronius cumulative-value glitch that poisoned the
+                # array meter also wrote ~36,000 kWh into each 7.6 kW inverter's
+                # daily slot (cap ≈ 182). Drop anything above the ceiling so the
+                # sparkline + peer-analysis engine never see impossible spikes.
+                # Prefer the captured nameplate, fall back to the persisted row's.
+                inv_np = ci.nameplate_kw or iv.nameplate_kw
+                inv_ceiling = (float(inv_np) * 24.0) if inv_np else None
+
+                def _inv_plausible(kwh: float) -> bool:
+                    return inv_ceiling is None or kwh <= inv_ceiling
+
                 want: dict = {}
-                if ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0:
+                if (ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0
+                        and _inv_plausible(float(ci.energy_today_kwh))):
                     want[today] = float(ci.energy_today_kwh)
                 for pt in (ci.daily or []):
                     if pt.kwh is None or pt.kwh < 0:
@@ -1946,6 +1960,14 @@ def inverter_capture(
                     except (TypeError, ValueError):
                         continue
                     v = float(pt.kwh)
+                    if not _inv_plausible(v):
+                        log.warning(
+                            "inverter-capture: dropping implausible per-inverter "
+                            "daily kWh %.0f for inverter %s day %s (ceiling %.0f = "
+                            "%.1f kW × 24h) — capture glitch, not real generation",
+                            v, iv.id, dd, inv_ceiling or 0, float(inv_np or 0),
+                        )
+                        continue
                     if dd not in want or v > want[dd]:   # max-wins on dup dates
                         want[dd] = v
                 if want:
