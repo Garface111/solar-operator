@@ -50,8 +50,47 @@
   // Observed response bodies, relayed by chint_inject.js (MAIN world).
   let siteListJson = null;                     // parsed /api/asset/site/retrieve
   const deviceJsonBySite = new Map();          // siteId -> parsed busTypeDevices
+  const dailyBySite = new Map();               // siteId -> [{date,kwh}] (history backfill)
 
   function tryParse(body) { try { return JSON.parse(body); } catch (_) { return null; } }
+
+  // Integrate the site's 30-min PV POWER curve into daily kWh. The production
+  // chart endpoint (/openApi/v1/siteMertics/getSiteTimeSharingChart2) returns
+  // data.times[] ("YYYY-MM-DD HH:MM") + data.pv[] (instantaneous kW per slot).
+  // kWh for a day = Σ(pv_kW × interval_hours). interval is in the URL (&interval=30
+  // minutes); default to 30 if absent. Grounded on Bruce's Londonderry HAR
+  // (2026-06-17): 6/15→1499, 6/16→1671 kWh — plausible for a 186 kW site.
+  // Site-level only (Chint exposes no per-inverter history) → never split per inv.
+  function dailyFromChart(json, search) {
+    const d = json && json.data;
+    if (!d || !Array.isArray(d.times)) return [];
+    // prefer the dedicated PV series; fall back to the generic "metrics" series.
+    const series = Array.isArray(d.pv) && d.pv.length ? d.pv
+      : (Array.isArray(d.metrics) ? d.metrics : []);
+    if (!series.length) return [];
+    let stepMin = 30;
+    const m = /[?&]interval=(\d+)/.exec(String(search || ""));
+    if (m) { const n = parseInt(m[1], 10); if (isFinite(n) && n > 0) stepMin = n; }
+    const stepH = stepMin / 60.0;
+    const byDay = new Map();
+    for (let i = 0; i < d.times.length; i++) {
+      const t = String(d.times[i] || "");
+      const day = t.split(" ")[0];                 // "2026-06-15"
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      const kw = Number(series[i]);
+      if (!isFinite(kw) || kw <= 0) { if (!byDay.has(day)) byDay.set(day, 0); continue; }
+      byDay.set(day, (byDay.get(day) || 0) + kw * stepH);
+    }
+    const out = [];
+    for (const [day, kwh] of byDay) out.push({ date: day, kwh: Math.round(kwh * 10) / 10 });
+    return out;
+  }
+
+  // Pull siteId out of the chart request's query string.
+  function siteIdFromSearch(search) {
+    const m = /[?&]siteId=([^&]+)/.exec(String(search || ""));
+    return m ? decodeURIComponent(m[1]) : null;
+  }
 
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.origin !== location.origin) return;
@@ -70,6 +109,17 @@
         deviceJsonBySite.set(String(sid), j);
         const n = countInverters(j);
         LOG("observed DEVICES for site", sid, "->", n, "inverter(s)");
+      }
+    } else if (d.path === "/openApi/v1/siteMertics/getSiteTimeSharingChart2") {
+      // Production chart — integrate its 30-min PV power curve into daily kWh
+      // for the instant history backfill. siteId comes from the query string.
+      const sid = siteIdFromSearch(d.search);
+      if (sid) {
+        const daily = dailyFromChart(j, d.search);
+        if (daily.length) {
+          dailyBySite.set(String(sid), daily);
+          LOG("observed PRODUCTION CHART for site", sid, "->", daily.length, "day(s) of kWh");
+        }
       }
     }
   });
@@ -125,26 +175,6 @@
   }
   function countInverters(devJson) { return invertersFrom(devJson).length; }
 
-  // Chint's site/retrieve response carries weekETrend[] — the site's daily energy
-  // for the last ~7 days: [{name:"20260610", value:"996.2"}, ...] (kWh). We map it
-  // to a {date:"YYYY-MM-DD", kwh} series so the backend can backfill DailyGeneration
-  // and the array graph renders REAL history the instant the owner connects, instead
-  // of waiting days for the daily snapshot job to accumulate it. Site-level only —
-  // Chint exposes no per-inverter history, so we never split this across inverters.
-  function dailyFromTrend(st) {
-    const trend = (st && Array.isArray(st.weekETrend)) ? st.weekETrend : [];
-    const out = [];
-    for (const pt of trend) {
-      const raw = String((pt && pt.name) || "");
-      const m = raw.match(/^(\d{4})(\d{2})(\d{2})$/);   // "20260610" -> 2026-06-10
-      if (!m) continue;
-      const kwh = Number(pt.value);
-      if (!isFinite(kwh) || kwh < 0) continue;
-      out.push({ date: m[1] + "-" + m[2] + "-" + m[3], kwh: Math.round(kwh * 1000) / 1000 });
-    }
-    return out;
-  }
-
   function broadcastLoginState(state) {
     if (state === lastLoginState) return;
     lastLoginState = state;
@@ -184,7 +214,7 @@
         current_power_w: liveW,
         error_count_today: inverters.filter((iv) => iv.status === "fault").length,
         status: (liveW || 0) > 0 ? "producing" : "idle",
-        daily: dailyFromTrend(st),       // ~7 days of site daily kWh for instant history
+        daily: (sid != null && dailyBySite.has(String(sid))) ? dailyBySite.get(String(sid)) : [],       // real site daily kWh (chart-integrated) for instant history
         inverters,
       });
     }
@@ -241,8 +271,13 @@
     // (and any multi-site owner) opens sites one at a time, and each must be
     // captured. The backend upserts idempotently, so progressive re-emits are safe
     // and additive. We only stop on intent timeout (MAX_POLLS), never on "got one".
+    // Signature includes EVERY site's inverters AND its captured daily-history
+    // day-count, so opening a new site OR the production chart loading later both
+    // change the hash and trigger a fresh emit (the chart often arrives AFTER the
+    // inverters, so without the day-count the history would never ship).
     const sig = sites.map((s) =>
       s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
+      + "|d" + ((s.daily || []).length)
     ).join("||");
     const h = await hashString(sig);
     if (h === lastHash) return;             // nothing new since last emit
