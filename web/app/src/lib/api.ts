@@ -1258,6 +1258,131 @@ export async function getNextRun(): Promise<NextRunPreview> {
   return request<NextRunPreview>("/v1/account/reports/next-run");
 }
 
+// ─── billing trends (CONTRACT 1 — macro multi-year trends) ─────────────────
+// Consumes GET /v1/array-operator/billing/subscriptions/{id}/trends.
+// The backend PR is built in parallel and may not be merged when this ships,
+// so every field is read DEFENSIVELY: missing scalars become null, absent
+// collections become empty. Callers can rely on the normalized shape below.
+
+/** One calendar month of a year's series. `savings` is USD (may be absent). */
+export interface TrendMonthPoint {
+  month: number; // 1–12
+  kwh: number;
+  savings: number | null;
+}
+
+/** Per-calendar-month seasonal comparison across the years present. */
+export interface SeasonalYoYEntry {
+  month: number; // 1–12
+  label: string; // "Jan"
+  /** year (as string key) → kWh for that month. */
+  by_year: Record<string, number>;
+  /** % change of the latest year vs the immediately prior year for this month.
+   *  Null when there is no prior year to compare against. */
+  latest_delta_pct: number | null;
+}
+
+export interface BillingTrends {
+  customer_name: string | null;
+  years: number[];
+  /** year (as string key) → that year's monthly points (only months with data). */
+  monthly_by_year: Record<string, TrendMonthPoint[]>;
+  seasonal_yoy: SeasonalYoYEntry[];
+  ttm_kwh: number | null;
+  ttm_savings: number | null;
+  lifetime_kwh: number | null;
+  summary_note: string | null;
+}
+
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** Coerce an arbitrary backend payload into a safe BillingTrends. Tolerates
+ *  missing fields, wrong-typed collections, and partial month entries — a thin
+ *  or not-yet-deployed backend must NEVER throw here, just yield empty data. */
+function normalizeTrends(raw: unknown): BillingTrends {
+  const r = (raw ?? {}) as Record<string, unknown>;
+
+  const years = Array.isArray(r.years)
+    ? (r.years.filter((y) => typeof y === "number") as number[])
+    : [];
+
+  const monthly_by_year: Record<string, TrendMonthPoint[]> = {};
+  const rawMonthly = (r.monthly_by_year ?? {}) as Record<string, unknown>;
+  if (rawMonthly && typeof rawMonthly === "object") {
+    for (const [year, list] of Object.entries(rawMonthly)) {
+      if (!Array.isArray(list)) continue;
+      const points: TrendMonthPoint[] = [];
+      for (const entry of list) {
+        const e = (entry ?? {}) as Record<string, unknown>;
+        const month = num(e.month);
+        const kwh = num(e.kwh);
+        if (month === null || kwh === null) continue;
+        points.push({ month, kwh, savings: num(e.savings) });
+      }
+      points.sort((a, b) => a.month - b.month);
+      monthly_by_year[year] = points;
+    }
+  }
+
+  const seasonal_yoy: SeasonalYoYEntry[] = [];
+  if (Array.isArray(r.seasonal_yoy)) {
+    for (const entry of r.seasonal_yoy) {
+      const e = (entry ?? {}) as Record<string, unknown>;
+      const month = num(e.month);
+      if (month === null) continue;
+      const by_year: Record<string, number> = {};
+      const rawBy = (e.by_year ?? {}) as Record<string, unknown>;
+      if (rawBy && typeof rawBy === "object") {
+        for (const [year, val] of Object.entries(rawBy)) {
+          const n = num(val);
+          if (n !== null) by_year[year] = n;
+        }
+      }
+      seasonal_yoy.push({
+        month,
+        label: typeof e.label === "string" ? e.label : MONTH_ABBR[month - 1] ?? String(month),
+        by_year,
+        latest_delta_pct: num(e.latest_delta_pct),
+      });
+    }
+    seasonal_yoy.sort((a, b) => a.month - b.month);
+  }
+
+  return {
+    customer_name: typeof r.customer_name === "string" ? r.customer_name : null,
+    years: [...years].sort((a, b) => a - b),
+    monthly_by_year,
+    seasonal_yoy,
+    ttm_kwh: num(r.ttm_kwh),
+    ttm_savings: num(r.ttm_savings),
+    lifetime_kwh: num(r.lifetime_kwh),
+    summary_note: typeof r.summary_note === "string" ? r.summary_note : null,
+  };
+}
+
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/** Fetch multi-year billing trends for a subscription. The reports UI has no
+ *  separate subscription list, and the endpoint is customer-scoped (it returns
+ *  `customer_name`), so callers pass the client/customer id as the subscription
+ *  identifier — see the "View trends" link in QuarterCard. Accepts string|number
+ *  so a differently-keyed backend still composes. */
+export async function getBillingTrends(
+  subscriptionId: string | number,
+): Promise<BillingTrends> {
+  const raw = await request<unknown>(
+    `/v1/array-operator/billing/subscriptions/${encodeURIComponent(
+      String(subscriptionId),
+    )}/trends`,
+  );
+  return normalizeTrends(raw);
+}
+
 // ─── spreadsheet ingest (V4) ─────────────────────────────────────────────
 
 /** Per-row provenance from the server — how data was extracted and whether

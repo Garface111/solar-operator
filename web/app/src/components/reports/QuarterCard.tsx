@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Chip } from "../../ui/Chip";
 import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
@@ -198,6 +199,17 @@ function ClientTableRow({
       {/* Actions */}
       <td className="py-2 pr-4 align-top">
         <div className="flex gap-1">
+          {/* Multi-year trends for this customer. The trends endpoint is
+              customer-scoped, and the reports UI has no separate subscription
+              list, so we key it by the client id (see getBillingTrends). */}
+          <Link
+            to={`/reports/trends/${client.id}`}
+            onClick={(e) => e.stopPropagation()}
+            title="View multi-year trends"
+            className="flex min-h-[32px] items-center rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-100 hover:text-primary-600"
+          >
+            📈 trends
+          </Link>
           <button
             type="button"
             disabled={downloading}
