@@ -944,6 +944,39 @@ def test_inverter_capture_backfills_site_daily_history(client):
     assert {"2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14"} <= dates
 
 
+def test_inverter_capture_rejects_implausible_daily_kwh(client):
+    """BILLING-CRITICAL (Jun 2026): a capture glitch once put a cumulative
+    677,533 kWh in a single DAILY slot for a 144 kW array (~34× the physical
+    max), which — since Array Operator bills per-kWh — would have invoiced ~$4k.
+    A daily value above nameplate×24h is physically impossible and must be
+    DROPPED at ingest, never persisted to DailyGeneration (the billing meter)."""
+    from api.models import DailyGeneration
+    import datetime as _dt
+    tid, key = _make_tenant()
+    today_iso = _dt.date.today().isoformat()
+    payload = {
+        "provider": "fronius",
+        "sites": [{
+            "site_id": "wc", "name": "west chester",
+            "peak_power_kw": 144.0,            # ceiling = 144 × 24 = 3,456 kWh/day
+            "daily": [
+                {"date": "2026-06-13", "kwh": 950.0},      # real, kept
+                {"date": "2026-06-14", "kwh": 677533.0},   # impossible, dropped
+            ],
+            "inverters": [{"serial": "wc-1", "nameplate_kw": 144.0, "energy_today_kwh": 700.0}],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        rows = {r.day.isoformat(): r.kwh for r in db.execute(
+            select(DailyGeneration).where(DailyGeneration.tenant_id == tid)
+        ).scalars().all()}
+        assert rows.get("2026-06-13") == 950.0          # real day kept
+        assert "2026-06-14" not in rows                 # impossible day dropped
+        assert all(v <= 3456.0 for v in rows.values())  # nothing above the ceiling
+
+
 def test_inverter_capture_readd_with_today_in_site_daily(client):
     """REGRESSION (Jun 2026): re-adding an SMA array 500'd on uq_daily_array_day
     (Sentry PYTHON-FASTAPI-3, Key (array_id, day)=(…, today)). Root cause: the

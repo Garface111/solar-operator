@@ -1774,8 +1774,31 @@ def inverter_capture(
             recorded_kwh = None
             if site.energy_today_kwh is not None and site.energy_today_kwh >= 0:
                 recorded_kwh = float(site.energy_today_kwh)
+
+            # PHYSICAL-PLAUSIBILITY GUARD (billing-critical). A capture parse
+            # glitch once landed a cumulative/lifetime value (677,533 kWh) in a
+            # single DAILY slot for a 144 kW array, which is ~34× the physical
+            # max — and since Array Operator bills per-kWh, that one row alone
+            # would have invoiced ~$4k. A daily kWh value can NEVER exceed the
+            # array's rated power running flat-out for 24h. Compute that ceiling
+            # from the site's peak power (or the sum of its inverters' nameplates)
+            # and DROP any day above it rather than poison the meter. The ceiling
+            # is deliberately generous (24h @ full nameplate ≈ 4-5× a real sunny
+            # day) so it only ever catches unit-error/cumulative garbage, never a
+            # legitimately strong production day.
+            peak_kw = site.peak_power_kw
+            if not peak_kw:
+                _np = sum(
+                    (iv.nameplate_kw or 0) for iv in (site.inverters or [])
+                ) or 0
+                peak_kw = _np or None
+            day_ceiling = (peak_kw * 24.0) if peak_kw else None
+
+            def _plausible(kwh: float) -> bool:
+                return day_ceiling is None or kwh <= day_ceiling
+
             want_arr: dict = {}
-            if recorded_kwh is not None:
+            if recorded_kwh is not None and _plausible(recorded_kwh):
                 want_arr[today] = recorded_kwh
             for pt in (site.daily or []):
                 if pt.kwh is None or pt.kwh < 0:
@@ -1785,6 +1808,14 @@ def inverter_capture(
                 except (TypeError, ValueError):
                     continue
                 v = float(pt.kwh)
+                if not _plausible(v):
+                    log.warning(
+                        "inverter-capture: dropping implausible daily kWh %.0f for "
+                        "array %s day %s (ceiling %.0f = %.1f kW × 24h) — likely a "
+                        "cumulative/unit-error capture glitch, not real generation",
+                        v, arr.id, d, day_ceiling or 0, peak_kw or 0,
+                    )
+                    continue
                 if d not in want_arr or v > want_arr[d]:   # max-wins on dup dates
                     want_arr[d] = v
             backfilled_days = 0
