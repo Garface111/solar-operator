@@ -943,6 +943,49 @@ def test_inverter_capture_backfills_site_daily_history(client):
     dates = {d["date"] for d in col["daily"]}
     assert {"2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14"} <= dates
 
+
+def test_inverter_capture_readd_with_today_in_site_daily(client):
+    """REGRESSION (Jun 2026): re-adding an SMA array 500'd on uq_daily_array_day
+    (Sentry PYTHON-FASTAPI-3, Key (array_id, day)=(…, today)). Root cause: the
+    array-level write had TWO blocks — the today-row (from site.energy_today_kwh)
+    AND the site.daily backfill loop — each SELECT-then-INSERT. SMA's daily
+    series INCLUDES today, so both targeted (array_id, today) and collided at
+    commit. This test reproduces it: site.energy_today_kwh set AND a site.daily
+    entry for today, captured TWICE. Must 200 both times, one row for today,
+    max-wins."""
+    from api.models import DailyGeneration
+    import datetime as _dt
+    tid, key = _make_tenant()
+    today_iso = _dt.date.today().isoformat()
+    payload = {
+        "provider": "sma",
+        "sites": [{
+            "site_id": "sma-plant-1", "name": "Tannery Brook",
+            "energy_today_kwh": 120.0,         # → today-row
+            "current_power_w": 30000.0,
+            "daily": [                          # history INCLUDING today (the collision)
+                {"date": "2026-06-15", "kwh": 800.0},
+                {"date": today_iso, "kwh": 95.0},   # same (array, today) as the today-row
+            ],
+            "inverters": [{"serial": "sma-1", "energy_today_kwh": 20.0, "current_power_w": 5000.0}],
+        }],
+    }
+    r1 = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert r1.status_code == 200, r1.text
+    # RE-ADD the same array (the exact user action) — must not 500.
+    r2 = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert r2.status_code == 200, r2.text
+    with SessionLocal() as db:
+        td = db.execute(
+            select(DailyGeneration).where(
+                DailyGeneration.tenant_id == tid,
+                DailyGeneration.day == _dt.date.today(),
+            )
+        ).scalars().all()
+        assert len(td) == 1                    # exactly one row for today, no duplicate
+        assert td[0].kwh == 120.0              # max(120 today-row, 95 history)
+
+
 def test_inverter_capture_chint_keeps_per_inverter_live_power(client):
     """REGRESSION (Jun 2026): Chint's portal reports live AC power PER inverter
     (commDevice.currentPower), but CaptureInverter had no current_power_w field,
