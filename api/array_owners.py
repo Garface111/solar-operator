@@ -32,7 +32,6 @@ from sqlalchemy import func, select
 
 from . import inverters
 from .adapters import gmp as gmp_adapter
-from .adapters import smarthub as smarthub_adapter
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
@@ -64,6 +63,15 @@ def _tenant_from_bearer(authorization: str | None) -> Tenant:
     (api.account login flow), not the raw tenant key. Accept the session
     token first; fall back to the tenant-key bearer so programmatic/API
     callers (and tests) keep working.
+
+    NOTE: this is the CAPTURE/dashboard resolver — it is intentionally more
+    permissive than app.tenant_from_bearer about INACTIVE tenants. The session
+    path already lets inactive (e.g. paused-no-card) tenants through so they can
+    view read-only; capture must match that so a paused trial keeps its inverter
+    data flowing (only report DELIVERY + premium features gate on active, in the
+    scheduler). The strict app.tenant_from_bearer hard-403s ANY inactive tenant,
+    which silently blocked every capture the moment a 14-day trial auto-paused —
+    see _capture_tenant_by_key for the capture-tolerant key path.
     """
     from .account import tenant_from_session
 
@@ -71,9 +79,43 @@ def _tenant_from_bearer(authorization: str | None) -> Tenant:
         return tenant_from_session(authorization)
     except HTTPException:
         pass
-    from .app import tenant_from_bearer
+    return _capture_tenant_by_key(authorization)
 
-    return tenant_from_bearer(authorization)
+
+# Statuses that are paused/ended-but-RECOVERABLE: the tenant kept its data and
+# can resume by adding a card. Capture stays allowed for these (data keeps
+# flowing); only a HARD-cancelled or never-existent tenant is refused.
+_CAPTURE_RECOVERABLE_STATUSES = {"paused_no_card", "trialing", "comped", "active", None}
+
+
+def _capture_tenant_by_key(authorization: str | None) -> Tenant:
+    """Resolve a tenant from its raw tenant-key bearer for the CAPTURE path.
+
+    Unlike app.tenant_from_bearer (which hard-403s any inactive tenant), this
+    allows an INACTIVE tenant through when its status is recoverable (e.g.
+    paused-no-card after a trial). A genuinely CANCELLED tenant — the user chose
+    to leave / payment hard-failed — is refused with a clear, actionable 402 so
+    the extension can show "add a card to resume" instead of a cryptic 403.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing bearer token")
+    key = authorization.split(" ", 1)[1].strip()
+    with SessionLocal() as db:
+        t = db.execute(select(Tenant).where(Tenant.tenant_key == key)).scalar_one_or_none()
+        if t is None:
+            raise HTTPException(403, "Invalid tenant key")
+        if not t.active and t.subscription_status not in _CAPTURE_RECOVERABLE_STATUSES:
+            # Hard-cancelled → actionable 402 (not a silent 403).
+            raise HTTPException(
+                402,
+                detail={
+                    "error": "subscription-cancelled",
+                    "message": "This account's subscription has ended. Add a "
+                               "payment method to resume syncing your data.",
+                    "cta_url": "/account",
+                },
+            )
+        return t
 
 
 # ── inverter connection resolution ────────────────────────────────────────────
@@ -2036,9 +2078,8 @@ def _persist_meter_accounts(
 ) -> list[dict]:
     """Shared per-account persistence for utility-meter GENERATION capture.
 
-    Used by BOTH the extension-push path (utility_meter_capture) and the
-    server-side-pull path (smarthub_meter_capture). For each account: match an
-    Array by name (nickname, else "<LABEL> <account>"), else create one — but
+    Used by the extension-push path (utility_meter_capture). For each account:
+    match an Array by name (nickname, else "<LABEL> <account>"), else create — but
     ONLY when the account actually has solar generation. Records generation as
     DailyGeneration rows with source="utility_meter" (idempotent per
     (array, day), max-kWh). Does NOT commit — the caller owns the transaction.
@@ -2175,138 +2216,3 @@ def _persist_meter_accounts(
             })
 
     return results
-
-
-# ── SmartHub server-side-pull meter capture (VEC / WEC solar generation) ───────
-# Distinct from utility_meter_capture (extension PUSHES the parsed accounts):
-# here the extension only hands us a short-lived SmartHub session (email +
-# authorizationToken captured from /services/oauth/auth/v2), and the BACKEND
-# pulls the daily generation itself via api.adapters.smarthub. This keeps the
-# heavy NISC SmartHub poll logic server-side and out of the content script.
-
-class SmartHubMeterCaptureBody(BaseModel):
-    provider: str          # "vec" | "wec"
-    host: str              # e.g. "vermontelectric.smarthub.coop"
-    email: str             # SmartHub primaryUsername / login email
-    auth_token: str        # authorizationToken from /services/oauth/auth/v2
-
-
-# Window of daily generation to pull on each capture (covers a full billing
-# cycle + slack so a re-capture backfills any gaps idempotently).
-_SMARTHUB_PULL_DAYS = 35
-
-
-@router.post("/v1/array-owners/smarthub-meter-capture")
-def smarthub_meter_capture(
-    body: SmartHubMeterCaptureBody,
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """Server-side-pull SOLAR GENERATION for a NISC SmartHub co-op (VEC / WEC).
-
-    The extension captures a short-lived SmartHub session (email +
-    authorizationToken) and POSTs it here. The BACKEND then pulls each meter's
-    daily generation directly from SmartHub (no generation crosses the wire from
-    the extension), and persists it via the SAME _persist_meter_accounts helper
-    used by utility_meter_capture (DRY). Dual-auth (session token OR tenant key).
-
-    UNVERIFIED CAVEAT (flag loudly, do NOT bury): the RETURN-channel generation
-    this reads is UNVERIFIED on a real WEC solar meter. VEC is confirmed to
-    expose FORWARD + RETURN flow directions; WEC still needs LIVE verification
-    against a real WEC solar (net-metering) HAR before its generation numbers
-    can be trusted. We never fabricate: if a co-op exposes no RETURN channel or
-    all-zero generation, this returns accounts_with_generation=0 honestly.
-
-    Idempotent: re-capturing re-matches the same Array by name (service address
-    if SmartHub exposes one, else the account number) and upserts the same
-    DailyGeneration rows, so repeated captures never duplicate.
-    """
-    tenant = _tenant_from_bearer(authorization)
-
-    provider = (body.provider or "").strip().lower()
-    host = (body.host or "").strip().lower()
-    if provider not in {"vec", "wec"}:
-        raise HTTPException(
-            400, f"Provider {provider!r} is not a SmartHub meter provider (vec/wec)."
-        )
-    if not host.endswith(".smarthub.coop"):
-        raise HTTPException(400, f"Host {host!r} is not a *.smarthub.coop deployment.")
-    if not body.email or not body.auth_token:
-        raise HTTPException(400, "Missing SmartHub session (email/auth_token).")
-
-    label = _UTILITY_LABEL.get(provider, provider.upper())
-    # The smarthub adapter's session shape: email + auth_token + primary_username
-    # (fetch_account_list reads primary_username for the userId param; default
-    # it to the email when the extension only captured the login address).
-    session = {
-        "email": body.email,
-        "auth_token": body.auth_token,
-        "primary_username": body.email,
-    }
-
-    today = date.today()
-    start = today - timedelta(days=_SMARTHUB_PULL_DAYS)
-
-    try:
-        accounts_meta = smarthub_adapter.fetch_account_list(host, session)
-        accounts_payload: list[UtilityMeterAccount] = []
-        for meta in accounts_meta:
-            service_location = str(meta.get("service_location_number") or "")
-            account_number = str(meta.get("account_number") or "")
-            if not service_location or not account_number:
-                continue
-            rows = smarthub_adapter.fetch_daily_generation(
-                host, session, service_location, account_number,
-                start=start, end=today,
-            )
-            daily = [
-                UtilityMeterDaily(
-                    date=row["day"].isoformat(),
-                    generated_kwh=row["kwh_generated"],
-                )
-                for row in rows
-                if (row.get("kwh_generated") or 0) > 0
-            ]
-            # Account nickname = SmartHub service address if available, else acct#.
-            nickname = (meta.get("description") or "").strip() or account_number
-            accounts_payload.append(UtilityMeterAccount(
-                account_number=account_number,
-                nickname=nickname,
-                summary={},
-                daily=daily,
-            ))
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code if e.response is not None else None
-        if status in (401, 403):
-            raise HTTPException(
-                401, f"Your {label} session expired — sign in again."
-            ) from e
-        raise HTTPException(
-            502, f"Couldn't reach {label} — try again."
-        ) from e
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Couldn't reach {label} — try again.") from e
-
-    # No accounts at all (or none with a usable location/account number): honest
-    # empty result — never fabricate an array or generation.
-    if not accounts_payload:
-        return {
-            "ok": True,
-            "provider": provider,
-            "accounts_captured": 0,
-            "arrays_created": 0,
-            "accounts_with_generation": 0,
-            "accounts": [],
-        }
-
-    with SessionLocal() as db:
-        results = _persist_meter_accounts(db, tenant, provider, accounts_payload)
-        db.commit()
-
-    return {
-        "ok": True,
-        "provider": provider,
-        "accounts_captured": len(results),
-        "arrays_created": sum(1 for r in results if r["created"]),
-        "accounts_with_generation": sum(1 for r in results if r["has_generation"]),
-        "accounts": results,
-    }

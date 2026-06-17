@@ -846,6 +846,45 @@ def test_inverter_capture_backfills_per_inverter_history(client):
         assert rows["2026-06-15"] == 55.3
 
 
+def test_capture_allowed_for_paused_no_card_tenant(client):
+    """MULTI-USER (Jun 2026): a 14-day trial with no card auto-pauses
+    (active=False, subscription_status='paused_no_card', 'read-only, resume
+    anytime'). Capture must STILL work via the tenant-key bearer — data keeps
+    flowing; only report delivery gates on active. Pre-fix the strict
+    app.tenant_from_bearer hard-403'd every inactive tenant, silently killing
+    capture the moment a trial paused."""
+    tid, key = _make_tenant()
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        t.active = False
+        t.subscription_status = "paused_no_card"
+        db.commit()
+    payload = {"provider": "fronius", "sites": [{
+        "site_id": "s1", "name": "Paused Site",
+        "inverters": [{"serial": "p-1", "energy_today_kwh": 10.0, "current_power_w": 1000.0}],
+    }]}
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+
+
+def test_capture_blocked_for_cancelled_tenant_with_402(client):
+    """A HARD-cancelled tenant (chose to leave / payment hard-failed) is refused
+    capture — but with an actionable 402 'add a card to resume', NOT a silent
+    403, so the extension can show a real upgrade prompt."""
+    tid, key = _make_tenant()
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        t.active = False
+        t.subscription_status = "cancelled"
+        db.commit()
+    payload = {"provider": "fronius", "sites": [{
+        "site_id": "s1", "name": "Gone", "inverters": [{"serial": "g-1", "energy_today_kwh": 1.0}],
+    }]}
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 402, resp.text
+    assert resp.json()["detail"]["error"] == "subscription-cancelled"
+
+
 def test_inverter_capture_backfills_site_daily_history(client):
     """REGRESSION/feat (Jun 2026): the Chint extension integrates the production
     chart's 30-min PV power curve into daily kWh (getSiteTimeSharingChart2) and
