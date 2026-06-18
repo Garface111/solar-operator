@@ -433,15 +433,24 @@ def _array_alert(inv_rows: list[dict]) -> dict:
             "headline": _ALERT_HEADLINE.get(worst, "All clear")}
 
 
-def _live_power_w(iv: Inverter, m: dict):
+def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True):
     """The card's "Current kW". API-pulled vendors (SolarEdge) carry a live
     instantaneous power in their telemetry (m["last_power_w"]) — prefer it. For
     extension-captured vendors there is no live feed, so fall back to the power
     stamped at capture time, but ONLY while fresh (see _POWER_FRESH) so a capture
-    from hours ago doesn't keep claiming the panels are producing right now."""
+    from hours ago doesn't keep claiming the panels are producing right now.
+
+    HONESTY GATE: never report a stale captured reading as live power when the
+    sun is down. A 2pm capture must not read as "producing 17kW" at 9pm — that's
+    the exact bug that contradicted SMA's own portal. A genuine live telemetry
+    value (m["last_power_w"], freshly polled/pulled this request) is trusted as-is
+    since it reflects the real instant; only the STORED capture fallback is
+    daylight-gated."""
     pw = m.get("last_power_w")
     if pw is not None:
         return pw
+    if not daylight:
+        return None
     if (iv.last_power_w is not None and iv.last_power_at is not None
             and (now() - iv.last_power_at) <= _POWER_FRESH):
         return iv.last_power_w
@@ -566,7 +575,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "min_kwh": min_kwh,                   # lowest daily output in the window (real)
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
-                "current_power_w": _live_power_w(iv, m),
+                "current_power_w": _live_power_w(iv, m, daylight=daylight),
                 "last_report": u.get("last_report") or m.get("last_report"),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,

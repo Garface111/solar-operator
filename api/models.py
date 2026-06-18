@@ -699,6 +699,36 @@ class InverterDaily(Base):
     )
 
 
+class InverterReading(Base):
+    """High-frequency instantaneous power time-series — the data-hub's live memory.
+
+    One row per (inverter, poll tick). The generalized server-side poller
+    (poll_all_sources) writes a row every time it fetches a vendor we hold
+    pullable API credentials for (SolarEdge today; SMA/Fronius/Locus/AlsoEnergy
+    as their OAuth/app creds come online). This is what makes the product a
+    real-time data hub instead of a stale-snapshot viewer: the fleet tree's
+    "current kW" and the live sparkline read the NEWEST reading here, and the
+    intraday power curve is the series of them.
+
+    Distinct from InverterDaily (one kWh total per day) — this is sub-hourly
+    instantaneous watts. Pruned on a rolling window (keep_days) so the table
+    stays bounded; daily energy is rolled up into InverterDaily before prune.
+    """
+    __tablename__ = "inverter_readings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    inverter_id: Mapped[int] = mapped_column(Integer, ForeignKey("inverters.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    power_w: Mapped[float | None] = mapped_column(Float, nullable=True)
+    energy_today_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    source: Mapped[str] = mapped_column(String(24), default="poll")
+
+    __table_args__ = (
+        Index("ix_inverter_readings_inv_ts", "inverter_id", "ts"),
+    )
+
+
 class WarrantyClaim(Base):
     """An automatic warranty / service claim — the paperwork arm of Array
     Operator. The agent watches the fleet and the MOMENT an inverter goes DEAD

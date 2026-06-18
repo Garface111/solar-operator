@@ -507,6 +507,32 @@ def hard_delete_old_soft_deleted():
         ), {"cutoff": cutoff})
 
 
+def poll_all_sources_job() -> dict:
+    """Scheduler wrapper for the data-hub poller. Catches/logs so a poll error
+    never crashes the scheduler thread."""
+    from .poller import poll_all_sources
+    try:
+        summary = poll_all_sources()
+        if summary.get("readings_written"):
+            logger.info("poller: %s arrays, %s readings written",
+                        summary["arrays_polled"], summary["readings_written"])
+        if summary.get("errors"):
+            logger.warning("poller: %d source errors this tick", len(summary["errors"]))
+        return summary
+    except Exception:
+        logger.exception("poller: poll_all_sources crashed")
+        return {"ran": False, "error": "exception"}
+
+
+def prune_inverter_readings_job() -> dict:
+    from .poller import prune_old_readings
+    try:
+        return prune_old_readings()
+    except Exception:
+        logger.exception("poller: prune_old_readings crashed")
+        return {"pruned": 0, "error": "exception"}
+
+
 def start():
     # Every 6 hours, enqueue pull-bills jobs for each active tenant
     scheduler.add_job(
@@ -539,6 +565,22 @@ def start():
     scheduler.add_job(
         reconcile_warranty_claims,
         "interval", minutes=15, id="reconcile_warranty_claims", replace_existing=True,
+    )
+    # DATA HUB: every 5 min, poll every array with a pullable vendor connection
+    # (SolarEdge live today; SMA/Fronius/etc. as their API creds come online) and
+    # write the time-series. Daylight-gated inside poll_all_sources (no night API
+    # spend). This is what keeps "current kW" tracking the vendor continuously.
+    scheduler.add_job(
+        poll_all_sources_job,
+        "interval", minutes=5, id="poll_inverter_sources", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
+    # Daily at 04:10 UTC: prune the high-frequency readings beyond the rolling
+    # window (daily kWh is rolled into InverterDaily separately).
+    scheduler.add_job(
+        prune_inverter_readings_job,
+        CronTrigger(hour=4, minute=10),
+        id="prune_inverter_readings", replace_existing=True,
     )
     # Weekly: Mondays at 09:00 UTC
     scheduler.add_job(
