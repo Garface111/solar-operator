@@ -104,7 +104,7 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
 
     put("B14", "Note — actual results for the billing period", bold)
     put("B15", "kWh:"); put("C15", round(inv["kwh"], 0), align=right)
-    put("B16", f"Net Rate: ${inv['tariff']:.5f}/kWh")
+    put("B16", f"Solar Credit Rate: ${inv['tariff']:.5f}/kWh")
     put("C16", _money(inv["net_value"]), align=right)
     put("B17", f"Incentive Rate: ${inv['adder']:.5f}/kWh")
     put("C17", _money(inv["incentive_value"]), align=right)
@@ -195,7 +195,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
 
     rows = [
         ["kWh", f"{inv['kwh']:,.0f}"],
-        [f"Net rate — ${inv['tariff']:.5f}/kWh", _money(inv["net_value"])],
+        [f"Solar credit rate — ${inv['tariff']:.5f}/kWh", _money(inv["net_value"])],
         [f"Incentive rate — ${inv['adder']:.5f}/kWh", _money(inv["incentive_value"])],
         ["Solar value", _money(inv["solar_value"])],
         [f"Billing rate — {_pct(inv['billing_rate'])}", _money(inv["billed_value"])],
