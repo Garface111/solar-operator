@@ -18,6 +18,7 @@ const VerifyAccuracy = lazyWithRetry(() => import("./screens/VerifyAccuracy"));
 
 const AccountTab = lazyWithRetry(() => import("./screens/AccountTab"));
 const ReportsTab = lazyWithRetry(() => import("./screens/ReportsTab"));
+const TrendsView = lazyWithRetry(() => import("./screens/TrendsView"));
 import { useToast } from "./ui/Toast";
 import {
   getSession,
@@ -177,6 +178,17 @@ function AuthGate() {
           element={
             <Suspense fallback={<TabSpinner />}>
               <ReportsTab />
+            </Suspense>
+          }
+        />
+        {/* Multi-year billing trends for one subscription/customer. Sub-route
+            under reports (not a new top-level tab) — the Reports tab stays
+            highlighted because TabBar matches on path.startsWith("/reports"). */}
+        <Route
+          path="/reports/trends/:subscriptionId"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <TrendsView />
             </Suspense>
           }
         />

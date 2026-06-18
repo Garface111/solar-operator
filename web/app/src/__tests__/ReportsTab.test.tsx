@@ -8,6 +8,7 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "../ui/Toast";
 import type { ClientRow, QuarterReport } from "../lib/api";
 
@@ -52,7 +53,13 @@ vi.mock("../components/reports/StatusPill", () => ({
 // ── Providers ─────────────────────────────────────────────────────────────────
 
 function Wrapper({ children }: { children: React.ReactNode }) {
-  return <ToastProvider>{children}</ToastProvider>;
+  // QuarterCard's per-client "View trends" link uses react-router, so the
+  // smoke test needs a Router in context (the real app always has one).
+  return (
+    <MemoryRouter>
+      <ToastProvider>{children}</ToastProvider>
+    </MemoryRouter>
+  );
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
