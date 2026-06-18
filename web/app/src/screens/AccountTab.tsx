@@ -5,6 +5,7 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { useDashboardContext } from "./DashboardLayout";
 import { AccountProfileCard } from "../components/settings/AccountProfileCard";
 import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
+import { SpongeProgressCard } from "../components/settings/SpongeProgressCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
 import { DangerZoneCard } from "../components/settings/DangerZoneCard";
 
@@ -53,6 +54,7 @@ export default function AccountTab() {
         </p>
       </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
+      <SpongeProgressCard />
       <UtilityConnectionsCard account={account} />
       <PlanBillingCard account={account} />
       {account.subscription_status === "trialing" && (

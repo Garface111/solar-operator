@@ -19,6 +19,7 @@ const VerifyAccuracy = lazyWithRetry(() => import("./screens/VerifyAccuracy"));
 const AccountTab = lazyWithRetry(() => import("./screens/AccountTab"));
 const ReportsTab = lazyWithRetry(() => import("./screens/ReportsTab"));
 const TrendsView = lazyWithRetry(() => import("./screens/TrendsView"));
+const EnergyHistoryView = lazyWithRetry(() => import("./screens/EnergyHistoryView"));
 import { useToast } from "./ui/Toast";
 import {
   getSession,
@@ -164,6 +165,17 @@ function AuthGate() {
           element={
             <Suspense fallback={<TabSpinner />}>
               <AccountTab />
+            </Suspense>
+          }
+        />
+        {/* The owner's absorbed multi-year energy history (the "data sponge").
+            Sub-route under account; reuses the billing Trends chart components so
+            the two read as one product. */}
+        <Route
+          path="/account/energy-history"
+          element={
+            <Suspense fallback={<TabSpinner />}>
+              <EnergyHistoryView />
             </Suspense>
           }
         />

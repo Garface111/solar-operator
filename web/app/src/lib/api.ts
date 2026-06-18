@@ -1383,6 +1383,101 @@ export async function getBillingTrends(
   return normalizeTrends(raw);
 }
 
+// ─── data sponge (energy history) ──────────────────────────────────────────
+// The owner's FULL utility energy record, absorbed at onboarding. Two endpoints:
+//   GET /v1/account/sponge          → live progress of the absorb (progress bar)
+//   GET /v1/account/energy-history  → the absorbed multi-year record + summary
+// Read defensively so a thin / not-yet-deployed backend never throws.
+
+export interface SpongeStatus {
+  status: "idle" | "running" | "done" | "error";
+  accounts_total: number;
+  accounts_done: number;
+  bills_absorbed: number;
+  years_covered: number | null;
+  pct: number;
+  message: string | null;
+  error?: string | null;
+}
+
+export interface EnergyPeriod {
+  period_start: string | null;
+  period_end: string | null;
+  bill_date: string | null;
+  billing_days: number | null;
+  kwh_generated: number | null;
+  kwh_consumed: number | null;
+  kwh_sent_to_grid: number | null;
+  kwh_gross_generated: number | null;
+  is_net_metered: boolean | null;
+  total_cost: number | null;
+  net_credit: number | null;
+  avg_rate_cents_kwh: number | null;
+  supplier: string | null;
+}
+
+export interface EnergyHistory {
+  summary: {
+    bills: number;
+    years_covered: number | null;
+    total_kwh_generated: number;
+    total_kwh_consumed: number;
+  };
+  periods: EnergyPeriod[];
+}
+
+export async function getSpongeStatus(): Promise<SpongeStatus> {
+  const raw = (await request<unknown>("/v1/account/sponge")) as Record<string, unknown>;
+  const r = raw ?? {};
+  const s = typeof r.status === "string" ? r.status : "idle";
+  return {
+    status: (["idle", "running", "done", "error"].includes(s) ? s : "idle") as SpongeStatus["status"],
+    accounts_total: num(r.accounts_total) ?? 0,
+    accounts_done: num(r.accounts_done) ?? 0,
+    bills_absorbed: num(r.bills_absorbed) ?? 0,
+    years_covered: num(r.years_covered),
+    pct: num(r.pct) ?? 0,
+    message: typeof r.message === "string" ? r.message : null,
+    error: typeof r.error === "string" ? r.error : null,
+  };
+}
+
+export async function getEnergyHistory(): Promise<EnergyHistory> {
+  const raw = (await request<unknown>("/v1/account/energy-history")) as Record<string, unknown>;
+  const r = raw ?? {};
+  const rs = (r.summary ?? {}) as Record<string, unknown>;
+  const periodsRaw = Array.isArray(r.periods) ? r.periods : [];
+  const periods: EnergyPeriod[] = periodsRaw.map((p) => {
+    const e = (p ?? {}) as Record<string, unknown>;
+    const str = (k: string) => (typeof e[k] === "string" ? (e[k] as string) : null);
+    const bool = (k: string) => (typeof e[k] === "boolean" ? (e[k] as boolean) : null);
+    return {
+      period_start: str("period_start"),
+      period_end: str("period_end"),
+      bill_date: str("bill_date"),
+      billing_days: num(e.billing_days),
+      kwh_generated: num(e.kwh_generated),
+      kwh_consumed: num(e.kwh_consumed),
+      kwh_sent_to_grid: num(e.kwh_sent_to_grid),
+      kwh_gross_generated: num(e.kwh_gross_generated),
+      is_net_metered: bool("is_net_metered"),
+      total_cost: num(e.total_cost),
+      net_credit: num(e.net_credit),
+      avg_rate_cents_kwh: num(e.avg_rate_cents_kwh),
+      supplier: str("supplier"),
+    };
+  });
+  return {
+    summary: {
+      bills: num(rs.bills) ?? 0,
+      years_covered: num(rs.years_covered),
+      total_kwh_generated: num(rs.total_kwh_generated) ?? 0,
+      total_kwh_consumed: num(rs.total_kwh_consumed) ?? 0,
+    },
+    periods,
+  };
+}
+
 // ─── spreadsheet ingest (V4) ─────────────────────────────────────────────
 
 /** Per-row provenance from the server — how data was extracted and whether
