@@ -359,7 +359,13 @@ export default function EnergyHistoryView() {
           </Button>
         </div>
       ) : !hasData ? (
-        <EmptyHistory />
+        <>
+          {/* Even with no absorbed BILLS yet, the all-time fleet report
+              aggregates per-array GENERATION (DailyGeneration), so the export
+              is still useful — show it above the connect-your-utility prompt. */}
+          <DownloadReport />
+          <EmptyHistory />
+        </>
       ) : (
         <>
           {/* Headline stats — the "data sponge" payoff. */}
