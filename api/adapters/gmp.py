@@ -165,54 +165,88 @@ def _extract_kwh_generated(bill: dict) -> float | None:
     return best if best > 0 else None
 
 
-# Candidate unitCode sets for the full energy record. unitCode/GENERATE is the
-# ONLY one verified against a real GMP HAR; the rest are best-effort guesses and
-# are why we ALSO store raw_json — so a field we mislabel here is never LOST and
-# a future view can re-derive it. Treat the modeled fields as a convenience layer
-# over the authoritative raw_json.
-_CONSUME_CODES = {"CONSUME", "USAGE", "KWHUSED", "DELIVERED", "USED"}
-_SENT_CODES = {"SENTTOGRID", "EXPORT", "DELIVEREDTOGRID"}
+# GMP bill JSON line-item unitCodes — VERIFIED against live prod raw_json
+# (introspected 2026-06-18 across 400+ real bills). The energy record lives in
+# segmentLineItems[].unitCode (KWH) + dollarAmount; the bill's money is in
+# segmentCalcs[].dollarAmount (rate-level summary, sums to the same total as the
+# line items — use ONE, never both). raw_json is still stored so any field not
+# modeled here is recoverable without a re-pull.
+_CONSUME_CODES = {"CONSUMED"}              # KWH consumed from the grid
+_SENT_CODES = {"EXCESS", "EXCESSO"}        # KWH excess generation sent to grid (credited)
+_NET_CODES = {"NET"}                       # net KWH (consumed - generated)
+_SOLCRED_CODES = {"SOLCRED"}               # solar credit KWH line(s)
 
 
 def _sum_kwh_by_codes(bill: dict, codes: set[str]) -> float | None:
-    """Sum KWH line items whose unitCode is in `codes`, across all segments."""
-    total = 0.0
-    found = False
+    """Largest single KWH line item per code-set across all segments. GMP repeats
+    a placeholder 0.0 row plus the real total (and sometimes duplicates), so MAX
+    (not SUM) collapses safely — mirrors _extract_kwh_generated."""
+    best = None
     for seg in bill.get("billSegments", []):
         for li in seg.get("segmentLineItems", []):
             if li.get("unitOfMeasure") == "KWH" and li.get("unitCode") in codes:
                 v = _to_float(li.get("unitCount"))
-                if v is not None:
-                    total += v
-                    found = True
-    return total if found else None
+                if v is not None and (best is None or abs(v) > abs(best)):
+                    best = v
+    return best
+
+
+def _bill_total_cost(bill: dict) -> float | None:
+    """Total $ for the bill = sum of segmentCalcs[].dollarAmount (the rate-level
+    charge summary). Negative = a net credit (net-metering customer earning).
+    Falls back to summing line-item dollarAmounts if no segmentCalcs exist."""
+    calc_total = 0.0
+    calc_found = False
+    li_total = 0.0
+    li_found = False
+    for seg in bill.get("billSegments", []):
+        for c in (seg.get("segmentCalcs") or []):
+            d = _to_float(c.get("dollarAmount"))
+            if d is not None:
+                calc_total += d
+                calc_found = True
+        for li in seg.get("segmentLineItems", []):
+            d = _to_float(li.get("dollarAmount"))
+            if d is not None:
+                li_total += d
+                li_found = True
+    if calc_found:
+        return round(calc_total, 2)
+    if li_found:
+        return round(li_total, 2)
+    return None
 
 
 def _extract_full_record(bill: dict) -> dict[str, Any]:
-    """Extract the FULL energy record from a GMP bill JSON: consumption, sent-to-
-    grid, gross gen, total cost, net credit, blended rate, supplier, net-metered.
+    """Extract the FULL energy record from a GMP bill JSON, grounded on the REAL
+    field names verified against live prod data: consumption (CONSUMED), excess
+    sent to grid (EXCESS), gross generation (GENERATE), bill cost (segmentCalcs
+    dollarAmount — negative = credit), blended rate, net-metered flag.
 
-    Defensive: every field may be None (GMP omits fields for non-solar accounts /
-    older bills). The bill's raw_json is stored alongside so nothing is lost even
-    when a code here misses — these modeled fields are the queryable convenience
-    layer, raw_json is the authoritative sponge."""
+    raw_json is stored alongside so anything not modeled here is recoverable."""
     gross = _extract_kwh_generated(bill)
     consumed = _sum_kwh_by_codes(bill, _CONSUME_CODES)
     sent = _sum_kwh_by_codes(bill, _SENT_CODES)
 
-    # Bill-level money: prefer explicit top-level totals when GMP provides them,
-    # else sum segment charge amounts. amountDue / totalAmount are common GMP keys.
-    total_cost = _to_float(
-        bill.get("amountDue") or bill.get("totalAmount") or bill.get("billAmount")
-    )
-    net_credit = _to_float(bill.get("netMeteringCredit") or bill.get("solarCredit"))
+    total_cost = _bill_total_cost(bill)
+    # Net-metering credit: a NEGATIVE bill total IS the credit the owner earned.
+    net_credit = -total_cost if (total_cost is not None and total_cost < 0) else None
 
-    # Blended rate: total cost / kWh consumed, in cents — only when both known.
+    # Blended rate (¢/kWh): |cost| / kWh consumed, only when both meaningful.
     avg_rate = None
     if total_cost is not None and consumed and consumed > 0:
-        avg_rate = round((total_cost / consumed) * 100.0, 3)
+        avg_rate = round((abs(total_cost) / consumed) * 100.0, 3)
 
-    supplier = bill.get("supplier") or bill.get("supplierName") or bill.get("energySupplier")
+    # Net-metered if the bill carries any excess/solar-credit/generation signal.
+    is_nm = None
+    codes_seen = {
+        li.get("unitCode")
+        for seg in bill.get("billSegments", [])
+        for li in seg.get("segmentLineItems", [])
+    }
+    if codes_seen:
+        nm_codes = _SENT_CODES | _SOLCRED_CODES | {"GENERATE"}
+        is_nm = bool((codes_seen & nm_codes) and (gross or sent))
 
     return {
         "kwh_gross_generated": gross,
@@ -221,8 +255,8 @@ def _extract_full_record(bill: dict) -> dict[str, Any]:
         "total_cost": total_cost,
         "net_credit": net_credit,
         "avg_rate_cents_kwh": avg_rate,
-        "supplier": str(supplier)[:120] if supplier else None,
-        "is_net_metered": bool(bill.get("isNetMetered")) if "isNetMetered" in bill else None,
+        "supplier": "Green Mountain Power",
+        "is_net_metered": is_nm,
     }
 
 

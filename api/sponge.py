@@ -153,6 +153,41 @@ def _years_covered(db, tenant_id: str) -> float | None:
     return round(days / 365.25, 1) if days > 0 else None
 
 
+def rederive_from_raw(tenant_id: str | None = None, batch: int = 500) -> dict:
+    """Re-parse the full energy record from already-stored raw_json — NO re-pull.
+
+    When the GMP parser improves (e.g. learning the real cost/consumption field
+    names), every bill we ever absorbed can be re-derived in place from its stored
+    raw_json. This is the payoff of keeping raw_json: a parser fix retroactively
+    enriches years of history instantly. Scope to one tenant or run fleet-wide.
+    """
+    from .adapters import gmp as _gmp
+    updated = 0
+    scanned = 0
+    with SessionLocal() as db:
+        q = select(Bill).where(Bill.raw_json.isnot(None))
+        if tenant_id:
+            q = q.where(Bill.tenant_id == tenant_id)
+        rows = db.execute(q).scalars().all()
+        for b in rows:
+            scanned += 1
+            full = _gmp._extract_full_record(b.raw_json or {})
+            b.kwh_gross_generated = full["kwh_gross_generated"]
+            cons = full["kwh_consumed_full"]
+            b.kwh_consumed = int(round(cons)) if cons is not None else b.kwh_consumed
+            b.kwh_sent_to_grid = full["kwh_sent_to_grid"]
+            b.is_net_metered = full["is_net_metered"]
+            b.total_cost = full["total_cost"]
+            b.net_credit = full["net_credit"]
+            b.avg_rate_cents_kwh = full["avg_rate_cents_kwh"]
+            b.supplier = full["supplier"]
+            updated += 1
+            if updated % batch == 0:
+                db.commit()
+        db.commit()
+    return {"scanned": scanned, "updated": updated}
+
+
 def sponge_status(tenant_id: str, provider: str = "gmp") -> dict:
     """Snapshot for the progress-bar poller. Always returns a usable shape."""
     with SessionLocal() as db:
