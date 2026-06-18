@@ -12,6 +12,7 @@ import {
   approveDraft,
   attachGmpInvoice,
   createManualSubscription,
+  downloadInvoiceWorkbook,
   generateDraft,
   getSubscriptionPreview,
   listAllArrays,
@@ -402,6 +403,12 @@ function ReviewDrawer({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [sending, setSending] = useState(false);
   const [attaching, setAttaching] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  // A subscription is workbook-sourced when it carries an uploaded format
+  // (source_filename). Manual (typed-in) customers have allocation_pct set and
+  // no workbook, so they have no own-format invoice to download.
+  const hasOwnFormat = Boolean(sub.source_filename);
 
   const rate = rateFor(draft);
   const pct = draft.allocation_pct != null ? draft.allocation_pct * 100 : pctOf(sub);
@@ -432,6 +439,26 @@ function ReviewDrawer({
       toast.error(err instanceof Error ? err.message : "Couldn't attach PDF");
     } finally {
       setAttaching(false);
+    }
+  }
+
+  async function handleDownloadWorkbook() {
+    setDownloading(true);
+    try {
+      await downloadInvoiceWorkbook(sub.id, sub.customer_name);
+    } catch (err) {
+      // The backend returns 422 for manual subs (no uploaded format); fall
+      // back gracefully with a clear message rather than a raw error.
+      const msg = err instanceof Error ? err.message : "";
+      if (/422/.test(msg)) {
+        toast.error(
+          "This customer has no uploaded format — using the standard invoice",
+        );
+      } else {
+        toast.error(msg || "Couldn't download the invoice");
+      }
+    } finally {
+      setDownloading(false);
     }
   }
 
@@ -577,6 +604,25 @@ function ReviewDrawer({
               </div>
             </div>
           </div>
+
+          {/* Download the customer's own-format populated invoice. Only shown
+              for workbook-sourced subscriptions — manual (typed-in) customers
+              have no uploaded format to populate. */}
+          {hasOwnFormat && (
+            <button
+              type="button"
+              onClick={() => void handleDownloadWorkbook()}
+              disabled={downloading}
+              className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-primary-700 hover:text-primary-800 disabled:opacity-60"
+            >
+              <span className="grid h-5 w-5 place-items-center rounded bg-primary-50 text-xs font-bold text-primary-800">
+                ↓
+              </span>
+              {downloading
+                ? "Preparing…"
+                : "Download invoice (.xlsx, your format)"}
+            </button>
+          )}
 
           {/* Email fields */}
           <label className={LABEL}>To</label>
@@ -1083,8 +1129,19 @@ export default function ReportsTab() {
             </Button>
           </div>
         ) : subs.length === 0 ? (
-          <div className="px-5 py-10 text-center text-sm text-zinc-400">
-            No billing customers yet. Add your first customer below to start a run.
+          <div className="flex flex-col items-center gap-4 px-5 py-12 text-center">
+            <p className="text-sm text-zinc-400">
+              No billing customers yet. Add your first customer to start a run.
+            </p>
+            <button
+              type="button"
+              onClick={() => setAddOpen(true)}
+              data-testid="add-first-customer"
+              className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-primary-700"
+            >
+              <span className="text-base font-bold leading-none">+</span>
+              Add your first customer
+            </button>
           </div>
         ) : (
           <table className="w-full border-collapse">
@@ -1257,7 +1314,10 @@ export default function ReportsTab() {
         )}
 
         {/* ── Add a customer (inline) ─────────────────────────────────────── */}
-        {!loading && !loadError && (
+        {/* When there are zero customers the prominent empty-state CTA above
+            opens this same form, so we only render the dashed collapsed row
+            when there are existing customers (or the form is already open). */}
+        {!loading && !loadError && (subs.length > 0 || addOpen) && (
           <AddCustomerRow
             arrays={arrays}
             open={addOpen}

@@ -12,6 +12,22 @@ same session bearer used everywhere else (account.tenant_from_session).
   POST   /subscriptions/{id}/send-now    test/manual send (test=1 forces to_me)
   GET    /subscriptions/{id}/preview     stream invoice|summary as pdf|xlsx
   GET    /subscriptions/{id}/trends      multi-year billing trends (JSON, CONTRACT 1)
+
+THREE SPREADSHEET SYSTEMS — keep them straight (they're easy to conflate):
+  1. api/writers/gmcs_writer.py        WRITES the NEPOOL-GIS *GMCS filing*
+                                       workbook — the NEPOOL Operator product's
+                                       quarterly output. NOT a customer invoice.
+  2. api/billing/matcher.py            READS an uploaded *customer billing*
+                                       workbook (HCT family) → BillingMatch.
+                                       Powers POST /match and onboarding.
+  3. api/billing/invoice_writer.py     WRITES the customer's invoice back into
+                                       THEIR OWN uploaded format (loads the
+                                       stored original, populates the period,
+                                       preserves styling/formulas/Template).
+                                       Served by GET /preview?kind=invoice&fmt=xlsx
+                                       for workbook subs.
+Manual (typed-in) customers have no uploaded workbook, so their invoice is the
+standard generated one (api/billing/invoice.py).
 """
 from __future__ import annotations
 
@@ -402,6 +418,23 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
         with tempfile.TemporaryDirectory(prefix="ao-prev-") as tmp:
             tmpd = pathlib.Path(tmp)
             if kind == "invoice":
+                # Invoice in the customer's OWN uploaded format: for workbook
+                # subs we load their stored .xlsx and populate it (preserving
+                # all styling/formulas/the Template sheet). Manual customers (no
+                # source_workbook) fall back to the standard generated invoice.
+                if fmt == "xlsx" and getattr(sub, "source_workbook", None):
+                    from .invoice_writer import (
+                        populate_invoice_workbook, InvoiceWriterError)
+                    try:
+                        blob = populate_invoice_workbook(sub)
+                    except InvoiceWriterError as e:
+                        raise HTTPException(422, str(e))
+                    media = ("application/vnd.openxmlformats-officedocument"
+                             ".spreadsheetml.sheet")
+                    fname = f"{sub.customer_name.replace(' ', '_')}_invoice.xlsx"
+                    return StreamingResponse(
+                        io.BytesIO(blob), media_type=media,
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
                 from . import invoice as inv
                 p = (inv.render_invoice_pdf(match, tmpd / "p.pdf") if fmt == "pdf"
                      else inv.render_invoice_xlsx(match, tmpd / "p.xlsx"))

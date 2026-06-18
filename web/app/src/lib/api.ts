@@ -916,7 +916,88 @@ export async function downloadClientReport(
   URL.revokeObjectURL(link.href);
 }
 
-// ─── production ──────────────────────────────────────────────────────────
+/** Stream the all-time aggregated fleet report (Excel or PDF) and trigger a
+ *  browser download. Session-authed (Bearer token); the server reads the DB
+ *  live so the file always reflects the latest absorbed month. */
+export async function downloadFleetReport(fmt: "xlsx" | "pdf"): Promise<void> {
+  const token = getSession();
+  const res = await fetchWithTimeout(
+    `/v1/account/fleet-report?fmt=${fmt}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the report (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  // Prefer the server-provided filename; fall back to a sensible default.
+  let filename = `FleetReport-AllTime.${fmt}`;
+  const cd = res.headers.get("Content-Disposition");
+  const match = cd?.match(/filename="?([^"]+)"?/);
+  if (match) filename = match[1];
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
+/** Download a billing customer's OWN-format populated invoice (.xlsx) — the
+ *  workbook in the customer's own uploaded layout. Only meaningful for
+ *  workbook-sourced subscriptions; the backend returns 422 for manual
+ *  (typed-in) customers, which callers should surface gracefully. Session-
+ *  authed (Bearer token); honors the server's Content-Disposition filename and
+ *  falls back to `${customerName}_invoice.xlsx`. */
+export async function downloadInvoiceWorkbook(
+  subId: number,
+  customerName: string,
+): Promise<void> {
+  const token = getSession();
+  const res = await fetchWithTimeout(
+    `/v1/array-operator/billing/subscriptions/${subId}/preview?kind=invoice&fmt=xlsx`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the invoice (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  // Prefer the server-provided filename; fall back to a sensible default.
+  const safeName = customerName.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  let filename = `${safeName}_invoice.xlsx`;
+  const cd = res.headers.get("Content-Disposition");
+  const match = cd?.match(/filename=\"?([^\"]+)\"?/);
+  if (match) filename = match[1];
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
 
 export interface ProductionMonthEntry {
   month: string; // "YYYY-MM"

@@ -15,6 +15,7 @@ Tokens expire after 15 minutes (login link) or 30 days (session).
 from __future__ import annotations
 
 import calendar
+import io
 import os
 import re
 import secrets
@@ -33,7 +34,7 @@ from typing import Optional
 
 import stripe
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
@@ -869,6 +870,30 @@ def account_energy_history(authorization: Optional[str] = Header(default=None)):
             },
             "periods": periods,
         }
+
+
+@router.get("/v1/account/fleet-report")
+def account_fleet_report(fmt: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
+                         authorization: Optional[str] = Header(default=None)):
+    """All-time aggregated fleet data report (Excel or PDF).
+
+    Aggregates the operator's WHOLE fleet across ALL time — generation by year
+    and month, per-array breakdown, plus bill-derived consumption/credit — read
+    LIVE from the DB each call so the file always reflects the latest absorbed
+    month (it is generated on demand, never a frozen snapshot).
+
+    Session-authed (dashboard Bearer token), like the rest of /v1/account/*.
+    """
+    t = tenant_from_session(authorization)
+    from .reports.fleet_report import build_fleet_report, report_filename
+    blob = build_fleet_report(t, fmt)
+    fname = report_filename(t, fmt)
+    media = ("application/pdf" if fmt == "pdf"
+             else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return StreamingResponse(
+        io.BytesIO(blob), media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ─── account mutations ──────────────────────────────────────────────────

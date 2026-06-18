@@ -12,6 +12,7 @@ import {
   type EnergyPeriod,
   type TrendMonthPoint,
   getEnergyHistory,
+  downloadFleetReport,
 } from "../lib/api";
 
 // ─── shared back link (mirrors TrendsView for consistent nav) ────────────────
@@ -233,6 +234,60 @@ function HistorySkeleton() {
   );
 }
 
+// ─── all-time fleet report download ──────────────────────────────────────────
+
+/** Prominent 'Download report' control with Excel / PDF options. Streams the
+ *  server-built blob (read live from the DB, so always current) to a download. */
+function DownloadReport() {
+  const [busy, setBusy] = useState<"xlsx" | "pdf" | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const onDownload = useCallback((fmt: "xlsx" | "pdf") => {
+    setBusy(fmt);
+    setErr(null);
+    downloadFleetReport(fmt)
+      .catch((e) =>
+        setErr(e instanceof Error ? e.message : "Couldn't build the report"),
+      )
+      .finally(() => setBusy(null));
+  }, []);
+
+  return (
+    <div className="rounded-xl border border-cream-border bg-cream p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-zinc-800">
+            Download all-time fleet report
+          </div>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            Every array, every year — aggregated live, so it always reflects your
+            latest absorbed month.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => onDownload("xlsx")}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-primary-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-primary-700 disabled:opacity-60"
+          >
+            {busy === "xlsx" ? "Building…" : "Excel"}
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => onDownload("pdf")}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-primary-600 bg-white px-3.5 py-2 text-xs font-semibold text-primary-700 transition-colors hover:bg-primary-50 disabled:opacity-60"
+          >
+            {busy === "pdf" ? "Building…" : "PDF"}
+          </button>
+        </div>
+      </div>
+      {err && <p className="mt-2 text-xs text-red-600">{err}</p>}
+    </div>
+  );
+}
+
 // ─── screen ──────────────────────────────────────────────────────────────────
 
 export default function EnergyHistoryView() {
@@ -321,6 +376,10 @@ export default function EnergyHistoryView() {
               tone={earnedCredit ? "up" : "neutral"}
             />
           </div>
+
+          {/* All-time fleet report export — the absorbed history as a
+              downloadable Excel/PDF, generated live so it's always current. */}
+          <DownloadReport />
 
           {/* Multi-year monthly trend lines — reuses the same chart as the
               billing Trends tab so the two views read as one product. */}
