@@ -1499,6 +1499,130 @@ export async function listAllArrays(): Promise<FlatArray[]> {
   return lists.flat();
 }
 
+/** Patch a billing subscription. The redesigned Reports tab uses this for the
+ *  inline allocation-% edit (allocation_pct is a fraction in (0, 1]) and for
+ *  reassigning the array. Any other editable field is accepted too. */
+export interface SubscriptionPatchInput {
+  customer_name?: string;
+  cadence?: "monthly" | "quarterly";
+  delivery_mode?: "approval" | "auto";
+  send_mode?: "to_me" | "to_client" | "to_both";
+  client_email?: string | null;
+  cc_emails?: string | null;
+  operator_email?: string | null;
+  enabled?: boolean;
+  /** Fraction in (0, 1] — e.g. 0.95 for 95%. */
+  allocation_pct?: number;
+  array_id?: number;
+}
+
+export async function patchSubscription(
+  id: number,
+  patch: SubscriptionPatchInput,
+): Promise<BillingSubscription> {
+  const res = await request<{ ok: boolean; subscription: BillingSubscription }>(
+    `/v1/array-operator/billing/subscriptions/${id}`,
+    { method: "PATCH", body: patch },
+  );
+  return res.subscription;
+}
+
+// ─── billing drafts (the approval inbox / per-period review) ────────────────
+// A draft = ONE customer's invoice for the current billing period, pending the
+// operator's "Approve & send". The redesigned Reports run-table surfaces these.
+
+export interface ReportDraft {
+  id: number;
+  subscription_id: number;
+  customer_name: string;
+  status: "pending" | "sent" | "dismissed";
+  period_label: string | null;
+  array_total_kwh: number | null;
+  allocation_pct: number | null;
+  customer_kwh: number | null;
+  amount_usd: number | null;
+  invoice_number: string | null;
+  has_gmp_pdf: boolean;
+  gmp_filename: string | null;
+  note: string | null;
+  created_at: string | null;
+  sent_at: string | null;
+}
+
+export async function listDrafts(
+  status: "pending" | "sent" | "dismissed" | "all" = "pending",
+): Promise<ReportDraft[]> {
+  const res = await request<{ drafts: ReportDraft[] }>(
+    `/v1/array-operator/billing/drafts?status=${status}`,
+  );
+  return res.drafts ?? [];
+}
+
+/** Build (or fetch the idempotent) pending draft for a subscription's latest
+ *  billing period, then open the review drawer with it. */
+export async function generateDraft(subId: number): Promise<ReportDraft> {
+  const res = await request<{ ok: boolean; draft: ReportDraft }>(
+    `/v1/array-operator/billing/subscriptions/${subId}/draft`,
+    { method: "POST", body: {} },
+  );
+  return res.draft;
+}
+
+/** Edit a draft before sending (currently the operator note). */
+export async function patchDraft(
+  draftId: number,
+  patch: { note?: string },
+): Promise<ReportDraft> {
+  const res = await request<{ ok: boolean; draft: ReportDraft }>(
+    `/v1/array-operator/billing/drafts/${draftId}`,
+    { method: "PATCH", body: patch },
+  );
+  return res.draft;
+}
+
+/** Approve & send a draft — the single human gate in front of delivery. */
+export async function approveDraft(draftId: number): Promise<ReportDraft> {
+  const res = await request<{ ok: boolean; draft: ReportDraft }>(
+    `/v1/array-operator/billing/drafts/${draftId}/approve`,
+    { method: "POST", body: {} },
+  );
+  return res.draft;
+}
+
+/** Discard a draft without sending. */
+export async function dismissDraft(draftId: number): Promise<void> {
+  await request(`/v1/array-operator/billing/drafts/${draftId}/dismiss`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+/** Attach the period's GMP utility-invoice PDF to a draft (multipart upload). */
+export async function attachGmpInvoice(
+  draftId: number,
+  file: File,
+): Promise<ReportDraft> {
+  const token = getSession();
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetchWithTimeout(
+    `/v1/array-operator/billing/drafts/${draftId}/gmp-invoice`,
+    {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    },
+  );
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  const body = (await res.json()) as { draft: ReportDraft };
+  return body.draft;
+}
+
 // ─── data sponge (energy history) ──────────────────────────────────────────
 // The owner's FULL utility energy record, absorbed at onboarding. Two endpoints:
 //   GET /v1/account/sponge          → live progress of the absorb (progress bar)

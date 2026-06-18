@@ -292,6 +292,11 @@ class SubscriptionPatch(BaseModel):
     include_summary: Optional[bool] = None
     annual_trueup: Optional[bool] = None
     enabled: Optional[bool] = None
+    # Redesigned Reports tab: inline-edit a manual customer's allocation % and
+    # (re)assign the array. allocation_pct is a fraction in (0, 1]. array_id ties
+    # the manual customer to the array whose generation is split.
+    allocation_pct: Optional[float] = None
+    array_id: Optional[int] = None
 
 
 @router.patch("/subscriptions/{sub_id}")
@@ -331,6 +336,21 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
             sub.annual_trueup = body.annual_trueup
         if body.enabled is not None:
             sub.enabled = body.enabled
+        if body.allocation_pct is not None:
+            try:
+                pct = float(body.allocation_pct)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "allocation_pct must be a number in (0, 1]")
+            if not (0.0 < pct <= 1.0):
+                raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
+                                         "(e.g. 0.95 for 95%)")
+            sub.allocation_pct = pct
+        if body.array_id is not None:
+            from ..models import Array
+            arr = db.get(Array, body.array_id)
+            if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
+                raise HTTPException(404, "Array not found")
+            sub.array_id = body.array_id
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
