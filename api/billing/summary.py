@@ -14,9 +14,15 @@ telemetry-connected the caller can pass `peer` health to enrich it.
 from __future__ import annotations
 
 import pathlib
+from collections import defaultdict
 from typing import Optional
 
 from .matcher import BillingMatch, Period
+
+# Stable month abbreviations (locale-independent — never use calendar's, which
+# follows the process locale and would drift the JSON shape across machines).
+_MONTH_ABBR = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
 def _same_month_prior_year(periods: list[Period], latest: Period) -> Optional[Period]:
@@ -62,6 +68,95 @@ def build_summary(match: BillingMatch, peer: Optional[dict] = None) -> dict:
     ]
     if peer:
         out["peer"] = peer
+    return out
+
+
+def _empty_trends(customer_name: Optional[str]) -> dict:
+    """The CONTRACT-1 shape for a subscription with no usable history. Returned
+    verbatim on thin/empty data so the endpoint is a 200, never a 500."""
+    return {
+        "customer_name": customer_name,
+        "years": [],
+        "monthly_by_year": {},
+        "seasonal_yoy": [],
+        "ttm_kwh": None,
+        "ttm_savings": None,
+        "lifetime_kwh": None,
+        "summary_note": None,
+    }
+
+
+def build_trends(match: BillingMatch) -> dict:
+    """Multi-year billing trends for the macro trends tab (CONTRACT 1).
+
+    Pure + derived entirely from the workbook ledger — the same source as
+    build_summary, no telemetry. Groups customer_kwh (and savings) by calendar
+    (year, month) so the frontend can overlay one line per year and read
+    seasonal year-over-year growth at a glance.
+
+      monthly_by_year: per year, the months that have data → {month, kwh, savings}.
+      seasonal_yoy:    per calendar month present, each year's kWh + the latest
+                       year's % change vs the immediately prior year (null if
+                       that prior year has no value for the month).
+      ttm/lifetime:    reused verbatim from build_summary.
+
+    Thin/empty workbook → empty collections + null scalars (never raises).
+    """
+    out = _empty_trends(match.customer.get("name"))
+
+    # Only periods with a real calendar date AND generation can be placed on the
+    # year×month grid. Undated rows can't be attributed to a season.
+    dated = [p for p in match.periods if p.end and (p.customer_kwh or p.array_kwh)]
+    if not dated:
+        return out
+
+    # Sum customer_kwh + savings per (year, month) — defensive against a ledger
+    # that splits a calendar month across two rows.
+    agg: dict[tuple[int, int], dict] = defaultdict(lambda: {"kwh": 0.0, "savings": 0.0})
+    for p in dated:
+        cell = agg[(p.end.year, p.end.month)]
+        cell["kwh"] += p.customer_kwh or 0.0
+        cell["savings"] += p.savings or 0.0
+
+    years = sorted({y for (y, _m) in agg})
+    out["years"] = years
+    out["monthly_by_year"] = {
+        str(y): [
+            {"month": m,
+             "kwh": round(agg[(y, m)]["kwh"], 1),
+             "savings": round(agg[(y, m)]["savings"], 2)}
+            for m in range(1, 13) if (y, m) in agg
+        ]
+        for y in years
+    }
+
+    seasonal: list[dict] = []
+    for m in sorted({mo for (_y, mo) in agg}):
+        by_year = {str(y): round(agg[(y, m)]["kwh"], 1) for y in years if (y, m) in agg}
+        present = sorted(int(y) for y in by_year)
+        latest_y = present[-1]
+        prior_v = by_year.get(str(latest_y - 1))   # immediately prior calendar year
+        latest_v = by_year[str(latest_y)]
+        delta_pct = (round(100 * (latest_v - prior_v) / prior_v, 1)
+                     if prior_v else None)
+        seasonal.append({
+            "month": m,
+            "label": _MONTH_ABBR[m],
+            "by_year": by_year,
+            "latest_delta_pct": delta_pct,
+        })
+    out["seasonal_yoy"] = seasonal
+
+    # Trailing-12-month + lifetime totals are already correct in build_summary;
+    # reuse them rather than recomputing (single source of truth).
+    summary = build_summary(match)
+    out["ttm_kwh"] = summary.get("ttm_kwh")
+    out["ttm_savings"] = summary.get("ttm_savings")
+    out["lifetime_kwh"] = summary.get("lifetime_kwh")
+    out["summary_note"] = (
+        f"{len(years)} years of billing history on record."
+        if len(years) != 1 else "1 year of billing history on record."
+    )
     return out
 
 
