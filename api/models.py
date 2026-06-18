@@ -103,6 +103,17 @@ class Tenant(Base):
         Float, nullable=True
     )
 
+    # ── Discount billing model (Jun 2026) ────────────────────────────────
+    # The customer pays the NET RATE minus a DISCOUNT (the operator's savings
+    # offer): invoice = produced kWh × net_rate × (1 − discount). Both are the
+    # operator's GLOBAL defaults, overridable per customer on the subscription.
+    #   default_discount_pct      — fraction in [0,1); null → DEFAULT_DISCOUNT (0.10 = 10% off)
+    #   default_net_rate_per_kwh  — $/kWh the discount applies to; null → VT default tariff
+    # (Supersedes the flat default_billing_rate_per_kwh above, kept only for
+    # backward-compat; new pricing reads the discount model.)
+    default_discount_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    default_net_rate_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # ── Email customization (V2, June 2026) ──────────────────────────────
     # Let the tenant (a NEPOOL stamping agent) control how reports go out
     # under their professional name. All nullable → null means "use the
@@ -1023,6 +1034,13 @@ class BillingReportSubscription(Base):
     # to the operator's global Tenant.default_billing_rate_per_kwh, then to the
     # legacy VT default. Lets Paul set one global rate and override per offtaker.
     rate_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Per-customer discount-model overrides (Jun 2026). When set, they win over
+    # the tenant's global defaults. invoice = kWh × net_rate × (1 − discount).
+    #   discount_pct      — fraction in [0,1); null → operator global → 10% default
+    #   net_rate_per_kwh  — $/kWh the discount applies to; null → global → VT default
+    discount_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_rate_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Dormant hook (Paul's reporting build): the utility's GMP invoice PDF, fed
     # later by the GMP-detection backend. When present, delivery attaches it

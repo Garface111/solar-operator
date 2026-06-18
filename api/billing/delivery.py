@@ -77,28 +77,81 @@ def build_match(sub) -> BillingMatch:
 MANUAL_TARIFF = 0.18398
 MANUAL_BILLING_RATE = 0.9
 
+# Default discount when neither the customer nor the operator set one: 10% off
+# the net rate (i.e. the customer pays 90% — matches the legacy MANUAL_BILLING_RATE).
+DEFAULT_DISCOUNT = 0.10
 
-def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:
-    """Resolve the effective $/kWh to bill this customer, and where it came from.
 
-    Precedence (Paul's model — global default + per-customer override):
-      1. sub.rate_per_kwh                          → "customer"   (override wins)
-      2. tenant.default_billing_rate_per_kwh       → "global"     (operator default)
-      3. None                                      → "vt_default" (legacy fallback;
-         caller prices via MANUAL_TARIFF × MANUAL_BILLING_RATE)
-    Returns (rate_or_None, source_label).
+def resolve_discount_pricing(sub) -> dict:
+    """Resolve the discount-model pricing for a customer.
+
+    invoice = produced kWh × net_rate × (1 − discount).
+
+    Precedence per field (customer override → operator global → built-in default):
+      net_rate : sub.net_rate_per_kwh → tenant.default_net_rate_per_kwh
+                 → legacy sub.rate_per_kwh/global flat rate (treated as a net rate)
+                 → MANUAL_TARIFF (VT default)
+      discount : sub.discount_pct → tenant.default_discount_pct → DEFAULT_DISCOUNT (0.10)
+
+    Returns a dict: {net_rate, discount_pct, effective_rate, net_source,
+    discount_source} where effective_rate = net_rate × (1 − discount).
     """
-    r = getattr(sub, "rate_per_kwh", None)
-    if r is not None and r > 0:
-        return float(r), "customer"
     from ..db import SessionLocal
     from ..models import Tenant
+
+    sub_net = getattr(sub, "net_rate_per_kwh", None)
+    sub_disc = getattr(sub, "discount_pct", None)
+    sub_flat = getattr(sub, "rate_per_kwh", None)   # legacy flat $/kWh override
+
+    g_net = g_disc = g_flat = None
     with SessionLocal() as db:
         t = db.get(Tenant, sub.tenant_id)
-        g = getattr(t, "default_billing_rate_per_kwh", None) if t else None
-    if g is not None and g > 0:
-        return float(g), "global"
-    return None, "vt_default"
+        if t:
+            g_net = getattr(t, "default_net_rate_per_kwh", None)
+            g_disc = getattr(t, "default_discount_pct", None)
+            g_flat = getattr(t, "default_billing_rate_per_kwh", None)
+
+    # ── net rate ──
+    if sub_net is not None and sub_net > 0:
+        net_rate, net_source = float(sub_net), "customer"
+    elif g_net is not None and g_net > 0:
+        net_rate, net_source = float(g_net), "global"
+    elif sub_flat is not None and sub_flat > 0:
+        # Legacy per-customer flat rate: treat as a net rate with 0 discount.
+        net_rate, net_source = float(sub_flat), "legacy_flat_customer"
+    elif g_flat is not None and g_flat > 0:
+        net_rate, net_source = float(g_flat), "legacy_flat_global"
+    else:
+        net_rate, net_source = MANUAL_TARIFF, "vt_default"
+
+    # ── discount ──
+    if sub_disc is not None and 0 <= sub_disc < 1:
+        discount, discount_source = float(sub_disc), "customer"
+    elif g_disc is not None and 0 <= g_disc < 1:
+        discount, discount_source = float(g_disc), "global"
+    elif net_source in ("legacy_flat_customer", "legacy_flat_global"):
+        # A legacy flat rate already encodes the price; don't re-discount it.
+        discount, discount_source = 0.0, "legacy_flat"
+    else:
+        discount, discount_source = DEFAULT_DISCOUNT, "default"
+
+    effective_rate = round(net_rate * (1 - discount), 6)
+    return {
+        "net_rate": net_rate,
+        "discount_pct": discount,
+        "effective_rate": effective_rate,
+        "net_source": net_source,
+        "discount_source": discount_source,
+    }
+
+
+def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:
+    """DEPRECATED — superseded by resolve_discount_pricing(). Kept for any
+    external caller; returns the effective $/kWh under the discount model."""
+    p = resolve_discount_pricing(sub)
+    src = "customer" if p["discount_source"] == "customer" or p["net_source"] == "customer" else \
+          ("global" if "global" in (p["net_source"], p["discount_source"]) else "vt_default")
+    return p["effective_rate"], src
 
 
 def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str]]:
@@ -213,21 +266,21 @@ def build_manual_match(sub) -> BillingMatch:
         pct = 0.0
 
     customer_kwh = round(array_kwh * pct, 2)
-    # Resolve the effective $/kWh: per-customer override → operator global
-    # default → legacy VT default. When an explicit rate is set, price the
-    # produced kWh directly at that rate (tariff=rate, billing_rate=1.0 so
-    # amount_owed == customer_kwh × rate). Otherwise fall back to the VT model.
-    rate, rate_source = resolve_rate_per_kwh(sub)
-    if rate is not None:
-        tariff, billing_rate = rate, 1.0
-    else:
-        tariff, billing_rate = MANUAL_TARIFF, MANUAL_BILLING_RATE
+    # Discount pricing: invoice = kWh × net_rate × (1 − discount). Resolve net
+    # rate + discount with per-customer override → operator global → defaults
+    # (10% off the VT net rate). compute_invoice's billing_rate = (1 − discount),
+    # so amount_owed == kWh × net_rate × (1−discount) and solar_savings == the
+    # discount the customer receives. Never fabricated — $0 when no generation.
+    pricing = resolve_discount_pricing(sub)
+    net_rate = pricing["net_rate"]
+    discount = pricing["discount_pct"]
+    billing_rate = 1.0 - discount
     period = Period(
         month=label, start=start, end=end,
         array_kwh=array_kwh, customer_kwh=customer_kwh,
-        tariff=tariff, adder=0.0,
+        tariff=net_rate, adder=0.0,
     )
-    computed = compute_invoice(customer_kwh, tariff, 0.0,
+    computed = compute_invoice(customer_kwh, net_rate, 0.0,
                                billing_rate, "percent_of_array", None)
     computed["invoice_number"] = end.strftime("%Y-%m") if end else label
     computed["period_start"] = start.isoformat() if start else None
@@ -235,10 +288,15 @@ def build_manual_match(sub) -> BillingMatch:
     computed["month"] = label
     computed["project_total_kwh"] = array_kwh
     computed["array_kwh"] = array_kwh
-    # Effective per-kWh rate + its provenance, so the UI/invoice can show the
-    # auditable "kWh × $rate" line and where the rate came from.
-    computed["rate_per_kwh"] = round(tariff * billing_rate, 6)
-    computed["rate_source"] = rate_source
+    # Discount-model fields for the UI/invoice (auditable savings story):
+    computed["net_rate_per_kwh"] = round(net_rate, 6)
+    computed["discount_pct"] = round(discount, 6)
+    computed["effective_rate_per_kwh"] = pricing["effective_rate"]
+    computed["net_rate_source"] = pricing["net_source"]
+    computed["discount_source"] = pricing["discount_source"]
+    # Back-compat: keep rate_per_kwh = the effective billed rate + a coarse source.
+    computed["rate_per_kwh"] = pricing["effective_rate"]
+    computed["rate_source"] = pricing["discount_source"]
     # Where the produced-kWh number came from: 'gmp_api' (authoritative GMP
     # daily-read) | 'daily_csv' (DailyGeneration/Bill fallback) | None (no data).
     computed["kwh_source"] = kwh_source

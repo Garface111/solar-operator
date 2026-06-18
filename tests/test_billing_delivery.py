@@ -379,12 +379,11 @@ def _math(client, auth, sub_id):
 
 
 def test_rate_global_and_per_customer_override(client):
-    """The keystone rate model. A manual customer is priced by:
-      1. per-customer rate_per_kwh (override) when set,
-      2. else the tenant global default_billing_rate_per_kwh,
-      3. else the legacy VT default.
-    Verifies the amount + rate_source flip correctly at each tier, and that
-    clearing the override (null) falls back to the global rate."""
+    """Legacy flat-rate back-compat under the discount model. A flat rate (per
+    customer or global) is treated as a net rate with 0 discount, so the billed
+    amount == kWh × flat_rate (unchanged dollars), and rate_source reflects the
+    legacy_flat provenance. With NO rate set, the new default is 10% off the VT
+    net rate."""
     tid, auth = _make_tenant()
     aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)  # 3000 kWh
     pct = 0.40
@@ -394,40 +393,97 @@ def test_rate_global_and_per_customer_override(client):
                             allocation_pct=str(pct), cadence="monthly",
                             send_mode="to_me").json()["subscription"]["id"]
 
-    # A) no rate anywhere → VT default fallback.
+    # A) no rate anywhere → default discount (10% off VT net rate 0.18398).
     a = _math(client, auth, sub_id)
-    assert a["rate_source"] == "vt_default"
+    assert a["discount_source"] == "default"
+    assert abs(a["discount_pct"] - 0.10) < 1e-9
+    assert abs(a["net_rate_per_kwh"] - 0.18398) < 1e-9
+    assert abs(a["effective_rate_per_kwh"] - round(0.18398 * 0.9, 6)) < 1e-9
     assert a["customer_kwh"] == cust_kwh
+    # savings = kWh × net × discount
+    assert abs(a["solar_savings_usd"] - round(cust_kwh * 0.18398 * 0.10, 2)) < 0.02
 
-    # B) set the GLOBAL default rate → that rate, exact amount.
+    # B) legacy global flat rate 0.20 → billed at exactly 0.20 (0 discount).
     r = client.put("/v1/array-operator/billing/global-rate",
                    json={"default_billing_rate_per_kwh": 0.20},
                    headers={"Authorization": auth})
     assert r.status_code == 200, r.text
     b = _math(client, auth, sub_id)
-    assert b["rate_source"] == "global"
+    assert b["rate_source"] == "legacy_flat"
     assert abs(b["rate"] - 0.20) < 1e-9
     assert abs(b["amount_usd"] - round(cust_kwh * 0.20, 2)) < 0.01
 
-    # C) per-customer override wins over the global rate.
+    # C) per-customer legacy flat override wins over the global rate.
     r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
                      json={"rate_per_kwh": 0.14},
                      headers={"Authorization": auth})
     assert r.status_code == 200, r.text
     assert abs(r.json()["subscription"]["rate_per_kwh"] - 0.14) < 1e-9
     c = _math(client, auth, sub_id)
-    assert c["rate_source"] == "customer"
     assert abs(c["amount_usd"] - round(cust_kwh * 0.14, 2)) < 0.01
 
-    # D) clearing the override (null) falls back to the global rate.
+    # D) clearing the override (null) falls back to the global flat rate.
     r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
                      json={"rate_per_kwh": None},
                      headers={"Authorization": auth})
     assert r.status_code == 200, r.text
     assert r.json()["subscription"]["rate_per_kwh"] is None
     d = _math(client, auth, sub_id)
-    assert d["rate_source"] == "global"
     assert abs(d["amount_usd"] - round(cust_kwh * 0.20, 2)) < 0.01
+
+
+def test_discount_model_global_and_per_customer(client):
+    """The discount billing model: invoice = kWh × net_rate × (1 − discount).
+    Default 10% off; editable globally and per-customer; savings reported."""
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)  # 3000 kWh
+    pct = 0.50
+    cust_kwh = round(3000 * pct, 2)  # 1500.0
+    NET = 0.18398
+
+    sub_id = _create_manual(client, auth, customer_name="Disc Co", array_id=aid,
+                            allocation_pct=str(pct), cadence="monthly",
+                            send_mode="to_me").json()["subscription"]["id"]
+
+    # A) default 10% off the VT net rate.
+    a = _math(client, auth, sub_id)
+    assert abs(a["amount_usd"] - round(cust_kwh * NET * 0.90, 2)) < 0.02
+
+    # B) set a GLOBAL discount of 25% (and an explicit global net rate of 0.20).
+    r = client.put("/v1/array-operator/billing/global-rate",
+                   json={"default_discount_pct": 0.25, "default_net_rate_per_kwh": 0.20},
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    b = _math(client, auth, sub_id)
+    assert b["net_rate_source"] == "global"
+    assert b["discount_source"] == "global"
+    assert abs(b["discount_pct"] - 0.25) < 1e-9
+    assert abs(b["amount_usd"] - round(cust_kwh * 0.20 * 0.75, 2)) < 0.02
+
+    # C) per-customer discount override (40%) wins over the global 25%.
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"discount_pct": 0.40},
+                     headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    c = _math(client, auth, sub_id)
+    assert c["discount_source"] == "customer"
+    assert abs(c["amount_usd"] - round(cust_kwh * 0.20 * 0.60, 2)) < 0.02
+    assert abs(c["solar_savings_usd"] - round(cust_kwh * 0.20 * 0.40, 2)) < 0.02
+
+    # D) clearing the per-customer discount falls back to the global 25%.
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"discount_pct": None},
+                     headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    d = _math(client, auth, sub_id)
+    assert d["discount_source"] == "global"
+    assert abs(d["amount_usd"] - round(cust_kwh * 0.20 * 0.75, 2)) < 0.02
+
+    # E) a discount ≥ 1 is rejected (would zero/inverse the bill).
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"discount_pct": 1.5},
+                     headers={"Authorization": auth})
+    assert r.status_code == 400
 
 
 def test_rate_rejects_out_of_range(client):

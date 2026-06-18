@@ -785,6 +785,22 @@ def main():
                 added.append(col)
                 print(f"  + bills.{col}")
 
+        # 2026-06-18 Discount billing model: net rate − discount (default 10% off).
+        for tbl, col, sql in [
+            ("tenants", "default_discount_pct",
+             "ALTER TABLE tenants ADD COLUMN default_discount_pct DOUBLE PRECISION"),
+            ("tenants", "default_net_rate_per_kwh",
+             "ALTER TABLE tenants ADD COLUMN default_net_rate_per_kwh DOUBLE PRECISION"),
+            ("billing_report_subscriptions", "discount_pct",
+             "ALTER TABLE billing_report_subscriptions ADD COLUMN discount_pct DOUBLE PRECISION"),
+            ("billing_report_subscriptions", "net_rate_per_kwh",
+             "ALTER TABLE billing_report_subscriptions ADD COLUMN net_rate_per_kwh DOUBLE PRECISION"),
+        ]:
+            if not column_exists(conn, tbl, col):
+                conn.execute(text(sql))
+                added.append(col)
+                print(f"  + {tbl}.{col}")
+
         # 2026-06-18 GMP daily-interval DATA SPONGE. Two BRAND-NEW tables
         # (gmp_usage_raw = verbatim CSV sponge, gmp_daily_generation = derived
         # per-day kWh) are created for free by init_db()/create_all above; this
