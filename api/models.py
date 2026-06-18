@@ -1022,6 +1022,14 @@ class BillingReportSubscription(Base):
     # alongside the customer invoice; null (the norm today) changes nothing.
     gmp_invoice_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
+    # Auto-attach the captured GMP bill PDF (Jun 2026). When True, delivery looks
+    # up the matching GMP bill PDF for this customer's array + billing period via
+    # the read seam (api/reports/gmp_bill_pdf_read) and attaches it automatically
+    # — Paul never hand-uploads. When no PDF is captured yet, nothing is attached
+    # (never fabricated). False = legacy manual-upload behavior only.
+    auto_attach_gmp: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
+
     # Schedule
     cadence: Mapped[str] = mapped_column(String(16), default="monthly")  # monthly | quarterly
     annual_trueup: Mapped[bool] = mapped_column(Boolean, default=False)

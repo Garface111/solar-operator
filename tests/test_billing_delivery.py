@@ -494,3 +494,58 @@ def test_kwh_source_prefers_gmp_else_falls_back(client):
     # GMP month total 28*70=1960 → 50% share = 980 kWh (distinct from the 50/day CSV).
     assert abs(b["array_total_kwh"] - 1960.0) < 1.0
     assert abs(b["customer_kwh"] - 980.0) < 1.0
+
+
+def test_auto_attach_gmp_bill_when_captured_else_nothing(client, monkeypatch):
+    """The auto-attach toggle: when a durable GMP bill PDF is captured for the
+    array+period, it rides the email automatically; when none is captured,
+    nothing is attached (never fabricated). Manual upload is unaffected."""
+    import pathlib, tempfile
+    from datetime import date as _date
+    from api.billing import delivery
+    from api.models import Client as ClientM, Array, BillingReportSubscription
+    from api.billing.matcher import BillingMatch, Period
+
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        c = ClientM(tenant_id=tid, name="Auto Co", active=True); db.add(c); db.flush()
+        arr = Array(tenant_id=tid, name="Auto Array", client_id=c.id, fuel_type="solar")
+        db.add(arr); db.flush()
+        sub = BillingReportSubscription(
+            tenant_id=tid, client_id=c.id, customer_name="Auto Cust",
+            array_id=arr.id, allocation_pct=0.5, billing_model="percent_of_array",
+            auto_attach_gmp=True, cadence="monthly", send_mode="to_me")
+        db.add(sub); db.commit()
+        sub_id, array_id = sub.id, arr.id
+
+    period = Period(month="2026-05", start=_date(2026, 5, 1), end=_date(2026, 5, 31),
+                    array_kwh=1000.0, customer_kwh=500.0)
+    match = BillingMatch(
+        matched=True, confidence=1.0, source="manual",
+        customer={"name": "Auto Cust"}, billing_model="percent_of_array",
+        periods=[period], latest_period=period,
+        computed_invoice={"invoice_number": "2026-05", "period_start": "2026-05-01",
+                          "period_end": "2026-05-31", "amount_owed": 100.0, "kwh": 500},
+    )
+
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+
+        # 1) No captured PDF → nothing attached (read seam returns None today).
+        #    formats=[] so only the GMP-attach branch runs (no invoice render).
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = delivery.generate_files(match, [], False,
+                                            pathlib.Path(tmp), sub=sub)
+            assert not any("GMP_bill" in p.name for p in paths)
+
+        # 2) Simulate ingestion having landed a durable PDF → auto-attached.
+        monkeypatch.setattr(
+            "api.reports.gmp_bill_pdf_read.get_bill_pdf_for_period",
+            lambda aid, ps=None, pe=None, **kw: {
+                "bytes": b"%PDF-1.4\nGMP bill\n", "filename": "GMP_bill_2026-05.pdf",
+                "content_type": "application/pdf", "account_id": 1,
+                "period_start": None, "period_end": None})
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = delivery.generate_files(match, [], False,
+                                            pathlib.Path(tmp), sub=sub)
+            assert any("GMP_bill" in p.name for p in paths), [p.name for p in paths]

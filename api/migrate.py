@@ -765,6 +765,15 @@ def main():
             added.append("rate_per_kwh")
             print("  + billing_report_subscriptions.rate_per_kwh")
 
+        # 2026-06-18 Auto-attach captured GMP bill PDF (per-customer toggle).
+        if not column_exists(conn, "billing_report_subscriptions", "auto_attach_gmp"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN auto_attach_gmp BOOLEAN DEFAULT false NOT NULL"
+            ))
+            added.append("auto_attach_gmp")
+            print("  + billing_report_subscriptions.auto_attach_gmp")
+
         # 2026-06-18 GMP daily-interval DATA SPONGE. Two BRAND-NEW tables
         # (gmp_usage_raw = verbatim CSV sponge, gmp_daily_generation = derived
         # per-day kWh) are created for free by init_db()/create_all above; this

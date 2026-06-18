@@ -68,6 +68,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "allocation_pct": getattr(s, "allocation_pct", None),
         "billing_model": s.billing_model,
         "rate_per_kwh": getattr(s, "rate_per_kwh", None),
+        "auto_attach_gmp": getattr(s, "auto_attach_gmp", False),
         "cadence": s.cadence,
         "annual_trueup": s.annual_trueup,
         "delivery_mode": getattr(s, "delivery_mode", "approval") or "approval",
@@ -343,6 +344,8 @@ class SubscriptionPatch(BaseModel):
     # explicit null to CLEAR it (fall back to the operator's global rate). We
     # use model_fields_set in the handler to tell "null to clear" from "omitted".
     rate_per_kwh: Optional[float] = None
+    # Per-customer 'auto-attach the captured GMP bill PDF' toggle.
+    auto_attach_gmp: Optional[bool] = None
 
 
 @router.patch("/subscriptions/{sub_id}")
@@ -400,6 +403,8 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
         if "rate_per_kwh" in body.model_fields_set:
             # null clears the override; a number sets it (validated).
             sub.rate_per_kwh = _validate_rate(body.rate_per_kwh)
+        if body.auto_attach_gmp is not None:
+            sub.auto_attach_gmp = body.auto_attach_gmp
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
@@ -658,7 +663,7 @@ def _get_owned(db, tenant_id: str, sub_id: int) -> BillingReportSubscription:
 #  I go over it and approve it or modify it and then send." Nothing reaches a
 #  real customer until the operator clicks Approve & send.
 
-def _draft_dict(d: ReportDraft) -> dict:
+def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None) -> dict:
     return {
         "id": d.id,
         "subscription_id": d.subscription_id,
@@ -673,9 +678,35 @@ def _draft_dict(d: ReportDraft) -> dict:
         "has_gmp_pdf": d.gmp_invoice_pdf is not None,
         "gmp_filename": d.gmp_filename,
         "note": d.note,
+        # Auto-attach state (resolved from the subscription when provided):
+        #   auto_attach_gmp   — is the toggle on for this customer
+        #   gmp_auto_status   — "ready" (a captured bill PDF will attach) |
+        #                       "pending" (toggle on, GMP account exists, no PDF
+        #                       captured yet) | "no_gmp" (array has no GMP account)
+        #                       | None (toggle off / not resolvable)
+        "auto_attach_gmp": (getattr(sub, "auto_attach_gmp", False) if sub else None),
+        "gmp_auto_status": gmp_auto_status,
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "sent_at": d.sent_at.isoformat() if d.sent_at else None,
     }
+
+
+def _resolve_gmp_auto_status(db, sub) -> Optional[str]:
+    """Honest auto-attach status for the draft card (never implies a PDF exists
+    when it doesn't)."""
+    if sub is None or not getattr(sub, "auto_attach_gmp", False):
+        return None
+    array_id = getattr(sub, "array_id", None)
+    if array_id is None:
+        return "no_gmp"
+    try:
+        from ..reports import gmp_bill_pdf_read as gbp
+        if not gbp.has_capturable_gmp_account(array_id, db=db):
+            return "no_gmp"
+        found = gbp.get_bill_pdf_for_period(array_id, db=db)
+        return "ready" if (found and found.get("bytes")) else "pending"
+    except Exception:  # noqa: BLE001
+        return "pending"
 
 
 def _get_owned_draft(db, tenant_id: str, draft_id: int) -> ReportDraft:
@@ -696,7 +727,12 @@ def list_drafts(status: str = Query(default="pending"),
         if status != "all":
             q = q.where(ReportDraft.status == status)
         rows = db.execute(q.order_by(ReportDraft.created_at.desc())).scalars().all()
-        return {"drafts": [_draft_dict(d) for d in rows]}
+        out = []
+        for d in rows:
+            sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
+            out.append(_draft_dict(d, sub=sub,
+                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub)))
+        return {"drafts": out}
 
 
 @router.post("/subscriptions/{sub_id}/draft")

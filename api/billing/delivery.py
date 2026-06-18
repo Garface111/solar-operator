@@ -293,12 +293,41 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
         elif "xlsx" in fmts:
             paths.append(summary_mod.render_summary_xlsx(
                 match, out_dir / f"{stem}_summary.xlsx", peer=peer))
-    # Dormant GMP-invoice hook: attach the utility's PDF when present (null today).
+    # GMP utility-bill PDF attachment. Two sources, manual takes precedence:
+    #   1. sub.gmp_invoice_pdf — a manually uploaded PDF (Paul's fallback).
+    #   2. auto-attach — when sub.auto_attach_gmp is on AND no manual PDF, look
+    #      up the captured bill PDF for this array+period via the read seam.
+    #      Returns nothing until ingestion persists durable bytes (never fabricated).
     if sub is not None and getattr(sub, "gmp_invoice_pdf", None):
         gmp_path = out_dir / f"{safe}_GMP_invoice.pdf"
         gmp_path.write_bytes(bytes(sub.gmp_invoice_pdf))
         paths.append(gmp_path)
+    elif sub is not None and getattr(sub, "auto_attach_gmp", False) \
+            and getattr(sub, "array_id", None) is not None:
+        try:
+            from ..reports import gmp_bill_pdf_read as gbp
+            ci = match.computed_invoice or {}
+            ps = _parse_iso_date(ci.get("period_start"))
+            pe = _parse_iso_date(ci.get("period_end"))
+            found = gbp.get_bill_pdf_for_period(sub.array_id, ps, pe)
+            if found and found.get("bytes"):
+                gmp_path = out_dir / f"{safe}_GMP_bill.pdf"
+                gmp_path.write_bytes(found["bytes"])
+                paths.append(gmp_path)
+        except Exception:  # noqa: BLE001 — provisional seam must never break send
+            logger.warning("auto-attach GMP bill lookup failed for sub %s",
+                           getattr(sub, "id", "?"), exc_info=True)
     return paths
+
+
+def _parse_iso_date(s) -> Optional[date]:
+    """Parse a 'YYYY-MM-DD'(...) string to a date, or None."""
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(str(s)[:10])
+    except ValueError:
+        return None
 
 
 # ─── recipients ─────────────────────────────────────────────────────────────
