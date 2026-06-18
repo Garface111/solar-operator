@@ -470,6 +470,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const energyAccounts = Array.isArray(cd.energyAccounts) ? cd.energyAccounts
           : (Array.isArray(current.energyAccounts) ? current.energyAccounts : []);
         const accounts = [];
+        let _probedHistory = false;   // grounding probe runs once, first solar acct
         for (const ea of energyAccounts) {
           const acctNum = String(ea.accountNumber || "").trim();
           if (!acctNum) continue;
@@ -491,32 +492,112 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const usedHome = Number(summary && summary.totalGenerationUsedByHome) || 0;
           const isSolar = !!(summary && (summary.isNetMetered || grossGen > 0 || sentGrid > 0 || usedHome > 0));
 
+          // ── GROUNDING PROBE (multi-year history) ────────────────────────────
+          // Runs ONCE, on the first solar account. Asks GMP's daily endpoint for
+          // 31-day windows at increasing ages (1 / 13 / 25 / 37 / 61 months back)
+          // and logs what actually comes back: how far history is served, the
+          // granularity, and whether returnedGeneration is populated that far
+          // back. Read-only; does NOT change what we ingest. Loud console output
+          // (copy these [AO HISTORY PROBE] lines back to verify before we widen).
+          if (isSolar && !_probedHistory) {
+            _probedHistory = true;
+            const PLOG = (...a) => { try { console.log("[AO HISTORY PROBE]", ...a); } catch (_) {} };
+            PLOG("account", acctNum, "— probing GMP daily history depth…");
+            const monthsAgoWindow = (m) => {
+              const e2 = new Date(); e2.setMonth(e2.getMonth() - m);
+              const s2 = new Date(e2.getTime() - 31 * 24 * 3600 * 1000);
+              return { s: s2, e: e2 };
+            };
+            for (const mAgo of [1, 13, 25, 37, 61]) {
+              const { s, e } = monthsAgoWindow(mAgo);
+              const label = `~${mAgo}mo (${fmtDate(s).slice(0,10)}..${fmtDate(e).slice(0,10)})`;
+              try {
+                const pr = await gmpGet(`/usage/${acctNum}/daily?startDate=${fmtDate(s)}&endDate=${fmtDate(e)}&temp=f`);
+                const ivs = (pr && Array.isArray(pr.intervals)) ? pr.intervals : [];
+                let rows = 0, withGen = 0, minD = null, maxD = null, sample = null;
+                for (const iv of ivs) for (const v of (iv.values || [])) {
+                  rows++;
+                  if (v && v.date) { if (!minD || v.date < minD) minD = v.date; if (!maxD || v.date > maxD) maxD = v.date; }
+                  if (v && v.returnedGeneration != null && isFinite(Number(v.returnedGeneration))) {
+                    withGen++; if (sample == null && Number(v.returnedGeneration) > 0) sample = { date: v.date, kwh: v.returnedGeneration };
+                  }
+                }
+                PLOG(label, "OK · intervals:", ivs.length, "rows:", rows, "withReturnedGen:", withGen,
+                     "served:", minD, "..", maxD, sample ? `sample{${sample.date}=${sample.kwh}kWh}` : "no-positive-gen");
+              } catch (err) {
+                PLOG(label, "FAILED ·", String(err && err.status || ""), String(err && err.message || err));
+              }
+              await new Promise(r => setTimeout(r, 350)); // be polite to GMP
+            }
+            PLOG("done — copy every [AO HISTORY PROBE] line back to Array Operator.");
+          }
+
           let daily = [];
           if (isSolar) {
-            try {
-              // Pull ~35 days of daily generation. GMP's daily endpoint shares the
-              // /monthly schema: intervals[].values[] each with { date, consumed,
-              // returnedGeneration }. returnedGeneration = the array's daily solar
-              // production (grounded against Bruce's 1a_Chester account, Jun 2026).
-              const end = new Date();
-              const start = new Date(end.getTime() - 35 * 24 * 3600 * 1000);
+            // MULTI-YEAR backfill. GMP's /daily endpoint accepts arbitrary
+            // historical ranges (grounded via HAR Jun 2026: a 2019 account
+            // returned full daily data for 2019..now; pre-online years return a
+            // ~144-byte empty shell). So we walk backward ONE CALENDAR YEAR at a
+            // time, collecting returnedGeneration (= daily solar production),
+            // and STOP for this account as soon as a year yields zero generation
+            // rows (its pre-online void) — no wasted calls into empty history.
+            // The backend ingest is idempotent per (array, day) with max-kWh, so
+            // re-running only fills gaps; capped at MAX_YEARS for safety.
+            const MAX_YEARS = 12;
+            const nowY = new Date().getUTCFullYear();
+            const parseYear = async (yr) => {
+              const start = `${yr}-01-01T00:00:00`;
+              const end = (yr === nowY)
+                ? fmtDate(new Date())
+                : `${yr}-12-31T23:59:59`;
               const dResp = await gmpGet(
-                `/usage/${acctNum}/daily?startDate=${fmtDate(start)}&endDate=${fmtDate(end)}&temp=f`
+                `/usage/${acctNum}/daily?startDate=${start}&endDate=${end}&temp=f`
               );
               const intervals = (dResp && Array.isArray(dResp.intervals)) ? dResp.intervals : [];
+              const out = [];
               for (const iv of intervals) {
                 for (const v of (iv.values || [])) {
                   const g = (v && v.returnedGeneration != null) ? Number(v.returnedGeneration) : null;
                   if (g != null && isFinite(g) && g > 0 && v.date) {
-                    daily.push({ date: v.date, generated_kwh: g });
+                    out.push({ date: v.date, generated_kwh: g });
                   }
                 }
               }
+              return out;
+            };
+            try {
+              let emptyStreak = 0;
+              for (let i = 0; i < MAX_YEARS; i++) {
+                const yr = nowY - i;
+                let yrRows = [];
+                try {
+                  yrRows = await parseYear(yr);
+                } catch (e) {
+                  // A single bad year shouldn't sink the backfill; note + continue.
+                  console.warn("[so] GMP daily year", yr, "failed for", acctNum, String(e && e.message));
+                  yrRows = [];
+                }
+                if (yrRows.length) {
+                  daily = daily.concat(yrRows);
+                  emptyStreak = 0;
+                } else {
+                  // The CURRENT year can legitimately have 0 gen rows early in
+                  // Jan; don't treat that as the history floor. For any prior
+                  // year, an empty result means we've walked past this account's
+                  // online date — stop.
+                  if (yr < nowY) {
+                    emptyStreak++;
+                    if (emptyStreak >= 1) break;
+                  }
+                }
+                await new Promise(r => setTimeout(r, 250)); // polite pacing
+              }
             } catch (e) {
-              // Daily is best-effort — fall back to the billing-period summary
-              // total (the backend uses parsed.kwh_generated when daily is empty).
-              console.warn("[so] GMP daily fetch failed for", acctNum, String(e && e.message));
-              daily = [];
+              console.warn("[so] GMP multi-year backfill failed for", acctNum, String(e && e.message));
+            }
+            if (daily.length) {
+              console.log("[so] GMP backfill", acctNum, "→", daily.length, "daily rows,",
+                          (daily[daily.length - 1] || {}).date, "..", (daily[0] || {}).date);
             }
           }
           accounts.push({

@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Array Operator — Reports · The Customer Ledger</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#ffffff; --ink:#111827; --muted:#6b7280;
+    --line:#e5e7eb; --green:#047857; --green-light:#34d399;
+    --green-bg:#ecfdf5; --amber:#f59e0b; --amber-bg:#fffbeb;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:14px; line-height:1.45;
+  }
+  .wrap{max-width:920px; margin:0 auto; padding:28px 24px 80px;}
+
+  /* App chrome */
+  .topnav{display:flex; align-items:center; gap:24px; margin-bottom:24px;}
+  .brand{display:flex; align-items:center; gap:9px; font-weight:700; font-size:15px;}
+  .brand .logo{width:24px; height:24px; border-radius:6px;
+    background:linear-gradient(135deg,var(--green),var(--green-light));
+    display:flex; align-items:center; justify-content:center; color:#fff; font-size:13px;}
+  .tabs{display:flex; gap:4px; margin-left:8px;}
+  .tabs a{padding:6px 12px; border-radius:7px; color:var(--muted); text-decoration:none; font-size:13px; font-weight:500;}
+  .tabs a.active{background:var(--green-bg); color:var(--green);}
+
+  /* Summary bar */
+  .summary{
+    display:flex; align-items:center; justify-content:space-between;
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:16px 20px; margin-bottom:18px;
+  }
+  .summary .lead{font-size:18px; font-weight:700;}
+  .summary .sub{color:var(--muted); font-size:13px; margin-top:2px;}
+  .summary .chips{display:flex; gap:8px; align-items:center;}
+  .chip{font-size:12px; font-weight:600; padding:4px 10px; border-radius:20px;}
+  .chip.green{background:var(--green-bg); color:var(--green);}
+  .chip.amber{background:var(--amber-bg); color:#b45309;}
+  .chip.grey{background:#f3f4f6; color:var(--muted);}
+  .btn{
+    font:inherit; font-weight:600; font-size:13px; cursor:pointer;
+    border-radius:8px; border:1px solid transparent; padding:8px 14px;
+  }
+  .btn.primary{background:var(--green); color:#fff;}
+  .btn.primary:hover{background:#036249;}
+  .btn.ghost{background:#fff; color:var(--ink); border-color:var(--line);}
+  .btn.ghost:hover{background:#f9fafb;}
+  .btn.small{padding:6px 11px; font-size:12px;}
+  .btn:disabled{opacity:.5; cursor:default;}
+
+  /* Section label */
+  .seclabel{font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+    color:var(--muted); margin:22px 4px 10px;}
+
+  /* Customer cards */
+  .cards{display:flex; flex-direction:column; gap:10px;}
+  .cust{background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    overflow:hidden; transition:box-shadow .15s,border-color .15s;}
+  .cust.ready{border-left:3px solid var(--green-light);}
+  .cust.sent{border-left:3px solid var(--line);}
+  .cust:hover{box-shadow:0 1px 6px rgba(0,0,0,.05);}
+
+  .row{display:grid; grid-template-columns:1.7fr 1.5fr 0.7fr 1.3fr auto;
+    align-items:center; gap:14px; padding:14px 18px; cursor:pointer;}
+  .row .name{font-weight:600; font-size:14.5px; display:flex; align-items:center; gap:8px;}
+  .row .name .caret{color:var(--muted); font-size:11px; transition:transform .15s;}
+  .cust.open .row .name .caret{transform:rotate(90deg);}
+  .cust-email{color:var(--muted); font-size:12px; font-weight:400; margin-top:2px;}
+  .meta-label{color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.03em;}
+  .meta-val{font-size:13px; margin-top:2px;}
+  .pct-badge{display:inline-block; background:var(--green-bg); color:var(--green);
+    font-weight:700; font-size:13px; padding:3px 9px; border-radius:6px;}
+  .status{display:flex; justify-content:flex-end; align-items:center; gap:8px;}
+  .dot{width:7px;height:7px;border-radius:50%;}
+  .dot.green{background:var(--green-light);}
+  .dot.amber{background:var(--amber);}
+  .dot.grey{background:#cbd5e1;}
+  .status-txt{font-size:12px; font-weight:600;}
+  .status-txt.ready{color:var(--green);}
+  .status-txt.attn{color:#b45309;}
+  .status-txt.sent{color:var(--muted);}
+
+  /* Expanded panel */
+  .panel{border-top:1px solid var(--line); padding:0; display:none; background:#fcfcfd;}
+  .cust.open .panel{display:block;}
+  .panel-inner{padding:18px 20px;}
+  .panel-grid{display:grid; grid-template-columns:1fr 320px; gap:24px;}
+  @media(max-width:760px){.panel-grid{grid-template-columns:1fr;}}
+
+  .hsubtitle{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color:var(--muted); margin:0 0 10px;}
+
+  /* History list */
+  .hist{display:flex; flex-direction:column; gap:8px;}
+  .hist-item{display:grid; grid-template-columns:auto 1fr auto auto; gap:12px; align-items:center;
+    background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 13px;}
+  .hist-period{font-weight:600; font-size:13px;}
+  .hist-detail{color:var(--muted); font-size:12px;}
+  .hist-amt{font-weight:700; font-size:13px;}
+  .hist-pdf{font-size:11px; color:var(--green); font-weight:600; text-decoration:none;}
+  .hist-pdf:hover{text-decoration:underline;}
+
+  /* Current period card / draft box */
+  .draft{background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px;}
+  .draft.ready{border-color:var(--green-light); background:var(--green-bg);}
+  .calc{font-size:13px; line-height:1.9;}
+  .calc .k{color:var(--muted);}
+  .calc .eq{border-top:1px dashed var(--line); margin:8px 0; padding-top:8px;}
+  .calc .total{font-size:18px; font-weight:800; color:var(--green);}
+  .draft-actions{display:flex; gap:8px; margin-top:14px;}
+
+  /* Inline edit */
+  .edit-toggle{font-size:12px; color:var(--green); font-weight:600; cursor:pointer; user-select:none;}
+  .edit-toggle:hover{text-decoration:underline;}
+  .editform{display:none; margin-top:14px; background:#fff; border:1px solid var(--line);
+    border-radius:8px; padding:14px;}
+  .editform.show{display:block;}
+  .field{margin-bottom:10px;}
+  .field label{display:block; font-size:11px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.03em; color:var(--muted); margin-bottom:4px;}
+  .field input, .field select{width:100%; font:inherit; font-size:13px; padding:7px 9px;
+    border:1px solid var(--line); border-radius:7px; background:#fff;}
+  .field input:focus, .field select:focus{outline:none; border-color:var(--green-light);
+    box-shadow:0 0 0 3px rgba(52,211,153,.18);}
+  .field-row{display:flex; gap:10px;}
+  .field-row .field{flex:1;}
+  .slider-row{display:flex; align-items:center; gap:12px;}
+  .slider-row input[type=range]{flex:1; accent-color:var(--green);}
+  .slider-row .pctout{font-weight:800; font-size:16px; color:var(--green); min-width:48px; text-align:right;}
+  .landowner-note{font-size:11px; color:var(--muted); margin-top:4px;}
+  .recompute{margin-top:8px; font-size:12px; color:var(--green); background:var(--green-bg);
+    border-radius:6px; padding:6px 9px; display:none;}
+  .recompute.show{display:block;}
+
+  /* Add customer */
+  .addrow{background:var(--card); border:1.5px dashed var(--line); border-radius:var(--radius);
+    padding:0; overflow:hidden; margin-top:10px;}
+  .addrow-head{display:flex; align-items:center; gap:10px; padding:14px 18px; cursor:pointer;
+    color:var(--green); font-weight:600; font-size:13.5px;}
+  .addrow-head .plus{width:22px; height:22px; border-radius:6px; background:var(--green-bg);
+    color:var(--green); display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:700;}
+  .addrow-body{display:none; padding:4px 18px 18px; border-top:1px solid var(--line);}
+  .addrow.open .addrow-body{display:block;}
+  .addrow.open .addrow-head .plus{transform:rotate(45deg); transition:transform .15s;}
+
+  .toast{position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(80px);
+    background:var(--ink); color:#fff; padding:12px 20px; border-radius:10px; font-size:13px;
+    font-weight:600; box-shadow:0 8px 24px rgba(0,0,0,.25); opacity:0; transition:.3s; z-index:50;
+    display:flex; align-items:center; gap:9px;}
+  .toast.show{transform:translateX(-50%) translateY(0); opacity:1;}
+  .toast .ok{color:var(--green-light);}
+
+  .muted{color:var(--muted);}
+  .hint{font-size:12px; color:var(--muted); margin-top:6px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- App chrome -->
+  <div class="topnav">
+    <div class="brand"><span class="logo">⌁</span> Array Operator</div>
+    <nav class="tabs">
+      <a href="#">Dashboard</a>
+      <a href="#">Arrays</a>
+      <a href="#" class="active">Reports</a>
+      <a href="#">Settings</a>
+    </nav>
+  </div>
+
+  <!-- Summary bar -->
+  <div class="summary">
+    <div>
+      <div class="lead">The Customer Ledger</div>
+      <div class="sub"><span id="custcount">4</span> customers · <span id="readycount">3</span> ready to send · May 2026</div>
+    </div>
+    <div class="chips">
+      <span class="chip green">GMP data posted</span>
+      <button class="btn primary" onclick="sendAllReady()">Send all ready (3)</button>
+    </div>
+  </div>
+
+  <div class="seclabel">Your customers — manage &amp; send from here</div>
+
+  <div class="cards" id="cards">
+
+    <!-- ============ CUSTOMER 1: Danville (ready) ============ -->
+    <div class="cust ready open" data-name="Danville Big Buck Solar">
+      <div class="row" onclick="toggleCust(this)">
+        <div>
+          <div class="name"><span class="caret">▶</span> Danville Big Buck Solar</div>
+          <div class="cust-email">accounts@bigbucksolar.com</div>
+        </div>
+        <div>
+          <div class="meta-label">Array</div>
+          <div class="meta-val">Danville · Field A</div>
+        </div>
+        <div>
+          <div class="meta-label">Share</div>
+          <div class="meta-val"><span class="pct-badge">95%</span></div>
+        </div>
+        <div>
+          <div class="meta-label">Last invoice</div>
+          <div class="meta-val">Apr 2026 · $1,842.10</div>
+        </div>
+        <div class="status">
+          <span class="dot green"></span><span class="status-txt ready">Ready</span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-inner">
+          <div class="panel-grid">
+            <!-- left: history -->
+            <div>
+              <div class="hsubtitle">Invoice history (audit trail)</div>
+              <div class="hist">
+                <div class="hist-item">
+                  <span class="hist-period">Apr 2026</span>
+                  <span class="hist-detail">38,200 kWh × 95% = 36,290 kWh</span>
+                  <span class="hist-amt">$1,842.10</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+                <div class="hist-item">
+                  <span class="hist-period">Mar 2026</span>
+                  <span class="hist-detail">41,500 kWh × 95% = 39,425 kWh</span>
+                  <span class="hist-amt">$2,001.18</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+                <div class="hist-item">
+                  <span class="hist-period">Feb 2026</span>
+                  <span class="hist-detail">29,800 kWh × 95% = 28,310 kWh</span>
+                  <span class="hist-amt">$1,437.34</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+              </div>
+              <div class="edit-toggle" onclick="toggleEdit(this)" style="margin-top:14px;">✎ Edit customer details</div>
+              <div class="editform">
+                <div class="field">
+                  <label>Customer name</label>
+                  <input type="text" value="Danville Big Buck Solar">
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label>Array</label>
+                    <select>
+                      <option selected>Danville · Field A</option>
+                      <option>Norwich · Roadside</option>
+                      <option>Strafford · Hilltop</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>Email</label>
+                    <input type="email" value="accounts@bigbucksolar.com">
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Customer share %</label>
+                  <div class="slider-row">
+                    <input type="range" min="50" max="100" value="95"
+                      oninput="onPct(this, 38200, 0.0508)">
+                    <span class="pctout">95%</span>
+                  </div>
+                  <div class="landowner-note">Landowner receives the remaining <b class="lo">5%</b></div>
+                  <div class="recompute">↻ At 95% of 38,200 kWh this period → <b>$1,844.34</b> to customer</div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" onclick="saveEdit(this)">Save changes</button>
+                  <button class="btn ghost small" onclick="toggleEdit(this.closest('.cust').querySelector('.edit-toggle'))">Cancel</button>
+                </div>
+              </div>
+            </div>
+            <!-- right: current draft -->
+            <div>
+              <div class="hsubtitle">May 2026 — current period</div>
+              <div class="draft ready">
+                <div class="calc">
+                  <div><span class="k">GMP generation</span> &nbsp; 36,400 kWh</div>
+                  <div><span class="k">Customer share</span> &nbsp; 95%</div>
+                  <div><span class="k">Allocated</span> &nbsp; 34,580 kWh</div>
+                  <div><span class="k">Rate</span> &nbsp; $0.0508 / kWh</div>
+                  <div class="eq total">$1,756.66</div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" onclick="reviewSend(this,'Danville Big Buck Solar')">Review &amp; send</button>
+                  <button class="btn ghost small" href="#">Preview PDF</button>
+                </div>
+                <div class="hint">GMP invoice PDF attached · email drafted, never auto-sent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ CUSTOMER 2: River Road (ready) ============ -->
+    <div class="cust ready" data-name="River Road Community">
+      <div class="row" onclick="toggleCust(this)">
+        <div>
+          <div class="name"><span class="caret">▶</span> River Road Community</div>
+          <div class="cust-email">billing@riverroad.coop</div>
+        </div>
+        <div>
+          <div class="meta-label">Array</div>
+          <div class="meta-val">Norwich · Roadside</div>
+        </div>
+        <div>
+          <div class="meta-label">Share</div>
+          <div class="meta-val"><span class="pct-badge">88%</span></div>
+        </div>
+        <div>
+          <div class="meta-label">Last invoice</div>
+          <div class="meta-val">Apr 2026 · $2,310.55</div>
+        </div>
+        <div class="status">
+          <span class="dot green"></span><span class="status-txt ready">Ready</span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-inner">
+          <div class="panel-grid">
+            <div>
+              <div class="hsubtitle">Invoice history (audit trail)</div>
+              <div class="hist">
+                <div class="hist-item">
+                  <span class="hist-period">Apr 2026</span>
+                  <span class="hist-detail">52,300 kWh × 88% = 46,024 kWh</span>
+                  <span class="hist-amt">$2,310.55</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+                <div class="hist-item">
+                  <span class="hist-period">Mar 2026</span>
+                  <span class="hist-detail">49,100 kWh × 88% = 43,208 kWh</span>
+                  <span class="hist-amt">$2,169.04</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+              </div>
+              <div class="edit-toggle" onclick="toggleEdit(this)" style="margin-top:14px;">✎ Edit customer details</div>
+              <div class="editform">
+                <div class="field">
+                  <label>Customer name</label>
+                  <input type="text" value="River Road Community">
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label>Array</label>
+                    <select><option selected>Norwich · Roadside</option><option>Danville · Field A</option></select>
+                  </div>
+                  <div class="field">
+                    <label>Email</label>
+                    <input type="email" value="billing@riverroad.coop">
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Customer share %</label>
+                  <div class="slider-row">
+                    <input type="range" min="50" max="100" value="88" oninput="onPct(this, 54100, 0.0502)">
+                    <span class="pctout">88%</span>
+                  </div>
+                  <div class="landowner-note">Landowner receives the remaining <b class="lo">12%</b></div>
+                  <div class="recompute"></div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" onclick="saveEdit(this)">Save changes</button>
+                  <button class="btn ghost small" onclick="toggleEdit(this.closest('.cust').querySelector('.edit-toggle'))">Cancel</button>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="hsubtitle">May 2026 — current period</div>
+              <div class="draft ready">
+                <div class="calc">
+                  <div><span class="k">GMP generation</span> &nbsp; 54,100 kWh</div>
+                  <div><span class="k">Customer share</span> &nbsp; 88%</div>
+                  <div><span class="k">Allocated</span> &nbsp; 47,608 kWh</div>
+                  <div><span class="k">Rate</span> &nbsp; $0.0502 / kWh</div>
+                  <div class="eq total">$2,389.92</div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" onclick="reviewSend(this,'River Road Community')">Review &amp; send</button>
+                  <button class="btn ghost small">Preview PDF</button>
+                </div>
+                <div class="hint">GMP invoice PDF attached · email drafted, never auto-sent</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ CUSTOMER 3: Norwich Union (needs attention) ============ -->
+    <div class="cust" data-name="Norwich Union Village" style="border-left:3px solid var(--amber);">
+      <div class="row" onclick="toggleCust(this)">
+        <div>
+          <div class="name"><span class="caret">▶</span> Norwich Union Village</div>
+          <div class="cust-email">treasurer@norwichunion.org</div>
+        </div>
+        <div>
+          <div class="meta-label">Array</div>
+          <div class="meta-val">Strafford · Hilltop</div>
+        </div>
+        <div>
+          <div class="meta-label">Share</div>
+          <div class="meta-val"><span class="pct-badge">75%</span></div>
+        </div>
+        <div>
+          <div class="meta-label">Last invoice</div>
+          <div class="meta-val">Apr 2026 · $1,120.88</div>
+        </div>
+        <div class="status">
+          <span class="dot amber"></span><span class="status-txt attn">Check %</span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-inner">
+          <div class="panel-grid">
+            <div>
+              <div class="hsubtitle">Invoice history (audit trail)</div>
+              <div class="hist">
+                <div class="hist-item">
+                  <span class="hist-period">Apr 2026</span>
+                  <span class="hist-detail">29,900 kWh × 75% = 22,425 kWh</span>
+                  <span class="hist-amt">$1,120.88</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+                <div class="hist-item">
+                  <span class="hist-period">Mar 2026</span>
+                  <span class="hist-detail">27,400 kWh × 75% = 20,550 kWh</span>
+                  <span class="hist-amt">$1,027.50</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+              </div>
+              <div class="hint" style="color:#b45309; margin-top:12px;">
+                ⚠ Their contract % renews this month — confirm 75% before sending.
+              </div>
+              <div class="edit-toggle" onclick="toggleEdit(this)" style="margin-top:10px;">✎ Edit customer details</div>
+              <div class="editform show">
+                <div class="field">
+                  <label>Customer name</label>
+                  <input type="text" value="Norwich Union Village">
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label>Array</label>
+                    <select><option selected>Strafford · Hilltop</option><option>Danville · Field A</option></select>
+                  </div>
+                  <div class="field">
+                    <label>Email</label>
+                    <input type="email" value="treasurer@norwichunion.org">
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Customer share %</label>
+                  <div class="slider-row">
+                    <input type="range" min="50" max="100" value="75" oninput="onPct(this, 31200, 0.0499)">
+                    <span class="pctout">75%</span>
+                  </div>
+                  <div class="landowner-note">Landowner receives the remaining <b class="lo">25%</b></div>
+                  <div class="recompute show">↻ At 75% of 31,200 kWh this period → <b>$1,167.66</b> to customer</div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" onclick="saveEdit(this)">Confirm &amp; save 75%</button>
+                  <button class="btn ghost small" onclick="toggleEdit(this.closest('.cust').querySelector('.edit-toggle'))">Cancel</button>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="hsubtitle">May 2026 — current period</div>
+              <div class="draft">
+                <div class="calc">
+                  <div><span class="k">GMP generation</span> &nbsp; 31,200 kWh</div>
+                  <div><span class="k">Customer share</span> &nbsp; 75%</div>
+                  <div><span class="k">Allocated</span> &nbsp; 23,400 kWh</div>
+                  <div><span class="k">Rate</span> &nbsp; $0.0499 / kWh</div>
+                  <div class="eq total">$1,167.66</div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" disabled title="Confirm % first">Review &amp; send</button>
+                  <button class="btn ghost small">Preview PDF</button>
+                </div>
+                <div class="hint">Confirm contract % at left to unlock sending.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ CUSTOMER 4: Green Mountain Dairy (already sent) ============ -->
+    <div class="cust sent" data-name="Green Mountain Dairy">
+      <div class="row" onclick="toggleCust(this)">
+        <div>
+          <div class="name"><span class="caret">▶</span> Green Mountain Dairy</div>
+          <div class="cust-email">paula@gmdairy.com</div>
+        </div>
+        <div>
+          <div class="meta-label">Array</div>
+          <div class="meta-val">Danville · Field A</div>
+        </div>
+        <div>
+          <div class="meta-label">Share</div>
+          <div class="meta-val"><span class="pct-badge">100%</span></div>
+        </div>
+        <div>
+          <div class="meta-label">Last invoice</div>
+          <div class="meta-val">May 2026 · $3,041.20</div>
+        </div>
+        <div class="status">
+          <span class="dot grey"></span><span class="status-txt sent">Sent May 14</span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-inner">
+          <div class="panel-grid">
+            <div>
+              <div class="hsubtitle">Invoice history (audit trail)</div>
+              <div class="hist">
+                <div class="hist-item" style="border-color:var(--green-light); background:var(--green-bg);">
+                  <span class="hist-period">May 2026</span>
+                  <span class="hist-detail">59,200 kWh × 100% = 59,200 kWh</span>
+                  <span class="hist-amt">$3,041.20</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+                <div class="hist-item">
+                  <span class="hist-period">Apr 2026</span>
+                  <span class="hist-detail">55,800 kWh × 100% = 55,800 kWh</span>
+                  <span class="hist-amt">$2,865.66</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+                <div class="hist-item">
+                  <span class="hist-period">Mar 2026</span>
+                  <span class="hist-detail">61,000 kWh × 100% = 61,000 kWh</span>
+                  <span class="hist-amt">$3,133.40</span>
+                  <a class="hist-pdf" href="#">PDF ↓</a>
+                </div>
+              </div>
+              <div class="edit-toggle" onclick="toggleEdit(this)" style="margin-top:14px;">✎ Edit customer details</div>
+              <div class="editform">
+                <div class="field">
+                  <label>Customer name</label>
+                  <input type="text" value="Green Mountain Dairy">
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label>Array</label>
+                    <select><option selected>Danville · Field A</option><option>Norwich · Roadside</option></select>
+                  </div>
+                  <div class="field">
+                    <label>Email</label>
+                    <input type="email" value="paula@gmdairy.com">
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Customer share %</label>
+                  <div class="slider-row">
+                    <input type="range" min="50" max="100" value="100" oninput="onPct(this, 59200, 0.05137)">
+                    <span class="pctout">100%</span>
+                  </div>
+                  <div class="landowner-note">Landowner receives the remaining <b class="lo">0%</b> (owner-occupied)</div>
+                  <div class="recompute"></div>
+                </div>
+                <div class="draft-actions">
+                  <button class="btn primary small" onclick="saveEdit(this)">Save changes</button>
+                  <button class="btn ghost small" onclick="toggleEdit(this.closest('.cust').querySelector('.edit-toggle'))">Cancel</button>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="hsubtitle">May 2026 — current period</div>
+              <div class="draft">
+                <div class="calc">
+                  <div><span class="k">GMP generation</span> &nbsp; 59,200 kWh</div>
+                  <div><span class="k">Customer share</span> &nbsp; 100%</div>
+                  <div><span class="k">Allocated</span> &nbsp; 59,200 kWh</div>
+                  <div><span class="k">Rate</span> &nbsp; $0.05137 / kWh</div>
+                  <div class="eq total">$3,041.20</div>
+                </div>
+                <div class="hint" style="color:var(--green);">✓ Invoice sent May 14, 2026 · email delivered · record saved.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ ADD CUSTOMER (always-visible, first-class) ============ -->
+    <div class="addrow" id="addrow">
+      <div class="addrow-head" onclick="toggleAdd()">
+        <span class="plus">+</span> Add a customer
+      </div>
+      <div class="addrow-body">
+        <div class="field-row">
+          <div class="field">
+            <label>Customer name</label>
+            <input type="text" id="new-name" placeholder="e.g. Thetford School District">
+          </div>
+          <div class="field">
+            <label>Email</label>
+            <input type="email" id="new-email" placeholder="billing@example.org">
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Array</label>
+            <select id="new-array">
+              <option>Danville · Field A</option>
+              <option>Norwich · Roadside</option>
+              <option>Strafford · Hilltop</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Customer share %</label>
+            <div class="slider-row">
+              <input type="range" min="50" max="100" value="90" id="new-pct"
+                oninput="document.getElementById('new-pctout').textContent=this.value+'%'; document.getElementById('new-lo').textContent=(100-this.value)+'%';">
+              <span class="pctout" id="new-pctout">90%</span>
+            </div>
+            <div class="landowner-note">Landowner receives the remaining <b id="new-lo">10%</b></div>
+          </div>
+        </div>
+        <div class="draft-actions">
+          <button class="btn primary small" onclick="addCustomer()">Add customer</button>
+          <button class="btn ghost small" onclick="toggleAdd()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"><span class="ok">✓</span> <span id="toast-msg">Done</span></div>
+
+<script>
+  function toggleCust(rowEl){
+    var cust = rowEl.closest('.cust');
+    cust.classList.toggle('open');
+  }
+  function toggleEdit(el){
+    var form = el.parentElement.querySelector('.editform')
+      || el.closest('.panel-inner').querySelector('.editform');
+    // find sibling editform
+    var f = el.nextElementSibling;
+    while(f && !f.classList.contains('editform')) f = f.nextElementSibling;
+    if(f) f.classList.toggle('show');
+  }
+  function onPct(slider, kwh, rate){
+    var pct = parseInt(slider.value,10);
+    slider.closest('.slider-row').querySelector('.pctout').textContent = pct + '%';
+    var lo = slider.closest('.field').querySelector('.lo');
+    if(lo) lo.textContent = (100-pct) + '%';
+    var amt = kwh * (pct/100) * rate;
+    var rc = slider.closest('.field').querySelector('.recompute');
+    if(rc){
+      rc.classList.add('show');
+      rc.innerHTML = '↻ At ' + pct + '% of ' + kwh.toLocaleString() + ' kWh this period → <b>$'
+        + amt.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) + '</b> to customer';
+    }
+  }
+  function saveEdit(btn){
+    var form = btn.closest('.editform');
+    var cust = btn.closest('.cust');
+    var newName = form.querySelector('input[type=text]').value;
+    var newEmail = form.querySelector('input[type=email]').value;
+    var pct = form.querySelector('input[type=range]').value;
+    cust.querySelector('.name').childNodes[2] &&
+      (cust.querySelector('.name').innerHTML = '<span class="caret">▶</span> ' + newName);
+    cust.querySelector('.cust-email').textContent = newEmail;
+    cust.querySelector('.pct-badge').textContent = pct + '%';
+    cust.setAttribute('data-name', newName);
+    form.classList.remove('show');
+    // clear amber attention state if present
+    var st = cust.querySelector('.status');
+    if(st.querySelector('.dot.amber')){
+      st.innerHTML = '<span class="dot green"></span><span class="status-txt ready">Ready</span>';
+      cust.style.borderLeft = '3px solid var(--green-light)';
+      cust.classList.add('ready');
+      var sendBtn = cust.querySelector('.draft .btn.primary');
+      if(sendBtn){ sendBtn.disabled = false; sendBtn.setAttribute('onclick', "reviewSend(this,'"+newName+"')"); }
+      cust.querySelector('.draft .hint').textContent = 'GMP invoice PDF attached · email drafted, never auto-sent';
+      recountReady();
+    }
+    showToast('Saved — ' + newName + ' updated');
+  }
+  function reviewSend(btn, name){
+    var cust = btn.closest('.cust');
+    var draft = btn.closest('.draft');
+    var amt = draft.querySelector('.total').textContent;
+    draft.classList.remove('ready');
+    draft.querySelector('.draft-actions').remove();
+    draft.querySelector('.hint').style.color = 'var(--green)';
+    draft.querySelector('.hint').textContent = '✓ Invoice sent May 14, 2026 · email delivered · record saved.';
+    // update card status + last invoice + history
+    var st = cust.querySelector('.status');
+    st.innerHTML = '<span class="dot grey"></span><span class="status-txt sent">Sent just now</span>';
+    cust.classList.remove('ready'); cust.classList.add('sent');
+    cust.style.borderLeft = '3px solid var(--line)';
+    var last = cust.querySelectorAll('.row .meta-val')[2];
+    if(last) last.textContent = 'May 2026 · ' + amt;
+    // prepend to history
+    var hist = cust.querySelector('.hist');
+    var alloc = draft.querySelectorAll('.calc div')[2].textContent.replace('Allocated','').trim();
+    var item = document.createElement('div');
+    item.className = 'hist-item';
+    item.style.borderColor = 'var(--green-light)';
+    item.style.background = 'var(--green-bg)';
+    item.innerHTML = '<span class="hist-period">May 2026</span>'
+      + '<span class="hist-detail">just sent · '+alloc+' allocated</span>'
+      + '<span class="hist-amt">'+amt+'</span><a class="hist-pdf" href="#">PDF ↓</a>';
+    hist.insertBefore(item, hist.firstChild);
+    recountReady();
+    showToast('Sent to ' + name + ' · ' + amt);
+  }
+  function sendAllReady(){
+    var ready = document.querySelectorAll('.cust.ready');
+    var n = 0;
+    ready.forEach(function(c){
+      var btn = c.querySelector('.draft.ready .btn.primary');
+      if(btn){ reviewSend(btn, c.getAttribute('data-name')); n++; }
+    });
+    if(n>0) showToast('Sent ' + n + ' invoices · all records saved');
+    else showToast('No invoices ready to send');
+  }
+  function recountReady(){
+    var n = document.querySelectorAll('.cust.ready').length;
+    document.getElementById('readycount').textContent = n;
+    var b = document.querySelector('.summary .btn.primary');
+    b.textContent = 'Send all ready (' + n + ')';
+    b.disabled = n === 0;
+  }
+  function toggleAdd(){ document.getElementById('addrow').classList.toggle('open'); }
+  function addCustomer(){
+    var name = document.getElementById('new-name').value || 'New Customer';
+    var email = document.getElementById('new-email').value || 'billing@example.org';
+    var array = document.getElementById('new-array').value;
+    var pct = document.getElementById('new-pct').value;
+    var card = document.createElement('div');
+    card.className = 'cust ready';
+    card.setAttribute('data-name', name);
+    card.innerHTML =
+      '<div class="row" onclick="toggleCust(this)">'
+      + '<div><div class="name"><span class="caret">▶</span> '+name+'</div>'
+      + '<div class="cust-email">'+email+'</div></div>'
+      + '<div><div class="meta-label">Array</div><div class="meta-val">'+array+'</div></div>'
+      + '<div><div class="meta-label">Share</div><div class="meta-val"><span class="pct-badge">'+pct+'%</span></div></div>'
+      + '<div><div class="meta-label">Last invoice</div><div class="meta-val muted">— none yet —</div></div>'
+      + '<div class="status"><span class="dot green"></span><span class="status-txt ready">Ready</span></div>'
+      + '</div>'
+      + '<div class="panel"><div class="panel-inner"><div class="panel-grid">'
+      + '<div><div class="hsubtitle">Invoice history (audit trail)</div>'
+      + '<div class="hist"><div class="hist-item"><span class="hist-period muted">No invoices yet</span>'
+      + '<span class="hist-detail">First invoice will appear here once sent.</span><span></span><span></span></div></div></div>'
+      + '<div><div class="hsubtitle">May 2026 — current period</div>'
+      + '<div class="draft ready"><div class="calc">'
+      + '<div><span class="k">GMP generation</span> &nbsp; pending</div>'
+      + '<div><span class="k">Customer share</span> &nbsp; '+pct+'%</div>'
+      + '<div class="eq total">$0.00</div></div>'
+      + '<div class="hint">Awaiting GMP data for the linked array.</div></div></div>'
+      + '</div></div></div>';
+    var addrow = document.getElementById('addrow');
+    addrow.parentElement.insertBefore(card, addrow);
+    document.getElementById('custcount').textContent =
+      document.querySelectorAll('.cust').length;
+    toggleAdd();
+    document.getElementById('new-name').value='';
+    document.getElementById('new-email').value='';
+    showToast('Added ' + name + ' — now managed in your ledger');
+  }
+  var toastTimer;
+  function showToast(msg){
+    var t = document.getElementById('toast');
+    document.getElementById('toast-msg').textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 2600);
+  }
+</script>
+</body>
+</html>

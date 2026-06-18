@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Array Operator — Reports · The Billing Run</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --card: #ffffff;
+    --ink: #111827;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --primary: #047857;
+    --primary-light: #34d399;
+    --primary-bg: #ecfdf5;
+    --amber: #f59e0b;
+    --amber-bg: #fffbeb;
+    --blue: #2563eb;
+    --blue-bg: #eff6ff;
+    --radius: 10px;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 80px; }
+
+  /* ---- Top app bar ---- */
+  .appbar {
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 22px;
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--primary), var(--primary-light));
+    display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 16px;
+  }
+  .appbar h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  .appbar .sub { color: var(--muted); font-size: 12.5px; }
+  .tabs { margin-left: auto; display: flex; gap: 4px; }
+  .tab {
+    padding: 7px 14px; border-radius: 8px; font-size: 13px; color: var(--muted);
+    cursor: pointer; border: none; background: transparent;
+  }
+  .tab.active { background: var(--primary-bg); color: var(--primary); font-weight: 600; }
+
+  /* ---- Hero ---- */
+  .hero {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    margin-bottom: 30px;
+  }
+  .hero-head {
+    padding: 20px 22px 18px;
+    display: flex; align-items: flex-start; gap: 16px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #f6fdfa, #ffffff);
+  }
+  .hero-head .period-label { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--primary); font-weight: 700; }
+  .hero-head h2 { margin: 2px 0 4px; font-size: 22px; font-weight: 700; }
+  .hero-head .meta { color: var(--muted); font-size: 13px; }
+  .hero-actions { margin-left: auto; text-align: right; }
+  .total-box { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  .total-box b { font-size: 20px; color: var(--ink); display: block; }
+
+  .btn {
+    font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid transparent;
+    padding: 9px 16px; font-weight: 600; font-size: 13.5px;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: #036b4d; }
+  .btn-primary:disabled { background: #9ca3af; cursor: not-allowed; }
+  .btn-ghost { background: #fff; color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover { background: #f9fafb; }
+  .btn-sm { padding: 6px 12px; font-size: 12.5px; }
+
+  .progress-line { padding: 12px 22px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); background: #fff; }
+  .pbar { flex: 1; height: 8px; border-radius: 99px; background: #eef2f1; overflow: hidden; }
+  .pbar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--primary), var(--primary-light)); width: 0%; transition: width .5s ease; }
+  .pcount { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+
+  /* ---- Table ---- */
+  table.run { width: 100%; border-collapse: collapse; }
+  .run th {
+    text-align: left; font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; padding: 12px 16px; border-bottom: 1px solid var(--line);
+  }
+  .run td { padding: 14px 16px; border-bottom: 1px solid #f1f3f2; vertical-align: middle; }
+  .run tr:last-child td { border-bottom: none; }
+  .run tr.row:hover { background: #fafefb; }
+  .cust { font-weight: 600; font-size: 14px; }
+  .arr { color: var(--muted); font-size: 12.5px; }
+  .math { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--muted); }
+  .math b { color: var(--ink); }
+  .amt { font-weight: 700; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; white-space: nowrap;
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 99px; }
+  .chip.ready { background: var(--primary-bg); color: var(--primary); }
+  .chip.ready .dot { background: var(--primary); }
+  .chip.draft { background: var(--blue-bg); color: var(--blue); }
+  .chip.draft .dot { background: var(--blue); }
+  .chip.needs { background: var(--amber-bg); color: #b45309; }
+  .chip.needs .dot { background: var(--amber); }
+  .chip.sent { background: #f3f4f6; color: #374151; }
+  .chip.sent .dot { background: #10b981; }
+
+  .row-action { text-align: right; }
+
+  /* ---- History ---- */
+  .section-title { font-size: 13px; font-weight: 700; color: var(--ink); margin: 0 0 4px; }
+  .section-sub { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+  .hist { background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+  .hist-row { border-bottom: 1px solid var(--line); }
+  .hist-row:last-child { border-bottom: none; }
+  .hist-head {
+    display: flex; align-items: center; gap: 14px; padding: 14px 18px; cursor: pointer; user-select: none;
+  }
+  .hist-head:hover { background: #fafafa; }
+  .hist-head .caret { color: var(--muted); transition: transform .2s; font-size: 12px; width: 12px; }
+  .hist-row.open .caret { transform: rotate(90deg); }
+  .hist-period { font-weight: 650; font-size: 14px; }
+  .hist-meta { color: var(--muted); font-size: 12.5px; }
+  .hist-total { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .hist-badge { font-size: 11.5px; color: var(--primary); background: var(--primary-bg); padding: 3px 9px; border-radius: 99px; font-weight: 600; }
+  .hist-body { display: none; padding: 4px 18px 16px 44px; }
+  .hist-row.open .hist-body { display: block; }
+  .hist-inv {
+    display: flex; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px dashed #eef0ef; font-size: 13px;
+  }
+  .hist-inv:last-child { border-bottom: none; }
+  .hist-inv .hi-name { font-weight: 600; }
+  .hist-inv .hi-math { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .hist-inv .hi-amt { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hist-inv .hi-link { color: var(--primary); font-size: 12px; text-decoration: none; font-weight: 600; }
+  .hist-inv .hi-link:hover { text-decoration: underline; }
+
+  /* ---- Drawer ---- */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(17,24,39,.42); opacity: 0; pointer-events: none;
+    transition: opacity .2s; z-index: 40;
+  }
+  .scrim.show { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; height: 100%; width: 460px; max-width: 94vw;
+    background: #fff; box-shadow: -8px 0 30px rgba(0,0,0,.12);
+    transform: translateX(100%); transition: transform .25s ease; z-index: 50;
+    display: flex; flex-direction: column;
+  }
+  .drawer.show { transform: translateX(0); }
+  .drawer-head { padding: 18px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; gap: 12px; }
+  .drawer-head h3 { margin: 0 0 2px; font-size: 16px; }
+  .drawer-head .dh-sub { color: var(--muted); font-size: 12.5px; }
+  .x { margin-left: auto; border: none; background: transparent; font-size: 20px; cursor: pointer; color: var(--muted); line-height: 1; }
+  .drawer-body { padding: 18px 20px; overflow-y: auto; flex: 1; }
+
+  .calc-card { background: var(--primary-bg); border: 1px solid #c7f0df; border-radius: 10px; padding: 14px 16px; margin-bottom: 18px; }
+  .calc-card .cc-row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; font-variant-numeric: tabular-nums; }
+  .calc-card .cc-row.total { border-top: 1px dashed #9fe3c6; margin-top: 6px; padding-top: 8px; font-weight: 700; font-size: 15px; }
+  .calc-card .cc-label { color: #065f46; }
+
+  .attach { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; margin-bottom: 8px; font-size: 13px; }
+  .attach .fic { width: 28px; height: 34px; border-radius: 4px; background: #fee2e2; color: #b91c1c; display: grid; place-items: center; font-size: 9px; font-weight: 700; }
+  .attach .a-size { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+  label.fl { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .03em; }
+  input.fi, textarea.fi {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 13px; color: var(--ink);
+    resize: vertical;
+  }
+  input.fi:focus, textarea.fi:focus { outline: none; border-color: var(--primary-light); box-shadow: 0 0 0 3px rgba(52,211,153,.18); }
+  textarea.fi { min-height: 150px; line-height: 1.5; }
+
+  .drawer-foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
+  .drawer-foot .df-note { font-size: 12px; color: var(--muted); }
+
+  /* toast */
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #111827; color: #fff; padding: 12px 18px; border-radius: 10px; font-size: 13.5px; font-weight: 500;
+    opacity: 0; pointer-events: none; transition: all .25s; z-index: 60; display: flex; align-items: center; gap: 9px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.25);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast .tk { color: var(--primary-light); font-weight: 700; }
+  .muted-note { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- App bar -->
+  <div class="appbar">
+    <div class="logo">A</div>
+    <div>
+      <h1>Array Operator</h1>
+      <div class="sub">Bozuwa Solar · 4 customers</div>
+    </div>
+    <nav class="tabs">
+      <button class="tab">Dashboard</button>
+      <button class="tab">Arrays</button>
+      <button class="tab active">Reports</button>
+      <button class="tab">Settings</button>
+    </nav>
+  </div>
+
+  <!-- HERO: This period -->
+  <section class="hero">
+    <div class="hero-head">
+      <div>
+        <div class="period-label">Current billing run</div>
+        <h2>May 2026</h2>
+        <div class="meta">GMP generation posted June 3 · 4 invoices to review &amp; send</div>
+      </div>
+      <div class="hero-actions">
+        <div class="total-box">Period total<b id="periodTotal">$0.00</b></div>
+        <button class="btn btn-primary" id="batchBtn" onclick="batchSend()">Review &amp; send all 4 →</button>
+      </div>
+    </div>
+
+    <div class="progress-line">
+      <div class="pbar"><span id="pbarFill"></span></div>
+      <div class="pcount" id="pcount">0 of 4 sent</div>
+    </div>
+
+    <table class="run">
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Generation × allocation</th>
+          <th>Customer share</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="runBody"></tbody>
+    </table>
+  </section>
+
+  <!-- HISTORY -->
+  <h3 class="section-title">History</h3>
+  <p class="section-sub">Every completed run is saved as a durable record. Expand a period to audit its sent invoices.</p>
+  <div class="hist" id="hist"></div>
+
+</div>
+
+<!-- Drawer -->
+<div class="scrim" id="scrim" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div>
+      <h3 id="dTitle">Review invoice</h3>
+      <div class="dh-sub" id="dSub"></div>
+    </div>
+    <button class="x" onclick="closeDrawer()">×</button>
+  </div>
+  <div class="drawer-body">
+    <div class="calc-card" id="dCalc"></div>
+
+    <div style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;">Attachments</div>
+    <div style="margin-top:8px;">
+      <div class="attach">
+        <div class="fic">PDF</div>
+        <div><div style="font-weight:600;" id="dInvName">Invoice.pdf</div><div class="muted-note">Customer invoice</div></div>
+        <div class="a-size">84 KB</div>
+      </div>
+      <div class="attach" id="dGmpAttach">
+        <div class="fic">PDF</div>
+        <div><div style="font-weight:600;" id="dGmpName">GMP-statement.pdf</div><div class="muted-note">GMP utility statement</div></div>
+        <div class="a-size">142 KB</div>
+      </div>
+    </div>
+
+    <label class="fl">To</label>
+    <input class="fi" id="dTo" type="text">
+    <label class="fl">Subject</label>
+    <input class="fi" id="dSubject" type="text">
+    <label class="fl">Message</label>
+    <textarea class="fi" id="dBody"></textarea>
+  </div>
+  <div class="drawer-foot">
+    <button class="btn btn-primary" id="dSend" onclick="sendCurrent()">Approve &amp; send</button>
+    <button class="btn btn-ghost btn-sm" onclick="closeDrawer()">Cancel</button>
+    <span class="df-note">Nothing sends automatically.</span>
+  </div>
+</aside>
+
+<div class="toast" id="toast"><span class="tk">✓</span><span id="toastMsg"></span></div>
+
+<script>
+  // ---- Data ----
+  const customers = [
+    { id:'danville', name:'Danville Big Buck Solar', array:'Danville Array A', gen:1284, pct:95, status:'ready',
+      email:'ops@bigbucksolar.com' },
+    { id:'river', name:'River Road Community', array:'River Road Array', gen:2042, pct:90, status:'ready',
+      email:'billing@riverroadcommunity.org' },
+    { id:'norwich', name:'Norwich Union Village', array:'Norwich Array B', gen:1610, pct:88, status:'needs',
+      email:'treasurer@norwichunion.vt.us' },
+    { id:'dairy', name:'Green Mountain Dairy', array:'Dairy Rooftop', gen:931, pct:97, status:'draft',
+      email:'accounts@gmdairy.com' },
+  ];
+  const RATE = 0.1485; // $/kWh blended net-metering credit rate
+  function shareKwh(c){ return c.gen * c.pct/100; }
+  function dollars(c){ return shareKwh(c) * RATE; }
+  function fmt(n){ return n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function fmtK(n){ return n.toLocaleString('en-US',{maximumFractionDigits:0}); }
+
+  const chipLabel = { ready:'Ready', draft:'Draft', needs:'Needs GMP PDF', sent:'Sent' };
+
+  // ---- Render run table ----
+  function renderRun(){
+    const tb = document.getElementById('runBody');
+    tb.innerHTML = '';
+    customers.forEach(c => {
+      const tr = document.createElement('tr');
+      tr.className = 'row';
+      const skwh = shareKwh(c);
+      const sentOrReady = c.status === 'sent';
+      tr.innerHTML = `
+        <td>
+          <div class="cust">${c.name}</div>
+          <div class="arr">${c.array} · ${c.pct}% allocation</div>
+        </td>
+        <td class="math">${fmtK(c.gen)} kWh × ${c.pct}% = <b>${fmtK(skwh)} kWh</b><br>
+          <span style="font-size:11.5px">${fmtK(skwh)} kWh × $${RATE.toFixed(4)}</span></td>
+        <td><span class="amt">$${fmt(dollars(c))}</span></td>
+        <td><span class="chip ${c.status}" onclick="cycleChip('${c.id}')" title="click to advance status">
+          <span class="dot"></span>${chipLabel[c.status]}</span></td>
+        <td class="row-action">
+          ${ c.status==='sent'
+              ? '<span class="muted-note">Sent ✓</span>'
+              : c.status==='needs'
+                ? `<button class="btn btn-ghost btn-sm" onclick="attachGmp('${c.id}')">Attach GMP PDF</button>`
+                : `<button class="btn btn-ghost btn-sm" onclick="openDrawer('${c.id}')">Review</button>` }
+        </td>`;
+      tb.appendChild(tr);
+    });
+    const total = customers.reduce((s,c)=>s+dollars(c),0);
+    document.getElementById('periodTotal').textContent = '$'+fmt(total);
+    updateProgress();
+  }
+
+  function updateProgress(){
+    const sent = customers.filter(c=>c.status==='sent').length;
+    document.getElementById('pbarFill').style.width = (sent/customers.length*100)+'%';
+    document.getElementById('pcount').textContent = `${sent} of ${customers.length} sent`;
+    const b = document.getElementById('batchBtn');
+    if(sent === customers.length){ b.textContent='All sent ✓'; b.disabled=true; }
+  }
+
+  // status cycle: needs -> draft -> ready (sent only via send)
+  function cycleChip(id){
+    const c = customers.find(x=>x.id===id);
+    if(c.status==='sent') return;
+    if(c.status==='needs'){ c.status='draft'; toast('GMP PDF attached — now a Draft'); }
+    else if(c.status==='draft'){ c.status='ready'; toast('Draft reviewed — marked Ready'); }
+    else if(c.status==='ready'){ c.status='draft'; }
+    renderRun();
+  }
+  function attachGmp(id){
+    const c = customers.find(x=>x.id===id);
+    c.status='ready';
+    toast('GMP statement attached — '+c.name.split(' ')[0]+' is Ready');
+    renderRun();
+  }
+
+  // ---- Drawer ----
+  let current = null;
+  function openDrawer(id){
+    const c = customers.find(x=>x.id===id);
+    current = c;
+    const skwh = shareKwh(c), amt = dollars(c);
+    document.getElementById('dTitle').textContent = c.name;
+    document.getElementById('dSub').textContent = c.array + ' · May 2026 billing run';
+    document.getElementById('dCalc').innerHTML = `
+      <div class="cc-row"><span class="cc-label">Array generation (GMP posted)</span><span>${fmtK(c.gen)} kWh</span></div>
+      <div class="cc-row"><span class="cc-label">Customer allocation</span><span>${c.pct}%</span></div>
+      <div class="cc-row"><span class="cc-label">Customer share</span><span>${fmtK(skwh)} kWh</span></div>
+      <div class="cc-row"><span class="cc-label">Credit rate</span><span>$${RATE.toFixed(4)} / kWh</span></div>
+      <div class="cc-row total"><span>Invoice total</span><span>$${fmt(amt)}</span></div>`;
+    document.getElementById('dInvName').textContent = `Invoice-${c.id}-May2026.pdf`;
+    document.getElementById('dGmpName').textContent = `GMP-${c.array.replace(/\s+/g,'')}-May2026.pdf`;
+    document.getElementById('dTo').value = c.email;
+    document.getElementById('dSubject').value = `Your May 2026 solar invoice — ${c.name}`;
+    document.getElementById('dBody').value =
+`Hi,
+
+Your solar production for May 2026 is in. ${c.array} generated ${fmtK(c.gen)} kWh; your ${c.pct}% allocation comes to ${fmtK(skwh)} kWh, for a total of $${fmt(amt)}.
+
+Your invoice and the GMP utility statement are attached. Let me know if you have any questions.
+
+Thanks,
+Paul Bozuwa
+Bozuwa Solar`;
+    const sendBtn = document.getElementById('dSend');
+    sendBtn.disabled = (c.status==='needs');
+    sendBtn.textContent = c.status==='needs' ? 'Attach GMP PDF first' : 'Approve & send';
+    document.getElementById('scrim').classList.add('show');
+    document.getElementById('drawer').classList.add('show');
+  }
+  function closeDrawer(){
+    current = null;
+    document.getElementById('scrim').classList.remove('show');
+    document.getElementById('drawer').classList.remove('show');
+  }
+  function sendCurrent(){
+    if(!current || current.status==='needs') return;
+    current.status='sent';
+    const name = current.name;
+    closeDrawer();
+    renderRun();
+    toast('Invoice sent to '+name);
+  }
+
+  // ---- Batch ----
+  function batchSend(){
+    const pending = customers.filter(c=>c.status==='ready');
+    if(pending.length===0){
+      const blocked = customers.filter(c=>c.status!=='sent');
+      if(blocked.length) toast(blocked.length+' invoice(s) not Ready — review them first');
+      return;
+    }
+    pending.forEach(c=>c.status='sent');
+    renderRun();
+    toast(pending.length+' invoice(s) sent in one pass');
+  }
+
+  // ---- History ----
+  const history = [
+    { period:'April 2026', sentOn:'May 4, 2026', total:2287.41, invoices:[
+        {name:'Danville Big Buck Solar', gen:1198, pct:95}, {name:'River Road Community', gen:1944, pct:90},
+        {name:'Norwich Union Village', gen:1502, pct:88}, {name:'Green Mountain Dairy', gen:868, pct:97} ] },
+    { period:'March 2026', sentOn:'April 3, 2026', total:1996.08, invoices:[
+        {name:'Danville Big Buck Solar', gen:1041, pct:95}, {name:'River Road Community', gen:1702, pct:90},
+        {name:'Norwich Union Village', gen:1310, pct:88}, {name:'Green Mountain Dairy', gen:744, pct:97} ] },
+    { period:'February 2026', sentOn:'March 5, 2026', total:1604.55, invoices:[
+        {name:'Danville Big Buck Solar', gen:842, pct:95}, {name:'River Road Community', gen:1355, pct:90},
+        {name:'Norwich Union Village', gen:1066, pct:88}, {name:'Green Mountain Dairy', gen:598, pct:97} ] },
+  ];
+  function renderHist(){
+    const h = document.getElementById('hist');
+    h.innerHTML='';
+    history.forEach((p,i)=>{
+      const row = document.createElement('div');
+      row.className='hist-row';
+      const periodTotal = p.invoices.reduce((s,inv)=>s + (inv.gen*inv.pct/100)*RATE, 0);
+      const invHtml = p.invoices.map(inv=>{
+        const sk = inv.gen*inv.pct/100, amt = sk*RATE;
+        return `<div class="hist-inv">
+          <span class="hi-name">${inv.name}</span>
+          <span class="hi-math">${fmtK(inv.gen)} kWh × ${inv.pct}% × $${RATE.toFixed(4)}</span>
+          <span class="hi-amt">$${fmt(amt)}</span>
+          <a class="hi-link" href="#" onclick="return false">Invoice PDF</a>
+          <a class="hi-link" href="#" onclick="return false">GMP PDF</a>
+        </div>`;
+      }).join('');
+      row.innerHTML = `
+        <div class="hist-head" onclick="this.parentElement.classList.toggle('open')">
+          <span class="caret">▶</span>
+          <span class="hist-period">${p.period}</span>
+          <span class="hist-badge">4 sent</span>
+          <span class="hist-meta">· sent ${p.sentOn}</span>
+          <span class="hist-total">$${fmt(periodTotal)}</span>
+        </div>
+        <div class="hist-body">${invHtml}</div>`;
+      h.appendChild(row);
+    });
+  }
+
+  // ---- Toast ----
+  let toastTimer=null;
+  function toast(msg){
+    const t=document.getElementById('toast');
+    document.getElementById('toastMsg').textContent=msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(()=>t.classList.remove('show'),2600);
+  }
+
+  renderRun();
+  renderHist();
+</script>
+</body>
+</html>
