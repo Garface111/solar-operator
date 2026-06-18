@@ -1,10 +1,9 @@
 # GMP Bill-PDF READ Contract  (ingestion ↔ Reports auto-attach)
 
-> **STATUS: CONSUMER-SIDE v0.** The Reports agent built the READ + auto-attach
-> half. This document + `api/reports/gmp_bill_pdf_read.py` are the source of
-> truth for what the INGESTION/extension agent must persist to make auto-attach
-> light up. When the ingestion side lands durable PDF bytes, auto-attach works
-> with zero further Reports-side change.
+> **STATUS: IMPLEMENTED (v1).** Both halves are now built by the Reports agent
+> (the other agent stopped): the READ/auto-attach side AND the durable
+> persistence + capture job. The only remaining external dependency is a valid
+> GMP session token (auth) — see "Auth blocker" below.
 
 ## The goal
 Paul's offtaker invoices should ship with the **actual GMP utility bill PDF**
@@ -21,23 +20,28 @@ so he never hand-uploads. Per-customer toggle:
   `gmp_bill_pdf_read.get_bill_pdf_for_period(array_id, period_start, period_end)`
   and attaches the returned bytes. It never scrapes, pulls, or writes.
 
-## THE GAP to close (ingestion side)
-Today `Bill.pdf_path` points at Railway's **ephemeral disk** → not durable, can't
-be attached weeks later. To make auto-attach work, persist the verbatim PDF
-**bytes in-row**, keyed by (utility_account_id, billing period):
+## What's now built (Reports agent, both halves)
+- **Durable storage:** `Bill.pdf_bytes` (LargeBinary) + `Bill.pdf_content_type`
+  on the bills table (migration in api/migrate.py). `pdf_path` is kept but is
+  ephemeral; the bytes are the durable source.
+- **Capture job:** `api/worker.py`
+  - `_pull_via_pdf` (fallback path) reads the downloaded PDF bytes and persists
+    them in-row.
+  - `_capture_current_bill_pdf` runs on the JSON-first path (the normal one):
+    after upserting bill metrics it fetches the account's CURRENT bill PDF via
+    `gmp.fetch_bill_pdf(currentBillUrlBinary)` and stores the bytes on the newest
+    bill row. Best-effort, never fails the pull; validates `%PDF` magic so an
+    auth-redirect HTML page is never stored as a "PDF".
+- **Read/attach:** `api/reports/gmp_bill_pdf_read.get_bill_pdf_for_period` reads
+  `Bill.pdf_bytes`; `delivery.generate_files` auto-attaches when the per-customer
+  `auto_attach_gmp` toggle is on.
 
-```python
-# Suggested additions to the Bill model (ingestion agent owns the migration):
-Bill.pdf_bytes : LargeBinary | None       # the verbatim GMP bill PDF
-Bill.pdf_content_type : str | None        # "application/pdf"
-```
-
-The read seam already reads `getattr(bill, "pdf_bytes", None)` defensively, so:
-- Before the column exists / before bytes are captured → returns None →
-  auto-attach attaches nothing (UI says "GMP bill will attach automatically once
-  captured"). **Never fabricated.**
-- After ingestion persists bytes → auto-attach attaches the right PDF, no
-  Reports-side change needed.
+### Scope note (current bill only, for now)
+The capture persists the **current** bill PDF (the only one `currentBillUrl`
+addresses). That covers the live monthly/quarterly invoice cycle. Historical
+back-capture would need a per-bill PDF URL confirmed in the bill JSON
+(`raw_json`); not done because GMP auth is blocked (can't introspect a live
+sample). Add it later if a per-bill URL field is confirmed.
 
 ## The read function (READ-ONLY, returns plain dict or None)
 ```python
@@ -56,9 +60,13 @@ bill whose period overlaps [period_start, period_end] (newest-first), returns it
 durable bytes. Account==meter; an array may sum several meters — the newest
 matching bill with bytes wins.
 
-## Blockers / notes
-- GMP backfill auth was blocked as of 2026-06-18 (stale token / 403 on refresh);
-  no PDFs can be captured until that's resolved. Auto-attach degrades silently
-  (attaches nothing) until then.
+## Auth blocker (the ONE remaining dependency)
+- GMP session token was blocked as of 2026-06-18 (stale token → 401; refresh
+  endpoint → 403 AUTHORIZATION_FAILURE, likely rate-limit/lockout). GMP does not
+  rotate the refresh_token. **Nothing pulls a PDF until a fresh GMP capture
+  lands** — re-capture the owner's GMP session via the extension (the bills pull
+  uses UtilitySession.api_token). Until then `_capture_current_bill_pdf` returns
+  `{"saved": False, "reason": "fetch failed: ..."}` and auto-attach attaches
+  nothing (never fabricated; surfaced honestly in the UI).
 - Keep the existing MANUAL upload (`POST /drafts/{id}/gmp-invoice`) as the
   fallback — when auto-attach finds nothing, Paul can still upload by hand.

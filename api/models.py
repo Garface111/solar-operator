@@ -456,6 +456,13 @@ class Bill(Base):
     raw_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     document_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
     pdf_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Durable bill-PDF bytes (Jun 2026). pdf_path points at Railway's EPHEMERAL
+    # disk (wiped on redeploy), so for anything that must survive — e.g. the
+    # auto-attach-GMP-bill feature reading via api/reports/gmp_bill_pdf_read —
+    # the actual PDF bytes are persisted in-row here. Nullable: only populated
+    # when the pull captures the PDF (current-bill path); null = not captured.
+    pdf_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    pdf_content_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     pulled_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     parse_status: Mapped[str] = mapped_column(String(20), default="parsed")  # parsed, failed, partial

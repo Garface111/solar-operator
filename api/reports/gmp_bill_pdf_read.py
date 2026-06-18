@@ -122,7 +122,7 @@ def get_bill_pdf_for_period(
                 return {
                     "bytes": data,
                     "filename": f"GMP_bill_{label}.pdf",
-                    "content_type": "application/pdf",
+                    "content_type": getattr(bill, "pdf_content_type", None) or "application/pdf",
                     "account_id": bill.account_id,
                     "period_start": ps,
                     "period_end": pe,

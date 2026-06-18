@@ -774,6 +774,17 @@ def main():
             added.append("auto_attach_gmp")
             print("  + billing_report_subscriptions.auto_attach_gmp")
 
+        # 2026-06-18 Durable bill-PDF bytes (auto-attach GMP bill). pdf_path was
+        # ephemeral; persist the actual bytes in-row so the PDF survives redeploys.
+        for col, sql in [
+            ("pdf_bytes",        "ALTER TABLE bills ADD COLUMN pdf_bytes BYTEA"),
+            ("pdf_content_type", "ALTER TABLE bills ADD COLUMN pdf_content_type VARCHAR(80)"),
+        ]:
+            if not column_exists(conn, "bills", col):
+                conn.execute(text(sql))
+                added.append(col)
+                print(f"  + bills.{col}")
+
         # 2026-06-18 GMP daily-interval DATA SPONGE. Two BRAND-NEW tables
         # (gmp_usage_raw = verbatim CSV sponge, gmp_daily_generation = derived
         # per-day kWh) are created for free by init_db()/create_all above; this

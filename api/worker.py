@@ -43,8 +43,15 @@ def _latest_session_token(db, tenant_id: str, provider: str) -> str | None:
 
 
 def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
-                 metrics: dict, source_path: str | None = None) -> str:
-    """Upsert one bill row. Returns 'created' or 'updated'."""
+                 metrics: dict, source_path: str | None = None,
+                 pdf_bytes: bytes | None = None,
+                 pdf_content_type: str | None = None) -> str:
+    """Upsert one bill row. Returns 'created' or 'updated'.
+
+    `pdf_bytes` (+ content type) are the DURABLE bill-PDF bytes — persisted
+    in-row so the auto-attach-GMP-bill feature can read them after a redeploy
+    (pdf_path alone is ephemeral). Optional; null when the PDF wasn't captured.
+    """
     existing = None
     if metrics.get("period_end"):
         existing = db.execute(
@@ -82,6 +89,9 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
                 setattr(existing, k, v)
         if source_path:
             existing.pdf_path = source_path
+        if pdf_bytes:
+            existing.pdf_bytes = pdf_bytes
+            existing.pdf_content_type = pdf_content_type or "application/pdf"
         if metrics.get("document_number"):
             existing.document_number = metrics["document_number"]
         return "updated"
@@ -94,6 +104,8 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
         billing_days=metrics["billing_days"],
         kwh_generated=metrics["kwh_generated"],
         pdf_path=source_path,
+        pdf_bytes=pdf_bytes,
+        pdf_content_type=(pdf_content_type or "application/pdf") if pdf_bytes else None,
         raw_text=metrics.get("raw_text", ""),
         parse_status=metrics["parse_status"],
         document_number=metrics.get("document_number"),
@@ -122,13 +134,56 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
             created += 1
         else:
             updated += 1
+    # The JSON path persists bill METRICS for all history but no PDF. Capture
+    # the CURRENT bill's PDF bytes durably onto its bill row so auto-attach has
+    # the real utility PDF for the latest period. Best-effort: never fail the
+    # pull over a PDF fetch (auth/format issues surface in the result).
+    pdf_capture = _capture_current_bill_pdf(db, tenant_id, account, adapter)
     return {
         "account": account.account_number, "nickname": account.nickname,
         "status": "ok", "source": "json",
         "bills_returned": len(bills),
         "created": created, "updated": updated,
         "no_generation": no_generation,
+        "pdf_capture": pdf_capture,
     }
+
+
+def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
+                              adapter) -> dict:
+    """Fetch the account's CURRENT bill PDF and persist its bytes onto the most
+    recent Bill row for that account. Durable storage for auto-attach. Returns a
+    small status dict; never raises (best-effort alongside the JSON pull)."""
+    current_bill_url = (account.extra or {}).get("currentBillUrlBinary") or \
+                       (account.extra or {}).get("current_bill_url")
+    if not current_bill_url:
+        return {"saved": False, "reason": "no current_bill_url"}
+    if not hasattr(adapter, "fetch_bill_pdf"):
+        return {"saved": False, "reason": "adapter has no fetch_bill_pdf"}
+    # Newest bill row for this account is where the current PDF belongs.
+    bill = db.execute(
+        select(Bill).where(Bill.account_id == account.id)
+        .order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
+    ).scalars().first()
+    if bill is None:
+        return {"saved": False, "reason": "no bill row to attach to"}
+    if bill.pdf_bytes:
+        return {"saved": False, "reason": "already captured", "bill_id": bill.id}
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    safe = (account.nickname or account.account_number).replace(" ", "_").replace("/", "_")
+    pdf_path = BILLS_DIR / tenant_id / f"{ts}_{account.provider}_{safe}.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _, content_type = adapter.fetch_bill_pdf(current_bill_url, pdf_path)
+        data = pdf_path.read_bytes()
+    except Exception as e:  # noqa: BLE001 — auth/format/transport; surface, don't fail the pull
+        return {"saved": False, "reason": f"fetch failed: {type(e).__name__}: {e}"}
+    if not data or data[:4] != b"%PDF":
+        return {"saved": False, "reason": "not a PDF (auth redirect?)"}
+    bill.pdf_bytes = data
+    bill.pdf_content_type = content_type or "application/pdf"
+    bill.pdf_path = str(pdf_path)
+    return {"saved": True, "bill_id": bill.id, "bytes": len(data)}
 
 
 def _pull_via_pdf(db, tenant_id: str, account: UtilityAccount, adapter) -> dict:
@@ -145,17 +200,26 @@ def _pull_via_pdf(db, tenant_id: str, account: UtilityAccount, adapter) -> dict:
     pdf_path = BILLS_DIR / tenant_id / f"{ts}_{account.provider}_{safe}.pdf"
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
 
-    adapter.fetch_bill_pdf(current_bill_url, pdf_path)
+    path, content_type = adapter.fetch_bill_pdf(current_bill_url, pdf_path)
     metrics = adapter.extract_bill_metrics(pdf_path)
     metrics["source"] = "pdf"
+    # Persist the actual PDF bytes durably (in-row) — pdf_path is ephemeral on
+    # Railway, and the auto-attach-GMP-bill feature reads these bytes later.
+    try:
+        pdf_bytes = pathlib.Path(pdf_path).read_bytes()
+    except OSError:
+        pdf_bytes = None
     action = _upsert_bill(db, tenant_id, account, metrics,
-                          source_path=str(pdf_path))
+                          source_path=str(pdf_path),
+                          pdf_bytes=pdf_bytes,
+                          pdf_content_type=content_type or "application/pdf")
     return {
         "account": account.account_number, "nickname": account.nickname,
         "status": "ok", "source": "pdf", "action": action,
         "kwh_generated": metrics["kwh_generated"],
         "billing_days": metrics["billing_days"],
         "pdf": pdf_path.name,
+        "pdf_bytes_saved": bool(pdf_bytes),
     }
 
 
