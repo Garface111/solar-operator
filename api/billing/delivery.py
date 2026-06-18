@@ -344,7 +344,8 @@ def _b64(path: pathlib.Path) -> dict:
             "content": base64.b64encode(path.read_bytes()).decode()}
 
 
-def _email_html(match: BillingMatch, sub, is_test: bool) -> tuple[str, str, str]:
+def _email_html(match: BillingMatch, sub, is_test: bool,
+                note: Optional[str] = None) -> tuple[str, str, str]:
     inv = match.computed_invoice or {}
     cust = match.customer.get("name") or sub.customer_name or "your array"
     period = ""
@@ -366,9 +367,23 @@ def _email_html(match: BillingMatch, sub, is_test: bool) -> tuple[str, str, str]
         return (f'<tr><td style="padding:{pad} 0;opacity:.65;">{label}</td>'
                 f'<td style="padding:{pad} 0;text-align:right;{valstyle}">{val}</td></tr>')
 
+    # The operator's edited note (Paul's "edit a pre-written email"), shown above
+    # the figures. Plain text → escaped + newlines to <br> so it renders safely.
+    note_html = ""
+    note_text = ""
+    if note and note.strip():
+        import html as _html
+        safe = _html.escape(note.strip()).replace("\n", "<br>")
+        note_html = (f'<div style="font-size:14px;line-height:1.55;margin:0 0 16px;">'
+                     f'{safe}</div>')
+        note_text = note.strip() + "\n\n"
+
+    intro_para = ("" if note_html
+                  else f"<p>Automatic solar report for <strong>{cust}</strong>.</p>")
     body_html = (
         f"{test_banner}"
-        f"<p>Automatic solar report for <strong>{cust}</strong>.</p>"
+        f"{note_html}"
+        f"{intro_para}"
         f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
         f'{_row("Period", period or "—")}'
         f'{_row("Generation", f"{kwh:,.0f} kWh")}'
@@ -386,6 +401,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool) -> tuple[str, str, str]
     text = render_email_skin_text(
         intro_line=f"Automatic solar report for {cust}",
         body_text=(
+            f"{note_text}"
             f"Solar report for {cust}\n\n"
             f"Period: {period or '—'}\n"
             f"Generation: {kwh:,.0f} kWh\n"
@@ -398,10 +414,14 @@ def _email_html(match: BillingMatch, sub, is_test: bool) -> tuple[str, str, str]
 
 
 def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None,
-                         triggered_by: str = "manual", is_test: bool = False) -> dict:
+                         triggered_by: str = "manual", is_test: bool = False,
+                         note: Optional[str] = None) -> dict:
     """Generate + email one subscription's report. Stamps schedule fields on
     success. Returns a structured result dict (never raises for the common
-    failure cases — surfaces them in the result instead)."""
+    failure cases — surfaces them in the result instead).
+
+    `note` is the operator's edited email body (from an approved draft); when
+    present it leads the email above the figure table."""
     from ..notify import _send_via_resend
 
     try:
@@ -431,7 +451,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             logger.exception("billing render failed")
             return {"ok": False, "error": f"render failed: {e}"}
         attachments = [_b64(p) for p in paths]
-        subject, html, text = _email_html(match, sub, is_test)
+        subject, html, text = _email_html(match, sub, is_test, note=note)
 
         from_addr = None
         if getattr(tenant, "send_from_email", None):

@@ -816,7 +816,8 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         if d.gmp_invoice_pdf is not None:
             sub.gmp_invoice_pdf = d.gmp_invoice_pdf
         db.commit()
-        result = deliver_subscription(db, sub, t, triggered_by="approval", is_test=False)
+        result = deliver_subscription(db, sub, t, triggered_by="approval",
+                                      is_test=False, note=d.note)
         if not result.get("ok"):
             raise HTTPException(422, result.get("error", "send failed"))
         d.status = "sent"

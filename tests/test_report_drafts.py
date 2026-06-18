@@ -191,3 +191,27 @@ def test_scheduled_auto_mode_sends_to_customer(client, monkeypatch):
     # Went to the customer; no draft created.
     assert "nfd@norwich.gov" in (captured.get("to") or "")
     assert client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"] == []
+
+
+def test_edited_email_note_rides_the_approved_send(client, monkeypatch):
+    """Paul's 'edit a pre-written email' ask: a note PATCHed onto the draft must
+    appear in the email body that goes out on Approve & send."""
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, send_mode="to_client",
+                     client_email="nfd@norwich.gov").json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth)).json()["draft"]["id"]
+    note = "Paul custom note - thank you for your business this quarter"
+    pr = client.patch(f"{BASE}/drafts/{draft_id}", json={"note": note},
+                      headers=_auth(auth))
+    assert pr.status_code == 200, pr.text
+
+    captured = {}
+    monkeypatch.setattr("api.notify._send_via_resend",
+                        lambda **kw: captured.update(kw) or True)
+    r = client.post(f"{BASE}/drafts/{draft_id}/approve", headers=_auth(auth))
+    assert r.status_code == 200, r.text
+    # The edited note rides the sent email: exact in the text body, and present
+    # (HTML-escaped) in the html body.
+    assert note in (captured.get("text") or ""), captured.get("text")
+    assert "thank you for your business this quarter" in (captured.get("html") or "")
