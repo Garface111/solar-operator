@@ -43,6 +43,15 @@ def test_blended_rate_uses_abs_cost_over_consumption():
     assert abs(m["avg_rate_cents_kwh"] - 21.46) < 0.01
 
 
+def test_blended_rate_guards_divide_by_tiny():
+    # A solar bill with ~0 consumption but fixed charges must NOT produce an
+    # absurd rate (the live $29.12 / 2 kWh = 1456¢ artifact).
+    m = gmp.bill_json_to_metrics(_bill(gen=2393.0, consumed=2.0, excess=2391.0,
+                                       calc_dollars=[29.12]))
+    assert m["avg_rate_cents_kwh"] is None        # suppressed, not garbage
+    assert m["total_cost"] == 29.12               # cost still kept
+
+
 def test_raw_json_always_kept():
     b = _bill(gen=100.0, calc_dollars=[5.0], weirdFutureField={"x": 1})
     m = gmp.bill_json_to_metrics(b)

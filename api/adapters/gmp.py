@@ -233,9 +233,14 @@ def _extract_full_record(bill: dict) -> dict[str, Any]:
     net_credit = -total_cost if (total_cost is not None and total_cost < 0) else None
 
     # Blended rate (¢/kWh): |cost| / kWh consumed, only when both meaningful.
+    # Guard the divide-by-tiny artifact: a solar bill with ~0 consumption but
+    # fixed charges produces an absurd rate (e.g. $29 / 2 kWh = 1456¢). Require a
+    # real consumption floor and clamp to a sane utility ceiling (~100¢/kWh).
     avg_rate = None
-    if total_cost is not None and consumed and consumed > 0:
-        avg_rate = round((abs(total_cost) / consumed) * 100.0, 3)
+    if total_cost is not None and consumed and consumed >= 10:
+        r = round((abs(total_cost) / consumed) * 100.0, 3)
+        if 0 <= r <= 100:
+            avg_rate = r
 
     # Net-metered if the bill carries any excess/solar-credit/generation signal.
     is_nm = None
