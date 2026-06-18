@@ -1,0 +1,150 @@
+"""Tests for the draft → approve → send report inbox (Paul Bozuwa's workflow).
+
+A drafted report sits in an approval inbox; nothing reaches a real customer until
+the operator approves it. The operator can attach the period's GMP utility-invoice
+PDF, which rides onto the approved email via delivery's existing attach hook.
+"""
+from __future__ import annotations
+
+import pathlib
+import secrets
+
+from sqlalchemy import select
+
+from api.account import mint_session_for_tenant
+from api.db import SessionLocal
+from api.models import Tenant, BillingReportSubscription, ReportDraft
+
+FIX = pathlib.Path(__file__).parent / "fixtures" / "billing"
+BASE = "/v1/array-operator/billing"
+
+
+def _make_tenant() -> tuple[str, str]:
+    tid = "ten_" + secrets.token_hex(6)
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=tid, name="Draft Test Operator",
+            contact_email=f"{tid}@operator.test",
+            tenant_key="sol_live_" + secrets.token_urlsafe(12),
+            plan="standard", active=True, product="array_operator",
+        ))
+        db.commit()
+    return tid, f"Bearer {mint_session_for_tenant(tid)}"
+
+
+def _upload(client, auth, fixture="norwich.xlsx", **form):
+    data = (FIX / fixture).read_bytes()
+    files = {"file": (fixture, data,
+             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    return client.post(f"{BASE}/subscriptions", files=files, data=form,
+                       headers={"Authorization": auth})
+
+
+def _auth(a):
+    return {"Authorization": a}
+
+
+def test_generate_draft_then_appears_in_inbox(client):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+    r = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth))
+    assert r.status_code == 200, r.text
+    d = r.json()["draft"]
+    assert d["status"] == "pending"
+    assert d["customer_name"] == "Norwich Fire District"
+    assert d["has_gmp_pdf"] is False
+    # Inbox lists it.
+    inbox = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    assert [x["id"] for x in inbox] == [d["id"]]
+
+
+def test_generate_draft_is_idempotent_per_period(client):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+    d1 = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth)).json()["draft"]
+    d2 = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth)).json()["draft"]
+    assert d1["id"] == d2["id"]  # same period → reuse the pending draft
+    inbox = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    assert len(inbox) == 1
+
+
+def test_attach_gmp_pdf_then_present_on_draft(client):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth)).json()["draft"]["id"]
+    pdf = b"%PDF-1.4\n%GMP invoice fixture\n"
+    r = client.post(f"{BASE}/drafts/{draft_id}/gmp-invoice",
+                    files={"file": ("gmp_may.pdf", pdf, "application/pdf")},
+                    headers=_auth(auth))
+    assert r.status_code == 200, r.text
+    assert r.json()["draft"]["has_gmp_pdf"] is True
+    assert r.json()["draft"]["gmp_filename"] == "gmp_may.pdf"
+
+
+def test_attach_rejects_non_pdf(client):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth)).json()["draft"]["id"]
+    r = client.post(f"{BASE}/drafts/{draft_id}/gmp-invoice",
+                    files={"file": ("notapdf.txt", b"hello", "text/plain")},
+                    headers=_auth(auth))
+    assert r.status_code == 400
+
+
+def test_approve_sends_and_attaches_gmp_pdf(client, monkeypatch):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, send_mode="to_client",
+                     client_email="nfd@norwich.gov").json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth)).json()["draft"]["id"]
+    pdf = b"%PDF-1.4\n%GMP invoice fixture\n"
+    client.post(f"{BASE}/drafts/{draft_id}/gmp-invoice",
+                files={"file": ("gmp.pdf", pdf, "application/pdf")}, headers=_auth(auth))
+
+    captured = {}
+    monkeypatch.setattr("api.notify._send_via_resend",
+                        lambda **kw: captured.update(kw) or True)
+    r = client.post(f"{BASE}/drafts/{draft_id}/approve", headers=_auth(auth))
+    assert r.status_code == 200, r.text
+    assert r.json()["draft"]["status"] == "sent"
+    # Went to the customer, and the GMP invoice PDF rode along.
+    names = [a.get("filename", "") for a in captured.get("attachments", [])]
+    assert any("GMP_invoice.pdf" in n for n in names), names
+    # Draft is now in the sent list, not pending.
+    pending = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    assert pending == []
+    sent = client.get(f"{BASE}/drafts?status=sent", headers=_auth(auth)).json()["drafts"]
+    assert [x["id"] for x in sent] == [draft_id]
+
+
+def test_approve_twice_409(client, monkeypatch):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, send_mode="to_client",
+                     client_email="nfd@norwich.gov").json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth)).json()["draft"]["id"]
+    monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
+    assert client.post(f"{BASE}/drafts/{draft_id}/approve", headers=_auth(auth)).status_code == 200
+    assert client.post(f"{BASE}/drafts/{draft_id}/approve", headers=_auth(auth)).status_code == 409
+
+
+def test_dismiss_draft(client):
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth)).json()["draft"]["id"]
+    assert client.post(f"{BASE}/drafts/{draft_id}/dismiss", headers=_auth(auth)).status_code == 200
+    assert client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"] == []
+
+
+def test_drafts_are_tenant_scoped(client):
+    _tid_a, auth_a = _make_tenant()
+    _tid_b, auth_b = _make_tenant()
+    sub_id = _upload(client, auth_a).json()["subscription"]["id"]
+    draft_id = client.post(f"{BASE}/subscriptions/{sub_id}/draft",
+                           headers=_auth(auth_a)).json()["draft"]["id"]
+    # Tenant B cannot see or touch A's draft.
+    assert client.get(f"{BASE}/drafts", headers=_auth(auth_b)).json()["drafts"] == []
+    assert client.post(f"{BASE}/drafts/{draft_id}/approve", headers=_auth(auth_b)).status_code == 404

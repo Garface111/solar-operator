@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from ..db import SessionLocal
-from ..models import BillingReportSubscription, Client
+from ..models import BillingReportSubscription, Client, ReportDraft
 from ..account import tenant_from_session, require_not_demo
 from .matcher import match_billing_workbook
 from .delivery import deliver_subscription, build_match, generate_files, next_send_at
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/array-operator/billing", tags=["array-operator-billing"])
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB — these workbooks are tens of KB
+MAX_PDF_BYTES = 12 * 1024 * 1024    # GMP invoice PDFs
 VALID_MODES = {"to_me", "to_client", "to_both"}
 VALID_CADENCE = {"monthly", "quarterly"}
 VALID_FORMATS = {"pdf", "xlsx"}
@@ -376,3 +377,190 @@ def _get_owned(db, tenant_id: str, sub_id: int) -> BillingReportSubscription:
     if sub is None:
         raise HTTPException(404, "Subscription not found")
     return sub
+
+
+# ─── DRAFT → APPROVE → SEND inbox (Paul Bozuwa's core workflow) ───────────────
+# "I get an email drafted... the customer invoice PDF, the GMP invoice PDF...
+#  I go over it and approve it or modify it and then send." Nothing reaches a
+#  real customer until the operator clicks Approve & send.
+
+def _draft_dict(d: ReportDraft) -> dict:
+    return {
+        "id": d.id,
+        "subscription_id": d.subscription_id,
+        "customer_name": d.customer_name,
+        "status": d.status,
+        "period_label": d.period_label,
+        "array_total_kwh": d.array_total_kwh,
+        "allocation_pct": d.allocation_pct,
+        "customer_kwh": d.customer_kwh,
+        "amount_usd": d.amount_usd,
+        "invoice_number": d.invoice_number,
+        "has_gmp_pdf": d.gmp_invoice_pdf is not None,
+        "gmp_filename": d.gmp_filename,
+        "note": d.note,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "sent_at": d.sent_at.isoformat() if d.sent_at else None,
+    }
+
+
+def _get_owned_draft(db, tenant_id: str, draft_id: int) -> ReportDraft:
+    d = db.get(ReportDraft, draft_id)
+    if d is None or d.tenant_id != tenant_id:
+        raise HTTPException(404, "Draft not found")
+    return d
+
+
+@router.get("/drafts")
+def list_drafts(status: str = Query(default="pending"),
+                authorization: Optional[str] = Header(default=None)):
+    """The approval inbox: drafts awaiting the operator's review. status=pending
+    (default) | sent | dismissed | all."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        q = select(ReportDraft).where(ReportDraft.tenant_id == t.id)
+        if status != "all":
+            q = q.where(ReportDraft.status == status)
+        rows = db.execute(q.order_by(ReportDraft.created_at.desc())).scalars().all()
+        return {"drafts": [_draft_dict(d) for d in rows]}
+
+
+@router.post("/subscriptions/{sub_id}/draft")
+def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Build a pending draft for this subscription's latest billing period, from
+    its stored workbook. This is what the (operator-built) GMP-detection backend
+    will call when a new GMP invoice lands; the operator can also trigger it
+    manually. Reuses an existing pending draft for the same period (idempotent)."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        try:
+            match = build_match(sub)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(422, f"workbook unreadable: {e}")
+        if not match.matched or not match.latest_period:
+            raise HTTPException(422, "no current billing period in the stored workbook")
+
+        ci = match.computed_invoice or {}
+        inv_no = ci.get("invoice_number")
+        period_label = None
+        if ci.get("period_start") or ci.get("period_end"):
+            period_label = f"{ci.get('period_start') or '—'} → {ci.get('period_end') or '—'}"
+
+        # Idempotent: reuse a pending draft for the same period/invoice number.
+        existing = db.execute(
+            select(ReportDraft).where(
+                ReportDraft.subscription_id == sub.id,
+                ReportDraft.status == "pending",
+                ReportDraft.invoice_number == inv_no,
+            )
+        ).scalars().first()
+        d = existing or ReportDraft(
+            tenant_id=t.id, subscription_id=sub.id,
+            customer_name=sub.customer_name, status="pending")
+        d.period_label = period_label
+        # The period's TOTAL array generation is Paul's anchor number ("what GMP
+        # reports"). The computed invoice carries the customer's SHARE (kwh) and
+        # the allocation %, so the array total = share / pct. Fall back to any
+        # explicit array field, else null.
+        cust_kwh = ci.get("kwh")
+        pct = match.allocation_pct
+        array_total = ci.get("project_total_kwh") or ci.get("array_kwh")
+        if array_total is None and cust_kwh is not None and pct:
+            array_total = round(cust_kwh / pct, 1)
+        d.array_total_kwh = array_total
+        d.allocation_pct = pct
+        d.customer_kwh = cust_kwh
+        d.amount_usd = ci.get("amount_owed")
+        d.invoice_number = inv_no
+        if existing is None:
+            db.add(d)
+        db.commit()
+        return {"ok": True, "draft": _draft_dict(d)}
+
+
+@router.post("/drafts/{draft_id}/gmp-invoice")
+async def attach_gmp_invoice(draft_id: int, file: UploadFile = File(...),
+                             authorization: Optional[str] = Header(default=None)):
+    """Attach the period's GMP utility-invoice PDF to a draft. Paul sends this
+    alongside the customer invoice 'to prove we're not just making this up.'"""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "empty file")
+    if len(data) > MAX_PDF_BYTES:
+        raise HTTPException(413, "PDF too large (max 12 MB)")
+    head = data[:5]
+    if head[:4] != b"%PDF":
+        raise HTTPException(400, "that doesn't look like a PDF")
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        if d.status != "pending":
+            raise HTTPException(409, "draft already resolved")
+        d.gmp_invoice_pdf = data
+        d.gmp_filename = (file.filename or "GMP_invoice.pdf")[:300]
+        db.commit()
+        return {"ok": True, "draft": _draft_dict(d)}
+
+
+class DraftPatch(BaseModel):
+    note: Optional[str] = None
+
+
+@router.patch("/drafts/{draft_id}")
+def patch_draft(draft_id: int, body: DraftPatch,
+                authorization: Optional[str] = Header(default=None)):
+    """Modify a draft before sending (Paul: 'approve it or MODIFY it and send')."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        if d.status != "pending":
+            raise HTTPException(409, "draft already resolved")
+        if body.note is not None:
+            d.note = body.note[:2000]
+        db.commit()
+        return {"ok": True, "draft": _draft_dict(d)}
+
+
+@router.post("/drafts/{draft_id}/approve")
+def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=None)):
+    """Approve & send: deliver the drafted report to the customer (per the
+    subscription's recipient slider), attaching the GMP invoice PDF the operator
+    put on the draft. This is the single human gate in front of delivery."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        if d.status != "pending":
+            raise HTTPException(409, "draft already resolved")
+        sub = _get_owned(db, t.id, d.subscription_id)
+        # Move the draft's GMP PDF onto the subscription so delivery's existing
+        # attach hook (generate_files) rides it onto the email, then send live.
+        if d.gmp_invoice_pdf is not None:
+            sub.gmp_invoice_pdf = d.gmp_invoice_pdf
+        db.commit()
+        result = deliver_subscription(db, sub, t, triggered_by="approval", is_test=False)
+        if not result.get("ok"):
+            raise HTTPException(422, result.get("error", "send failed"))
+        d.status = "sent"
+        d.sent_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "draft": _draft_dict(d), "result": result}
+
+
+@router.post("/drafts/{draft_id}/dismiss")
+def dismiss_draft(draft_id: int, authorization: Optional[str] = Header(default=None)):
+    """Discard a draft without sending."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        if d.status == "sent":
+            raise HTTPException(409, "draft already sent")
+        d.status = "dismissed"
+        d.dismissed_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True}
