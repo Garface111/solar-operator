@@ -82,28 +82,35 @@ MANUAL_BILLING_RATE = 0.9
 DEFAULT_DISCOUNT = 0.10
 
 
-def resolve_discount_pricing(sub) -> dict:
+def resolve_discount_pricing(sub, *, period_end=None, region=None,
+                             first_connect_date=None) -> dict:
     """Resolve the discount-model pricing for a customer.
 
     invoice = produced kWh × net_rate × (1 − discount).
 
-    Precedence per field (customer override → operator global → built-in default):
+    Precedence per field (customer override → operator global → AUTO schedule →
+    legacy flat → built-in default):
       net_rate : sub.net_rate_per_kwh → tenant.default_net_rate_per_kwh
-                 → legacy sub.rate_per_kwh/global flat rate (treated as a net rate)
-                 → MANUAL_TARIFF (VT default)
+                 → auto RateSchedule (blended, by utility/location/age/month,
+                   derived from captured bills) → legacy flat rate → MANUAL_TARIFF
       discount : sub.discount_pct → tenant.default_discount_pct → DEFAULT_DISCOUNT (0.10)
 
-    Returns a dict: {net_rate, discount_pct, effective_rate, net_source,
-    discount_source} where effective_rate = net_rate × (1 − discount).
+    period_end/region/first_connect_date feed the auto schedule lookup; when not
+    passed they're best-effort derived from the sub's array.
+
+    Returns {net_rate, discount_pct, effective_rate, net_source, discount_source,
+    net_rate_note} where effective_rate = net_rate × (1 − discount).
     """
     from ..db import SessionLocal
-    from ..models import Tenant
+    from ..models import Tenant, Array, UtilityAccount
+    from ..rate_schedule import resolve_net_rate
 
     sub_net = getattr(sub, "net_rate_per_kwh", None)
     sub_disc = getattr(sub, "discount_pct", None)
     sub_flat = getattr(sub, "rate_per_kwh", None)   # legacy flat $/kWh override
 
     g_net = g_disc = g_flat = None
+    net_note = None
     with SessionLocal() as db:
         t = db.get(Tenant, sub.tenant_id)
         if t:
@@ -111,18 +118,40 @@ def resolve_discount_pricing(sub) -> dict:
             g_disc = getattr(t, "default_discount_pct", None)
             g_flat = getattr(t, "default_billing_rate_per_kwh", None)
 
-    # ── net rate ──
-    if sub_net is not None and sub_net > 0:
-        net_rate, net_source = float(sub_net), "customer"
-    elif g_net is not None and g_net > 0:
-        net_rate, net_source = float(g_net), "global"
-    elif sub_flat is not None and sub_flat > 0:
-        # Legacy per-customer flat rate: treat as a net rate with 0 discount.
-        net_rate, net_source = float(sub_flat), "legacy_flat_customer"
-    elif g_flat is not None and g_flat > 0:
-        net_rate, net_source = float(g_flat), "legacy_flat_global"
-    else:
-        net_rate, net_source = MANUAL_TARIFF, "vt_default"
+        # Best-effort derive the array's utility/region/age for the auto lookup
+        # when the caller didn't supply them.
+        _region, _fc, _provider = region, first_connect_date, None
+        arr_id = getattr(sub, "array_id", None)
+        if arr_id is not None:
+            arr = db.get(Array, arr_id)
+            if arr is not None:
+                if _region is None:
+                    _region = arr.region
+                if _fc is None:
+                    _fc = arr.first_connect_date
+                acct = db.execute(
+                    select(UtilityAccount).where(UtilityAccount.array_id == arr_id)
+                ).scalars().first()
+                if acct is not None:
+                    _provider = acct.provider
+
+        # ── net rate ──  (customer → global → AUTO schedule → legacy flat → VT default)
+        if sub_net is not None and sub_net > 0:
+            net_rate, net_source = float(sub_net), "customer"
+        elif g_net is not None and g_net > 0:
+            net_rate, net_source = float(g_net), "global"
+        else:
+            auto = resolve_net_rate(db, provider=_provider, region=_region,
+                                    first_connect_date=_fc, period_end=period_end)
+            if auto.source in ("schedule", "schedule_provisional"):
+                net_rate, net_source, net_note = auto.rate, "auto_" + auto.source, auto.note
+            elif sub_flat is not None and sub_flat > 0:
+                net_rate, net_source = float(sub_flat), "legacy_flat_customer"
+            elif g_flat is not None and g_flat > 0:
+                net_rate, net_source = float(g_flat), "legacy_flat_global"
+            else:
+                # auto returned the VT default — use it and keep its provenance.
+                net_rate, net_source, net_note = auto.rate, "vt_default", auto.note
 
     # ── discount ──
     if sub_disc is not None and 0 <= sub_disc < 1:
@@ -142,6 +171,7 @@ def resolve_discount_pricing(sub) -> dict:
         "effective_rate": effective_rate,
         "net_source": net_source,
         "discount_source": discount_source,
+        "net_rate_note": net_note,
     }
 
 
@@ -271,7 +301,7 @@ def build_manual_match(sub) -> BillingMatch:
     # (10% off the VT net rate). compute_invoice's billing_rate = (1 − discount),
     # so amount_owed == kWh × net_rate × (1−discount) and solar_savings == the
     # discount the customer receives. Never fabricated — $0 when no generation.
-    pricing = resolve_discount_pricing(sub)
+    pricing = resolve_discount_pricing(sub, period_end=end)
     net_rate = pricing["net_rate"]
     discount = pricing["discount_pct"]
     billing_rate = 1.0 - discount
@@ -293,6 +323,7 @@ def build_manual_match(sub) -> BillingMatch:
     computed["discount_pct"] = round(discount, 6)
     computed["effective_rate_per_kwh"] = pricing["effective_rate"]
     computed["net_rate_source"] = pricing["net_source"]
+    computed["net_rate_note"] = pricing.get("net_rate_note")
     computed["discount_source"] = pricing["discount_source"]
     # Back-compat: keep rate_per_kwh = the effective billed rate + a coarse source.
     computed["rate_per_kwh"] = pricing["effective_rate"]

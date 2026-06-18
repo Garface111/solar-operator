@@ -486,6 +486,39 @@ class Bill(Base):
     )
 
 
+class RateSchedule(Base):
+    """A pre-propagated blended retail rate cell — the auto-applied net rate for
+    billing (Jun 2026). The correct rate depends on FOUR dimensions:
+      • utility       (provider code: gmp/vec/wec/stowe/…)
+      • location      (location_class: VT region north/central/south, or '*')
+      • array age     (age_bucket: 'le11' = ≤11 yrs since first_connect, 'gt11' = older)
+      • month/period  (effective_start..effective_end — rates reset ~every 2 yrs)
+
+    Rows are DERIVED FROM CAPTURED BILLS (api/rate_schedule.derive_*), never
+    invented: blended_rate_per_kwh is the measured $/kWh from real GMP bill line
+    items over the window, with sample_size + source_note for auditability. To
+    handle the biennial reset, add a new row with the next effective window; the
+    resolver auto-picks it once the billing month rolls into that range.
+    """
+    __tablename__ = "rate_schedule"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    state: Mapped[str] = mapped_column(String(8), default="VT", server_default="VT", index=True)
+    utility: Mapped[str] = mapped_column(String(24), index=True)        # provider code, or '*' = any
+    location_class: Mapped[str] = mapped_column(String(24), default="*", server_default="*")
+    age_bucket: Mapped[str] = mapped_column(String(8), default="*", server_default="*")  # le11 | gt11 | *
+    effective_start: Mapped[date] = mapped_column(Date, index=True)
+    effective_end: Mapped[date | None] = mapped_column(Date, nullable=True)  # null = open-ended
+    blended_rate_per_kwh: Mapped[float] = mapped_column(Float)
+    sample_size: Mapped[int | None] = mapped_column(Integer, nullable=True)  # bills measured
+    source_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_provisional: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        Index("ix_rate_lookup", "state", "utility", "location_class", "age_bucket", "effective_start"),
+    )
+
+
 class Job(Base):
     """Background jobs. Pull-bills, generate-report, refresh-session, etc."""
     __tablename__ = "jobs"

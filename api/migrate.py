@@ -801,6 +801,10 @@ def main():
                 added.append(col)
                 print(f"  + {tbl}.{col}")
 
+        # 2026-06-18 RateSchedule table (auto-applied blended rate, derived from
+        # captured bills). create_all makes it; verify it landed for the log.
+        print(f"  {'✓' if inspect(conn).has_table('rate_schedule') else '✗ MISSING'} table rate_schedule")
+
         # 2026-06-18 GMP daily-interval DATA SPONGE. Two BRAND-NEW tables
         # (gmp_usage_raw = verbatim CSV sponge, gmp_daily_generation = derived
         # per-day kWh) are created for free by init_db()/create_all above; this

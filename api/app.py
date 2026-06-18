@@ -1236,6 +1236,16 @@ def admin_run_jobs(_: None = Depends(_require_admin)):
     return {"ran": run_pending_jobs()}
 
 
+@app.post("/admin/rate-schedule/refresh")
+def admin_refresh_rate_schedule(_: None = Depends(_require_admin)):
+    """(Re)compute the blended RateSchedule from captured bills. Idempotent;
+    measures the median $/kWh per utility × effective-window × age bucket and
+    upserts rows. Run after a bill pull or when a new biennial window opens."""
+    from .rate_schedule import refresh_rate_schedule
+    with SessionLocal() as db:
+        return refresh_rate_schedule(db)
+
+
 # ---- root --------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)

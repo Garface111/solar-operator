@@ -328,9 +328,9 @@ def test_manual_subscription_computes_customer_share_on_send(client, monkeypatch
     assert r.status_code == 200, r.text
     result = r.json()["result"]
     assert result["ok"]
-    # 10% of 3000 kWh = 300 kWh → priced at the default VT solar value.
-    # amount_owed = 300 × 0.18398 × 0.9 ≈ 49.67
-    assert result["amount_owed"] == pytest.approx(49.67, abs=0.5)
+    # 10% of 3000 kWh = 300 kWh → priced at the default VT net rate (0.21,
+    # provider default) with the default 10% discount: 300 × 0.21 × 0.9 = 56.70.
+    assert result["amount_owed"] == pytest.approx(56.70, abs=0.5)
     # An invoice attachment was produced from the synthesized match.
     names = [a["filename"] for a in captured["attachments"]]
     assert any(n.endswith("_invoice.pdf") for n in names)
@@ -393,15 +393,17 @@ def test_rate_global_and_per_customer_override(client):
                             allocation_pct=str(pct), cadence="monthly",
                             send_mode="to_me").json()["subscription"]["id"]
 
-    # A) no rate anywhere → default discount (10% off VT net rate 0.18398).
+    # A) no rate anywhere → default discount (10%) off the resolved VT net rate.
+    #    No UtilityAccount on this array → provider default 0.21 (api/rates.py).
     a = _math(client, auth, sub_id)
     assert a["discount_source"] == "default"
     assert abs(a["discount_pct"] - 0.10) < 1e-9
-    assert abs(a["net_rate_per_kwh"] - 0.18398) < 1e-9
-    assert abs(a["effective_rate_per_kwh"] - round(0.18398 * 0.9, 6)) < 1e-9
+    NET_DEFAULT = 0.21
+    assert abs(a["net_rate_per_kwh"] - NET_DEFAULT) < 1e-6
+    assert abs(a["effective_rate_per_kwh"] - round(NET_DEFAULT * 0.9, 6)) < 1e-6
     assert a["customer_kwh"] == cust_kwh
     # savings = kWh × net × discount
-    assert abs(a["solar_savings_usd"] - round(cust_kwh * 0.18398 * 0.10, 2)) < 0.02
+    assert abs(a["solar_savings_usd"] - round(cust_kwh * NET_DEFAULT * 0.10, 2)) < 0.02
 
     # B) legacy global flat rate 0.20 → billed at exactly 0.20 (0 discount).
     r = client.put("/v1/array-operator/billing/global-rate",
@@ -439,7 +441,7 @@ def test_discount_model_global_and_per_customer(client):
     aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)  # 3000 kWh
     pct = 0.50
     cust_kwh = round(3000 * pct, 2)  # 1500.0
-    NET = 0.18398
+    NET = 0.21   # no UtilityAccount → provider default net rate (api/rates.py)
 
     sub_id = _create_manual(client, auth, customer_name="Disc Co", array_id=aid,
                             allocation_pct=str(pct), cadence="monthly",

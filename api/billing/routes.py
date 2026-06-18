@@ -59,6 +59,23 @@ VALID_FORMATS = {"pdf", "xlsx"}
 VALID_DELIVERY = {"approval", "auto"}
 
 
+def _resolved_pricing_fields(s) -> dict:
+    """The pricing actually applied to this customer (auto-resolved net rate +
+    discount + provenance), for the UI card. Best-effort; never raises."""
+    try:
+        from .delivery import resolve_discount_pricing
+        p = resolve_discount_pricing(s)
+        return {
+            "resolved_net_rate": round(p["net_rate"], 5),
+            "resolved_discount_pct": round(p["discount_pct"], 5),
+            "resolved_effective_rate": p["effective_rate"],
+            "resolved_net_source": p["net_source"],
+            "resolved_net_note": p.get("net_rate_note"),
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _sub_dict(s: BillingReportSubscription) -> dict:
     return {
         "id": s.id,
@@ -70,6 +87,9 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "rate_per_kwh": getattr(s, "rate_per_kwh", None),
         "discount_pct": getattr(s, "discount_pct", None),
         "net_rate_per_kwh": getattr(s, "net_rate_per_kwh", None),
+        # The pricing actually applied (auto-resolved net rate + discount, with
+        # provenance) so the card can SHOW the auto rate instead of a blank box.
+        **_resolved_pricing_fields(s),
         "auto_attach_gmp": getattr(s, "auto_attach_gmp", False),
         "cadence": s.cadence,
         "annual_trueup": s.annual_trueup,
@@ -636,6 +656,7 @@ def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None
         "discount_pct": ci.get("discount_pct"),
         "effective_rate_per_kwh": ci.get("effective_rate_per_kwh"),
         "net_rate_source": ci.get("net_rate_source"),
+        "net_rate_note": ci.get("net_rate_note"),
         "discount_source": ci.get("discount_source"),
         "solar_savings_usd": (ci.get("solar_savings") if has_data else None),
         "kwh_source": ci.get("kwh_source"),
