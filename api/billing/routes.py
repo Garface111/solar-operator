@@ -67,6 +67,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "array_id": getattr(s, "array_id", None),
         "allocation_pct": getattr(s, "allocation_pct", None),
         "billing_model": s.billing_model,
+        "rate_per_kwh": getattr(s, "rate_per_kwh", None),
         "cadence": s.cadence,
         "annual_trueup": s.annual_trueup,
         "delivery_mode": getattr(s, "delivery_mode", "approval") or "approval",
@@ -137,12 +138,33 @@ def _parse_formats(raw: Optional[str]) -> list[str]:
     return fmts or ["pdf"]
 
 
+# Sanity ceiling for a $/kWh rate. VT solar value is ~$0.18/kWh; anything above
+# this is almost certainly a units mistake (e.g. cents typed as dollars).
+MAX_RATE_PER_KWH = 5.0
+
+
+def _validate_rate(rate):
+    """Coerce/validate an optional $/kWh rate. None passes through (no rate set).
+    Rejects negatives and absurd values so a fat-fingered rate can't silently
+    produce a wild invoice."""
+    if rate is None:
+        return None
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "rate_per_kwh must be a number ($/kWh)")
+    if r < 0 or r > MAX_RATE_PER_KWH:
+        raise HTTPException(400, f"rate_per_kwh must be between 0 and {MAX_RATE_PER_KWH} $/kWh")
+    return r
+
+
 @router.post("/subscriptions")
 async def create_subscription(
     file: Optional[UploadFile] = File(default=None),
     customer_name: Optional[str] = Form(default=None),
     array_id: Optional[int] = Form(default=None),
     allocation_pct: Optional[float] = Form(default=None),
+    rate_per_kwh: Optional[float] = Form(default=None),
     cadence: str = Form(default="monthly"),
     send_mode: str = Form(default="to_me"),
     delivery_mode: str = Form(default="approval"),
@@ -176,7 +198,8 @@ async def create_subscription(
     if file is None:
         return await _create_manual_subscription(
             t, customer_name=customer_name, array_id=array_id,
-            allocation_pct=allocation_pct, cadence=cadence, send_mode=send_mode,
+            allocation_pct=allocation_pct, rate_per_kwh=rate_per_kwh,
+            cadence=cadence, send_mode=send_mode,
             delivery_mode=delivery_mode, client_email=client_email,
             cc_emails=cc_emails, operator_email=operator_email, formats=formats,
             include_summary=include_summary, annual_trueup=annual_trueup,
@@ -212,6 +235,7 @@ async def create_subscription(
             source_filename=file.filename,
             parsed_map=match.to_dict(),
             billing_model=match.billing_model,
+            rate_per_kwh=rate_per_kwh,
             cadence=cadence,
             annual_trueup=annual_trueup,
             delivery_mode=delivery_mode,
@@ -230,8 +254,8 @@ async def create_subscription(
 
 
 async def _create_manual_subscription(
-    t, *, customer_name, array_id, allocation_pct, cadence, send_mode,
-    delivery_mode, client_email, cc_emails, operator_email, formats,
+    t, *, customer_name, array_id, allocation_pct, rate_per_kwh, cadence,
+    send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
     include_summary, annual_trueup, enabled,
 ):
     """Create a workbook-less subscription from typed fields. The customer's
@@ -253,6 +277,7 @@ async def _create_manual_subscription(
     if not (0.0 < pct <= 1.0):
         raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
                                  "(e.g. 0.25 for 25%)")
+    rate_val = _validate_rate(rate_per_kwh)
 
     with SessionLocal() as db:
         arr = db.get(Array, array_id)
@@ -275,6 +300,7 @@ async def _create_manual_subscription(
             customer_name=name,
             array_id=array_id,
             allocation_pct=pct,
+            rate_per_kwh=rate_val,
             source_workbook=None,
             source_filename=None,
             parsed_map=None,
@@ -313,6 +339,10 @@ class SubscriptionPatch(BaseModel):
     # the manual customer to the array whose generation is split.
     allocation_pct: Optional[float] = None
     array_id: Optional[int] = None
+    # Per-customer billing rate override ($/kWh). Send a number to set it, or
+    # explicit null to CLEAR it (fall back to the operator's global rate). We
+    # use model_fields_set in the handler to tell "null to clear" from "omitted".
+    rate_per_kwh: Optional[float] = None
 
 
 @router.patch("/subscriptions/{sub_id}")
@@ -367,8 +397,42 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
             if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
                 raise HTTPException(404, "Array not found")
             sub.array_id = body.array_id
+        if "rate_per_kwh" in body.model_fields_set:
+            # null clears the override; a number sets it (validated).
+            sub.rate_per_kwh = _validate_rate(body.rate_per_kwh)
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
+
+
+class GlobalRatePatch(BaseModel):
+    default_billing_rate_per_kwh: Optional[float] = None
+
+
+@router.get("/global-rate")
+def get_global_rate(authorization: Optional[str] = Header(default=None)):
+    """The operator's global default $/kWh (null = not set; pricing falls back
+    to the legacy VT default)."""
+    t = tenant_from_session(authorization)
+    return {"ok": True,
+            "default_billing_rate_per_kwh": getattr(t, "default_billing_rate_per_kwh", None)}
+
+
+@router.put("/global-rate")
+def set_global_rate(body: GlobalRatePatch,
+                    authorization: Optional[str] = Header(default=None)):
+    """Set (or clear, via null) the operator's global default $/kWh. Every
+    customer without a per-customer override is priced at this rate."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    rate = _validate_rate(body.default_billing_rate_per_kwh)
+    with SessionLocal() as db:
+        from ..models import Tenant
+        tt = db.get(Tenant, t.id)
+        if tt is None:
+            raise HTTPException(404, "Account not found")
+        tt.default_billing_rate_per_kwh = rate
+        db.commit()
+        return {"ok": True, "default_billing_rate_per_kwh": rate}
 
 
 @router.delete("/subscriptions/{sub_id}")
@@ -504,6 +568,7 @@ def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None
         "customer_kwh": cust_kwh if has_data else None,
         "amount_usd": amount if has_data else None,
         "rate": rate if has_data else None,
+        "rate_source": ci.get("rate_source"),
         "period_start": ci.get("period_start"),
         "period_end": ci.get("period_end"),
     }

@@ -93,6 +93,16 @@ class Tenant(Base):
         Integer, default=24, server_default="24", nullable=False
     )
 
+    # ── Billing rate (Array Operator, Jun 2026) ──────────────────────────
+    # The operator's GLOBAL default $/kWh used to price a customer's produced
+    # generation when that customer has no per-customer override
+    # (BillingReportSubscription.rate_per_kwh). Nullable → when null, pricing
+    # falls back to the legacy VT default (delivery.MANUAL_TARIFF ×
+    # MANUAL_BILLING_RATE). Set/read via the Reports tab global-rate control.
+    default_billing_rate_per_kwh: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+
     # ── Email customization (V2, June 2026) ──────────────────────────────
     # Let the tenant (a NEPOOL stamping agent) control how reports go out
     # under their professional name. All nullable → null means "use the
@@ -606,6 +616,75 @@ class DailyGeneration(Base):
     tenant: Mapped["Tenant"] = relationship()
 
 
+class GmpUsageRaw(Base):
+    """THE SPONGE for GMP daily-interval usage. One row per (account, fetched
+    window) holding the VERBATIM CSV payload GMP returned from
+    /api/v2/usage/{acct}/download. This is the authoritative source of record —
+    the modeled GmpDailyGeneration rows are a queryable convenience derived from
+    these blobs and can always be re-derived in place with NO re-pull (mirrors
+    Bill.raw_json + sponge.rederive_from_raw).
+
+    Why per-window (not per-day) raw: GMP serves 15-min intervals in date-range
+    windows (≤90 days/request — a 1-year request 503-times-out server-side), so
+    the natural raw unit is the window we fetched. Ford attaches the raw GMP
+    source to invoices later, so we keep every byte.
+    """
+    __tablename__ = "gmp_usage_raw"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("utility_accounts.id"), index=True)
+    account_number: Mapped[str] = mapped_column(String(40), index=True)
+    window_start: Mapped[date] = mapped_column(Date, index=True)   # requested window start
+    window_end: Mapped[date] = mapped_column(Date)                 # requested window end
+    fmt: Mapped[str] = mapped_column(String(8), default="csv")     # the GMP ?format= value
+    http_status: Mapped[int] = mapped_column(Integer, default=200) # 200 ok, 404 below floor, etc.
+    row_count: Mapped[int] = mapped_column(Integer, default=0)     # interval rows parsed from this blob
+    interval_min: Mapped[date | None] = mapped_column(Date, nullable=True)  # earliest IntervalStart seen
+    interval_max: Mapped[date | None] = mapped_column(Date, nullable=True)  # latest IntervalStart seen
+    raw_csv: Mapped[str | None] = mapped_column(Text, nullable=True)  # the VERBATIM payload (the sponge)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        # One authoritative row per (account, exact window). Re-fetching the same
+        # window overwrites in place — idempotent, never duplicates the sponge.
+        UniqueConstraint("account_id", "window_start", "window_end", name="uq_gmp_raw_window"),
+        Index("ix_gmp_raw_acct_window", "account_id", "window_start"),
+    )
+
+
+class GmpDailyGeneration(Base):
+    """Modeled, queryable daily generation derived from GmpUsageRaw — one row per
+    (utility account, calendar day). Kept SEPARATE from DailyGeneration on
+    purpose: a GMP account == one meter/ServiceAgreement, but an Array may sum
+    several GMP meters (e.g. Bruce's Starlake = 3 sub-meters). Storing per-ACCOUNT
+    here avoids the (array_id, day) collision and keeps the raw→modeled mapping
+    1:1 and re-derivable. The READ contract aggregates per-array on read.
+
+    source is always 'gmp_api' (the utility meter's settled generation view) so
+    it is never confused with independent inverter production (solaredge/extension)
+    by the reconciliation engine.
+    """
+    __tablename__ = "gmp_daily_generation"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("utility_accounts.id"), index=True)
+    account_number: Mapped[str] = mapped_column(String(40), index=True)
+    # Denormalized array link at derive time, for fast per-array reads. Nullable:
+    # a GMP account may not be mapped to an array yet (residential / unassigned).
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    kwh: Mapped[float] = mapped_column(Float)              # Σ of that day's 15-min interval Quantity (kWh)
+    interval_count: Mapped[int] = mapped_column(Integer, default=0)  # # of intervals summed (96 = full day)
+    source: Mapped[str] = mapped_column(String(16), default="gmp_api")
+    derived_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "day", name="uq_gmp_daily_account_day"),
+        Index("ix_gmp_daily_acct_day", "account_id", "day"),
+        Index("ix_gmp_daily_array_day", "array_id", "day"),
+    )
+
+
 class InverterConnection(Base):
     """A per-array connection to an inverter vendor's cloud API.
 
@@ -931,6 +1010,12 @@ class BillingReportSubscription(Base):
     allocation_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
     array_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+
+    # Per-customer billing rate override ($/kWh, Jun 2026). When set, this
+    # customer's invoice is priced at this rate; when NULL, pricing falls back
+    # to the operator's global Tenant.default_billing_rate_per_kwh, then to the
+    # legacy VT default. Lets Paul set one global rate and override per offtaker.
+    rate_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Dormant hook (Paul's reporting build): the utility's GMP invoice PDF, fed
     # later by the GMP-detection backend. When present, delivery attaches it

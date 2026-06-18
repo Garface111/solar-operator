@@ -71,9 +71,34 @@ def build_match(sub) -> BillingMatch:
 
 
 # Default Vermont solar value used to price a manual customer's share when no
-# workbook supplies a tariff. Mirrors reconciliation's VT_DEFAULT_RATE.
+# workbook AND no explicit rate supplies a tariff. Mirrors reconciliation's
+# VT_DEFAULT_RATE. Kept as the final fallback below the per-customer rate and
+# the operator's global default rate.
 MANUAL_TARIFF = 0.18398
 MANUAL_BILLING_RATE = 0.9
+
+
+def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:
+    """Resolve the effective $/kWh to bill this customer, and where it came from.
+
+    Precedence (Paul's model — global default + per-customer override):
+      1. sub.rate_per_kwh                          → "customer"   (override wins)
+      2. tenant.default_billing_rate_per_kwh       → "global"     (operator default)
+      3. None                                      → "vt_default" (legacy fallback;
+         caller prices via MANUAL_TARIFF × MANUAL_BILLING_RATE)
+    Returns (rate_or_None, source_label).
+    """
+    r = getattr(sub, "rate_per_kwh", None)
+    if r is not None and r > 0:
+        return float(r), "customer"
+    from ..db import SessionLocal
+    from ..models import Tenant
+    with SessionLocal() as db:
+        t = db.get(Tenant, sub.tenant_id)
+        g = getattr(t, "default_billing_rate_per_kwh", None) if t else None
+    if g is not None and g > 0:
+        return float(g), "global"
+    return None, "vt_default"
 
 
 def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str]]:
@@ -147,19 +172,32 @@ def build_manual_match(sub) -> BillingMatch:
         pct = 0.0
 
     customer_kwh = round(array_kwh * pct, 2)
+    # Resolve the effective $/kWh: per-customer override → operator global
+    # default → legacy VT default. When an explicit rate is set, price the
+    # produced kWh directly at that rate (tariff=rate, billing_rate=1.0 so
+    # amount_owed == customer_kwh × rate). Otherwise fall back to the VT model.
+    rate, rate_source = resolve_rate_per_kwh(sub)
+    if rate is not None:
+        tariff, billing_rate = rate, 1.0
+    else:
+        tariff, billing_rate = MANUAL_TARIFF, MANUAL_BILLING_RATE
     period = Period(
         month=label, start=start, end=end,
         array_kwh=array_kwh, customer_kwh=customer_kwh,
-        tariff=MANUAL_TARIFF, adder=0.0,
+        tariff=tariff, adder=0.0,
     )
-    computed = compute_invoice(customer_kwh, MANUAL_TARIFF, 0.0,
-                               MANUAL_BILLING_RATE, "percent_of_array", None)
+    computed = compute_invoice(customer_kwh, tariff, 0.0,
+                               billing_rate, "percent_of_array", None)
     computed["invoice_number"] = end.strftime("%Y-%m") if end else label
     computed["period_start"] = start.isoformat() if start else None
     computed["period_end"] = end.isoformat() if end else None
     computed["month"] = label
     computed["project_total_kwh"] = array_kwh
     computed["array_kwh"] = array_kwh
+    # Effective per-kWh rate + its provenance, so the UI/invoice can show the
+    # auditable "kWh × $rate" line and where the rate came from.
+    computed["rate_per_kwh"] = round(tariff * billing_rate, 6)
+    computed["rate_source"] = rate_source
 
     return BillingMatch(
         matched=True,
@@ -168,7 +206,7 @@ def build_manual_match(sub) -> BillingMatch:
         data_sheet=None,
         customer={"name": sub.customer_name, "email": sub.client_email},
         allocation_pct=pct,
-        billing_rate=MANUAL_BILLING_RATE,
+        billing_rate=billing_rate,
         billing_model="percent_of_array",
         periods=[period],
         latest_period=period,

@@ -749,6 +749,30 @@ def main():
                 added.append(col)
                 print(f"  + bills.{col}")
 
+        # 2026-06-18 Array Operator billing rate ($/kWh). Global default on the
+        # tenant + per-customer override on the subscription. create_all adds
+        # these on fresh DBs; an existing prod table needs the explicit ALTER.
+        if not column_exists(conn, "tenants", "default_billing_rate_per_kwh"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN default_billing_rate_per_kwh DOUBLE PRECISION"
+            ))
+            added.append("default_billing_rate_per_kwh")
+            print("  + tenants.default_billing_rate_per_kwh")
+        if not column_exists(conn, "billing_report_subscriptions", "rate_per_kwh"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions ADD COLUMN rate_per_kwh DOUBLE PRECISION"
+            ))
+            added.append("rate_per_kwh")
+            print("  + billing_report_subscriptions.rate_per_kwh")
+
+        # 2026-06-18 GMP daily-interval DATA SPONGE. Two BRAND-NEW tables
+        # (gmp_usage_raw = verbatim CSV sponge, gmp_daily_generation = derived
+        # per-day kWh) are created for free by init_db()/create_all above; this
+        # block just verifies they landed so the migration log is explicit.
+        for tbl in ("gmp_usage_raw", "gmp_daily_generation"):
+            exists = inspect(conn).has_table(tbl)
+            print(f"  {'✓' if exists else '✗ MISSING'} table {tbl}")
+
     print("=== Migration complete ===")
 
 

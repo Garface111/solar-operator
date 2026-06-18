@@ -366,3 +366,79 @@ def test_scheduler_monthly_billing_delivers(client, monkeypatch):
     # And it stamped the schedule on our sub.
     with SessionLocal() as db:
         assert db.get(BillingReportSubscription, sub_id).last_sent_at is not None
+
+
+# ─── billing rate ($/kWh): global default + per-customer override ────────────
+
+
+def _math(client, auth, sub_id):
+    r = client.get(f"/v1/array-operator/billing/subscriptions/{sub_id}/preview-math",
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_rate_global_and_per_customer_override(client):
+    """The keystone rate model. A manual customer is priced by:
+      1. per-customer rate_per_kwh (override) when set,
+      2. else the tenant global default_billing_rate_per_kwh,
+      3. else the legacy VT default.
+    Verifies the amount + rate_source flip correctly at each tier, and that
+    clearing the override (null) falls back to the global rate."""
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)  # 3000 kWh
+    pct = 0.40
+    cust_kwh = round(3000 * pct, 2)  # 1200.0
+
+    sub_id = _create_manual(client, auth, customer_name="Rate Co", array_id=aid,
+                            allocation_pct=str(pct), cadence="monthly",
+                            send_mode="to_me").json()["subscription"]["id"]
+
+    # A) no rate anywhere → VT default fallback.
+    a = _math(client, auth, sub_id)
+    assert a["rate_source"] == "vt_default"
+    assert a["customer_kwh"] == cust_kwh
+
+    # B) set the GLOBAL default rate → that rate, exact amount.
+    r = client.put("/v1/array-operator/billing/global-rate",
+                   json={"default_billing_rate_per_kwh": 0.20},
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    b = _math(client, auth, sub_id)
+    assert b["rate_source"] == "global"
+    assert abs(b["rate"] - 0.20) < 1e-9
+    assert abs(b["amount_usd"] - round(cust_kwh * 0.20, 2)) < 0.01
+
+    # C) per-customer override wins over the global rate.
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"rate_per_kwh": 0.14},
+                     headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert abs(r.json()["subscription"]["rate_per_kwh"] - 0.14) < 1e-9
+    c = _math(client, auth, sub_id)
+    assert c["rate_source"] == "customer"
+    assert abs(c["amount_usd"] - round(cust_kwh * 0.14, 2)) < 0.01
+
+    # D) clearing the override (null) falls back to the global rate.
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"rate_per_kwh": None},
+                     headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert r.json()["subscription"]["rate_per_kwh"] is None
+    d = _math(client, auth, sub_id)
+    assert d["rate_source"] == "global"
+    assert abs(d["amount_usd"] - round(cust_kwh * 0.20, 2)) < 0.01
+
+
+def test_rate_rejects_out_of_range(client):
+    """A fat-fingered rate (negative or absurdly high) is rejected, so a units
+    mistake can't silently produce a wild invoice."""
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid)
+    r = _create_manual(client, auth, customer_name="Bad Rate", array_id=aid,
+                       allocation_pct="0.25", rate_per_kwh="99")
+    assert r.status_code == 400
+    r = client.put("/v1/array-operator/billing/global-rate",
+                   json={"default_billing_rate_per_kwh": -1},
+                   headers={"Authorization": auth})
+    assert r.status_code == 400
