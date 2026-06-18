@@ -417,6 +417,65 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+@router.get("/subscriptions/{sub_id}/preview-math")
+def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Compute (without persisting a draft) the auditable billing math for a
+    subscription's latest period: the array's period generation, the customer's
+    allocation %, the resulting customer-share kWh, the $/kWh rate, and the
+    dollar amount. Powers the run-table rows so every customer shows real
+    numbers eagerly — no draft required.
+
+    Never fabricates: when the array has no generation for the period yet,
+    `has_data` is false and the kWh/amount fields are null so the UI can show a
+    muted 'No generation data yet' instead of a bogus number.
+    """
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+    try:
+        match = build_match(sub)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(422, f"workbook unreadable: {e}")
+    if not match.matched or not match.latest_period:
+        return {
+            "subscription_id": sub.id,
+            "source": match.source,
+            "has_data": False,
+            "allocation_pct": match.allocation_pct,
+            "array_total_kwh": None,
+            "customer_kwh": None,
+            "amount_usd": None,
+            "rate": None,
+            "period_start": None,
+            "period_end": None,
+        }
+    ci = match.computed_invoice or {}
+    array_total = ci.get("project_total_kwh") or ci.get("array_kwh")
+    cust_kwh = ci.get("kwh")
+    pct = match.allocation_pct
+    if array_total is None and cust_kwh is not None and pct:
+        array_total = round(cust_kwh / pct, 1)
+    amount = ci.get("amount_owed")
+    rate = None
+    if cust_kwh and amount is not None and cust_kwh > 0:
+        rate = amount / cust_kwh
+    # "Has data" means the array actually produced generation this period — a
+    # zero array total means we have nothing real to show yet.
+    has_data = bool(array_total)
+    return {
+        "subscription_id": sub.id,
+        "source": match.source,
+        "has_data": has_data,
+        "allocation_pct": pct,
+        "array_total_kwh": array_total if has_data else None,
+        "customer_kwh": cust_kwh if has_data else None,
+        "amount_usd": amount if has_data else None,
+        "rate": rate if has_data else None,
+        "period_start": ci.get("period_start"),
+        "period_end": ci.get("period_end"),
+    }
+
+
 @router.get("/subscriptions/{sub_id}/trends")
 def subscription_trends(sub_id: int,
                         authorization: Optional[str] = Header(default=None)):

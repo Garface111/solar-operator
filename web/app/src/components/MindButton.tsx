@@ -122,8 +122,13 @@ export function MindButton({ account }: Props) {
   // API spend Ford pays for. (Hidden before the email gate below.)
   if (account?.is_demo) return null;
 
-  // Beta: show to everyone. Gating removed Jun 6'26 ("we are still beta testing").
-  const allowed = !!account?.email;
+  // The Mind is an internal operator tool (it proxies to Ford's OCICBB Mind).
+  // Keep it OFF for customer-facing tenants so it never clutters an operator's
+  // UI (e.g. Paul's billing screen). Re-scoped to the allow-list Jun 18'26 after
+  // the redesign QA — the beta "show to everyone" had it floating over the new
+  // Reports tab. Broaden again when the Mind is a real shipped feature.
+  const allowed = !!account?.email &&
+    MIND_BUTTON_ALLOWED_EMAILS.includes(account.email);
   if (!allowed) return null;
 
   async function captureCurrentPage(): Promise<string | null> {

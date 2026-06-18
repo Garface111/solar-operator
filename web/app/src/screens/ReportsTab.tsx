@@ -8,10 +8,12 @@ import {
   type BillingSubscription,
   type FlatArray,
   type ReportDraft,
+  type SubscriptionPreview,
   approveDraft,
   attachGmpInvoice,
   createManualSubscription,
   generateDraft,
+  getSubscriptionPreview,
   listAllArrays,
   listBillingSubscriptions,
   listDrafts,
@@ -92,6 +94,48 @@ function pctOf(sub: BillingSubscription): number {
 
 function currentPeriodLabel(): string {
   return new Date().toLocaleString("en-US", { month: "long", year: "numeric" });
+}
+
+/** Format an ISO date (YYYY-MM-DD) as a clean "Month YYYY". Parsed in UTC so a
+ *  period-end like 2026-05-19 doesn't slip into April in negative time zones. */
+function monthYearFromISO(iso: string): string | null {
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/** True when a period label is already human-friendly (e.g. "May 2026") rather
+ *  than a raw ISO range like "2026-04-17 → 2026-05-19". */
+function isHumanPeriodLabel(label: string): boolean {
+  return /[A-Za-z]{3,}/.test(label) && !label.includes("→");
+}
+
+/** Normalize a draft's stored period_label to a clean "Month YYYY". Raw ISO
+ *  ranges are collapsed to the month of their END date; already-friendly labels
+ *  pass through untouched. */
+function cleanPeriodLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  if (isHumanPeriodLabel(raw)) return raw;
+  const parts = raw.split("→").map((s) => s.trim());
+  const end = parts[parts.length - 1];
+  return monthYearFromISO(end) ?? (isHumanPeriodLabel(raw) ? raw : null);
+}
+
+/** Does this subscription's allocation % live in the column, or in a parsed
+ *  workbook map? Workbook-sourced rows carry the % inside parsed_map, so the
+ *  column reads null/0 — we must NOT render a "gen × 0% =" contradiction. */
+function isWorkbookSub(
+  sub: BillingSubscription,
+  preview: SubscriptionPreview | undefined,
+): boolean {
+  if (preview && (preview.source === "schema" || preview.source === "llm")) {
+    return true;
+  }
+  return !!sub.source_filename;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -723,6 +767,9 @@ export default function ReportsTab() {
   const [subs, setSubs] = useState<BillingSubscription[]>([]);
   const [pendingDrafts, setPendingDrafts] = useState<ReportDraft[]>([]);
   const [sentDrafts, setSentDrafts] = useState<ReportDraft[]>([]);
+  const [previews, setPreviews] = useState<Map<number, SubscriptionPreview>>(
+    new Map(),
+  );
   const [arrays, setArrays] = useState<FlatArray[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -748,6 +795,21 @@ export default function ReportsTab() {
         setSubs(rows);
         setPendingDrafts(pend);
         setSentDrafts(sent);
+        // Eagerly compute each visible sub's billing math so every run-table
+        // row shows real numbers (gen × % = kWh × rate = $) immediately —
+        // never a "Review to compute" placeholder. Failures are swallowed
+        // per-row so one bad workbook can't blank the whole table.
+        void Promise.all(
+          rows.map((s) =>
+            getSubscriptionPreview(s.id)
+              .then((p) => [s.id, p] as const)
+              .catch(() => null),
+          ),
+        ).then((results) => {
+          const next = new Map<number, SubscriptionPreview>();
+          for (const r of results) if (r) next.set(r[0], r[1]);
+          setPreviews(next);
+        });
       })
       .catch((err) =>
         setLoadError(
@@ -787,18 +849,33 @@ export default function ReportsTab() {
   );
 
   const periodLabel = useMemo(() => {
-    const withLabel = pendingDrafts.find((d) => d.period_label);
-    return withLabel?.period_label ?? currentPeriodLabel();
-  }, [pendingDrafts]);
+    // Prefer a draft's label (cleaned to "Month YYYY"); else derive the month
+    // from any preview's period-end date; else fall back to the current month.
+    for (const d of pendingDrafts) {
+      const clean = cleanPeriodLabel(d.period_label);
+      if (clean) return clean;
+    }
+    for (const p of previews.values()) {
+      if (p.period_end) {
+        const clean = monthYearFromISO(p.period_end);
+        if (clean) return clean;
+      }
+    }
+    return currentPeriodLabel();
+  }, [pendingDrafts, previews]);
 
-  // Period total: sum of computed amounts where we have a draft, else estimate.
+  // Period total: sum of computed amounts — authoritative draft amount when
+  // present, else the eager preview amount, so the hero total reflects every
+  // row's real math even before any draft is generated.
   const periodTotal = useMemo(() => {
     return subs.reduce((sum, s) => {
       const d = draftBySub.get(s.id);
       if (d?.amount_usd != null) return sum + d.amount_usd;
+      const p = previews.get(s.id);
+      if (p?.has_data && p.amount_usd != null) return sum + p.amount_usd;
       return sum;
     }, 0);
-  }, [subs, draftBySub]);
+  }, [subs, draftBySub, previews]);
 
   const sentCount = useMemo(
     () => subs.filter((s) => chipFor(s, draftBySub.get(s.id)) === "sent").length,
@@ -1028,16 +1105,46 @@ export default function ReportsTab() {
             <tbody>
               {subs.map((sub) => {
                 const draft = draftBySub.get(sub.id);
+                const preview = previews.get(sub.id);
                 const chip = chipFor(sub, draft);
-                const rate = rateFor(draft);
                 const pct = pctOf(sub);
-                const arrayKwh = draft?.array_total_kwh ?? null;
+                const isWorkbook = isWorkbookSub(sub, preview);
+
+                // Prefer the authoritative draft, else the eager preview. Each
+                // source already carries array total, customer share, $ and the
+                // effective rate — never re-derive a fabricated number.
+                const rate =
+                  draft && draft.customer_kwh && draft.amount_usd != null
+                    ? rateFor(draft)
+                    : preview?.rate ?? rateFor(draft);
+                const arrayKwh =
+                  draft?.array_total_kwh ?? preview?.array_total_kwh ?? null;
                 const shareKwh =
-                  draft?.customer_kwh ??
-                  (arrayKwh != null ? (arrayKwh * pct) / 100 : null);
+                  draft?.customer_kwh ?? preview?.customer_kwh ?? null;
                 const amount =
-                  draft?.amount_usd ??
-                  (shareKwh != null ? shareKwh * rate : null);
+                  draft?.amount_usd ?? preview?.amount_usd ?? null;
+                // The effective % to display: a draft's stored % wins; else the
+                // column %. For workbook subs the column is null/0 so we never
+                // render a contradictory "× 0%".
+                const draftPct =
+                  draft?.allocation_pct != null
+                    ? draft.allocation_pct * 100
+                    : null;
+                const effectivePct = draftPct ?? pct;
+                // Real, displayable math requires generation AND a share.
+                const hasMath =
+                  arrayKwh != null &&
+                  arrayKwh > 0 &&
+                  shareKwh != null &&
+                  amount != null;
+                // A preview that came back but has no generation yet.
+                const noData =
+                  !hasMath &&
+                  preview != null &&
+                  !preview.has_data &&
+                  draft?.array_total_kwh == null;
+                const arr = arrayName(sub);
+                const showArr = arr && arr !== "—" && arr !== "Workbook customer";
                 return (
                   <tr
                     key={sub.id}
@@ -1046,34 +1153,60 @@ export default function ReportsTab() {
                   >
                     {/* Customer */}
                     <td className="border-b border-[#f1f3f2] px-4 py-3.5 align-middle">
-                      <div className="font-semibold text-zinc-900">
+                      <div className="max-w-[15rem] truncate font-semibold text-zinc-900">
                         {sub.customer_name}
                       </div>
-                      <div className="text-xs text-zinc-400">
-                        {arrayName(sub)} ·{" "}
-                        <PctPill
-                          sub={sub}
-                          editable={manageMode}
-                          onCommit={(p) => commitPct(sub, p)}
-                        />{" "}
-                        allocation
+                      <div className="flex min-w-0 items-center gap-1 truncate text-xs text-zinc-400">
+                        {showArr && (
+                          <span className="truncate">{arr} ·</span>
+                        )}
+                        {isWorkbook && pct === 0 ? (
+                          // Workbook % lives in parsed_map, not the column — show
+                          // a clean label instead of a misleading "0% allocation".
+                          <span>Workbook allocation</span>
+                        ) : (
+                          <>
+                            <PctPill
+                              sub={sub}
+                              editable={manageMode}
+                              onCommit={(p) => commitPct(sub, p)}
+                            />{" "}
+                            allocation
+                          </>
+                        )}
                       </div>
                     </td>
                     {/* Math */}
                     <td className="border-b border-[#f1f3f2] px-4 py-3.5 align-middle text-xs tabular-nums text-zinc-500">
-                      {arrayKwh != null && shareKwh != null ? (
-                        <>
-                          {fmtKwh(arrayKwh)} kWh × {Math.round(pct)}% ={" "}
-                          <b className="text-zinc-800">{fmtKwh(shareKwh)} kWh</b>
-                          <br />
-                          <span className="text-[11px]">
-                            {fmtKwh(shareKwh)} kWh × ${rate.toFixed(4)}
-                          </span>
-                        </>
+                      {hasMath ? (
+                        isWorkbook ? (
+                          // Workbook subs carry the % inside parsed_map, not the
+                          // column — show the derived share without a fake "× %".
+                          <>
+                            <b className="text-zinc-800">
+                              {fmtKwh(shareKwh)} kWh
+                            </b>{" "}
+                            of {fmtKwh(arrayKwh)} kWh
+                            <br />
+                            <span className="text-[11px]">
+                              Workbook allocation · {fmtKwh(shareKwh)} kWh × $
+                              {rate.toFixed(4)}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            {fmtKwh(arrayKwh)} kWh × {Math.round(effectivePct)}% ={" "}
+                            <b className="text-zinc-800">{fmtKwh(shareKwh)} kWh</b>
+                            <br />
+                            <span className="text-[11px]">
+                              {fmtKwh(shareKwh)} kWh × ${rate.toFixed(4)}
+                            </span>
+                          </>
+                        )
+                      ) : noData ? (
+                        <span className="text-zinc-400">No generation data yet</span>
                       ) : (
-                        <span className="text-zinc-400">
-                          {Math.round(pct)}% allocation · Review to compute share
-                        </span>
+                        <span className="text-zinc-400">Computing share…</span>
                       )}
                     </td>
                     {/* Customer share $ */}

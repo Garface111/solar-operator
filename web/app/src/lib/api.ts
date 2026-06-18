@@ -1553,6 +1553,33 @@ export interface ReportDraft {
   sent_at: string | null;
 }
 
+/** A draft-less, eager preview of a subscription's billing math for the latest
+ *  period. Powers the run-table rows so every customer shows real, auditable
+ *  numbers (generation × allocation = kWh × rate = $) without generating a
+ *  draft. `has_data` is false when the array has no generation yet — in that
+ *  case the kWh/amount fields are null and the UI shows a muted note instead of
+ *  a fabricated number. */
+export interface SubscriptionPreview {
+  subscription_id: number;
+  source: string;
+  has_data: boolean;
+  allocation_pct: number | null;
+  array_total_kwh: number | null;
+  customer_kwh: number | null;
+  amount_usd: number | null;
+  rate: number | null;
+  period_start: string | null;
+  period_end: string | null;
+}
+
+export async function getSubscriptionPreview(
+  subId: number,
+): Promise<SubscriptionPreview> {
+  return request<SubscriptionPreview>(
+    `/v1/array-operator/billing/subscriptions/${subId}/preview-math`,
+  );
+}
+
 export async function listDrafts(
   status: "pending" | "sent" | "dismissed" | "all" = "pending",
 ): Promise<ReportDraft[]> {
