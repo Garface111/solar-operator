@@ -1,0 +1,180 @@
+SMA DEVELOPER-APP REGISTRATION — RUNBOOK FOR FORD
+Plant: "Tannery Brook"  |  Goal: produce the 3 (or 4) values our backend needs
+so the data hub polls SMA live, exactly like SolarEdge.
+
+WHAT THE ENGINEER NEEDS BACK (the whole point):
+  [ ] client_id          (public app id)
+  [ ] client_secret      (app password — treat like a password)
+  [ ] system_id          (the SMA Plant / System ID for Tannery Brook)
+  [ ] refresh_token       (ONLY if SMA requires owner-consent — see Step 4)
+
+These map 1:1 to the fields our SMA adapter already reads
+(api/inverters/sma.py → FIELDS = client_id, client_secret, system_id,
+refresh_token). The moment these go onto Tannery Brook's connection, the hub
+polls SMA every tick with ZERO further code changes.
+
+──────────────────────────────────────────────────────────────────────────────
+GROUNDING NOTE (read once)
+──────────────────────────────────────────────────────────────────────────────
+The HOST NAMES, OAUTH ENDPOINTS, and GRANT TYPES below are NOT guesses — they
+are exactly what our shipped backend code calls:
+  - Token endpoint:   https://auth.smaapis.de/oauth2/token
+  - Monitoring base:  https://monitoring.smaapis.de/v1
+  - Grants we support: client_credentials (no refresh_token) OR refresh_token
+  - Plant check:      GET /plants/{system_id}
+  - Live power:       GET /plants/{system_id}/measurements/sets/EnergyAndPowerPv/Recent
+  - Daily energy:     GET /plants/{system_id}/measurements/sets/EnergyAndPowerPv/Day?Date=YYYY-MM-DD
+Those are reliable. What I could NOT verify live (web research was unavailable
+this session): the exact CURRENT button/menu labels on the SMA developer portal
+and the precise authorize-flow path. Every spot that depends on the live UI is
+marked [VERIFY ON SCREEN]. If a step doesn't match what you see, STOP and send a
+screenshot rather than guessing — this is real credential setup.
+
+SMA brands this platform several ways — all the same ecosystem, one login:
+"SMA Data" / "smaapis" / "ennexOS" / "Sunny Portal".
+
+──────────────────────────────────────────────────────────────────────────────
+STEP 1 — REGISTER ON THE SMA DEVELOPER PORTAL
+──────────────────────────────────────────────────────────────────────────────
+1a. Go to:  https://developer.sma.de
+1b. Sign in with your SMA ID — the SAME account you use for Sunny Portal /
+    ennexOS to view Tannery Brook. (No account? Register one, then come back.)
+1c. If prompted, accept the developer / API terms of use (one-time).  [VERIFY ON SCREEN]
+
+WHY THE ACCOUNT MATTERS: SMA treats plant telemetry as belonging to the plant's
+OWNER account. Use the account that owns/manages Tannery Brook so consent (Step 4)
+is straightforward.
+
+──────────────────────────────────────────────────────────────────────────────
+STEP 2 — CREATE AN OAUTH CLIENT APPLICATION  → client_id + client_secret
+──────────────────────────────────────────────────────────────────────────────
+2a. Find the apps area — labeled something like "My Apps" / "Applications" /
+    "Clients" / "API Access".  [VERIFY ON SCREEN]
+2b. Click "Create application" / "Register new client".  [VERIFY ON SCREEN]
+2c. Fill in:
+      - Name:        Array Operator — Tannery Brook
+      - Description:  Backend that polls plant telemetry for monitoring.
+      - Redirect URI: see Step 4. If unsure, enter   https://localhost/callback
+2d. On save, the portal shows a client_id and a client_secret.
+    >>> COPY BOTH NOW. The secret is often shown only once. <<<
+    If you miss the secret you can regenerate it (which invalidates the old one).
+
+──────────────────────────────────────────────────────────────────────────────
+STEP 3 — SUBSCRIBE THE APP TO THE MONITORING API
+──────────────────────────────────────────────────────────────────────────────
+3a. In a "Products" / "APIs" / "Subscriptions" section, subscribe the app to the
+    MONITORING API (may read "Monitoring", "Monitoring API", or "Energy &
+    Power").  [VERIFY ON SCREEN]
+3b. If individual scopes are listed, select the monitoring/read scope. For the
+    refresh-token path (Step 4 Option B) also enable "offline_access" if shown.
+3c. APPROVAL WAIT: some SMA API products activate instantly; others go to
+    "Pending"/"In review" and need SMA approval (hours to ~2 weeks).  [VERIFY ON SCREEN]
+    If it's Pending, the verification in Step 5 will fail until it flips to
+    Active — note the status and tell the engineer.
+
+──────────────────────────────────────────────────────────────────────────────
+STEP 4 — PICK YOUR AUTH PATH (this decides whether you need a refresh_token)
+──────────────────────────────────────────────────────────────────────────────
+Our backend supports BOTH. Enable whichever the portal offers; enable both if
+unsure.
+
+OPTION A — client_credentials  (simplest; NO refresh_token needed)
+  Works when the app's own account is authorized for the plant data directly.
+  - Enable the "Client Credentials" grant on the app.  [VERIFY ON SCREEN]
+  - You're done with auth — our backend mints tokens from client_id + secret.
+  - Skip straight to Step 5.
+
+OPTION B — Authorization Code + refresh_token  (likely required if the plant
+           owner account differs from the app, or SMA demands owner consent)
+  - Enable the "Authorization Code" grant + refresh tokens (offline_access).  [VERIFY ON SCREEN]
+  - Redirect URI on the app must match what you use below — use
+        https://localhost/callback
+    (or a redirect URI the engineer gives you).
+  - Get the initial refresh_token (one-time owner consent):
+    4b-1. Open this in a browser (replace YOUR_CLIENT_ID; confirm the authorize
+          PATH with the engineer if it errors — the host auth.smaapis.de is
+          correct, the /oauth2/authorize path is the standard one but UNVERIFIED):
+            https://auth.smaapis.de/oauth2/authorize?response_type=code&client_id=YOUR_CLIENT_ID&redirect_uri=https://localhost/callback&scope=monitoring%20offline_access
+    4b-2. Log in as the Tannery Brook OWNER and click Allow / Authorize.
+    4b-3. The browser redirects to https://localhost/callback?code=XXXX . The
+          page may fail to load — that's fine; copy the code=XXXX value from the
+          address bar (it expires in minutes, so move quickly).
+    4b-4. Exchange the code for tokens (terminal):
+            curl -s -X POST https://auth.smaapis.de/oauth2/token \
+              -u "YOUR_CLIENT_ID:YOUR_CLIENT_SECRET" \
+              -d "grant_type=authorization_code" \
+              -d "code=THE_CODE" \
+              -d "redirect_uri=https://localhost/callback"
+    4b-5. The JSON response includes "refresh_token" — COPY it. That's the value
+          the backend stores. (It also returns an access_token for Step 5.)
+  If any of 4b is confusing, DON'T keep retrying — send the engineer the
+  client_id + redirect URI and they'll walk it live.
+
+──────────────────────────────────────────────────────────────────────────────
+STEP 5 — FIND system_id + VERIFY IT ACTUALLY WORKS  (do this before sending)
+──────────────────────────────────────────────────────────────────────────────
+5a. Get an access token (terminal):
+
+    -- Option A (client_credentials): --
+    curl -s -X POST https://auth.smaapis.de/oauth2/token \
+      -u "YOUR_CLIENT_ID:YOUR_CLIENT_SECRET" \
+      -d "grant_type=client_credentials"
+
+    -- Option B (refresh_token): --
+    curl -s -X POST https://auth.smaapis.de/oauth2/token \
+      -u "YOUR_CLIENT_ID:YOUR_CLIENT_SECRET" \
+      -d "grant_type=refresh_token" \
+      -d "refresh_token=YOUR_REFRESH_TOKEN"
+
+    Copy the "access_token" from the JSON.
+
+5b. List the plants your app can see — THIS is how you find system_id without
+    hunting through the portal:
+
+    curl -s https://monitoring.smaapis.de/v1/plants \
+      -H "Authorization: Bearer ACCESS_TOKEN"
+
+    Find "Tannery Brook" in the response and read its id → that's system_id.
+    (Alternatively the plant ID is visible in the ennexOS/Sunny Portal URL when
+    you open the plant: https://ennexos.sunnyportal.com .)
+
+5c. Confirm the exact plant endpoint our backend hits:
+
+    curl -s https://monitoring.smaapis.de/v1/plants/YOUR_SYSTEM_ID \
+      -H "Authorization: Bearer ACCESS_TOKEN"
+
+    SUCCESS = JSON describing Tannery Brook.
+    401 = bad credentials/token. 403 = app not approved / owner hasn't consented.
+    404 = wrong system_id.
+
+5d. (Optional) Confirm the live-power feed the hub reads every tick:
+
+    curl -s "https://monitoring.smaapis.de/v1/plants/YOUR_SYSTEM_ID/measurements/sets/EnergyAndPowerPv/Recent" \
+      -H "Authorization: Bearer ACCESS_TOKEN"
+
+──────────────────────────────────────────────────────────────────────────────
+STEP 6 — SEND TO THE ENGINEER (securely — these are credentials)
+──────────────────────────────────────────────────────────────────────────────
+  client_id           = ...
+  client_secret       = ...
+  system_id           = ...        (or "pull from /plants" if 5b didn't show it)
+  refresh_token       = ...        (Option B only)
+  grant used          = client_credentials  OR  refresh_token
+  Monitoring product  = Active  OR  Pending
+  redirect URI used   = https://localhost/callback   (Option B only)
+  + note any [VERIFY ON SCREEN] step where the portal wording differed (screenshot helps).
+
+SECURITY: Ford, when you paste these into chat, the transcript will hold them —
+tell me and we'll store them chmod 600 under ~/.hermes/secrets and you can rotate
+the client_secret afterward if you want belt-and-suspenders.
+
+──────────────────────────────────────────────────────────────────────────────
+REFERENCE
+──────────────────────────────────────────────────────────────────────────────
+  Developer portal:   https://developer.sma.de
+  Token endpoint:     https://auth.smaapis.de/oauth2/token            (used by backend)
+  Authorize endpoint: https://auth.smaapis.de/oauth2/authorize        [PATH UNVERIFIED]
+  Monitoring base:    https://monitoring.smaapis.de/v1                (used by backend)
+  ennexOS portal:     https://ennexos.sunnyportal.com
+  Classic Sunny Portal: https://www.sunnyportal.com
+  Our adapter:        api/inverters/sma.py  (the code these creds feed)
