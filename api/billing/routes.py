@@ -34,7 +34,7 @@ from __future__ import annotations
 import io
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
@@ -767,6 +767,90 @@ def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None
         "period_start": ci.get("period_start"),
         "period_end": ci.get("period_end"),
     }
+
+
+@router.get("/subscriptions/{sub_id}/daily-series")
+def subscription_daily_series(
+    sub_id: int,
+    period: Optional[str] = Query(default=None, description="YYYY-MM month, or YYYY-Qn quarter; default = latest month with data"),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Real DAILY generation for an offtaker's array over a billing period —
+    powers the daily-generation bar graph in reports. Points are the array's
+    measured DailyGeneration rows, scaled by the offtaker's allocation_pct so the
+    bars show THAT offtaker's daily share. Never fabricates: when the array has no
+    daily rows for the window, returns points:[] + has_data:false so the UI shows
+    an honest empty state instead of invented bars.
+    """
+    from datetime import date as _date
+    from ..models import DailyGeneration, Array
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        array_id = sub.array_id
+        alloc = sub.allocation_pct if sub.allocation_pct is not None else 1.0
+        if array_id is None:
+            return {"subscription_id": sub_id, "has_data": False, "points": [],
+                    "reason": "no_array", "allocation_pct": alloc}
+
+        # Resolve the window. Explicit period wins; else the latest month that has
+        # any daily rows for this array.
+        start = end = None
+        label = None
+        if period:
+            p = period.strip().upper()
+            try:
+                if "Q" in p:
+                    yr, q = p.split("-Q") if "-Q" in p else (p[:4], p[-1])
+                    yr = int(yr); q = int(q)
+                    sm = 3 * (q - 1) + 1
+                    start = _date(yr, sm, 1)
+                    end = (_date(yr + (sm + 2) // 12, ((sm + 2) % 12) + 1, 1)
+                           if sm + 3 > 12 else _date(yr, sm + 3, 1)) - timedelta(days=1)
+                    label = f"Q{q} {yr}"
+                else:
+                    yr, mo = p.split("-"); yr = int(yr); mo = int(mo)
+                    start = _date(yr, mo, 1)
+                    end = (_date(yr + 1, 1, 1) if mo == 12 else _date(yr, mo + 1, 1)) - timedelta(days=1)
+                    label = start.strftime("%B %Y")
+            except (ValueError, IndexError):
+                raise HTTPException(400, "period must be YYYY-MM or YYYY-Qn")
+        if start is None:
+            latest = db.execute(
+                select(DailyGeneration.day)
+                .where(DailyGeneration.array_id == array_id)
+                .order_by(DailyGeneration.day.desc()).limit(1)
+            ).scalar_one_or_none()
+            if latest is None:
+                return {"subscription_id": sub_id, "has_data": False, "points": [],
+                        "reason": "no_daily_data", "allocation_pct": alloc}
+            start = latest.replace(day=1)
+            end = (_date(latest.year + 1, 1, 1) if latest.month == 12
+                   else _date(latest.year, latest.month + 1, 1)) - timedelta(days=1)
+            label = start.strftime("%B %Y")
+
+        rows = db.execute(
+            select(DailyGeneration.day, DailyGeneration.kwh)
+            .where(DailyGeneration.array_id == array_id,
+                   DailyGeneration.day >= start, DailyGeneration.day <= end)
+            .order_by(DailyGeneration.day.asc())
+        ).all()
+        arr = db.get(Array, array_id)
+        points = [{"day": d.isoformat(),
+                   "array_kwh": round(k or 0.0, 1),
+                   "kwh": round((k or 0.0) * alloc, 1)} for (d, k) in rows]
+        total = round(sum(p["kwh"] for p in points), 1)
+        return {
+            "subscription_id": sub_id,
+            "has_data": bool(points),
+            "period_label": label,
+            "period_start": start.isoformat(),
+            "period_end": end.isoformat(),
+            "allocation_pct": alloc,
+            "array_name": arr.name if arr else None,
+            "total_kwh": total,
+            "points": points,
+        }
 
 
 @router.get("/subscriptions/{sub_id}/trends")
