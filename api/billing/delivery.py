@@ -22,6 +22,8 @@ import tempfile
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import select
+
 from .matcher import match_billing_workbook, BillingMatch
 from . import invoice as invoice_mod
 from . import summary as summary_mod
@@ -253,3 +255,126 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     if not ok:
         result["error"] = "email send failed (check RESEND_API_KEY / domain)"
     return result
+
+
+def _operator_review_email(sub, tenant, draft) -> tuple[str, str, str]:
+    """The 'a report is ready for your review' note sent to the OPERATOR when a
+    scheduled period lands in approval mode. It does NOT contain the invoice —
+    it points the operator at their inbox to review, optionally edit, and send."""
+    from ..email_skin import render_email_skin, render_email_skin_text
+    from ..branding import app_url  # product-aware app origin
+    cust = sub.customer_name or "your customer"
+    amt = draft.amount_usd
+    amt_str = f"${amt:,.2f}" if isinstance(amt, (int, float)) else "—"
+    try:
+        url = app_url(getattr(tenant, "product", "array_operator")).rstrip("/") + "/#reports"
+    except Exception:  # noqa: BLE001
+        url = "https://arrayoperator.com/#reports"
+    subject = f"Ready to review — {cust} solar report"
+    body_html = (
+        f"<p>A new solar report for <strong>{cust}</strong> is drafted and waiting "
+        f"in your approval inbox.</p>"
+        f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
+        f'<tr><td style="padding:6px 0;opacity:.65;">Period</td>'
+        f'<td style="padding:6px 0;text-align:right;">{draft.period_label or "—"}</td></tr>'
+        f'<tr><td style="padding:6px 0;opacity:.65;">Their production</td>'
+        f'<td style="padding:6px 0;text-align:right;">{(draft.customer_kwh or 0):,.0f} kWh</td></tr>'
+        f'<tr><td style="padding:10px 0;opacity:.65;">Amount</td>'
+        f'<td style="padding:10px 0;text-align:right;font-weight:700;color:#3fd68a;">{amt_str}</td></tr>'
+        f"</table>"
+        f'<p style="margin-top:18px;"><a href="{url}" '
+        f'style="background:#16a34a;color:#fff;padding:11px 20px;border-radius:8px;'
+        f'text-decoration:none;font-weight:600;display:inline-block;">Review &amp; send</a></p>'
+        f'<p style="margin-top:14px;font-size:13px;opacity:.7;">Nothing has been sent to your '
+        f"customer. Open the report, edit anything you like, then approve to send it.</p>"
+    )
+    html = render_email_skin(
+        preheader=f"A solar report for {cust} is ready for your review.",
+        intro_line=f"Ready to review — {cust}",
+        body_html=body_html, product="array_operator")
+    text = render_email_skin_text(
+        intro_line=f"Ready to review — {cust}",
+        body_text=(
+            f"A solar report for {cust} is drafted and waiting in your approval inbox.\n\n"
+            f"Period: {draft.period_label or '—'}\n"
+            f"Their production: {(draft.customer_kwh or 0):,.0f} kWh\n"
+            f"Amount: {amt_str}\n\n"
+            f"Review, edit, and send it here: {url}\n\n"
+            f"Nothing has been sent to your customer yet."
+        ),
+        product="array_operator")
+    return subject, html, text
+
+
+def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> dict:
+    """Approval-mode handling for a due scheduled period: create (or reuse) a
+    pending ReportDraft from the stored workbook and email the OPERATOR a
+    'ready to review' note. The report lands in their inbox — they open it,
+    optionally edit, and click Approve & send. Nothing reaches the customer here.
+
+    Stamps next_send_at forward so the same period isn't re-drafted every tick.
+    Returns a structured result dict (never raises for common failures).
+    """
+    from ..models import ReportDraft
+    from ..notify import _send_via_resend
+
+    try:
+        match = build_match(sub)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"workbook unreadable: {e}"}
+    if not match.matched or not match.latest_period:
+        return {"ok": False, "error": "no current billing period in the stored workbook"}
+
+    ci = match.computed_invoice or {}
+    inv_no = ci.get("invoice_number")
+    period_label = None
+    if ci.get("period_start") or ci.get("period_end"):
+        period_label = f"{ci.get('period_start') or '—'} → {ci.get('period_end') or '—'}"
+    cust_kwh = ci.get("kwh")
+    pct = match.allocation_pct
+    array_total = ci.get("project_total_kwh") or ci.get("array_kwh")
+    if array_total is None and cust_kwh is not None and pct:
+        array_total = round(cust_kwh / pct, 1)
+
+    # Idempotent per (subscription, invoice period).
+    existing = db.execute(
+        select(ReportDraft).where(
+            ReportDraft.subscription_id == sub.id,
+            ReportDraft.status == "pending",
+            ReportDraft.invoice_number == inv_no,
+        )
+    ).scalars().first()
+    draft = existing or ReportDraft(
+        tenant_id=sub.tenant_id, subscription_id=sub.id,
+        customer_name=sub.customer_name, status="pending")
+    draft.period_label = period_label
+    draft.array_total_kwh = array_total
+    draft.allocation_pct = pct
+    draft.customer_kwh = cust_kwh
+    draft.amount_usd = ci.get("amount_owed")
+    draft.invoice_number = inv_no
+    if existing is None:
+        db.add(draft)
+    # Move the schedule forward so we don't re-draft this period next tick.
+    now = datetime.utcnow()
+    sub.next_send_at = next_send_at(sub.cadence, now)
+    db.commit()
+
+    # Notify the operator (best-effort — the draft is created regardless).
+    op = sub.operator_email or getattr(tenant, "contact_email", None)
+    notified = False
+    if op:
+        try:
+            subject, html, text = _operator_review_email(sub, tenant, draft)
+            from_addr = None
+            if getattr(tenant, "send_from_email", None):
+                nm = getattr(tenant, "send_from_name", None) or getattr(tenant, "company_name", None)
+                from_addr = f'"{nm}" <{tenant.send_from_email}>' if nm else tenant.send_from_email
+            notified = bool(_send_via_resend(
+                to=op, subject=subject, html=html, text=text,
+                from_addr=from_addr, product="array_operator"))
+        except Exception:  # noqa: BLE001
+            notified = False
+    return {"ok": True, "drafted": True, "draft_id": draft.id,
+            "operator_notified": notified, "to_review": op,
+            "triggered_by": triggered_by}

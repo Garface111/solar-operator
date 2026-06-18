@@ -219,13 +219,14 @@ def test_send_now_to_client_without_email_errors(client, monkeypatch):
 
 
 def test_scheduler_monthly_billing_delivers(client, monkeypatch):
-    """The scheduler job picks up THIS tenant's enabled monthly sub and delivers
-    it. (Asserts on our own sub id — the session-scoped test DB accumulates subs
-    from other tests, so exact counts aren't meaningful.)"""
+    """The scheduler job picks up THIS tenant's enabled monthly sub. With
+    delivery_mode='auto' it sends straight to the recipient. (Asserts on our own
+    sub id — the session-scoped test DB accumulates subs from other tests, so
+    exact counts aren't meaningful.)"""
     from api import scheduler
     tid, auth = _make_tenant()
     sub_id = _upload(client, auth, "norwich.xlsx", cadence="monthly",
-                     send_mode="to_me").json()["subscription"]["id"]
+                     delivery_mode="auto", send_mode="to_me").json()["subscription"]["id"]
 
     monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
     result = scheduler.deliver_billing_reports("monthly")

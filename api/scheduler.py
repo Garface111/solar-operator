@@ -146,9 +146,10 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     tenants, internal-alerts on failure, exactly-once stamping happens inside
     deliver_subscription (it sets last_sent_at / next_send_at on success only)."""
     from .models import BillingReportSubscription
-    from .billing.delivery import deliver_subscription
+    from .billing.delivery import deliver_subscription, draft_subscription
 
     sent: list[int] = []
+    drafted: list[int] = []
     failed: list[int] = []
     with SessionLocal() as db:
         q = (
@@ -172,11 +173,20 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
             if sub is None or tenant is None:
                 continue
+            # Per-customer choice: "approval" (default) drafts into the operator's
+            # inbox for review-and-send; "auto" sends straight to the recipient.
+            mode = getattr(sub, "delivery_mode", "approval") or "approval"
             try:
-                result = deliver_subscription(
-                    db, sub, tenant,
-                    triggered_by=f"sched-billing-{'trueup' if trueup_only else cadence}")
-                (sent if result.get("ok") else failed).append(sid)
+                if mode == "auto":
+                    result = deliver_subscription(
+                        db, sub, tenant,
+                        triggered_by=f"sched-billing-{'trueup' if trueup_only else cadence}")
+                    (sent if result.get("ok") else failed).append(sid)
+                else:
+                    result = draft_subscription(
+                        db, sub, tenant,
+                        triggered_by=f"sched-draft-{'trueup' if trueup_only else cadence}")
+                    (drafted if result.get("ok") else failed).append(sid)
                 if not result.get("ok"):
                     logger.warning("billing delivery skipped sub %s: %s",
                                    sid, result.get("error"))
@@ -190,10 +200,10 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     if failed:
         send_internal_alert(
             f"Array Operator billing — partial failures ({cadence})",
-            f"Sent OK: {sent}\nFailed/skipped: {failed}",
+            f"Sent OK: {sent}\nDrafted: {drafted}\nFailed/skipped: {failed}",
         )
     return {"cadence": cadence, "trueup_only": trueup_only,
-            "sent": sent, "failed": failed}
+            "sent": sent, "drafted": drafted, "failed": failed}
 
 
 def deliver_monthly_billing_reports() -> dict:

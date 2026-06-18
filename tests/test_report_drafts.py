@@ -148,3 +148,46 @@ def test_drafts_are_tenant_scoped(client):
     # Tenant B cannot see or touch A's draft.
     assert client.get(f"{BASE}/drafts", headers=_auth(auth_b)).json()["drafts"] == []
     assert client.post(f"{BASE}/drafts/{draft_id}/approve", headers=_auth(auth_b)).status_code == 404
+
+
+# ─── scheduler delivery-mode routing (auto-send vs draft-for-approval) ────────
+
+def test_scheduled_approval_mode_drafts_and_notifies_operator(client, monkeypatch):
+    """A due scheduled period in approval mode (default) creates a pending draft
+    and emails the OPERATOR a review note — it does NOT send to the customer."""
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, send_mode="to_client",
+                     client_email="nfd@norwich.gov").json()["subscription"]["id"]
+    sent = []
+    monkeypatch.setattr("api.notify._send_via_resend",
+                        lambda **kw: sent.append(kw) or True)
+    from api.scheduler import deliver_billing_reports
+    res = deliver_billing_reports("monthly")
+    assert sub_id in res["drafted"], res
+    assert sub_id not in res["sent"]
+    # No email in this run went to MY customer (approval mode never sends to them).
+    assert all("nfd@norwich.gov" not in (m.get("to") or "") for m in sent)
+    # A pending draft now exists in MY inbox.
+    inbox = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    assert len(inbox) == 1
+
+
+def test_scheduled_auto_mode_sends_to_customer(client, monkeypatch):
+    """A due scheduled period in auto mode sends straight to the customer (the
+    original hands-off behavior) and creates no draft."""
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, send_mode="to_client",
+                     client_email="nfd@norwich.gov").json()["subscription"]["id"]
+    # Flip this customer to auto-send.
+    client.patch(f"{BASE}/subscriptions/{sub_id}",
+                 json={"delivery_mode": "auto"}, headers=_auth(auth))
+    captured = {}
+    monkeypatch.setattr("api.notify._send_via_resend",
+                        lambda **kw: captured.update(kw) or True)
+    from api.scheduler import deliver_billing_reports
+    res = deliver_billing_reports("monthly")
+    assert sub_id in res["sent"], res
+    assert sub_id not in res["drafted"]
+    # Went to the customer; no draft created.
+    assert "nfd@norwich.gov" in (captured.get("to") or "")
+    assert client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"] == []

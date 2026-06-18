@@ -40,6 +40,7 @@ MAX_PDF_BYTES = 12 * 1024 * 1024    # GMP invoice PDFs
 VALID_MODES = {"to_me", "to_client", "to_both"}
 VALID_CADENCE = {"monthly", "quarterly"}
 VALID_FORMATS = {"pdf", "xlsx"}
+VALID_DELIVERY = {"approval", "auto"}
 
 
 def _sub_dict(s: BillingReportSubscription) -> dict:
@@ -50,6 +51,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "billing_model": s.billing_model,
         "cadence": s.cadence,
         "annual_trueup": s.annual_trueup,
+        "delivery_mode": getattr(s, "delivery_mode", "approval") or "approval",
         "send_mode": s.send_mode,
         "client_email": s.client_email,
         "cc_emails": s.cc_emails,
@@ -123,6 +125,7 @@ async def create_subscription(
     customer_name: Optional[str] = Form(default=None),
     cadence: str = Form(default="monthly"),
     send_mode: str = Form(default="to_me"),
+    delivery_mode: str = Form(default="approval"),
     client_email: Optional[str] = Form(default=None),
     cc_emails: Optional[str] = Form(default=None),
     operator_email: Optional[str] = Form(default=None),
@@ -149,6 +152,8 @@ async def create_subscription(
         raise HTTPException(400, "cadence must be monthly or quarterly")
     if send_mode not in VALID_MODES:
         raise HTTPException(400, "send_mode must be to_me, to_client, or to_both")
+    if delivery_mode not in VALID_DELIVERY:
+        raise HTTPException(400, "delivery_mode must be approval or auto")
 
     name = customer_name or match.customer.get("name") or "Customer"
     client_email = client_email or match.customer.get("email")
@@ -175,6 +180,7 @@ async def create_subscription(
             billing_model=match.billing_model,
             cadence=cadence,
             annual_trueup=annual_trueup,
+            delivery_mode=delivery_mode,
             send_mode=send_mode,
             client_email=client_email,
             cc_emails=cc_emails,
@@ -192,6 +198,7 @@ async def create_subscription(
 class SubscriptionPatch(BaseModel):
     customer_name: Optional[str] = None
     cadence: Optional[str] = None
+    delivery_mode: Optional[str] = None
     send_mode: Optional[str] = None
     client_email: Optional[str] = None
     cc_emails: Optional[str] = None
@@ -218,6 +225,10 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
             if body.send_mode not in VALID_MODES:
                 raise HTTPException(400, "invalid send_mode")
             sub.send_mode = body.send_mode
+        if body.delivery_mode is not None:
+            if body.delivery_mode not in VALID_DELIVERY:
+                raise HTTPException(400, "delivery_mode must be approval or auto")
+            sub.delivery_mode = body.delivery_mode
         if body.customer_name is not None:
             sub.customer_name = body.customer_name
         if body.client_email is not None:

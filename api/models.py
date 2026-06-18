@@ -931,6 +931,14 @@ class BillingReportSubscription(Base):
     cadence: Mapped[str] = mapped_column(String(16), default="monthly")  # monthly | quarterly
     annual_trueup: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # When a scheduled period comes due, how to handle it:
+    #   "approval" (default) → DRAFT it into the approval inbox and email the
+    #       operator a "ready to review" note; nothing reaches the customer until
+    #       the operator opens it, optionally edits, and clicks Approve & send.
+    #   "auto" → send straight to the recipient per send_mode (the original
+    #       hands-off behavior). Both modes are offered per customer.
+    delivery_mode: Mapped[str] = mapped_column(String(12), default="approval")
+
     # Recipient slider (Ford: to me / to my client / to both)
     send_mode: Mapped[str] = mapped_column(String(20), default="to_me")
     # to_me | to_client | to_both

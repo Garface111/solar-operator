@@ -687,6 +687,15 @@ def main():
             ))
             print("  + billing_report_subscriptions.gmp_invoice_pdf")
 
+        # 2026-06-17 Paul's reporting build: per-customer delivery mode. Scheduled
+        # periods either DRAFT for the operator's approval (default) or auto-send.
+        if not column_exists(conn, "billing_report_subscriptions", "delivery_mode"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN delivery_mode VARCHAR(12) DEFAULT 'approval'"
+            ))
+            print("  + billing_report_subscriptions.delivery_mode")
+
         # 2026-06-16 Live current power for extension-captured inverters.
         # The inverters table came free via create_all, but an EXISTING prod table
         # won't gain new columns from create_all — add them explicitly so the
