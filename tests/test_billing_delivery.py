@@ -442,3 +442,55 @@ def test_rate_rejects_out_of_range(client):
                    json={"default_billing_rate_per_kwh": -1},
                    headers={"Authorization": auth})
     assert r.status_code == 400
+
+
+def test_kwh_source_prefers_gmp_else_falls_back(client):
+    """Source-agnostic period generation: when GMP daily-read has coverage the
+    invoice is sourced from it (kwh_source='gmp_api'); otherwise it falls back
+    to DailyGeneration ('daily_csv'). Verified via the live preview-math route."""
+    from api.models import Client as ClientM, Array, UtilityAccount, \
+        DailyGeneration, GmpDailyGeneration
+    from datetime import date, timedelta
+
+    tid, auth = _make_tenant()
+    # Array with a month of DailyGeneration (the fallback source).
+    today = date.today()
+    anchor = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    with SessionLocal() as db:
+        c = ClientM(tenant_id=tid, name="Src Co", active=True); db.add(c); db.flush()
+        arr = Array(tenant_id=tid, name="Src Array", client_id=c.id, fuel_type="solar")
+        db.add(arr); db.flush()
+        aid = arr.id
+        for i in range(28):
+            db.add(DailyGeneration(tenant_id=tid, array_id=aid,
+                                   day=anchor + timedelta(days=i), kwh=50.0, source="csv"))
+        db.commit()
+
+    sid = _create_manual(client, auth, customer_name="Src Cust", array_id=aid,
+                         allocation_pct="0.50", send_mode="to_me",
+                         ).json()["subscription"]["id"]
+
+    # No GMP rows yet → falls back to DailyGeneration.
+    a = _math(client, auth, sid)
+    assert a["kwh_source"] == "daily_csv"
+    assert a["has_data"] is True
+
+    # Now add GMP daily-read coverage for a DIFFERENT, later month via a GMP
+    # utility account — the adapter must PREFER it.
+    gmp_anchor = anchor  # same month is fine; distinct source table
+    with SessionLocal() as db:
+        ua = UtilityAccount(tenant_id=tid, array_id=aid, provider="gmp",
+                            account_number="GMP-TEST-1", enabled=True)
+        db.add(ua); db.flush()
+        for i in range(28):
+            db.add(GmpDailyGeneration(
+                tenant_id=tid, account_id=ua.id, account_number="GMP-TEST-1",
+                array_id=aid, day=gmp_anchor + timedelta(days=i),
+                kwh=70.0, interval_count=96, source="gmp_api"))
+        db.commit()
+
+    b = _math(client, auth, sid)
+    assert b["kwh_source"] == "gmp_api", b
+    # GMP month total 28*70=1960 → 50% share = 980 kWh (distinct from the 50/day CSV).
+    assert abs(b["array_total_kwh"] - 1960.0) < 1.0
+    assert abs(b["customer_kwh"] - 980.0) < 1.0

@@ -139,6 +139,45 @@ def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date
     return None, None, None, None
 
 
+def _array_period_kwh_sourced(
+    db, array_id: int
+) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str], Optional[str]]:
+    """Source-agnostic period generation for an array, with provenance.
+
+    Precedence (per Ford's call + the GMP_DAILY_READ_CONTRACT):
+      1. GMP daily-read contract (api/reports/gmp_daily_read) — the authoritative
+         metered source. We call its functions only; we never touch the gmp_*
+         tables/ORM directly (storage stays the data-sponge agent's).
+      2. DailyGeneration / Bill (the legacy path) when GMP has no coverage yet
+         (e.g. backfill not run / GMP auth blocked).
+
+    Returns (kwh, start, end, label, kwh_source) where kwh_source is one of
+    'gmp_api' | 'daily_csv' | None. Mirrors _array_period_kwh's "latest month
+    present" semantics so downstream math is unchanged regardless of source.
+    """
+    # 1) Try the GMP contract first. Defensive: a provisional module / empty
+    #    tables must degrade to the fallback, never raise into invoice math.
+    try:
+        from ..reports import gmp_daily_read as gdr
+        months = gdr.get_monthly_totals(array_id, db=db)
+        if months:
+            latest = months[-1]                       # ascending → last = newest
+            y, m = latest["year"], latest["month"]
+            series = [r for r in gdr.get_daily_series(array_id, db=db)
+                      if r["day"].year == y and r["day"].month == m]
+            if series:
+                days = sorted(r["day"] for r in series)
+                return (round(float(latest["kwh"]), 1), days[0], days[-1],
+                        f"{y:04d}-{m:02d}", "gmp_api")
+    except Exception:  # noqa: BLE001 — provisional contract / missing tables
+        logger.warning("GMP daily-read unavailable for array %s; falling back",
+                       array_id, exc_info=True)
+
+    # 2) Legacy fallback: DailyGeneration → Bill.
+    kwh, start, end, label = _array_period_kwh(db, array_id)
+    return kwh, start, end, label, ("daily_csv" if kwh is not None else None)
+
+
 def build_manual_match(sub) -> BillingMatch:
     """Synthesize a BillingMatch for a manually-entered customer (no workbook).
 
@@ -157,12 +196,14 @@ def build_manual_match(sub) -> BillingMatch:
     start = end = None
     label: Optional[str] = None
     array_name: Optional[str] = None
+    kwh_source: Optional[str] = None
 
     if sub.array_id is not None:
         with SessionLocal() as db:
             arr = db.get(Array, sub.array_id)
             array_name = arr.name if arr else None
-            array_kwh, start, end, label = _array_period_kwh(db, sub.array_id)
+            array_kwh, start, end, label, kwh_source = _array_period_kwh_sourced(
+                db, sub.array_id)
     if array_kwh is None:
         warnings.append("No generation data for this array yet — invoice shows $0 "
                         "until production lands.")
@@ -198,6 +239,9 @@ def build_manual_match(sub) -> BillingMatch:
     # auditable "kWh × $rate" line and where the rate came from.
     computed["rate_per_kwh"] = round(tariff * billing_rate, 6)
     computed["rate_source"] = rate_source
+    # Where the produced-kWh number came from: 'gmp_api' (authoritative GMP
+    # daily-read) | 'daily_csv' (DailyGeneration/Bill fallback) | None (no data).
+    computed["kwh_source"] = kwh_source
 
     return BillingMatch(
         matched=True,

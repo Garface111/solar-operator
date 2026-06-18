@@ -569,6 +569,7 @@ def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None
         "amount_usd": amount if has_data else None,
         "rate": rate if has_data else None,
         "rate_source": ci.get("rate_source"),
+        "kwh_source": ci.get("kwh_source"),
         "period_start": ci.get("period_start"),
         "period_end": ci.get("period_end"),
     }
