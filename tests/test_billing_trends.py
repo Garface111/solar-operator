@@ -175,6 +175,61 @@ def test_trends_endpoint_thin_data_empty_200(client, monkeypatch):
     assert body["customer_name"] == "Norwich Fire District"
 
 
+def test_trends_endpoint_resolves_by_client_id(client):
+    """The reports UI is client-centric and links trends by CLIENT id, not
+    subscription id. The endpoint must resolve a client id → that client's
+    subscription and return its trends (the cross-agent integration seam)."""
+    from api.models import BillingReportSubscription, Client
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, "norwich.xlsx").json()["subscription"]["id"]
+    # Link the subscription to a client (reuse the auto-created one if the
+    # upload made it, else create it) — the reports UI links trends by client id.
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+        cid = sub.client_id
+        if cid is None:
+            c = Client(tenant_id=tid, name="Norwich Fire District",
+                       contact_email="nfd@test.test")
+            db.add(c); db.flush()
+            cid = c.id
+            sub.client_id = cid
+            db.commit()
+    # Hitting the endpoint with the CLIENT id resolves to the linked sub's trends.
+    r = client.get(f"/v1/array-operator/billing/subscriptions/{cid}/trends",
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["customer_name"] == "Norwich Fire District"
+    assert body["lifetime_kwh"] is not None  # real workbook → real trends
+
+
+def test_trends_endpoint_client_without_workbook_empty_200(client):
+    """A valid client that has no billing subscription yet → honest empty
+    trends (200), NOT a 404, so the UI shows 'not enough history' cleanly."""
+    from api.models import Client
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        c = Client(tenant_id=tid, name="No Workbook Co",
+                   contact_email="nw@test.test")
+        db.add(c); db.commit()
+        cid = c.id
+    r = client.get(f"/v1/array-operator/billing/subscriptions/{cid}/trends",
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["years"] == []
+    assert body["monthly_by_year"] == {}
+    assert body["customer_name"] == "No Workbook Co"
+
+
+def test_trends_endpoint_404_unknown_id(client):
+    """An id matching neither a subscription nor a client → 404."""
+    _, auth = _make_tenant()
+    r = client.get("/v1/array-operator/billing/subscriptions/99999999/trends",
+                   headers={"Authorization": auth})
+    assert r.status_code == 404
+
+
 # ─── GMP invoice attach hook (CONTRACT 2) ────────────────────────────────────
 
 def test_generate_files_no_gmp_pdf_unchanged(tmp_path):

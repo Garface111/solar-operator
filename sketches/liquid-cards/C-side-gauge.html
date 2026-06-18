@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variant C — Side Gauge</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0c1117;color:#e8eef2;padding:32px;-webkit-font-smoothing:antialiased}
+  h1{font-size:18px;font-weight:600;margin-bottom:4px}
+  .sub{color:#7a8794;font-size:13px;margin-bottom:24px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:18px;max-width:1120px}
+  .card{position:relative;height:150px;border-radius:14px;overflow:hidden;display:flex;
+    background:#141b24;border:1px solid #1f2a36;box-shadow:0 4px 20px rgba(0,0,0,.3)}
+  /* dedicated tank column — text never overlaps liquid at all */
+  .tank{position:relative;width:54px;flex:0 0 54px;overflow:hidden;
+    background:#0e151d;border-right:1px solid #1f2a36}
+  .liquid{position:absolute;left:0;right:0;bottom:0;width:100%;
+    background:linear-gradient(180deg,rgba(46,213,115,.6),rgba(28,170,90,.9));
+    transition:height .8s cubic-bezier(.4,0,.2,1)}
+  .liquid::before,.liquid::after{content:"";position:absolute;top:-9px;left:-50%;width:200%;height:18px;
+    background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(120,255,170,.7),transparent 70%);
+    animation:wave 4s linear infinite}
+  .liquid::after{animation-duration:6s;animation-direction:reverse;opacity:.5}
+  @keyframes wave{from{transform:translateX(0)}to{transform:translateX(30%)}}
+  .bubbles span{position:absolute;bottom:0;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,rgba(190,255,210,.9),rgba(120,255,170,.25));
+    animation:rise linear infinite}
+  @keyframes rise{0%{transform:translateY(0) scale(.6);opacity:0}
+    15%{opacity:.9}100%{transform:translateY(-120px) scale(1);opacity:0}}
+  /* tick marks on the tank */
+  .ticks{position:absolute;inset:0;z-index:2;pointer-events:none}
+  .ticks i{position:absolute;left:0;right:0;height:1px;background:rgba(255,255,255,.07)}
+  .body{flex:1;padding:14px 16px;position:relative}
+  .name{font-size:14px;font-weight:600}
+  .meta{font-size:11px;color:#8a99a6;margin-top:2px}
+  .kw{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1;margin-top:14px}
+  .unit{font-size:13px;color:#9fb0bd;font-weight:500}
+  .foot{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px}
+  .pct{font-weight:700;font-variant-numeric:tabular-nums}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .label{color:#8a99a6}
+  .fault .liquid{background:linear-gradient(180deg,rgba(255,170,60,.55),rgba(200,120,20,.85))}
+  .fault .bubbles{display:none}
+  .fault .liquid::before,.fault .liquid::after{animation:none}
+</style>
+</head>
+<body>
+  <h1>Variant C — Side Gauge</h1>
+  <div class="sub">Liquid lives in a dedicated tank column on the left. Text occupies the rest of the card — zero overlap, maximum legibility. The tank reads like a beaker. Fill = capacity factor.</div>
+  <div class="grid" id="grid"></div>
+
+<script>
+  const cards=[
+    {name:"South Field A",meta:"Fronius 25kW · NEPOOL 4471",kw:21.8,nameplate:25,state:"ok",label:"Producing"},
+    {name:"Barn Roof B",meta:"SolarEdge 11.4kW · NEPOOL 4472",kw:11.4,nameplate:11.4,state:"clip",label:"Clipping"},
+    {name:"Pasture C",meta:"Fronius 25kW · NEPOOL 4473",kw:7.2,nameplate:25,state:"low",label:"Underperforming"},
+    {name:"Pond Array D",meta:"SMA 15kW · NEPOOL 4474",kw:0,nameplate:15,state:"idle",label:"Idle (no sun)"},
+    {name:"Hilltop E",meta:"Fronius 25kW · NEPOOL 4475",kw:3.1,nameplate:25,state:"fault",label:"Fault — check"},
+    {name:"West Field F",meta:"SolarEdge 20kW · NEPOOL 4476",kw:18.4,nameplate:20,state:"ok",label:"Producing"},
+  ];
+  const colors={ok:'#5fe89a',clip:'#7cc8ff',low:'#ffd95a',idle:'#9fb0bd',fault:'#ff8a6a'};
+  const g=document.getElementById('grid');
+  cards.forEach(c=>{
+    const cf=Math.min(c.kw/c.nameplate,1);
+    const bubbleCount=c.state==='idle'||c.state==='fault'?0:Math.min(2+Math.round(cf*4),6);
+    let bubbles='';
+    for(let i=0;i<bubbleCount;i++){
+      const sz=3+Math.random()*6,left=12+Math.random()*70,
+        dur=(2.4+Math.random()*2.2).toFixed(2),delay=(Math.random()*3).toFixed(2);
+      bubbles+=`<span style="width:${sz}px;height:${sz}px;left:${left}%;animation-duration:${dur}s;animation-delay:${delay}s"></span>`;
+    }
+    let ticks='';for(let p=25;p<100;p+=25)ticks+=`<i style="bottom:${p}%"></i>`;
+    g.insertAdjacentHTML('beforeend',`
+      <div class="card ${c.state==='fault'?'fault':''}">
+        <div class="tank">
+          <div class="ticks">${ticks}</div>
+          <div class="liquid" style="height:${(cf*100).toFixed(1)}%"><div class="bubbles">${bubbles}</div></div>
+        </div>
+        <div class="body">
+          <div class="name">${c.name}</div>
+          <div class="meta">${c.meta}</div>
+          <div class="kw">${c.kw.toFixed(1)} <span class="unit">kW / ${c.nameplate}</span></div>
+          <div class="foot">
+            <span class="dot" style="background:${colors[c.state]}"></span>
+            <span class="pct" style="color:${colors[c.state]}">${Math.round(cf*100)}%</span>
+            <span class="label">${c.label}</span>
+          </div>
+        </div>
+      </div>`);
+  });
+</script>
+</body>
+</html>

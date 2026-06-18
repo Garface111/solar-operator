@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variant B — Floating Plate</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0c1117;color:#e8eef2;padding:32px;-webkit-font-smoothing:antialiased}
+  h1{font-size:18px;font-weight:600;margin-bottom:4px}
+  .sub{color:#7a8794;font-size:13px;margin-bottom:24px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px;max-width:1080px}
+  .card{position:relative;height:170px;border-radius:14px;overflow:hidden;
+    background:#141b24;border:1px solid #1f2a36;box-shadow:0 4px 20px rgba(0,0,0,.3)}
+  /* liquid can rise the FULL height of the card */
+  .liquid{position:absolute;left:0;right:0;bottom:0;z-index:1;width:100%;
+    background:linear-gradient(180deg,rgba(46,213,115,.5),rgba(28,170,90,.82));
+    transition:height .8s cubic-bezier(.4,0,.2,1)}
+  .liquid::before,.liquid::after{content:"";position:absolute;top:-13px;left:-50%;width:200%;height:26px;
+    background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(120,255,170,.7),transparent 70%);
+    animation:wave 4.5s linear infinite}
+  .liquid::after{animation-duration:6.5s;animation-direction:reverse;opacity:.5}
+  @keyframes wave{from{transform:translateX(0)}to{transform:translateX(25%)}}
+  .bubbles span{position:absolute;bottom:0;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,rgba(190,255,210,.9),rgba(120,255,170,.25));
+    animation:rise linear infinite}
+  @keyframes rise{0%{transform:translateY(0) scale(.6);opacity:0}
+    15%{opacity:.9}100%{transform:translateY(-150px) scale(1);opacity:0}}
+  /* the floating plate — solid, text sits ON it, liquid never alpha-blends over glyphs */
+  .plate{position:absolute;z-index:3;left:12px;right:12px;top:12px;
+    background:rgba(13,19,26,.82);backdrop-filter:blur(6px);
+    border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:11px 13px}
+  .name{font-size:14px;font-weight:600}
+  .meta{font-size:11px;color:#8a99a6;margin-top:1px}
+  .row{display:flex;align-items:baseline;justify-content:space-between;margin-top:8px}
+  .kw{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+  .unit{font-size:12px;color:#9fb0bd}
+  .pct{font-size:13px;font-weight:700;color:#7be89f;font-variant-numeric:tabular-nums}
+  .fault .liquid{background:linear-gradient(180deg,rgba(255,170,60,.5),rgba(200,120,20,.8))}
+  .fault .bubbles{display:none}
+  .fault .liquid::before,.fault .liquid::after{animation:none}
+  .fault .pct{color:#ff8a6a}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:middle}
+</style>
+</head>
+<body>
+  <h1>Variant B — Floating Plate</h1>
+  <div class="sub">Liquid rises the <b>full</b> card height for max drama (great for spotting clipping). All text sits on a solid frosted plate that floats above the liquid — glyphs are never alpha-blended over. Fill = capacity factor.</div>
+  <div class="grid" id="grid"></div>
+
+<script>
+  const cards=[
+    {name:"South Field A",meta:"Fronius 25kW · NEPOOL 4471",kw:21.8,nameplate:25,state:"ok"},
+    {name:"Barn Roof B",meta:"SolarEdge 11.4kW · NEPOOL 4472",kw:11.4,nameplate:11.4,state:"clip"},
+    {name:"Pasture C",meta:"Fronius 25kW · NEPOOL 4473",kw:7.2,nameplate:25,state:"low"},
+    {name:"Pond Array D",meta:"SMA 15kW · NEPOOL 4474",kw:0,nameplate:15,state:"idle"},
+    {name:"Hilltop E",meta:"Fronius 25kW · NEPOOL 4475",kw:3.1,nameplate:25,state:"fault"},
+    {name:"West Field F",meta:"SolarEdge 20kW · NEPOOL 4476",kw:18.4,nameplate:20,state:"ok"},
+  ];
+  const colors={ok:'#5fe89a',clip:'#7cc8ff',low:'#ffd95a',idle:'#9fb0bd',fault:'#ff8a6a'};
+  const g=document.getElementById('grid');
+  cards.forEach(c=>{
+    const cf=Math.min(c.kw/c.nameplate,1);
+    const bubbleCount=c.state==='idle'||c.state==='fault'?0:Math.min(3+Math.round(cf*4),6);
+    let bubbles='';
+    for(let i=0;i<bubbleCount;i++){
+      const sz=4+Math.random()*8,left=6+Math.random()*88,
+        dur=(2.6+Math.random()*2.6).toFixed(2),delay=(Math.random()*3).toFixed(2);
+      bubbles+=`<span style="width:${sz}px;height:${sz}px;left:${left}%;animation-duration:${dur}s;animation-delay:${delay}s"></span>`;
+    }
+    g.insertAdjacentHTML('beforeend',`
+      <div class="card ${c.state==='fault'?'fault':''}">
+        <div class="liquid" style="height:${(cf*100).toFixed(1)}%"><div class="bubbles">${bubbles}</div></div>
+        <div class="plate">
+          <div class="name">${c.name}</div>
+          <div class="meta">${c.meta}</div>
+          <div class="row">
+            <div><span class="kw">${c.kw.toFixed(1)}</span> <span class="unit">kW / ${c.nameplate}</span></div>
+            <div class="pct"><span class="dot" style="background:${colors[c.state]}"></span>${Math.round(cf*100)}%</div>
+          </div>
+        </div>
+      </div>`);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variant A — Capped Tank</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0c1117;color:#e8eef2;padding:32px;-webkit-font-smoothing:antialiased}
+  h1{font-size:18px;font-weight:600;margin-bottom:4px}
+  .sub{color:#7a8794;font-size:13px;margin-bottom:24px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px;max-width:1080px}
+  .card{position:relative;height:170px;border-radius:14px;overflow:hidden;
+    background:#141b24;border:1px solid #1f2a36;box-shadow:0 4px 20px rgba(0,0,0,.3)}
+  /* text zone — liquid never reaches here */
+  .head{position:relative;z-index:3;padding:14px 16px 8px}
+  .name{font-size:14px;font-weight:600;letter-spacing:.2px}
+  .meta{font-size:11px;color:#8a99a6;margin-top:2px}
+  .stat{position:relative;z-index:3;padding:0 16px;display:flex;align-items:baseline;gap:6px}
+  .kw{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+  .unit{font-size:13px;color:#9fb0bd;font-weight:500}
+  .pct{position:absolute;z-index:3;right:14px;bottom:12px;font-size:12px;font-weight:600;
+    font-variant-numeric:tabular-nums;color:#c7f5d0;background:rgba(7,20,12,.55);
+    padding:3px 8px;border-radius:20px;backdrop-filter:blur(2px)}
+  /* liquid layer, capped at 72% so it never invades head/stat zones */
+  .tank{position:absolute;left:0;right:0;bottom:0;z-index:1;overflow:hidden;
+    border-bottom-left-radius:14px;border-bottom-right-radius:14px}
+  .liquid{position:absolute;left:0;right:0;bottom:0;width:100%;
+    background:linear-gradient(180deg,rgba(46,213,115,.55),rgba(28,170,90,.85));
+    transition:height .8s cubic-bezier(.4,0,.2,1)}
+  .liquid::before,.liquid::after{content:"";position:absolute;top:-12px;left:-50%;width:200%;height:24px;
+    background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(120,255,170,.7),transparent 70%);
+    animation:wave 4s linear infinite}
+  .liquid::after{animation-duration:6s;animation-direction:reverse;opacity:.5}
+  @keyframes wave{from{transform:translateX(0)}to{transform:translateX(25%)}}
+  .bubbles span{position:absolute;bottom:0;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,rgba(190,255,210,.9),rgba(120,255,170,.25));
+    animation:rise linear infinite}
+  @keyframes rise{0%{transform:translateY(0) scale(.6);opacity:0}
+    15%{opacity:.9}100%{transform:translateY(-130px) scale(1);opacity:0}}
+  /* fault = amber, no bubbles, flat */
+  .fault .liquid{background:linear-gradient(180deg,rgba(255,170,60,.5),rgba(200,120,20,.8))}
+  .fault .bubbles{display:none}
+  .fault .liquid::before,.fault .liquid::after{animation:none;
+    background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(255,200,120,.5),transparent 70%)}
+  .badge{position:absolute;z-index:3;top:14px;right:14px;font-size:10px;font-weight:700;
+    text-transform:uppercase;letter-spacing:.5px;padding:3px 7px;border-radius:6px}
+  .b-ok{background:rgba(46,213,115,.15);color:#5fe89a}
+  .b-clip{background:rgba(90,200,255,.15);color:#7cc8ff}
+  .b-low{background:rgba(255,210,90,.12);color:#ffd95a}
+  .b-idle{background:rgba(120,140,160,.15);color:#9fb0bd}
+  .b-fault{background:rgba(255,120,90,.18);color:#ff8a6a}
+</style>
+</head>
+<body>
+  <h1>Variant A — Capped Tank</h1>
+  <div class="sub">Liquid is capped at 72% of card height. Text lives in a fixed top zone the liquid <b>physically cannot reach</b>. Fill = current kW ÷ nameplate kW (capacity factor).</div>
+  <div class="grid" id="grid"></div>
+
+<script>
+  // shared animation clock note: in prod use one rAF + offscreen freeze.
+  const cards=[
+    {name:"South Field A",meta:"Fronius 25kW · NEPOOL 4471",kw:21.8,nameplate:25,state:"ok",badge:"Producing"},
+    {name:"Barn Roof B",meta:"SolarEdge 11.4kW · NEPOOL 4472",kw:11.4,nameplate:11.4,state:"clip",badge:"Clipping"},
+    {name:"Pasture C",meta:"Fronius 25kW · NEPOOL 4473",kw:7.2,nameplate:25,state:"low",badge:"Low"},
+    {name:"Pond Array D",meta:"SMA 15kW · NEPOOL 4474",kw:0,nameplate:15,state:"idle",badge:"Idle"},
+    {name:"Hilltop E",meta:"Fronius 25kW · NEPOOL 4475",kw:3.1,nameplate:25,state:"fault",badge:"Fault"},
+    {name:"West Field F",meta:"SolarEdge 20kW · NEPOOL 4476",kw:18.4,nameplate:20,state:"ok",badge:"Producing"},
+  ];
+  const CAP=72; // % of card height liquid may occupy
+  const g=document.getElementById('grid');
+  cards.forEach(c=>{
+    const cf=Math.min(c.kw/c.nameplate,1); // capacity factor 0..1
+    const h=(cf*CAP).toFixed(1);
+    const bubbleCount=c.state==='idle'||c.state==='fault'?0:Math.min(3+Math.round(cf*4),6);
+    let bubbles='';
+    for(let i=0;i<bubbleCount;i++){
+      const sz=4+Math.random()*7, left=8+Math.random()*84,
+        dur=(2.6+Math.random()*2.4).toFixed(2), delay=(Math.random()*3).toFixed(2);
+      bubbles+=`<span style="width:${sz}px;height:${sz}px;left:${left}%;animation-duration:${dur}s;animation-delay:${delay}s"></span>`;
+    }
+    const badgeClass={ok:'b-ok',clip:'b-clip',low:'b-low',idle:'b-idle',fault:'b-fault'}[c.state];
+    g.insertAdjacentHTML('beforeend',`
+      <div class="card ${c.state==='fault'?'fault':''}">
+        <div class="tank" style="height:${CAP}%">
+          <div class="liquid" style="height:${(cf*100).toFixed(1)}%">
+            <div class="bubbles">${bubbles}</div>
+          </div>
+        </div>
+        <span class="badge ${badgeClass}">${c.badge}</span>
+        <div class="head">
+          <div class="name">${c.name}</div>
+          <div class="meta">${c.meta}</div>
+        </div>
+        <div class="stat"><span class="kw">${c.kw.toFixed(1)}</span><span class="unit">kW / ${c.nameplate}</span></div>
+        <span class="pct">${Math.round(cf*100)}%</span>
+      </div>`);
+  });
+</script>
+</body>
+</html>

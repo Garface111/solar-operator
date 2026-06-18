@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hybrid — Liquid Fill + Sparkline (+ Night Mode)</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#0a0e14;color:#e8eef2;padding:28px;-webkit-font-smoothing:antialiased;transition:background 1.2s}
+  body.night{background:#070a12}
+  h1{font-size:17px;font-weight:600;margin-bottom:3px}
+  .sub{color:#7a8794;font-size:12.5px;margin-bottom:16px;max-width:1100px}
+  .toggle{display:inline-flex;gap:0;margin-bottom:22px;border:1px solid #1c2531;border-radius:10px;overflow:hidden}
+  .toggle button{font-family:inherit;font-size:12px;font-weight:600;padding:7px 16px;border:0;
+    background:#10161f;color:#7a8794;cursor:pointer}
+  .toggle button.on{background:#1c2a3d;color:#e8eef2}
+  .wrap{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
+
+  /* ---- ARRAY summary panel ---- */
+  .array{flex:0 0 270px;background:#10161f;border:1px solid #1c2531;border-radius:16px;padding:18px;transition:background 1.2s,border-color 1.2s}
+  body.night .array{background:#0b1018;border-color:#161e2b}
+  .array .eyebrow{font-size:10px;letter-spacing:1.5px;color:#5b8def;font-weight:700}
+  .array h2{font-size:19px;font-weight:700;line-height:1.15;margin:3px 0 12px}
+  .btn{display:inline-block;font-size:11px;font-weight:600;color:#e9c46a;
+    border:1px solid #4a3f1e;background:#211c0e;padding:5px 11px;border-radius:8px;margin-bottom:10px}
+  .drop{font-size:12px;color:#9fb0bd;background:#161d27;border:1px solid #1c2531;
+    padding:5px 10px;border-radius:8px;display:inline-block}
+  .alerts{margin-top:14px;border:1px solid #1e3a2a;background:#0f1a14;border-radius:12px;padding:12px 14px;transition:all 1.2s}
+  .alerts .eyebrow{color:#3ddc84}
+  .alerts .big{font-size:15px;font-weight:700;margin-top:2px}
+  .alerts .small{font-size:12px;color:#7a8794}
+  /* array panel goes calm/indigo at night */
+  body.night .alerts{border-color:#2a3358;background:#10142a}
+  body.night .alerts .eyebrow{color:#8fa3e0}
+  .arrayprod{margin-top:16px}
+  .arrayprod .top{display:flex;justify-content:space-between;align-items:baseline;font-size:11px;
+    letter-spacing:.5px;color:#7a8794;font-weight:600}
+  .arrayprod .mwh{color:#e8eef2;font-size:14px;font-weight:700}
+
+  /* ---- inverter cards row ---- */
+  .row{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:16px;flex:1;min-width:600px}
+  .card{position:relative;height:248px;border-radius:14px;overflow:hidden;
+    background:#10161f;border:1px solid #1c2531;box-shadow:0 4px 18px rgba(0,0,0,.35);transition:background 1.2s,border-color 1.2s}
+  body.night .card{background:#0b1018;border-color:#1a2236}
+
+  /* liquid layer — full height, behind the frosted plate (Variant B) */
+  .liquid{position:absolute;left:0;right:0;bottom:0;z-index:1;width:100%;
+    background:linear-gradient(180deg,rgba(46,213,115,.42),rgba(24,165,86,.8));
+    transition:height 1s cubic-bezier(.4,0,.2,1),background 1.2s}
+  .liquid::before,.liquid::after{content:"";position:absolute;top:-12px;left:-50%;width:200%;height:24px;
+    background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(120,255,170,.65),transparent 70%);
+    animation:wave 5s linear infinite}
+  .liquid::after{animation-duration:7s;animation-direction:reverse;opacity:.5}
+  @keyframes wave{from{transform:translateX(0)}to{transform:translateX(25%)}}
+  .bubbles span{position:absolute;bottom:0;border-radius:50%;
+    background:radial-gradient(circle at 35% 35%,rgba(190,255,210,.9),rgba(120,255,170,.2));
+    animation:rise linear infinite}
+  @keyframes rise{0%{transform:translateY(0) scale(.6);opacity:0}
+    15%{opacity:.85}100%{transform:translateY(-230px) scale(1);opacity:0}}
+
+  /* frosted plate */
+  .plate{position:absolute;z-index:3;inset:10px;display:flex;flex-direction:column;
+    background:rgba(11,16,23,.8);backdrop-filter:blur(7px);
+    border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px 13px 11px;transition:background 1.2s}
+  body.night .plate{background:rgba(9,12,26,.82)}
+  .htop{display:flex;justify-content:space-between;align-items:baseline}
+  .name{font-size:14px;font-weight:700}
+  .plate-kw{font-size:12px;color:#8a99a6;font-weight:600}
+
+  .spark{margin:9px 0 7px}
+  .spark svg{display:block;width:100%;height:42px;overflow:visible}
+  .axis{display:flex;justify-content:space-between;font-size:9px;color:#5e6b78;margin-top:2px}
+
+  .now-label{font-size:9.5px;letter-spacing:.8px;color:#7a8794;font-weight:700;margin-top:2px}
+  .outrow{display:flex;align-items:baseline;justify-content:space-between;margin-top:1px}
+  .pct{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+  .ofmax{font-size:10.5px;color:#8a99a6}
+
+  .foot{margin-top:auto;display:flex;flex-direction:column;gap:7px}
+  .status{text-align:center;font-size:12px;font-weight:700;padding:6px;border-radius:8px;
+    background:rgba(46,213,115,.16);color:#5fe89a;border:1px solid rgba(46,213,115,.25)}
+  .vendor{align-self:flex-start;font-size:10px;font-weight:700;color:#e9c46a;
+    background:#211c0e;border:1px solid #4a3f1e;padding:3px 8px;border-radius:6px}
+
+  /* state variants */
+  .clip .pct,.clip .status{color:#7cc8ff}
+  .clip .status{background:rgba(90,200,255,.14);border-color:rgba(90,200,255,.25)}
+  .low .pct{color:#ffd95a}
+  .fault .liquid{background:linear-gradient(180deg,rgba(255,170,60,.42),rgba(200,120,20,.8))}
+  .fault .bubbles{display:none}
+  .fault .liquid::before,.fault .liquid::after{animation:none}
+  .fault .pct{color:#ff8a6a}
+  .fault .status{background:rgba(255,120,90,.16);color:#ff8a6a;border-color:rgba(255,120,90,.3)}
+
+  /* ───────────────  SLEEPING (NIGHT) STATE  ─────────────── */
+  /* calm: still, dim indigo resting pool. no bubbles. slow breathing glow. */
+  .sleep .liquid{
+    background:linear-gradient(180deg,rgba(90,110,190,.30),rgba(50,62,120,.55));
+    animation:breathe 5.5s ease-in-out infinite}
+  .sleep .liquid::before{animation:none;
+    background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(150,170,255,.35),transparent 70%)}
+  .sleep .liquid::after{display:none}
+  .sleep .bubbles{display:none}
+  @keyframes breathe{0%,100%{opacity:.72}50%{opacity:1}}
+  .sleep .pct{color:#9aa8e0;font-size:18px}
+  .sleep .now-label{color:#6a7290}
+  .sleep .status{background:rgba(120,135,210,.14);color:#aab4e8;border-color:rgba(120,135,210,.28)}
+  .sleep .spark svg polyline{stroke:#5a6790 !important;opacity:.6}
+  .moon{position:absolute;z-index:4;top:13px;right:13px;font-size:13px;opacity:.85}
+  .zzz{position:absolute;z-index:4;left:13px;bottom:46px;font-size:13px;color:#8a96c8;
+    opacity:.8;animation:breathe 5.5s ease-in-out infinite}
+  /* faint stars drifting on the resting pool */
+  .stars span{position:absolute;border-radius:50%;background:rgba(200,210,255,.8);
+    animation:twinkle ease-in-out infinite}
+  @keyframes twinkle{0%,100%{opacity:.15}50%{opacity:.9}}
+</style>
+</head>
+<body>
+  <h1>Hybrid — Liquid Fill + Sparkline + Night Mode</h1>
+  <div class="sub">Same hybrid card. The new bit: at night every inverter is at 0 output — instead of scary empty tanks, they show a calm <b>Sleeping</b> state (dim indigo resting pool, no bubbles, slow breathing glow, moon + zzz). This is how 0-output-because-night reads totally differently from 0-output-because-fault.</div>
+  <div class="toggle">
+    <button id="btnDay" class="on" onclick="setMode('day')">☀ Daytime</button>
+    <button id="btnNight" onclick="setMode('night')">🌙 Night — all sleeping</button>
+  </div>
+
+  <div class="wrap">
+    <div class="array">
+      <div class="eyebrow">ARRAY</div>
+      <h2>Londonderry<br>Community Solar <span id="weather">☁</span></h2>
+      <span class="btn">Open in SolarEdge ↗</span><br>
+      <span class="drop">▾ 6 inverters</span>
+      <div class="alerts">
+        <div class="eyebrow" id="alertEyebrow">ALERTS</div>
+        <div class="big" id="alertBig">All clear</div>
+        <div class="small" id="alertSmall">nothing to do</div>
+      </div>
+      <div class="arrayprod">
+        <div class="top"><span>ARRAY PRODUCTION · LAST 8 DAYS</span><span class="mwh">5.7 MWh</span></div>
+        <svg viewBox="0 0 240 56" style="width:100%;height:56px;margin-top:6px" preserveAspectRatio="none">
+          <polyline fill="none" stroke="#e07a6a" stroke-width="2"
+            points="0,40 34,30 68,36 102,18 136,26 170,10 204,22 240,44"/>
+        </svg>
+        <div class="axis"><span>6/10</span><span>6/13</span><span>now</span></div>
+      </div>
+    </div>
+    <div class="row" id="row"></div>
+  </div>
+
+<script>
+  const data=[
+    {name:"Inverter 1",max:33.3,kw:18.4,state:"ok",curve:[22,14,26,12,20,16,24,30]},
+    {name:"Inverter 2",max:33.3,kw:11.2,state:"low",curve:[24,16,28,14,22,18,26,30]},
+    {name:"Inverter 4",max:33.3,kw:11.4,state:"low",curve:[22,15,27,13,21,17,25,29]},
+    {name:"Inverter 3",max:20,kw:10.7,state:"ok",curve:[20,14,24,12,18,15,22,26]},
+    {name:"Inverter 5",max:20,kw:6.9,state:"low",curve:[18,13,22,11,17,14,20,24]},
+    {name:"Inverter 6",max:10,kw:8.0,state:"clip",curve:[16,12,20,14,18,15,19,17]},
+  ];
+  const row=document.getElementById('row');
+
+  function sparkPoints(curve){
+    const max=Math.max(...curve),min=Math.min(...curve),span=(max-min)||1;
+    const step=200/(curve.length-1);
+    return curve.map((v,i)=>`${(i*step).toFixed(1)},${(38-((v-min)/span)*34).toFixed(1)}`).join(' ');
+  }
+
+  function render(night){
+    row.innerHTML='';
+    data.forEach(d=>{
+      // at night: output is 0, fill drops to a low resting pool (~14%), state=sleep
+      const sleeping = night;
+      const cf = sleeping ? 0 : Math.min(d.kw/d.max,1);
+      const fillH = sleeping ? 14 : cf*100;           // resting pool height at night
+      const pct = sleeping ? 0 : Math.round(cf*100);
+      const cls = sleeping ? 'sleep' : d.state;
+
+      let bubbles='';
+      if(!sleeping){
+        const n=d.state==='fault'?0:Math.min(3+Math.round(cf*4),6);
+        for(let i=0;i<n;i++){
+          const sz=4+Math.random()*7,left=8+Math.random()*84,
+            dur=(3+Math.random()*2.4).toFixed(2),delay=(Math.random()*3).toFixed(2);
+          bubbles+=`<span style="width:${sz}px;height:${sz}px;left:${left}%;animation-duration:${dur}s;animation-delay:${delay}s"></span>`;
+        }
+      }
+      // faint stars on the night resting pool
+      let stars='';
+      if(sleeping){
+        for(let i=0;i<5;i++){
+          const sz=1.5+Math.random()*2,left=10+Math.random()*80,bottom=2+Math.random()*9,
+            dur=(2.5+Math.random()*2.5).toFixed(2),delay=(Math.random()*3).toFixed(2);
+          stars+=`<span style="width:${sz}px;height:${sz}px;left:${left}%;bottom:${bottom}px;animation-duration:${dur}s;animation-delay:${delay}s"></span>`;
+        }
+      }
+      const strokeColor=d.state==='clip'?'#7cc8ff':(d.state==='fault'?'#ff8a6a':'#3ddc84');
+      const statusText = sleeping ? 'Sleeping'
+        : (d.state==='fault'?'Check inverter':(d.state==='clip'?'Clipping (full)':'All good'));
+      const nowText = sleeping ? '—' : pct+'%';
+      const ofMax = sleeping ? '0 / '+d.max+' kW' : d.kw+'/'+d.max+' kW';
+
+      row.insertAdjacentHTML('beforeend',`
+        <div class="card ${cls}">
+          <div class="liquid" style="height:${fillH.toFixed(1)}%">
+            <div class="bubbles">${bubbles}</div>
+            <div class="stars">${stars}</div>
+          </div>
+          ${sleeping?'<span class="moon">🌙</span><span class="zzz">z<sup>z</sup></span>':''}
+          <div class="plate">
+            <div class="htop"><span class="name">${d.name}</span><span class="plate-kw">${d.max} kW</span></div>
+            <div class="spark">
+              <svg viewBox="0 0 200 40" preserveAspectRatio="none">
+                <polyline fill="none" stroke="${strokeColor}" stroke-width="2.2"
+                  stroke-linejoin="round" stroke-linecap="round" points="${sparkPoints(d.curve)}"/>
+              </svg>
+              <div class="axis"><span>6/10</span><span>6/13</span><span>now</span></div>
+            </div>
+            <div class="now-label">${sleeping?'OUTPUT NOW · ASLEEP':'OUTPUT NOW'}</div>
+            <div class="outrow"><span class="pct">${nowText}</span><span class="ofmax">${ofMax}</span></div>
+            <div class="foot">
+              <div class="status">${statusText}</div>
+              <span class="vendor">SolarEdge</span>
+            </div>
+          </div>
+        </div>`);
+    });
+  }
+
+  function setMode(mode){
+    const night = mode==='night';
+    document.body.classList.toggle('night',night);
+    document.getElementById('btnDay').classList.toggle('on',!night);
+    document.getElementById('btnNight').classList.toggle('on',night);
+    document.getElementById('weather').textContent = night ? '🌙' : '☁';
+    document.getElementById('alertEyebrow').textContent = night ? 'STATUS' : 'ALERTS';
+    document.getElementById('alertBig').textContent = night ? 'Resting' : 'All clear';
+    document.getElementById('alertSmall').textContent = night ? '6 inverters asleep · back at sunrise' : 'nothing to do';
+    render(night);
+  }
+  render(false);
+</script>
+</body>
+</html>

@@ -309,16 +309,61 @@ def subscription_trends(sub_id: int,
     t = tenant_from_session(authorization)
     from . import summary as summ
     with SessionLocal() as db:
-        sub = _get_owned(db, t.id, sub_id)
+        sub, client = _resolve_trends_target(db, t.id, sub_id)
+        if sub is None:
+            # A valid CLIENT exists but has no billing workbook yet → honest
+            # empty state, not a 404. (The reports UI is client-centric and
+            # links trends by client id; a client without an uploaded workbook
+            # simply has no history to chart.)
+            return summ._empty_trends(client.name if client else None)
         try:
             match = build_match(sub)
             trends = summ.build_trends(match)
         except Exception:  # noqa: BLE001 — thin/missing/corrupt workbook
-            logger.warning("trends build failed for sub %s", sub_id, exc_info=True)
+            logger.warning("trends build failed for sub %s", sub.id, exc_info=True)
             trends = summ._empty_trends(sub.customer_name)
         if not trends.get("customer_name"):
             trends["customer_name"] = sub.customer_name
         return trends
+
+
+def _resolve_trends_target(db, tenant_id: str, ident: int):
+    """Resolve the trends route's {id} to (subscription, client).
+
+    The reports UI is client-centric and links by client id, but trends are
+    derived from a BillingReportSubscription's stored workbook. Accept EITHER:
+      1. a BillingReportSubscription.id (direct), or
+      2. a Client.id → that client's newest non-deleted subscription.
+    Returns (sub, client). Raises 404 only when `ident` matches neither a sub
+    nor a client owned by this tenant. (sub may be None when a real client has
+    no subscription yet — caller renders the empty trends state.)
+    """
+    sub = db.execute(
+        select(BillingReportSubscription).where(
+            BillingReportSubscription.id == ident,
+            BillingReportSubscription.tenant_id == tenant_id,
+            BillingReportSubscription.deleted_at.is_(None))
+    ).scalar_one_or_none()
+    if sub is not None:
+        return sub, None
+
+    client = db.execute(
+        select(Client).where(
+            Client.id == ident,
+            Client.tenant_id == tenant_id,
+            Client.deleted_at.is_(None))
+    ).scalar_one_or_none()
+    if client is None:
+        raise HTTPException(404, "Subscription not found")
+
+    csub = db.execute(
+        select(BillingReportSubscription).where(
+            BillingReportSubscription.client_id == client.id,
+            BillingReportSubscription.tenant_id == tenant_id,
+            BillingReportSubscription.deleted_at.is_(None))
+        .order_by(BillingReportSubscription.id.desc())
+    ).scalars().first()
+    return csub, client
 
 
 def _get_owned(db, tenant_id: str, sub_id: int) -> BillingReportSubscription:

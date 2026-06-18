@@ -1020,10 +1020,12 @@ def test_inverter_capture_readd_with_today_in_site_daily(client):
     commit. This test reproduces it: site.energy_today_kwh set AND a site.daily
     entry for today, captured TWICE. Must 200 both times, one row for today,
     max-wins."""
-    from api.models import DailyGeneration
-    import datetime as _dt
+    from api.models import DailyGeneration, now as _now
     tid, key = _make_tenant()
-    today_iso = _dt.date.today().isoformat()
+    # Use the SAME clock the handler uses (now().date(), UTC) — not local
+    # date.today() — so this test is stable across the UTC/local midnight
+    # boundary (the handler stamps today's row by now().date()).
+    today_iso = _now().date().isoformat()
     payload = {
         "provider": "sma",
         "sites": [{
@@ -1046,7 +1048,7 @@ def test_inverter_capture_readd_with_today_in_site_daily(client):
         td = db.execute(
             select(DailyGeneration).where(
                 DailyGeneration.tenant_id == tid,
-                DailyGeneration.day == _dt.date.today(),
+                DailyGeneration.day == _now().date(),
             )
         ).scalars().all()
         assert len(td) == 1                    # exactly one row for today, no duplicate
