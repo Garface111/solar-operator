@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import type { Brand } from "../lib/brand";
 
 export interface Tab {
   label: string;
@@ -10,6 +11,8 @@ export interface Tab {
 
 interface TabBarProps {
   tabs: Tab[];
+  /** Product-aware brand for the wordmark + marketing link. */
+  brand: Brand;
   /** Tab paths that the user hasn't visited yet — render a small green dot
    *  next to each so first-time operators know they should look at each one. */
   unvisited?: Set<string>;
@@ -29,7 +32,7 @@ interface TabBarProps {
  * Mobile (<640px): wordmark hidden to free up tab space; shortLabel shown
  * instead of label; py reduced; sign-out shrinks to compact form.
  */
-export function TabBar({ tabs, unvisited, email, onSignOut }: TabBarProps) {
+export function TabBar({ tabs, brand, unvisited, email, onSignOut }: TabBarProps) {
   return (
     <nav className="sticky top-0 z-30 border-b border-cream-border bg-cream/90 backdrop-blur">
       {/* py-3 sm:py-0 gives the bar height on mobile where tabs are hidden (moved to BottomTabBar) */}
@@ -39,12 +42,13 @@ export function TabBar({ tabs, unvisited, email, onSignOut }: TabBarProps) {
             not a router NavLink, because the landing site is a separate deploy from
             this app (which is served under /accounts/). */}
         <a
-          href="https://nepooloperator.com"
+          href={brand.marketingUrl}
           className="shrink-0 rounded text-base font-semibold tracking-tight text-zinc-900 transition-opacity hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
           style={{ fontFamily: "'Georgia', ui-serif, serif" }}
-          title="Go to nepooloperator.com"
+          title={`Go to ${brand.marketingUrl.replace(/^https?:\/\//, "")}`}
         >
-          <span className="text-primary-600">NEPOOL</span> Operator
+          <span className="text-primary-600">{brand.wordmarkAccent}</span>{" "}
+          {brand.wordmarkRest}
         </a>
 
         {/* Center: tabs — hidden on mobile (< 640px); those screens use BottomTabBar instead. */}

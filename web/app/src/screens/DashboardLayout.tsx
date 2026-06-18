@@ -10,6 +10,7 @@ import { useToast } from "../ui/Toast";
 import { type Account, getAccount } from "../lib/api";
 import { openPortalTab } from "../lib/openPortalTab";
 import { useAutoPairExtension } from "../lib/useExtensionStatus";
+import { brandFor } from "../lib/brand";
 
 interface Props {
   onSignOut: () => void;
@@ -24,11 +25,11 @@ export interface DashboardContext {
   retryLoad: () => void;
 }
 
-const TABS: Tab[] = [
-  { label: "Master account", shortLabel: "Account", to: "/account" },
-  { label: "Clients", to: "/clients" },
-  { label: "Automatic Reports", shortLabel: "Reports", to: "/reports" },
-];
+const BASE_TABS = [
+  { key: "account", shortLabel: "Account", to: "/account" },
+  { key: "clients", to: "/clients" },
+  { key: "reports", shortLabel: "Reports", to: "/reports" },
+] as const;
 
 /**
  * Persistent dashboard chrome: top nav + tab bar wrap an <Outlet> that renders
@@ -96,7 +97,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
   useEffect(() => {
     if (!visitKey) return;
     const path = location.pathname;
-    const match = TABS.find((t) => path.startsWith(t.to));
+    const match = BASE_TABS.find((t) => path.startsWith(t.to));
     if (!match || visited.has(match.to)) return;
     const next = new Set(visited);
     next.add(match.to);
@@ -109,7 +110,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
   }, [location.pathname, visitKey, visited]);
   const unvisited = useMemo(() => {
     const s = new Set<string>();
-    TABS.forEach((t) => {
+    BASE_TABS.forEach((t) => {
       if (!visited.has(t.to)) s.add(t.to);
     });
     return s;
@@ -141,6 +142,13 @@ export default function DashboardLayout({ onSignOut }: Props) {
         48 * 60 * 60 * 1000
     : false;
 
+  const brand = brandFor(account?.product);
+  const tabs: Tab[] = [
+    { ...BASE_TABS[0], label: brand.accountTabLabel },
+    { ...BASE_TABS[1], label: brand.clientsTabLabel },
+    { ...BASE_TABS[2], label: brand.reportsTabLabel },
+  ];
+
   return (
     <div className="min-h-full">
       {account?.is_demo === true && (
@@ -163,7 +171,8 @@ export default function DashboardLayout({ onSignOut }: Props) {
       )}
 
       <TabBar
-        tabs={TABS}
+        tabs={tabs}
+        brand={brand}
         unvisited={unvisited}
         email={account?.email ?? null}
         onSignOut={onSignOut}
@@ -213,9 +222,9 @@ export default function DashboardLayout({ onSignOut }: Props) {
       </main>
 
       <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
-        NEPOOL Operator · admin@solaroperator.org ·{" "}
+        {brand.fullName} · admin@solaroperator.org ·{" "}
         <a
-          href="https://nepooloperator.com/privacy"
+          href={`${brand.marketingUrl}/privacy`}
           target="_blank"
           rel="noopener noreferrer"
           className="underline-offset-2 hover:text-zinc-600 hover:underline"

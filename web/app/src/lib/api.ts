@@ -193,6 +193,10 @@ export interface Account {
   operator_name: string | null;
   company_name: string | null;
   email: string | null;
+  /** Which product this tenant belongs to: "nepool" (NEPOOL Operator) or
+   *  "array_operator" (Array Operator). Drives shell branding + tab labels so
+   *  an Array Operator owner never sees NEPOOL chrome. */
+  product: string | null;
   plan: string | null;
   active: boolean;
   /** Shared read-only demo tenant. When true the SPA shows the demo banner and
