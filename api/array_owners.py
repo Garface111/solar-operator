@@ -445,6 +445,135 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
     }
 
 
+_MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+@router.get("/v1/array-owners/fleet-trends")
+def array_owners_fleet_trends(
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """PORTFOLIO-WIDE multi-year production trends — the owner's macro view.
+
+    Aggregates DailyGeneration kWh across EVERY array the tenant owns, grouped
+    by calendar (year, month), so the Trends tab can draw one line per year
+    (Jan–Dec) plus a seasonal year-over-year comparison for the whole fleet.
+    This is Paul's "macro-level tab for multi-year trend lines" — the fleet
+    total, not a single array. Also returns a per-array breakdown so the owner
+    can drill in. Derived entirely from real generation telemetry; an owner with
+    thin history gets empty collections (never a 500).
+
+    Shape:
+      {
+        "years": [2024, 2025, 2026],
+        "monthly_by_year": {"2025": [{"month": 1, "kwh": ...}, ...], ...},
+        "seasonal_yoy": [{"month": 1, "label": "Jan",
+                          "by_year": {"2025": ..., "2026": ...},
+                          "latest_delta_pct": 4.8}, ...],
+        "ttm_kwh": ..., "ttm_savings_usd": ...,
+        "lifetime_kwh": ...,
+        "by_array": [{"array_id", "name", "lifetime_kwh", "years": [...]}],
+      }
+    """
+    tenant = _tenant_from_bearer(authorization)
+    today = date.today()
+
+    # (year, month) → kWh across the whole fleet, and per-array lifetime/years.
+    fleet_ym: dict[tuple[int, int], float] = defaultdict(float)
+    by_array: dict[int, dict] = {}
+    rate_blended = 0.0
+    rate_n = 0
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array)
+            .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None),
+                   Array.excluded.is_(False))
+            .order_by(Array.id)
+        ).scalars().all()
+
+        for arr in arrays:
+            rows = db.execute(
+                select(DailyGeneration.day, DailyGeneration.kwh).where(
+                    DailyGeneration.array_id == arr.id,
+                )
+            ).all()
+            arr_ym: dict[tuple[int, int], float] = defaultdict(float)
+            arr_life = 0.0
+            for d, kwh in rows:
+                if d is None or kwh is None:
+                    continue
+                k = float(kwh)
+                fleet_ym[(d.year, d.month)] += k
+                arr_ym[(d.year, d.month)] += k
+                arr_life += k
+            by_array[arr.id] = {
+                "array_id": arr.id,
+                "name": arr.name,
+                "lifetime_kwh": round(arr_life, 1),
+                "years": sorted({y for (y, _m) in arr_ym.keys()}),
+            }
+            try:
+                rate_blended += get_energy_rate(_array_provider(db, arr.id))
+                rate_n += 1
+            except Exception:  # noqa: BLE001
+                pass
+
+    years = sorted({y for (y, _m) in fleet_ym.keys()})
+    rate = (rate_blended / rate_n) if rate_n else 0.0
+
+    monthly_by_year: dict[str, list[dict]] = {}
+    for y in years:
+        pts = [
+            {"month": m, "kwh": round(fleet_ym[(y, m)], 1)}
+            for m in range(1, 13) if (y, m) in fleet_ym
+        ]
+        monthly_by_year[str(y)] = pts
+
+    # Seasonal YoY: per calendar month, each year's fleet total + latest delta%.
+    seasonal_yoy: list[dict] = []
+    for m in range(1, 13):
+        by_year = {
+            str(y): round(fleet_ym[(y, m)], 1)
+            for y in years if (y, m) in fleet_ym
+        }
+        if not by_year:
+            continue
+        present = sorted(int(y) for y in by_year.keys())
+        latest_delta_pct = None
+        if len(present) >= 2:
+            latest, prior = present[-1], present[-2]
+            pv = by_year[str(prior)]
+            if pv:
+                latest_delta_pct = round(
+                    100.0 * (by_year[str(latest)] - pv) / pv, 1)
+        seasonal_yoy.append({
+            "month": m, "label": _MONTH_LABELS[m - 1],
+            "by_year": by_year, "latest_delta_pct": latest_delta_pct,
+        })
+
+    # Trailing twelve months (rolling from today) across the fleet.
+    ttm_kwh = 0.0
+    for off in range(12):
+        yy, mm = today.year, today.month - off
+        while mm <= 0:
+            mm += 12
+            yy -= 1
+        ttm_kwh += fleet_ym.get((yy, mm), 0.0)
+    lifetime_kwh = round(sum(fleet_ym.values()), 1)
+
+    return {
+        "years": years,
+        "monthly_by_year": monthly_by_year,
+        "seasonal_yoy": seasonal_yoy,
+        "ttm_kwh": round(ttm_kwh, 1),
+        "ttm_savings_usd": round(ttm_kwh * rate, 2) if rate else None,
+        "lifetime_kwh": lifetime_kwh,
+        "by_array": sorted(by_array.values(),
+                           key=lambda a: -a["lifetime_kwh"]),
+    }
+
+
 # ── fleet tree (sandbox) ──────────────────────────────────────────────────────
 # Per-inverter equipment reads are heavier (inventory + 1 telemetry call per
 # inverter), so cache the assembled tree per array for 10 minutes to respect the

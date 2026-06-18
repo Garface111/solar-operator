@@ -1098,3 +1098,60 @@ def test_inverter_capture_chint_keeps_per_inverter_live_power(client):
     assert powers["0001013791738043"] == 54000.0
 
 
+# ── fleet-trends (portfolio-wide multi-year, Paul's macro tab) ───────────────
+
+def test_fleet_trends_empty_when_no_arrays(client):
+    _tid, key = _make_tenant()
+    r = client.get("/v1/array-owners/fleet-trends", headers=_auth(key))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["years"] == []
+    assert b["monthly_by_year"] == {}
+    assert b["seasonal_yoy"] == []
+    assert b["by_array"] == []
+
+
+def test_fleet_trends_aggregates_across_arrays_and_years(client):
+    tid, key = _make_tenant()
+    a1 = _make_array(tid, "West Chester")
+    a2 = _make_array(tid, "Londonderry")
+    # Two arrays, same Jan months across two years → fleet sums them.
+    _add_daily(tid, a1, [(date(2025, 1, 10), 100.0), (date(2025, 1, 20), 50.0),
+                         (date(2026, 1, 15), 200.0)])
+    _add_daily(tid, a2, [(date(2025, 1, 5), 30.0), (date(2026, 1, 8), 40.0)])
+    r = client.get("/v1/array-owners/fleet-trends", headers=_auth(key))
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["years"] == [2025, 2026]
+    # Jan 2025 fleet = 100+50+30 = 180; Jan 2026 = 200+40 = 240.
+    jan25 = next(p for p in b["monthly_by_year"]["2025"] if p["month"] == 1)
+    jan26 = next(p for p in b["monthly_by_year"]["2026"] if p["month"] == 1)
+    assert jan25["kwh"] == 180.0
+    assert jan26["kwh"] == 240.0
+    # Seasonal YoY for Jan: both years present, latest delta = (240-180)/180.
+    jan = next(s for s in b["seasonal_yoy"] if s["month"] == 1)
+    assert jan["by_year"] == {"2025": 180.0, "2026": 240.0}
+    assert jan["latest_delta_pct"] == round(100 * (240 - 180) / 180, 1)
+    assert b["lifetime_kwh"] == 420.0
+    # by_array sorted by lifetime desc; West Chester (350) before Londonderry (70).
+    assert [a["name"] for a in b["by_array"]] == ["West Chester", "Londonderry"]
+    assert b["by_array"][0]["lifetime_kwh"] == 350.0
+
+
+def test_fleet_trends_excludes_deleted_and_excluded_arrays(client):
+    tid, key = _make_tenant()
+    keep = _make_array(tid, "Keep")
+    gone = _make_array(tid, "Gone")
+    _add_daily(tid, keep, [(date(2026, 3, 1), 10.0)])
+    _add_daily(tid, gone, [(date(2026, 3, 1), 999.0)])
+    with SessionLocal() as db:
+        from api.models import Array as _A
+        import datetime as _dt2
+        db.get(_A, gone).deleted_at = _dt2.datetime.utcnow()
+        db.commit()
+    r = client.get("/v1/array-owners/fleet-trends", headers=_auth(key))
+    b = r.json()
+    assert b["lifetime_kwh"] == 10.0  # the deleted array's 999 is excluded
+    assert [a["name"] for a in b["by_array"]] == ["Keep"]
+
+
