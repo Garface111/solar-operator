@@ -470,7 +470,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const energyAccounts = Array.isArray(cd.energyAccounts) ? cd.energyAccounts
           : (Array.isArray(current.energyAccounts) ? current.energyAccounts : []);
         const accounts = [];
-        let _probedHistory = false;   // grounding probe runs once, first solar acct
         for (const ea of energyAccounts) {
           const acctNum = String(ea.accountNumber || "").trim();
           if (!acctNum) continue;
@@ -491,46 +490,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const sentGrid = Number(summary && summary.totalGenerationSentToGrid) || 0;
           const usedHome = Number(summary && summary.totalGenerationUsedByHome) || 0;
           const isSolar = !!(summary && (summary.isNetMetered || grossGen > 0 || sentGrid > 0 || usedHome > 0));
-
-          // ── GROUNDING PROBE (multi-year history) ────────────────────────────
-          // Runs ONCE, on the first solar account. Asks GMP's daily endpoint for
-          // 31-day windows at increasing ages (1 / 13 / 25 / 37 / 61 months back)
-          // and logs what actually comes back: how far history is served, the
-          // granularity, and whether returnedGeneration is populated that far
-          // back. Read-only; does NOT change what we ingest. Loud console output
-          // (copy these [AO HISTORY PROBE] lines back to verify before we widen).
-          if (isSolar && !_probedHistory) {
-            _probedHistory = true;
-            const PLOG = (...a) => { try { console.log("[AO HISTORY PROBE]", ...a); } catch (_) {} };
-            PLOG("account", acctNum, "— probing GMP daily history depth…");
-            const monthsAgoWindow = (m) => {
-              const e2 = new Date(); e2.setMonth(e2.getMonth() - m);
-              const s2 = new Date(e2.getTime() - 31 * 24 * 3600 * 1000);
-              return { s: s2, e: e2 };
-            };
-            for (const mAgo of [1, 13, 25, 37, 61]) {
-              const { s, e } = monthsAgoWindow(mAgo);
-              const label = `~${mAgo}mo (${fmtDate(s).slice(0,10)}..${fmtDate(e).slice(0,10)})`;
-              try {
-                const pr = await gmpGet(`/usage/${acctNum}/daily?startDate=${fmtDate(s)}&endDate=${fmtDate(e)}&temp=f`);
-                const ivs = (pr && Array.isArray(pr.intervals)) ? pr.intervals : [];
-                let rows = 0, withGen = 0, minD = null, maxD = null, sample = null;
-                for (const iv of ivs) for (const v of (iv.values || [])) {
-                  rows++;
-                  if (v && v.date) { if (!minD || v.date < minD) minD = v.date; if (!maxD || v.date > maxD) maxD = v.date; }
-                  if (v && v.returnedGeneration != null && isFinite(Number(v.returnedGeneration))) {
-                    withGen++; if (sample == null && Number(v.returnedGeneration) > 0) sample = { date: v.date, kwh: v.returnedGeneration };
-                  }
-                }
-                PLOG(label, "OK · intervals:", ivs.length, "rows:", rows, "withReturnedGen:", withGen,
-                     "served:", minD, "..", maxD, sample ? `sample{${sample.date}=${sample.kwh}kWh}` : "no-positive-gen");
-              } catch (err) {
-                PLOG(label, "FAILED ·", String(err && err.status || ""), String(err && err.message || err));
-              }
-              await new Promise(r => setTimeout(r, 350)); // be polite to GMP
-            }
-            PLOG("done — copy every [AO HISTORY PROBE] line back to Array Operator.");
-          }
 
           let daily = [];
           if (isSolar) {
