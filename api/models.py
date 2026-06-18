@@ -414,7 +414,15 @@ class UtilitySession(Base):
 
 
 class Bill(Base):
-    """One pulled bill PDF + extracted metrics."""
+    """One pulled bill — the full energy record, not just generation.
+
+    DATA SPONGE: the JSON pull keeps EVERYTHING GMP exposes per billing period —
+    generation, consumption, sent-to-grid, cost, rate, net-metering credits,
+    supplier — plus the entire raw bill in raw_json so we never lose a field we
+    haven't modeled yet. This makes the account the owner's system of record for
+    their whole energy life (years of data they can't easily get elsewhere), and
+    the switching cost compounds with every billing period absorbed.
+    """
     __tablename__ = "bills"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(32), index=True)
@@ -425,6 +433,17 @@ class Bill(Base):
     billing_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     kwh_generated: Mapped[int | None] = mapped_column(Integer, nullable=True)
     kwh_consumed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # ── Full energy-record fields (the sponge) ──────────────────────────────
+    kwh_sent_to_grid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kwh_gross_generated: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_net_metered: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)        # $ billed this period
+    net_credit: Mapped[float | None] = mapped_column(Float, nullable=True)        # $ net-metering credit
+    avg_rate_cents_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)  # blended ¢/kWh
+    supplier: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The ENTIRE raw bill JSON — the true sponge: never lose a field we don't
+    # model yet, so a future view can mine it without a re-pull.
+    raw_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     document_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
     pdf_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -453,6 +472,30 @@ class Job(Base):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class SpongeProgress(Base):
+    """Live progress of an onboarding history-absorb ("data sponge") run, so the
+    UI can render a real progress bar. One row per (tenant, provider) absorb;
+    re-running an absorb resets it. The frontend polls GET /account/sponge.
+    """
+    __tablename__ = "sponge_progress"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40), default="gmp")
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running|done|error
+    accounts_total: Mapped[int] = mapped_column(Integer, default=0)
+    accounts_done: Mapped[int] = mapped_column(Integer, default=0)
+    bills_absorbed: Mapped[int] = mapped_column(Integer, default=0)
+    years_covered: Mapped[float | None] = mapped_column(Float, nullable=True)
+    message: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", name="uq_sponge_tenant_provider"),
+    )
 
 
 class LoginToken(Base):
@@ -909,6 +952,57 @@ class BillingReportSubscription(Base):
 
     __table_args__ = (
         Index("ix_billing_sub_tenant_enabled", "tenant_id", "enabled"),
+    )
+
+
+class ReportDraft(Base):
+    """A drafted billing report awaiting the operator's approval before it's sent.
+
+    Paul Bozuwa's core ask: when a billing period is ready, the system should
+    DRAFT the customer's invoice email (customer invoice PDF + the GMP utility
+    invoice PDF) and drop it in an approval inbox — "I get an email drafted...
+    I go over it and approve it or modify it and then send." Nothing reaches a
+    real customer until the operator clicks Approve & send.
+
+    A draft snapshots the numbers at generation time (period, total array kWh,
+    the customer's allocation %, the customer's share, amount) so the inbox can
+    render the card without recomputing, and carries the optional GMP invoice PDF
+    the operator attaches. Approving calls the normal deliver_subscription path
+    (which already attaches sub.gmp_invoice_pdf), so the email/format/recipient
+    machinery is reused — the draft is the human gate in front of it.
+    """
+    __tablename__ = "report_drafts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    subscription_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("billing_report_subscriptions.id"), index=True)
+    customer_name: Mapped[str] = mapped_column(String(200))
+
+    # pending → sent | dismissed. Only one pending draft per subscription/period.
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+
+    # Snapshot of the numbers the draft was built from (for the inbox card).
+    period_label: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    array_total_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    allocation_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
+    customer_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    invoice_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+    # The operator can attach the period's GMP utility invoice PDF (Paul sends it
+    # alongside the customer invoice "to prove we're not just making this up").
+    gmp_invoice_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    gmp_filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    # Editable-before-send overrides (Paul: "approve it or MODIFY it and send").
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_report_drafts_tenant_status", "tenant_id", "status"),
     )
 
 

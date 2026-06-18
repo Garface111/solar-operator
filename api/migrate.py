@@ -701,6 +701,25 @@ def main():
                 added.append(col)
                 print(f"  + inverters.{col}")
 
+        # 2026-06-18 DATA SPONGE: full energy-record columns on bills. The bills
+        # table predates these; create_all won't add columns to an existing prod
+        # table, so add the sponge fields explicitly. JSONB for raw_json so the
+        # whole bill is queryable later without a re-pull.
+        for col, sql in [
+            ("kwh_sent_to_grid",    "ALTER TABLE bills ADD COLUMN kwh_sent_to_grid DOUBLE PRECISION"),
+            ("kwh_gross_generated", "ALTER TABLE bills ADD COLUMN kwh_gross_generated DOUBLE PRECISION"),
+            ("is_net_metered",      "ALTER TABLE bills ADD COLUMN is_net_metered BOOLEAN"),
+            ("total_cost",          "ALTER TABLE bills ADD COLUMN total_cost DOUBLE PRECISION"),
+            ("net_credit",          "ALTER TABLE bills ADD COLUMN net_credit DOUBLE PRECISION"),
+            ("avg_rate_cents_kwh",  "ALTER TABLE bills ADD COLUMN avg_rate_cents_kwh DOUBLE PRECISION"),
+            ("supplier",            "ALTER TABLE bills ADD COLUMN supplier VARCHAR(120)"),
+            ("raw_json",            "ALTER TABLE bills ADD COLUMN raw_json JSONB"),
+        ]:
+            if not column_exists(conn, "bills", col):
+                conn.execute(text(sql))
+                added.append(col)
+                print(f"  + bills.{col}")
+
     print("=== Migration complete ===")
 
 

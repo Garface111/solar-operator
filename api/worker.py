@@ -54,6 +54,21 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
             )
         ).scalar_one_or_none()
 
+    # Full energy-record fields — present on the JSON path (the sponge), absent
+    # on the legacy PDF path (.get → None, columns nullable). raw_json is the
+    # authoritative full bill so nothing GMP exposed is ever lost.
+    _sponge = dict(
+        kwh_consumed=metrics.get("kwh_consumed"),
+        kwh_sent_to_grid=metrics.get("kwh_sent_to_grid"),
+        kwh_gross_generated=metrics.get("kwh_gross_generated"),
+        is_net_metered=metrics.get("is_net_metered"),
+        total_cost=metrics.get("total_cost"),
+        net_credit=metrics.get("net_credit"),
+        avg_rate_cents_kwh=metrics.get("avg_rate_cents_kwh"),
+        supplier=metrics.get("supplier"),
+        raw_json=metrics.get("raw_json"),
+    )
+
     if existing:
         existing.kwh_generated = metrics["kwh_generated"]
         existing.billing_days  = metrics["billing_days"]
@@ -62,6 +77,9 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
         existing.raw_text      = metrics.get("raw_text", "")
         existing.parse_status  = metrics["parse_status"]
         existing.pulled_at     = now()
+        for k, v in _sponge.items():
+            if v is not None:          # never overwrite a known value with None
+                setattr(existing, k, v)
         if source_path:
             existing.pdf_path = source_path
         if metrics.get("document_number"):
@@ -79,6 +97,7 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
         raw_text=metrics.get("raw_text", ""),
         parse_status=metrics["parse_status"],
         document_number=metrics.get("document_number"),
+        **_sponge,
     ))
     return "created"
 
@@ -88,12 +107,16 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
     """JSON-first path. Returns result dict."""
     bills = adapter.fetch_bills_json(account.account_number, jwt)
     created = updated = 0
-    skipped_no_kwh = 0
+    no_generation = 0
     for b in bills:
         metrics = adapter.bill_json_to_metrics(b)
+        # DATA SPONGE: absorb EVERY bill into the energy record — consumption,
+        # cost, rate, net credits — not just solar-generation periods. (Previously
+        # we skipped any bill with no kWh generated, throwing away the rest of the
+        # owner's energy history.) We still TRACK the no-generation count so the
+        # NEPOOL generation signal is observable, but we persist the full record.
         if metrics["kwh_generated"] is None or metrics["kwh_generated"] <= 0:
-            skipped_no_kwh += 1
-            continue
+            no_generation += 1
         action = _upsert_bill(db, tenant_id, account, metrics, source_path=None)
         if action == "created":
             created += 1
@@ -104,7 +127,7 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
         "status": "ok", "source": "json",
         "bills_returned": len(bills),
         "created": created, "updated": updated,
-        "skipped_no_kwh": skipped_no_kwh,
+        "no_generation": no_generation,
     }
 
 

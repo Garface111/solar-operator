@@ -165,6 +165,67 @@ def _extract_kwh_generated(bill: dict) -> float | None:
     return best if best > 0 else None
 
 
+# Candidate unitCode sets for the full energy record. unitCode/GENERATE is the
+# ONLY one verified against a real GMP HAR; the rest are best-effort guesses and
+# are why we ALSO store raw_json — so a field we mislabel here is never LOST and
+# a future view can re-derive it. Treat the modeled fields as a convenience layer
+# over the authoritative raw_json.
+_CONSUME_CODES = {"CONSUME", "USAGE", "KWHUSED", "DELIVERED", "USED"}
+_SENT_CODES = {"SENTTOGRID", "EXPORT", "DELIVEREDTOGRID"}
+
+
+def _sum_kwh_by_codes(bill: dict, codes: set[str]) -> float | None:
+    """Sum KWH line items whose unitCode is in `codes`, across all segments."""
+    total = 0.0
+    found = False
+    for seg in bill.get("billSegments", []):
+        for li in seg.get("segmentLineItems", []):
+            if li.get("unitOfMeasure") == "KWH" and li.get("unitCode") in codes:
+                v = _to_float(li.get("unitCount"))
+                if v is not None:
+                    total += v
+                    found = True
+    return total if found else None
+
+
+def _extract_full_record(bill: dict) -> dict[str, Any]:
+    """Extract the FULL energy record from a GMP bill JSON: consumption, sent-to-
+    grid, gross gen, total cost, net credit, blended rate, supplier, net-metered.
+
+    Defensive: every field may be None (GMP omits fields for non-solar accounts /
+    older bills). The bill's raw_json is stored alongside so nothing is lost even
+    when a code here misses — these modeled fields are the queryable convenience
+    layer, raw_json is the authoritative sponge."""
+    gross = _extract_kwh_generated(bill)
+    consumed = _sum_kwh_by_codes(bill, _CONSUME_CODES)
+    sent = _sum_kwh_by_codes(bill, _SENT_CODES)
+
+    # Bill-level money: prefer explicit top-level totals when GMP provides them,
+    # else sum segment charge amounts. amountDue / totalAmount are common GMP keys.
+    total_cost = _to_float(
+        bill.get("amountDue") or bill.get("totalAmount") or bill.get("billAmount")
+    )
+    net_credit = _to_float(bill.get("netMeteringCredit") or bill.get("solarCredit"))
+
+    # Blended rate: total cost / kWh consumed, in cents — only when both known.
+    avg_rate = None
+    if total_cost is not None and consumed and consumed > 0:
+        avg_rate = round((total_cost / consumed) * 100.0, 3)
+
+    supplier = bill.get("supplier") or bill.get("supplierName") or bill.get("energySupplier")
+
+    return {
+        "kwh_gross_generated": gross,
+        "kwh_consumed_full": consumed,
+        "kwh_sent_to_grid": sent,
+        "total_cost": total_cost,
+        "net_credit": net_credit,
+        "avg_rate_cents_kwh": avg_rate,
+        "supplier": str(supplier)[:120] if supplier else None,
+        "is_net_metered": bool(bill.get("isNetMetered")) if "isNetMetered" in bill else None,
+    }
+
+
 def _segment_dates(bill: dict) -> tuple[datetime | None, datetime | None]:
     """First segment's (startDate, endDate) as datetimes, or (None, None)."""
     for seg in bill.get("billSegments", []):
@@ -253,6 +314,7 @@ def bill_json_to_metrics(bill: dict) -> dict[str, Any]:
     days = (period_end - period_start).days if (period_start and period_end) else None
 
     status = "parsed" if (kwh is not None and days is not None) else "partial"
+    full = _extract_full_record(bill)
     return {
         "kwh_generated": int(round(kwh)) if kwh is not None else None,
         "period_start":  period_start,
@@ -263,4 +325,14 @@ def bill_json_to_metrics(bill: dict) -> dict[str, Any]:
         "parse_status":  status,
         "source":        "json",
         "document_number": bill.get("billNumber") or bill.get("invoiceNumber"),
+        # ── full energy record (the sponge) ──────────────────────────────────
+        "kwh_consumed":        int(round(full["kwh_consumed_full"])) if full["kwh_consumed_full"] is not None else None,
+        "kwh_sent_to_grid":    full["kwh_sent_to_grid"],
+        "kwh_gross_generated": full["kwh_gross_generated"],
+        "is_net_metered":      full["is_net_metered"],
+        "total_cost":          full["total_cost"],
+        "net_credit":          full["net_credit"],
+        "avg_rate_cents_kwh":  full["avg_rate_cents_kwh"],
+        "supplier":            full["supplier"],
+        "raw_json":            bill,   # the authoritative full record — never lose a field
     }

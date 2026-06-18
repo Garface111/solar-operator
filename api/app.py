@@ -1042,25 +1042,33 @@ async def sync(request: Request, authorization: str | None = Header(default=None
             log.warning("CaptureEvent flush failed for tenant %s", tenant.id, exc_info=True)
         db.commit()
 
-    # Fire a bill-pull immediately so the operator sees data the moment they
-    # finish logging into GMP. The 6h scheduler tick is the long-tail safety
-    # net; this is the "trust the system" moment. Best-effort, never blocks
-    # the response.
+    # DATA SPONGE: the moment they finish logging into GMP, absorb their ENTIRE
+    # energy history (3+ years) into their account — with live progress so the UI
+    # shows an "importing your N years…" bar. For GMP we run the sponge (full
+    # energy record + progress); other providers keep the plain bill pull. The 6h
+    # scheduler tick is the long-tail safety net. Best-effort, never blocks the
+    # response.
     try:
         from threading import Thread
-        from .worker import pull_bills_for_tenant
-        def _bg_pull(tid: str):
+        _provider = normalized.get("provider")
+        _tid = tenant.id
+        def _bg_absorb(tid: str, provider: str | None):
             try:
-                pull_bills_for_tenant(tid)
+                if provider == "gmp":
+                    from .sponge import absorb_history
+                    absorb_history(tid, "gmp")
+                else:
+                    from .worker import pull_bills_for_tenant
+                    pull_bills_for_tenant(tid)
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception(
-                    "post-/v1/sync pull_bills_for_tenant failed for %s", tid)
-        Thread(target=_bg_pull, args=(tenant.id,), daemon=True).start()
+                    "post-/v1/sync history absorb failed for %s", tid)
+        Thread(target=_bg_absorb, args=(_tid, _provider), daemon=True).start()
     except Exception:
         # Never let pull-kickoff failures break the sync response.
         import logging
-        logging.getLogger(__name__).exception("failed to kick off post-sync pull")
+        logging.getLogger(__name__).exception("failed to kick off post-sync absorb")
 
     # Push a live event to any open SSE connections for this tenant so the
     # sandbox canvas can materialize the new/updated client immediately.

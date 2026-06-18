@@ -811,6 +811,66 @@ def account_me(authorization: Optional[str] = Header(default=None)):
         }
 
 
+@router.get("/v1/account/sponge")
+def account_sponge_status(provider: str = "gmp",
+                          authorization: Optional[str] = Header(default=None)):
+    """Progress of the onboarding history-absorb ("data sponge") for the
+    progress bar. Polled by the frontend after a GMP connect."""
+    t = tenant_from_session(authorization)
+    from .sponge import sponge_status
+    return sponge_status(t.id, provider)
+
+
+@router.get("/v1/account/energy-history")
+def account_energy_history(authorization: Optional[str] = Header(default=None)):
+    """The absorbed energy record — the owner's years of GMP history, organized.
+    Returns per-period rows (newest first) with the full sponge fields, plus a
+    summary the account page headlines ("N years · M bills")."""
+    t = tenant_from_session(authorization)
+    from .models import Bill
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Bill).where(Bill.tenant_id == t.id)
+            .order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
+        ).scalars().all()
+        periods = []
+        for b in rows:
+            periods.append({
+                "period_start": b.period_start.date().isoformat() if b.period_start else None,
+                "period_end": b.period_end.date().isoformat() if b.period_end else None,
+                "bill_date": b.bill_date.date().isoformat() if b.bill_date else None,
+                "billing_days": b.billing_days,
+                "kwh_generated": b.kwh_generated,
+                "kwh_consumed": b.kwh_consumed,
+                "kwh_sent_to_grid": b.kwh_sent_to_grid,
+                "kwh_gross_generated": b.kwh_gross_generated,
+                "is_net_metered": b.is_net_metered,
+                "total_cost": b.total_cost,
+                "net_credit": b.net_credit,
+                "avg_rate_cents_kwh": b.avg_rate_cents_kwh,
+                "supplier": b.supplier,
+            })
+        # summary
+        dated = [b for b in rows if b.period_start and b.period_end]
+        years = None
+        if dated:
+            lo = min(b.period_start for b in dated)
+            hi = max(b.period_end for b in dated)
+            days = (hi - lo).days
+            years = round(days / 365.25, 1) if days > 0 else None
+        total_gen = sum((b.kwh_generated or 0) for b in rows)
+        total_con = sum((b.kwh_consumed or 0) for b in rows)
+        return {
+            "summary": {
+                "bills": len(rows),
+                "years_covered": years,
+                "total_kwh_generated": int(total_gen),
+                "total_kwh_consumed": int(total_con),
+            },
+            "periods": periods,
+        }
+
+
 # ─── account mutations ──────────────────────────────────────────────────
 
 @router.post("/v1/account/email")
