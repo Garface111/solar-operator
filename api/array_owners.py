@@ -2054,11 +2054,13 @@ def inverter_capture(
                 iv.last_seen_at = now()
 
                 # Live current power. PREFER the inverter's OWN reading when the
-                # portal exposed it per device (Chint commDevice.currentPower) —
+                # portal exposed it per device (Chint commDevice.currentPower; and
+                # Fronius's per-device devwork chart latest point, when fresh) —
                 # that's the real measured value, not a derived split. Only when
                 # the inverter carries no per-unit reading do we fall back to
-                # allocating the site's instantaneous total by energy share (the
-                # only option for Fronius, whose portal gives power site-wide only).
+                # allocating the site's instantaneous total by energy share
+                # (Fronius's site-level GetActualValues, used when the per-device
+                # devwork point is stale/absent — e.g. at night).
                 if ci.current_power_w is not None and ci.current_power_w >= 0:
                     iv.last_power_w = round(float(ci.current_power_w), 1)
                     iv.last_power_at = now()

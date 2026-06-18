@@ -149,18 +149,50 @@
     const series = (((dataResp || {}).settings || {}).series) || [];
     const kwhByName = {};
     const peakByName = {};
+    const lastByName = {};   // displayName -> { kw, ts_ms } = most-recent power point today
     for (const s of series) {
       const nm = String(s.name || "");
       if (!/Total Power\s*\|/.test(nm)) continue;       // skip the PV-production total series
       const disp = nm.replace(/^.*\|\s*/, "").trim();
       kwhByName[disp] = integrateKwh(s.data);
-      const ys = (s.data || []).filter((p) => Array.isArray(p) && typeof p[1] === "number").map((p) => p[1]);
+      const valid = (s.data || []).filter((p) => Array.isArray(p) && p.length === 2 && typeof p[1] === "number");
+      const ys = valid.map((p) => p[1]);
       peakByName[disp] = ys.length ? Math.max(...ys) : null;
+      // Last chronological point = this inverter's latest power reading today.
+      // The devwork series is in kW (same units integrateKwh + peak_power_kw use
+      // — verified by plausible daily kWh landing in prod). Keep its timestamp so
+      // we only treat it as LIVE power when recent (see the freshness guard below).
+      const sorted = valid.slice().sort((a, b) => a[0] - b[0]);
+      const lastPt = sorted.length ? sorted[sorted.length - 1] : null;
+      lastByName[disp] = lastPt ? { kw: lastPt[1], ts_ms: lastPt[0] } : null;
     }
+
+    // A devwork point older than this is NOT "current power" — at night the
+    // last point is the final daylight reading (hours stale) or zero. Only a
+    // recent point is a genuine live reading; otherwise leave current_power_w
+    // null so the card honestly shows "produced today · no live feed" (handled
+    // in array-operator sandbox.js) instead of a stale value stamped as fresh.
+    const LIVE_FRESH_MS = 30 * 60 * 1000;   // 30 min
+    const nowMs = Date.now();
+
+    // DIAGNOSTIC (daylight verification): print each device's raw last point so a
+    // single live capture confirms units (kW vs W) + freshness without a rebuild.
+    try {
+      LOG("per-inverter last devwork point (kW, age_min):",
+        invDevices.map((d) => {
+          const disp = String(d.displayName || "");
+          const lp = lastByName[disp];
+          return disp + "=" + (lp ? (lp.kw + "kW/" + Math.round((nowMs - lp.ts_ms) / 60000) + "m") : "none");
+        }).join("  "));
+    } catch (_) {}
 
     return invDevices.map((d, i) => {
       const disp = String(d.displayName || ("Inverter " + (i + 1)));
       const peak = peakByName[disp] != null ? peakByName[disp] : null;
+      const lp = lastByName[disp];
+      // Per-inverter LIVE power (W): the latest devwork point, ONLY if recent.
+      const liveW = (lp && lp.kw != null && (nowMs - lp.ts_ms) <= LIVE_FRESH_MS)
+        ? Math.round(lp.kw * 1000) : null;
       return {
         serial: String(d.deviceId),               // stable Fronius device GUID = our serial
         name: disp,
@@ -168,6 +200,7 @@
         nameplate_kw: nameplateFromModel(disp),
         energy_today_kwh: kwhByName[disp] != null ? kwhByName[disp] : null,
         peak_power_kw: peak,
+        current_power_w: liveW,                    // real per-inverter AC power when fresh, else null
         // No per-inverter fault code in this channel; system-level errors are
         // carried on the site. A zero-energy inverter while peers produce will
         // be flagged "dead" by the peer engine downstream.
