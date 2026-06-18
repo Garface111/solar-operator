@@ -4,12 +4,41 @@ from __future__ import annotations
 import secrets
 from datetime import date
 
+import pytest
+
 from api.db import SessionLocal
 from api.models import Tenant, Client, Array, DailyGeneration, BillingReportSubscription
 
 
+_SEEDED_TENANTS: list[str] = []
+
+
+def _cleanup():
+    """Remove rows this module seeded so the shared sqlite doesn't leak into
+    other test files (several of which assert global single-row counts)."""
+    if not _SEEDED_TENANTS:
+        return
+    with SessionLocal() as db:
+        for tid in _SEEDED_TENANTS:
+            for Model in (BillingReportSubscription, DailyGeneration, Array, Client):
+                for row in db.query(Model).filter(Model.tenant_id == tid).all():
+                    db.delete(row)
+            t = db.get(Tenant, tid)
+            if t is not None:
+                db.delete(t)
+        db.commit()
+    _SEEDED_TENANTS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_seed():
+    yield
+    _cleanup()
+
+
 def _seed_with_daily():
     tid = "ten_" + secrets.token_hex(6)
+    _SEEDED_TENANTS.append(tid)
     with SessionLocal() as db:
         db.add(Tenant(id=tid, name="Bars Test", contact_email=f"{tid}@t.test",
                       tenant_key="sol_live_" + secrets.token_urlsafe(8),

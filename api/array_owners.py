@@ -480,6 +480,7 @@ def array_owners_fleet_trends(
 
     # (year, month) → kWh across the whole fleet, and per-array lifetime/years.
     fleet_ym: dict[tuple[int, int], float] = defaultdict(float)
+    fleet_daily: dict[date, float] = defaultdict(float)   # last-30-days bar graph
     by_array: dict[int, dict] = {}
     rate_blended = 0.0
     rate_n = 0
@@ -505,6 +506,7 @@ def array_owners_fleet_trends(
                     continue
                 k = float(kwh)
                 fleet_ym[(d.year, d.month)] += k
+                fleet_daily[d] += k
                 arr_ym[(d.year, d.month)] += k
                 arr_life += k
             by_array[arr.id] = {
@@ -562,6 +564,20 @@ def array_owners_fleet_trends(
         ttm_kwh += fleet_ym.get((yy, mm), 0.0)
     lifetime_kwh = round(sum(fleet_ym.values()), 1)
 
+    # Recent daily series for the fleet bar graph — the 30-day window ending at
+    # the most recent day with data (so the chart is full even if today's pull
+    # hasn't landed). Contiguous days; days with no generation render as 0 bars.
+    daily_recent: list[dict] = []
+    if fleet_daily:
+        last_day = max(fleet_daily.keys())
+        from datetime import timedelta as _td
+        window_start = last_day - _td(days=29)
+        d = window_start
+        while d <= last_day:
+            daily_recent.append({"day": d.isoformat(),
+                                 "kwh": round(fleet_daily.get(d, 0.0), 1)})
+            d += _td(days=1)
+
     return {
         "years": years,
         "monthly_by_year": monthly_by_year,
@@ -569,6 +585,7 @@ def array_owners_fleet_trends(
         "ttm_kwh": round(ttm_kwh, 1),
         "ttm_savings_usd": round(ttm_kwh * rate, 2) if rate else None,
         "lifetime_kwh": lifetime_kwh,
+        "daily_recent": daily_recent,
         "by_array": sorted(by_array.values(),
                            key=lambda a: -a["lifetime_kwh"]),
     }
