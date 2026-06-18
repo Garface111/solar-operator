@@ -40,7 +40,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from ..db import SessionLocal
 from ..models import BillingReportSubscription, Client, ReportDraft
@@ -515,6 +515,110 @@ def set_global_rate(body: GlobalRatePatch,
                 "default_net_rate_per_kwh": tt.default_net_rate_per_kwh,
                 "default_discount_pct": tt.default_discount_pct,
                 "default_billing_rate_per_kwh": tt.default_billing_rate_per_kwh}
+
+
+# ─── First-run setup wizard ──────────────────────────────────────────────────
+
+@router.get("/setup-state")
+def setup_state(authorization: Optional[str] = Header(default=None)):
+    """One call that powers the first-run Reports setup wizard. Returns the
+    owner's arrays (with the age/utility/location we need for auto-rates and
+    what's still MISSING), whether any customers exist yet, and the global
+    rate/discount defaults. The UI shows the wizard when has_customers is False.
+    """
+    from ..models import Array, UtilityAccount
+    from .delivery import DEFAULT_DISCOUNT
+    from ..rate_schedule import resolve_net_rate, array_age_bucket, AGE_THRESHOLD_YEARS
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
+            .order_by(Array.name)
+        ).scalars().all()
+        out_arrays = []
+        for a in arrays:
+            acct = db.execute(
+                select(UtilityAccount).where(UtilityAccount.array_id == a.id)
+            ).scalars().first()
+            provider = acct.provider if acct else None
+            fc = a.first_connect_date
+            # The auto rate this array's customers would get today.
+            rr = resolve_net_rate(db, provider=provider, region=a.region,
+                                  first_connect_date=fc, period_end=None)
+            out_arrays.append({
+                "array_id": a.id,
+                "name": a.name,
+                "region": a.region,
+                "provider": provider,
+                "first_connect_date": fc.date().isoformat() if fc else None,
+                "install_year": fc.year if fc else None,
+                "age_known": fc is not None,
+                "age_bucket": array_age_bucket(fc) if fc else None,
+                "auto_net_rate": round(rr.rate, 5),
+                "auto_net_source": rr.source,
+                "auto_net_note": rr.note,
+            })
+        n_customers = db.execute(
+            select(func.count(BillingReportSubscription.id)).where(
+                BillingReportSubscription.tenant_id == t.id,
+                BillingReportSubscription.deleted_at.is_(None))
+        ).scalar() or 0
+        return {
+            "ok": True,
+            "has_customers": n_customers > 0,
+            "customer_count": int(n_customers),
+            "age_threshold_years": AGE_THRESHOLD_YEARS,
+            "arrays": out_arrays,
+            "global": {
+                "default_net_rate_per_kwh": getattr(t, "default_net_rate_per_kwh", None),
+                "default_discount_pct": getattr(t, "default_discount_pct", None),
+                "effective_discount_pct": (getattr(t, "default_discount_pct", None)
+                                           if getattr(t, "default_discount_pct", None) is not None
+                                           else DEFAULT_DISCOUNT),
+            },
+        }
+
+
+class ArrayAgeBody(BaseModel):
+    # Either an install year (YYYY) or a full ISO date; year is the friendly path.
+    install_year: Optional[int] = None
+    first_connect_date: Optional[str] = None
+    region: Optional[str] = None   # north | central | south (optional location)
+
+
+@router.patch("/arrays/{array_id}")
+def set_array_setup(array_id: int, body: ArrayAgeBody,
+                    authorization: Optional[str] = Header(default=None)):
+    """Set an array's install age (feeds the auto rate buckets ≤11 vs >11 yr)
+    and optional region. Tenant-scoped. Year is validated to a sane range."""
+    from datetime import date as _date
+    from ..models import Array
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    fc = None
+    if body.first_connect_date:
+        try:
+            fc = datetime.fromisoformat(body.first_connect_date[:10])
+        except ValueError:
+            raise HTTPException(400, "first_connect_date must be YYYY-MM-DD")
+    elif body.install_year is not None:
+        yr = int(body.install_year)
+        if yr < 1990 or yr > _date.today().year:
+            raise HTTPException(400, f"install_year must be 1990–{_date.today().year}")
+        fc = datetime(yr, 1, 1)
+    with SessionLocal() as db:
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
+            raise HTTPException(404, "Array not found")
+        if fc is not None:
+            arr.first_connect_date = fc
+        if "region" in body.model_fields_set and body.region is not None:
+            arr.region = body.region.strip().lower() or None
+        db.commit()
+        return {"ok": True, "array_id": arr.id,
+                "first_connect_date": arr.first_connect_date.date().isoformat()
+                if arr.first_connect_date else None,
+                "region": arr.region}
 
 
 @router.delete("/subscriptions/{sub_id}")
