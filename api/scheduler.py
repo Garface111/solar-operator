@@ -683,6 +683,14 @@ def start():
         CronTrigger(minute=20),
         id="inverter_alert_sweep", replace_existing=True,
     )
+    # Daily at 12:00 UTC (~7-8am ET): morning fleet-health digest. One
+    # tenant-facing email per active Array Operator owner with KPIs, highlights,
+    # and per-array health rendered from build_fleet_tree. Read-only on data.
+    scheduler.add_job(
+        _run_morning_fleet_digest,
+        CronTrigger(hour=12, minute=0),
+        id="morning_fleet_digest", replace_existing=True,
+    )
     scheduler.start()
 
 
@@ -714,6 +722,24 @@ def _run_usage_report() -> None:
         send_internal_alert(
             "Array Operator usage report: unhandled exception",
             f"The per-kWh usage-report job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_morning_fleet_digest() -> None:
+    """Daily tenant-facing morning fleet-health digest for Array Operator owners.
+    Wrapper so import/build errors don't crash the scheduler at fire time."""
+    try:
+        from .jobs.morning_fleet_digest import run_morning_digest
+        result = run_morning_digest()
+        logger.info(
+            "morning_fleet_digest: sent=%d skipped=%d errors=%d",
+            len(result.get("sent", [])), result.get("skipped", 0),
+            len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Morning fleet digest: unhandled exception",
+            f"The morning fleet-health digest job raised an unexpected error:\n{exc}",
         )
 
 

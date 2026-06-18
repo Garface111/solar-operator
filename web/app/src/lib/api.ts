@@ -1383,6 +1383,122 @@ export async function getBillingTrends(
   return normalizeTrends(raw);
 }
 
+// ─── billing subscriptions (Array Operator customers) ──────────────────────
+// A subscription = ONE customer who gets a % allocation of an array's output,
+// invoiced per period. Two creation paths on the backend:
+//   * upload an .xlsx billing workbook, or
+//   * MANUAL — type the customer in (name, array, allocation %, email, cadence,
+//     delivery + send mode). This client only exercises the manual path; the
+//     upload path lives in the existing workbook-upload flow.
+
+export interface BillingSubscription {
+  id: number;
+  customer_name: string;
+  client_id: number | null;
+  array_id: number | null;
+  allocation_pct: number | null;
+  billing_model: string;
+  cadence: string;
+  delivery_mode: string;
+  send_mode: string;
+  client_email: string | null;
+  cc_emails: string | null;
+  operator_email: string | null;
+  formats: string[];
+  include_summary: boolean;
+  enabled: boolean;
+  source_filename: string | null;
+  last_sent_at: string | null;
+  next_send_at: string | null;
+  last_invoice_number: string | null;
+}
+
+export async function listBillingSubscriptions(): Promise<BillingSubscription[]> {
+  const res = await request<{ ok: boolean; subscriptions: BillingSubscription[] }>(
+    "/v1/array-operator/billing/subscriptions",
+  );
+  return res.subscriptions ?? [];
+}
+
+export interface ManualCustomerInput {
+  customer_name: string;
+  array_id: number;
+  /** Fraction in (0, 1] — e.g. 0.25 for 25%. */
+  allocation_pct: number;
+  client_email?: string | null;
+  cadence?: "monthly" | "quarterly";
+  delivery_mode?: "approval" | "auto";
+  send_mode?: "to_me" | "to_client" | "to_both";
+  cc_emails?: string | null;
+}
+
+/** Create a customer with NO workbook — the manual-input path. POSTs
+ *  multipart/form-data WITHOUT a file so the backend takes its typed branch. */
+export async function createManualSubscription(
+  input: ManualCustomerInput,
+): Promise<BillingSubscription> {
+  const token = getSession();
+  const fd = new FormData();
+  fd.append("customer_name", input.customer_name);
+  fd.append("array_id", String(input.array_id));
+  fd.append("allocation_pct", String(input.allocation_pct));
+  if (input.client_email) fd.append("client_email", input.client_email);
+  if (input.cc_emails) fd.append("cc_emails", input.cc_emails);
+  fd.append("cadence", input.cadence ?? "monthly");
+  fd.append("delivery_mode", input.delivery_mode ?? "approval");
+  fd.append("send_mode", input.send_mode ?? "to_me");
+
+  const res = await fetchWithTimeout(
+    "/v1/array-operator/billing/subscriptions",
+    {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    },
+  );
+  if (res.status === 401) {
+    clearSession();
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) throw new Error(await parseError(res));
+  const body = (await res.json()) as { subscription: BillingSubscription };
+  return body.subscription;
+}
+
+/** Every array the operator owns, flattened across their clients, for the
+ *  manual-customer array picker. Each entry carries the owning client id so the
+ *  picker can group/label. */
+export interface FlatArray {
+  id: number;
+  name: string;
+  client_id: number;
+  client_name: string;
+}
+
+export async function listAllArrays(): Promise<FlatArray[]> {
+  const clients = await listClients();
+  const active = clients.filter((c) => c.active);
+  const lists = await Promise.all(
+    active.map(async (c) => {
+      try {
+        const arrays = await listArrays(c.id);
+        return arrays
+          .filter((a) => !a.deleted_at && !a.excluded)
+          .map((a) => ({
+            id: a.id,
+            name: a.name,
+            client_id: c.id,
+            client_name: c.name,
+          }));
+      } catch {
+        return [] as FlatArray[];
+      }
+    }),
+  );
+  return lists.flat();
+}
+
 // ─── data sponge (energy history) ──────────────────────────────────────────
 // The owner's FULL utility energy record, absorbed at onboarding. Two endpoints:
 //   GET /v1/account/sponge          → live progress of the absorb (progress bar)

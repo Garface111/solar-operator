@@ -48,6 +48,8 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "id": s.id,
         "customer_name": s.customer_name,
         "client_id": s.client_id,
+        "array_id": getattr(s, "array_id", None),
+        "allocation_pct": getattr(s, "allocation_pct", None),
         "billing_model": s.billing_model,
         "cadence": s.cadence,
         "annual_trueup": s.annual_trueup,
@@ -123,6 +125,8 @@ def _parse_formats(raw: Optional[str]) -> list[str]:
 async def create_subscription(
     file: Optional[UploadFile] = File(default=None),
     customer_name: Optional[str] = Form(default=None),
+    array_id: Optional[int] = Form(default=None),
+    allocation_pct: Optional[float] = Form(default=None),
     cadence: str = Form(default="monthly"),
     send_mode: str = Form(default="to_me"),
     delivery_mode: str = Form(default="approval"),
@@ -135,18 +139,16 @@ async def create_subscription(
     enabled: bool = Form(default=True),
     authorization: Optional[str] = Header(default=None),
 ):
-    """Create a report schedule from an uploaded workbook. The workbook bytes
-    are stored as the per-cycle source of truth."""
+    """Create a report schedule for one customer. Two paths:
+
+      * UPLOAD — a billing .xlsx is attached; the matcher recognizes it and the
+        stored workbook bytes are the per-cycle source of truth.
+      * MANUAL — no file; the operator typed the customer in (name + array_id +
+        allocation_pct). No workbook is stored; allocation_pct × the array's
+        period generation drives delivery/draft. (Paul Bozuwa's demo path.)
+    """
     t = tenant_from_session(authorization)
     require_not_demo(t)
-    if file is None:
-        raise HTTPException(400, "Upload the billing workbook for this customer")
-    data = await _read_upload(file)
-    match = match_billing_workbook(data)
-    if not match.matched:
-        raise HTTPException(
-            422, "Couldn't recognize this as a billing workbook — "
-                 "check the file or fill the fields in manually.")
 
     if cadence not in VALID_CADENCE:
         raise HTTPException(400, "cadence must be monthly or quarterly")
@@ -154,6 +156,22 @@ async def create_subscription(
         raise HTTPException(400, "send_mode must be to_me, to_client, or to_both")
     if delivery_mode not in VALID_DELIVERY:
         raise HTTPException(400, "delivery_mode must be approval or auto")
+
+    if file is None:
+        return await _create_manual_subscription(
+            t, customer_name=customer_name, array_id=array_id,
+            allocation_pct=allocation_pct, cadence=cadence, send_mode=send_mode,
+            delivery_mode=delivery_mode, client_email=client_email,
+            cc_emails=cc_emails, operator_email=operator_email, formats=formats,
+            include_summary=include_summary, annual_trueup=annual_trueup,
+            enabled=enabled)
+
+    data = await _read_upload(file)
+    match = match_billing_workbook(data)
+    if not match.matched:
+        raise HTTPException(
+            422, "Couldn't recognize this as a billing workbook — "
+                 "check the file or fill the fields in manually.")
 
     name = customer_name or match.customer.get("name") or "Customer"
     client_email = client_email or match.customer.get("email")
@@ -178,6 +196,73 @@ async def create_subscription(
             source_filename=file.filename,
             parsed_map=match.to_dict(),
             billing_model=match.billing_model,
+            cadence=cadence,
+            annual_trueup=annual_trueup,
+            delivery_mode=delivery_mode,
+            send_mode=send_mode,
+            client_email=client_email,
+            cc_emails=cc_emails,
+            operator_email=operator_email or t.contact_email,
+            formats=_parse_formats(formats),
+            include_summary=include_summary,
+            enabled=enabled,
+            next_send_at=next_send_at(cadence),
+        )
+        db.add(sub)
+        db.commit()
+        return {"ok": True, "subscription": _sub_dict(sub)}
+
+
+async def _create_manual_subscription(
+    t, *, customer_name, array_id, allocation_pct, cadence, send_mode,
+    delivery_mode, client_email, cc_emails, operator_email, formats,
+    include_summary, annual_trueup, enabled,
+):
+    """Create a workbook-less subscription from typed fields. The customer's
+    invoice is computed each cycle as allocation_pct × the array's period
+    generation (see delivery.build_manual_match)."""
+    from ..models import Array
+
+    name = (customer_name or "").strip()
+    if not name:
+        raise HTTPException(400, "customer_name is required for a manual customer")
+    if array_id is None:
+        raise HTTPException(400, "array_id is required for a manual customer")
+    if allocation_pct is None:
+        raise HTTPException(400, "allocation_pct is required for a manual customer")
+    try:
+        pct = float(allocation_pct)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "allocation_pct must be a number between 0 and 1")
+    if not (0.0 < pct <= 1.0):
+        raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
+                                 "(e.g. 0.25 for 25%)")
+
+    with SessionLocal() as db:
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
+            raise HTTPException(404, "Array not found")
+
+        client = db.execute(
+            select(Client).where(Client.tenant_id == t.id, Client.name == name,
+                                 Client.deleted_at.is_(None))
+        ).scalar_one_or_none()
+        if client is None:
+            client = Client(tenant_id=t.id, name=name, contact_email=client_email,
+                            active=True)
+            db.add(client)
+            db.flush()
+
+        sub = BillingReportSubscription(
+            tenant_id=t.id,
+            client_id=client.id,
+            customer_name=name,
+            array_id=array_id,
+            allocation_pct=pct,
+            source_workbook=None,
+            source_filename=None,
+            parsed_map=None,
+            billing_model="percent_of_array",
             cadence=cadence,
             annual_trueup=annual_trueup,
             delivery_mode=delivery_mode,

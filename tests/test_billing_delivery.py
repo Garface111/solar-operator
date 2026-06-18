@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from api.account import mint_session_for_tenant
 from api.db import SessionLocal
-from api.models import Tenant, Client, BillingReportSubscription
+from api.models import Tenant, Client, BillingReportSubscription, Array, DailyGeneration
 
 FIX = pathlib.Path(__file__).parent / "fixtures" / "billing"
 
@@ -216,6 +216,137 @@ def test_send_now_to_client_without_email_errors(client, monkeypatch):
     r = client.post(f"/v1/array-operator/billing/subscriptions/{sub_id}/send-now",
                     params={"test": "false"}, headers={"Authorization": auth})
     assert r.status_code == 422
+
+
+# ─── manual customer-input path (no workbook) ───────────────────────────────
+
+
+def _make_array_with_generation(tid: str, kwh_per_day: float = 100.0,
+                                days: int = 30) -> int:
+    """An array with a recent full month of DailyGeneration rows. Returns its id."""
+    from datetime import date, timedelta
+    with SessionLocal() as db:
+        c = Client(tenant_id=tid, name="Manual Co", active=True)
+        db.add(c)
+        db.flush()
+        arr = Array(tenant_id=tid, name="Manual Array", client_id=c.id,
+                    fuel_type="solar")
+        db.add(arr)
+        db.flush()
+        aid = arr.id
+        # Most-recent complete month: anchor on the 1st of last month.
+        today = date.today()
+        first_this = today.replace(day=1)
+        anchor = (first_this - timedelta(days=1)).replace(day=1)  # 1st of last month
+        for i in range(days):
+            d = anchor + timedelta(days=i)
+            if d.month != anchor.month:
+                break
+            db.add(DailyGeneration(tenant_id=tid, array_id=aid, day=d,
+                                   kwh=kwh_per_day, source="csv"))
+        db.commit()
+    return aid
+
+
+def _create_manual(client, auth, **form):
+    """POST the subscriptions endpoint as multipart/form-data WITHOUT a file."""
+    return client.post("/v1/array-operator/billing/subscriptions",
+                       data=form, headers={"Authorization": auth})
+
+
+def test_manual_subscription_no_file_creates_and_stores_allocation(client):
+    """The manual customer-input path: NO xlsx, just typed fields. Asserts 200,
+    the typed allocation is stored, and the sub appears in GET /subscriptions.
+
+    Old behavior (proof this would FAIL pre-change): create_subscription did
+    `if file is None: raise HTTPException(400, "Upload the billing workbook …")`,
+    so this same request returned 400 and stored nothing.
+    """
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)
+
+    r = _create_manual(client, auth,
+                       customer_name="Paul Bozuwa", array_id=aid,
+                       allocation_pct="0.25", cadence="monthly",
+                       delivery_mode="approval", send_mode="to_me",
+                       client_email="paul@example.com")
+    assert r.status_code == 200, r.text
+    sub = r.json()["subscription"]
+    assert sub["customer_name"] == "Paul Bozuwa"
+    assert sub["array_id"] == aid
+    assert abs(sub["allocation_pct"] - 0.25) < 1e-9
+    assert sub["billing_model"] == "percent_of_array"
+    assert sub["cadence"] == "monthly"
+    assert sub["next_send_at"]
+
+    # Stored without a workbook, with the typed allocation.
+    with SessionLocal() as db:
+        s = db.get(BillingReportSubscription, sub["id"])
+        assert s.source_workbook is None
+        assert s.allocation_pct == 0.25
+        assert s.array_id == aid
+
+    # Appears in the list.
+    lst = client.get("/v1/array-operator/billing/subscriptions",
+                     headers={"Authorization": auth}).json()
+    assert sub["id"] in [x["id"] for x in lst["subscriptions"]]
+
+
+def test_manual_subscription_rejects_bad_allocation(client):
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid)
+    # > 1.0 (caller must pass a fraction).
+    r = _create_manual(client, auth, customer_name="Bad Pct", array_id=aid,
+                       allocation_pct="1.5")
+    assert r.status_code == 400
+    # Missing array_id.
+    r = _create_manual(client, auth, customer_name="No Array",
+                       allocation_pct="0.5")
+    assert r.status_code == 400
+
+
+def test_manual_subscription_computes_customer_share_on_send(client, monkeypatch):
+    """A manual sub with no workbook still produces a real invoice: the
+    customer share = allocation_pct × the array's period generation."""
+    tid, auth = _make_tenant()
+    # 30 days × 100 kWh = 3000 kWh for the array's recent month.
+    aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)
+    sub_id = _create_manual(client, auth, customer_name="Share Test",
+                            array_id=aid, allocation_pct="0.10",
+                            send_mode="to_me").json()["subscription"]["id"]
+
+    captured = {}
+
+    def fake_send(to, subject, html, text, attachments=None, from_addr=None,
+                  reply_to=None, product="nepool"):
+        captured.update(to=to, attachments=attachments)
+        return True
+
+    monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+    r = client.post(f"/v1/array-operator/billing/subscriptions/{sub_id}/send-now",
+                    params={"test": "true"}, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    result = r.json()["result"]
+    assert result["ok"]
+    # 10% of 3000 kWh = 300 kWh → priced at the default VT solar value.
+    # amount_owed = 300 × 0.18398 × 0.9 ≈ 49.67
+    assert result["amount_owed"] == pytest.approx(49.67, abs=0.5)
+    # An invoice attachment was produced from the synthesized match.
+    names = [a["filename"] for a in captured["attachments"]]
+    assert any(n.endswith("_invoice.pdf") for n in names)
+
+
+def test_manual_subscription_array_must_be_owned(client):
+    tid_a, auth_a = _make_tenant()
+    tid_b, auth_b = _make_tenant()
+    aid = _make_array_with_generation(tid_a)
+    # Tenant B cannot attach a manual customer to tenant A's array.
+    r = _create_manual(client, auth_b, customer_name="Cross Tenant",
+                       array_id=aid, allocation_pct="0.2")
+    assert r.status_code == 404
+
+
+# ─── scheduler ──────────────────────────────────────────────────────────────
 
 
 def test_scheduler_monthly_billing_delivers(client, monkeypatch):

@@ -922,6 +922,16 @@ class BillingReportSubscription(Base):
     parsed_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     billing_model: Mapped[str] = mapped_column(String(24), default="percent_of_array")
 
+    # Manual customer-input path (no workbook): the operator TYPES the customer
+    # straight into the Reports tab — name, which array, their allocation share.
+    # When source_workbook is NULL these two carry the truth instead of
+    # parsed_map: delivery/draft compute the customer's share as
+    # allocation_pct × the array's period generation. Both NULL for the
+    # workbook-driven path, which keeps its allocation inside parsed_map.
+    allocation_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
+    array_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+
     # Dormant hook (Paul's reporting build): the utility's GMP invoice PDF, fed
     # later by the GMP-detection backend. When present, delivery attaches it
     # alongside the customer invoice; null (the norm today) changes nothing.

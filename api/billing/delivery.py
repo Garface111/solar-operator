@@ -56,10 +56,131 @@ def next_send_at(cadence: str, after: Optional[datetime] = None) -> datetime:
 # ─── attachment generation ──────────────────────────────────────────────────
 
 def build_match(sub) -> BillingMatch:
-    """Rebuild a BillingMatch from the subscription's stored workbook bytes."""
+    """Rebuild a BillingMatch from a subscription.
+
+    Two paths:
+      * workbook-driven (the original) — re-parse the stored .xlsx bytes.
+      * manual (no workbook) — the operator typed the customer in; synthesize a
+        BillingMatch from the typed allocation_pct × the array's period
+        generation. Both produce the same BillingMatch shape so every downstream
+        consumer (invoice/summary renderers, delivery, drafts) is unchanged.
+    """
     if not sub.source_workbook:
-        raise ValueError("subscription has no stored workbook")
+        return build_manual_match(sub)
     return match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)
+
+
+# Default Vermont solar value used to price a manual customer's share when no
+# workbook supplies a tariff. Mirrors reconciliation's VT_DEFAULT_RATE.
+MANUAL_TARIFF = 0.18398
+MANUAL_BILLING_RATE = 0.9
+
+
+def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str]]:
+    """The array's most recent full-month generation: (array_kwh, start, end,
+    month_label). Prefers DailyGeneration; falls back to Bill.kwh_generated.
+    Returns (None, None, None, None) when the array has no data yet."""
+    from ..models import DailyGeneration, Bill, UtilityAccount
+
+    # Prefer DailyGeneration: pick the latest (year, month) that has rows.
+    rows = db.execute(
+        select(DailyGeneration.day, DailyGeneration.kwh)
+        .where(DailyGeneration.array_id == array_id)
+        .order_by(DailyGeneration.day.desc())
+    ).all()
+    if rows:
+        latest_day = rows[0].day
+        y, m = latest_day.year, latest_day.month
+        month_rows = [r for r in rows if r.day.year == y and r.day.month == m]
+        total = sum(float(r.kwh or 0) for r in month_rows)
+        days = sorted(r.day for r in month_rows)
+        label = latest_day.strftime("%Y-%m")
+        return round(total, 1), days[0], days[-1], label
+
+    # Fallback: the array's bills (kwh_generated) for the most recent period.
+    bill = db.execute(
+        select(Bill)
+        .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+        .where(UtilityAccount.array_id == array_id,
+               Bill.kwh_generated.isnot(None),
+               Bill.period_end.isnot(None))
+        .order_by(Bill.period_end.desc())
+    ).scalars().first()
+    if bill is not None:
+        ps = bill.period_start.date() if bill.period_start else None
+        pe = bill.period_end.date() if bill.period_end else None
+        label = pe.strftime("%Y-%m") if pe else None
+        return round(float(bill.kwh_generated), 1), ps, pe, label
+    return None, None, None, None
+
+
+def build_manual_match(sub) -> BillingMatch:
+    """Synthesize a BillingMatch for a manually-entered customer (no workbook).
+
+    The customer's share = allocation_pct × the array's most recent period
+    generation, priced at the default VT solar value. Always returns a matched
+    BillingMatch (with a zero-kWh period when the array has no data yet) so the
+    demo can render and send; warnings flag any thin data.
+    """
+    from ..db import SessionLocal
+    from ..models import Array
+    from .matcher import Period, compute_invoice
+
+    pct = sub.allocation_pct
+    warnings: list[str] = []
+    array_kwh: Optional[float] = None
+    start = end = None
+    label: Optional[str] = None
+    array_name: Optional[str] = None
+
+    if sub.array_id is not None:
+        with SessionLocal() as db:
+            arr = db.get(Array, sub.array_id)
+            array_name = arr.name if arr else None
+            array_kwh, start, end, label = _array_period_kwh(db, sub.array_id)
+    if array_kwh is None:
+        warnings.append("No generation data for this array yet — invoice shows $0 "
+                        "until production lands.")
+        array_kwh = 0.0
+    if not pct:
+        warnings.append("No allocation % set for this manual customer.")
+        pct = 0.0
+
+    customer_kwh = round(array_kwh * pct, 2)
+    period = Period(
+        month=label, start=start, end=end,
+        array_kwh=array_kwh, customer_kwh=customer_kwh,
+        tariff=MANUAL_TARIFF, adder=0.0,
+    )
+    computed = compute_invoice(customer_kwh, MANUAL_TARIFF, 0.0,
+                               MANUAL_BILLING_RATE, "percent_of_array", None)
+    computed["invoice_number"] = end.strftime("%Y-%m") if end else label
+    computed["period_start"] = start.isoformat() if start else None
+    computed["period_end"] = end.isoformat() if end else None
+    computed["month"] = label
+    computed["project_total_kwh"] = array_kwh
+    computed["array_kwh"] = array_kwh
+
+    return BillingMatch(
+        matched=True,
+        confidence=1.0,
+        source="manual",
+        data_sheet=None,
+        customer={"name": sub.customer_name, "email": sub.client_email},
+        allocation_pct=pct,
+        billing_rate=MANUAL_BILLING_RATE,
+        billing_model="percent_of_array",
+        periods=[period],
+        latest_period=period,
+        template={"title": "Invoice - Solar Power Generation"},
+        computed_invoice=computed,
+        project_totals={
+            "total_array_kwh": array_kwh,
+            "total_customer_kwh": customer_kwh,
+            "array_name": array_name,
+        },
+        warnings=warnings,
+    )
 
 
 def generate_files(match: BillingMatch, formats: list[str], include_summary: bool,

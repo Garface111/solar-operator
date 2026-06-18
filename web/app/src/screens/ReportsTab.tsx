@@ -6,6 +6,7 @@ import { StatusPill, type ShipStatus } from "../components/reports/StatusPill";
 import { FailureStrip, type DeliveryFailure } from "../components/reports/FailureStrip";
 import { NextRunCard } from "../components/reports/NextRunCard";
 import { AutoReportsSettingsCard } from "../components/reports/AutoReportsSettingsCard";
+import { AddCustomerCard } from "../components/reports/AddCustomerCard";
 
 const EmailTemplateStudio = lazyWithRetry(() =>
   import("../components/reports/EmailTemplateStudio").then((m) => ({
@@ -229,7 +230,10 @@ export default function ReportsTab() {
         onOpenStudio={() => setStudioOpen(true)}
       />
 
-      {/* 4. Next run countdown + send-now */}
+      {/* 4. Add a billing customer (manual input — no spreadsheet) */}
+      <AddCustomerCard onCreated={loadData} />
+
+      {/* 5. Next run countdown + send-now */}
       <NextRunCard onSent={loadData} />
 
       {/* 5. Report history — vertical timeline */}

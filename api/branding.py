@@ -88,17 +88,15 @@ def magic_link_url(product: str | None, token: str) -> str:
 def from_address(product: str | None) -> str:
     """Product-correct email From header (display name + sender).
 
-    Resend only sends from VERIFIED domains. As of 2026-06-14:
+    Resend only sends from VERIFIED domains. As of 2026-06-18:
       - nepooloperator.com IS verified → NEPOOL sends from its own domain.
-      - arrayoperator.com is NOT verified yet → Array Operator falls back to the
-        verified platform domain (solaroperator.org) with the AO display name.
-    To flip AO to its own domain: verify arrayoperator.com in Resend, then set
-    MAIL_FROM_AO='Array Operator <hello@arrayoperator.com>' (no code change).
+      - arrayoperator.com IS verified → Array Operator sends from its own domain
+        (confirmed via the Resend /domains API). Override with MAIL_FROM_AO.
     Replies are routed to the monitored inbox via reply_to_address() regardless
     of the From domain, so changing the From never strands a customer reply.
     """
     if _key(product) == "array_operator":
-        return os.getenv("MAIL_FROM_AO", "Array Operator <hello@solaroperator.org>")
+        return os.getenv("MAIL_FROM_AO", "Array Operator <hello@arrayoperator.com>")
     return (os.getenv("MAIL_FROM_NEPOOL")
             or os.getenv("MAIL_FROM", "NEPOOL Operator <hello@nepooloperator.com>"))
 
