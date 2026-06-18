@@ -11,15 +11,18 @@ export const MONTH_ABBR = [
 ];
 
 // Year line colors, newest year first so the most recent (most relevant) line
-// reads boldest. Drawn from the Tailwind theme tokens already in use:
-// primary-600 green, wood-500 ochre, zinc-500, wood-400, primary-500, zinc-400.
+// reads boldest. 8 distinct hues so up to 8 years of history never share a
+// color (Bruce/Norwich have 8). Latest year is the bold theme green; the rest
+// spread across wood/teal/slate/blue tones that sit in the app's palette.
 const YEAR_PALETTE = [
-  "#10b981", // primary-600 — latest year (bold)
-  "#b56d2c", // wood-500
-  "#71717a", // zinc-500
-  "#d4914a", // wood-400
-  "#34d399", // primary-500
-  "#a1a1aa", // zinc-400
+  "#10b981", // primary-600 green — latest year (bold)
+  "#b56d2c", // wood-500 ochre
+  "#0ea5e9", // sky-500 blue
+  "#d4914a", // wood-400 tan
+  "#0d9488", // teal-600
+  "#71717a", // zinc-500 slate
+  "#9333ea", // violet-600
+  "#a16207", // amber-700 deep gold
 ];
 
 /** Deterministic color for a year given the full (any-order) set of years.
