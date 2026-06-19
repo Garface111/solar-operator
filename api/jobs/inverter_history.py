@@ -79,8 +79,13 @@ def backfill_connection_history(
             return {"connection_id": conn_id, "error": "connection not found"}
         arr = db.get(Array, conn.array_id)
         if arr is None or arr.deleted_at is not None:
+            # Orphaned/soft-deleted array — there's no live array to show history
+            # for, so STAMP it done. Otherwise the healer would retry this dead
+            # connection on every run forever (the bug that left 9 "pending").
+            conn.history_backfilled_at = now()
+            db.commit()
             return {"connection_id": conn_id, "array_id": conn.array_id,
-                    "error": "array missing/deleted"}
+                    "stamped": True, "note": "array missing/deleted — skipped"}
 
         vendor = conn.vendor
         module = inverters.VENDORS.get(vendor)

@@ -98,6 +98,20 @@ def test_backfill_error_leaves_unstamped_for_retry(monkeypatch):
         assert db.get(InverterConnection, cid).history_backfilled_at is None
 
 
+def test_orphaned_connection_stamped_not_retried_forever(monkeypatch):
+    """A connection whose array is soft-deleted must be stamped done so the
+    healer stops retrying it every run (regression: 9 orphans stayed pending)."""
+    from api.models import now
+    tid = _tenant(); aid = _array(tid, "Orphan"); cid = _conn(aid)
+    with SessionLocal() as db:
+        db.get(Array, aid).deleted_at = now()
+        db.commit()
+    r = ih.backfill_connection_history(cid, start_year=2024)
+    assert r["stamped"] is True
+    with SessionLocal() as db:
+        assert db.get(InverterConnection, cid).history_backfilled_at is not None
+
+
 def test_no_daily_vendor_stamped_immediately(monkeypatch):
     tid = _tenant(); aid = _array(tid, "Chint"); cid = _conn(aid, vendor="chint", config={})
     r = ih.backfill_connection_history(cid, start_year=2024)
