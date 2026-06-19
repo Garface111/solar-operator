@@ -646,6 +646,122 @@ def array_owners_fleet_trends(
     }
 
 
+@router.get("/v1/array-owners/fleet-audit")
+def array_owners_fleet_audit(
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """PORTFOLIO-WIDE settlement audit — the auditor's owner-facing view.
+
+    Runs the production-vs-settlement reconciliation engine across EVERY array
+    the tenant owns and rolls the per-array verdicts into a fleet summary the
+    Audit tab renders: how many arrays reconcile cleanly, how many show an
+    unconfirmed gap, how many can't be audited yet (and why), plus the dollars
+    flagged. Read-only; never fabricates — an array with no production feed comes
+    back honestly as 'insufficient_data', not a fake leak.
+
+    Shape:
+      {
+        "summary": {
+          "total": int, "auditable": int, "ok": int, "leak": int,
+          "leak_unconfirmed": int, "incomplete_monitoring": int,
+          "insufficient_data": int, "have_settlement": int,
+          "have_production": int, "dollars_flagged": float,
+          "coverage_pct": float          # auditable / total
+        },
+        "arrays": [ {
+            "array_id", "name", "status", "classification",
+            "settlement_kwh", "production_kwh", "coverage_ratio",
+            "variance_pct", "dollars_at_risk", "independent_feed",
+            "n_bills", "headline", "detail"
+        }, ... ]   # sorted: leaks first, then unconfirmed, then by $ desc
+      }
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .reconciliation import reconcile_array
+
+    # Human-facing one-liners per status (the slick card copy).
+    HEADLINE = {
+        "leak": "Money leak confirmed",
+        "leak_unconfirmed": "Possible gap — confirm with monitoring",
+        "ok": "Reconciles cleanly",
+        "incomplete_monitoring": "Partial monitoring",
+        "insufficient_data": "Not enough data to audit yet",
+    }
+    RANK = {"leak": 0, "leak_unconfirmed": 1, "incomplete_monitoring": 2,
+            "ok": 3, "insufficient_data": 4}
+
+    rows: list[dict] = []
+    summary = {
+        "total": 0, "auditable": 0, "ok": 0, "leak": 0,
+        "leak_unconfirmed": 0, "incomplete_monitoring": 0,
+        "insufficient_data": 0, "have_settlement": 0, "have_production": 0,
+        "dollars_flagged": 0.0,
+    }
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array)
+            .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None),
+                   Array.excluded.is_(False))
+            .order_by(Array.id)
+        ).scalars().all()
+
+        for arr in arrays:
+            summary["total"] += 1
+            try:
+                r = reconcile_array(db, arr.id)
+            except Exception:
+                # A single array's failure must not 500 the whole audit.
+                summary["insufficient_data"] += 1
+                rows.append({
+                    "array_id": arr.id, "name": arr.name,
+                    "status": "insufficient_data",
+                    "classification": "single_site",
+                    "settlement_kwh": 0.0, "production_kwh": 0.0,
+                    "coverage_ratio": None, "variance_pct": None,
+                    "dollars_at_risk": 0.0, "independent_feed": False,
+                    "n_bills": 0,
+                    "headline": HEADLINE["insufficient_data"],
+                    "detail": "Audit could not run for this array.",
+                })
+                continue
+
+            st = r.status
+            if st in summary:
+                summary[st] += 1
+            if st in ("ok", "leak"):
+                summary["auditable"] += 1
+            if r.settlement_kwh > 0:
+                summary["have_settlement"] += 1
+            if r.production_kwh > 0:
+                summary["have_production"] += 1
+            if st in ("leak", "leak_unconfirmed"):
+                summary["dollars_flagged"] += r.dollars_at_risk or 0.0
+
+            rows.append({
+                "array_id": arr.id, "name": arr.name,
+                "status": st, "classification": r.classification,
+                "settlement_kwh": r.settlement_kwh,
+                "production_kwh": r.production_kwh,
+                "coverage_ratio": r.coverage_ratio,
+                "variance_pct": r.variance_pct,
+                "dollars_at_risk": r.dollars_at_risk,
+                "independent_feed": bool(r.gates.get("independent_feed")),
+                "n_bills": r.n_bills,
+                "headline": HEADLINE.get(st, st),
+                "detail": (r.notes[-1] if r.notes else ""),
+            })
+
+    summary["dollars_flagged"] = round(summary["dollars_flagged"], 2)
+    summary["coverage_pct"] = (
+        round(100.0 * summary["auditable"] / summary["total"], 1)
+        if summary["total"] else 0.0
+    )
+    rows.sort(key=lambda x: (RANK.get(x["status"], 9),
+                             -(x["dollars_at_risk"] or 0)))
+    return {"summary": summary, "arrays": rows}
+
+
 # ── fleet tree (sandbox) ──────────────────────────────────────────────────────
 # Per-inverter equipment reads are heavier (inventory + 1 telemetry call per
 # inverter), so cache the assembled tree per array for 10 minutes to respect the
