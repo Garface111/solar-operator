@@ -26,7 +26,16 @@ NAMEPLATE_CF_HIGH = 0.30         # implausibly high monthly capacity factor
 FULL_COVERAGE_FLOOR = 0.90       # group feed considered "complete" at/above this
 
 # kWh sources that count as real metered production (not bill pro-rate).
-PRODUCTION_SOURCES = ("solaredge", "csv", "extension_pull", "gmp_portal_scrape", "manual")
+PRODUCTION_SOURCES = ("solaredge", "csv", "extension_pull", "extension_pull_corrected",
+                      "gmp_portal_scrape", "manual")
+
+# Of those, the ones from a party INDEPENDENT of the utility (the inverter vendor
+# or a direct meter export the owner controls). A variance backed only by
+# utility-sourced production (GMP interval / GMP portal scrape) is reconciling the
+# utility against itself — still useful ("are you credited for metered kWh?") but
+# lower-confidence, so leaks from it are flagged as needs-confirm, never asserted
+# with the same authority as an independent-feed leak.
+INDEPENDENT_SOURCES = ("solaredge", "csv", "manual")
 
 # VT statewide blended residential credit rate, PUC eff. Apr 2024. Per-array
 # vintage/category may differ; callers can override via rate arg.
@@ -72,19 +81,45 @@ def _bills_for_account(db: Session, account_id: int, ws: date | None, we: date |
     return out
 
 
-def _production_over_window(db: Session, array_id: int, ps: date, pe: date) -> tuple[float, int]:
-    """Sum metered production + distinct production-days over a bill service window."""
+def _production_over_window(db: Session, array_id: int, ps: date, pe: date) -> tuple[float, int, float]:
+    """Sum metered production + distinct production-days over a bill service window.
+
+    Merges two sources per day (no double-count): the DailyGeneration table
+    (inverter/CSV/portal) and the GMP daily-generation sponge (read via the
+    gmp_daily_read seam). DailyGeneration wins on a day both cover. Returns
+    (total_kwh, distinct_days, independent_kwh) where independent_kwh is the
+    portion from a party independent of the utility (INDEPENDENT_SOURCES).
+    """
     rows = list(db.execute(
-        select(DailyGeneration.day, DailyGeneration.kwh).where(
+        select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source).where(
             DailyGeneration.array_id == array_id,
             DailyGeneration.day >= ps,
             DailyGeneration.day <= pe,
             DailyGeneration.source.in_(PRODUCTION_SOURCES),
         )
     ))
-    kwh = sum(float(r.kwh) for r in rows)
-    days = len({r.day for r in rows})
-    return kwh, days
+    per_day: dict[date, float] = {}
+    independent_days: set[date] = set()
+    for r in rows:
+        per_day[r.day] = per_day.get(r.day, 0.0) + float(r.kwh)
+        if r.source in INDEPENDENT_SOURCES:
+            independent_days.add(r.day)
+    independent_kwh = sum(v for d, v in per_day.items() if d in independent_days)
+
+    # Fill days the DailyGeneration table doesn't cover with the GMP daily sponge
+    # (utility meter — counts as production, but NOT independent).
+    try:
+        from ..reports import gmp_daily_read as _gdr
+        for pt in _gdr.get_daily_series(array_id, start=ps, end=pe, db=db):
+            d = pt["day"]
+            if d not in per_day:
+                per_day[d] = float(pt["kwh"])
+    except Exception:
+        pass  # GMP seam unavailable → fall back to DailyGeneration only
+
+    kwh = sum(per_day.values())
+    days = len(per_day)
+    return kwh, days, independent_kwh
 
 
 def _nameplate_kw(db: Session, array_id: int) -> float:
@@ -119,6 +154,7 @@ def reconcile_array(
 
     settlement_kwh = 0.0
     production_kwh = 0.0
+    independent_kwh = 0.0
     feed_complete_all = True
     n_bills = 0
     nameplate = _nameplate_kw(db, array_id)
@@ -131,8 +167,9 @@ def reconcile_array(
             n_bills += 1
             settlement_kwh += float(b.kwh_generated)
             ps, pe = b.period_start.date(), b.period_end.date()
-            pk, pdays = _production_over_window(db, array_id, ps, pe)
+            pk, pdays, ik = _production_over_window(db, array_id, ps, pe)
             production_kwh += pk
+            independent_kwh += ik
             billing_days = b.billing_days or ((pe - ps).days + 1)
             if billing_days > 0 and (pdays / billing_days) < FEED_COMPLETENESS_FLOOR:
                 feed_complete_all = False
@@ -147,6 +184,9 @@ def reconcile_array(
         100.0 * (production_kwh - settlement_kwh) / settlement_kwh
         if settlement_kwh > 0 else None
     )
+    # Is the production leg backed by a feed independent of the utility? (Most of
+    # it from an inverter vendor / owner export, not GMP's own meter.)
+    independent_feed = production_kwh > 0 and (independent_kwh / production_kwh) >= 0.5
 
     # ── Gates (spec §4) ─────────────────────────────────────────────────────
     gate_feed_complete = feed_complete_all and n_bills > 0
@@ -186,15 +226,33 @@ def reconcile_array(
         notes.append("Production implies implausible capacity factor — data-hygiene flag, not a leak.")
     else:
         # complete, plausible, full-coverage feed
-        report_leak = (
+        variance_is_leak = (
             cls.classification == "single_site"
             and variance_pct is not None
             and abs(variance_pct) > LEAK_THRESHOLD_PCT
         )
-        status = "leak" if report_leak else "ok"
-        if report_leak and variance_pct is not None:
-            # dollars: the kWh gap valued at the credit rate
-            dollars_at_risk = abs(production_kwh - settlement_kwh) * rate
+        if variance_is_leak and not independent_feed:
+            # The variance is real, but production came from the utility's OWN
+            # meter (GMP interval) — reconciling the utility against itself. Flag
+            # it for the owner to confirm, don't assert it as a definite leak.
+            status = "leak_unconfirmed"
+            report_leak = False
+            notes.append(
+                "Metered generation diverges from utility settlement by "
+                f"{variance_pct:+.1f}%, but the production figure is the utility's "
+                "own meter data — connect the inverter monitoring (SolarEdge/Chint/"
+                "Fronius) to confirm this as an independent leak."
+            )
+            if variance_pct is not None:
+                dollars_at_risk = abs(production_kwh - settlement_kwh) * rate
+        else:
+            report_leak = variance_is_leak
+            status = "leak" if report_leak else "ok"
+            if report_leak and variance_pct is not None:
+                # dollars: the kWh gap valued at the credit rate
+                dollars_at_risk = abs(production_kwh - settlement_kwh) * rate
+
+    gates["independent_feed"] = independent_feed
 
     return ReconResult(
         array_id=array_id,
