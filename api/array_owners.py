@@ -448,6 +448,47 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
 _MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
+# Canonical data-source families for the Production Analytics "where this data
+# comes from" attribution. Maps every DailyGeneration.source value (and the GMP
+# daily sponge, which has no DailyGeneration row) onto a stable display family.
+# This is AO's edge over single-ecosystem portals: one fleet, every vendor,
+# attributed honestly. `key` is stable for the frontend; `label` is user-facing.
+_SOURCE_FAMILY = {
+    # utility meter feeds (settled generation) → GMP
+    "gmp_api": ("gmp", "GMP (utility meter)"),
+    "gmp_portal_scrape": ("gmp", "GMP (utility meter)"),
+    "utility_meter": ("gmp", "GMP (utility meter)"),
+    "smarthub": ("gmp", "GMP (utility meter)"),
+    # inverter telemetry vendors
+    "solaredge": ("solaredge", "SolarEdge"),
+    "fronius": ("fronius", "Fronius"),
+    "sma": ("sma", "SMA"),
+    "chint": ("chint", "CHINT"),
+    "extension_pull": ("inverter", "Inverter (extension)"),
+    "extension_pull_corrected": ("inverter", "Inverter (extension)"),
+    # operator-supplied
+    "csv": ("csv", "CSV upload"),
+    "manual": ("manual", "Manual entry"),
+    "bill_prorate": ("bill", "Bill (prorated)"),
+}
+# Display order for the attribution legend (the five named vendors lead).
+_SOURCE_ORDER = ["gmp", "solaredge", "fronius", "sma", "chint",
+                 "inverter", "csv", "manual", "bill", "other"]
+_SOURCE_LABELS = {
+    "gmp": "GMP (utility meter)", "solaredge": "SolarEdge", "fronius": "Fronius",
+    "sma": "SMA", "chint": "CHINT", "inverter": "Inverter (extension)",
+    "csv": "CSV upload", "manual": "Manual entry", "bill": "Bill (prorated)",
+    "other": "Other",
+}
+
+
+def _source_family(src: str | None) -> str:
+    """Map a raw DailyGeneration.source onto a canonical display family key."""
+    if not src:
+        return "other"
+    fam = _SOURCE_FAMILY.get(src.strip().lower())
+    return fam[0] if fam else "other"
+
 
 @router.get("/v1/array-owners/fleet-trends")
 def array_owners_fleet_trends(
@@ -484,6 +525,13 @@ def array_owners_fleet_trends(
     # (year, month) → kWh across the whole fleet, and per-array lifetime/years.
     fleet_ym: dict[tuple[int, int], float] = defaultdict(float)
     fleet_daily: dict[date, float] = defaultdict(float)   # last-30-days bar graph
+    # Per data-source family: (year,month)→kWh, day→kWh, lifetime→kWh. Drives the
+    # Production Analytics vendor-attribution layer (AO's multi-vendor edge).
+    fleet_ym_src: dict[str, dict[tuple[int, int], float]] = defaultdict(lambda: defaultdict(float))
+    fleet_daily_src: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
+    src_lifetime: dict[str, float] = defaultdict(float)
+    capacity_kw = 0.0          # summed inverter nameplate over the SCOPED set
+    capacity_known_arrays = 0  # how many scoped arrays had any nameplate data
     by_array: dict[int, dict] = {}
     rate_blended = 0.0
     rate_n = 0
@@ -516,31 +564,56 @@ def array_owners_fleet_trends(
             # back to the GMP value to fill gaps. Result feeds fleet totals,
             # month×year, the 30-day daily bars, and per-array lifetime.
             per_day: dict = {}
+            per_day_src: dict = {}   # day → canonical source family
             rows = db.execute(
-                select(DailyGeneration.day, DailyGeneration.kwh).where(
+                select(DailyGeneration.day, DailyGeneration.kwh,
+                       DailyGeneration.source).where(
                     DailyGeneration.array_id == arr.id,
                 )
             ).all()
-            for d, kwh in rows:
+            for d, kwh, src in rows:
                 if d is None or kwh is None:
                     continue
                 per_day[d] = float(kwh)
+                per_day_src[d] = _source_family(src)
             # GMP daily sponge — only fills days the CSV table doesn't already cover.
             try:
                 for pt in _gdr.get_daily_series(arr.id, db=db):
                     d = pt["day"]
                     if d is not None and d not in per_day:
                         per_day[d] = float(pt["kwh"] or 0.0)
+                        per_day_src[d] = "gmp"   # sponge is always the GMP meter
             except Exception:  # noqa: BLE001 — never let a read-contract hiccup sink trends
                 pass
 
             arr_ym: dict[tuple[int, int], float] = defaultdict(float)
             arr_life = 0.0
             for d, k in per_day.items():
+                fam = per_day_src.get(d, "other")
                 fleet_ym[(d.year, d.month)] += k
                 fleet_daily[d] += k
                 arr_ym[(d.year, d.month)] += k
                 arr_life += k
+                fleet_ym_src[fam][(d.year, d.month)] += k
+                fleet_daily_src[fam][d] += k
+                src_lifetime[fam] += k
+            # System size (kWp) — sum live inverter nameplate so Analytics can show
+            # specific yield (kWh/kWp) like SolarEdge/SMA. Honest: arrays with no
+            # nameplate on record simply don't contribute (frontend prompts to add).
+            try:
+                nps = db.execute(
+                    select(Inverter.nameplate_kw).where(
+                        Inverter.array_id == arr.id,
+                        Inverter.deleted_at.is_(None),
+                        Inverter.nameplate_kw.isnot(None),
+                    )
+                ).scalars().all()
+                arr_kw = sum(float(x) for x in nps if x)
+                if arr_kw > 0:
+                    capacity_kw += arr_kw
+                    capacity_known_arrays += 1
+            except Exception:  # noqa: BLE001
+                pass
             # rate blended over the SCOPED set, so EST. VALUE matches the kWh shown
             try:
                 rate_blended += get_energy_rate(_array_provider(db, arr.id))
@@ -622,6 +695,7 @@ def array_owners_fleet_trends(
     # the most recent day with data (so the chart is full even if today's pull
     # hasn't landed). Contiguous days; days with no generation render as 0 bars.
     daily_recent: list[dict] = []
+    daily_series: list[dict] = []   # longer (≤365d) window for Analytics Day/Week nav
     if fleet_daily:
         last_day = max(fleet_daily.keys())
         from datetime import timedelta as _td
@@ -631,6 +705,66 @@ def array_owners_fleet_trends(
             daily_recent.append({"day": d.isoformat(),
                                  "kwh": round(fleet_daily.get(d, 0.0), 1)})
             d += _td(days=1)
+        # Extended daily series: from the earliest day with data, capped at the
+        # most recent 365 days, so Analytics can navigate weeks/months of bars.
+        first_day = min(fleet_daily.keys())
+        ext_start = max(first_day, last_day - _td(days=364))
+        d = ext_start
+        while d <= last_day:
+            daily_series.append({"day": d.isoformat(),
+                                 "kwh": round(fleet_daily.get(d, 0.0), 1)})
+            d += _td(days=1)
+
+    # ── Data-source attribution (AO's multi-vendor edge) ────────────────────
+    # For each canonical source family present, report lifetime kWh, share of
+    # fleet lifetime, and a per-month breakdown. None of GMP/SolarEdge/Fronius/
+    # SMA/CHINT can show this — each only sees its own ecosystem; AO sees them
+    # side by side, attributed to the feed each kWh actually came from.
+    total_life = sum(src_lifetime.values()) or 0.0
+    source_breakdown: list[dict] = []
+    present_fams = [f for f in _SOURCE_ORDER if f in src_lifetime and src_lifetime[f] > 0]
+    # include any family not in the canonical order (defensive)
+    present_fams += [f for f in src_lifetime if f not in present_fams and src_lifetime[f] > 0]
+    for fam in present_fams:
+        # monthly per year for this source
+        fam_by_year: dict[str, list[dict]] = {}
+        for y in years:
+            pts = [{"month": m, "kwh": round(fleet_ym_src[fam].get((y, m), 0.0), 1)}
+                   for m in range(1, 13) if (y, m) in fleet_ym_src[fam]]
+            if pts:
+                fam_by_year[str(y)] = pts
+        lt = round(src_lifetime[fam], 1)
+        source_breakdown.append({
+            "key": fam,
+            "label": _SOURCE_LABELS.get(fam, fam.title()),
+            "lifetime_kwh": lt,
+            "share_pct": round(100.0 * lt / total_life, 1) if total_life else 0.0,
+            "monthly_by_year": fam_by_year,
+        })
+
+    # System size + specific yield (kWh/kWp) — SolarEdge/SMA show this. Honest:
+    # only computed from inverter nameplate we actually hold; null when unknown
+    # so the frontend can prompt the owner to add system size rather than guess.
+    cap_kw = round(capacity_kw, 2) if capacity_kw > 0 else None
+    specific_yield_ttm = (round(ttm_kwh / capacity_kw, 1)
+                          if capacity_kw > 0 else None)
+
+    # Environmental impact — EPA Greenhouse Gas Equivalencies (2024 factors),
+    # applied to LIFETIME clean kWh. Factors are published + cited so this is
+    # provenance-backed, not fabricated.  https://www.epa.gov/energy/greenhouse-gases-equivalencies-calculator-calculations-and-references
+    _CO2_LB_PER_KWH = 1.5634          # avoided CO2 (lb) per kWh (US grid avg)
+    _TREE_CO2_LB_YR = 48.0            # CO2 (lb) sequestered by 1 tree-seedling over 10y / 10 ≈ annual
+    _CAR_CO2_LB_YR = 11015.0         # avg passenger vehicle CO2 (lb) per year
+    _HOME_KWH_YR = 10500.0           # avg US home electricity use (kWh) per year
+    co2_lb = lifetime_kwh * _CO2_LB_PER_KWH
+    environmental = {
+        "co2_avoided_lb": round(co2_lb, 0),
+        "co2_avoided_tonnes": round(co2_lb * 0.000453592, 2),
+        "trees_equiv": round(co2_lb / _TREE_CO2_LB_YR, 0),
+        "cars_year_equiv": round(co2_lb / _CAR_CO2_LB_YR, 1),
+        "homes_year_equiv": round(lifetime_kwh / _HOME_KWH_YR, 1),
+        "basis": "EPA GHG equivalencies (2024); applied to lifetime clean kWh",
+    } if lifetime_kwh > 0 else None
 
     return {
         "years": years,
@@ -638,8 +772,15 @@ def array_owners_fleet_trends(
         "seasonal_yoy": seasonal_yoy,
         "ttm_kwh": round(ttm_kwh, 1),
         "ttm_savings_usd": round(ttm_kwh * rate, 2) if rate else None,
+        "blended_rate_usd_per_kwh": round(rate, 4) if rate else None,
         "lifetime_kwh": lifetime_kwh,
         "daily_recent": daily_recent,
+        "daily_series": daily_series,
+        "source_breakdown": source_breakdown,
+        "capacity_kw": cap_kw,
+        "capacity_known_arrays": capacity_known_arrays,
+        "specific_yield_ttm_kwh_per_kwp": specific_yield_ttm,
+        "environmental": environmental,
         "selected_array_id": array_id,
         "by_array": sorted(by_array.values(),
                            key=lambda a: -a["lifetime_kwh"]),

@@ -11,6 +11,7 @@ import pytest
 from api.db import SessionLocal
 from api.models import (
     Tenant, Client, Array, UtilityAccount, DailyGeneration, GmpDailyGeneration,
+    Inverter,
 )
 
 
@@ -22,7 +23,7 @@ def _cleanup():
         return
     with SessionLocal() as db:
         for tid in _SEEDED:
-            for Model in (GmpDailyGeneration, DailyGeneration, UtilityAccount, Array, Client):
+            for Model in (GmpDailyGeneration, DailyGeneration, Inverter, UtilityAccount, Array, Client):
                 for row in db.query(Model).filter(Model.tenant_id == tid).all():
                     db.delete(row)
             t = db.get(Tenant, tid)
@@ -151,6 +152,85 @@ def test_fleet_trends_array_filter_scopes_payload(client):
 
     r404 = client.get("/v1/array-owners/fleet-trends?array_id=99999999", headers=auth)
     assert r404.status_code == 404
+
+
+def test_fleet_trends_source_breakdown_and_analytics_fields(client):
+    """Production Analytics fields: source_breakdown attributes kWh to the right
+    vendor family (GMP vs SolarEdge vs Fronius vs SMA vs CHINT), env-impact is
+    derived from lifetime kWh, daily_series exists, and capacity/specific-yield
+    are honestly null when no inverter nameplate is on record."""
+    from api.inverters import VENDORS  # noqa: F401 (sanity import)
+    tid = "ten_" + secrets.token_hex(6)
+    _SEEDED.append(tid)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, name="Source Mix", contact_email=f"{tid}@t.test",
+                      tenant_key="sol_live_" + secrets.token_urlsafe(8),
+                      plan="standard", active=True, product="array_operator"))
+        c = Client(tenant_id=tid, name="C", active=True); db.add(c); db.flush()
+        arr = Array(tenant_id=tid, name="Mixed Array", client_id=c.id,
+                    fuel_type="solar", region="central"); db.add(arr); db.flush()
+        # four named-vendor feeds on distinct days
+        for dom, kwh, src in [(1, 50.0, "solaredge"), (2, 60.0, "fronius"),
+                              (3, 70.0, "sma"), (4, 80.0, "chint")]:
+            db.add(DailyGeneration(tenant_id=tid, array_id=arr.id,
+                                   day=date(2025, 7, dom), kwh=kwh, source=src))
+        db.commit()
+    from api.account import mint_session_for_tenant
+    auth = {"Authorization": "Bearer " + mint_session_for_tenant(tid)}
+    r = client.get("/v1/array-owners/fleet-trends", headers=auth)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["lifetime_kwh"] == pytest.approx(260.0, abs=0.1)
+    # source_breakdown attributes each kWh to its vendor family
+    sb = {s["key"]: s for s in d["source_breakdown"]}
+    assert set(["solaredge", "fronius", "sma", "chint"]).issubset(sb.keys())
+    assert sb["solaredge"]["lifetime_kwh"] == pytest.approx(50.0, abs=0.1)
+    assert sb["chint"]["lifetime_kwh"] == pytest.approx(80.0, abs=0.1)
+    # shares sum to ~100
+    assert sum(s["share_pct"] for s in d["source_breakdown"]) == pytest.approx(100.0, abs=0.5)
+    # each source carries a per-year monthly breakdown
+    assert "2025" in sb["sma"]["monthly_by_year"]
+    # env-impact derived from lifetime, with provenance basis string
+    assert d["environmental"] is not None
+    assert d["environmental"]["co2_avoided_lb"] > 0
+    assert "EPA" in d["environmental"]["basis"]
+    # daily_series present (extended window)
+    assert isinstance(d["daily_series"], list) and len(d["daily_series"]) >= 4
+    # no inverter nameplate on record → capacity/specific-yield honestly null
+    assert d["capacity_kw"] is None
+    assert d["specific_yield_ttm_kwh_per_kwp"] is None
+
+
+def test_fleet_trends_specific_yield_from_inverter_nameplate(client):
+    """When inverter nameplate is on record, capacity_kw sums it and specific
+    yield (kWh/kWp) is computed — the SolarEdge/SMA-style metric."""
+    from api.models import Inverter
+    tid = "ten_" + secrets.token_hex(6)
+    _SEEDED.append(tid)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, name="Yield", contact_email=f"{tid}@t.test",
+                      tenant_key="sol_live_" + secrets.token_urlsafe(8),
+                      plan="standard", active=True, product="array_operator"))
+        c = Client(tenant_id=tid, name="C", active=True); db.add(c); db.flush()
+        arr = Array(tenant_id=tid, name="Yield Array", client_id=c.id,
+                    fuel_type="solar", region="central"); db.add(arr); db.flush()
+        db.add(Inverter(tenant_id=tid, array_id=arr.id, vendor="solaredge",
+                        serial="SN-A", nameplate_kw=5.0))
+        db.add(Inverter(tenant_id=tid, array_id=arr.id, vendor="solaredge",
+                        serial="SN-B", nameplate_kw=5.0))
+        # production this month so TTM picks it up
+        db.add(DailyGeneration(tenant_id=tid, array_id=arr.id, day=date.today(),
+                               kwh=100.0, source="solaredge"))
+        db.commit()
+    from api.account import mint_session_for_tenant
+    auth = {"Authorization": "Bearer " + mint_session_for_tenant(tid)}
+    r = client.get("/v1/array-owners/fleet-trends", headers=auth)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["capacity_kw"] == pytest.approx(10.0, abs=0.01)
+    assert d["capacity_known_arrays"] == 1
+    # 100 kWh TTM / 10 kWp = 10.0 kWh/kWp
+    assert d["specific_yield_ttm_kwh_per_kwp"] == pytest.approx(10.0, abs=0.1)
 
 
 def test_gmp_backfill_admin_requires_key(client, monkeypatch):
