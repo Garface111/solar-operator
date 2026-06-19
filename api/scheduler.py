@@ -838,6 +838,17 @@ def start():
         id="inverter_history_heal", replace_existing=True,
         max_instances=1, coalesce=True,
     )
+    # Daily at 04:45 UTC: auto-dedup duplicate arrays. The GMP absorption feature
+    # can create a GMP twin of a vendor array; this merges the unambiguous ones
+    # (shared utility account / identical name / cross-source name containment)
+    # and leaves anything questionable as a one-click suggestion. LOSSLESS +
+    # undo-logged. Runs after the history heal so merged arrays carry full data.
+    scheduler.add_job(
+        _run_array_dedup,
+        CronTrigger(hour=4, minute=45),
+        id="array_dedup_sweep", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     # Daily at 03:30 UTC: snapshot per-inverter daily history into InverterDaily for
     # every owner (persist-on-read forced on a schedule) so the per-inverter graphs
     # keep accumulating real history even when nobody opens the dashboard. Critical
@@ -1057,6 +1068,24 @@ def _run_history_heal() -> None:
         send_internal_alert(
             "Inverter history heal: unhandled exception",
             f"The deep-history backfill heal job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_array_dedup() -> None:
+    """Auto-merge unambiguous duplicate arrays (GMP↔vendor twins). Lossless +
+    undo-logged; questionable pairs are left as one-click suggestions."""
+    try:
+        from .jobs.array_dedup import sweep_all_tenants
+        result = sweep_all_tenants(execute=True)
+        logger.info(
+            "array_dedup_sweep: auto_merged=%d suggested=%d across %d tenants",
+            result.get("auto_merged", 0), result.get("suggested", 0),
+            result.get("tenants_with_dupes", 0),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Array dedup sweep: unhandled exception",
+            f"The duplicate-array auto-merge job raised an unexpected error:\n{exc}",
         )
 
 

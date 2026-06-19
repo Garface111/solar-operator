@@ -2558,12 +2558,14 @@ class ArrayMergeIntoBody(BaseModel):
 @router.post("/v1/account/arrays/{src_array_id}/merge-into")
 def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
                      authorization: Optional[str] = Header(default=None)):
-    """Merge `src_array_id` INTO `body.dst_array_id`. Reparents utility
-    accounts to dst, merges metadata (dst wins on conflict), soft-deletes
-    src. Bills follow utility_accounts via account_id so no per-bill
-    reparent is needed.
+    """Merge `src_array_id` INTO `body.dst_array_id`. LOSSLESS: reparents utility
+    accounts, GMP daily, per-array daily generation (source-priority on day
+    collisions), inverters + connection, warranty/verification rows, and billing
+    subscriptions to dst, merges metadata (dst wins on conflict), then soft-deletes
+    src with an undo row. Bills follow utility_accounts via account_id.
 
     Idempotent on already-soft-deleted src (returns noop:true)."""
+    from .array_merge import merge_arrays as _merge_arrays
     t = tenant_from_session(authorization)
     require_not_demo(t)
     require_active_subscription(t)
@@ -2571,75 +2573,37 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
         raise HTTPException(400, "src and dst must differ")
 
     with SessionLocal() as db:
-        src = db.execute(
-            select(Array).where(
-                Array.tenant_id == t.id,
-                Array.id == src_array_id,
-            )
-        ).scalar_one_or_none()
-        dst = db.execute(
-            select(Array).where(
-                Array.tenant_id == t.id,
-                Array.id == body.dst_array_id,
-                Array.deleted_at.is_(None),
-            )
-        ).scalar_one_or_none()
+        # Validate both belong to the tenant before delegating.
+        src = db.execute(select(Array).where(
+            Array.tenant_id == t.id, Array.id == src_array_id)).scalar_one_or_none()
+        dst = db.execute(select(Array).where(
+            Array.tenant_id == t.id, Array.id == body.dst_array_id,
+            Array.deleted_at.is_(None))).scalar_one_or_none()
         if not src or not dst:
             raise HTTPException(404, "array not found")
         if src.deleted_at is not None:
             return {"ok": True, "noop": True, "dst_array_id": dst.id}
 
-        # Reparent utility accounts to dst
-        n_uas = db.execute(
-            select(func.count()).select_from(UtilityAccount).where(
-                UtilityAccount.tenant_id == t.id,
-                UtilityAccount.array_id == src.id,
-            )
-        ).scalar() or 0
-        for ua in db.execute(
-            select(UtilityAccount).where(
-                UtilityAccount.tenant_id == t.id,
-                UtilityAccount.array_id == src.id,
-            )
-        ).scalars().all():
-            ua.array_id = dst.id
-
-        # Merge metadata: dst keeps its values when set, otherwise inherit
-        for field in ("nepool_gis_id", "region", "first_connect_date",
-                      "solar_adder_cents", "notes"):
-            if getattr(dst, field) in (None, "") and getattr(src, field):
-                setattr(dst, field, getattr(src, field))
-        # bill_offset_months: dst wins (it's a per-array config the operator
-        # may have set deliberately, e.g. Starlake's 0 vs default 1)
-
-        # Excluded flag: AND semantics — only excluded if BOTH were
-        if not (src.excluded and dst.excluded):
-            dst.excluded = False
-
-        # Soft-delete src
-        src.deleted_at = now()
-
-        # Clear dismissals involving src
-        db.query(ArrayMergeDismissal).filter(
-            ArrayMergeDismissal.tenant_id == t.id,
-            or_(
-                ArrayMergeDismissal.array_a_id == src.id,
-                ArrayMergeDismissal.array_b_id == src.id,
-            ),
-        ).delete(synchronize_session=False)
-
+        res = _merge_arrays(db, src.id, dst.id, t.id, reason="manual-merge")
+        if not res.get("ok"):
+            raise HTTPException(400, res.get("error", "merge failed"))
         db.commit()
         db.refresh(dst)
-        # Merging soft-deletes src, dropping the billable count by one (unless
-        # src was already excluded). Reconcile Stripe — merging duplicate
-        # sub-meter arrays is a routine cleanup, and it used to leave billing at
-        # the pre-merge quantity forever (June 2026 fix).
+
         new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
+        ua_count = db.execute(
+            select(func.count()).select_from(UtilityAccount).where(
+                UtilityAccount.array_id == dst.id,
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalar() or 0
         result = {
             "ok": True,
             "merged_from_id": src.id,
+            "undo_token": res.get("undo_token"),
+            "reparented": res.get("counts"),
             "dst_array": {
                 "id": dst.id,
                 "name": dst.name,
@@ -2647,16 +2611,9 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
                 "nepool_gis_id": dst.nepool_gis_id,
                 "bill_offset_months": dst.bill_offset_months,
                 "excluded": dst.excluded,
-                "utility_accounts_count": (
-                    db.execute(
-                        select(func.count()).select_from(UtilityAccount).where(
-                            UtilityAccount.array_id == dst.id,
-                            UtilityAccount.deleted_at.is_(None),
-                        )
-                    ).scalar() or 0
-                ),
+                "utility_accounts_count": ua_count,
             },
-            "reparented_utility_accounts": n_uas,
+            "reparented_utility_accounts": (res.get("counts") or {}).get("utility_accounts", 0),
         }
 
     reconcile_subscription_quantity(sub_id, int(new_count), t.id, tenant_email)

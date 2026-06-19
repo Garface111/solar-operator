@@ -35,6 +35,70 @@ import re as _re
 _SYNC_EMAIL_RE = _re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 
 
+def _find_array_to_absorb_into(db, tenant_id, owner_id, provider, captured_name):
+    """Smart GMP-absorption matcher: given a captured account's name, find an
+    EXISTING array of this owner that the account should ATTACH to instead of
+    spawning a duplicate (the GMP↔vendor twin problem).
+
+    Tiers, deterministic + no fuzzy guessing:
+      1. EXACT normalized-name match to an owner array with no account of this
+         provider yet (the original behavior).
+      2. CROSS-SOURCE CONTAINMENT: one normalized name fully contains the other
+         (e.g. GMP "Londonderry Community Solar" vs vendor "Londonderry"), the
+         candidate has a vendor InverterConnection (so it's the vendor twin), and
+         the names do NOT differ only by a sub-array token (Starlake North/South
+         are real distinct meters — never absorb across those).
+    Returns the Array to absorb into, or None to create fresh.
+    """
+    from .array_merge import _norm_name, _differs_only_by_subarray_token
+    from .models import InverterConnection
+    cap = (captured_name or "").strip()
+    if not cap:
+        return None
+    cap_norm = _norm_name(cap)
+    candidates = db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant_id,
+            Array.client_id == owner_id,
+            Array.deleted_at.is_(None),
+        ).order_by(Array.id)
+    ).scalars().all()
+
+    def _no_provider_account(arr):
+        return (db.execute(
+            select(func.count(UtilityAccount.id)).where(
+                UtilityAccount.array_id == arr.id,
+                UtilityAccount.provider == provider,
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalar() or 0) == 0
+
+    def _has_vendor(arr):
+        return (db.execute(
+            select(func.count(InverterConnection.id)).where(
+                InverterConnection.array_id == arr.id)
+        ).scalar() or 0) > 0
+
+    # Tier 1: exact normalized-name match, no existing account of this provider.
+    for arr in candidates:
+        if _norm_name(arr.name) == cap_norm and _no_provider_account(arr):
+            return arr
+    # Tier 2: cross-source containment against a VENDOR array (the twin), guarded.
+    for arr in candidates:
+        an = _norm_name(arr.name)
+        if not an or an == cap_norm:
+            continue
+        if not (cap_norm in an or an in cap_norm):
+            continue
+        if _differs_only_by_subarray_token(arr.name, cap):
+            continue
+        if _has_vendor(arr) and _no_provider_account(arr):
+            return arr
+    return None
+
+
+
+
 def _smart_client_name(
     user_dict: dict,
     accounts: list[dict],
@@ -732,27 +796,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                         # captured nickname against the owner's array names
                         # (case-insensitive), restricted to arrays that have no GMP
                         # account linked yet — a deterministic, no-guess link.
+                        # Smart matcher: exact-name OR cross-source containment
+                        # against a vendor twin (guarded against sub-array splits),
+                        # so a GMP capture ATTACHES to the existing SolarEdge array
+                        # instead of spawning a duplicate.
                         linked_existing = None
                         if a.get("nickname"):
-                            cand = db.execute(
-                                select(Array).where(
-                                    Array.tenant_id == tenant.id,
-                                    Array.client_id == owner.id,
-                                    Array.deleted_at.is_(None),
-                                    func.lower(Array.name) == arr_name.strip().lower(),
-                                ).order_by(Array.id)
-                            ).scalars().all()
-                            for c_arr in cand:
-                                has_gmp = db.execute(
-                                    select(func.count(UtilityAccount.id)).where(
-                                        UtilityAccount.array_id == c_arr.id,
-                                        UtilityAccount.provider == provider,
-                                        UtilityAccount.deleted_at.is_(None),
-                                    )
-                                ).scalar() or 0
-                                if has_gmp == 0:
-                                    linked_existing = c_arr
-                                    break
+                            linked_existing = _find_array_to_absorb_into(
+                                db, tenant.id, owner.id, provider, arr_name)
                         if linked_existing is not None:
                             acct.array_id = linked_existing.id
                             ctx.add("array_linked",
@@ -965,6 +1016,21 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                     ctx.add("array_skipped", decision=f"account {acct_no} already linked to array {acct.array_id}")
                                     continue
                             arr_name = (a.get("nickname") or acct_no)[:200]
+                            # Smart absorb: attach to an existing vendor twin
+                            # instead of creating a duplicate (same matcher as the
+                            # autopop branch).
+                            linked_existing = None
+                            if a.get("nickname"):
+                                linked_existing = _find_array_to_absorb_into(
+                                    db, tenant.id, target.id, provider, arr_name)
+                            if linked_existing is not None:
+                                acct.array_id = linked_existing.id
+                                ctx.add("array_linked",
+                                        decision=f"linked account {acct_no} to existing array "
+                                                 f"{linked_existing.name!r} (id {linked_existing.id})")
+                                if not acct.captured_client_name:
+                                    acct.captured_client_name = (target.name or "")[:200]
+                                continue
                             ghost_arr = db.execute(
                                 select(Array).where(
                                     Array.tenant_id == tenant.id,
@@ -1354,6 +1420,24 @@ def admin_inverter_history_connection(
     """Force the full multi-year history backfill for ONE inverter connection."""
     from .jobs.inverter_history import backfill_connection_history
     return backfill_connection_history(connection_id, start_year=since_year)
+
+
+@app.post("/admin/array-dedup/sweep")
+def admin_array_dedup_sweep(execute: bool = False, _: None = Depends(_require_admin)):
+    """Detect (and optionally merge) duplicate arrays fleet-wide. DRY-RUN by
+    default (execute=False) — returns what WOULD merge + what's suggested. Pass
+    execute=true to actually merge the STRONG/MEDIUM tiers."""
+    from .jobs.array_dedup import sweep_all_tenants
+    return sweep_all_tenants(execute=execute)
+
+
+@app.post("/admin/array-dedup/tenant/{tenant_id}")
+def admin_array_dedup_tenant(tenant_id: str, execute: bool = False,
+                             _: None = Depends(_require_admin)):
+    """Detect (and optionally merge) duplicate arrays for ONE tenant. DRY-RUN by
+    default. Returns the scored pairs + auto-merge/suggest split."""
+    from .jobs.array_dedup import sweep_tenant
+    return sweep_tenant(tenant_id, execute=execute)
 
 
 # ---- root --------------------------------------------------------------
