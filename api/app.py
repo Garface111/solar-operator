@@ -1276,6 +1276,28 @@ def admin_gmp_backfill_account(
     return bf.backfill_account(None, account_id, window_days=window_days, force_refetch=force_refetch)
 
 
+@app.post("/admin/bill-to-daily/tenant/{tenant_id}")
+def admin_bill_to_daily_tenant(
+    tenant_id: str,
+    _: None = Depends(_require_admin),
+):
+    """Transform captured GMP bills into the daily-generation stream the frontend
+    reads (source=bill_prorate), so parsed bills SHOW in Trends + merge with
+    inverter data. Idempotent; real metered readings are never overwritten.
+    Returns counts {arrays, bills_seen, days_written, days_updated,
+    days_skipped_real}."""
+    from .jobs.bill_to_daily import transform_tenant_bills
+    return transform_tenant_bills(tenant_id)
+
+
+@app.post("/admin/bill-to-daily/all")
+def admin_bill_to_daily_all(_: None = Depends(_require_admin)):
+    """Run the bill→daily transform across every active tenant. Same as the
+    nightly 05:30 job; returns the grand-total counts."""
+    from .jobs.bill_to_daily import transform_all_tenants
+    return transform_all_tenants()
+
+
 # ---- root --------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)

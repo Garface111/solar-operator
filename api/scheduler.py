@@ -878,7 +878,31 @@ def start():
         id="gmp_daily_backfill", replace_existing=True,
         max_instances=1, coalesce=True,
     )
+    # Daily at 05:30 UTC: Bill→daily transform. Converts captured GMP bills'
+    # generation into bill_prorate DailyGeneration rows so parsed bills SHOW in
+    # Trends + merge with inverter data. Runs AFTER the 05:00 GMP daily-interval
+    # backfill so granular GMP-API days land first; bill-prorate only fills the
+    # remaining gaps and never overwrites a real metered reading.
+    scheduler.add_job(
+        _run_bill_to_daily,
+        CronTrigger(hour=5, minute=30),
+        id="bill_to_daily", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     scheduler.start()
+
+
+def _run_bill_to_daily() -> None:
+    """Prorate captured GMP bills into the daily-generation stream the frontend
+    reads. Idempotent + incremental; real metered readings always win."""
+    try:
+        from .jobs.bill_to_daily import transform_all_tenants
+        transform_all_tenants()
+    except Exception as exc:  # noqa: BLE001
+        send_internal_alert(
+            "Bill→daily transform: unhandled exception",
+            f"The bill-to-daily transformer raised an error:\n{exc}",
+        )
 
 
 def _run_generation_watchdog() -> None:
