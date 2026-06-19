@@ -13,6 +13,7 @@ import {
   UNAUTHORIZED_EVENT,
   UnauthorizedError,
   getAccount,
+  passwordLogin,
   setSession,
   clearSession,
 } from "../lib/api";
@@ -22,6 +23,18 @@ function mock401Once() {
     ok: false,
     status: 401,
     json: async () => ({ detail: "Session expired — sign in again" }),
+    text: async () => "",
+    clone() {
+      return this;
+    },
+  } as unknown as Response);
+}
+
+function mock401Credentials() {
+  return vi.fn().mockResolvedValue({
+    ok: false,
+    status: 401,
+    json: async () => ({ detail: "Invalid email or password" }),
     text: async () => "",
     clone() {
       return this;
@@ -79,5 +92,40 @@ describe("401 handling — single bounce per session", () => {
     expect(handler).toHaveBeenCalledTimes(2);
 
     window.removeEventListener(UNAUTHORIZED_EVENT, handler);
+  });
+});
+
+describe("401 on a noAuth request — bad credentials, NOT a session expiry", () => {
+  beforeEach(() => {
+    clearSession();
+    setSession("stale-token"); // a session exists, but login is a noAuth call
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    clearSession();
+  });
+
+  it("surfaces the server's real message and does NOT bounce to login", async () => {
+    vi.stubGlobal("fetch", mock401Credentials());
+    const handler = vi.fn();
+    window.addEventListener(UNAUTHORIZED_EVENT, handler);
+
+    let caught: unknown;
+    try {
+      await passwordLogin("ford@example.com", "wrongpass");
+    } catch (err) {
+      caught = err;
+    }
+
+    window.removeEventListener(UNAUTHORIZED_EVENT, handler);
+
+    // A wrong password is a plain Error carrying the server's message — NOT an
+    // UnauthorizedError (which would mislabel it "Session expired") …
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(UnauthorizedError);
+    expect((caught as Error).message).toBe("Invalid email or password");
+    // … and it must NOT fire the session-expiry bounce.
+    expect(handler).not.toHaveBeenCalled();
   });
 });

@@ -134,8 +134,18 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   });
 
   if (res.status === 401) {
-    notifyUnauthorizedOnce();
-    throw new UnauthorizedError();
+    // A 401 on an AUTHED request means the session token is dead → bounce to
+    // login. But a 401 on a noAuth request (the public auth endpoints:
+    // password-login, auth/verify, auth/request) means BAD CREDENTIALS, not an
+    // expired session — there is no session yet. Surface the server's real
+    // message ("Invalid email or password") inline instead of firing the
+    // session-expiry machinery, which would mislabel a wrong password as
+    // "Session expired — sign in again" and bounce the login screen.
+    if (!opts.noAuth) {
+      notifyUnauthorizedOnce();
+      throw new UnauthorizedError();
+    }
+    throw new Error(await parseError(res));
   }
   if (!res.ok) {
     // Structured 409 (e.g. login-already-claimed) — surface the detail
