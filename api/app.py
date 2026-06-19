@@ -1466,15 +1466,34 @@ class SPAStaticFiles(StaticFiles):
     genuinely-missing asset (e.g. a stale /onboarding/assets/*.js after a bad
     build), which then fails to parse client-side rather than 404ing. That only
     happens on a broken deploy, so the simpler blanket fallback is the trade.
+
+    CACHING: the SPA shell (index.html) must NEVER be cached, or a browser keeps
+    loading the previous deploy's hashed chunk references and users run stale code
+    after every deploy (e.g. a fixed auth bug that "still" reproduces because the
+    old index.html is cached). We stamp `Cache-Control: no-cache` on index.html so
+    it's always revalidated, while the content-hashed assets under /assets/ stay
+    immutable-cacheable (their filenames change every build, so caching them
+    forever is correct and fast).
     """
 
     async def get_response(self, path: str, scope):
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
             if exc.status_code == 404:
-                return await super().get_response("index.html", scope)
-            raise
+                response = await super().get_response("index.html", scope)
+            else:
+                raise
+        # index.html (the SPA shell, served directly or as the deep-link / 404
+        # fallback) must always be revalidated so a new deploy is picked up
+        # immediately. Hashed assets are immutable and keep their long cache.
+        is_index = path in ("", ".", "/", "index.html") or path.endswith("/index.html")
+        # The fallback path above re-served index.html even when `path` was an
+        # unmatched route, so also treat any text/html response as the shell.
+        media_type = response.headers.get("content-type", "")
+        if is_index or media_type.startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
 
 # ---- v0.6.7: per-change preview bundles (MC Lens-Picker live iframes) -------
