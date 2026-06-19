@@ -11,7 +11,7 @@ from __future__ import annotations
 import secrets
 
 from api.db import SessionLocal
-from api.models import Array, Tenant, UtilityAccount
+from api.models import Array, DailyGeneration, Tenant, UtilityAccount
 
 
 def _make_tenant() -> tuple[str, str]:
@@ -33,17 +33,55 @@ def _status(client, key: str):
     return r.json()
 
 
-def test_no_gmp_not_complete(client):
-    """No GMP at all → incomplete, banner shows 'connect_gmp'."""
+def test_no_source_not_complete(client):
+    """No data source of any kind → incomplete, banner shows 'connect_gmp'."""
     tid, key = _make_tenant()
     s = _status(client, key)
     assert s["gmp_connected"] is False
+    assert s["connected"] is False
     assert s["complete"] is False
     assert s["next_step"] == "connect_gmp"
 
 
+def test_solaredge_connected_is_complete_without_gmp(client):
+    """THE FIX: an Array Operator tenant connected via SolarEdge (legacy
+    Array.solaredge_site_id) but with NO GMP must be complete → banner hides.
+    This is exactly Ford's AO tenant (19 arrays via SolarEdge, 0 GMP)."""
+    tid, key = _make_tenant()
+    with SessionLocal() as db:
+        db.add(Array(tenant_id=tid, name="SE Array", fuel_type="solar",
+                     solaredge_api_key="k", solaredge_site_id=1341613))
+        db.commit()
+
+    s = _status(client, key)
+    assert s["gmp_connected"] is False
+    assert s["has_inverter"] is True
+    assert s["connected"] is True
+    assert s["complete"] is True          # banner hides
+    assert s["next_step"] == "done"
+
+
+def test_daily_generation_alone_is_complete(client):
+    """Data is flowing (DailyGeneration rows exist) → connected, banner hides,
+    even with no GMP and no inverter row."""
+    tid, key = _make_tenant()
+    import datetime as _dt
+    with SessionLocal() as db:
+        arr = Array(tenant_id=tid, name="Arr", fuel_type="solar")
+        db.add(arr)
+        db.flush()
+        db.add(DailyGeneration(tenant_id=tid, array_id=arr.id,
+                               day=_dt.date(2026, 5, 1), kwh=42.0, source="csv"))
+        db.commit()
+
+    s = _status(client, key)
+    assert s["connected"] is True
+    assert s["complete"] is True
+    assert s["next_step"] == "done"
+
+
 def test_gmp_connected_but_unlinked_is_complete(client):
-    """THE FIX: GMP connected (account captured) but NOT linked to an array →
+    """GMP connected (account captured) but NOT linked to an array →
     complete=True so the finish-setup banner DISAPPEARS. next_step still nudges
     to link, but the big setup gate is gone."""
     tid, key = _make_tenant()
@@ -58,6 +96,7 @@ def test_gmp_connected_but_unlinked_is_complete(client):
 
     s = _status(client, key)
     assert s["gmp_connected"] is True
+    assert s["connected"] is True
     assert s["linked_arrays"] == 0
     assert s["unlinked_accounts"] == 1
     assert s["complete"] is True          # banner hides
@@ -79,6 +118,7 @@ def test_gmp_connected_and_linked_is_done(client):
 
     s = _status(client, key)
     assert s["gmp_connected"] is True
+    assert s["connected"] is True
     assert s["linked_arrays"] == 1
     assert s["complete"] is True
     assert s["next_step"] == "done"

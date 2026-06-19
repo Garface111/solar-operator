@@ -1143,26 +1143,29 @@ class LinkAccountBody(BaseModel):
 
 @router.get("/v1/array-owners/onboarding-status")
 def onboarding_status_ep(authorization: str | None = Header(default=None)) -> dict:
-    """Is the owner's onboarding actually COMPLETE? The hard gate is connecting
-    GMP — without captured utility bills there's no settlement data to audit,
-    reconcile, or bill against, so the product can't do its job. This drives the
-    'you're not done until you connect GMP' banner.
+    """Is the owner's onboarding actually COMPLETE? The product needs a REAL
+    data source to do its job (audit / reconcile / bill). This drives the
+    finish-setup (#gmpGate) banner.
 
-    COMPLETE the moment GMP is connected (Ford's rule: "once you connect GMP the
-    finish-setup banner needs to disappear"). Account→array linking is a
-    secondary nudge surfaced elsewhere (Account tab); it must NOT keep the big
-    "you're not done" setup banner up after GMP is connected.
+    "Connected" means ANY working source — GMP, a VEC/WEC utility account, an
+    inverter connection (SolarEdge/Fronius/SMA/Chint, incl. legacy
+    Array.solaredge_site_id), or any stored DailyGeneration. The banner is named
+    after GMP but must NOT nag an owner who connected another way (Ford's AO
+    tenant: 19 arrays via SolarEdge, 0 GMP → banner was stuck on).
 
     Returns:
-      gmp_connected     — a GMP session has been captured for this tenant
+      gmp_connected     — a GMP session/account has been captured for this tenant
+      connected         — ANY data source is connected (drives the banner)
       has_gmp_accounts  — at least one GMP UtilityAccount exists
+      has_inverter      — an inverter connection (or legacy SolarEdge) exists
+      has_utility_accounts — any utility account (any provider) exists
       linked_arrays     — # of arrays with a GMP account linked
       unlinked_accounts — # of captured GMP accounts not yet linked to an array
       arrays_total      — # of (active) arrays
-      complete          — True once GMP is connected (banner hides)
+      complete          — True once ANY source is connected (banner hides)
       next_step         — machine key for the UI: 'connect_gmp' | 'link_accounts' | 'done'
     """
-    from .models import UtilityAccount, Array, UtilitySession
+    from .models import UtilityAccount, Array, UtilitySession, InverterConnection, DailyGeneration
     tenant = _tenant_from_bearer(authorization)
     with SessionLocal() as db:
         gmp_sessions = db.execute(
@@ -1187,20 +1190,62 @@ def onboarding_status_ep(authorization: str | None = Header(default=None)) -> di
         ).scalar() or 0
 
         gmp_connected = gmp_sessions > 0 or len(gmp_accts) > 0
-        # Ford's rule: connecting GMP completes the setup gate — the finish-setup
-        # banner must disappear the moment GMP is connected, even if the captured
-        # accounts aren't linked to arrays yet. Linking is a softer, separate nudge.
-        complete = gmp_connected
-        if not gmp_connected:
+
+        # The setup gate is about whether the product has a REAL data source to
+        # work with — NOT specifically GMP. Array Operator owners connect via
+        # SolarEdge/Fronius/SMA/Chint inverters and VEC/WEC meters too; demanding
+        # GMP nagged owners who were already fully connected another way (Ford's
+        # AO tenant: 19 arrays via SolarEdge, 0 GMP → banner stuck on). So
+        # "connected" = ANY working source:
+        #   • GMP session/account, OR
+        #   • any non-GMP utility account (vec/wec…), OR
+        #   • an inverter connection (or a legacy Array.solaredge_site_id), OR
+        #   • any stored DailyGeneration row (data is actually flowing).
+        any_utility_acct = db.execute(
+            select(func.count(UtilityAccount.id)).where(
+                UtilityAccount.tenant_id == tenant.id,
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalar() or 0
+        inverter_conns = db.execute(
+            select(func.count(InverterConnection.id))
+            .select_from(InverterConnection)
+            .join(Array, InverterConnection.array_id == Array.id)
+            .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+        ).scalar() or 0
+        legacy_solaredge = db.execute(
+            select(func.count(Array.id)).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None),
+                Array.solaredge_site_id.is_not(None),
+            )
+        ).scalar() or 0
+        daily_rows = db.execute(
+            select(func.count(DailyGeneration.id)).where(
+                DailyGeneration.tenant_id == tenant.id,
+            )
+        ).scalar() or 0
+        inverter_connected = (inverter_conns > 0) or (legacy_solaredge > 0)
+        connected = bool(
+            gmp_connected or any_utility_acct > 0 or inverter_connected or daily_rows > 0
+        )
+
+        # complete (drives the finish-setup banner): hidden once ANY source is
+        # connected. next_step keeps the GMP-specific guidance for the common
+        # path but no longer holds the gate up for non-GMP owners.
+        complete = connected
+        if not connected:
             next_step = "connect_gmp"
-        elif linked == 0:
+        elif gmp_connected and linked == 0:
             next_step = "link_accounts"
         else:
             next_step = "done"
         return {
             "ok": True,
             "gmp_connected": gmp_connected,
+            "connected": connected,
             "has_gmp_accounts": len(gmp_accts) > 0,
+            "has_inverter": inverter_connected,
+            "has_utility_accounts": any_utility_acct > 0,
             "linked_arrays": linked,
             "unlinked_accounts": unlinked,
             "arrays_total": int(arrays_total),
