@@ -769,10 +769,33 @@ def main():
         if not column_exists(conn, "billing_report_subscriptions", "auto_attach_gmp"):
             conn.execute(text(
                 "ALTER TABLE billing_report_subscriptions "
-                "ADD COLUMN auto_attach_gmp BOOLEAN DEFAULT false NOT NULL"
+                "ADD COLUMN auto_attach_gmp BOOLEAN DEFAULT true NOT NULL"
             ))
             added.append("auto_attach_gmp")
             print("  + billing_report_subscriptions.auto_attach_gmp")
+        else:
+            # Auto-attach is now ON by default. For installs created under the
+            # OLD false default, do a ONE-TIME flip of existing rows + change the
+            # column default to true. Gated on the column's current default so it
+            # runs exactly once and never clobbers later per-offtaker opt-outs.
+            try:
+                cur_default = conn.execute(text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_name = 'billing_report_subscriptions' "
+                    "AND column_name = 'auto_attach_gmp'"
+                )).scalar()
+                if cur_default is not None and "false" in str(cur_default).lower():
+                    conn.execute(text(
+                        "UPDATE billing_report_subscriptions SET auto_attach_gmp = true "
+                        "WHERE auto_attach_gmp = false"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE billing_report_subscriptions "
+                        "ALTER COLUMN auto_attach_gmp SET DEFAULT true"
+                    ))
+                    print("  ~ billing_report_subscriptions.auto_attach_gmp default → true (one-time flip)")
+            except Exception as _e:
+                print(f"  (auto_attach_gmp default flip skipped: {_e})")
 
         # 2026-06-18 Durable bill-PDF bytes (auto-attach GMP bill). pdf_path was
         # ephemeral; persist the actual bytes in-row so the PDF survives redeploys.
