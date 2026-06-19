@@ -764,6 +764,12 @@ class InverterConnection(Base):
     # unverified | ok | error
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When the one-time DEEP HISTORY backfill last succeeded for this connection.
+    # The nightly pull only reaches ~90 days, so a freshly-connected vendor would
+    # show just the current year in Trends. The self-healing backfill pulls the
+    # vendor's full multi-year daily history into DailyGeneration on connect (and
+    # a scheduled healer retries any connection still NULL). NULL = never done.
+    history_backfilled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

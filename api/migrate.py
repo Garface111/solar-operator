@@ -846,6 +846,18 @@ def main():
             exists = inspect(conn).has_table(tbl)
             print(f"  {'✓' if exists else '✗ MISSING'} table {tbl}")
 
+        # 2026-06-19 Self-healing deep-history backfill marker. The nightly pull
+        # only reaches ~90 days, so a freshly-connected SolarEdge array showed
+        # just the current year in Trends. history_backfilled_at stamps when the
+        # one-time full multi-year backfill last succeeded (NULL = pending → the
+        # scheduled healer + connect hook fill it in).
+        if not column_exists(conn, "inverter_connections", "history_backfilled_at"):
+            conn.execute(text(
+                "ALTER TABLE inverter_connections ADD COLUMN history_backfilled_at TIMESTAMP"
+            ))
+            added.append("history_backfilled_at")
+            print("  + inverter_connections.history_backfilled_at")
+
     print("=== Migration complete ===")
 
 

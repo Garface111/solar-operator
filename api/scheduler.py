@@ -826,6 +826,18 @@ def start():
         CronTrigger(hour=3, minute=0),
         id="inverter_daily_pull", replace_existing=True,
     )
+    # Daily at 04:15 UTC: SELF-HEALING deep-history backfill. The 03:00 pull only
+    # reaches ~90 days, so a newly-connected inverter shows just the current year
+    # in Trends. This heals any connection whose full multi-year history hasn't
+    # been pulled yet (history_backfilled_at IS NULL) — stamps only on success so
+    # a failed/partial attempt retries next run. Capped per-run to respect vendor
+    # rate limits; the connect endpoint also fires it immediately for new connects.
+    scheduler.add_job(
+        _run_history_heal,
+        CronTrigger(hour=4, minute=15),
+        id="inverter_history_heal", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     # Daily at 03:30 UTC: snapshot per-inverter daily history into InverterDaily for
     # every owner (persist-on-read forced on a schedule) so the per-inverter graphs
     # keep accumulating real history even when nobody opens the dashboard. Critical
@@ -1026,6 +1038,25 @@ def _run_inverter_pull() -> None:
         send_internal_alert(
             "Inverter daily pull: unhandled exception",
             f"The inverter daily pull job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_history_heal() -> None:
+    """Self-healing deep-history backfill: fill multi-year history for any
+    inverter connection that hasn't had it pulled yet (so Trends shows past
+    years, not just the ~90 days the nightly pull reaches)."""
+    try:
+        from .jobs.inverter_history import heal_missing_history
+        result = heal_missing_history()
+        logger.info(
+            "inverter_history_heal: processed=%d stamped=%d still_pending=%d",
+            result.get("processed", 0), result.get("stamped", 0),
+            result.get("still_pending", 0),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Inverter history heal: unhandled exception",
+            f"The deep-history backfill heal job raised an unexpected error:\n{exc}",
         )
 
 

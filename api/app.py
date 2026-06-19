@@ -1337,6 +1337,25 @@ def admin_bill_to_daily_all(_: None = Depends(_require_admin)):
     return transform_all_tenants()
 
 
+@app.post("/admin/inverter-history/heal")
+def admin_inverter_history_heal(limit: int = 50, _: None = Depends(_require_admin)):
+    """Self-healing deep-history backfill across connections whose multi-year
+    history hasn't been pulled yet. Same as the nightly 04:15 job; idempotent."""
+    from .jobs.inverter_history import heal_missing_history
+    return heal_missing_history(limit=limit)
+
+
+@app.post("/admin/inverter-history/connection/{connection_id}")
+def admin_inverter_history_connection(
+    connection_id: int,
+    since_year: int = 2010,
+    _: None = Depends(_require_admin),
+):
+    """Force the full multi-year history backfill for ONE inverter connection."""
+    from .jobs.inverter_history import backfill_connection_history
+    return backfill_connection_history(connection_id, start_year=since_year)
+
+
 # ---- root --------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
