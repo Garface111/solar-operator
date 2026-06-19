@@ -118,6 +118,71 @@ def _daily_generation_by_month(
 
 
 # ── main builder ─────────────────────────────────────────────────────
+def report_has_data(client_id: int, *, quarters: int = 6,
+                    reference_date: Optional[date] = None) -> bool:
+    """True iff the workbook for `client_id` would render at least one non-zero
+    generation month in its reporting window.
+
+    Mirrors build_workbook's data sourcing EXACTLY: same rolling-quarter window,
+    same two sources (Bill kWh via calendar-day attribution + DailyGeneration),
+    so this never disagrees with what the rendered cells show. Used by the
+    delivery layer to skip auto-sending a blank workbook (a client with arrays
+    but no bills/daily data, or an empty onboarding stub) — exactly what an
+    operator does by hand when they only send reports that have real numbers.
+
+    Read-only. Cheap relative to building the whole workbook.
+    """
+    ref = reference_date or date.today()
+    qlist = _rolling_quarters(ref, count=quarters)
+    qmonths = set()
+    for (qy, qq) in qlist:
+        for (my, mm) in _quarter_months(qy, qq):
+            qmonths.add((my, mm))
+    start_year, start_q = qlist[0]
+    report_start = date(start_year, (start_q - 1) * 3 + 1, 1)
+    end_year, end_q = qlist[-1]
+    end_month = end_q * 3
+    report_end = (date(end_year, 12, 31) if end_month == 12
+                  else date(end_year, end_month + 1, 1) - timedelta(days=1))
+
+    with SessionLocal() as db:
+        client = db.get(Client, client_id)
+        if client is None:
+            return False
+        arrays = db.execute(
+            select(Array).where(
+                Array.client_id == client.id,
+                Array.excluded.is_(False),
+            )
+        ).scalars().all()
+        array_ids = [a.id for a in arrays]
+        if not array_ids:
+            return False
+
+        # 1) DailyGeneration — any non-zero kWh in window means data exists.
+        for arr_id in array_ids:
+            dg = _daily_generation_by_month(db, arr_id, report_start, report_end)
+            if any(v > 0 for v in dg.values()):
+                return True
+
+        # 2) Bill kWh — attribute each bill across calendar days, keep only the
+        #    months inside the report window (matches the renderer's per_group).
+        accounts = db.execute(
+            select(UtilityAccount).where(UtilityAccount.array_id.in_(array_ids))
+        ).scalars().all()
+        account_ids = [a.id for a in accounts]
+        if account_ids:
+            bills = db.execute(
+                select(Bill).where(Bill.account_id.in_(account_ids))
+            ).scalars().all()
+            for b in bills:
+                for (yy, mm), kwh in distribute_kwh_by_calendar_day(b).items():
+                    if (yy, mm) in qmonths and kwh > 0:
+                        return True
+    return False
+
+
+# ── main builder ─────────────────────────────────────────────────────
 def build_workbook(tenant_id: Optional[str] = None,
                    year: Optional[int] = None,
                    out_path: Optional[pathlib.Path] = None,

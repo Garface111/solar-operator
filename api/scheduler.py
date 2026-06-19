@@ -256,6 +256,7 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
 
     sent: list[int] = []
     failed: list[int] = []
+    skipped_empty: list[int] = []
     with SessionLocal() as db:
         # All client rows that EITHER explicitly match the cadence OR
         # inherit it from the tenant
@@ -278,8 +279,16 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
 
     for cid in candidates:
         try:
-            result = deliver_for_client(cid, triggered_by=f"sched-{frequency}")
-            (sent if result.get("ok") and result.get("email_sent") else failed).append(cid)
+            # skip_if_empty: never auto-email a blank workbook (a client with
+            # arrays but no bills/daily data, or an empty onboarding stub).
+            result = deliver_for_client(cid, triggered_by=f"sched-{frequency}",
+                                        skip_if_empty=True)
+            if result.get("skipped_empty"):
+                skipped_empty.append(cid)
+            elif result.get("ok") and result.get("email_sent"):
+                sent.append(cid)
+            else:
+                failed.append(cid)
         except Exception as e:
             failed.append(cid)
             send_internal_alert(
@@ -287,12 +296,16 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
                 f"Client: {cid}\nError: {e}",
             )
 
-    if failed:
+    # Internal-alert on failures AND on skipped-empty clients, so the operator
+    # learns which clients have no data instead of silently sending nothing.
+    if failed or skipped_empty:
         send_internal_alert(
-            f"Scheduled delivery — partial failures ({frequency})",
-            f"Sent OK: {sent}\nFailed: {failed}",
+            f"Scheduled delivery — {frequency} run summary",
+            f"Sent OK: {sent}\nFailed: {failed}\n"
+            f"Skipped (no generation data, not emailed): {skipped_empty}",
         )
-    return {"frequency": frequency, "sent": sent, "failed": failed}
+    return {"frequency": frequency, "sent": sent, "failed": failed,
+            "skipped_empty": skipped_empty}
 
 
 def deliver_weekly_reports():

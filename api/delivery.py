@@ -61,8 +61,18 @@ def _recipients_for_client(client: Client, tenant: Tenant,
 def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
                        triggered_by: str = "manual",
-                       subject_prefix: str = "") -> dict:
-    """Build & email the workbook for ONE client."""
+                       subject_prefix: str = "",
+                       skip_if_empty: bool = False) -> dict:
+    """Build & email the workbook for ONE client.
+
+    skip_if_empty=True makes an automatic/scheduled send refuse to mail a
+    workbook that would render with NO generation data (a client with arrays but
+    no bills/daily readings, or an empty onboarding stub). The scheduler passes
+    this so the cron never emails a blank report — the same judgment an operator
+    applies by hand when they only send reports that have real numbers. Explicit
+    operator sends (the dashboard buttons) leave it False so a forced send always
+    goes through.
+    """
     with SessionLocal() as db:
         client = db.get(Client, client_id)
         if not client:
@@ -112,6 +122,23 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         return {"ok": False, "reason": "tenant or client inactive",
                 "client_id": client_id, "client_name": client_name,
                 "recipient": "", "tenant": tenant_id}
+
+    # Automatic/scheduled sends must never email a blank workbook. If this
+    # client would render with no generation data in the reporting window, skip
+    # it and surface why — instead of mailing a zero-filled report to a client
+    # (the exact "bogus report" failure). Explicit operator sends pass
+    # skip_if_empty=False so a deliberate force-send always goes through.
+    if skip_if_empty:
+        from .writers.gmcs_writer import report_has_data
+        if not report_has_data(client_id):
+            logger.info(
+                "skip empty report: client %s (%s) tenant %s — no generation "
+                "data in window, not auto-sending",
+                client_id, client_name, tenant_id,
+            )
+            return {"ok": False, "reason": "no generation data — skipped",
+                    "client_id": client_id, "client_name": client_name,
+                    "recipient": "", "tenant": tenant_id, "skipped_empty": True}
 
     # Resolve recipients, honoring send_mode. An explicit override_to (ops
     # force-send) always wins and ignores send_mode.
@@ -227,7 +254,8 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
 
 def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
-                       triggered_by: str = "manual") -> dict:
+                       triggered_by: str = "manual",
+                       skip_if_empty: bool = True) -> dict:
     """Build & email a workbook for EVERY active client under a tenant.
 
     Returns an aggregate result with one entry per client. This is the
@@ -235,6 +263,13 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
       - the customer-facing "send report now" button (sends all clients)
       - the scheduler cron
       - the ops admin force-send
+
+    skip_if_empty defaults True for this BULK fan-out: a "send all" must never
+    blast blank workbooks to clients that have no generation data. Skipped
+    clients come back in the result (reason "no generation data — skipped") so
+    the UI can tell the operator. An ops force-send passing override_to still
+    delivers per-client because override_to wins; set skip_if_empty=False to
+    force-send blanks deliberately.
     """
     with SessionLocal() as db:
         tenant = db.get(Tenant, tenant_id)
@@ -252,22 +287,27 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
         client_ids = [c.id for c in clients]
 
     results = []
+    # An override_to send (ops force-send to a single address) is a deliberate
+    # request to deliver every client regardless of data — don't skip those.
+    effective_skip = skip_if_empty and override_to is None
     for cid in client_ids:
         try:
             results.append(deliver_for_client(
                 cid, year=year, override_to=override_to,
-                triggered_by=triggered_by))
+                triggered_by=triggered_by, skip_if_empty=effective_skip))
         except Exception as e:
             logger.exception("Delivery failed for client %s", cid)
             results.append({"ok": False, "client_id": cid,
                             "client_name": None, "recipient": "",
                             "reason": "unexpected error", "error": str(e)})
     ok_count = sum(1 for r in results if r.get("ok"))
+    skipped_empty = [r.get("client_id") for r in results if r.get("skipped_empty")]
     return {
         "ok": ok_count > 0,
         "tenant": tenant_id,
         "client_count": len(client_ids),
         "delivered": ok_count,
+        "skipped_empty": skipped_empty,
         "results": results,
         "triggered_by": triggered_by,
     }
