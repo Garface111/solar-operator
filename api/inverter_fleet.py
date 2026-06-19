@@ -419,6 +419,43 @@ _ALERT_HEADLINE = {
 _ALERT_PRIORITY = {"fault": 4, "dead": 4, "comm_gap": 3, "underperforming": 2, "ok": 0}
 
 
+# A vendor site is treated as having a SOURCE-side reporting outage when its
+# freshest inverter last_report is older than this (it stopped sending data to
+# its own monitoring portal — nothing we can fix; we just surface it honestly).
+_SOURCE_STALE_HOURS = 6.0
+
+
+def _source_status(inv_rows: list[dict]) -> dict:
+    """Array-level source-data freshness from the inverters' last_report.
+
+    Returns {state, last_report, age_hours}:
+      • "none"  — no live-capable feed at all (no last_report on any inverter).
+      • "ok"    — freshest report within the staleness window.
+      • "stale" — freshest report older than the window (the VENDOR/source has
+                  not received data recently — a source-side outage, not ours).
+    last_report is the most-recent inverter timestamp (ISO), age_hours its age.
+    """
+    from datetime import datetime, timezone
+    stamps: list[datetime] = []
+    for r in inv_rows:
+        lr = r.get("last_report")
+        if not lr:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(lr).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            stamps.append(dt)
+        except (ValueError, TypeError):
+            continue
+    if not stamps:
+        return {"state": "none", "last_report": None, "age_hours": None}
+    freshest = max(stamps)
+    age_h = round((datetime.now(timezone.utc) - freshest).total_seconds() / 3600.0, 1)
+    state = "stale" if age_h >= _SOURCE_STALE_HOURS else "ok"
+    return {"state": state, "last_report": freshest.isoformat(), "age_hours": age_h}
+
+
 def _array_alert(inv_rows: list[dict]) -> dict:
     worst, worst_rank, bad = "ok", 0, 0
     for inv in inv_rows:
@@ -601,6 +638,13 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                          "site_id": iv.source_site_id, "url": url}
         origin_links = [seen[k] for k in sorted(seen, key=lambda t: (str(t[0] or ""), str(t[1] or "")))]
 
+        # Source-data freshness for this array. The vendor portal (e.g. SolarEdge)
+        # reports each inverter's last_report timestamp; when a site stops sending
+        # data to its own vendor, last_report goes stale. We surface that as a
+        # SOURCE outage (the vendor isn't receiving data) — distinct from any
+        # problem on our side. Computed from the freshest inverter last_report.
+        src_status = _source_status(inv_rows)
+
         columns.append({
             "array_id": arr.id,
             "array_name": arr.name,
@@ -620,6 +664,10 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             # that zeroes output never reads as "asleep". Regional (central VT)
             # until a per-array lat/long exists; recomputed each fetch.
             "is_daylight": daylight,
+            # {"state": ok|stale|dark|none, "last_report": iso|None, "age_hours": float|None}
+            # — surfaced on the card so a vendor-side reporting gap reads as a
+            # SOURCE outage, not an app failure.
+            "source_status": src_status,
         })
 
     attention = sum(c["alert"]["count"] for c in columns)
