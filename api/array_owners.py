@@ -1148,13 +1148,18 @@ def onboarding_status_ep(authorization: str | None = Header(default=None)) -> di
     reconcile, or bill against, so the product can't do its job. This drives the
     'you're not done until you connect GMP' banner.
 
+    COMPLETE the moment GMP is connected (Ford's rule: "once you connect GMP the
+    finish-setup banner needs to disappear"). Account→array linking is a
+    secondary nudge surfaced elsewhere (Account tab); it must NOT keep the big
+    "you're not done" setup banner up after GMP is connected.
+
     Returns:
       gmp_connected     — a GMP session has been captured for this tenant
       has_gmp_accounts  — at least one GMP UtilityAccount exists
       linked_arrays     — # of arrays with a GMP account linked
       unlinked_accounts — # of captured GMP accounts not yet linked to an array
       arrays_total      — # of (active) arrays
-      complete          — True once GMP is connected AND ≥1 array is linked
+      complete          — True once GMP is connected (banner hides)
       next_step         — machine key for the UI: 'connect_gmp' | 'link_accounts' | 'done'
     """
     from .models import UtilityAccount, Array, UtilitySession
@@ -1182,7 +1187,10 @@ def onboarding_status_ep(authorization: str | None = Header(default=None)) -> di
         ).scalar() or 0
 
         gmp_connected = gmp_sessions > 0 or len(gmp_accts) > 0
-        complete = gmp_connected and linked > 0
+        # Ford's rule: connecting GMP completes the setup gate — the finish-setup
+        # banner must disappear the moment GMP is connected, even if the captured
+        # accounts aren't linked to arrays yet. Linking is a softer, separate nudge.
+        complete = gmp_connected
         if not gmp_connected:
             next_step = "connect_gmp"
         elif linked == 0:
