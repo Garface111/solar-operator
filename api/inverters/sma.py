@@ -38,9 +38,14 @@ FIELDS = [
 AUTH_URL = "https://auth.smaapis.de/oauth2/token"
 MON_BASE = "https://monitoring.smaapis.de/v1"
 
-# Token cache: client_id -> (access_token, expires_at). Module-scoped so a daily
-# poll across many plants under one app reuses a single token.
-_TOKEN_CACHE: dict[str, tuple[str, datetime]] = {}
+# Token cache: client_id -> (access_token, refresh_token, expires_at). Module-
+# scoped so a daily poll across many plants under one app reuses a single token.
+# The refresh_token is cached too because SMA ROTATES it on every refresh grant —
+# the response hands back a NEW refresh_token and invalidates the one just used.
+# We must reuse the freshest one (and persist it back to the connection config,
+# see _get_token's mutation of `config`) or the next refresh fails 401 and the
+# plant goes dark until the owner manually reconnects.
+_TOKEN_CACHE: dict[str, tuple[str, str | None, datetime]] = {}
 
 
 def _now() -> datetime:
@@ -50,13 +55,17 @@ def _now() -> datetime:
 def _get_token(config: dict) -> str:
     cid = str(config["client_id"])
     cached = _TOKEN_CACHE.get(cid)
-    if cached is not None and cached[1] > _now():
+    if cached is not None and cached[2] > _now():
         return cached[0]
 
-    if config.get("refresh_token"):
+    # Prefer the freshest refresh_token we hold: the rotated one from the cache
+    # (set by a prior refresh) over the original stored in config.
+    refresh_token = (cached[1] if cached is not None else None) or config.get("refresh_token")
+
+    if refresh_token:
         data = {
             "grant_type": "refresh_token",
-            "refresh_token": config["refresh_token"],
+            "refresh_token": refresh_token,
             "client_id": cid,
             "client_secret": config["client_secret"],
         }
@@ -72,7 +81,13 @@ def _get_token(config: dict) -> str:
     except httpx.RequestError as exc:
         raise InverterError(f"Network error contacting SMA OAuth: {exc}") from exc
     if resp.status_code in (401, 403):
-        raise InverterAuthError("SMA OAuth rejected the client credentials (401/403).")
+        # A rotated/expired refresh token lands here. Drop the dead cache entry
+        # AND clear it from config so the NEXT call falls back to a fresh
+        # client_credentials grant instead of retrying the dead token forever.
+        _TOKEN_CACHE.pop(cid, None)
+        if config.get("refresh_token"):
+            config["refresh_token"] = None
+        raise InverterAuthError("SMA OAuth rejected the credentials (401/403).")
     if not resp.is_success:
         raise InverterError(
             f"SMA token endpoint returned {resp.status_code}: {resp.text[:200]}"
@@ -86,7 +101,14 @@ def _get_token(config: dict) -> str:
     if not token:
         raise InverterError("SMA token endpoint returned no access_token")
     ttl = int(body.get("expires_in") or 3600)
-    _TOKEN_CACHE[cid] = (token, _now() + timedelta(seconds=max(ttl - 60, 60)))
+    # Capture the ROTATED refresh_token SMA just issued (falls back to the one we
+    # sent if the response omits it). Cache it AND write it back into `config` in
+    # place so the caller (poller) can persist it to the DB — surviving both
+    # access-token expiry and a server redeploy that clears the in-memory cache.
+    new_refresh = body.get("refresh_token") or refresh_token
+    _TOKEN_CACHE[cid] = (token, new_refresh, _now() + timedelta(seconds=max(ttl - 60, 60)))
+    if new_refresh and new_refresh != config.get("refresh_token"):
+        config["refresh_token"] = new_refresh
     return token
 
 

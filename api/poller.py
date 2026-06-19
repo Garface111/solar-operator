@@ -56,11 +56,32 @@ import logging
 from datetime import timedelta
 
 from sqlalchemy import select, delete
+from sqlalchemy.orm.attributes import flag_modified
 
 from .db import SessionLocal
 from .models import (
     Array, Inverter, InverterReading, InverterConnection, now,
 )
+
+
+def _persist_config_if_changed(conn, cfg: dict) -> None:
+    """Write an in-place-mutated config back to the connection row.
+
+    OAuth vendors (SMA) rotate their refresh_token on each grant and write the
+    new value into the cfg dict in place. JSON columns don't auto-detect nested
+    mutation, so re-assign + flag_modified to guarantee the new token is saved.
+    Cheap and idempotent — a no-op when nothing changed (same dict reference is
+    re-flagged at most once per poll). The surrounding poll commits the session.
+    """
+    if not isinstance(conn, InverterConnection):
+        return
+    try:
+        if conn.config is not cfg:
+            conn.config = cfg
+        flag_modified(conn, "config")
+    except Exception:  # never let persistence break the poll
+        pass
+
 from . import inverter_fleet as _fleet
 from . import inverters as _vendors
 
@@ -263,10 +284,19 @@ def poll_all_sources(*, force_daylight: bool | None = None) -> dict:
                 if isinstance(conn, InverterConnection):
                     conn.last_error = str(exc)[:500]
                     conn.status = "error"
+                    # An OAuth vendor (SMA) may have cleared a dead rotated token
+                    # from cfg in place — persist that so we don't keep retrying it.
+                    _persist_config_if_changed(conn, cfg)
                 continue
 
             _governor_record(ck, day, ts)
             summary["api_calls"] += 1
+
+            # OAuth vendors (SMA) rotate the refresh_token on each grant and write
+            # the new one back into cfg in place. Persist it now so it survives the
+            # access-token expiry AND a redeploy — otherwise the plant goes dark
+            # until a manual reconnect (the bug this fixes).
+            _persist_config_if_changed(conn, cfg)
 
             site_power_w = (live or {}).get("current_power_w")
             if site_power_w is None:
