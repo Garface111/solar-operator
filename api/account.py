@@ -424,25 +424,28 @@ def issue_magic_link(email: str, persist: bool = True, product: str | None = Non
     """
     email = email.lower().strip()
     with SessionLocal() as db:
-        # An email can have several tenant rows (legacy dupes, deactivated
-        # accounts). Prefer the ACTIVE, most-recent one so the sign-in link
-        # lands on the account the owner actually uses — not a dormant row.
-        t = db.execute(
-            select(Tenant).where(Tenant.contact_email == email)
-            .order_by(Tenant.active.desc(), Tenant.created_at.desc())
-        ).scalars().first()
-        # When the caller knows the product (a per-brand login page), prefer the
-        # tenant in THAT product so a NEPOOL+AO shared email lands in the right
-        # dashboard instead of whichever happens to be active/newest.
-        if product:
-            want = product.strip().lower()
-            scoped = db.execute(
+        want = product.strip().lower() if product else None
+        if want:
+            # PRODUCT-SCOPED login: the request came from a per-brand login page
+            # (NEPOOL /accounts or arrayoperator.com/login), so resolve ONLY
+            # within that product. An email that owns BOTH a NEPOOL and an Array
+            # Operator account must get its NEPOOL link from the NEPOOL login and
+            # its AO link from the AO login — never cross-leaked. If no tenant
+            # exists in the requested product, refuse rather than falling back to
+            # the other product's account (which would email a wrong-brand link).
+            t = db.execute(
                 select(Tenant).where(
                     Tenant.contact_email == email, Tenant.product == want
                 ).order_by(Tenant.active.desc(), Tenant.created_at.desc())
             ).scalars().first()
-            if scoped is not None:
-                t = scoped
+        else:
+            # Product-blind caller (legacy/unknown origin): pick the ACTIVE,
+            # most-recent tenant across all products so the link at least lands
+            # on the account the owner actually uses.
+            t = db.execute(
+                select(Tenant).where(Tenant.contact_email == email)
+                .order_by(Tenant.active.desc(), Tenant.created_at.desc())
+            ).scalars().first()
         if not t:
             return False
 

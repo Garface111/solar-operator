@@ -24,10 +24,28 @@ export function getSession(): string | null {
 
 export function setSession(token: string): void {
   localStorage.setItem(SESSION_KEY, token);
+  // A fresh session re-arms the one-shot 401 notifier so the NEXT genuine
+  // expiry surfaces its bounce-to-login again.
+  unauthorizedNotified = false;
 }
 
 export function clearSession(): void {
   localStorage.removeItem(SESSION_KEY);
+}
+
+// One-shot guard: a single expired session typically fans out into several
+// concurrent authed requests (account + clients + reports), each returning 401.
+// Without this, every one of them dispatches UNAUTHORIZED_EVENT and the user
+// gets a STACK of identical "session expired" toasts. Notify once per session;
+// setSession() re-arms it on the next sign-in.
+let unauthorizedNotified = false;
+
+/** Broadcast a single session-expiry bounce. Idempotent until the next login. */
+function notifyUnauthorizedOnce(): void {
+  clearSession();
+  if (unauthorizedNotified) return;
+  unauthorizedNotified = true;
+  window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
 }
 
 /** Raised on a 401 so callers can distinguish auth failures from other errors. */
@@ -116,8 +134,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   });
 
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) {
@@ -142,8 +159,18 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
 // ─── auth ──────────────────────────────────────────────────────────────────
 
+// This bundle is the NEPOOL Operator dashboard (served at nepooloperator.com
+// /accounts). Every auth call declares its product so an email that owns BOTH a
+// NEPOOL and an Array Operator account is routed to its NEPOOL tenant — never
+// cross-leaked into Array Operator (which has its own login passing
+// product:"array_operator"). See api/account.issue_magic_link strict scoping.
+const PRODUCT = "nepool";
+
 export async function requestLoginLink(email: string, persist = true): Promise<void> {
-  await request("/v1/auth/request", { body: { email, persist }, noAuth: true });
+  await request("/v1/auth/request", {
+    body: { email, persist, product: PRODUCT },
+    noAuth: true,
+  });
 }
 
 /** Sign in with email + password. Returns session token on success. */
@@ -153,7 +180,7 @@ export async function passwordLogin(
 ): Promise<string> {
   const res = await request<{ session_token: string }>(
     "/v1/auth/password-login",
-    { body: { email, password }, noAuth: true },
+    { body: { email, password, product: PRODUCT }, noAuth: true },
   );
   return res.session_token;
 }
@@ -891,8 +918,7 @@ export async function downloadClientReport(
     { headers: token ? { Authorization: `Bearer ${token}` } : {} },
   );
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) {
@@ -926,8 +952,7 @@ export async function downloadFleetReport(fmt: "xlsx" | "pdf"): Promise<void> {
     { headers: token ? { Authorization: `Bearer ${token}` } : {} },
   );
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) {
@@ -970,8 +995,7 @@ export async function downloadInvoiceWorkbook(
     { headers: token ? { Authorization: `Bearer ${token}` } : {} },
   );
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) {
@@ -1185,8 +1209,7 @@ export async function uploadDailyCsv(
   );
 
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -1542,8 +1565,7 @@ export async function createManualSubscription(
     },
   );
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -1726,8 +1748,7 @@ export async function attachGmpInvoice(
     },
   );
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -1917,8 +1938,7 @@ export async function ingestPreview(
   );
 
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -2014,8 +2034,7 @@ export async function nepoolPreview(
   );
 
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -2245,8 +2264,7 @@ export async function uploadVerification(
     body: fd,
   });
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -2279,8 +2297,7 @@ export async function fetchVerificationUploadedFile(id: number): Promise<Blob> {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(await parseError(res));
@@ -2295,8 +2312,7 @@ export async function fetchVerificationSoWorkbook(
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (res.status === 401) {
-    clearSession();
-    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    notifyUnauthorizedOnce();
     throw new UnauthorizedError();
   }
   if (!res.ok) {

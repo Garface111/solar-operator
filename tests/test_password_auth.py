@@ -359,3 +359,106 @@ class TestMultiTenantEmail:
                            json={"email": email, "password": "totallywrong9"})
         assert resp.status_code == 401
 
+
+# ─── magic-link STRICT product scoping (the cross-product leak fix) ──────────────
+
+class TestMagicLinkProductScoping:
+    """issue_magic_link(product=...) must resolve ONLY within that product.
+
+    The reported bug: a NEPOOL operator requested a sign-in link and got emailed
+    a link into Array Operator, because the request was product-blind and the
+    cross-product fallback picked whichever tenant was active/newest. With the
+    SPA now passing product="nepool" (and AO passing "array_operator"), the
+    backend must route each login to its OWN product's tenant — and must NOT
+    fall back to the other product when no tenant matches.
+    """
+
+    def _two_accounts(self, email: str):
+        """Make a NEPOOL + an Array Operator tenant on the SAME email. The AO one
+        is created LAST so it sorts first under the (active, created_at desc)
+        order the old product-blind path used — i.e. the worst case where a bare
+        NEPOOL request would have leaked into AO."""
+        ids = {}
+        with SessionLocal() as db:
+            for product in ("nepool", "array_operator"):
+                tid = "ten_" + secrets.token_hex(6)
+                db.add(Tenant(
+                    id=tid, name=f"{product} Co", contact_email=email,
+                    operator_name=f"{product} Owner",
+                    tenant_key="sol_live_" + secrets.token_urlsafe(12),
+                    plan="standard", active=True, subscription_status="trialing",
+                    product=product))
+                ids[product] = tid
+            db.commit()
+        return ids
+
+    def _capture(self, monkeypatch):
+        import api.account as account
+        captured = {}
+        def _fake(to, subject, html, text=None, **kw):
+            captured["to"] = to
+            captured["html"] = html
+            captured["text"] = text
+            captured["product"] = kw.get("product")
+            return True
+        monkeypatch.setattr(account, "_send_via_resend", _fake)
+        return account, captured
+
+    def test_nepool_request_with_dual_email_targets_nepool(self, monkeypatch):
+        """A NEPOOL login on a shared email lands on nepooloperator.com even
+        though an Array Operator tenant exists (and sorts first)."""
+        account, cap = self._capture(monkeypatch)
+        email = f"dual_{secrets.token_hex(4)}@example.com"
+        self._two_accounts(email)
+        sent = account.issue_magic_link(email, product="nepool")
+        assert sent is True
+        assert "nepooloperator.com/accounts/?token=" in cap["html"]
+        assert "arrayoperator.com" not in cap["html"]
+
+    def test_array_operator_request_with_dual_email_targets_ao(self, monkeypatch):
+        account, cap = self._capture(monkeypatch)
+        email = f"dual_{secrets.token_hex(4)}@example.com"
+        self._two_accounts(email)
+        sent = account.issue_magic_link(email, product="array_operator")
+        assert sent is True
+        assert "arrayoperator.com/login?token=" in cap["html"]
+        assert "nepooloperator.com" not in cap["html"]
+
+    def test_no_fallback_when_product_absent(self, monkeypatch):
+        """If the requested product has NO tenant for this email, refuse —
+        never email a link into the other product's account."""
+        account, cap = self._capture(monkeypatch)
+        email = f"nepoolonly_{secrets.token_hex(4)}@example.com"
+        # Only an Array Operator tenant exists on this email.
+        with SessionLocal() as db:
+            tid = "ten_" + secrets.token_hex(6)
+            db.add(Tenant(
+                id=tid, name="AO only", contact_email=email,
+                operator_name="AO Owner",
+                tenant_key="sol_live_" + secrets.token_urlsafe(12),
+                plan="standard", active=True, subscription_status="trialing",
+                product="array_operator"))
+            db.commit()
+        # A NEPOOL login for this email must NOT leak the AO account.
+        sent = account.issue_magic_link(email, product="nepool")
+        assert sent is False
+        assert cap == {}  # nothing emailed
+
+    def test_product_blind_request_keeps_legacy_fallback(self, monkeypatch):
+        """A product-less caller (legacy/unknown origin) still resolves to the
+        active/newest tenant so no existing integration breaks."""
+        account, cap = self._capture(monkeypatch)
+        email = f"legacy_{secrets.token_hex(4)}@example.com"
+        with SessionLocal() as db:
+            tid = "ten_" + secrets.token_hex(6)
+            db.add(Tenant(
+                id=tid, name="Legacy Co", contact_email=email,
+                operator_name="Legacy Owner",
+                tenant_key="sol_live_" + secrets.token_urlsafe(12),
+                plan="standard", active=True, subscription_status="trialing",
+                product="nepool"))
+            db.commit()
+        sent = account.issue_magic_link(email)  # no product
+        assert sent is True
+        assert "nepooloperator.com/accounts/?token=" in cap["html"]
+

@@ -731,8 +731,10 @@ def complete(background_tasks: BackgroundTasks, token: str = Query(...), body: O
     session_token = mint_session_for_tenant(tenant_id)
 
     # Magic-link sign-in too, for when they later sign in from a new browser
-    # or device (the session token above only lives in this browser).
-    magic_link_email_sent = issue_magic_link(email)
+    # or device (the session token above only lives in this browser). Scope to
+    # the product just onboarded so a dual-product email gets THIS account's
+    # link, not whichever happens to be newest.
+    magic_link_email_sent = issue_magic_link(email, product=product)
 
     # Second email: a sample report so they see what their clients will receive.
     # Best-effort — already swallows its own exceptions, never blocks completion.

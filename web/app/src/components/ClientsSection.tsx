@@ -31,6 +31,7 @@ import {
   undoDelete,
   undoMerge,
   getNepoolStats,
+  UnauthorizedError,
 } from "../lib/api";
 import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 import { useDashboardContext } from "../screens/DashboardLayout";
@@ -270,6 +271,9 @@ export function ClientsSection({ expandClientId }: Props) {
         return rows;
       })
       .catch((err) => {
+        // A 401 is already handled globally (bounce to login). Don't raise a
+        // second, scary, sticky red toast on top of the session-expiry bounce.
+        if (err instanceof UnauthorizedError) return [] as ClientRow[];
         toast.error(err instanceof Error ? err.message : "Couldn't load clients");
         setClients([]);
         return [] as ClientRow[];
@@ -301,10 +305,9 @@ export function ClientsSection({ expandClientId }: Props) {
         if (!cancelled) setClients(rows);
       })
       .catch((err) => {
-        if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : "Couldn't load clients");
-          setClients([]);
-        }
+        if (cancelled || err instanceof UnauthorizedError) return;
+        toast.error(err instanceof Error ? err.message : "Couldn't load clients");
+        setClients([]);
       });
 
     // Live-refresh whenever the sandbox above mutates its state (reparent,

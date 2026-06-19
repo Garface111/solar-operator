@@ -22,6 +22,9 @@ interface ToastApi {
   error: (message: string) => void;
   warning: (message: string) => void;
   success: (message: string) => void;
+  /** Remove all currently-shown toasts. Used when bouncing to the login screen
+   *  so a sticky (dismiss-only) error toast doesn't linger over the new view. */
+  clear: () => void;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -58,11 +61,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((ts) => [...ts, { id, message, kind }]);
   }, []);
 
+  const clear = useCallback(() => setToasts([]), []);
+
   const api: ToastApi = {
     show,
     error: useCallback((m: string) => show(m, "error"), [show]),
     warning: useCallback((m: string) => show(m, "warning"), [show]),
     success: useCallback((m: string) => show(m, "success"), [show]),
+    clear,
   };
 
   return (

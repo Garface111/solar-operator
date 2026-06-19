@@ -122,6 +122,10 @@ function AuthGate() {
   // Global 401 handler — clearSession() already ran inside the api client.
   useEffect(() => {
     function onUnauthorized() {
+      // Clear any in-flight error toasts first (e.g. a tab's "couldn't load"
+      // raised by the same expiry) so the login screen shows ONE clean info
+      // message, not a stack — and nothing sticky survives the next sign-in.
+      toast.clear();
       toast.show("Your session expired — sign in again to continue.", "info");
       setState("anon");
       navigate("/login", { replace: true });
