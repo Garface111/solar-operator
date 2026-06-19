@@ -2759,6 +2759,26 @@ def _persist_meter_accounts(
     ).scalars().all()
     by_name = {a.name.strip().lower(): a for a in existing}
 
+    # Match by the array's LINKED utility account number too — far more stable
+    # than the display name. NEPOOL arrays are created by the bill-capture path
+    # with a UtilityAccount (e.g. VEC acct 6578300) and a service-address name;
+    # the meter-capture nickname (addr1, city, state — no zip) won't string-match
+    # that name, so without this an account-number match the generation pull
+    # would spawn a DUPLICATE array. Map account_number → its array.
+    by_acct_number: dict[str, Array] = {}
+    array_ids = [a.id for a in existing]
+    if array_ids:
+        for ua in db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tenant.id,
+                UtilityAccount.array_id.in_(array_ids),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all():
+            arr_for_acct = next((a for a in existing if a.id == ua.array_id), None)
+            if ua.account_number and arr_for_acct is not None:
+                by_acct_number[str(ua.account_number).strip()] = arr_for_acct
+
     for acct in accounts:
             # GMP accounts carry a GMP-style /usage summary; SmartHub utilities
             # (vec/wec) supply daily[] generation directly with no summary. Only
@@ -2804,7 +2824,7 @@ def _persist_meter_accounts(
                 })
                 continue
 
-            arr = by_name.get(name.lower())
+            arr = by_acct_number.get(acct_num) or by_name.get(name.lower())
             created = False
             if arr is None:
                 arr = Array(
@@ -2814,6 +2834,8 @@ def _persist_meter_accounts(
                 db.add(arr)
                 db.flush()
                 by_name[name.lower()] = arr
+                if acct_num:
+                    by_acct_number[acct_num] = arr
                 created = True
 
             kwh_recorded = 0.0

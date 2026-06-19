@@ -392,16 +392,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // page via SO_CAPTURE_LANDED; the page POSTs the accounts to the EXISTING
   // /v1/array-owners/utility-meter-capture endpoint (the proven GMP daily path).
   if (msg.type === "SMARTHUB_METER_GEN_CAPTURED") {
+    const accounts = Array.isArray(msg.accounts) ? msg.accounts : [];
+    const provider = msg.provider || "vec";
     const landed = {
       type: "SO_CAPTURE_LANDED",
       ok: true,
-      provider: msg.provider || "vec",
+      provider,
       kind: "utility_meter",
-      accounts: Array.isArray(msg.accounts) ? msg.accounts : [],
+      accounts,
       at: new Date().toISOString(),
     };
     broadcastToSoTabs(landed);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
+    // NEPOOL path: there is no Array Operator page open to POST the capture, but
+    // the extension is paired to a tenant. POST the daily generation straight to
+    // the dual-auth endpoint with the stored tenant key so VEC/WEC generation
+    // lands in DailyGeneration → NEPOOL reports. ADDITIVE: the AO relay above
+    // still runs for Array Operator owners (idempotent if both fire).
+    (async () => {
+      try {
+        const { tenantKey, endpoint } = await getSettings();
+        if (!tenantKey || accounts.length === 0) return;
+        const base = (endpoint || PROD_ENDPOINT).replace(/\/v1\/sync$/, "");
+        const r = await fetch(`${base}/v1/array-owners/utility-meter-capture`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tenantKey}` },
+          body: JSON.stringify({ provider, accounts }),
+        });
+        console.log("[EnergyAgent] smarthub meter-capture POST ->", r.status, r.ok ? "ok" : "FAIL");
+      } catch (e) {
+        console.warn("[EnergyAgent] smarthub meter-capture POST threw:", e && e.message || e);
+      }
+    })();
     sendResponse({ ok: true });
     return; // synchronous response
   }

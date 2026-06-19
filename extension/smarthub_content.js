@@ -100,11 +100,21 @@
   function meterIntentArmed() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get("so_capture_intent", (res) => {
+        chrome.storage.local.get(["so_capture_intent", "tenant_key"], (res) => {
           if (chrome.runtime.lastError) { void chrome.runtime.lastError; return resolve(false); }
+          // (a) Array Operator path: an explicit vec/wec meter intent armed when
+          //     the owner clicked "Connect" on the AO site (10-min TTL).
           const intent = res && res.so_capture_intent;
-          resolve(!!(intent && intent.vendor === PROVIDER &&
-            (Date.now() - (intent.ts || 0)) < 10 * 60 * 1000));
+          const aoArmed = !!(intent && intent.vendor === PROVIDER &&
+            (Date.now() - (intent.ts || 0)) < 10 * 60 * 1000);
+          // (b) NEPOOL path: the extension is paired to a tenant (tenant_key set).
+          //     SmartHub bills carry NO generation kWh, so a NEPOOL operator's
+          //     reports stay empty unless we ALSO pull daily generation here.
+          //     There's no AO intent on the NEPOOL side, so being paired is the
+          //     trigger — the background routes the result to the dual-auth
+          //     utility-meter-capture endpoint with the stored tenant_key.
+          const paired = !!(res && res.tenant_key);
+          resolve(aoArmed || paired);
         });
       } catch (_) { resolve(false); }
     });
