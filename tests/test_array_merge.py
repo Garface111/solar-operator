@@ -74,6 +74,23 @@ def test_subarray_guard_blocks_directional_siblings():
     assert _differs_only_by_subarray_token("Riverbend 1", "Riverbend 2")
 
 
+def test_subarray_guard_blocks_prefixed_siblings_regression():
+    # REGRESSION (prod dry-run caught this): a "1a_" label prefix must NOT defeat
+    # the guard. Starlake North/South/Center are 3 distinct sub-meters and must
+    # never collapse into one "Starlake".
+    assert _differs_only_by_subarray_token("1a_Starlake_North", "Starlake")
+    assert _differs_only_by_subarray_token("1a_Starlake_South", "Starlake")
+    assert _differs_only_by_subarray_token("1a_Starlake_Center", "Starlake")
+    assert _differs_only_by_subarray_token("1a_Starlake_North", "1a_Starlake_South")
+
+
+def test_subarray_guard_allows_prefixed_real_twins():
+    # A label prefix WITHOUT a positional token is a real GMP↔vendor twin → merge.
+    assert not _differs_only_by_subarray_token("1a_Londonderry", "Londonderry")
+    assert not _differs_only_by_subarray_token("1b_COVER Catamount Building",
+                                               "Cover Catamount Building")
+
+
 def test_subarray_guard_allows_real_twins():
     # GMP nickname vs vendor name — differ by a NON-subarray word → not blocked
     assert not _differs_only_by_subarray_token("Londonderry Community Solar", "Londonderry")

@@ -76,20 +76,30 @@ def _tokens(name: str) -> list[str]:
 
 
 def _differs_only_by_subarray_token(n1: str, n2: str) -> bool:
-    """True if the two names are identical except for ≥1 sub-array token, i.e.
-    they're distinct sub-meters of the same site (Starlake North vs South), NOT
-    a GMP/vendor twin of one array."""
+    """True if the two names look like DISTINCT sub-meters of the same site rather
+    than a GMP/vendor twin of ONE array — in which case they must never be merged.
+
+    Conservative rule (safety over recall): fire whenever a known sub-array /
+    positional token (north/south/center/roof/lot/1/2/a/b…) appears in EXACTLY ONE
+    of the two names AND the two names share at least one substantive (non-token)
+    stem word. That catches:
+        "Starlake"            vs "Starlake North"            (token in one side)
+        "1a_Starlake_Center"  vs "1a_Starlake_North"         (different tokens)
+        "Maple Ridge Roof"    vs "Maple Ridge Carport"       (different tokens)
+    while still allowing real twins where the only difference is a NON-token word
+    ("Londonderry" vs "Londonderry Community Solar").
+    """
     t1, t2 = _tokens(n1), _tokens(n2)
     s1, s2 = set(t1), set(t2)
-    common = s1 & s2
-    diff = (s1 ^ s2)            # tokens in exactly one of the two
+    diff = s1 ^ s2                       # tokens in exactly one name
     if not diff:
-        return False           # identical token sets → not a sub-array split
-    if not common:
-        return False           # nothing shared → handled elsewhere
-    # Every differing token must be a known sub-array token for this to be a
-    # safe "these are siblings, don't merge" verdict.
-    return all(t in _SUBARRAY_TOKENS for t in diff)
+        return False                     # identical token sets → not a split
+    # Substantive (non-sub-array) words the two names share — proves same site.
+    shared_stem = {t for t in (s1 & s2) if t not in _SUBARRAY_TOKENS}
+    if not shared_stem:
+        return False                     # no common real word → decide elsewhere
+    # If ANY differing token is a sub-array/positional token, these are siblings.
+    return any(t in _SUBARRAY_TOKENS for t in diff)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
