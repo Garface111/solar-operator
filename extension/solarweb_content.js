@@ -48,7 +48,7 @@
     // Surface capture diagnostics in the page console (prefixed for grep-ability).
     try { console.warn.apply(console, ["[solar-operator/fronius]"].concat([].slice.call(arguments))); } catch (_) {}
   }
-  LOG("content script loaded v1.9.44 on", location.hostname, "\u2014 watching for a Connect-Fronius capture. If you DON'T see this line, the extension isn't injected on this tab (reload solarweb.com with the extension enabled).");
+  LOG("content script loaded v1.9.45 on", location.hostname, "\u2014 watching for a Connect-Fronius capture. If you DON'T see this line, the extension isn't injected on this tab (reload solarweb.com with the extension enabled).");
   async function getJson(url, opts) {
     const r = await fetch(url, Object.assign({ credentials: "include" }, opts || {}));
     if (!r.ok) throw new Error(url + " -> " + r.status);
@@ -155,14 +155,21 @@
       const nm = String(s.name || "");
       if (!/Total Power\s*\|/.test(nm)) continue;       // skip the PV-production total series
       const disp = nm.replace(/^.*\|\s*/, "").trim();
-      kwhByName[disp] = integrateKwh(s.data);
-      const valid = (s.data || []).filter((p) => Array.isArray(p) && p.length === 2 && typeof p[1] === "number");
+      // The devwork series is in WATTS (verified 2026-06-19 by a live daylight
+      // capture: a Primo 12.5kW inverter read ~1699, i.e. 1699 W = 1.7 kW, which
+      // would be an impossible 1699 kW if it were already kW). Normalize the whole
+      // series to kW ONCE here so integrateKwh (→kWh), peak_power_kw, and the live
+      // point are all consistently in kW.
+      const kwData = (s.data || []).map((p) =>
+        (Array.isArray(p) && p.length === 2 && typeof p[1] === "number")
+          ? [p[0], p[1] / 1000] : p);
+      kwhByName[disp] = integrateKwh(kwData);
+      const valid = kwData.filter((p) => Array.isArray(p) && p.length === 2 && typeof p[1] === "number");
       const ys = valid.map((p) => p[1]);
       peakByName[disp] = ys.length ? Math.max(...ys) : null;
-      // Last chronological point = this inverter's latest power reading today.
-      // The devwork series is in kW (same units integrateKwh + peak_power_kw use
-      // — verified by plausible daily kWh landing in prod). Keep its timestamp so
-      // we only treat it as LIVE power when recent (see the freshness guard below).
+      // Last chronological point = this inverter's latest power reading today (kW,
+      // after the watts→kW normalization above). Keep its timestamp so we only
+      // treat it as LIVE power when recent (see the freshness guard below).
       const sorted = valid.slice().sort((a, b) => a[0] - b[0]);
       const lastPt = sorted.length ? sorted[sorted.length - 1] : null;
       lastByName[disp] = lastPt ? { kw: lastPt[1], ts_ms: lastPt[0] } : null;
@@ -173,7 +180,12 @@
     // recent point is a genuine live reading; otherwise leave current_power_w
     // null so the card honestly shows "produced today · no live feed" (handled
     // in array-operator sandbox.js) instead of a stale value stamped as fresh.
-    const LIVE_FRESH_MS = 30 * 60 * 1000;   // 30 min
+    // Solar.web's devwork chart updates on a coarse cadence (~30 min between
+    // points — a live capture 2026-06-19 read points 34–35 min old at midday).
+    // A 30-min window would reject those legitimately-recent readings, so use
+    // 60 min: recent enough to be "current," loose enough for the source's real
+    // granularity. Older than this = a stale final-daylight point, left null.
+    const LIVE_FRESH_MS = 60 * 60 * 1000;   // 60 min
     const nowMs = Date.now();
 
     // DIAGNOSTIC (daylight verification): print each device's raw last point so a
