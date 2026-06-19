@@ -114,6 +114,45 @@ def test_fleet_trends_pure_gmp_array_shows_data(client):
     assert aid in by_arr and by_arr[aid]["lifetime_kwh"] == pytest.approx(88.0, abs=0.1)
 
 
+def test_fleet_trends_array_filter_scopes_payload(client):
+    """?array_id=N scopes the aggregates to ONE array, but by_array still lists
+    the whole fleet (so the filter dropdown can switch). Bad id -> 404."""
+    tid = "ten_" + secrets.token_hex(6)
+    _SEEDED.append(tid)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, name="Filter Test", contact_email=f"{tid}@t.test",
+                      tenant_key="sol_live_" + secrets.token_urlsafe(8),
+                      plan="standard", active=True, product="array_operator"))
+        c = Client(tenant_id=tid, name="C", active=True); db.add(c); db.flush()
+        a1 = Array(tenant_id=tid, name="Array One", client_id=c.id, fuel_type="solar",
+                   region="central"); db.add(a1)
+        a2 = Array(tenant_id=tid, name="Array Two", client_id=c.id, fuel_type="solar",
+                   region="central"); db.add(a2); db.flush()
+        db.add(DailyGeneration(tenant_id=tid, array_id=a1.id, day=date(2025, 7, 1),
+                               kwh=100.0, source="manual"))
+        db.add(DailyGeneration(tenant_id=tid, array_id=a2.id, day=date(2025, 7, 1),
+                               kwh=300.0, source="manual"))
+        db.commit()
+        a1id = a1.id
+    from api.account import mint_session_for_tenant
+    auth = {"Authorization": "Bearer " + mint_session_for_tenant(tid)}
+
+    rf = client.get("/v1/array-owners/fleet-trends", headers=auth)
+    assert rf.status_code == 200
+    assert rf.json()["lifetime_kwh"] == pytest.approx(400.0, abs=0.1)
+    assert rf.json()["selected_array_id"] is None
+
+    r1 = client.get(f"/v1/array-owners/fleet-trends?array_id={a1id}", headers=auth)
+    assert r1.status_code == 200
+    body = r1.json()
+    assert body["lifetime_kwh"] == pytest.approx(100.0, abs=0.1)
+    assert body["selected_array_id"] == a1id
+    assert len(body["by_array"]) == 2, "by_array must stay full-fleet for the dropdown"
+
+    r404 = client.get("/v1/array-owners/fleet-trends?array_id=99999999", headers=auth)
+    assert r404.status_code == 404
+
+
 def test_gmp_backfill_admin_requires_key(client, monkeypatch):
     """The trigger endpoints must be admin-guarded: when ADMIN_API_KEY is set, a
     request with the wrong/no key is rejected. (In local dev with no key set the

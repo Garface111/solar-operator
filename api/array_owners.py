@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.get
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -452,6 +452,9 @@ _MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 @router.get("/v1/array-owners/fleet-trends")
 def array_owners_fleet_trends(
     authorization: str | None = Header(default=None),
+    array_id: int | None = Query(default=None,
+        description="Scope the whole trends payload to ONE owned array. "
+                    "by_array still lists the full fleet so the filter can switch."),
 ) -> dict:
     """PORTFOLIO-WIDE multi-year production trends — the owner's macro view.
 
@@ -493,9 +496,18 @@ def array_owners_fleet_trends(
             .order_by(Array.id)
         ).scalars().all()
 
+        # Optional per-array scope: the aggregation below runs over `scoped`,
+        # but `by_array` is always built from the FULL fleet so the filter
+        # dropdown can switch between arrays. A bad/unowned id → 404.
+        scoped = arrays
+        if array_id is not None:
+            scoped = [a for a in arrays if a.id == array_id]
+            if not scoped:
+                raise HTTPException(404, "array not found")
+
         from .reports import gmp_daily_read as _gdr
 
-        for arr in arrays:
+        for arr in scoped:
             # Per-day kWh for this array, merged across BOTH sources:
             #   • DailyGeneration  — CSV-upload / billing-meter table
             #   • gmp_daily_generation — the GMP API daily sponge (via the read
@@ -529,17 +541,39 @@ def array_owners_fleet_trends(
                 fleet_daily[d] += k
                 arr_ym[(d.year, d.month)] += k
                 arr_life += k
-            by_array[arr.id] = {
-                "array_id": arr.id,
-                "name": arr.name,
-                "lifetime_kwh": round(arr_life, 1),
-                "years": sorted({y for (y, _m) in arr_ym.keys()}),
-            }
+            # rate blended over the SCOPED set, so EST. VALUE matches the kWh shown
             try:
                 rate_blended += get_energy_rate(_array_provider(db, arr.id))
                 rate_n += 1
             except Exception:  # noqa: BLE001
                 pass
+
+        # by_array always reflects the FULL fleet (so the filter dropdown lists
+        # every array regardless of the current scope). Computed with the same
+        # two-source merge as the aggregation, but only for the lifetime/years
+        # summary each row needs.
+        for arr in arrays:
+            per_day: dict = {}
+            for d, kwh in db.execute(
+                select(DailyGeneration.day, DailyGeneration.kwh).where(
+                    DailyGeneration.array_id == arr.id)
+            ).all():
+                if d is not None and kwh is not None:
+                    per_day[d] = float(kwh)
+            try:
+                for pt in _gdr.get_daily_series(arr.id, db=db):
+                    dd = pt["day"]
+                    if dd is not None and dd not in per_day:
+                        per_day[dd] = float(pt["kwh"] or 0.0)
+            except Exception:  # noqa: BLE001
+                pass
+            life = round(sum(per_day.values()), 1)
+            by_array[arr.id] = {
+                "array_id": arr.id,
+                "name": arr.name,
+                "lifetime_kwh": life,
+                "years": sorted({d.year for d in per_day.keys()}),
+            }
 
     years = sorted({y for (y, _m) in fleet_ym.keys()})
     rate = (rate_blended / rate_n) if rate_n else 0.0
@@ -606,6 +640,7 @@ def array_owners_fleet_trends(
         "ttm_savings_usd": round(ttm_kwh * rate, 2) if rate else None,
         "lifetime_kwh": lifetime_kwh,
         "daily_recent": daily_recent,
+        "selected_array_id": array_id,
         "by_array": sorted(by_array.values(),
                            key=lambda a: -a["lifetime_kwh"]),
     }
