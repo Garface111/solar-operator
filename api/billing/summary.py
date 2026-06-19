@@ -211,6 +211,8 @@ def render_summary_xlsx(match: BillingMatch, out_path: pathlib.Path,
 
 def render_summary_pdf(match: BillingMatch, out_path: pathlib.Path,
                        peer: Optional[dict] = None) -> pathlib.Path:
+    """Slick, on-brand performance-summary PDF — same energy hero band + bar
+    chart as the invoice, with stat cards instead of a payable table."""
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.lib.units import inch
@@ -221,19 +223,17 @@ def render_summary_pdf(match: BillingMatch, out_path: pathlib.Path,
     except ImportError as e:  # pragma: no cover
         raise RuntimeError("reportlab is required for PDF summaries") from e
 
+    from . import _pdf_brand as brand
+
     s = build_summary(match, peer)
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    styles = getSampleStyleSheet()
-    GREEN = colors.HexColor("#047857")
-    h = ParagraphStyle("h", parent=styles["Title"], textColor=GREEN, fontSize=18)
-    lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=10)
-
-    doc = SimpleDocTemplate(str(out_path), pagesize=letter,
-                            topMargin=0.7 * inch, bottomMargin=0.7 * inch)
-    story = [Paragraph(f"Performance summary — {s.get('customer_name') or 'Array'}", h),
-             Spacer(1, 14)]
+    HERO_H = 1.55 * inch
+    INKDK = colors.HexColor(brand.INKDK)
+    MUTEDDK = colors.HexColor(brand.MUTEDDK)
+    GREEN_DK = colors.HexColor(brand.GREEN_DK)
+    cust = s.get("customer_name") or "Array"
 
     def fmt(v, money=False, pct=False):
         if v is None:
@@ -244,32 +244,91 @@ def render_summary_pdf(match: BillingMatch, out_path: pathlib.Path,
             return f"{v:+.1f}%"
         return f"{v:,.0f}" if isinstance(v, (int, float)) else str(v)
 
-    rows = [
-        ["This period", f"{fmt(s.get('this_period_kwh'))} kWh  ({s.get('this_period_month') or ''})"],
-        ["Year over year", f"{fmt(s.get('yoy_delta_kwh'))} kWh  ({fmt(s.get('yoy_delta_pct'), pct=True)})"
-            if s.get("yoy_delta_kwh") is not None else "—"],
-        ["Trailing 12 months", f"{fmt(s.get('ttm_kwh'))} kWh"],
-        ["Trailing 12-mo savings", fmt(s.get("ttm_savings"), money=True)],
-        ["Lifetime generation", f"{fmt(s.get('lifetime_kwh'))} kWh"],
-        ["Lifetime savings", fmt(s.get("lifetime_savings"), money=True)],
-        ["Periods on record", fmt(s.get("period_count"))],
+    # Hero: lifetime generation as the headline figure.
+    life = s.get("lifetime_kwh")
+    decorate = brand.make_hero_decorator(
+        title="Performance Summary", subtitle=cust,
+        right_label="LIFETIME GENERATION",
+        right_value=(f"{life:,.0f} kWh" if life is not None else ""),
+        footer_right="Performance summary", hero_h=HERO_H)
+
+    styles = getSampleStyleSheet()
+    lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=11,
+                         textColor=INKDK, fontName="Helvetica-Bold")
+    small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8.5,
+                           textColor=MUTEDDK)
+
+    doc = SimpleDocTemplate(
+        str(out_path), pagesize=letter,
+        topMargin=HERO_H + 0.35 * inch, bottomMargin=0.8 * inch,
+        leftMargin=0.85 * inch, rightMargin=0.85 * inch)
+    story = []
+
+    # ---- stat cards (2×3 grid) -----------------------------------------------
+    yoy = (f"{fmt(s.get('yoy_delta_kwh'))} kWh  ({fmt(s.get('yoy_delta_pct'), pct=True)})"
+           if s.get("yoy_delta_kwh") is not None else "—")
+    cards = [
+        ("THIS PERIOD", f"{fmt(s.get('this_period_kwh'))} kWh",
+         s.get("this_period_month") or ""),
+        ("YEAR OVER YEAR", yoy, "vs. same month last year"),
+        ("TRAILING 12 MONTHS", f"{fmt(s.get('ttm_kwh'))} kWh",
+         f"{fmt(s.get('ttm_savings'), money=True)} saved"),
+        ("LIFETIME GENERATION", f"{fmt(s.get('lifetime_kwh'))} kWh",
+         f"{s.get('period_count') or '—'} periods on record"),
+        ("LIFETIME SAVINGS", fmt(s.get("lifetime_savings"), money=True),
+         "total solar savings"),
+        ("PEER HEALTH",
+         str((s.get("peer") or {}).get("status") or "—") if s.get("peer") else "—",
+         "telemetry-measured" if s.get("peer") else "connect telemetry"),
     ]
-    if s.get("peer"):
-        p = s["peer"]
-        rows.append(["Peer-measured health", str(p.get("status") or p)])
-    t = Table(rows, colWidths=[2.6 * inch, 3.6 * inch])
-    t.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 11),
-        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#555")),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("LINEBELOW", (0, 0), (-1, -2), 0.4, colors.HexColor("#e5e7eb")),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+
+    def _card(c):
+        eyebrow, value, sub = c
+        inner = Table([[eyebrow], [value], [sub]], colWidths=[3.05 * inch])
+        inner.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (0, 0), 7.5),
+            ("TEXTCOLOR", (0, 0), (0, 0), MUTEDDK),
+            ("FONTNAME", (0, 1), (0, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 1), (0, 1), 16),
+            ("TEXTCOLOR", (0, 1), (0, 1), GREEN_DK),
+            ("FONTSIZE", (0, 2), (0, 2), 8),
+            ("TEXTCOLOR", (0, 2), (0, 2), MUTEDDK),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return inner
+
+    grid = []
+    for i in range(0, len(cards), 2):
+        grid.append([_card(cards[i]), _card(cards[i + 1])])
+    gt = Table(grid, colWidths=[3.3 * inch, 3.3 * inch])
+    gt.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(brand.PAPER2)),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(brand.LINE)),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(brand.LINE)),
+        ("TOPPADDING", (0, 0), (-1, -1), 13),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 13),
+        ("LEFTPADDING", (0, 0), (-1, -1), 15),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 15),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
-    story.append(t)
-    story.append(Spacer(1, 10))
+    story.append(gt)
+    story.append(Spacer(1, 22))
+
+    # ---- trailing-12-month energy chart --------------------------------------
+    story.append(Paragraph("Trailing 12 months of production", lbl))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
-        "Generation and savings are computed from your billing ledger. "
-        "Year-over-year compares the same billing month one year earlier.", lbl))
-    doc.build(story)
+        "Your monthly generation over the last year — measured from your billing "
+        "ledger. Year-over-year compares the same billing month one year earlier.",
+        small))
+    story.append(Spacer(1, 8))
+    pts = [(pt.get("month") or "", pt.get("kwh")) for pt in s.get("ttm_points", [])]
+    story.append(brand.make_chart_flowable(
+        pts, 6.6 * inch, 1.9 * inch,
+        empty_msg="No production history on record yet."))
+
+    doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
     return out_path
