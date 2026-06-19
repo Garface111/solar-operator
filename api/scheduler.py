@@ -691,6 +691,16 @@ def start():
         CronTrigger(hour=12, minute=0),
         id="morning_fleet_digest", replace_existing=True,
     )
+    # Daily at 05:00 UTC: GMP daily-generation sponge top-up. Walks each GMP
+    # meter's full multi-year history on first run, then incrementally tops up.
+    # Feeds Trends + Reports with GMP data hands-free. Runs after the 03:xx
+    # inverter pulls and before the 09:00 report deliveries.
+    scheduler.add_job(
+        _run_gmp_daily_backfill,
+        CronTrigger(hour=5, minute=0),
+        id="gmp_daily_backfill", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     scheduler.start()
 
 
@@ -722,6 +732,44 @@ def _run_usage_report() -> None:
         send_internal_alert(
             "Array Operator usage report: unhandled exception",
             f"The per-kWh usage-report job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_gmp_daily_backfill() -> None:
+    """Daily GMP daily-generation sponge top-up across every active tenant with
+    enabled GMP accounts. Idempotent + incremental: only re-pulls the recent
+    still-changing window plus any gaps, so day-to-day cost is tiny while the
+    first run per meter walks its full multi-year history. This is what keeps
+    Trends + Reports fed with GMP data hands-free. Wrapper so any import/build
+    error can't crash the scheduler thread."""
+    try:
+        from sqlalchemy import select as _select
+        from .jobs import gmp_daily_backfill as bf
+        from .models import Tenant, UtilityAccount
+        with SessionLocal() as db:
+            tenant_ids = db.execute(
+                _select(UtilityAccount.tenant_id)
+                .where(UtilityAccount.provider == "gmp",
+                       UtilityAccount.enabled == True,  # noqa: E712
+                       UtilityAccount.deleted_at.is_(None))
+                .group_by(UtilityAccount.tenant_id)
+            ).scalars().all()
+        ins = upd = errs = 0
+        for tid in tenant_ids:
+            r = bf.backfill_tenant(tid)
+            t = r.get("totals", {})
+            ins += t.get("daily_inserted", 0)
+            upd += t.get("daily_updated", 0)
+            errs += t.get("accounts_error", 0)
+        logger.info(
+            "gmp_daily_backfill: tenants=%d daily_inserted=%d daily_updated=%d account_errors=%d",
+            len(tenant_ids), ins, upd, errs,
+        )
+    except Exception as exc:
+        logger.exception("gmp_daily_backfill: crashed")
+        send_internal_alert(
+            "GMP daily backfill: unhandled exception",
+            f"The scheduled GMP daily-generation backfill raised an error:\n{exc}",
         )
 
 

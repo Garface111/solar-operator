@@ -30,6 +30,184 @@ PROVIDER = "gmp"
 GMP_API_BASE = "https://api.greenmountainpower.com"
 
 
+# ─── Daily 15-minute interval USAGE CSV (the multi-year DATA SPONGE) ──────────
+# Grounded on a live read-only probe (2026-06-18), documented in
+# docs/plans/GMP_DAILY_READ_CONTRACT.md:
+#   GET /api/v2/usage/{acct}/download?startDate=&endDate=&format=csv  (Bearer JWT)
+#   → 15-min interval CSV, cols: ServiceAgreement, IntervalStart, IntervalEnd,
+#     Quantity, UnitOfMeasure(kWh). Below a meter's history floor GMP returns a
+#     clean 404; a ~1-year request 503-times-out server-side (page in <=90d).
+# The backfill job (api/jobs/gmp_daily_backfill.py) depends on these.
+
+class GmpUsageNotFound(Exception):
+    """GMP returned 404 for a usage window — below the meter's history floor."""
+
+
+class GmpUsageTimeout(Exception):
+    """GMP 503/timeout — the requested window is too large; caller should shrink."""
+
+
+def fetch_usage_csv(account_number: str, jwt: str, start, end, timeout: float = 60.0) -> str:
+    """Fetch the 15-minute interval generation CSV for one GMP meter over
+    [start, end). `start`/`end` are date or datetime.
+
+    Raises:
+      GmpUsageNotFound  on HTTP 404 (below the meter's earliest data),
+      GmpUsageTimeout   on HTTP 503 / read timeout (window too big),
+      ValueError        on any other non-200 (e.g. 401/403 expired JWT — the
+                        status code is embedded in the message for the caller's
+                        refresh-retry logic).
+    """
+    headers = {
+        "Authorization": f"Bearer {jwt}",
+        "Accept": "text/csv, application/json, text/plain, */*",
+        "Origin": "https://greenmountainpower.com",
+        "Referer": "https://greenmountainpower.com/",
+        "GMP-Source": "web",
+        "User-Agent": "Mozilla/5.0 (Solar Operator)",
+    }
+    sd = start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else str(start)
+    ed = end.strftime("%Y-%m-%d") if hasattr(end, "strftime") else str(end)
+    url = f"{GMP_API_BASE}/api/v2/usage/{account_number}/download"
+    params = {"startDate": sd, "endDate": ed, "format": "csv"}
+    try:
+        with httpx.Client(timeout=timeout, headers=headers) as c:
+            r = c.get(url, params=params)
+    except httpx.TimeoutException as exc:
+        raise GmpUsageTimeout(f"GMP usage CSV timed out for {sd}..{ed}") from exc
+    if r.status_code == 404:
+        raise GmpUsageNotFound(f"GMP usage 404 for {account_number} {sd}..{ed}")
+    if r.status_code == 503:
+        raise GmpUsageTimeout(f"GMP usage 503 for {account_number} {sd}..{ed}")
+    if r.status_code != 200:
+        raise ValueError(f"GMP usage CSV returned HTTP {r.status_code}")
+    return r.text
+
+
+def parse_usage_csv_to_daily(csv_text: str) -> dict[str, Any]:
+    """Parse a GMP 15-minute interval CSV into per-day kWh aggregates.
+
+    Columns (case-insensitive, order-tolerant): ServiceAgreement, IntervalStart,
+    IntervalEnd, Quantity, UnitOfMeasure. The day is taken from IntervalStart.
+    kWh per day = Σ Quantity for that day; intervals = count of rows that day.
+
+    NEVER fabricates: a blank/missing/unparseable Quantity contributes nothing.
+    Negative interval noise is preserved here (the modeled layer clamps to >=0).
+
+    Returns:
+        {
+          "by_day": {date: {"kwh": float, "intervals": int}},
+          "row_count": int,                 # data rows parsed
+          "interval_min": date|None,        # earliest day seen
+          "interval_max": date|None,        # latest day seen
+          "service_agreements": [str],      # distinct SA ids present
+          "unit": str|None,                 # UnitOfMeasure (expect 'kWh')
+        }
+    """
+    import csv as _csv
+    import io as _io
+
+    empty = {"by_day": {}, "row_count": 0, "interval_min": None,
+             "interval_max": None, "service_agreements": [], "unit": None}
+    if not csv_text or not csv_text.strip():
+        return empty
+
+    reader = _csv.reader(_io.StringIO(csv_text))
+    rows = list(reader)
+    if not rows:
+        return empty
+
+    # Locate the header row (GMP sometimes prepends a title line); find the row
+    # that contains an "interval" + "quantity" column.
+    header_idx = None
+    for i, row in enumerate(rows[:5]):
+        low = [c.strip().lower() for c in row]
+        if any("interval" in c or c == "date" for c in low) and any("quantity" in c or "kwh" in c for c in low):
+            header_idx = i
+            break
+    if header_idx is None:
+        header_idx = 0
+    header = [c.strip().lower() for c in rows[header_idx]]
+
+    def col(*names):
+        for nm in names:
+            for j, h in enumerate(header):
+                if h == nm or nm in h:
+                    return j
+        return None
+
+    i_start = col("intervalstart", "interval start", "start", "date")
+    i_qty = col("quantity", "kwh", "usage", "value")
+    i_sa = col("serviceagreement", "service agreement", "account", "meter")
+    i_unit = col("unitofmeasure", "unit of measure", "unit", "uom")
+    if i_start is None or i_qty is None:
+        return empty
+
+    by_day: dict = {}
+    row_count = 0
+    sas: set = set()
+    unit = None
+    dmin = dmax = None
+
+    for row in rows[header_idx + 1:]:
+        if not row or len(row) <= max(i_start, i_qty):
+            continue
+        raw_dt = (row[i_start] or "").strip().strip('"')
+        if not raw_dt:
+            continue
+        d = _parse_interval_date(raw_dt)
+        if d is None:
+            continue
+        qty = _to_float((row[i_qty] or "").strip().strip('"').replace(",", ""))
+        if qty is None:
+            continue  # never fabricate — a missing reading is skipped
+        cell = by_day.setdefault(d, {"kwh": 0.0, "intervals": 0})
+        cell["kwh"] += qty
+        cell["intervals"] += 1
+        row_count += 1
+        if i_sa is not None and i_sa < len(row):
+            sa = (row[i_sa] or "").strip()
+            if sa:
+                sas.add(sa)
+        if unit is None and i_unit is not None and i_unit < len(row):
+            u = (row[i_unit] or "").strip()
+            if u:
+                unit = u
+        dmin = d if dmin is None else min(dmin, d)
+        dmax = d if dmax is None else max(dmax, d)
+
+    # round day totals to avoid float dust
+    for d in by_day:
+        by_day[d]["kwh"] = round(by_day[d]["kwh"], 6)
+
+    return {
+        "by_day": by_day,
+        "row_count": row_count,
+        "interval_min": dmin,
+        "interval_max": dmax,
+        "service_agreements": sorted(sas),
+        "unit": unit,
+    }
+
+
+def _parse_interval_date(s: str):
+    """Extract the calendar date from a GMP IntervalStart cell. Handles
+    'YYYY-MM-DD HH:MM:SS', ISO 'YYYY-MM-DDTHH:MM:SS', and 'MM/DD/YYYY HH:MM'."""
+    s = s.strip()
+    # take just the date portion before any space or 'T'
+    head = s.split("T")[0].split(" ")[0]
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(head, fmt).date()
+        except ValueError:
+            continue
+    # last resort: full ISO parse
+    try:
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        return None
+
+
 def parse_extension_payload(payload: dict) -> dict:
     """Normalize the Chrome extension's POST body into structured fields the
     API can persist directly."""

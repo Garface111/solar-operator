@@ -493,18 +493,38 @@ def array_owners_fleet_trends(
             .order_by(Array.id)
         ).scalars().all()
 
+        from .reports import gmp_daily_read as _gdr
+
         for arr in arrays:
+            # Per-day kWh for this array, merged across BOTH sources:
+            #   • DailyGeneration  — CSV-upload / billing-meter table
+            #   • gmp_daily_generation — the GMP API daily sponge (via the read
+            #     contract; summed across the array's GMP meters)
+            # Prefer the CSV value on any day both have (avoid double-count); fall
+            # back to the GMP value to fill gaps. Result feeds fleet totals,
+            # month×year, the 30-day daily bars, and per-array lifetime.
+            per_day: dict = {}
             rows = db.execute(
                 select(DailyGeneration.day, DailyGeneration.kwh).where(
                     DailyGeneration.array_id == arr.id,
                 )
             ).all()
-            arr_ym: dict[tuple[int, int], float] = defaultdict(float)
-            arr_life = 0.0
             for d, kwh in rows:
                 if d is None or kwh is None:
                     continue
-                k = float(kwh)
+                per_day[d] = float(kwh)
+            # GMP daily sponge — only fills days the CSV table doesn't already cover.
+            try:
+                for pt in _gdr.get_daily_series(arr.id, db=db):
+                    d = pt["day"]
+                    if d is not None and d not in per_day:
+                        per_day[d] = float(pt["kwh"] or 0.0)
+            except Exception:  # noqa: BLE001 — never let a read-contract hiccup sink trends
+                pass
+
+            arr_ym: dict[tuple[int, int], float] = defaultdict(float)
+            arr_life = 0.0
+            for d, k in per_day.items():
                 fleet_ym[(d.year, d.month)] += k
                 fleet_daily[d] += k
                 arr_ym[(d.year, d.month)] += k

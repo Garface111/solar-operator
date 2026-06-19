@@ -1246,6 +1246,36 @@ def admin_refresh_rate_schedule(_: None = Depends(_require_admin)):
         return refresh_rate_schedule(db)
 
 
+@app.post("/admin/gmp-backfill/tenant/{tenant_id}")
+def admin_gmp_backfill_tenant(
+    tenant_id: str,
+    window_days: int = 60,
+    force_refetch: bool = False,
+    _: None = Depends(_require_admin),
+):
+    """Run the multi-year GMP daily backfill for EVERY enabled GMP account of a
+    tenant. Walks each meter backward to its history floor, stores verbatim CSV
+    in the sponge (gmp_usage_raw) + derives per-day kWh (gmp_daily_generation).
+    Idempotent: re-running tops up recent/missing windows only unless
+    force_refetch. Returns an evidence summary (date ranges + row counts)."""
+    from .jobs import gmp_daily_backfill as bf
+    return bf.backfill_tenant(tenant_id, window_days=window_days, force_refetch=force_refetch)
+
+
+@app.post("/admin/gmp-backfill/account/{account_id}")
+def admin_gmp_backfill_account(
+    account_id: int,
+    window_days: int = 60,
+    force_refetch: bool = False,
+    _: None = Depends(_require_admin),
+):
+    """Run the GMP daily backfill for ONE account (meter) — full available
+    history. Same storage + idempotency as the tenant runner. Useful for a
+    targeted re-pull or to prove the pipeline on a single meter."""
+    from .jobs import gmp_daily_backfill as bf
+    return bf.backfill_account(None, account_id, window_days=window_days, force_refetch=force_refetch)
+
+
 # ---- root --------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
