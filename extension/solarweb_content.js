@@ -48,6 +48,7 @@
     // Surface capture diagnostics in the page console (prefixed for grep-ability).
     try { console.warn.apply(console, ["[solar-operator/fronius]"].concat([].slice.call(arguments))); } catch (_) {}
   }
+  LOG("content script loaded v1.9.44 on", location.hostname, "\u2014 watching for a Connect-Fronius capture. If you DON'T see this line, the extension isn't injected on this tab (reload solarweb.com with the extension enabled).");
   async function getJson(url, opts) {
     const r = await fetch(url, Object.assign({ credentials: "include" }, opts || {}));
     if (!r.ok) throw new Error(url + " -> " + r.status);
@@ -341,11 +342,22 @@
   async function tick() {
     if (done) return;
     polls++;
-    if (!(await hasIntent())) return;            // no explicit AO click → never capture
-    if (!(await isSignedIn())) { broadcastLoginState("login_required"); return; }
+    const intent = await hasIntent();
+    LOG("tick #" + polls + " — intent:", intent ? "yes" : "NO (click \u201cConnect Fronius\u201d in Array Operator within 10 min, then return here)");
+    if (!intent) return;            // no explicit AO click → never capture
+    const signedIn = await isSignedIn();
+    LOG("signed in to Solar.web:", signedIn ? "yes" : "NO (sign in at solarweb.com, then it retries automatically)");
+    if (!signedIn) { broadcastLoginState("login_required"); return; }
     broadcastLoginState("signed_in");
     let payload;
-    try { payload = await captureFlow(); } catch (_) { return; }   // retry on next tick
+    try {
+      payload = await captureFlow();
+    } catch (e) {
+      LOG("capture failed this tick (will retry):", (e && e.message) || e);
+      return;   // retry on next tick
+    }
+    LOG("captured systems:", (payload.sites || []).length,
+        "— inverters:", (payload.sites || []).reduce((n, s) => n + ((s.inverters || []).length), 0));
     if (!(payload.sites || []).length) return;   // nothing usable yet
     // De-dupe identical captures (e.g. the poller firing twice) by hashing the
     // site ids + their today-energy snapshot.
@@ -355,6 +367,7 @@
     lastHash = h;
     done = true;
     clearIntent();
+    LOG("\u2713 capture complete — shipping to Array Operator. (The 'per-inverter last devwork point' line above is what your dev needs.)");
     chrome.runtime.sendMessage({ type: "FRONIUS_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
