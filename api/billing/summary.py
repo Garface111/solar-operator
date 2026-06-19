@@ -289,13 +289,17 @@ def render_summary_pdf(match: BillingMatch, out_path: pathlib.Path,
             ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (0, 0), 7.5),
             ("TEXTCOLOR", (0, 0), (0, 0), MUTEDDK),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 7),    # gap under the eyebrow
             ("FONTNAME", (0, 1), (0, 1), "Helvetica-Bold"),
             ("FONTSIZE", (0, 1), (0, 1), 16),
+            ("LEADING", (0, 1), (0, 1), 19),
             ("TEXTCOLOR", (0, 1), (0, 1), GREEN_DK),
+            ("BOTTOMPADDING", (0, 1), (0, 1), 6),    # gap between value and sub
             ("FONTSIZE", (0, 2), (0, 2), 8),
             ("TEXTCOLOR", (0, 2), (0, 2), MUTEDDK),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (0, 0), 0),
+            ("TOPPADDING", (0, 2), (0, 2), 0),
+            ("BOTTOMPADDING", (0, 2), (0, 2), 0),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ]))
         return inner
