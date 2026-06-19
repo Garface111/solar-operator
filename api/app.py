@@ -724,6 +724,45 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 ctx.add("array_skipped", decision=f"account {acct_no} already linked to array {acct.array_id}")
                                 continue
                         arr_name = (a.get("nickname") or acct_no)[:200]
+                        # PREFER linking to an EXISTING active array of this owner
+                        # before creating a new one. Operators often pre-create
+                        # arrays (spreadsheet import, manual) with the real name
+                        # but no GMP account attached; a later GMP capture should
+                        # ATTACH to that array, not spawn a duplicate. Match by the
+                        # captured nickname against the owner's array names
+                        # (case-insensitive), restricted to arrays that have no GMP
+                        # account linked yet — a deterministic, no-guess link.
+                        linked_existing = None
+                        if a.get("nickname"):
+                            cand = db.execute(
+                                select(Array).where(
+                                    Array.tenant_id == tenant.id,
+                                    Array.client_id == owner.id,
+                                    Array.deleted_at.is_(None),
+                                    func.lower(Array.name) == arr_name.strip().lower(),
+                                ).order_by(Array.id)
+                            ).scalars().all()
+                            for c_arr in cand:
+                                has_gmp = db.execute(
+                                    select(func.count(UtilityAccount.id)).where(
+                                        UtilityAccount.array_id == c_arr.id,
+                                        UtilityAccount.provider == provider,
+                                        UtilityAccount.deleted_at.is_(None),
+                                    )
+                                ).scalar() or 0
+                                if has_gmp == 0:
+                                    linked_existing = c_arr
+                                    break
+                        if linked_existing is not None:
+                            acct.array_id = linked_existing.id
+                            ctx.add("array_linked",
+                                    decision=f"linked account {acct_no} to existing array "
+                                             f"{linked_existing.name!r} (id {linked_existing.id})")
+                            if not acct.captured_client_name:
+                                acct.captured_client_name = (owner.name or "")[:200]
+                            if owner.is_placeholder:
+                                owner.is_placeholder = False
+                            continue
                         # Resurrect a soft-deleted Array with the same
                         # (tenant_id, name) — the uq_array_per_tenant
                         # unique constraint doesn't exclude deleted_at.

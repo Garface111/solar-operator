@@ -1082,6 +1082,72 @@ def create_array_ep(body: CreateArrayBody,
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
+@router.get("/v1/array-owners/utility-accounts")
+def list_utility_accounts_ep(authorization: str | None = Header(default=None)) -> dict:
+    """The tenant's captured GMP/utility accounts and which array each is linked
+    to (if any). Powers the 'link a captured account to an array' UI — the manual
+    bridge for the multi-meter case (e.g. Starlake = 3 GMP accounts → 1 array)
+    that name-matching can't auto-resolve. Also reports how many bills each
+    account carries, so the owner knows which links will light up history."""
+    from .models import UtilityAccount, Array, Bill
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tenant.id,
+                UtilityAccount.deleted_at.is_(None),
+            ).order_by(UtilityAccount.provider, UtilityAccount.account_number)
+        ).scalars().all()
+        out = []
+        for a in accts:
+            arr = db.get(Array, a.array_id) if a.array_id else None
+            nbills = db.execute(
+                select(func.count(Bill.id)).where(Bill.account_id == a.id)
+            ).scalar() or 0
+            out.append({
+                "account_id": a.id, "provider": a.provider,
+                "account_number": a.account_number, "nickname": a.nickname,
+                "linked_array_id": a.array_id,
+                "linked_array_name": arr.name if arr else None,
+                "bill_count": int(nbills),
+            })
+        arrays = [{"array_id": ar.id, "name": ar.name} for ar in db.execute(
+            select(Array).where(Array.tenant_id == tenant.id,
+                                Array.deleted_at.is_(None)).order_by(Array.name)
+        ).scalars().all()]
+        return {"ok": True, "accounts": out, "arrays": arrays}
+
+
+class LinkAccountBody(BaseModel):
+    account_id: int
+    array_id: int | None = None   # None = unlink
+
+
+@router.post("/v1/array-owners/utility-accounts/link")
+def link_utility_account_ep(body: LinkAccountBody,
+                            authorization: str | None = Header(default=None)) -> dict:
+    """Link (or unlink) a captured GMP account to an existing array — the manual
+    bridge so one array can aggregate several GMP meters. Once linked, the
+    account's captured bills flow into that array's daily stream (via the
+    bill→daily transform) and its trends/audit/reconcile light up. Tenant-scoped:
+    both the account and the target array must belong to the caller."""
+    from .models import UtilityAccount, Array
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        acct = db.get(UtilityAccount, body.account_id)
+        if acct is None or acct.tenant_id != tenant.id or acct.deleted_at is not None:
+            raise HTTPException(404, "utility account not found")
+        if body.array_id is not None:
+            arr = db.get(Array, body.array_id)
+            if arr is None or arr.tenant_id != tenant.id or arr.deleted_at is not None:
+                raise HTTPException(404, "array not found")
+            acct.array_id = arr.id
+        else:
+            acct.array_id = None
+        db.commit()
+        return {"ok": True, "account_id": acct.id, "linked_array_id": acct.array_id}
+
+
 # ── Inverter down/underperformance email alerts ──────────────────────────────
 class AlertSettingsBody(BaseModel):
     """All optional → only provided fields are updated."""
