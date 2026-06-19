@@ -76,6 +76,176 @@ def reconcile_warranty_claims() -> dict:
     return result
 
 
+def _build_audit_for_tenant(db, tenant_id: str) -> dict:
+    """Run the settlement audit across one tenant's fleet → the same summary
+    shape the Audit tab uses. Read-only; never fabricates a verdict."""
+    from .reconciliation import reconcile_array
+    from .models import Array
+    rows: list[dict] = []
+    s = {"total": 0, "auditable": 0, "ok": 0, "leak": 0, "leak_unconfirmed": 0,
+         "incomplete_monitoring": 0, "insufficient_data": 0,
+         "have_settlement": 0, "have_production": 0, "dollars_flagged": 0.0}
+    arrays = db.execute(
+        select(Array).where(Array.tenant_id == tenant_id,
+                            Array.deleted_at.is_(None), Array.excluded.is_(False))
+        .order_by(Array.id)
+    ).scalars().all()
+    for arr in arrays:
+        s["total"] += 1
+        try:
+            r = reconcile_array(db, arr.id)
+        except Exception:
+            s["insufficient_data"] += 1
+            continue
+        if r.status in s:
+            s[r.status] += 1
+        if r.status in ("ok", "leak"):
+            s["auditable"] += 1
+        if r.settlement_kwh > 0:
+            s["have_settlement"] += 1
+        if r.production_kwh > 0:
+            s["have_production"] += 1
+        if r.status in ("leak", "leak_unconfirmed"):
+            s["dollars_flagged"] += r.dollars_at_risk or 0.0
+            rows.append({"name": arr.name, "status": r.status,
+                         "variance_pct": r.variance_pct,
+                         "dollars": r.dollars_at_risk or 0.0,
+                         "headline": r.notes[-1] if r.notes else ""})
+    s["dollars_flagged"] = round(s["dollars_flagged"], 2)
+    s["coverage_pct"] = (round(100.0 * s["auditable"] / s["total"], 1)
+                         if s["total"] else 0.0)
+    rows.sort(key=lambda x: (0 if x["status"] == "leak" else 1, -x["dollars"]))
+    return {"summary": s, "flagged": rows}
+
+
+def deliver_weekly_audit_digest() -> dict:
+    """Weekly settlement-audit digest to every active Array Operator CLIENT.
+
+    Runs the production-vs-settlement audit across each owner's fleet and emails
+    them a plain-language summary: dollars flagged, what reconciles, what needs a
+    monitoring connection to confirm, and how much of the fleet is auditable.
+    Honest by construction — sends even when there's nothing flagged ('all clear'),
+    and never invents a leak. Skips owners we can't email or whose fleet has no
+    bills to audit yet (nothing useful to say)."""
+    import html as _html
+    from .models import Tenant
+    from .notify import _send_via_resend
+    from .email_skin import render_email_skin, render_email_skin_text
+
+    DASH = "https://arrayoperator.com/#audit"
+    sent = skipped = errors = 0
+    with SessionLocal() as db:
+        tenants = db.execute(
+            select(Tenant).where(
+                Tenant.active == True, Tenant.product == "array_operator")  # noqa: E712
+        ).scalars().all()
+        tids = [(t.id, t.contact_email, (t.operator_name or t.company_name or t.name or "there"))
+                for t in tenants]
+
+    for tid, email, name in tids:
+        if not email:
+            skipped += 1
+            continue
+        try:
+            with SessionLocal() as db:
+                data = _build_audit_for_tenant(db, tid)
+            s = data["summary"]
+            # Nothing to audit yet (no bills anywhere) → don't email noise.
+            if not s["total"] or s["have_settlement"] == 0:
+                skipped += 1
+                continue
+
+            first = _html.escape(str(name).split()[0])
+            flagged_n = s["leak"] + s["leak_unconfirmed"]
+            dollars = f"${s['dollars_flagged']:,.0f}"
+
+            # Headline line: dollars when flagged, else an all-clear.
+            if flagged_n:
+                intro = (f"We found {flagged_n} array{'s' if flagged_n != 1 else ''} "
+                         f"worth a look this week — {dollars} flagged.")
+                preheader = f"{dollars} flagged across {flagged_n} array(s) this week."
+            else:
+                intro = "Your fleet reconciles cleanly this week — nothing flagged."
+                preheader = "Your weekly settlement audit: all clear."
+
+            # Flagged rows table (only the concerning ones).
+            rows_html = ""
+            for r in data["flagged"][:12]:
+                tag = ("Leak" if r["status"] == "leak" else "Unconfirmed gap")
+                color = "#ff6b6b" if r["status"] == "leak" else "#c07d2a"
+                var = (f"{r['variance_pct']:+.0f}%" if r["variance_pct"] is not None else "")
+                rows_html += (
+                    f'<tr><td style="padding:8px 0;border-bottom:1px solid #e5ebf1;">'
+                    f'<strong>{_html.escape(r["name"])}</strong> '
+                    f'<span style="color:{color};font-weight:700;font-size:13px;">{tag}</span> '
+                    f'<span style="color:#5a6675;font-size:13px;">{var}</span></td>'
+                    f'<td style="padding:8px 0;border-bottom:1px solid #e5ebf1;text-align:right;'
+                    f'font-weight:700;color:{color};">${r["dollars"]:,.0f}</td></tr>')
+            table_html = (
+                f'<table style="width:100%;border-collapse:collapse;margin:14px 0;">'
+                f'{rows_html}</table>') if rows_html else ""
+
+            body_html = (
+                f"<p>Hi {first},</p>"
+                f"<p>Here's your weekly settlement audit — we reconcile what your "
+                f"arrays actually produced against what the utility settled, and flag "
+                f"any gaps in plain dollars.</p>"
+                f"{table_html}"
+                f'<p style="background:#f5f8fb;border-radius:8px;padding:14px 16px;font-size:14px;color:#33414f;">'
+                f"<strong>{s['auditable']} of {s['total']}</strong> arrays fully auditable "
+                f"({s['coverage_pct']:.0f}%) · "
+                f"<strong>{s['have_settlement']}</strong> with utility bills · "
+                f"<strong>{s['have_production']}</strong> with a production feed.</p>"
+                + ("<p>An <em>unconfirmed gap</em> means the meter data diverges from "
+                   "your bill, but we only have the utility's own figure — connect your "
+                   "inverter monitoring to confirm it as a real, recoverable leak.</p>"
+                   if s["leak_unconfirmed"] else "")
+                + f'<p style="margin-top:22px;font-size:14px;opacity:.85;">'
+                  f"See every array's verdict on your "
+                  f'<a href="{DASH}" style="color:#3fd68a;">Audit dashboard</a>.</p>'
+                  f'<p style="margin-top:20px;">— Array Operator</p>'
+            )
+            body_text = (
+                f"Hi {str(name).split()[0]},\n\n"
+                f"Weekly settlement audit:\n"
+                + (f"  {dollars} flagged across {flagged_n} array(s).\n" if flagged_n
+                   else "  All clear — nothing flagged.\n")
+                + "".join(
+                    f"  - {r['name']}: {'Leak' if r['status']=='leak' else 'Unconfirmed gap'} "
+                    f"(${r['dollars']:,.0f})\n" for r in data["flagged"][:12])
+                + f"\n{s['auditable']} of {s['total']} arrays auditable "
+                  f"({s['coverage_pct']:.0f}%). "
+                  f"{s['have_settlement']} with bills, {s['have_production']} with a "
+                  f"production feed.\n\n"
+                  f"See full details: {DASH}\n\n— Array Operator"
+            )
+
+            subject = (f"Settlement audit: {dollars} flagged this week"
+                       if flagged_n else "Weekly settlement audit — all clear")
+            html = render_email_skin(
+                preheader=preheader, headline="Array Operator",
+                intro_line=intro, body_html=body_html,
+                cta={"label": "Open your Audit dashboard", "url": DASH},
+                product="array_operator")
+            text = render_email_skin_text(
+                headline="Array Operator", intro_line=intro, body_text=body_text,
+                cta={"label": "Open your Audit dashboard", "url": DASH},
+                product="array_operator")
+
+            if _send_via_resend(to=email, subject=subject, html=html, text=text,
+                                product="array_operator"):
+                sent += 1
+            else:
+                errors += 1
+        except Exception as exc:  # one bad fleet must not stall the batch
+            errors += 1
+            logger.warning("audit digest failed for %s: %s", tid, exc)
+
+    result = {"sent": sent, "skipped": skipped, "errors": errors}
+    logger.info("weekly audit digest: %s", result)
+    return result
+
+
 def _deliver_clients_with_frequency(frequency: str) -> dict:
     """Send the workbook to every active CLIENT whose effective frequency
     matches. Effective = client.report_frequency if set, else
@@ -597,6 +767,13 @@ def start():
         deliver_weekly_reports,
         CronTrigger(day_of_week="mon", hour=9, minute=0),
         id="deliver_weekly", replace_existing=True,
+    )
+    # Weekly settlement-audit digest to each Array Operator client — Mondays at
+    # 13:00 UTC (~8–9am ET), after the morning data refresh + reports.
+    scheduler.add_job(
+        deliver_weekly_audit_digest,
+        CronTrigger(day_of_week="mon", hour=13, minute=0),
+        id="deliver_weekly_audit", replace_existing=True,
     )
     # Monthly: 1st of every month at 09:00 UTC
     scheduler.add_job(
