@@ -261,6 +261,35 @@ def _array_period_kwh_sourced(
     return kwh, start, end, label, ("daily_csv" if kwh is not None else None)
 
 
+def _normalized_allocations(sub) -> list[dict]:
+    """Return a clean list of {array_id:int, allocation_pct:float} for a sub.
+
+    Reads sub.array_allocations (the multi-array field). Coerces types, drops
+    rows with no array_id or a non-positive pct. Returns [] when the field is
+    absent/empty — callers then use the legacy single array_id path. Never raises.
+    """
+    raw = getattr(sub, "array_allocations", None)
+    if not raw:
+        return []
+    out: list[dict] = []
+    try:
+        for r in raw:
+            try:
+                aid = int(r.get("array_id"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            try:
+                pct = float(r.get("allocation_pct"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if pct <= 0:
+                continue
+            out.append({"array_id": aid, "allocation_pct": pct})
+    except TypeError:
+        return []
+    return out
+
+
 def build_manual_match(sub) -> BillingMatch:
     """Synthesize a BillingMatch for a manually-entered customer (no workbook).
 
@@ -280,6 +309,103 @@ def build_manual_match(sub) -> BillingMatch:
     label: Optional[str] = None
     array_name: Optional[str] = None
     kwh_source: Optional[str] = None
+
+    # Multi-array path: an offtaker owning a share of SEVERAL arrays. Sum each
+    # array's (period kWh × that array's pct) into one combined invoice, with a
+    # per-array breakdown line. Falls back to the single array_id path below.
+    allocs = _normalized_allocations(sub)
+    if allocs:
+        from ..db import SessionLocal
+        from ..models import Array
+        from .matcher import Period, compute_invoice
+        breakdown: list[dict] = []
+        total_customer_kwh = 0.0
+        total_array_kwh = 0.0
+        starts: list[date] = []
+        ends: list[date] = []
+        labels: list[str] = []
+        sources: set[str] = set()
+        with SessionLocal() as db:
+            for al in allocs:
+                aid = al["array_id"]
+                apct = al["allocation_pct"]
+                arr = db.get(Array, aid)
+                a_kwh, a_start, a_end, a_label, a_src = _array_period_kwh_sourced(db, aid)
+                if a_kwh is None:
+                    warnings.append(f"No generation data yet for "
+                                    f"{(arr.name if arr else 'array ' + str(aid))} — "
+                                    f"its share shows $0 until production lands.")
+                    a_kwh = 0.0
+                cust_kwh = round(a_kwh * apct, 2)
+                total_customer_kwh += cust_kwh
+                total_array_kwh += a_kwh
+                if a_start: starts.append(a_start)
+                if a_end: ends.append(a_end)
+                if a_label: labels.append(a_label)
+                if a_src: sources.add(a_src)
+                breakdown.append({
+                    "array_id": aid,
+                    "array_name": arr.name if arr else f"Array {aid}",
+                    "array_kwh": round(a_kwh, 1),
+                    "allocation_pct": apct,
+                    "customer_kwh": cust_kwh,
+                })
+        total_customer_kwh = round(total_customer_kwh, 2)
+        total_array_kwh = round(total_array_kwh, 1)
+        start = min(starts) if starts else None
+        end = max(ends) if ends else None
+        # Common label when all arrays share the same period; else the latest.
+        label = labels[-1] if labels else None
+        if len(set(labels)) == 1:
+            label = labels[0] if labels else None
+        elif len(set(labels)) > 1:
+            warnings.append("Selected arrays have different latest billing periods; "
+                            "invoice uses the combined range.")
+        kwh_source = "+".join(sorted(sources)) if sources else None
+
+        pricing = resolve_discount_pricing(sub, period_end=end)
+        net_rate = pricing["net_rate"]
+        discount = pricing["discount_pct"]
+        billing_rate = 1.0 - discount
+        period = Period(
+            month=label, start=start, end=end,
+            array_kwh=total_array_kwh, customer_kwh=total_customer_kwh,
+            tariff=net_rate, adder=0.0,
+        )
+        computed = compute_invoice(total_customer_kwh, net_rate, 0.0,
+                                   billing_rate, "percent_of_array", None)
+        computed["invoice_number"] = end.strftime("%Y-%m") if end else label
+        computed["period_start"] = start.isoformat() if start else None
+        computed["period_end"] = end.isoformat() if end else None
+        computed["month"] = label
+        computed["project_total_kwh"] = total_array_kwh
+        computed["array_kwh"] = total_array_kwh
+        computed["array_breakdown"] = breakdown   # one line per array
+        computed["net_rate_per_kwh"] = round(net_rate, 6)
+        computed["discount_pct"] = round(discount, 6)
+        computed["effective_rate_per_kwh"] = pricing["effective_rate"]
+        computed["net_rate_source"] = pricing["net_source"]
+        computed["net_rate_note"] = pricing.get("net_rate_note")
+        computed["discount_source"] = pricing["discount_source"]
+        computed["rate_per_kwh"] = pricing["effective_rate"]
+        computed["rate_source"] = pricing["discount_source"]
+        computed["kwh_source"] = kwh_source
+        return BillingMatch(
+            matched=True, confidence=1.0, source="manual", data_sheet=None,
+            customer={"name": sub.customer_name, "email": sub.client_email},
+            allocation_pct=None,
+            billing_rate=billing_rate, billing_model="percent_of_array",
+            periods=[period], latest_period=period,
+            template={"title": "Invoice - Solar Power Generation"},
+            computed_invoice=computed,
+            project_totals={
+                "total_array_kwh": total_array_kwh,
+                "total_customer_kwh": total_customer_kwh,
+                "array_name": ", ".join(b["array_name"] for b in breakdown),
+                "array_breakdown": breakdown,
+            },
+            warnings=warnings,
+        )
 
     if sub.array_id is not None:
         with SessionLocal() as db:

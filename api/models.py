@@ -1062,6 +1062,13 @@ class BillingReportSubscription(Base):
     array_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("arrays.id"), nullable=True, index=True)
 
+    # Multi-array allocations (Jun 2026): an offtaker can own a share of SEVERAL
+    # arrays at once. List of {"array_id": int, "allocation_pct": float 0..1}.
+    # When set + non-empty, delivery SUMS each array's (period kWh × pct) into one
+    # combined invoice (one line per array). When NULL/empty, the legacy single
+    # array_id/allocation_pct path above drives delivery unchanged (back-compat).
+    array_allocations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     # Per-customer billing rate override ($/kWh, Jun 2026). When set, this
     # customer's invoice is priced at this rate; when NULL, pricing falls back
     # to the operator's global Tenant.default_billing_rate_per_kwh, then to the

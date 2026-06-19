@@ -716,6 +716,16 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_id")
 
+        # 2026-06 Multi-array allocations: an offtaker can own a share of several
+        # arrays at once. JSON list of {array_id, allocation_pct}. NULL = legacy
+        # single array_id/allocation_pct path. JSON works on both sqlite + PG.
+        if not column_exists(conn, "billing_report_subscriptions", "array_allocations"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN array_allocations JSON"
+            ))
+            print("  + billing_report_subscriptions.array_allocations")
+
         # 2026-06-16 Live current power for extension-captured inverters.
         # The inverters table came free via create_all, but an EXISTING prod table
         # won't gain new columns from create_all — add them explicitly so the

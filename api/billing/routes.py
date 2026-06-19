@@ -83,6 +83,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "client_id": s.client_id,
         "array_id": getattr(s, "array_id", None),
         "allocation_pct": getattr(s, "allocation_pct", None),
+        "array_allocations": getattr(s, "array_allocations", None),
         "billing_model": s.billing_model,
         "rate_per_kwh": getattr(s, "rate_per_kwh", None),
         "discount_pct": getattr(s, "discount_pct", None),
@@ -201,6 +202,7 @@ async def create_subscription(
     customer_name: Optional[str] = Form(default=None),
     array_id: Optional[int] = Form(default=None),
     allocation_pct: Optional[float] = Form(default=None),
+    array_allocations: Optional[str] = Form(default=None),
     rate_per_kwh: Optional[float] = Form(default=None),
     discount_pct: Optional[float] = Form(default=None),
     net_rate_per_kwh: Optional[float] = Form(default=None),
@@ -237,7 +239,8 @@ async def create_subscription(
     if file is None:
         return await _create_manual_subscription(
             t, customer_name=customer_name, array_id=array_id,
-            allocation_pct=allocation_pct, rate_per_kwh=rate_per_kwh,
+            allocation_pct=allocation_pct, array_allocations=array_allocations,
+            rate_per_kwh=rate_per_kwh,
             discount_pct=discount_pct, net_rate_per_kwh=net_rate_per_kwh,
             cadence=cadence, send_mode=send_mode,
             delivery_mode=delivery_mode, client_email=client_email,
@@ -296,38 +299,82 @@ async def create_subscription(
 
 
 async def _create_manual_subscription(
-    t, *, customer_name, array_id, allocation_pct, rate_per_kwh, discount_pct,
+    t, *, customer_name, array_id, allocation_pct, array_allocations=None,
+    rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
     include_summary, annual_trueup, enabled,
 ):
     """Create a workbook-less subscription from typed fields. The customer's
     invoice is computed each cycle as allocation_pct × the array's period
-    generation (see delivery.build_manual_match)."""
+    generation (see delivery.build_manual_match).
+
+    Two shapes:
+      * single array  — array_id + allocation_pct (legacy, unchanged).
+      * multi array    — array_allocations: JSON list of {array_id, allocation_pct}.
+        The offtaker owns a share of several arrays; delivery sums each array's
+        (period kWh × pct) into one combined invoice.
+    """
+    import json as _json
     from ..models import Array
 
     name = (customer_name or "").strip()
     if not name:
         raise HTTPException(400, "customer_name is required for a manual customer")
-    if array_id is None:
-        raise HTTPException(400, "array_id is required for a manual customer")
-    if allocation_pct is None:
-        raise HTTPException(400, "allocation_pct is required for a manual customer")
-    try:
-        pct = float(allocation_pct)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "allocation_pct must be a number between 0 and 1")
-    if not (0.0 < pct <= 1.0):
-        raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
-                                 "(e.g. 0.25 for 25%)")
+
+    # Parse the optional multi-array allocations list.
+    allocs: list[dict] = []
+    if array_allocations:
+        try:
+            parsed = _json.loads(array_allocations)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "array_allocations must be valid JSON")
+        if not isinstance(parsed, list):
+            raise HTTPException(400, "array_allocations must be a JSON list")
+        for r in parsed:
+            if not isinstance(r, dict):
+                raise HTTPException(400, "each allocation must be an object")
+            try:
+                aid = int(r.get("array_id"))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "each allocation needs a numeric array_id")
+            try:
+                p = float(r.get("allocation_pct"))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "each allocation needs a numeric allocation_pct")
+            if not (0.0 < p <= 1.0):
+                raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
+                                         "(e.g. 0.25 for 25%)")
+            allocs.append({"array_id": aid, "allocation_pct": p})
+        if not allocs:
+            raise HTTPException(400, "array_allocations had no usable rows")
+
+    if not allocs:
+        # Legacy single-array path.
+        if array_id is None:
+            raise HTTPException(400, "array_id is required for a manual customer")
+        if allocation_pct is None:
+            raise HTTPException(400, "allocation_pct is required for a manual customer")
+        try:
+            pct = float(allocation_pct)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "allocation_pct must be a number between 0 and 1")
+        if not (0.0 < pct <= 1.0):
+            raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
+                                     "(e.g. 0.25 for 25%)")
+    else:
+        pct = None
     rate_val = _validate_rate(rate_per_kwh)
     disc_val = _validate_discount(discount_pct)
     net_val = _validate_rate(net_rate_per_kwh)
 
     with SessionLocal() as db:
-        arr = db.get(Array, array_id)
-        if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
-            raise HTTPException(404, "Array not found")
+        # Validate every referenced array belongs to this tenant.
+        aids_to_check = [a["array_id"] for a in allocs] if allocs else [array_id]
+        for aid in aids_to_check:
+            arr = db.get(Array, aid)
+            if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
+                raise HTTPException(404, f"Array {aid} not found")
 
         client = db.execute(
             select(Client).where(Client.tenant_id == t.id, Client.name == name,
@@ -343,8 +390,12 @@ async def _create_manual_subscription(
             tenant_id=t.id,
             client_id=client.id,
             customer_name=name,
-            array_id=array_id,
-            allocation_pct=pct,
+            # Keep a single array_id/allocation_pct for back-compat + list views;
+            # when multi-array, store the first as the representative and the full
+            # list in array_allocations (which delivery prefers when present).
+            array_id=(allocs[0]["array_id"] if allocs else array_id),
+            allocation_pct=(allocs[0]["allocation_pct"] if allocs else pct),
+            array_allocations=(allocs or None),
             rate_per_kwh=rate_val,
             discount_pct=disc_val,
             net_rate_per_kwh=net_val,

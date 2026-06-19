@@ -41,6 +41,10 @@ def invoice_for_period(match: BillingMatch, period: Period,
         "allocation_pct": match.allocation_pct,
         "project_total_kwh": match.project_totals.get("total_customer_kwh"),
         "project_total_savings": match.project_totals.get("total_savings"),
+        # Per-array breakdown for multi-array offtakers (one line per array). Lives
+        # on project_totals/computed_invoice; surfaced here so the PDF can render it.
+        "array_breakdown": match.project_totals.get("array_breakdown")
+            or (match.computed_invoice or {}).get("array_breakdown"),
     })
     return inv
 
@@ -212,6 +216,38 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     ]))
     story.append(mt)
     story.append(Spacer(1, 18))
+
+    # ---- per-array breakdown (multi-array offtakers) -------------------------
+    # When the offtaker owns a share of several arrays, show one line per array
+    # (array · its production · this offtaker's % · their kWh) so the summed
+    # "Energy produced" total below is auditable. Single-array invoices skip this.
+    breakdown = inv.get("array_breakdown") or []
+    if len(breakdown) > 1:
+        story.append(Paragraph("Your share by array", lbl))
+        story.append(Spacer(1, 8))
+        brows = [["Array", "Array produced", "Your %", "Your kWh"]]
+        for b in breakdown:
+            brows.append([
+                str(b.get("array_name") or "Array"),
+                f"{float(b.get('array_kwh') or 0):,.0f} kWh",
+                _pct(b.get("allocation_pct") or 0),
+                f"{float(b.get('customer_kwh') or 0):,.0f} kWh",
+            ])
+        brows.append(["Total", "", "", f"{inv['kwh']:,.0f} kWh"])
+        bt = Table(brows, colWidths=[2.7 * inch, 1.5 * inch, 0.9 * inch, 1.5 * inch])
+        bt.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("TEXTCOLOR", (0, 0), (-1, -1), INKDK),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor(brand.LINE)),
+            ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.HexColor(brand.LINE)),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(bt)
+        story.append(Spacer(1, 16))
 
     # ---- line items ----------------------------------------------------------
     story.append(Paragraph("Actual results for the billing period", lbl))
