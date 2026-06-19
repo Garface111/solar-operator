@@ -181,7 +181,25 @@ def _connect_inverter(db, arr: Array, vendor: str, config: dict) -> dict:
         arr.solaredge_site_id = int(config["site_id"])
 
     db.commit()
+    # Self-healing: pull the vendor's FULL multi-year daily history in the
+    # background so this array shows past years in Trends within minutes, not
+    # only the ~90 days the nightly pull reaches. Best-effort; the scheduled
+    # healer retries if this connection isn't stamped.
+    _trigger_history_backfill(db, arr.id)
     return result
+
+
+def _trigger_history_backfill(db, array_id: int) -> None:
+    """Fire the on-connect deep-history backfill for an array's connection."""
+    try:
+        conn = db.execute(
+            select(InverterConnection).where(InverterConnection.array_id == array_id)
+        ).scalar_one_or_none()
+        if conn is not None and conn.id is not None:
+            from .jobs.inverter_history import backfill_connection_history_async
+            backfill_connection_history_async(conn.id)
+    except Exception:  # noqa: BLE001 — never let backfill scheduling break a connect
+        log.warning("history backfill trigger failed for array %s", array_id, exc_info=True)
 
 
 # ── aggregation helpers ───────────────────────────────────────────────────────
@@ -1123,6 +1141,66 @@ class LinkAccountBody(BaseModel):
     array_id: int | None = None   # None = unlink
 
 
+@router.get("/v1/array-owners/onboarding-status")
+def onboarding_status_ep(authorization: str | None = Header(default=None)) -> dict:
+    """Is the owner's onboarding actually COMPLETE? The hard gate is connecting
+    GMP — without captured utility bills there's no settlement data to audit,
+    reconcile, or bill against, so the product can't do its job. This drives the
+    'you're not done until you connect GMP' banner.
+
+    Returns:
+      gmp_connected     — a GMP session has been captured for this tenant
+      has_gmp_accounts  — at least one GMP UtilityAccount exists
+      linked_arrays     — # of arrays with a GMP account linked
+      unlinked_accounts — # of captured GMP accounts not yet linked to an array
+      arrays_total      — # of (active) arrays
+      complete          — True once GMP is connected AND ≥1 array is linked
+      next_step         — machine key for the UI: 'connect_gmp' | 'link_accounts' | 'done'
+    """
+    from .models import UtilityAccount, Array, UtilitySession
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        gmp_sessions = db.execute(
+            select(func.count(UtilitySession.id)).where(
+                UtilitySession.tenant_id == tenant.id,
+                UtilitySession.provider == "gmp",
+            )
+        ).scalar() or 0
+        gmp_accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tenant.id,
+                UtilityAccount.provider == "gmp",
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        linked = sum(1 for a in gmp_accts if a.array_id is not None)
+        unlinked = sum(1 for a in gmp_accts if a.array_id is None)
+        arrays_total = db.execute(
+            select(func.count(Array.id)).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None),
+            )
+        ).scalar() or 0
+
+        gmp_connected = gmp_sessions > 0 or len(gmp_accts) > 0
+        complete = gmp_connected and linked > 0
+        if not gmp_connected:
+            next_step = "connect_gmp"
+        elif linked == 0:
+            next_step = "link_accounts"
+        else:
+            next_step = "done"
+        return {
+            "ok": True,
+            "gmp_connected": gmp_connected,
+            "has_gmp_accounts": len(gmp_accts) > 0,
+            "linked_arrays": linked,
+            "unlinked_accounts": unlinked,
+            "arrays_total": int(arrays_total),
+            "complete": complete,
+            "next_step": next_step,
+        }
+
+
 @router.post("/v1/array-owners/utility-accounts/link")
 def link_utility_account_ep(body: LinkAccountBody,
                             authorization: str | None = Header(default=None)) -> dict:
@@ -1808,6 +1886,14 @@ def solaredge_connect_account(
 
         db.commit()
 
+        # Self-healing: kick off the deep multi-year history backfill for every
+        # array we just attached so past years populate in Trends within minutes
+        # (the nightly pull only reaches ~90 days). Best-effort; the scheduled
+        # healer covers any that don't stamp.
+        for _e in connected:
+            if _e.get("array_id"):
+                _trigger_history_backfill(db, _e["array_id"])
+
     return {
         "ok": True,
         "connected": connected,
@@ -2053,6 +2139,14 @@ def locus_connect_account(
             connected.append(entry)
 
         db.commit()
+
+        # Self-healing: kick off the deep multi-year history backfill for every
+        # array we just attached so past years populate in Trends within minutes
+        # (the nightly pull only reaches ~90 days). Best-effort; the scheduled
+        # healer covers any that don't stamp.
+        for _e in connected:
+            if _e.get("array_id"):
+                _trigger_history_backfill(db, _e["array_id"])
 
     return {
         "ok": True,
