@@ -239,10 +239,58 @@ def test_persist_keeps_larger_kwh_on_reread(monkeypatch):
         print("PASS persist keeps larger kwh")
 
 
+def test_array_daily_split_separates_vendor_and_utility_streams():
+    """The sandbox slider's two streams: vendor (inverter telemetry) vs utility
+    (meter). A blended array carries both source families; the split must route
+    each day to the right stream and never lose data."""
+    from datetime import date
+    from api.models import DailyGeneration, GmpDailyGeneration, UtilityAccount
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Blended", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        # vendor-stream days
+        db.add(DailyGeneration(tenant_id=t.id, array_id=a.id, day=date(2026,6,1), kwh=40.0, source="solaredge"))
+        db.add(DailyGeneration(tenant_id=t.id, array_id=a.id, day=date(2026,6,2), kwh=12.0, source="extension_pull"))
+        # utility-stream day
+        db.add(DailyGeneration(tenant_id=t.id, array_id=a.id, day=date(2026,6,3), kwh=9.0, source="utility_meter"))
+        # GMP per-account meter table (utility) — a day NOT in DailyGeneration
+        ua = UtilityAccount(tenant_id=t.id, array_id=a.id, provider="gmp", account_number="X1")
+        db.add(ua); db.commit(); db.refresh(ua)
+        db.add(GmpDailyGeneration(tenant_id=t.id, account_id=ua.id, array_id=a.id,
+                                  account_number="X1", day=date(2026,6,4), kwh=7.5))
+        db.commit()
+
+        split = IF._array_daily_split(db, a.id, days=30)
+        vdays = {r["date"]: r["kwh"] for r in split["vendor"]}
+        udays = {r["date"]: r["kwh"] for r in split["utility"]}
+        assert vdays == {"2026-06-01": 40.0, "2026-06-02": 12.0}
+        assert udays == {"2026-06-03": 9.0, "2026-06-04": 7.5}   # incl. GMP table
+        assert split["has_vendor"] and split["has_utility"]
+        print("PASS daily split")
+
+
+def test_array_daily_split_empty_side_flags_false():
+    from datetime import date
+    from api.models import DailyGeneration
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="VendorOnly", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        db.add(DailyGeneration(tenant_id=t.id, array_id=a.id, day=date(2026,6,1), kwh=5.0, source="solaredge"))
+        db.commit()
+        split = IF._array_daily_split(db, a.id)
+        assert split["has_vendor"] is True and split["has_utility"] is False
+        assert split["utility"] == []
+        print("PASS empty-side flags")
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()
     test_create_array_and_cross_tenant_guard()
     test_peer_cohort_follows_owner_grouping()
     test_origin_links_deep_link_to_vendor_portal()
+    test_array_daily_split_separates_vendor_and_utility_streams()
+    test_array_daily_split_empty_side_flags_false()
     print("ALL PASS")

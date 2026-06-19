@@ -494,11 +494,39 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True):
     return None
 
 
+# ── Two distinct data streams: VENDOR (inverter telemetry) vs UTILITY (meter) ──
+# The sandbox slider switches between these. The system still INTEGRATES both
+# (the blended `daily` is what dedup/Trends use); these split views just let the
+# owner SEE each feed on its own. Classify DailyGeneration.source into one stream.
+_VENDOR_SOURCES = {
+    "solaredge", "fronius", "sma", "chint",
+    "extension_pull", "extension_pull_corrected",
+    "csv", "manual",                      # operator-supplied independent production
+}
+_UTILITY_SOURCES = {
+    "gmp_api", "gmp_portal_scrape", "utility_meter", "smarthub", "bill_prorate",
+}
+
+
+def _daily_stream(src: str | None) -> str:
+    """Map a raw DailyGeneration.source onto 'vendor' | 'utility' | 'other'."""
+    s = (src or "").strip().lower()
+    if s in _VENDOR_SOURCES:
+        return "vendor"
+    if s in _UTILITY_SOURCES:
+        return "utility"
+    return "other"
+
+
 def _array_daily(db, array_id: int, days: int = 14) -> list[dict]:
     """Array-level daily kWh (DailyGeneration), ascending, last `days`. This is
     the array's OWN production history — used by the front-end array graph as a
     fallback/primary when the vendor gives site-level history but no per-inverter
-    series (e.g. Chint's weekETrend backfill). Returns [{"date","kwh"}]."""
+    series (e.g. Chint's weekETrend backfill). Returns [{"date","kwh"}].
+
+    BLENDED view: at most one row per (array,day) exists in DailyGeneration, so
+    this is already the integrated stream (dedup keeps the strongest source/day).
+    """
     rows = db.execute(
         select(DailyGeneration)
         .where(DailyGeneration.array_id == array_id)
@@ -509,6 +537,64 @@ def _array_daily(db, array_id: int, days: int = 14) -> list[dict]:
         {"date": r.day.isoformat(), "kwh": round(float(r.kwh or 0.0), 2)}
         for r in sorted(rows, key=lambda x: x.day)
     ]
+
+
+def _array_daily_split(db, array_id: int, days: int = 14) -> dict:
+    """Per-array daily kWh split into the two SOURCE STREAMS the sandbox slider
+    toggles between:
+        vendor  — inverter telemetry (SolarEdge/Fronius/SMA/CHINT/extension) +
+                  operator-supplied (csv/manual)
+        utility — the utility meter's settled generation (GMP api/meter/smarthub,
+                  bill-prorated). Includes GmpDailyGeneration (per-account meter
+                  table) aggregated per day, in case it's richer than the array's
+                  utility_meter DailyGeneration rows.
+    Each value is ascending [{date,kwh}], last `days`. Returns
+    {"vendor": [...], "utility": [...], "has_vendor": bool, "has_utility": bool}.
+    """
+    from .models import GmpDailyGeneration
+    rows = db.execute(
+        select(DailyGeneration)
+        .where(DailyGeneration.array_id == array_id)
+        .order_by(DailyGeneration.day.desc())
+        .limit(days * 3)   # over-fetch; a day may belong to either stream
+    ).scalars().all()
+
+    vendor: dict[str, float] = {}
+    utility: dict[str, float] = {}
+    for r in rows:
+        stream = _daily_stream(r.source)
+        d = r.day.isoformat()
+        kwh = round(float(r.kwh or 0.0), 2)
+        if stream == "vendor":
+            vendor[d] = kwh
+        elif stream == "utility":
+            utility[d] = kwh
+        # 'other' is intentionally excluded from both named streams
+
+    # Fold in the GMP per-account meter table (utility side) — sum per day across
+    # the array's GMP accounts; only fills days the array's own utility rows miss.
+    gmp_rows = db.execute(
+        select(GmpDailyGeneration.day, GmpDailyGeneration.kwh)
+        .where(GmpDailyGeneration.array_id == array_id)
+    ).all()
+    gmp_by_day: dict[str, float] = {}
+    for day, kwh in gmp_rows:
+        k = day.isoformat()
+        gmp_by_day[k] = gmp_by_day.get(k, 0.0) + float(kwh or 0.0)
+    for k, v in gmp_by_day.items():
+        utility.setdefault(k, round(v, 2))
+
+    def _tail(d: dict) -> list[dict]:
+        items = sorted(d.items())[-days:]
+        return [{"date": k, "kwh": v} for k, v in items]
+
+    return {
+        "vendor": _tail(vendor),
+        "utility": _tail(utility),
+        "has_vendor": bool(vendor),
+        "has_utility": bool(utility),
+    }
+
 
 
 def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict:
@@ -659,6 +745,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             # graph when the vendor gives site-level history but no per-inverter
             # series (Chint weekETrend backfill); ascending [{date,kwh}].
             "daily": _array_daily(db, arr.id),
+            # The SAME data split into the two source streams the sandbox slider
+            # toggles between — VENDOR (inverter telemetry) vs UTILITY (meter).
+            # System still integrates both; this just lets the owner view each on
+            # its own. {vendor:[...], utility:[...], has_vendor, has_utility}.
+            "daily_split": _array_daily_split(db, arr.id),
             # Sun-up flag for the card "Sleeping" night state. The card gates
             # "Sleeping" on (is_daylight==False AND output==0) so a daytime fault
             # that zeroes output never reads as "asleep". Regional (central VT)
