@@ -65,9 +65,19 @@ _SUBARRAY_TOKENS = {
 }
 
 
+# GMP's internal portal prefixes account labels with a positional code like
+# "1a_Chester" / "2b_Tannery Brook" (see api/adapters/_gmp_clean.py). The adapter
+# strips these on live capture, but arrays seeded/imported through other paths can
+# still carry them — which is exactly why "1a_Tannery Brook" looked DISTINCT from
+# "Tannery Brook" and escaped dedup. Strip the same prefix here so the two
+# normalize identically. Only strips when a real body follows (not a bare "1_").
+_GMP_POSITIONAL_PREFIX = re.compile(r"^\d{1,3}[a-zA-Z]?[_\-]+(?=\S)")
+
+
 def _norm_name(name: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace."""
-    s = re.sub(r"[,.\-_/()]", " ", (name or "").lower())
+    """Lowercase, strip a GMP positional prefix, strip punctuation, collapse ws."""
+    s = _GMP_POSITIONAL_PREFIX.sub("", (name or ""))
+    s = re.sub(r"[,.\-_/()]", " ", s.lower())
     return re.sub(r"\s+", " ", s).strip()
 
 

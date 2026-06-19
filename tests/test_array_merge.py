@@ -135,6 +135,41 @@ def test_detect_skips_subarray_siblings():
     assert not any(tuple(sorted((p["a_id"], p["b_id"]))) in sib for p in pairs)
 
 
+def test_gmp_positional_prefix_normalizes():
+    # REGRESSION (sandbox dupes): GMP "1a_" positional prefix made 1a_Tannery Brook
+    # look distinct from Tannery Brook → escaped dedup. Now they normalize equal.
+    from api.array_merge import _norm_name
+    assert _norm_name("1a_Tannery Brook") == _norm_name("Tannery Brook") == "tannery brook"
+    assert _norm_name("1b_Pittsfield Garage") == "pittsfield garage"
+    assert _norm_name("1a_Starlake_North") == "starlake north"  # NOT stripped to bare site
+
+
+def test_detect_gmp_prefixed_twin_is_strong_and_merges():
+    tid = _tenant(); cid = _client_id(tid)
+    _array(tid, "Tannery Brook", cid)
+    _array(tid, "1a_Tannery Brook", cid)
+    pairs = find_duplicate_pairs(SessionLocal(), tid)
+    assert pairs and pairs[0]["confidence"] == "STRONG"
+    r = sweep_tenant(tid, execute=True)
+    assert len(r["auto_merged"]) == 1
+    with SessionLocal() as db:
+        import sqlalchemy as sa
+        alive = db.execute(sa.select(sa.func.count(Array.id)).where(
+            Array.tenant_id == tid, Array.deleted_at.is_(None))).scalar()
+        assert alive == 1
+
+
+def test_gmp_prefixed_subarray_still_blocked_after_strip():
+    tid = _tenant(); cid = _client_id(tid)
+    _array(tid, "Starlake", cid)
+    n = _array(tid, "1a_Starlake_North", cid)
+    s = _array(tid, "1a_Starlake_South", cid)
+    pairs = find_duplicate_pairs(SessionLocal(), tid)
+    auto = [p for p in pairs if p["confidence"] in ("STRONG", "MEDIUM")]
+    touched = {p["src_id"] for p in auto} | {p["dst_id"] for p in auto}
+    assert n not in touched and s not in touched
+
+
 # ── lossless merge ────────────────────────────────────────────────────────────
 
 def test_merge_is_lossless_and_reparents_everything():
