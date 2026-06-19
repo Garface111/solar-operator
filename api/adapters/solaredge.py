@@ -313,6 +313,54 @@ def site_details(api_key: str, site_id: int) -> dict:
 import re as _re
 from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+except Exception:  # pragma: no cover - zoneinfo is stdlib on 3.9+
+    _ZoneInfo = None
+
+# SolarEdge timestamps (equipment telemetry `date`, overview `lastUpdateTime`)
+# are in the SITE's LOCAL time with NO timezone marker. Reading them as UTC made
+# the outage clock run hours fast (a VT site, America/New_York, looked ~4-5h more
+# stale than reality). We fetch the site's IANA timeZone from /site/{id}/details
+# ONCE (it never changes) and cache it, then stamp every naive timestamp with it.
+_SITE_TZ_CACHE: dict[int, str] = {}
+
+
+def _site_timezone(api_key: str, site_id: int) -> str | None:
+    """The site's IANA timeZone (e.g. 'America/New_York'), cached. None on any
+    failure — callers then fall back to leaving the timestamp naive."""
+    if site_id in _SITE_TZ_CACHE:
+        return _SITE_TZ_CACHE[site_id] or None
+    tzname = None
+    try:
+        resp = httpx.get(f"{SOLAREDGE_API_BASE}/site/{site_id}/details",
+                         params={"api_key": api_key}, timeout=_TIMEOUT)
+        if resp.is_success:
+            loc = ((resp.json() or {}).get("details") or {}).get("location") or {}
+            tzname = loc.get("timeZone") or None
+    except Exception:
+        tzname = None
+    _SITE_TZ_CACHE[site_id] = tzname or ""
+    return tzname
+
+
+def _localize_to_utc_iso(naive_ts: str | None, tzname: str | None) -> str | None:
+    """Turn a naive 'YYYY-MM-DD HH:MM:SS' SolarEdge timestamp (site-local) into a
+    timezone-AWARE ISO string. Uses the site's IANA zone when known; otherwise
+    leaves it naive (downstream treats naive as UTC — the pre-fix behavior)."""
+    if not naive_ts:
+        return None
+    iso = str(naive_ts).replace(" ", "T")
+    if not (tzname and _ZoneInfo):
+        return iso
+    try:
+        dt = _dt.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_ZoneInfo(tzname))
+        return dt.astimezone(_tz.utc).isoformat()
+    except Exception:
+        return iso
+
 
 def _nameplate_from_model(model: str | None) -> float | None:
     """SolarEdge model strings encode nameplate, e.g. SE20K=20kW,
@@ -421,10 +469,13 @@ def fetch_inverter_telemetry(
         for day, v in sorted(by_day.items())
     ]
     err = last_mode if (last_mode and last_mode.upper() in _FAULT_MODES) else None
+    # last_ts is site-LOCAL naive time → convert to a tz-aware UTC ISO using the
+    # site's timezone so the downstream outage-age math is correct.
+    tzname = _site_timezone(api_key, site_id)
     return {
         "daily": daily,
         "error_code": err,
         "last_mode": last_mode,
-        "last_report": (last_ts.replace(" ", "T") if last_ts else None),
+        "last_report": _localize_to_utc_iso(last_ts, tzname),
         "last_power_w": last_power_w,
     }
