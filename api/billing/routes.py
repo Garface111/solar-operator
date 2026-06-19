@@ -521,6 +521,22 @@ class GlobalRatePatch(BaseModel):
     default_discount_pct: Optional[float] = None
 
 
+@router.get("/reconcile-bills")
+def reconcile_bills_route(authorization: Optional[str] = Header(default=None)):
+    """Compare each offtaker invoice's produced-kWh against the captured GMP bill
+    for the same array + period — a READ-ONLY trust check before sending.
+
+    Per array: our_kwh (what the invoice uses) vs gmp_kwh (the utility's metered
+    generation), with a match|mismatch|no_bill verdict. 'no_bill' = no GMP bill
+    is linked to that array yet (awaiting capture) — reported honestly, never
+    fabricated.
+    """
+    from .reconcile_bills import reconcile_tenant
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        return reconcile_tenant(db, t.id)
+
+
 @router.get("/global-rate")
 def get_global_rate(authorization: Optional[str] = Header(default=None)):
     """The operator's global billing defaults. The discount model:
