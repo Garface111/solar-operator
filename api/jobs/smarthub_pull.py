@@ -262,3 +262,62 @@ def pull_daily_generation_for_account(
     finally:
         if _own_db:
             db.close()
+
+
+def pull_all_smarthub(days_back: int = 90) -> dict[str, Any]:
+    """Pull daily generation for EVERY array whose linked utility account is a
+    SmartHub provider AND has a stored session with an auth token.
+
+    Mirrors jobs.inverter_pull.pull_all_inverters: iterate candidates, pull each,
+    aggregate counts. SmartHub (VEC/WEC/Stowe/…) bills carry NO generation kWh —
+    a net-metering solar account's production lives only in the usage API, so
+    this server-side pull is the authoritative source of DailyGeneration for
+    those arrays. Accounts without a captured token are skipped silently (the
+    extension must capture the authorizationToken first).
+
+    Idempotent: per-account upsert by (array_id, day). Best-effort per account —
+    one failure never aborts the batch.
+    """
+    summary = {"arrays_processed": 0, "arrays_with_data": 0,
+               "inserted": 0, "updated": 0, "skipped": 0, "errors": 0}
+    with SessionLocal() as db:
+        # Distinct arrays that have an enabled SmartHub utility account.
+        rows = db.execute(
+            select(UtilityAccount.array_id, UtilityAccount.tenant_id,
+                   UtilityAccount.provider)
+            .where(
+                UtilityAccount.array_id.is_not(None),
+                UtilityAccount.enabled.is_(True),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).all()
+        candidates: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for array_id, tenant_id, provider in rows:
+            if array_id in seen:
+                continue
+            if is_smarthub_provider(provider or ""):
+                seen.add(array_id)
+                candidates.append((array_id, tenant_id))
+
+    for array_id, tenant_id in candidates:
+        summary["arrays_processed"] += 1
+        try:
+            r = pull_daily_generation_for_account(None, tenant_id, array_id,
+                                                  days_back=days_back)
+            status = r.get("status")
+            if status == "ok":
+                ins = r.get("inserted", 0)
+                upd = r.get("updated", 0)
+                summary["inserted"] += ins
+                summary["updated"] += upd
+                if ins or upd:
+                    summary["arrays_with_data"] += 1
+            elif status == "skipped":
+                summary["skipped"] += 1
+            else:
+                summary["errors"] += 1
+        except Exception:
+            summary["errors"] += 1
+            log.exception("pull_all_smarthub: array %s failed", array_id)
+    return summary

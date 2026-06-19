@@ -1111,14 +1111,6 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 if not acct_id or not b.get("billing_date"):
                     continue
                 doc_no = b.get("bill_uuid") or b.get("pdf_url") or b["billing_date"].strftime("VEC-%Y-%m-%d")
-                exists = db.execute(
-                    select(Bill).where(
-                        Bill.account_id == acct_id,
-                        Bill.document_number == doc_no,
-                    )
-                ).scalar_one_or_none()
-                if exists:
-                    continue
                 # Attach usage from the same billing month, if available.
                 # API-captured bills (v1.6.0) carry kWh + meter-read period
                 # inline — prefer those; usage-explorer rows remain the
@@ -1129,6 +1121,30 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 _kwh = b.get("kwh")
                 if _kwh is None and u:
                     _kwh = u["kwh"]
+                exists = db.execute(
+                    select(Bill).where(
+                        Bill.account_id == acct_id,
+                        Bill.document_number == doc_no,
+                    )
+                ).scalar_one_or_none()
+                if exists:
+                    # UPDATE-don't-skip: a later capture may finally carry the
+                    # kWh (e.g. the operator visited Usage Explorer this time, or
+                    # an API capture replaced a DOM scrape). VEC bills first land
+                    # with kwh_generated=0/None because billing-history has no
+                    # generation number — backfill it when we now have one,
+                    # instead of dropping the corrected reading as a duplicate.
+                    if _kwh is not None:
+                        new_kwh = int(_kwh)
+                        if (exists.kwh_generated or 0) != new_kwh:
+                            exists.kwh_generated = new_kwh
+                            exists.parse_status = "parsed"
+                        # Backfill period bounds if they were missing.
+                        if _ps and not exists.period_start:
+                            exists.period_start = _ps
+                        if _pe and not exists.period_end:
+                            exists.period_end = _pe
+                    continue
                 db.add(Bill(
                     tenant_id=tenant.id,
                     account_id=acct_id,

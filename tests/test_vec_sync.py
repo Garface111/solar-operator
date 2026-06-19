@@ -163,3 +163,40 @@ def test_bills_for_unknown_account_skipped(client):
     with SessionLocal() as db:
         bills = db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().all()
     assert len(bills) == 0
+
+
+# ── (6) UPDATE-don't-skip: a later capture backfills kWh on a partial bill ──────
+
+def test_later_usage_backfills_kwh_on_existing_bill(client):
+    """The exact VEC failure: bill first lands from the billing-history page with
+    NO kWh (partial). A LATER sync that includes the Usage Explorer reading for
+    the same month must UPDATE the existing bill's kwh_generated, not skip it as
+    a duplicate (which left every VEC bill stuck at 0)."""
+    tid, key = _make_tenant()
+    bills_data = json.loads((FIXTURES / "billing_rows.json").read_text())[:1]
+    accounts = [{"accountNumber": "6578300", "customerName": "Test LLC"}]
+
+    # First sync: billing-history only → partial bill, kwh None.
+    assert _sync(client, key, _vec_payload(accounts, bills_data)).status_code == 200
+    with SessionLocal() as db:
+        b = db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().one()
+        assert b.parse_status == "partial"
+        assert b.kwh_generated is None
+
+    # Second sync: SAME bill + the Usage Explorer row for that month (Nov 2023).
+    usage_data = [{
+        "aria_label": (
+            "Nov 2023 Billing Period. Usage Dates: Oct 18 - Nov 17. "
+            "Meter 63698951 - Consumption - kWh: 1234 kWh. Average Temperature: 45 °F"
+        ),
+        "account_id": "6578300",
+    }]
+    assert _sync(client, key, _vec_payload(accounts, bills_data, usage_data)).status_code == 200
+
+    with SessionLocal() as db:
+        bills = db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().all()
+    # Still ONE bill (no duplicate), now backfilled with the real kWh.
+    assert len(bills) == 1
+    b = bills[0]
+    assert b.kwh_generated == 1234
+    assert b.parse_status == "parsed"
