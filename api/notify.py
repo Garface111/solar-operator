@@ -840,7 +840,7 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
     they need to log in once to reconnect."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
-    gmp_url = "https://mypower.greenmountainpower.com/"
+    gmp_url = "https://greenmountainpower.com/account/login/"
 
     body_html = (
         f"<p>Hi {first},</p>"
