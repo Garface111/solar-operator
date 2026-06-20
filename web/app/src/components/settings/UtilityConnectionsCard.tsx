@@ -461,9 +461,6 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
                   onReconnect={() => reconnect("vec")}
                 />
               ))}
-              <p className="pt-1 text-[11px] text-zinc-400">
-                WEC support coming soon
-              </p>
             </div>
           )}
         </div>

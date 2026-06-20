@@ -54,7 +54,10 @@ export default function AccountTab() {
         </p>
       </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
-      <SpongeProgressCard />
+      {/* Energy history ("data sponge") belongs to Array Operator only — its
+          multi-year absorbed history is a core AO feature. NEPOOL operators
+          don't surface it on their master account. */}
+      {account.product === "array_operator" && <SpongeProgressCard />}
       <UtilityConnectionsCard account={account} />
       <PlanBillingCard account={account} />
       {account.subscription_status === "trialing" && (
