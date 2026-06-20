@@ -178,32 +178,22 @@
     return r.json();
   }
 
-  // Pull ~35 days of DAILY usage for one (account, serviceLocation) and reduce
-  // the negative-y export signal into per-day generation rows. Grounded contract.
-  async function fetchDailyGeneration(userId, accountNumber, serviceLocation) {
-    const end = new Date();
-    const start = new Date(end.getTime() - 35 * 24 * 3600 * 1000);
-    const body = {
-      timeFrame: "DAILY",
-      userId: userId,
-      screen: "USAGE_COMPARISON",
-      includeDemand: false,
-      serviceLocationNumber: String(serviceLocation),
-      accountNumber: String(accountNumber),
-      industries: ["ELECTRIC"],
-      startDateTime: start.getTime(),
-      endDateTime: end.getTime(),
-    };
-    let data;
-    try { data = await shPost("/services/secured/utility-usage", body); }   // cookie-only first (matches the working billing call)
-    catch (e1) {
-      // Retry WITH the nisc username header in case this deployment requires it.
-      try { data = await shPost("/services/secured/utility-usage", body, userId); }
-      catch (e2) { LOG("usage fetch failed for", accountNumber, e1 && e1.message, "/", e2 && e2.message); return []; }
-    }
+  // How far back to pull daily generation. The NEPOOL/GMCS report renders 6
+  // rolling quarters (18 months); we pull ~19 months so a SINGLE owner re-login
+  // backfills the entire reporting window — not just the last month (the old
+  // 35-day window left every historical quarter at zero). Chunked because a
+  // single 18-month DAILY POST gets truncated/rejected by the NISC API; 90-day
+  // chunks are the proven-safe size for the utility-usage endpoint.
+  const GEN_LOOKBACK_DAYS = 580;   // ~19 months — covers 6 quarters + margin
+  const GEN_CHUNK_DAYS = 90;       // safe per-request DAILY window
 
+  // Reduce ONE utility-usage response into per-day generation, accumulating into
+  // `byDay` (isoDay -> generated kWh). Grounded contract:
+  //   NEGATIVE daily y = net export = generation (West Glover's meter is tagged
+  //   FORWARD/isNetMeter=false yet net-exports). An explicit RETURN flow, if
+  //   present, is generation directly.
+  function _reduceUsageInto(data, byDay) {
     const electric = (data && Array.isArray(data.ELECTRIC)) ? data.ELECTRIC : [];
-    const byDay = {};   // isoDay -> generated kWh
     for (const entry of electric) {
       const seriesMap = {};
       for (const s of (entry.series || [])) {
@@ -224,9 +214,6 @@
           if (x == null || y == null) continue;
           const day = new Date(x).toISOString().slice(0, 10);
           const kwh = Number(y);
-          // Grounded signal: NEGATIVE daily y = export = generation (West Glover's
-          // meter is tagged FORWARD/isNetMeter=false yet net-exports). RETURN flow,
-          // if present, is generation directly.
           let gen = 0;
           if (flow === "RETURN") gen = Math.max(0, kwh);
           else if (kwh < 0) gen = Math.abs(kwh);
@@ -234,6 +221,56 @@
         }
       }
     }
+  }
+
+  // Pull one chunk [start,end] of DAILY usage for (account, serviceLocation).
+  // Returns the raw response or null on failure (cookie-only first, then retry
+  // with the nisc username header for deployments that require it).
+  async function _fetchUsageChunk(userId, accountNumber, serviceLocation, start, end) {
+    const body = {
+      timeFrame: "DAILY",
+      userId: userId,
+      screen: "USAGE_COMPARISON",
+      includeDemand: false,
+      serviceLocationNumber: String(serviceLocation),
+      accountNumber: String(accountNumber),
+      industries: ["ELECTRIC"],
+      startDateTime: start.getTime(),
+      endDateTime: end.getTime(),
+    };
+    try { return await shPost("/services/secured/utility-usage", body); }
+    catch (e1) {
+      try { return await shPost("/services/secured/utility-usage", body, userId); }
+      catch (e2) {
+        LOG("usage chunk failed for", accountNumber,
+          start.toISOString().slice(0, 10), "→", end.toISOString().slice(0, 10),
+          e1 && e1.message, "/", e2 && e2.message);
+        return null;
+      }
+    }
+  }
+
+  // Pull the FULL reporting window of daily generation in 90-day chunks and
+  // reduce the negative-y export signal into per-day generation rows.
+  async function fetchDailyGeneration(userId, accountNumber, serviceLocation) {
+    const overallEnd = new Date();
+    const overallStart = new Date(overallEnd.getTime() - GEN_LOOKBACK_DAYS * 24 * 3600 * 1000);
+    const byDay = {};   // isoDay -> generated kWh
+    const chunkMs = GEN_CHUNK_DAYS * 24 * 3600 * 1000;
+    let okChunks = 0, failChunks = 0;
+    // Walk newest→oldest so partial failures still leave the most recent
+    // (most-likely-needed) data populated.
+    let chunkEnd = new Date(overallEnd.getTime());
+    while (chunkEnd > overallStart) {
+      const chunkStart = new Date(Math.max(overallStart.getTime(), chunkEnd.getTime() - chunkMs));
+      const data = await _fetchUsageChunk(userId, accountNumber, serviceLocation, chunkStart, chunkEnd);
+      if (data) { _reduceUsageInto(data, byDay); okChunks++; }
+      else { failChunks++; }
+      // step back one day past chunkStart to avoid double-counting the boundary
+      chunkEnd = new Date(chunkStart.getTime() - 24 * 3600 * 1000);
+    }
+    LOG("daily generation for", accountNumber, "→", Object.keys(byDay).length,
+      "day(s) over", okChunks, "ok /", failChunks, "failed chunk(s)");
     return Object.keys(byDay).sort().map((d) => ({ date: d, generated_kwh: Math.round(byDay[d] * 1000) / 1000 }));
   }
 
