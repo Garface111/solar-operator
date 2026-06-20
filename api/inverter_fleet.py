@@ -937,6 +937,50 @@ def restore_array(db, tenant: Tenant, array_id: int) -> Array:
     return arr
 
 
+def delete_inverter(db, tenant: Tenant, inverter_id: int) -> Inverter:
+    """Soft-delete a SINGLE inverter (the owner's right-click "Delete inverter").
+
+    SOFT-delete only — sets `deleted_at` on the one Inverter row so it vanishes
+    from build_fleet_tree (which filters `Inverter.deleted_at.is_(None)`) while
+    leaving its parent array and siblings untouched. NEVER hard-deletes, so an
+    undo / restore can revive the row. Ownership-checked: the inverter must
+    belong to `tenant`, else FleetError (route → 404), so a cross-tenant id
+    leaks nothing. Idempotent: an already-deleted inverter is treated as
+    not-found.
+
+    AO billing is per-kWh metered (not per-inverter), so this deliberately does
+    NOT touch Stripe — same as delete_array.
+    """
+    iv = db.get(Inverter, inverter_id)
+    if iv is None or iv.tenant_id != tenant.id or iv.deleted_at is not None:
+        raise FleetError("Inverter not found")
+    iv.deleted_at = now()
+    db.commit()
+    db.refresh(iv)
+    return iv
+
+
+def restore_inverter(db, tenant: Tenant, inverter_id: int) -> Inverter:
+    """Un-delete a soft-deleted inverter (the inverse of delete_inverter).
+
+    Clears `deleted_at` so the inverter reappears in the fleet tree under its
+    array. Powers the sandbox "Undo delete" for a single inverter.
+    Ownership-checked (cross-tenant or unknown id → FleetError → 404).
+    Idempotent: a not-currently-deleted inverter is treated as not-found.
+
+    Guards against a dangling revive: if the inverter's parent array is itself
+    soft-deleted, the inverter stays hidden in the tree (the array filter wins),
+    which is correct — restoring the array brings its inverters back.
+    """
+    iv = db.get(Inverter, inverter_id)
+    if iv is None or iv.tenant_id != tenant.id or iv.deleted_at is None:
+        raise FleetError("Inverter not found")
+    iv.deleted_at = None
+    db.commit()
+    db.refresh(iv)
+    return iv
+
+
 def reset_layout(db, tenant: Tenant) -> int:
     """Snap every inverter back to its discovered (source) array grouping.
     Returns count reset. Empty owner-created arrays are left in place."""

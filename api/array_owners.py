@@ -1379,6 +1379,52 @@ def restore_array_ep(array_id: int,
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
+@router.delete("/v1/array-owners/inverters/{inverter_id}")
+def delete_inverter_ep(inverter_id: int,
+                       authorization: str | None = Header(default=None)) -> dict:
+    """Soft-delete a single inverter (the owner's right-click "Delete inverter").
+
+    SOFT-delete only: sets `deleted_at` on the one Inverter row so it disappears
+    from GET /v1/array-owners/fleet-tree immediately (that tree filters
+    Inverter.deleted_at.is_(None)) while its parent array and siblings stay put.
+    404 if the inverter isn't found or belongs to another tenant. The shared
+    read-only DEMO tenant can never delete (403). AO billing is per-kWh metered,
+    so this does NOT touch Stripe.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            iv = inverter_fleet.delete_inverter(db, tenant, inverter_id)
+        except inverter_fleet.FleetError:
+            raise HTTPException(404, "Inverter not found")
+        return {"ok": True, "inverter_id": iv.id}
+
+
+@router.post("/v1/array-owners/inverters/{inverter_id}/restore")
+def restore_inverter_ep(inverter_id: int,
+                        authorization: str | None = Header(default=None)) -> dict:
+    """Un-delete a soft-deleted inverter — powers the sandbox "Undo delete".
+
+    The inverse of DELETE /v1/array-owners/inverters/{inverter_id}: clears
+    `deleted_at` so the inverter reappears in the fleet tree under its array.
+    404 if the inverter isn't found, isn't currently deleted, or belongs to
+    another tenant. The shared read-only DEMO tenant can never mutate (403).
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            iv = inverter_fleet.restore_inverter(db, tenant, inverter_id)
+        except inverter_fleet.FleetError:
+            raise HTTPException(404, "Inverter not found")
+        return {"ok": True, "inverter_id": iv.id}
+
+
 @router.post("/v1/array-owners/layout/reset")
 def reset_layout_ep(authorization: str | None = Header(default=None)) -> dict:
     """Snap every inverter back to its discovered (source) array grouping."""
