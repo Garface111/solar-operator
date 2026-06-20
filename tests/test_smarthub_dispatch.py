@@ -179,3 +179,50 @@ def test_wec_recapture_returns_updated(client):
     r2 = _sync(client, key, payload)
     assert r2.status_code == 200
     assert r2.json()["result"] == "updated"
+
+
+# ─── Test 6: SmartHub bill kWh (totalUsage) is CONSUMPTION, never generation ──
+# Regression guard for the VEC/WEC empty-NEPOOL-report bug: the extension sources
+# bill `kwh` from billing/overview `totalUsage`, which is net CONSUMPTION. For a
+# net-metering solar account that net-exports it's ~0. It must land in
+# kwh_consumed and MUST NOT populate kwh_generated (which the GMCS report reads as
+# production) — generation comes only from the daily utility-usage pull
+# (DailyGeneration). Before the fix, acct 6578300 had 36 bills all
+# kwh_generated=0 and reports rendered zeros.
+
+def test_smarthub_bill_kwh_is_consumption_not_generation(client):
+    from api.models import Bill
+
+    tid, key = _tenant()
+    email = "solar@wec.vt"
+    payload = _wec_payload(email, [_account("8008888", "Net Export Solar")])
+    # Bill carries totalUsage-derived kWh (consumption) — api-capture shape.
+    payload["bills"] = [{
+        "account_id": "8008888",
+        "billing_date": "6/1/2024",
+        "kwh": 12,                       # totalUsage — CONSUMPTION, not generation
+        "period_start": "2024-05-01",
+        "period_end": "2024-05-31",
+        "bill_uuid": "uuid-netexport-1",
+    }]
+
+    r = _sync(client, key, payload)
+    assert r.status_code == 200, r.text
+
+    with SessionLocal() as db:
+        acct = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tid,
+                UtilityAccount.account_number == "8008888",
+            )
+        ).scalar_one()
+        bill = db.execute(
+            select(Bill).where(Bill.account_id == acct.id)
+        ).scalar_one()
+
+    # The consumption number must NOT be treated as generation.
+    assert bill.kwh_generated is None, (
+        "SmartHub bill consumption leaked into kwh_generated — "
+        "this is the empty-report bug"
+    )
+    assert bill.kwh_consumed == 12

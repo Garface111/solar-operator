@@ -1118,9 +1118,21 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 u = usage_by_acct.get(acct_no, {}).get(b["billing_date"].strftime("%Y-%m"))
                 _ps = b.get("period_start") or (u["period_start"] if u else None)
                 _pe = b.get("period_end") or (u["period_end"] if u else None)
-                _kwh = b.get("kwh")
-                if _kwh is None and u:
-                    _kwh = u["kwh"]
+                # CRITICAL — SmartHub bill kWh is CONSUMPTION, not generation.
+                # The extension sources this from billing/overview `totalUsage`
+                # (and the usage-explorer aria-label kWh), which is the meter's
+                # NET CONSUMPTION for the period. For a net-metering SOLAR account
+                # that net-exports, totalUsage is ~0 — so writing it into
+                # kwh_generated (which the GMCS report reads as production) made
+                # every VEC/WEC NEPOOL report render zeros (live: acct 6578300 had
+                # 36 bills all kwh_generated=0). SmartHub bills carry NO generation
+                # number; the ONLY generation source is the daily utility-usage
+                # pull (negative net-export → DailyGeneration, source=utility_meter
+                # / smarthub). So route this to kwh_consumed and NEVER touch
+                # kwh_generated from the bill path.
+                _consumed = b.get("kwh")
+                if _consumed is None and u:
+                    _consumed = u["kwh"]
                 exists = db.execute(
                     select(Bill).where(
                         Bill.account_id == acct_id,
@@ -1129,15 +1141,11 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 ).scalar_one_or_none()
                 if exists:
                     # UPDATE-don't-skip: a later capture may finally carry the
-                    # kWh (e.g. the operator visited Usage Explorer this time, or
-                    # an API capture replaced a DOM scrape). VEC bills first land
-                    # with kwh_generated=0/None because billing-history has no
-                    # generation number — backfill it when we now have one,
-                    # instead of dropping the corrected reading as a duplicate.
-                    if _kwh is not None:
-                        new_kwh = int(_kwh)
-                        if (exists.kwh_generated or 0) != new_kwh:
-                            exists.kwh_generated = new_kwh
+                    # consumption kWh (e.g. an API capture replaced a DOM scrape).
+                    if _consumed is not None:
+                        new_consumed = int(_consumed)
+                        if (exists.kwh_consumed or 0) != new_consumed:
+                            exists.kwh_consumed = new_consumed
                             exists.parse_status = "parsed"
                         # Backfill period bounds if they were missing.
                         if _ps and not exists.period_start:
@@ -1151,10 +1159,14 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     bill_date=b["billing_date"],
                     period_start=_ps,
                     period_end=_pe,
-                    kwh_generated=int(_kwh) if _kwh is not None else None,
+                    # generation is unknown from a SmartHub bill — leave it None so
+                    # the report's bill-prorate path never treats consumption as
+                    # production; DailyGeneration (daily pull) is the truth source.
+                    kwh_generated=None,
+                    kwh_consumed=int(_consumed) if _consumed is not None else None,
                     document_number=doc_no,
                     pdf_path=b.get("pdf_url"),
-                    parse_status="parsed" if _kwh is not None else "partial",
+                    parse_status="parsed" if _consumed is not None else "partial",
                 ))
 
         try:
