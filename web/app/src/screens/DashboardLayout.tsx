@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useOutletContext } from "react-router-dom";
 import { TrialBanner } from "../components/TrialBanner";
 import { TrialEndedGate } from "../components/TrialEndedGate";
+import { CancelledGate } from "../components/CancelledGate";
 import { AllSetCelebration } from "../components/AllSetCelebration";
 import { BottomTabBar } from "../components/BottomTabBar";
 import { MindButton } from "../components/MindButton";
@@ -123,6 +124,16 @@ export default function DashboardLayout({ onSignOut }: Props) {
   // the server's active=False gate) reports/scrapes are already halted.
   const pausedNoCard = account?.subscription_status === "paused_no_card";
 
+  // A cancelled account must NOT load the working dashboard, or cancelling
+  // appears to do nothing. Lock it behind a full-page gate. Match both
+  // spellings the backend uses ("cancelled" from cancel-trial, "canceled" from
+  // the Stripe webhook). Guard on active===false so a re-subscribed tenant
+  // (status flipped back) is never gated.
+  const cancelled =
+    account?.active === false &&
+    (account?.subscription_status === "cancelled" ||
+      account?.subscription_status === "canceled");
+
   // Auto-pair the extension as soon as we know the operator's tenant_key.
   // The activation-code UI was removed — pairing is fully zero-touch now.
   useAutoPairExtension(account?.tenant_key ?? null);
@@ -183,6 +194,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
           The inline paused banner is intentionally omitted here — the gate
           below is the single, unambiguous surface for this state. */}
       {!pausedNoCard &&
+        !cancelled &&
         account?.trial_ends_at &&
         new Date(account.trial_ends_at) > new Date() && (
           <TrialBanner
@@ -191,7 +203,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
           />
         )}
 
-      {heartbeatStale && (
+      {heartbeatStale && !cancelled && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
           <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-amber-800">
@@ -218,7 +230,13 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
       {/* pb-24 on mobile clears the 56px bottom tab bar + safe area. */}
       <main className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8">
-        {pausedNoCard ? <TrialEndedGate onSignOut={onSignOut} /> : <Outlet context={ctx} />}
+        {cancelled ? (
+          <CancelledGate onSignOut={onSignOut} />
+        ) : pausedNoCard ? (
+          <TrialEndedGate onSignOut={onSignOut} />
+        ) : (
+          <Outlet context={ctx} />
+        )}
       </main>
 
       <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
