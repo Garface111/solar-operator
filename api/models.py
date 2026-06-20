@@ -1068,6 +1068,17 @@ class BillingReportSubscription(Base):
     array_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("arrays.id"), nullable=True, index=True)
 
+    # OFFTAKER ↔ UTILITY BILL binding (Jun 2026, Ford's offtaker-report rule).
+    # Offtaker invoices are computed EXCLUSIVELY from the utility's paper bills
+    # (Bill.kwh_generated for THIS GMP account, per billing period) — never from
+    # vendor/inverter telemetry, never from the GMP hourly-interval data, never
+    # from a daily CSV. When this is set the delivery path reads utility-bill kWh
+    # for this account ONLY and SKIPS (waits) if no bill covers the period, rather
+    # than falling back to any other source. Nullable for back-compat with older
+    # array-based subscriptions; new offtakers select the GMP bill that's theirs.
+    utility_account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("utility_accounts.id"), nullable=True, index=True)
+
     # Multi-array allocations (Jun 2026): an offtaker can own a share of SEVERAL
     # arrays at once. List of {"array_id": int, "allocation_pct": float 0..1}.
     # When set + non-empty, delivery SUMS each array's (period kWh × pct) into one

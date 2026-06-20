@@ -726,6 +726,18 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_allocations")
 
+        # 2026-06 OFFTAKER ↔ UTILITY BILL binding. Offtaker invoices read ONLY the
+        # utility's paper bills (Bill.kwh_generated) for the bound GMP account —
+        # never vendor/inverter data. This column ties an offtaker subscription to
+        # the specific GMP utility account whose bills are theirs. NULL = legacy
+        # array-based subscription. INTEGER FK works on both sqlite + Postgres.
+        if not column_exists(conn, "billing_report_subscriptions", "utility_account_id"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN utility_account_id INTEGER"
+            ))
+            print("  + billing_report_subscriptions.utility_account_id")
+
         # 2026-06-16 Live current power for extension-captured inverters.
         # The inverters table came free via create_all, but an EXISTING prod table
         # won't gain new columns from create_all — add them explicitly so the

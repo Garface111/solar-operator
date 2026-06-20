@@ -82,6 +82,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "customer_name": s.customer_name,
         "client_id": s.client_id,
         "array_id": getattr(s, "array_id", None),
+        "utility_account_id": getattr(s, "utility_account_id", None),
         "allocation_pct": getattr(s, "allocation_pct", None),
         "array_allocations": getattr(s, "array_allocations", None),
         "billing_model": s.billing_model,
@@ -134,6 +135,64 @@ async def billing_match(file: UploadFile = File(...),
     data = await _read_upload(file)
     match = match_billing_workbook(data)
     return {"ok": True, "filename": file.filename, "match": match.to_dict()}
+
+
+# ─── GMP utility-bill selector (offtaker binding) ───────────────────────────
+
+@router.get("/utility-accounts")
+def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
+    """List this tenant's GMP utility accounts so the add-offtaker UI can let the
+    operator SELECT the utility bill that connects to an offtaker.
+
+    Offtaker invoices are computed EXCLUSIVELY from the chosen account's utility
+    PAPER BILLS (Bill.kwh_generated per billing period) — never vendor/inverter
+    data. This endpoint surfaces each GMP account with the array it feeds and a
+    summary of the bills we hold (count + latest period + that period's kWh) so
+    the operator can pick confidently and see whether a bill is on file yet.
+    """
+    from ..models import UtilityAccount, Bill, Array
+
+    t = tenant_from_session(authorization)
+    out = []
+    with SessionLocal() as db:
+        accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                UtilityAccount.provider == "gmp",
+                UtilityAccount.deleted_at.is_(None),
+            ).order_by(UtilityAccount.nickname, UtilityAccount.account_number)
+        ).scalars().all()
+        for a in accts:
+            # Latest bill that actually carries generation for this account.
+            latest = db.execute(
+                select(Bill)
+                .where(Bill.account_id == a.id,
+                       Bill.kwh_generated.isnot(None),
+                       Bill.period_end.isnot(None))
+                .order_by(Bill.period_end.desc())
+            ).scalars().first()
+            bill_count = db.execute(
+                select(func.count(Bill.id)).where(
+                    Bill.account_id == a.id,
+                    Bill.kwh_generated.isnot(None))
+            ).scalar() or 0
+            arr = db.get(Array, a.array_id) if a.array_id else None
+            out.append({
+                "utility_account_id": a.id,
+                "account_number": a.account_number,
+                "nickname": a.nickname,
+                "array_id": a.array_id,
+                "array_name": arr.name if arr else None,
+                "bill_count": int(bill_count),
+                "has_bill": latest is not None,
+                "latest_period_end": latest.period_end.date().isoformat()
+                    if latest and latest.period_end else None,
+                "latest_period_label": latest.period_end.strftime("%Y-%m")
+                    if latest and latest.period_end else None,
+                "latest_kwh_generated": (int(latest.kwh_generated)
+                    if latest and latest.kwh_generated is not None else None),
+            })
+    return {"ok": True, "utility_accounts": out}
 
 
 # ─── subscriptions CRUD ─────────────────────────────────────────────────────
@@ -201,6 +260,7 @@ async def create_subscription(
     file: Optional[UploadFile] = File(default=None),
     customer_name: Optional[str] = Form(default=None),
     array_id: Optional[int] = Form(default=None),
+    utility_account_id: Optional[int] = Form(default=None),
     allocation_pct: Optional[float] = Form(default=None),
     array_allocations: Optional[str] = Form(default=None),
     rate_per_kwh: Optional[float] = Form(default=None),
@@ -239,6 +299,7 @@ async def create_subscription(
     if file is None:
         return await _create_manual_subscription(
             t, customer_name=customer_name, array_id=array_id,
+            utility_account_id=utility_account_id,
             allocation_pct=allocation_pct, array_allocations=array_allocations,
             rate_per_kwh=rate_per_kwh,
             discount_pct=discount_pct, net_rate_per_kwh=net_rate_per_kwh,
@@ -300,27 +361,98 @@ async def create_subscription(
 
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
+    utility_account_id=None,
     rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
     include_summary, annual_trueup, enabled,
 ):
-    """Create a workbook-less subscription from typed fields. The customer's
-    invoice is computed each cycle as allocation_pct × the array's period
-    generation (see delivery.build_manual_match).
+    """Create a workbook-less subscription from typed fields.
 
-    Two shapes:
+    THREE shapes (checked in priority order):
+      * OFFTAKER ↔ UTILITY BILL — utility_account_id + allocation_pct. The
+        offtaker's invoice is computed EXCLUSIVELY from that GMP account's utility
+        PAPER BILLS (Bill.kwh_generated per period) — never vendor/inverter data,
+        never the hourly interval data, and with NO fallback. This is the path
+        Ford specified for offtaker reports.
       * single array  — array_id + allocation_pct (legacy, unchanged).
       * multi array    — array_allocations: JSON list of {array_id, allocation_pct}.
         The offtaker owns a share of several arrays; delivery sums each array's
         (period kWh × pct) into one combined invoice.
     """
     import json as _json
-    from ..models import Array
+    from ..models import Array, UtilityAccount
 
     name = (customer_name or "").strip()
     if not name:
         raise HTTPException(400, "customer_name is required for a manual customer")
+
+    # ── OFFTAKER ↔ UTILITY BILL path (highest priority) ──────────────────────
+    if utility_account_id is not None:
+        if allocation_pct is None:
+            raise HTTPException(
+                400, "allocation_pct is required when binding an offtaker to a utility bill")
+        try:
+            pct = float(allocation_pct)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "allocation_pct must be a number between 0 and 1")
+        if not (0.0 < pct <= 1.0):
+            raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
+                                     "(e.g. 0.25 for 25%)")
+        rate_val = _validate_rate(rate_per_kwh)
+        disc_val = _validate_discount(discount_pct)
+        net_val = _validate_rate(net_rate_per_kwh)
+        with SessionLocal() as db:
+            acct = db.get(UtilityAccount, utility_account_id)
+            if (acct is None or acct.tenant_id != t.id
+                    or acct.deleted_at is not None):
+                raise HTTPException(404, f"Utility account {utility_account_id} not found")
+            if (acct.provider or "").lower() != "gmp":
+                raise HTTPException(
+                    400, "Offtaker reports bind to a GMP utility account "
+                         "(utility-bill data only).")
+            client = db.execute(
+                select(Client).where(Client.tenant_id == t.id, Client.name == name,
+                                     Client.deleted_at.is_(None))
+            ).scalar_one_or_none()
+            if client is None:
+                client = Client(tenant_id=t.id, name=name, contact_email=client_email,
+                                active=True)
+                db.add(client)
+                db.flush()
+            sub = BillingReportSubscription(
+                tenant_id=t.id,
+                client_id=client.id,
+                customer_name=name,
+                utility_account_id=utility_account_id,
+                # Keep array_id populated (from the account's array) for list views,
+                # but delivery uses the utility-bill path because utility_account_id
+                # is set — it never reads vendor/array data for this offtaker.
+                array_id=acct.array_id,
+                allocation_pct=pct,
+                array_allocations=None,
+                rate_per_kwh=rate_val,
+                discount_pct=disc_val,
+                net_rate_per_kwh=net_val,
+                source_workbook=None,
+                source_filename=None,
+                parsed_map=None,
+                billing_model="percent_of_array",
+                cadence=cadence,
+                annual_trueup=annual_trueup,
+                delivery_mode=delivery_mode,
+                send_mode=send_mode,
+                client_email=client_email,
+                cc_emails=cc_emails,
+                operator_email=operator_email or t.contact_email,
+                formats=_parse_formats(formats),
+                include_summary=include_summary,
+                enabled=enabled,
+                next_send_at=next_send_at(cadence),
+            )
+            db.add(sub)
+            db.commit()
+            return {"ok": True, "subscription": _sub_dict(sub)}
 
     # Parse the optional multi-array allocations list.
     allocs: list[dict] = []

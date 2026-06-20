@@ -261,6 +261,38 @@ def _array_period_kwh_sourced(
     return kwh, start, end, label, ("daily_csv" if kwh is not None else None)
 
 
+def _utility_bill_period_kwh(
+    db, utility_account_id: int
+) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str]]:
+    """OFFTAKER source of truth: the utility's PAPER BILL generation for ONE GMP
+    account's most recent billing period — and NOTHING else.
+
+    Reads Bill.kwh_generated for the bound utility_account_id (the paper copy's
+    stated generation per billing period). This is deliberately the ONLY source
+    for offtaker invoices: NO vendor/inverter telemetry, NO GMP hourly-interval
+    data, NO DailyGeneration CSV. If no utility bill covers a period yet, returns
+    (None, None, None, None) so the caller SKIPS/waits — it must never fabricate
+    or substitute another source.
+
+    Returns (kwh, period_start, period_end, label). label = period_end's YYYY-MM.
+    """
+    from ..models import Bill
+
+    bill = db.execute(
+        select(Bill)
+        .where(Bill.account_id == utility_account_id,
+               Bill.kwh_generated.isnot(None),
+               Bill.period_end.isnot(None))
+        .order_by(Bill.period_end.desc())
+    ).scalars().first()
+    if bill is None:
+        return None, None, None, None
+    ps = bill.period_start.date() if bill.period_start else None
+    pe = bill.period_end.date() if bill.period_end else None
+    label = pe.strftime("%Y-%m") if pe else None
+    return round(float(bill.kwh_generated), 1), ps, pe, label
+
+
 def _normalized_allocations(sub) -> list[dict]:
     """Return a clean list of {array_id:int, allocation_pct:float} for a sub.
 
@@ -309,6 +341,79 @@ def build_manual_match(sub) -> BillingMatch:
     label: Optional[str] = None
     array_name: Optional[str] = None
     kwh_source: Optional[str] = None
+
+    # ── OFFTAKER ↔ UTILITY BILL path (Ford's rule) ────────────────────────────
+    # When the offtaker is bound to a GMP utility account, their invoice is
+    # computed EXCLUSIVELY from that account's utility PAPER BILLS — the metered
+    # generation the utility itself states per billing period. NO vendor/inverter
+    # data, NO GMP hourly-interval data, NO daily CSV, and NO fallback to any of
+    # those. If no utility bill covers a period yet, kWh stays None and delivery
+    # SKIPS (waits on the utility bill) — it is never fabricated or substituted.
+    if getattr(sub, "utility_account_id", None) is not None:
+        from ..models import UtilityAccount
+        with SessionLocal() as db:
+            acct = db.get(UtilityAccount, sub.utility_account_id)
+            array_name = (acct.nickname if acct and acct.nickname
+                          else (f"GMP {acct.account_number}" if acct else None))
+            ub_kwh, start, end, label = _utility_bill_period_kwh(
+                db, sub.utility_account_id)
+        kwh_source = "utility_bill"
+        if ub_kwh is None:
+            # No utility bill for this account yet → wait, don't fabricate.
+            warnings.append(
+                "Waiting on the utility bill for this offtaker — no GMP bill "
+                "has landed yet for this account. The invoice will generate "
+                "from the paper bill once it arrives (no vendor data is used).")
+            array_kwh = None      # signals delivery/skip-if-empty to hold
+        else:
+            array_kwh = ub_kwh
+        if not pct:
+            warnings.append("No allocation % set for this offtaker.")
+            pct = 0.0
+        customer_kwh = round((array_kwh or 0.0) * pct, 2)
+        pricing = resolve_discount_pricing(sub, period_end=end)
+        net_rate = pricing["net_rate"]
+        discount = pricing["discount_pct"]
+        billing_rate = 1.0 - discount
+        period = Period(
+            month=label, start=start, end=end,
+            array_kwh=(array_kwh or 0.0), customer_kwh=customer_kwh,
+            tariff=net_rate, adder=0.0,
+        )
+        computed = compute_invoice(customer_kwh, net_rate, 0.0,
+                                   billing_rate, "percent_of_array", None)
+        computed["invoice_number"] = end.strftime("%Y-%m") if end else label
+        computed["period_start"] = start.isoformat() if start else None
+        computed["period_end"] = end.isoformat() if end else None
+        computed["month"] = label
+        computed["project_total_kwh"] = (array_kwh or 0.0)
+        computed["array_kwh"] = (array_kwh or 0.0)
+        computed["net_rate_per_kwh"] = round(net_rate, 6)
+        computed["discount_pct"] = round(discount, 6)
+        computed["effective_rate_per_kwh"] = pricing["effective_rate"]
+        computed["net_rate_source"] = pricing["net_source"]
+        computed["net_rate_note"] = pricing.get("net_rate_note")
+        computed["discount_source"] = pricing["discount_source"]
+        computed["rate_per_kwh"] = pricing["effective_rate"]
+        computed["rate_source"] = pricing["discount_source"]
+        computed["kwh_source"] = kwh_source           # always 'utility_bill' here
+        # has_data flag the empty-skip path checks (None kWh = nothing to bill).
+        computed["has_utility_bill"] = array_kwh is not None
+        return BillingMatch(
+            matched=True, confidence=1.0, source="manual", data_sheet=None,
+            customer={"name": sub.customer_name, "email": sub.client_email},
+            allocation_pct=pct,
+            billing_rate=billing_rate, billing_model="percent_of_array",
+            periods=[period], latest_period=period,
+            template={"title": "Invoice - Solar Power Generation"},
+            computed_invoice=computed,
+            project_totals={
+                "total_array_kwh": (array_kwh or 0.0),
+                "total_customer_kwh": customer_kwh,
+                "array_name": array_name,
+            },
+            warnings=warnings,
+        )
 
     # Multi-array path: an offtaker owning a share of SEVERAL arrays. Sum each
     # array's (period kWh × that array's pct) into one combined invoice, with a
@@ -674,6 +779,17 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
         return {"ok": False, "error": "no current billing period in the stored workbook"}
+
+    # OFFTAKER ↔ UTILITY BILL guard: a utility-bound offtaker is billed ONLY from
+    # the utility's paper bill. If no bill has landed for the period yet, do NOT
+    # send a $0/blank invoice — skip and wait. (build_manual_match flags this via
+    # computed_invoice.has_utility_bill === False; vendor data is never used.)
+    _ci_guard = match.computed_invoice or {}
+    if getattr(sub, "utility_account_id", None) is not None and _ci_guard.get("has_utility_bill") is False:
+        return {"ok": False, "skipped": True,
+                "error": "waiting on the utility bill for this offtaker — "
+                         "no GMP bill has landed for this period yet (no vendor "
+                         "data is substituted)"}
 
     # For a real (non-test) send honor the slider; a test always goes to_me.
     if is_test:
