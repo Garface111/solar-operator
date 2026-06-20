@@ -470,7 +470,56 @@ def _array_alert(inv_rows: list[dict]) -> dict:
             "headline": _ALERT_HEADLINE.get(worst, "All clear")}
 
 
-def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True):
+def _cross_tenant_live_by_serial(db, inverters: list) -> dict:
+    """Best FRESH live-power reading per physical inverter, ACROSS ALL tenants.
+
+    The same physical array can be captured into more than one tenant (e.g. an
+    installer/owner each run the extension against the same Fronius Solar.web
+    system; a system shared as a guest gets a delayed/reduced live feed). When one
+    tenant's browser captures a bogus near-zero wattage for a device while another
+    tenant captured a real value for the SAME device THIS SAME window, we'd rather
+    show the real one than a misleading ~0.
+
+    Join key = (vendor, serial). For Fronius the serial is the stable device GUID,
+    so this matches the exact physical inverter — borrowing can only correct a
+    bad/low reading, never invent or cross panels. We keep the MAX fresh reading
+    (freshness-gated by _POWER_FRESH, positive only) so a stale or zero sibling
+    never drags a good local reading down — it's a pure upward correction.
+
+    Returns {(vendor, serial): watts}. Empty when no sibling capture beats local.
+    """
+    serials = {
+        (str(iv.vendor or "").lower(), str(iv.serial))
+        for iv in inverters if iv.serial
+    }
+    if not serials:
+        return {}
+    wanted_serials = {s for _v, s in serials}
+    fresh_after = now() - _POWER_FRESH
+    rows = db.execute(
+        select(Inverter).where(
+            Inverter.serial.in_(wanted_serials),
+            Inverter.deleted_at.is_(None),
+            Inverter.last_power_w.isnot(None),
+            Inverter.last_power_at.isnot(None),
+            Inverter.last_power_at >= fresh_after,
+        )
+    ).scalars().all()
+    best: dict[tuple, float] = {}
+    for r in rows:
+        key = (str(r.vendor or "").lower(), str(r.serial))
+        if key not in serials:
+            continue  # a serial we care about but a different vendor — skip
+        w = float(r.last_power_w or 0.0)
+        if w <= 0:
+            continue
+        if key not in best or w > best[key]:
+            best[key] = w
+    return best
+
+
+def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
+                  borrow: dict | None = None):
     """The card's "Current kW". API-pulled vendors (SolarEdge) carry a live
     instantaneous power in their telemetry (m["last_power_w"]) — prefer it. For
     extension-captured vendors there is no live feed, so fall back to the power
@@ -482,16 +531,31 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True):
     the exact bug that contradicted SMA's own portal. A genuine live telemetry
     value (m["last_power_w"], freshly polled/pulled this request) is trusted as-is
     since it reflects the real instant; only the STORED capture fallback is
-    daylight-gated."""
+    daylight-gated.
+
+    CROSS-TENANT BORROW: `borrow` maps (vendor, serial) -> the best fresh reading
+    for this physical device across ALL tenants (see _cross_tenant_live_by_serial).
+    When another tenant captured a higher real value for the SAME inverter this
+    window, take it — this corrects the case where one browser's capture returns a
+    bogus near-zero for a shared/guest Solar.web system while the owner's browser
+    read the true wattage. Upward-only and serial-exact, so it can't fabricate.
+    Still daylight-gated: at night every tenant reads ~0, so there's nothing to
+    borrow."""
     pw = m.get("last_power_w")
-    if pw is not None:
-        return pw
-    if not daylight:
+    base = pw if pw is not None else None
+    if base is None and daylight and (
+        iv.last_power_w is not None and iv.last_power_at is not None
+        and (now() - iv.last_power_at) <= _POWER_FRESH
+    ):
+        base = iv.last_power_w
+    # Cross-tenant upward correction (daylight only — nothing to borrow at night).
+    if daylight and borrow and iv.serial:
+        bw = borrow.get((str(iv.vendor or "").lower(), str(iv.serial)))
+        if bw is not None and (base is None or bw > base):
+            return bw
+    if base is None and pw is None and not daylight:
         return None
-    if (iv.last_power_w is not None and iv.last_power_at is not None
-            and (now() - iv.last_power_at) <= _POWER_FRESH):
-        return iv.last_power_w
-    return None
+    return base
 
 
 # ── Two distinct data streams: VENDOR (inverter telemetry) vs UTILITY (meter) ──
@@ -620,6 +684,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
     # Compute sun-up ONCE per fleet build (regional default; all arrays share it
     # until per-array lat/long exists). The card uses this for the "Sleeping" state.
     daylight = _is_daylight()
+    # Cross-tenant live-power borrow map (vendor,serial) -> best fresh wattage
+    # across ALL tenants. Lets a tenant whose browser captured a bogus near-zero
+    # for a SHARED physical system show the real reading another tenant captured
+    # for the same device this window. Computed once per build (upward-only).
+    borrow_live = _cross_tenant_live_by_serial(db, inverters)
     for arr in arrays:
         ivs = sorted(by_array.get(arr.id, []), key=lambda x: (x.position, x.id))
 
@@ -698,7 +767,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "min_kwh": min_kwh,                   # lowest daily output in the window (real)
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
-                "current_power_w": _live_power_w(iv, m, daylight=daylight),
+                "current_power_w": _live_power_w(iv, m, daylight=daylight, borrow=borrow_live),
                 "last_report": u.get("last_report") or m.get("last_report"),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,
