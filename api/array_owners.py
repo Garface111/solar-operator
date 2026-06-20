@@ -2893,10 +2893,15 @@ def _persist_meter_accounts(
     """
     results: list[dict] = []
 
+    # Match by name across ALL arrays, INCLUDING soft-deleted ones. The unique
+    # constraint uq_array_per_tenant spans (tenant_id, name) with NO deleted_at
+    # predicate, so a soft-deleted array still RESERVES its name. Filtering
+    # deleted rows out here meant a re-capture of a previously-deleted array tried
+    # to INSERT a colliding name → psycopg2 UniqueViolation → 500 ("couldn't grab
+    # your GMP account"). Include them and revive on reuse (mirrors the Fronius
+    # inverter-capture path).
     existing = db.execute(
-        select(Array).where(
-            Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
-        )
+        select(Array).where(Array.tenant_id == tenant.id)
     ).scalars().all()
     by_name = {a.name.strip().lower(): a for a in existing}
 
@@ -2978,6 +2983,10 @@ def _persist_meter_accounts(
                 if acct_num:
                     by_acct_number[acct_num] = arr
                 created = True
+            elif arr.deleted_at is not None:
+                # Reusing a soft-deleted array (its name kept the constraint slot)
+                # — reactivate it rather than colliding. Generation is flowing again.
+                arr.deleted_at = None
 
             kwh_recorded = 0.0
             days_written = 0

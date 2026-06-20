@@ -113,3 +113,55 @@ def test_capture_is_idempotent_no_duplicate_days(client):
             select(DailyGeneration).where(DailyGeneration.array_id == arr_id)
         ).scalars().all()
         assert len(dg) == 1  # one day, not two rows
+
+
+def test_capture_revives_soft_deleted_array_instead_of_500(client):
+    """REGRESSION: the 'couldn't grab your GMP account' HTTP 500.
+
+    uq_array_per_tenant spans (tenant_id, name) including soft-deleted rows, so a
+    soft-deleted array still RESERVES its name. The capture path used to build its
+    name map from non-deleted arrays only — so a re-capture whose name matched a
+    soft-deleted array tried to INSERT a colliding name → psycopg2 UniqueViolation
+    → 500. It must instead REVIVE the soft-deleted array (no duplicate, no crash).
+    """
+    from datetime import datetime
+    tid, key = _make_tenant()
+    # An array with this exact capture-derived name exists but is SOFT-DELETED.
+    # The meter-capture name for a nickname-less GMP account = "GMP <acct>".
+    with SessionLocal() as db:
+        arr = Array(tenant_id=tid, name="GMP 770099", client_id=None,
+                    fuel_type="solar", deleted_at=datetime.utcnow())
+        db.add(arr)
+        db.flush()
+        deleted_id = arr.id
+        db.commit()
+
+    resp = client.post(
+        "/v1/array-owners/utility-meter-capture",
+        json={
+            "provider": "gmp",
+            "accounts": [{
+                "account_number": "770099",
+                "nickname": "",                       # → name becomes "GMP 770099"
+                "summary": {},
+                "daily": [{"date": "2026-05-10", "generated_kwh": 250.0}],
+            }],
+        },
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    # Must NOT 500 — the soft-deleted array is revived and reused.
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        # Same row revived (deleted_at cleared), no duplicate created.
+        arrs = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.name == "GMP 770099")
+        ).scalars().all()
+        assert len(arrs) == 1
+        assert arrs[0].id == deleted_id
+        assert arrs[0].deleted_at is None
+        dg = db.execute(
+            select(DailyGeneration).where(DailyGeneration.array_id == deleted_id)
+        ).scalars().all()
+        assert len(dg) == 1 and dg[0].kwh == 250.0
+
