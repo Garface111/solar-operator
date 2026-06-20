@@ -165,3 +165,96 @@ def test_capture_revives_soft_deleted_array_instead_of_500(client):
         ).scalars().all()
         assert len(dg) == 1 and dg[0].kwh == 250.0
 
+
+def test_gmp_capture_creates_linkable_utility_account_and_bill(client):
+    """The offtaker dropdown lists GMP UtilityAccounts and bills them from
+    Bill.kwh_generated. A GMP meter capture with a billing-period summary must
+    therefore create BOTH a UtilityAccount (so the account is linkable) and a
+    Bill (so the offtaker invoice has real utility-bill kWh) — not just
+    DailyGeneration. This is what makes 'Link GMP utility bills' actually
+    populate the add-offtaker picker."""
+    from api.models import Bill, UtilityAccount
+    tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/utility-meter-capture",
+        json={
+            "provider": "gmp",
+            "accounts": [{
+                "account_number": "5551212",
+                "nickname": "Maple Field",
+                "summary": {
+                    "accountNumber": "5551212",
+                    "isNetMetered": True,
+                    "billingPeriodStartDate": "2026-05-01",
+                    "billingPeriodEndDate": "2026-05-31",
+                    "totalGrossGenerated": 1800,
+                    "totalGenerationSentToGrid": 1500,
+                },
+                "daily": [],
+            }],
+        },
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        ua = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tid,
+                UtilityAccount.provider == "gmp",
+                UtilityAccount.account_number == "5551212",
+            )
+        ).scalar_one()
+        assert ua.array_id is not None          # linked to the array
+        bills = db.execute(
+            select(Bill).where(Bill.account_id == ua.id)
+        ).scalars().all()
+        assert len(bills) == 1
+        assert bills[0].kwh_generated == 1800    # the paper-bill total
+        assert bills[0].period_end is not None
+
+
+def test_gmp_capture_bill_is_idempotent_no_dupe_bill(client):
+    """Re-capturing the same GMP billing period upserts the Bill (climbs only),
+    never duplicating it."""
+    from api.models import Bill, UtilityAccount
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "gmp",
+        "accounts": [{
+            "account_number": "5559000",
+            "nickname": "Birch Field",
+            "summary": {
+                "accountNumber": "5559000", "isNetMetered": True,
+                "billingPeriodStartDate": "2026-05-01",
+                "billingPeriodEndDate": "2026-05-31",
+                "totalGrossGenerated": 1000,
+            },
+            "daily": [],
+        }],
+    }
+    client.post("/v1/array-owners/utility-meter-capture", json=payload,
+                headers={"Authorization": f"Bearer {key}"})
+    # Second capture, generation climbed within the same period.
+    payload["accounts"][0]["summary"]["totalGrossGenerated"] = 1850
+    client.post("/v1/array-owners/utility-meter-capture", json=payload,
+                headers={"Authorization": f"Bearer {key}"})
+
+    with SessionLocal() as db:
+        ua = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tid,
+                UtilityAccount.account_number == "5559000")
+        ).scalar_one()
+        bills = db.execute(select(Bill).where(Bill.account_id == ua.id)).scalars().all()
+        assert len(bills) == 1                   # no duplicate Bill for the period
+        assert bills[0].kwh_generated == 1850    # climbed to max
+        # And exactly one UtilityAccount (no dupe account either).
+        accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == tid,
+                UtilityAccount.account_number == "5559000")
+        ).scalars().all()
+        assert len(accts) == 1
+
+

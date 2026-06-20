@@ -21,7 +21,7 @@ import json
 import logging
 import math
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as dtime
 from types import SimpleNamespace
 from typing import Optional
 
@@ -35,7 +35,7 @@ from .adapters import gmp as gmp_adapter
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
-from .models import Array, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
+from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
 from .models import Inverter, InverterDaily
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
@@ -2987,6 +2987,81 @@ def _persist_meter_accounts(
                 # Reusing a soft-deleted array (its name kept the constraint slot)
                 # — reactivate it rather than colliding. Generation is flowing again.
                 arr.deleted_at = None
+
+            # ── Link a UtilityAccount + Bill so offtakers can bind to this bill ──
+            # The offtaker invoice generator lists GMP UtilityAccounts and bills
+            # them EXCLUSIVELY from Bill.kwh_generated. This capture path used to
+            # write only DailyGeneration, so a "connected" GMP account never
+            # appeared in the add-offtaker picker and had no bill to invoice from.
+            # Upsert the UtilityAccount (idempotent on tenant+provider+account_number)
+            # and, when the GMP summary carries a billing period + generation,
+            # upsert a Bill so the offtaker dropdown populates and invoices have
+            # real utility-bill kWh. Only for accounts WITH generation (we already
+            # 'continue'd past the no-solar ones above).
+            if acct_num:
+                ua = db.execute(
+                    select(UtilityAccount).where(
+                        UtilityAccount.tenant_id == tenant.id,
+                        UtilityAccount.provider == provider,
+                        UtilityAccount.account_number == acct_num,
+                    )
+                ).scalar_one_or_none()
+                if ua is None:
+                    ua = UtilityAccount(
+                        tenant_id=tenant.id, provider=provider,
+                        account_number=acct_num, array_id=arr.id,
+                        nickname=(acct.nickname or "").strip() or None,
+                    )
+                    db.add(ua)
+                    db.flush()
+                else:
+                    if ua.deleted_at is not None:
+                        ua.deleted_at = None
+                    # Keep it linked to the array (don't steal an existing manual link).
+                    if ua.array_id is None:
+                        ua.array_id = arr.id
+                    if not ua.nickname and (acct.nickname or "").strip():
+                        ua.nickname = (acct.nickname or "").strip()
+                    ua.last_seen = now()
+
+                # Bill from the GMP billing-period summary (the "paper bill" total).
+                if (period_gen is not None and period_gen > 0
+                        and period_end is not None):
+                    period_start = _meter_day(parsed.get("period_start"))
+                    existing_bill = db.execute(
+                        select(Bill).where(
+                            Bill.account_id == ua.id,
+                            Bill.period_end.isnot(None),
+                        ).order_by(Bill.period_end.desc())
+                    ).scalars().all()
+                    # Match the same billing period by period_end (one Bill/period).
+                    bill = next(
+                        (b for b in existing_bill
+                         if b.period_end and b.period_end.date() == period_end),
+                        None,
+                    )
+                    bdays = ((period_end - period_start).days
+                             if period_start else None)
+                    if bill is None:
+                        db.add(Bill(
+                            tenant_id=tenant.id, account_id=ua.id,
+                            period_start=(datetime.combine(period_start, dtime.min)
+                                          if period_start else None),
+                            period_end=datetime.combine(period_end, dtime.min),
+                            bill_date=datetime.combine(period_end, dtime.min),
+                            billing_days=bdays,
+                            kwh_generated=int(round(float(period_gen))),
+                            kwh_sent_to_grid=parsed.get("kwh_sent_to_grid"),
+                            is_net_metered=bool(parsed.get("is_net_metered")),
+                            parse_status="parsed",
+                        ))
+                    else:
+                        # Never lower a captured generation figure (climbs only).
+                        newg = int(round(float(period_gen)))
+                        if bill.kwh_generated is None or newg > bill.kwh_generated:
+                            bill.kwh_generated = newg
+                        if bill.period_start is None and period_start is not None:
+                            bill.period_start = datetime.combine(period_start, dtime.min)
 
             kwh_recorded = 0.0
             days_written = 0
