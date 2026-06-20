@@ -1,8 +1,10 @@
+import { useState, useCallback } from "react";
+import { reactivateAccount } from "../lib/api";
+import { useToast } from "../ui/Toast";
+
 interface Props {
   /** Sign the operator out (shown as a secondary, low-emphasis action). */
   onSignOut: () => void;
-  /** Product-aware support address shown for reactivation. */
-  supportEmail?: string;
 }
 
 /**
@@ -11,13 +13,30 @@ interface Props {
  *
  * A cancelled account must NOT load the working dashboard — otherwise
  * cancelling appears to do nothing (the operator can still browse and act).
- * This replaces the dashboard content with an unambiguous "cancelled" state.
+ * This replaces the dashboard content with an unambiguous "cancelled" state and
+ * a single clear action: start your subscription again.
  *
- * Friendly + data-safe: nothing is deleted. Reactivation is a deliberate,
- * human step (reply / email support) rather than an auto-resume, because the
- * add-card auto-resume path is wired only for the `paused_no_card` state.
+ * Reactivation starts a fresh PAID subscription with NO trial — the operator
+ * already used their trial. reactivateAccount() sends them to Stripe Checkout to
+ * add a card; the setup_intent.succeeded webhook then creates the subscription
+ * (no trial) and flips them back to active. Data is preserved throughout.
  */
-export function CancelledGate({ onSignOut, supportEmail = "admin@solaroperator.org" }: Props) {
+export function CancelledGate({ onSignOut }: Props) {
+  const toast = useToast();
+  const [starting, setStarting] = useState(false);
+
+  const startReactivate = useCallback(async () => {
+    setStarting(true);
+    try {
+      await reactivateAccount(); // redirects to Stripe Checkout (setup mode)
+    } catch (err) {
+      setStarting(false);
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't open secure checkout",
+      );
+    }
+  }, [toast]);
+
   return (
     <div className="flex min-h-[70vh] items-center justify-center px-4 py-12">
       <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-8 text-center shadow-sm">
@@ -39,23 +58,29 @@ export function CancelledGate({ onSignOut, supportEmail = "admin@solaroperator.o
         </div>
 
         <h1 className="mb-2 text-xl font-semibold text-zinc-900">
-          Your account is cancelled
+          Your subscription is cancelled
         </h1>
         <p className="mb-1 text-sm leading-relaxed text-zinc-600">
-          This account has been cancelled, so the dashboard and automatic bill
-          pulls are turned off. You won&apos;t be charged.
+          Your dashboard and automatic bill pulls are turned off. Start your
+          subscription again to pick up right where you left off.
         </p>
         <p className="mb-6 text-sm font-medium leading-relaxed text-emerald-700">
-          Your data is safe — we haven&apos;t deleted anything. Want to come
-          back? Just let us know and we&apos;ll reactivate it.
+          Your data is safe — we haven&apos;t deleted anything.
         </p>
 
-        <a
-          href={`mailto:${supportEmail}?subject=Reactivate my account`}
-          className="block w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-700"
+        <button
+          type="button"
+          onClick={startReactivate}
+          disabled={starting}
+          className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:opacity-60"
         >
-          Email us to reactivate →
-        </a>
+          {starting ? "Opening secure checkout…" : "Start my subscription →"}
+        </button>
+
+        <p className="mt-4 text-xs text-zinc-400">
+          Billing starts today — your free trial has already been used. Cancel
+          anytime.
+        </p>
 
         <button
           type="button"

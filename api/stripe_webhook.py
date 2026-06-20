@@ -256,6 +256,10 @@ def _process_subscription_deleted(sub: dict) -> dict:
 
         t.subscription_status = "canceled"
         t.active = False
+        # Clear the dead subscription id so a later reactivation creates a fresh
+        # subscription instead of short-circuiting on `already_active` in
+        # create_subscription_for_tenant.
+        t.stripe_subscription_id = None
         db.commit()
         tid, email = t.id, t.contact_email
         name = t.operator_name or t.company_name or t.name
@@ -378,18 +382,26 @@ def _process_setup_intent_succeeded(si: dict) -> dict:
         if customer_id:
             t.stripe_customer_id = customer_id
         was_paused = t.subscription_status == "paused_no_card"
+        # A cancelled tenant adding a card = reactivation. Detect both spellings
+        # plus the explicit reactivate=1 metadata flag set by /v1/account/reactivate.
+        _status = (t.subscription_status or "").lower()
+        was_cancelled = (not t.active) and _status in ("cancelled", "canceled")
+        reactivate_flag = str(meta.get("reactivate", "")) == "1"
         db.commit()
         tid, email = t.id, t.contact_email
 
-    logger.info("setup_intent.succeeded: stored pm=%s for tenant=%s (was_paused=%s)",
-                payment_method_id, tid, was_paused)
+    logger.info("setup_intent.succeeded: stored pm=%s for tenant=%s (was_paused=%s was_cancelled=%s reactivate=%s)",
+                payment_method_id, tid, was_paused, was_cancelled, reactivate_flag)
 
     result: dict = {"tenant": tid, "pm_stored": True}
-    if was_paused:
-        # Auto-resume so the operator doesn't have to click anything else.
+    if was_paused or was_cancelled or reactivate_flag:
+        # Auto-(re)subscribe with NO trial so the operator doesn't have to click
+        # anything else. create_subscription_for_tenant always creates a paid,
+        # no-trial subscription (it clears trial_ends_at) and flips active=True.
         from .stripe_helpers import create_subscription_for_tenant
         resume = create_subscription_for_tenant(tid)
         result["resumed"] = bool(resume.get("ok"))
+        result["reactivated"] = bool(resume.get("ok")) and (was_cancelled or reactivate_flag)
     else:
         send_internal_alert(
             "💳 Card added",

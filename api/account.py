@@ -1847,6 +1847,68 @@ def add_payment_method(authorization: Optional[str] = Header(default=None)):
         raise HTTPException(502, f"Stripe error: {e}")
 
 
+@router.post("/v1/account/reactivate")
+def reactivate_account(authorization: Optional[str] = Header(default=None)):
+    """Start a fresh paid subscription for a CANCELLED account — no trial.
+
+    Shown behind the cancelled-account gate (both NEPOOL + Array Operator). The
+    operator cancelled (card detached, active=False), so we must recapture a card
+    AND begin billing immediately with no trial period. This returns a Stripe
+    Checkout Session (mode='setup') tagged reactivate=1; the setup_intent.succeeded
+    webhook stores the card and, seeing the tenant is cancelled, calls
+    create_subscription_for_tenant — which creates a no-trial paid subscription
+    (NEPOOL: setup fee + per-array; Array Operator: per-kWh metered) and flips the
+    tenant back to active.
+
+    Gated to cancelled tenants only: an active/trialing tenant has nothing to
+    reactivate (and resume-from-pause / add-payment-method cover their cases).
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(500, "Stripe not configured")
+
+    status = (t.subscription_status or "").lower()
+    is_cancelled = (not t.active) and status in ("cancelled", "canceled")
+    if not is_cancelled:
+        raise HTTPException(400, "This account isn't cancelled — nothing to reactivate.")
+
+    customer_id = t.stripe_customer_id
+    if not customer_id:
+        try:
+            customer = stripe.Customer.create(
+                email=t.contact_email,
+                name=t.company_name or t.name or t.operator_name or None,
+                metadata={"tenant_id": t.id},
+            )
+            customer_id = customer["id"] if isinstance(customer, dict) else customer.id
+        except stripe.error.StripeError as e:
+            raise HTTPException(502, f"Stripe error: {e}")
+        with SessionLocal() as db:
+            db_t = db.get(Tenant, t.id)
+            if db_t:
+                db_t.stripe_customer_id = customer_id
+                db.commit()
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="setup",
+            payment_method_types=["card"],
+            customer=customer_id,
+            success_url=f"{branding.dashboard_url(t.product)}/?reactivated=1",
+            cancel_url=f"{branding.dashboard_url(t.product)}/?reactivate_cancelled=1",
+            # reactivate=1 lets the webhook distinguish a reactivation from a
+            # plain add-card; it also reactivates on tenant state alone, so this
+            # is belt-and-suspenders.
+            setup_intent_data={"metadata": {"tenant_id": t.id, "reactivate": "1"}},
+            metadata={"tenant_id": t.id, "reactivate": "1"},
+        )
+        url = session["url"] if isinstance(session, dict) else session.url
+        return {"checkout_url": url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(502, f"Stripe error: {e}")
+
+
 @router.post("/v1/account/resume-from-pause")
 def resume_from_pause(authorization: Optional[str] = Header(default=None)):
     """Resume a 'paused_no_card' tenant once a card is on file.

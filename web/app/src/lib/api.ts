@@ -478,6 +478,17 @@ export async function addPaymentMethod(): Promise<void> {
   window.location.href = res.checkout_url;
 }
 
+/** Restart a CANCELLED account: returns a Stripe Checkout setup-mode URL and
+ *  redirects to it. The setup_intent.succeeded webhook recaptures the card and
+ *  starts a fresh PAID subscription with NO trial (create_subscription_for_tenant),
+ *  flipping the tenant back to active. Gated server-side to cancelled tenants. */
+export async function reactivateAccount(): Promise<void> {
+  const res = await request<{ checkout_url: string }>(
+    "/v1/account/reactivate",
+    { method: "POST" },
+  );
+  window.location.href = res.checkout_url;
+}
 /** Manual fallback to resume a 'paused_no_card' tenant once a card is on file.
  *  Normally the webhook resumes automatically right after the card is added. */
 export async function resumeFromPause(): Promise<{
