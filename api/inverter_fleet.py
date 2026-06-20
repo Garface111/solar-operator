@@ -518,6 +518,30 @@ def _cross_tenant_live_by_serial(db, inverters: list) -> dict:
     return best
 
 
+def _report_is_stale(last_report) -> bool:
+    """True when a vendor telemetry timestamp is older than the SOURCE-stale
+    window (_SOURCE_STALE_HOURS) — i.e. the source stopped reporting, so any
+    live value carried alongside it is frozen, not current. Uses the SAME
+    threshold as _source_status so the live number and the SOURCE-OFFLINE banner
+    can never disagree. A missing/unparseable timestamp is NOT treated as stale
+    (return False) — we only suppress a live value when we can prove it's old."""
+    if not last_report:
+        return False
+    from datetime import datetime, timezone
+    try:
+        if isinstance(last_report, datetime):
+            dt = last_report
+        else:
+            s = str(last_report).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+    return age_h > _SOURCE_STALE_HOURS
+
+
 def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
                   borrow: dict | None = None):
     """The card's "Current kW". API-pulled vendors (SolarEdge) carry a live
@@ -540,8 +564,22 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
     bogus near-zero for a shared/guest Solar.web system while the owner's browser
     read the true wattage. Upward-only and serial-exact, so it can't fabricate.
     Still daylight-gated: at night every tenant reads ~0, so there's nothing to
-    borrow."""
+    borrow.
+
+    SOURCE-STALE GATE: a vendor live value (m["last_power_w"], e.g. SolarEdge's
+    /overview currentPower) and its timestamp (m["last_report"], lastUpdateTime)
+    come from the SAME response. When the source stopped reporting, currentPower
+    FREEZES at its last value while lastUpdateTime ages — so a stale feed would
+    otherwise read "producing 596 W" while the card simultaneously shows "SOURCE
+    OFFLINE — last reported 8h ago" (the exact contradiction Ford hit on Cover
+    Catamount). So we only trust m["last_power_w"] as LIVE when its own report is
+    within the staleness window; a stale vendor reading is dropped (→ no live
+    number), matching the honest SOURCE-OFFLINE banner."""
     pw = m.get("last_power_w")
+    # Drop a vendor live reading whose own telemetry timestamp is stale — it's a
+    # frozen value from a source that stopped reporting, not a live instant.
+    if pw is not None and _report_is_stale(m.get("last_report")):
+        pw = None
     base = pw if pw is not None else None
     if base is None and daylight and (
         iv.last_power_w is not None and iv.last_power_at is not None

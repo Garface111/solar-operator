@@ -80,3 +80,44 @@ def test_vendor_must_match():
     borrow = {("sma", "dev-1"): 2257.1}   # different vendor keyed
     out = F._live_power_w(iv, {"last_power_w": None}, daylight=True, borrow=borrow)
     assert out == 3.0
+
+
+# 7. SOURCE-STALE GATE: a vendor live value whose own last_report is stale must
+#    NOT read as live — it's a frozen value from a source that stopped reporting
+#    (the Cover Catamount "SOURCE OFFLINE 8h ago" + "PRODUCING 596W" contradiction).
+def _iso_ago(hours: float) -> str:
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+def test_stale_vendor_reading_dropped():
+    iv = _iv("se-1", vendor="solaredge")
+    # 596W carried with an 8h-old report → source is offline → drop the live value.
+    out = F._live_power_w(
+        iv, {"last_power_w": 596.3, "last_report": _iso_ago(8.0)}, daylight=True
+    )
+    assert out is None
+
+
+def test_fresh_vendor_reading_kept():
+    iv = _iv("se-1", vendor="solaredge")
+    # same value, but a fresh (1h-old) report → genuinely live → keep it.
+    out = F._live_power_w(
+        iv, {"last_power_w": 596.3, "last_report": _iso_ago(1.0)}, daylight=True
+    )
+    assert out == 596.3
+
+
+def test_missing_report_does_not_suppress():
+    # No timestamp at all → we can't prove staleness, so don't suppress (a vendor
+    # that simply doesn't carry last_report keeps its live value).
+    iv = _iv("se-1", vendor="solaredge")
+    out = F._live_power_w(iv, {"last_power_w": 596.3, "last_report": None}, daylight=True)
+    assert out == 596.3
+
+
+def test_report_is_stale_helper():
+    assert F._report_is_stale(_iso_ago(8.0)) is True
+    assert F._report_is_stale(_iso_ago(1.0)) is False
+    assert F._report_is_stale(None) is False
+    assert F._report_is_stale("not-a-date") is False
