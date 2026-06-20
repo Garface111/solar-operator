@@ -731,6 +731,32 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
         # problem on our side. Computed from the freshest inverter last_report.
         src_status = _source_status(inv_rows)
 
+        # ARRAY-LEVEL live power (server-computed, authoritative). Sum the
+        # per-inverter live readings so the card no longer has to aggregate
+        # client-side (which broke on a stale SPA bundle) and every surface reads
+        # ONE number. None when NO inverter has a live value (so the card can show
+        # an honest "no live feed" rather than a fake 0).
+        _live_vals = [
+            i["current_power_w"] for i in inv_rows
+            if i.get("current_power_w") is not None
+        ]
+        array_power_w = round(sum(_live_vals), 1) if _live_vals else None
+
+        # HONEST "did it produce today" signal — the antidote to the whack-a-mole
+        # where a near-zero/stale LIVE reading makes a healthy array read "IDLE /
+        # not producing" even though it generated energy all day (Bruce's
+        # Waterford: 10 inverters live at 3 W each = 30 W "idle" while it logged
+        # 591 kWh today). The card uses this to show "produced today · live feed
+        # updating" instead of a bald "not producing right now" when live≈0 but
+        # the array clearly worked today. Read from the array's own daily history
+        # (today's row), independent of the flaky instantaneous feed.
+        _today_iso = now().date().isoformat()
+        _daily_rows = _array_daily(db, arr.id)
+        _today_kwh = next(
+            (r["kwh"] for r in _daily_rows if r.get("date") == _today_iso), None
+        )
+        produced_today_kwh = _today_kwh if (_today_kwh and _today_kwh > 0) else None
+
         columns.append({
             "array_id": arr.id,
             "array_name": arr.name,
@@ -738,6 +764,14 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             "vendors": vendors,
             "inverter_source": "live" if ivs else None,
             "inverter_count": len(inv_rows),
+            # Server-computed array live power (W) = sum of per-inverter live
+            # readings; None when no inverter has a live value. Authoritative so
+            # the card need not aggregate client-side.
+            "current_power_w": array_power_w,
+            # Today's generated kWh from the array's own daily history (the source
+            # of truth that the flaky instantaneous live feed is NOT). Lets the
+            # card show "produced today" instead of "not producing" when live≈0.
+            "produced_today_kwh": produced_today_kwh,
             "alert": _array_alert(inv_rows),
             "inverters": inv_rows,
             "origin_links": origin_links,
