@@ -102,7 +102,12 @@ def test_bills_raw_with_matching_usage_creates_parsed_bill(client):
     assert len(bills) == 1
     b = bills[0]
     assert b.parse_status == "parsed"
-    assert b.kwh_generated == 1234
+    # SmartHub/VEC bill kWh is CONSUMPTION (net usage), not generation — it must
+    # route to kwh_consumed and NEVER touch kwh_generated (see app.py sync path:
+    # writing it to kwh_generated zeroed every VEC/WEC NEPOOL report). Generation
+    # comes only from the daily utility-usage net-export pull.
+    assert b.kwh_consumed == 1234
+    assert b.kwh_generated is None
     assert b.period_start is not None
     assert b.period_end is not None
 
@@ -195,8 +200,11 @@ def test_later_usage_backfills_kwh_on_existing_bill(client):
 
     with SessionLocal() as db:
         bills = db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().all()
-    # Still ONE bill (no duplicate), now backfilled with the real kWh.
+    # Still ONE bill (no duplicate), now backfilled with the real kWh — which is
+    # CONSUMPTION (kwh_consumed), never kwh_generated (SmartHub/VEC bill kWh is net
+    # usage; routing it to kwh_generated zeroed every VEC/WEC NEPOOL report).
     assert len(bills) == 1
     b = bills[0]
-    assert b.kwh_generated == 1234
+    assert b.kwh_consumed == 1234
+    assert b.kwh_generated is None
     assert b.parse_status == "parsed"

@@ -1904,6 +1904,14 @@ def solaredge_connect_account(
         by_site_id: dict[int, list[int]] = defaultdict(list)
         by_name: dict[str, list[int]] = defaultdict(list)
         names_lower: set[str] = set()
+        # uq_array_per_tenant spans soft-deleted rows, so the new-array collision
+        # guard must check ALL names (live + soft-deleted), else a site colliding
+        # with a deleted array's name slips through → INSERT → UniqueViolation 500.
+        all_names_lower: set[str] = {
+            n.strip().lower() for (n,) in db.execute(
+                select(Array.name).where(Array.tenant_id == tenant.id)
+            ).all()
+        }
         arr_by_id = {a.id: a for a in arrays}
         for a in arrays:
             key = a.name.strip().lower()
@@ -1964,9 +1972,11 @@ def solaredge_connect_account(
                 matched.append(entry)
             else:
                 name = site_name
-                if name.lower() in names_lower:
-                    # Two sites share a name (or it collides with an array we
-                    # won't reuse) — disambiguate so uq_array_per_tenant holds.
+                if name.lower() in all_names_lower:
+                    # Two sites share a name OR it collides with an array we won't
+                    # reuse — INCLUDING a soft-deleted array, whose name still
+                    # reserves the uq_array_per_tenant slot. Disambiguate so the
+                    # INSERT can't hit the unique constraint (→ 500).
                     name = f"{site_name} ({sid})"
                 new_arr = Array(
                     tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
@@ -1976,6 +1986,7 @@ def solaredge_connect_account(
                 _attach_solaredge(db, new_arr, api_key, sid)
                 used.add(new_arr.id)
                 names_lower.add(name.lower())
+                all_names_lower.add(name.lower())
                 arr_by_id[new_arr.id] = new_arr
                 entry["array_id"] = new_arr.id
                 entry["name"] = new_arr.name
@@ -2163,6 +2174,14 @@ def locus_connect_account(
         by_site_id: dict[int, list[int]] = defaultdict(list)
         by_name: dict[str, list[int]] = defaultdict(list)
         names_lower: set[str] = set()
+        # uq_array_per_tenant spans soft-deleted rows — the new-array collision
+        # guard must check ALL names (live + soft-deleted) or a site colliding with
+        # a deleted array's name slips through → INSERT → UniqueViolation 500.
+        all_names_lower: set[str] = {
+            n.strip().lower() for (n,) in db.execute(
+                select(Array.name).where(Array.tenant_id == tenant.id)
+            ).all()
+        }
         arr_by_id = {a.id: a for a in arrays}
         for a in arrays:
             key = a.name.strip().lower()
@@ -2219,8 +2238,9 @@ def locus_connect_account(
                 matched.append(entry)
             else:
                 name = site_name
-                if name.lower() in names_lower:
-                    # Disambiguate so uq_array_per_tenant holds.
+                if name.lower() in all_names_lower:
+                    # Disambiguate so uq_array_per_tenant holds (includes
+                    # soft-deleted arrays, whose names still reserve the slot).
                     name = f"{site_name} ({sid})"
                 new_arr = Array(
                     tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
@@ -2230,6 +2250,7 @@ def locus_connect_account(
                 _attach_locus(db, new_arr, creds, sid)
                 used.add(new_arr.id)
                 names_lower.add(name.lower())
+                all_names_lower.add(name.lower())
                 arr_by_id[new_arr.id] = new_arr
                 entry["array_id"] = new_arr.id
                 entry["name"] = new_arr.name

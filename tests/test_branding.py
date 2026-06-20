@@ -91,12 +91,11 @@ def test_from_address_is_product_correct(monkeypatch):
     b = _fresh_branding(monkeypatch)
     # NEPOOL sends from its own (Resend-verified) domain.
     assert b.from_address("nepool") == "NEPOOL Operator <hello@nepooloperator.com>"
-    # Array Operator falls back to the verified platform domain until
-    # arrayoperator.com is verified — but keeps the AO display name.
+    # Array Operator now sends from its OWN verified domain (arrayoperator.com
+    # was verified via the Resend /domains API; see branding.from_address docstring).
     ao = b.from_address("array_operator")
     assert ao.startswith("Array Operator <")
-    assert "solaroperator.org" in ao  # verified fallback domain
-    assert "arrayoperator.com" not in ao  # not verified yet
+    assert "arrayoperator.com" in ao  # AO's own verified domain
 
 
 def test_from_address_env_overrides(monkeypatch):

@@ -316,6 +316,34 @@ def test_connect_account_duplicate_site_names(client, monkeypatch):
     assert len({a.solaredge_site_id for a in arrays}) == 3
 
 
+def test_connect_account_name_collides_with_soft_deleted_array(client, monkeypatch):
+    """REGRESSION (uq_array_per_tenant class): a soft-deleted array still RESERVES
+    its name in the unique constraint. A SolarEdge site whose name matches a
+    SOFT-DELETED array must NOT 500 — the new-array name-collision guard checks
+    ALL names (live + deleted) and disambiguates with the site id."""
+    from datetime import datetime
+    tid = _make_tenant()
+    # Pre-existing SOFT-DELETED array named "Solar Barn".
+    _make_array(tid, "Solar Barn", deleted_at=datetime.utcnow())
+
+    # Incoming SolarEdge site with the SAME name (a different physical site).
+    sites = [_site(7, "Solar Barn")]
+    monkeypatch.setattr(httpx, "get", _sites_get(sites))
+    resp = client.post(
+        "/v1/array-owners/solaredge/connect-account",
+        json={"api_key": "acct_key"}, headers=_auth(tid),
+    )
+    # Must succeed, not 500 on the unique constraint.
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert len(out["created"]) == 1
+    # The live array is disambiguated ("Solar Barn (7)"), not colliding.
+    arrays = _arrays_for(tid)
+    assert len(arrays) == 1
+    assert arrays[0].name == "Solar Barn (7)"
+    assert arrays[0].solaredge_site_id == 7
+
+
 def test_connect_account_subset_site_ids(client, monkeypatch):
     tid = _make_tenant()
     sites = [_site(1, "A"), _site(2, "B"), _site(3, "C")]

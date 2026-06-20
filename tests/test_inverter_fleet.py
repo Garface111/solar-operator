@@ -137,10 +137,17 @@ def test_inverter_daily_series_and_min_peak(monkeypatch):
             {"date": "2026-06-11", "kwh": 52.7},     # the peak
             {"date": "2026-06-12", "kwh": 47.0},
         ]
+        # last_report must be RECENT relative to "now": _live_power_w drops a vendor
+        # live reading whose telemetry timestamp is older than _SOURCE_STALE_HOURS
+        # (a frozen value from a source that stopped reporting). A hardcoded past
+        # date made this test go stale with the calendar; use a fresh timestamp so
+        # the live-power assertion is time-robust.
+        from datetime import datetime, timezone, timedelta
+        fresh_report = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         def _fake_tel(vendor, api_key, site_id, *, force=False):
             return {"SN-D": {"name": "Daily 1", "model": "SE10K", "nameplate_kw": 10.0,
                              "daily": series, "error_code": None,
-                             "last_report": "2026-06-12T12:00:00",
+                             "last_report": fresh_report,
                              "last_mode": "PRODUCING", "last_power_w": 6400}}
         monkeypatch.setattr(IF, "_telemetry_for_site", _fake_tel)
         # ensure a resolvable connection so telemetry is pulled
