@@ -684,6 +684,76 @@ def test_fleet_tree_renders_fronius_comb(client):
     assert lag["peer_index"] < healthy["peer_index"]
 
 
+def test_inverter_capture_rebinds_by_site_id_after_rename(client):
+    """STABLE SITE ANCHOR: after the owner renames the array, a re-capture (which
+    still carries the same Fronius PvSystemId site_id but the OLD portal name)
+    must re-bind to the SAME array — never spawn a phantom duplicate that splits
+    the inverters from their data. This is the 'inverters in the wrong array'
+    glitch's structural cause."""
+    from api.models import Inverter
+    tid, key = _make_tenant()
+    # First capture creates array "Waterford" + 3 inverters under it.
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.name == "Waterford")
+        ).scalar_one()
+        original_id = arr.id
+        # Owner renames the array in AO (e.g. to a friendlier label).
+        arr.name = "Waterford Community Solar"
+        db.commit()
+
+    # Same site_id comes back in the next capture (portal name unchanged).
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+        ).scalars().all()
+        # No phantom: exactly ONE array, still the renamed original.
+        assert len(arrays) == 1, [a.name for a in arrays]
+        assert arrays[0].id == original_id
+        assert arrays[0].name == "Waterford Community Solar"
+        # All 3 inverters still under that one array.
+        invs = db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid,
+                                   Inverter.deleted_at.is_(None))
+        ).scalars().all()
+        assert len(invs) == 3
+        assert all(iv.array_id == original_id for iv in invs)
+
+
+def test_inverter_capture_preserves_manual_reassignment_on_recapture(client):
+    """After the owner DRAGS an inverter to a different array, a re-capture of the
+    same site must KEEP that owner grouping — never snap the moved inverter back
+    to the source array."""
+    from api.models import Inverter
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+    # Owner makes a second array and drags dev-3 into it.
+    other_id = _make_array(tid, "North Field")
+    with SessionLocal() as db:
+        iv3 = db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid, Inverter.serial == "dev-3")
+        ).scalar_one()
+        iv3.array_id = other_id
+        db.commit()
+
+    # Re-capture the same Fronius site.
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+
+    with SessionLocal() as db:
+        iv3 = db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid, Inverter.serial == "dev-3")
+        ).scalar_one()
+        # The owner's drag survives the re-capture.
+        assert iv3.array_id == other_id
+
+
 # ── SMA (ennexOS) per-inverter capture — same ingest path as Fronius ──────────
 
 def test_inverter_capture_sma_persists_per_inverter(client):

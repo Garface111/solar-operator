@@ -2455,10 +2455,44 @@ def inverter_capture(
             select(Array).where(Array.tenant_id == tenant.id)
         ).scalars().all()
         by_name = {a.name.strip().lower(): a for a in existing}
+        by_id = {a.id: a for a in existing}
+
+        # STABLE SITE ANCHOR (fixes "inverters in the wrong array after a rename").
+        # The Fronius site name is MUTABLE — the owner can rename the array in AO,
+        # and the portal name can differ from ours. Matching a captured site to an
+        # array by NAME alone meant a rename produced a PHANTOM duplicate array:
+        # the site's DailyGeneration + any newly-appearing inverter routed to the
+        # phantom while the existing inverters (matched globally by serial) stayed
+        # put — splitting a device from its data and its siblings.
+        #
+        # The durable anchor is the vendor's stable site id (Fronius PvSystemId),
+        # which we already persist on every inverter as source_site_id, tied to the
+        # array that originally surfaced it (source_array_id). Build site_id→array
+        # from those rows so a captured site re-binds to the SAME array regardless
+        # of name. First capture (no inverter rows yet) still falls back to name.
+        by_site_id: dict[str, Array] = {}
+        for iv in db.execute(
+            select(Inverter).where(
+                Inverter.tenant_id == tenant.id,
+                Inverter.vendor == provider,
+                Inverter.source_site_id.isnot(None),
+                Inverter.deleted_at.is_(None),
+            )
+        ).scalars().all():
+            sid = str(iv.source_site_id).strip()
+            if not sid or sid in by_site_id:
+                continue
+            anchor = (by_id.get(iv.source_array_id) if iv.source_array_id else None) \
+                or (by_id.get(iv.array_id) if iv.array_id else None)
+            if anchor is not None:
+                by_site_id[sid] = anchor
 
         for site in body.sites:
             site_name = (site.name or "").strip() or f"Fronius {site.site_id}"
-            arr = by_name.get(site_name.lower())
+            site_key = str(site.site_id).strip()
+            # 1) Stable site-id anchor (rename-proof). 2) name. 3) create.
+            arr = (by_site_id.get(site_key) if site_key else None) \
+                or by_name.get(site_name.lower())
             created = False
             if arr is None:
                 arr = Array(
@@ -2468,12 +2502,20 @@ def inverter_capture(
                 db.add(arr)
                 db.flush()
                 by_name[site_name.lower()] = arr
+                by_id[arr.id] = arr
+                if site_key:
+                    by_site_id[site_key] = arr
                 created = True
-            elif arr.deleted_at is not None:
-                # Re-capturing a previously-deleted array reactivates it (the
-                # constraint kept its name reserved). Mirrors the Inverter
-                # undelete below — live data is flowing again.
-                arr.deleted_at = None
+            else:
+                if arr.deleted_at is not None:
+                    # Re-capturing a previously-deleted array reactivates it (the
+                    # constraint kept its name reserved). Mirrors the Inverter
+                    # undelete below — live data is flowing again.
+                    arr.deleted_at = None
+                # Remember this site_id→array binding for the rest of this batch
+                # (and so a same-name-different-site collision can't steal it).
+                if site_key and site_key not in by_site_id:
+                    by_site_id[site_key] = arr
 
             # NOTE: nameplate hinting via Inverter rows is a follow-up — the
             # Array is the owner-facing grouping, and the value/peer model
