@@ -281,7 +281,21 @@
       String(_now.getDate()).padStart(2, "0");
     const devices = await getJson(UIAPI + "/api/v1/overview/" + plantId + "/devices?todayDate=" + todayDate);
     const inverters = (devices || [])
-      .filter((d) => d && d.componentType === "Device" && d.pvPower !== null && d.pvPower !== undefined)
+      // Keep every real inverter Device. DO NOT gate on per-device pvPower: the
+      // /overview/.../devices endpoint DRIFTED and now serves pvPower=null (see
+      // fetchSiteLivePowerW comment), so requiring it dropped EVERY inverter →
+      // captureOnePlant returned null → the whole SMA capture failed and the
+      // cards froze at the last reading that happened to carry pvPower. Live
+      // power now comes from the site-level measurements/gauge call below and is
+      // allocated across inverters by the backend (same as Fronius). An inverter
+      // qualifies if it reports live power OR today's energy OR just has an id.
+      .filter((d) => {
+        if (!d || d.componentType !== "Device") return false;
+        const hasPower = typeof d.pvPower === "number";
+        const hasEnergy = typeof d.totWhOutToday === "number";
+        const hasId = d.serial != null || d.componentId != null;
+        return hasPower || hasEnergy || hasId;
+      })
       .map((d) => ({
         serial: String(d.serial || d.componentId),
         name: d.name || String(d.serial),
