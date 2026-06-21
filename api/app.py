@@ -334,6 +334,10 @@ app.include_router(events_router)
 app.include_router(dev_sandbox_router)
 # Dev-only capture timeline (gated by SO_DEV_ENABLED in each route).
 app.include_router(dev_captures_router)
+
+# CC funnel dashboard (read-only admin metrics)
+from .admin_funnel import router as funnel_router
+app.include_router(funnel_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(
