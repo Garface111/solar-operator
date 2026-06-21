@@ -146,3 +146,52 @@ def test_recapture_same_login_upserts_in_place(client):
             UtilitySession.customer_number == "111")).scalars().all()
         assert len(sessions) == 1          # upserted, not appended
         assert sessions[0].api_token == "tok2"
+
+
+def test_multi_customer_capture_upserts_single_null_session(client):
+    """THE DUP-SESSION BUG (prod probe 2026-06-21): a GMP OPERATOR login manages
+    MANY utility customers, so a capture carries many distinct customer_numbers
+    and session_customer_number() returns None. Before the fix, every such
+    capture INSERTed a new unkeyed row — prod accumulated 2-6 rows per operator
+    (all customer_number NULL), making "which session is authoritative" ambiguous
+    and multiplying reauth emails. The NULL bucket must UPSERT: one unkeyed row
+    per (tenant, provider), refreshed in place."""
+    tid, key = _tenant()
+    accounts = [_acct("100", "111"), _acct("200", "222"), _acct("300", "333")]
+    for tok in ("tokA", "tokB", "tokC"):
+        assert _sync(client, key, _gmp_payload(
+            "op@gmp.test", accounts, tok)).status_code == 200
+
+    with SessionLocal() as db:
+        sessions = db.execute(select(UtilitySession).where(
+            UtilitySession.tenant_id == tid,
+            UtilitySession.provider == "gmp")).scalars().all()
+        assert len(sessions) == 1               # ONE NULL-bucket row, not three
+        assert sessions[0].customer_number is None
+        assert sessions[0].api_token == "tokC"  # refreshed in place
+
+
+def test_null_bucket_upsert_resets_refresh_failures(client):
+    """A reconnect (re-capture) of the unkeyed GMP operator session must reset
+    refresh_failures to 0 on the SAME row, so the failing-dup pile-up that drove
+    the reauth emails cannot persist after the operator re-authenticates."""
+    tid, key = _tenant()
+    accounts = [_acct("100", "111"), _acct("200", "222")]
+    assert _sync(client, key, _gmp_payload(
+        "op@gmp.test", accounts, "tok1")).status_code == 200
+    with SessionLocal() as db:
+        sess = db.execute(select(UtilitySession).where(
+            UtilitySession.tenant_id == tid,
+            UtilitySession.provider == "gmp")).scalar_one()
+        sess.refresh_failures = 17          # simulate a failing session
+        db.commit()
+
+    assert _sync(client, key, _gmp_payload(
+        "op@gmp.test", accounts, "tok2")).status_code == 200
+    with SessionLocal() as db:
+        rows = db.execute(select(UtilitySession).where(
+            UtilitySession.tenant_id == tid,
+            UtilitySession.provider == "gmp")).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].api_token == "tok2"
+        assert rows[0].refresh_failures == 0

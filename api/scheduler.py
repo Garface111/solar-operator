@@ -636,6 +636,30 @@ def refresh_expiring_gmp_tokens() -> dict:
             )
         ).scalars().all()
 
+        # Tenant-level reauth-email de-dup: only the AUTHORITATIVE (newest-
+        # captured) GMP session per tenant may trigger a reauth email. Until the
+        # dup-session consolidation runs, an operator can have several stale GMP
+        # session rows for the same login (prod 2026-06-21: up to 6) — each one
+        # keeps failing to refresh, and without this gate ONE outage fans out
+        # into one email PER dup row. The newest capture is the row selection
+        # actually uses (latest-per-provider in api/sessions.py), so it is the
+        # only one whose failure means the operator genuinely must re-auth; the
+        # older zombies are ignored for notification. (The per-session crossing
+        # test below still prevents hourly re-spam from the authoritative row.)
+        tenant_ids = {s.tenant_id for s in sessions}
+        authoritative_sess_id: dict[str, int] = {}
+        if tenant_ids:
+            newest_rows = db.execute(
+                select(UtilitySession.tenant_id, UtilitySession.id)
+                .where(UtilitySession.provider == "gmp",
+                       UtilitySession.tenant_id.in_(tenant_ids))
+                .order_by(UtilitySession.tenant_id,
+                          UtilitySession.captured_at.desc(),
+                          UtilitySession.id.desc())
+            ).all()
+            for _tid, _sid in newest_rows:
+                authoritative_sess_id.setdefault(_tid, _sid)  # first per tenant = newest
+
         for sess in sessions:
             tenant = db.get(Tenant, sess.tenant_id)
             token_prefix = sess.refresh_token[:8] if sess.refresh_token else "?"
@@ -672,7 +696,10 @@ def refresh_expiring_gmp_tokens() -> dict:
                 crossed_threshold = (
                     prev_failures < _GMP_REAUTH_NOTIFY_AFTER <= sess.refresh_failures
                 )
-                if crossed_threshold and tenant:
+                is_authoritative = (
+                    sess.id == authoritative_sess_id.get(sess.tenant_id)
+                )
+                if crossed_threshold and is_authoritative and tenant:
                     try:
                         send_gmp_reauth_needed_email(
                             to=tenant.contact_email,

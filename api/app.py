@@ -601,9 +601,11 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         # store the session — keyed by the captured login's identity
         # (customer_number) so an operator who logs into multiple distinct
         # utility customers (one login per client) keeps EVERY login usable, not
-        # just the latest. Re-capturing the same login upserts its row in place;
-        # a capture with no single customer identity is stored unkeyed and
-        # selection falls back to latest-per-provider (legacy behavior).
+        # just the latest. Re-capturing the same login upserts its row in place.
+        # A capture with no single customer identity (none, or many distinct —
+        # the GMP-operator norm) is stored under the NULL bucket and ALSO
+        # upserts: one unkeyed row per (tenant, provider), refreshed in place,
+        # with selection falling back to latest-per-provider (legacy behavior).
         expires_at = None
         if normalized["auth"].get("apiTokenExpires"):
             try:
@@ -615,16 +617,30 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         api_token = normalized["auth"].get("apiToken", "")
         refresh_token = normalized["auth"].get("refreshToken")
         raw_payload = {"user": normalized["user"]}
-        existing_sess = None
-        if session_customer:
-            existing_sess = db.execute(
-                select(UtilitySession)
-                .where(UtilitySession.tenant_id == tenant.id,
-                       UtilitySession.provider == normalized["provider"],
-                       UtilitySession.customer_number == session_customer)
-                .order_by(UtilitySession.captured_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
+        # Upsert the session for this login identity. When the capture has a
+        # single shared customer_number we key on it; when it has none or many
+        # distinct ones (the GMP-OPERATOR case — one operator login manages many
+        # utility customers, so session_customer is None), we key on the NULL
+        # bucket so a reconnect REFRESHES the one unkeyed row per (tenant,
+        # provider) instead of inserting a duplicate on every capture. Without
+        # this, prod accumulated 2-6 GMP session rows per operator (probe
+        # 2026-06-21: all 24 GMP sessions had customer_number NULL), which made
+        # "which session is authoritative" ambiguous and multiplied reauth
+        # emails. NULL must be matched with IS NULL, not ==, or the lookup never
+        # finds the existing unkeyed row.
+        cust_predicate = (
+            UtilitySession.customer_number == session_customer
+            if session_customer is not None
+            else UtilitySession.customer_number.is_(None)
+        )
+        existing_sess = db.execute(
+            select(UtilitySession)
+            .where(UtilitySession.tenant_id == tenant.id,
+                   UtilitySession.provider == normalized["provider"],
+                   cust_predicate)
+            .order_by(UtilitySession.captured_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
         if existing_sess is not None:
             existing_sess.api_token = api_token
             existing_sess.refresh_token = refresh_token
