@@ -88,9 +88,13 @@ def test_setup_intent_succeeded_resumes_paused_tenant(client, monkeypatch):
     call = mock_stripe.Subscription.create.call_args[1]
     assert call["customer"] == "cus_paused"
     assert call["default_payment_method"] == "pm_resume"
+    # Recurring per-array line on `items`; the $250 ONE-TIME setup fee on
+    # `add_invoice_items` (Stripe rejects a one_time price in subscription items).
     qmap = {item["price"]: item["quantity"] for item in call["items"]}
     assert qmap["price_array"] == 3
-    assert qmap["price_setup"] == 1
+    assert "price_setup" not in qmap
+    inv_items = {i["price"]: i.get("quantity") for i in (call.get("add_invoice_items") or [])}
+    assert inv_items["price_setup"] == 1
 
 
 def test_setup_intent_succeeded_stores_card_without_resume_when_not_paused(client, monkeypatch):

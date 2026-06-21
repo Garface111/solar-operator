@@ -155,22 +155,28 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
 
     quantity = max(int(array_count), 1)
     items: list[dict] = []
+    add_invoice_items: list[dict] = []
     if ao:
         # Per-kWh metered line — Stripe REJECTS `quantity` on a metered price.
         # No setup fee on the owner side. Usage is reported by the usage-report job.
         if array_price_id:
             items.append({"price": array_price_id})
     else:
-        if setup_price_id:
-            items.append({"price": setup_price_id, "quantity": 1})
         if array_price_id:
             items.append({"price": array_price_id, "quantity": quantity})
+        # The $250 setup is a ONE-TIME price. Stripe REJECTS a one_time price in
+        # subscription `items` (those must be recurring) — so attach it to the
+        # FIRST invoice via add_invoice_items instead. (Putting it in `items`
+        # made every NEPOOL subscription-create fail with InvalidRequestError.)
+        if setup_price_id:
+            add_invoice_items.append({"price": setup_price_id, "quantity": 1})
 
     try:
         sub = stripe.Subscription.create(
             customer=customer_id,
             items=items if items else None,
             default_payment_method=pm_id,
+            add_invoice_items=add_invoice_items or None,
         )
         sub_dict = sub.to_dict() if hasattr(sub, "to_dict") else sub
         sub_id = sub_dict["id"]

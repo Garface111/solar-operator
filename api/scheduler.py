@@ -492,20 +492,28 @@ def finalize_expired_trials():
                 ao = is_array_operator(product)
                 price_id = array_price_id_for_product(product)
                 items = []
+                add_invoice_items = []
                 if ao:
                     # Array Operator = per-kWh METERED line, NO quantity, NO setup
                     # fee. Usage is reported by report_usage_for_all_owners().
                     if price_id:
                         items.append({"price": price_id})
                 else:
-                    if setup_price_id:
-                        items.append({"price": setup_price_id, "quantity": 1})
                     if price_id:
                         items.append({"price": price_id, "quantity": quantity})
+                    # $250 setup is a ONE-TIME price → Stripe rejects it in
+                    # subscription `items` (must be recurring); bill it on the
+                    # first invoice via add_invoice_items instead. (Same fix as
+                    # stripe_helpers.create_subscription_for_tenant — without it
+                    # every NEPOOL trial-end conversion raised InvalidRequestError
+                    # and silently failed to convert.)
+                    if setup_price_id:
+                        add_invoice_items.append({"price": setup_price_id, "quantity": 1})
                 sub = stripe.Subscription.create(
                     customer=t.stripe_customer_id,
                     items=items if items else None,
                     default_payment_method=t.stripe_payment_method_id,
+                    add_invoice_items=add_invoice_items or None,
                 )
                 # Stripe SDK v15 returns StripeObjects without .get(); use [] with `in`.
                 sub_dict = sub.to_dict() if hasattr(sub, "to_dict") else sub

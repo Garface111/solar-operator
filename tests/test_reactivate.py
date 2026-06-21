@@ -97,9 +97,14 @@ def test_reactivate_nepool_creates_no_trial_subscription(client, monkeypatch):
     call = mock_stripe.Subscription.create.call_args[1]
     # No trial_period_days anywhere — billing starts immediately.
     assert "trial_period_days" not in call
+    # The recurring per-array line rides on `items`; the $250 ONE-TIME setup fee
+    # must ride on `add_invoice_items` (Stripe rejects a one_time price in
+    # subscription items). Regression guard for the InvalidRequestError bug.
     qmap = {item["price"]: item.get("quantity") for item in call["items"]}
     assert qmap["price_array"] == 3
-    assert qmap["price_setup"] == 1
+    assert "price_setup" not in qmap
+    inv_items = {i["price"]: i.get("quantity") for i in (call.get("add_invoice_items") or [])}
+    assert inv_items["price_setup"] == 1
 
 
 def test_reactivate_array_operator_metered_no_trial(client, monkeypatch):
