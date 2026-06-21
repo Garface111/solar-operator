@@ -338,6 +338,10 @@ app.include_router(dev_captures_router)
 # CC funnel dashboard (read-only admin metrics)
 from .admin_funnel import router as funnel_router
 app.include_router(funnel_router)
+
+# CC feature-suggestion capture + admin review endpoints
+from .feature_suggestions import router as feature_suggestions_router
+app.include_router(feature_suggestions_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(
