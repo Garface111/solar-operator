@@ -295,9 +295,19 @@ def _create_trial_tenant(
             .order_by(Tenant.active.desc(), Tenant.created_at.desc())
         ).scalars().first()
         if existing:
+            # A DEACTIVATED account is recoverable, not a dead end: signing in
+            # reaches /account (we let inactive tenants in) where they can
+            # reactivate. Frame it as "welcome back", not an error — a hard
+            # "account already exists / lost access?" message reads like a wall
+            # for someone whose account is simply paused.
+            if existing.active:
+                raise HTTPException(409,
+                    "An account already exists for this email. "
+                    "Sign in instead, or email admin@solaroperator.org if you've lost access.")
             raise HTTPException(409,
-                "An account already exists for this email. "
-                "Sign in instead, or email admin@solaroperator.org if you've lost access.")
+                "Welcome back — your account is still here. Sign in to pick up "
+                "right where you left off and reactivate it. "
+                "Lost access? Email admin@solaroperator.org.")
 
         t = Tenant(
             id=tenant_id, name=display_name, contact_email=email,

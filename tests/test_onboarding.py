@@ -220,6 +220,12 @@ def test_start_blocks_inactive_duplicate_same_product(client, mocks):
         "product": "array_operator",
     })
     assert resp.status_code == 409, resp.text
+    # A DEACTIVATED account is recoverable: the copy must read as welcome-back /
+    # reactivate, NOT a hard "account already exists / lost access" wall.
+    detail = resp.json()["detail"].lower()
+    assert "welcome back" in detail
+    assert "reactivate" in detail
+    assert "already exists" not in detail
 
 
 def test_start_allows_same_email_different_product(client, mocks):
