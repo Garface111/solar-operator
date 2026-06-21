@@ -607,6 +607,12 @@ def send_trial_ending_reminders() -> dict:
     return {"reminded": reminded}
 
 
+# Consecutive GMP-refresh failures before we email the operator to re-login. We
+# notify exactly ONCE per outage (on the run that crosses this count), never every
+# hourly tick — see the transition check in refresh_expiring_gmp_tokens.
+_GMP_REAUTH_NOTIFY_AFTER = 3
+
+
 def refresh_expiring_gmp_tokens() -> dict:
     """Refresh GMP sessions expiring within 7 days.
 
@@ -647,14 +653,26 @@ def refresh_expiring_gmp_tokens() -> dict:
                 )
                 refreshed.append(sess.id)
             except GmpRefreshError as exc:
-                sess.refresh_failures = (sess.refresh_failures or 0) + 1
+                prev_failures = sess.refresh_failures or 0
+                sess.refresh_failures = prev_failures + 1
                 db.commit()
                 logger.warning(
                     "GMP refresh failed: tenant=%s sess=%d failures=%d err=%s",
                     sess.tenant_id, sess.id, sess.refresh_failures, exc,
                 )
                 failed.append(sess.id)
-                if sess.refresh_failures >= 3 and tenant:
+                # Notify the operator ONCE per outage — on the run that CROSSES the
+                # failure threshold — never every hourly tick thereafter. The old
+                # '>= 3' re-sent the reauth email on EVERY subsequent run, so a
+                # genuinely-revoked GMP session emailed the owner hourly forever
+                # (seen in prod: sessions reached 20-70+ failures = that many
+                # duplicate emails to one owner). The transition test (prev < N <=
+                # now) is independent of the increment size; a successful refresh
+                # resets failures to 0 above, re-arming a fresh notice next incident.
+                crossed_threshold = (
+                    prev_failures < _GMP_REAUTH_NOTIFY_AFTER <= sess.refresh_failures
+                )
+                if crossed_threshold and tenant:
                     try:
                         send_gmp_reauth_needed_email(
                             to=tenant.contact_email,
@@ -666,7 +684,7 @@ def refresh_expiring_gmp_tokens() -> dict:
                             tenant.contact_email, notify_exc,
                         )
                     send_internal_alert(
-                        f"GMP refresh: 3 failures for tenant {sess.tenant_id}",
+                        f"GMP refresh: {_GMP_REAUTH_NOTIFY_AFTER} consecutive failures for tenant {sess.tenant_id}",
                         f"Tenant: {sess.tenant_id} ({getattr(tenant, 'contact_email', '?')})\n"
                         f"Session: {sess.id}\nToken prefix: {token_prefix}...\n"
                         f"Operator notified to re-login.",

@@ -205,3 +205,72 @@ def test_scheduler_skips_null_refresh_token():
     # Our null-RT session must not appear in either refreshed or failed
     assert sess_id not in result["refreshed"]
     assert sess_id not in result["failed"]
+
+
+def test_scheduler_does_not_renotify_after_threshold_crossed():
+    """SPAM GUARD (the Bruce-hourly-email fix): a GMP session that has ALREADY
+    crossed the failure threshold and keeps failing must NOT re-send the reauth
+    email every hourly run. The owner is notified once on the crossing; later
+    failures stay silent. Before the fix, '>= 3' re-sent on every run, so a
+    genuinely-revoked session emailed the owner hourly (prod sessions reached
+    20-70+ failures = that many duplicate emails)."""
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="renotify")
+        db.flush()
+        sess = _make_session(
+            db, t.id,
+            expires_at=datetime.utcnow() + timedelta(days=1),
+            failures=10,  # already long past the threshold
+        )
+        db.commit()
+        sess_id = sess.id
+        tenant_email = t.contact_email
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_notify, \
+         patch("api.scheduler.send_internal_alert"):
+        result = refresh_expiring_gmp_tokens()
+
+    # Our already-failed session keeps failing but must NOT re-notify its owner.
+    # (Filter by OUR email so other sessions in the shared test DB can't mask it.)
+    assert sess_id in result["failed"]
+    my_emails = [c for c in mock_notify.call_args_list
+                 if c.kwargs.get("to") == tenant_email]
+    assert my_emails == [], f"reauth email was re-sent to {tenant_email}"
+
+    with SessionLocal() as db:
+        updated = db.get(UtilitySession, sess_id)
+        assert updated.refresh_failures == 11  # still climbs for diagnostics
+
+
+def test_scheduler_notifies_exactly_once_on_threshold_crossing():
+    """Complement: the owner IS notified on the run that crosses the threshold
+    (failures 2 -> 3), so the fix silences the spam without silencing the genuine
+    one-time nudge."""
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="crossonce")
+        db.flush()
+        _make_session(db, t.id,
+                      expires_at=datetime.utcnow() + timedelta(days=1), failures=2)
+        db.commit()
+        tenant_email = t.contact_email
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_notify, \
+         patch("api.scheduler.send_internal_alert"):
+        refresh_expiring_gmp_tokens()
+
+    my_emails = [c for c in mock_notify.call_args_list
+                 if c.kwargs.get("to") == tenant_email]
+    assert len(my_emails) == 1  # notified exactly once, on the crossing
