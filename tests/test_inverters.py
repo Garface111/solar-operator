@@ -400,13 +400,15 @@ def test_inverter_vendors_listing(client):
     resp = client.get("/v1/array-owners/inverter-vendors", headers=_auth(key))
     assert resp.status_code == 200, resp.text
     by_code = {v["code"]: v for v in resp.json()}
-    assert set(by_code) == {"solaredge", "locus", "fronius", "sma", "chint", "alsoenergy"}
-    # solaredge: 2 fields; fronius: 3; sma: 4; locus: 6; alsoenergy: 3; chint: unavailable + note
+    assert set(by_code) == {"solaredge", "enphase", "locus", "fronius", "sma", "chint", "alsoenergy"}
+    # solaredge: 2 fields; enphase: 5; fronius: 3; sma: 4; locus: 6; alsoenergy: 3; chint: unavailable + note
     assert len(by_code["solaredge"]["fields"]) == 2
+    assert len(by_code["enphase"]["fields"]) == 5
     assert len(by_code["fronius"]["fields"]) == 3
     assert len(by_code["sma"]["fields"]) == 4
     assert len(by_code["locus"]["fields"]) == 6
     assert len(by_code["alsoenergy"]["fields"]) == 3
+    assert by_code["enphase"]["available"] is True
     assert by_code["alsoenergy"]["available"] is True
     assert by_code["locus"]["available"] is True
     assert by_code["solaredge"]["available"] is True
