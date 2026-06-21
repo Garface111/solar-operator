@@ -10,6 +10,29 @@ this package prepares everything up to that point.
 
 ---
 
+## ‼️ CRITICAL — an item ALREADY EXISTS. Update it, don't create a new one.
+
+The live Array Operator dashboard hardcodes an install link to an existing Web
+Store item: **id `ocohbimolfpnkjcjhiodopjjlhclinpl`** (slug `solar-operator-sync`),
+wired as the "Add the 1-click helper — free →" button (`public/sandbox.js`).
+
+Google's CRX update server recognizes this ID (`<app status="ok">`) but serves no
+public version (`noupdate`) — i.e. the item was **created/uploaded but never
+fully published** (draft or unlisted). So:
+
+- **Open that existing item in the dev console and upload v1.9.48 into it** — do
+  NOT create a brand-new item. A new item gets a **new random ID**, which would
+  NOT match the install link baked into the live SPA → every "Add the helper"
+  click would land on the wrong/old listing.
+- If you can't find/access that item (wrong Google account, deleted), the
+  fallback is to create a new one AND update `EXT_STORE_URL` in
+  `array-operator/public/sandbox.js` to the new ID, then redeploy AO. Flag me to
+  do the SPA edit if it comes to that.
+- The display name will read **EnergyAgent** (from the manifest) even though the
+  URL slug stays `solar-operator-sync` — that's fine, the slug is cosmetic.
+
+---
+
 ## ⚠️ ONE BLOCKER before you can pass review — privacy policy
 
 The Web Store reviewer compares the extension's permissions against the privacy
@@ -160,8 +183,11 @@ Tip: 1280×800 browser window, OS screenshot, crop to exactly 1280×800.
 1. Pay the one-time **$5** Chrome Web Store developer registration (if not already
    a registered developer).
 2. Confirm `https://nepooloperator.com/privacy` serves the **updated** policy
-   (PRIVACY.md). ← the one real blocker.
-3. New item → upload `energyagent-extension-v1.9.48.zip`.
+   (PRIVACY.md). ← a real blocker.
+3. **Open the EXISTING item `ocohbimolfpnkjcjhiodopjjlhclinpl`** (see critical note
+   above) → upload `energyagent-extension-v1.9.48.zip` as a new package version.
+   (Only create a new item if that one is truly inaccessible — then also update
+   `EXT_STORE_URL` in the SPA.)
 4. Paste the listing fields + privacy-practices answers above.
 5. Add 1–5 screenshots.
 6. **Submit for review.**
