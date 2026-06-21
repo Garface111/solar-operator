@@ -590,6 +590,15 @@ def main():
             ))
             print("  + tenants.trial_reminder_sent_at")
 
+        # 2026-06-21 Multi-touch trial reminder: urgent ~2-day "last chance"
+        # nudge, stamped separately so the early (7-day) and urgent touches
+        # are each exactly-once. NULL = urgent reminder not yet sent.
+        if not column_exists(conn, "tenants", "trial_final_reminder_sent_at"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN trial_final_reminder_sent_at TIMESTAMP NULL"
+            ))
+            print("  + tenants.trial_final_reminder_sent_at")
+
         # 2026-06-09 V2 REC-bearing fuels (feat/v2-rec-fuels). Generalizes the
         # array data model from solar-only to any fuel that mints renewable-
         # energy certificates (wind, hydro, anaerobic digester/biogas, storage).

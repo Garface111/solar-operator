@@ -564,34 +564,28 @@ def finalize_expired_trials():
 
 
 def send_trial_ending_reminders() -> dict:
-    """Remind no-card trialing operators ~3 days before their trial ends.
+    """Nudge no-card trialing operators to add a card before their trial ends.
 
-    Runs once daily. Selects trialing tenants with NO payment method on file
-    whose trial_ends_at is within 3 days AND who haven't already been reminded
-    (trial_reminder_sent_at IS NULL). After sending we stamp
-    trial_reminder_sent_at, making the reminder exactly-once regardless of tick
-    cadence — a missed or double-fired tick no longer drops or duplicates it.
-    Tenants who already added a card go through the normal trial-charge path and
-    are skipped here.
+    Two exactly-once touches, each gated by its own timestamp so a missed or
+    double-fired tick never drops or duplicates a send:
+      EARLY  ~7 days out  -> stamps trial_reminder_sent_at
+      URGENT ~2 days out  -> stamps trial_final_reminder_sent_at (after EARLY)
+    Tenants who add a card go through the normal trial-charge path and drop out.
+    Runs once daily.
     """
     if not os.getenv("STRIPE_SECRET_KEY"):
         # Mirrors finalize_expired_trials: skip when billing isn't configured.
-        return {"reminded": []}
-    window_end = datetime.utcnow() + timedelta(days=3)
+        return {"reminded": [], "urgent": []}
+    now = datetime.utcnow()
+    early_window = now + timedelta(days=7)
+    urgent_window = now + timedelta(days=2)
     reminded: list[str] = []
-    with SessionLocal() as db:
-        rows = db.execute(
-            select(Tenant).where(
-                Tenant.subscription_status == "trialing",
-                Tenant.stripe_payment_method_id.is_(None),
-                Tenant.trial_ends_at <= window_end,
-                Tenant.trial_reminder_sent_at.is_(None),
-            )
-        ).scalars().all()
+    urgent: list[str] = []
+
+    def _send(db, stage_field: str, rows, bucket: list[str]) -> None:
         targets = [(t.id, t.contact_email,
                     t.operator_name or t.company_name or t.name,
                     t.trial_ends_at, getattr(t, "product", "nepool")) for t in rows]
-
         for tid, email, name, trial_ends_at, product in targets:
             try:
                 end_str = trial_ends_at.strftime(
@@ -599,20 +593,44 @@ def send_trial_ending_reminders() -> dict:
                 send_trial_ending_no_card_reminder_email(
                     to=email, name=name, trial_end_date=end_str, product=product)
                 # Stamp only on a successful send so a transient email failure
-                # leaves the tenant eligible for the next tick (at-least-once on
-                # failure, exactly-once on success).
+                # leaves the tenant eligible next tick (at-least-once on failure,
+                # exactly-once on success).
                 t = db.get(Tenant, tid)
                 if t is not None:
-                    t.trial_reminder_sent_at = datetime.utcnow()
+                    setattr(t, stage_field, datetime.utcnow())
                     db.commit()
-                reminded.append(tid)
+                bucket.append(tid)
             except Exception as e:
                 db.rollback()
                 logger.warning(
-                    "send_trial_ending_no_card_reminder_email failed for %s: %s",
-                    tid, e)
-    logger.info("send_trial_ending_reminders: reminded=%d", len(reminded))
-    return {"reminded": reminded}
+                    "send_trial_ending_no_card_reminder_email (%s) failed for %s: %s",
+                    stage_field, tid, e)
+
+    with SessionLocal() as db:
+        early_rows = db.execute(
+            select(Tenant).where(
+                Tenant.subscription_status == "trialing",
+                Tenant.stripe_payment_method_id.is_(None),
+                Tenant.trial_ends_at <= early_window,
+                Tenant.trial_reminder_sent_at.is_(None),
+            )
+        ).scalars().all()
+        _send(db, "trial_reminder_sent_at", early_rows, reminded)
+
+        urgent_rows = db.execute(
+            select(Tenant).where(
+                Tenant.subscription_status == "trialing",
+                Tenant.stripe_payment_method_id.is_(None),
+                Tenant.trial_ends_at <= urgent_window,
+                Tenant.trial_final_reminder_sent_at.is_(None),
+                Tenant.trial_reminder_sent_at.is_not(None),
+            )
+        ).scalars().all()
+        _send(db, "trial_final_reminder_sent_at", urgent_rows, urgent)
+
+    logger.info("send_trial_ending_reminders: early=%d urgent=%d",
+                len(reminded), len(urgent))
+    return {"reminded": reminded, "urgent": urgent}
 
 
 # Consecutive GMP-refresh failures before we email the operator to re-login. We

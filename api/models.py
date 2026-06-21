@@ -165,6 +165,9 @@ class Tenant(Base):
     # of tick cadence (replaces the fragile 1-day rolling window). NULL = not
     # yet reminded.
     trial_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Second, urgent "last chance" reminder ~2 days before trial end, sent
+    # only after the early heads-up. Separate field so each touch is exactly-once.
+    trial_final_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Password-based login (June 2026). Nullable — null means magic-link only.
     # bcrypt hash (passlib, cost 12). Never expose this field in API responses.
