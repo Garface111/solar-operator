@@ -35,6 +35,22 @@ def _money(x: Optional[float]) -> str:
     return f"${(x or 0):,.2f}"
 
 
+def _chart_label(lbl) -> str:
+    """Short x-axis label for a bar. A 'YYYY-MM' (or 'YYYY-MM-DD') period label
+    becomes a 3-letter month abbrev ('2026-06' → 'Jun'); anything else is
+    truncated to 3 chars — the legacy behaviour for already-short month names
+    like 'Jul'. (Without this, 'YYYY-MM' labels render as a clipped '202'.)"""
+    import re
+    import calendar
+    s = str(lbl)
+    m = re.match(r"^\d{4}-(\d{2})", s)
+    if m:
+        mi = int(m.group(1))
+        if 1 <= mi <= 12:
+            return calendar.month_abbr[mi]
+    return s[:3]
+
+
 def draw_energy_chart(c, x, y, w, h, points, accent=GOOD, empty_msg="No production data yet."):
     """Draw a juicy gradient energy bar chart on the reportlab canvas.
 
@@ -56,7 +72,7 @@ def draw_energy_chart(c, x, y, w, h, points, accent=GOOD, empty_msg="No producti
     plot_w = w - pad_left - 6
     plot_h = h - pad_bottom - pad_top
 
-    pts = [(str(lbl)[:3], float(v)) for lbl, v in points if v is not None]
+    pts = [(_chart_label(lbl), float(v)) for lbl, v in points if v is not None]
     if not pts:
         c.setFillColor(muted_c)
         c.setFont("Helvetica", 8)

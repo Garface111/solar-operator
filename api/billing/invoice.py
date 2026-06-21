@@ -184,6 +184,12 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
                          textColor=INKDK, fontName="Helvetica-Bold")
     small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8.5,
                            textColor=MUTEDDK)
+    # Wrapping style for the bill-to / period values: a long customer name must
+    # WRAP within its column, not overflow into the period cell (plain table
+    # strings don't wrap → they bleed across the column boundary).
+    billval = ParagraphStyle("billval", parent=styles["Normal"], fontSize=13,
+                             leading=15, fontName="Helvetica-Bold",
+                             textColor=INKDK)
 
     doc = SimpleDocTemplate(
         str(out_path), pagesize=letter,
@@ -192,10 +198,12 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story = []
 
     # ---- meta block (bill-to + dates) ----------------------------------------
+    from xml.sax.saxutils import escape as _xesc
     meta = [
         ["BILL TO", "PERIOD"],
-        [inv["customer_name"] or "Customer",
-         f"{inv['period_start']}  →  {inv['period_end']}"],
+        [Paragraph(_xesc(inv["customer_name"] or "Customer"), billval),
+         Paragraph(f"{_xesc(inv['period_start'] or '')}  →  "
+                   f"{_xesc(inv['period_end'] or '')}", billval)],
         ["", ""],
         ["Invoice date", inv["invoice_date"]],
         ["Due date (28 days)", inv["due_date"]],
@@ -205,9 +213,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, 0), 8),
         ("TEXTCOLOR", (0, 0), (-1, 0), MUTEDDK),
-        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 1), (-1, 1), 13),
-        ("TEXTCOLOR", (0, 1), (-1, 1), INKDK),
+        ("VALIGN", (0, 1), (-1, 1), "TOP"),
         ("FONTSIZE", (0, 3), (-1, -1), 9.5),
         ("TEXTCOLOR", (0, 3), (0, -1), MUTEDDK),
         ("TEXTCOLOR", (1, 3), (1, -1), INKDK),
