@@ -43,11 +43,18 @@ The extension now also reads SmartHub utilities + four inverter portals
 on-device. **Submitting against the stale policy risks rejection AND misstates
 to users what we do.**
 
-→ The accurate replacement is in **`PRIVACY.md`** (this folder). It must be
-published at a public URL (reuse `nepooloperator.com/privacy`) before review.
-That page is served from Lane A's tree (`web/onboarding/public/privacy.md` →
-`api/onboarding_dist/privacy.md`), so this is a **coordination hand-off**, not an
-extension change. Flagged to Ford + Lane A.
+→ The accurate replacement is in **`PRIVACY.md`** (this folder) and is ALREADY
+publicly readable (the repo is public):
+**https://github.com/Garface111/solar-operator/blob/main/extension/store-listing/PRIVACY.md**
+That URL works as the listing's privacy-policy field right now — no deploy needed.
+
+Two ways to satisfy the reviewer (Ford's call — it's outward-facing):
+- **Now / zero-friction:** paste the GitHub URL above into the privacy-policy
+  field. Accepted by Chrome Web Store; accurate; nothing to deploy.
+- **Proper / on-domain (follow-up):** replace the live `nepooloperator.com/privacy`
+  text — but it's BAKED INTO Lane A's compiled onboarding SPA bundle
+  (`api/onboarding_dist/assets/index-*.js`), so it needs a Lane A SPA-source edit
+  + rebuild, not a markdown swap. Coordination hand-off.
 
 ---
 
