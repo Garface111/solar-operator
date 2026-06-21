@@ -28,7 +28,6 @@ from __future__ import annotations
 import math
 import secrets
 
-import pytest
 from sqlalchemy import select
 
 from api.db import SessionLocal
@@ -166,22 +165,50 @@ def test_ceiling_uses_inverter_nameplates_when_no_site_peak(client):
     assert len(rows) == 1 and math.isclose(rows[0].kwh, 200.0)
 
 
-@pytest.mark.xfail(reason="KNOWN GAP (flagged to Ford): with NO site peak AND NO "
-                          "inverter nameplate, day_ceiling is None so the "
-                          "plausibility guard is disabled and a cumulative/unit-"
-                          "error value reaches the per-kWh meter. A conservative "
-                          "absolute fallback ceiling would close this.",
-                   strict=True)
-def test_no_nameplate_no_peak_still_guards_cumulative_glitch(client):
-    """DESIRED contract: even when the capture omits BOTH peak_power_kw and every
-    nameplate, an obviously-cumulative value (677,533 kWh in one day) must not be
-    metered. Currently it IS (ceiling=None disables the guard) — this xfail is the
-    tripwire that flips green the moment a fallback ceiling is added."""
+def test_no_nameplate_no_peak_absolute_fallback_drops_cumulative(client):
+    """CLOSED GAP: even when the capture omits BOTH peak_power_kw and every
+    nameplate, an obviously-cumulative value (677,533 kWh in one day) is caught by
+    the absolute fallback ceiling and never metered. (Was a known unbounded hole —
+    with no capacity signal the guard used to pass everything.)"""
     tid, key = _mk_tenant()
     client.post(CAPTURE, json={"provider": "fronius", "sites": [{
         "site_id": SID, "name": "Bare", "energy_today_kwh": 677533.0,
         "inverters": [{"serial": "x"}]}]}, headers=_auth(key))
-    assert _daily_rows(tid) == []  # currently fails: the glitch is metered
+    assert _daily_rows(tid) == []
+
+
+def test_no_capacity_signal_still_keeps_a_normal_day(client):
+    """The absolute fallback must NEVER false-drop a real day: with no peak and no
+    nameplate, a normal 250 kWh day is far under the absolute ceiling and recorded.
+    (Under-billing from a false-drop would be its own trust failure.)"""
+    tid, key = _mk_tenant()
+    client.post(CAPTURE, json={"provider": "fronius", "sites": [{
+        "site_id": SID, "name": "Bare", "energy_today_kwh": 250.0,
+        "inverters": [{"serial": "x"}]}]}, headers=_auth(key))
+    rows = _daily_rows(tid)
+    assert len(rows) == 1 and math.isclose(rows[0].kwh, 250.0)
+
+
+def test_per_inverter_no_nameplate_absolute_fallback(client):
+    """The per-inverter no-nameplate gap is closed too: a cumulative per-inverter
+    value with no nameplate is dropped by the absolute single-inverter ceiling,
+    while a normal no-nameplate value is recorded."""
+    tid, key = _mk_tenant()
+    client.post(CAPTURE, json={"provider": "fronius", "sites": [{
+        "site_id": SID, "name": "BareInv", "peak_power_kw": 50.0,
+        "inverters": [
+            {"serial": "big", "energy_today_kwh": 500000.0},   # no nameplate, cumulative
+            {"serial": "norm", "energy_today_kwh": 45.0},      # no nameplate, normal
+        ]}]}, headers=_auth(key))
+    with SessionLocal() as db:
+        invs = {iv.serial: iv for iv in db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid)).scalars().all()}
+        big_daily = db.execute(select(InverterDaily).where(
+            InverterDaily.inverter_id == invs["big"].id)).scalars().all()
+        norm_daily = db.execute(select(InverterDaily).where(
+            InverterDaily.inverter_id == invs["norm"].id)).scalars().all()
+        assert big_daily == []                                  # cumulative dropped
+        assert len(norm_daily) == 1 and math.isclose(norm_daily[0].kwh, 45.0)
 
 
 # ════════════════════════ 2. CROSS-TENANT ISOLATION ══════════════════════════

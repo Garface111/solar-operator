@@ -2436,6 +2436,21 @@ class InverterCaptureBody(BaseModel):
 # Vendors allowed to ingest readings this way (no usable backend API key path).
 _CAPTURE_VENDORS = {"fronius", "chint", "sma"}
 
+# Absolute daily-kWh sanity ceilings — used ONLY when a capture reports no capacity
+# signal at all (no site peak_power_kw AND no inverter nameplate). Without them the
+# plausibility guard is disabled (ceiling=None => everything passes) and a cumulative/
+# lifetime value reaches the per-kWh meter UNBOUNDED (the no-capacity case behind the
+# 677,533 kWh -> ~$4k phantom-bill class). Set FAR above any Array Operator-plausible
+# single day so they only ever catch lifetime junk, never real generation — and the
+# tighter capacity x 24h ceiling always wins when a real peak/nameplate is present:
+#   array    = 100,000 kWh/day  (a >4 MW array at realistic peak-sun-hours — no
+#                                browser-extension owner runs that scale)
+#   inverter = 10,000 kWh/day   (a >400 kW single inverter; AO uses string inverters)
+# A drop is always logged, so a (vanishingly unlikely) false-drop is visible, never
+# silent — and under-billing from a drop is far safer than over-billing from a leak.
+_ABS_ARRAY_DAILY_KWH_CEILING = 100_000.0
+_ABS_INVERTER_DAILY_KWH_CEILING = 10_000.0
+
 
 @router.post("/v1/array-owners/inverter-capture")
 def inverter_capture(
@@ -2572,10 +2587,16 @@ def inverter_capture(
                     (iv.nameplate_kw or 0) for iv in (site.inverters or [])
                 ) or 0
                 peak_kw = _np or None
-            day_ceiling = (peak_kw * 24.0) if peak_kw else None
+            # Capacity-based ceiling (preferred). When the portal reports NEITHER a
+            # peak power NOR any inverter nameplate, fall back to an absolute sanity
+            # ceiling so a cumulative/lifetime value can't slip through UNBOUNDED into
+            # the per-kWh meter — the no-capacity gap behind the 677,533 kWh -> ~$4k
+            # phantom-bill class. The fallback sits far above any AO-plausible single
+            # day, so it only ever catches lifetime junk, never real generation.
+            day_ceiling = (peak_kw * 24.0) if peak_kw else _ABS_ARRAY_DAILY_KWH_CEILING
 
             def _plausible(kwh: float) -> bool:
-                return day_ceiling is None or kwh <= day_ceiling
+                return kwh <= day_ceiling
 
             want_arr: dict = {}
             if recorded_kwh is not None and _plausible(recorded_kwh):
@@ -2725,10 +2746,14 @@ def inverter_capture(
                 # sparkline + peer-analysis engine never see impossible spikes.
                 # Prefer the captured nameplate, fall back to the persisted row's.
                 inv_np = ci.nameplate_kw or iv.nameplate_kw
-                inv_ceiling = (float(inv_np) * 24.0) if inv_np else None
+                # Capacity-or-absolute fallback (same logic as the array level): an
+                # inverter daily kWh with no known nameplate still can't exceed an
+                # absolute single-inverter sanity ceiling, so a cumulative value never
+                # poisons the sparkline/peer-analysis even when nameplate is missing.
+                inv_ceiling = (float(inv_np) * 24.0) if inv_np else _ABS_INVERTER_DAILY_KWH_CEILING
 
                 def _inv_plausible(kwh: float) -> bool:
-                    return inv_ceiling is None or kwh <= inv_ceiling
+                    return kwh <= inv_ceiling
 
                 want: dict = {}
                 if (ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0
