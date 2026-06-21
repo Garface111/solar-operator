@@ -419,16 +419,6 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
     via stripe_events table — replays are no-ops."""
     payload = await request.body()
 
-    # Temporary debug logging — remove once root cause of 400s is confirmed.
-    _runtime_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-    logger.warning(
-        "webhook debug: secret_mod[:40]=%r secret_env[:40]=%r sig_header[:40]=%r body_len=%d",
-        STRIPE_WEBHOOK_SECRET[:40],
-        _runtime_secret[:40],
-        (stripe_signature or "")[:40],
-        len(payload),
-    )
-
     # Verify signature
     if not STRIPE_WEBHOOK_SECRET:
         try:
