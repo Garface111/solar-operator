@@ -214,6 +214,49 @@ def test_gmp_capture_creates_linkable_utility_account_and_bill(client):
         assert bills[0].period_end is not None
 
 
+def test_gmp_capture_open_cycle_creates_no_future_dated_bill(client):
+    """REGRESSION (Bruce's 83-vs-803): GMP's /usage summary reports the CURRENT,
+    OPEN cycle — billingPeriodEndDate is the NEXT bill date (in the FUTURE) and the
+    generation is only the partial accrual so far. That must NOT be recorded as a
+    settled paper bill (it would be future-dated and prorate a partial total across
+    a partly-future window). The account stays linkable, but no Bill and no
+    today/future DailyGeneration rows are written until the cycle closes."""
+    from datetime import timedelta
+    from api.models import Bill, UtilityAccount, now
+    tid, key = _make_tenant()
+    today = now().date()
+    resp = client.post(
+        "/v1/array-owners/utility-meter-capture",
+        json={
+            "provider": "gmp",
+            "accounts": [{
+                "account_number": "5557777",
+                "nickname": "Open Cycle Field",
+                "summary": {
+                    "accountNumber": "5557777", "isNetMetered": True,
+                    "billingPeriodStartDate": (today - timedelta(days=6)).isoformat(),
+                    "billingPeriodEndDate": (today + timedelta(days=24)).isoformat(),
+                    "totalGrossGenerated": 2574,     # partial accrual, open cycle
+                },
+                "daily": [],
+            }],
+        },
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        ua = db.execute(select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid,
+            UtilityAccount.account_number == "5557777")).scalar_one_or_none()
+        if ua is not None:
+            bills = db.execute(select(Bill).where(Bill.account_id == ua.id)).scalars().all()
+            assert bills == [], f"open cycle must not create a bill: {[b.period_end for b in bills]}"
+        fut = db.execute(select(DailyGeneration).where(
+            DailyGeneration.tenant_id == tid,
+            DailyGeneration.day > today)).scalars().all()
+        assert fut == [], f"open cycle must not write future daily rows: {len(fut)}"
+
+
 def test_gmp_capture_bill_is_idempotent_no_dupe_bill(client):
     """Re-capturing the same GMP billing period upserts the Bill (climbs only),
     never duplicating it."""

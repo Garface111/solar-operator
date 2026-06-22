@@ -3091,8 +3091,15 @@ def _persist_meter_accounts(
                     ua.last_seen = now()
 
                 # Bill from the GMP billing-period summary (the "paper bill" total).
+                # ONLY when the period has CLOSED. The GMP usage summary reports the
+                # CURRENT, OPEN cycle — period_end is the NEXT bill date (in the
+                # FUTURE) and period_gen is only the generation accrued SO FAR.
+                # Recording that as a settled paper bill is the root of the
+                # future-dated bills + prorate rows (Bruce's 83-vs-803): a partial
+                # total smeared across a full, partly-future window. Wait for close.
                 if (period_gen is not None and period_gen > 0
-                        and period_end is not None):
+                        and period_end is not None
+                        and period_end <= now().date()):
                     period_start = _meter_day(parsed.get("period_start"))
                     existing_bill = db.execute(
                         select(Bill).where(
@@ -3183,7 +3190,8 @@ def _persist_meter_accounts(
                 gen = period_gen
                 _pstart = _meter_day(parsed.get("period_start")) if isinstance(parsed, dict) else None
                 if (gen is not None and gen > 0 and period_end is not None
-                        and _pstart is not None and period_end > _pstart):
+                        and _pstart is not None and period_end > _pstart
+                        and period_end <= now().date()):   # closed cycles only
                     n_days = (period_end - _pstart).days + 1
                     per_day = float(gen) / n_days
                     # Never estimate today / the future / the trailing 2-day guard —
