@@ -342,6 +342,10 @@ app.include_router(funnel_router)
 # CC feature-suggestion capture + admin review endpoints
 from .feature_suggestions import router as feature_suggestions_router
 app.include_router(feature_suggestions_router)
+
+# Auto-adapter engine: self-improving declarative adapters (synth -> validate -> registry)
+from .auto_adapters import router as auto_adapters_router
+app.include_router(auto_adapters_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(

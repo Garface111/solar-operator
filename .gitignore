@@ -17,3 +17,6 @@ dist/
 
 # Auto-fix system kill-switch (create to pause; never commit)
 .autofix_disabled
+
+# Auto-adapter local registry (sqlite; runtime state, not source)
+api/auto_adapters.db
