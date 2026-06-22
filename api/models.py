@@ -168,6 +168,10 @@ class Tenant(Base):
     # Second, urgent "last chance" reminder ~2 days before trial end, sent
     # only after the early heads-up. Separate field so each touch is exactly-once.
     trial_final_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # GMP reauth-alert cooldown: when we last emailed this operator to re-login.
+    # Suppresses repeat reauth/internal alerts within 7d even if refresh re-crosses
+    # the failure threshold (flapping / duplicate sessions) — bounds alert spam.
+    gmp_reauth_alert_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Password-based login (June 2026). Nullable — null means magic-link only.
     # bcrypt hash (passlib, cost 12). Never expose this field in API responses.

@@ -725,7 +725,9 @@ def refresh_expiring_gmp_tokens() -> dict:
                 is_authoritative = (
                     sess.id == authoritative_sess_id.get(sess.tenant_id)
                 )
-                if crossed_threshold and is_authoritative and tenant:
+                _last_alert = tenant.gmp_reauth_alert_at if tenant else None
+                _cooldown_ok = (_last_alert is None) or (datetime.utcnow() - _last_alert >= timedelta(days=7))
+                if crossed_threshold and is_authoritative and tenant and _cooldown_ok:
                     try:
                         send_gmp_reauth_needed_email(
                             to=tenant.contact_email,
@@ -742,6 +744,8 @@ def refresh_expiring_gmp_tokens() -> dict:
                         f"Session: {sess.id}\nToken prefix: {token_prefix}...\n"
                         f"Operator notified to re-login.",
                     )
+                    tenant.gmp_reauth_alert_at = datetime.utcnow()
+                    db.commit()
 
     logger.info(
         "refresh_expiring_gmp_tokens: refreshed=%d failed=%d skipped=%d",

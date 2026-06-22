@@ -599,6 +599,13 @@ def main():
             ))
             print("  + tenants.trial_final_reminder_sent_at")
 
+        # 2026-06-21 GMP reauth-alert cooldown (suppress repeat reauth emails <7d).
+        if not column_exists(conn, "tenants", "gmp_reauth_alert_at"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN gmp_reauth_alert_at TIMESTAMP NULL"
+            ))
+            print("  + tenants.gmp_reauth_alert_at")
+
         # 2026-06-09 V2 REC-bearing fuels (feat/v2-rec-fuels). Generalizes the
         # array data model from solar-only to any fuel that mints renewable-
         # energy certificates (wind, hydro, anaerobic digester/biogas, storage).
