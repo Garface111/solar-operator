@@ -433,9 +433,17 @@ _ALERT_PRIORITY = {"fault": 4, "dead": 4, "comm_gap": 3, "underperforming": 2, "
 # freshest inverter last_report is older than this (it stopped sending data to
 # its own monitoring portal — nothing we can fix; we just surface it honestly).
 _SOURCE_STALE_HOURS = 6.0
+# Extension-captured vendors (Fronius/SMA/Chint) rely on the user's browser
+# session staying alive for hourly background recapture. last_power_at advances
+# only when real production is captured (the sub-floor guard means near-zero
+# nighttime readings don't stamp it), so the natural overnight gap can be 8–14h.
+# Use a 26h threshold so a single missed night never triggers SOURCE OFFLINE;
+# a genuine session expiry (no daytime capture for >26h) still fires the banner.
+_EXT_SOURCE_STALE_HOURS = 26.0
+_EXT_CAPTURED_VENDORS = {"fronius", "sma", "chint"}
 
 
-def _source_status(inv_rows: list[dict]) -> dict:
+def _source_status(inv_rows: list[dict], *, stale_hours: float = _SOURCE_STALE_HOURS) -> dict:
     """Array-level source-data freshness from the inverters' last_report.
 
     Returns {state, last_report, age_hours}:
@@ -444,6 +452,7 @@ def _source_status(inv_rows: list[dict]) -> dict:
       • "stale" — freshest report older than the window (the VENDOR/source has
                   not received data recently — a source-side outage, not ours).
     last_report is the most-recent inverter timestamp (ISO), age_hours its age.
+    Pass stale_hours to override the threshold (extension vendors use 26h).
     """
     from datetime import datetime, timezone
     stamps: list[datetime] = []
@@ -462,7 +471,7 @@ def _source_status(inv_rows: list[dict]) -> dict:
         return {"state": "none", "last_report": None, "age_hours": None}
     freshest = max(stamps)
     age_h = round((datetime.now(timezone.utc) - freshest).total_seconds() / 3600.0, 1)
-    state = "stale" if age_h >= _SOURCE_STALE_HOURS else "ok"
+    state = "stale" if age_h >= stale_hours else "ok"
     return {"state": state, "last_report": freshest.isoformat(), "age_hours": age_h}
 
 
@@ -824,7 +833,17 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
                 "current_power_w": _live_power_w(iv, m, daylight=daylight, borrow=borrow_live),
-                "last_report": u.get("last_report") or m.get("last_report"),
+                # Extension-captured vendors have no telemetry last_report; use
+                # last_power_at as a heartbeat proxy so _source_status() can flag
+                # a stale session (no daytime capture for >_EXT_SOURCE_STALE_HOURS).
+                "last_report": (
+                    u.get("last_report") or m.get("last_report")
+                    or (
+                        iv.last_power_at.isoformat()
+                        if iv.last_power_at and iv.vendor in _EXT_CAPTURED_VENDORS
+                        else None
+                    )
+                ),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,
                 "origin_url": _portal_link(iv.vendor, iv.source_site_id),
@@ -854,7 +873,16 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
         # data to its own vendor, last_report goes stale. We surface that as a
         # SOURCE outage (the vendor isn't receiving data) — distinct from any
         # problem on our side. Computed from the freshest inverter last_report.
-        src_status = _source_status(inv_rows)
+        # Extension-captured vendors use a 26h threshold (vs 6h for API-polled)
+        # because their last_report proxy (last_power_at) only advances during
+        # production — a normal overnight gap must not trigger SOURCE OFFLINE.
+        _arr_vendors = {iv.vendor for iv in ivs}
+        _stale_h = (
+            _EXT_SOURCE_STALE_HOURS
+            if _arr_vendors and _arr_vendors.issubset(_EXT_CAPTURED_VENDORS)
+            else _SOURCE_STALE_HOURS
+        )
+        src_status = _source_status(inv_rows, stale_hours=_stale_h)
 
         # ARRAY-LEVEL live power (server-computed, authoritative). Sum the
         # per-inverter live readings so the card no longer has to aggregate
