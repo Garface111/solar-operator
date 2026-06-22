@@ -32,7 +32,8 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      attachments: list[dict] | None = None,
                      from_addr: str | None = None,
                      reply_to: str | None = None,
-                     product: str = "nepool") -> bool:
+                     product: str = "nepool",
+                     log_failures: bool = True) -> bool:
     """Returns True on success, False otherwise. Uses the official Resend
     SDK so we play nice with their Cloudflare bot rules.
 
@@ -73,11 +74,13 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         if result and result.get("id"):
             _send_via_resend._last_error = None
             return True
-        logger.error("Resend returned unexpected response: %s", result)
+        (logger.error if log_failures else logger.warning)(
+            "Resend returned unexpected response: %s", result)
         _send_via_resend._last_error = f"Unexpected response: {result}"
         return False
     except Exception as e:
-        logger.error("Resend send failed: %s: %s", type(e).__name__, e)
+        (logger.error if log_failures else logger.warning)(
+            "Resend send failed: %s: %s", type(e).__name__, e)
         _send_via_resend._last_error = f"{type(e).__name__}: {e}"
         return False
 
@@ -120,27 +123,42 @@ def send_workbook_email(to: str, subject: str, html: str, text: str,
         attachment_label=filename or p.name,
     )
 
-    ok = _send_via_resend(
-        to=to, subject=subject, html=wrapped_html, text=wrapped_text,
-        attachments=attachments, from_addr=from_addr, reply_to=reply_to,
-    )
-    if not ok and from_addr:
+    # No "send as me" identity — use the platform brand From directly.
+    if not from_addr:
+        return _send_via_resend(
+            to=to, subject=subject, html=wrapped_html, text=wrapped_text,
+            attachments=attachments, from_addr=None, reply_to=reply_to,
+        )
+
+    # A real custom domain MIGHT be a verified sender — try it once. Its failure
+    # is expected/recoverable (we retry below), so don't log it as an error. A
+    # free-mail From (gmail/yahoo/...) can NEVER be verified, so we skip straight
+    # to the platform send rather than fail + spam Sentry on every report.
+    if not _is_free_mail(from_addr):
+        ok = _send_via_resend(
+            to=to, subject=subject, html=wrapped_html, text=wrapped_text,
+            attachments=attachments, from_addr=from_addr, reply_to=reply_to,
+            log_failures=False,
+        )
+        if ok:
+            return True
         logger.warning(
             "Custom From %r failed (unverified domain?) — retrying from platform "
             "default with Reply-To preserved.", from_addr)
-        fallback_reply = reply_to or _addr_only(from_addr)
-        # Build "Operator Name via NEPOOL Operator <admin@solaroperator.org>"
-        # so the recipient sees the operator's name even when we can't send as them.
-        op_name = _name_part(from_addr)
-        fallback_from = (
-            f'"{op_name} via NEPOOL Operator" <{_addr_only(FROM_ADDRESS)}>'
-            if op_name else FROM_ADDRESS
-        )
-        ok = _send_via_resend(
-            to=to, subject=subject, html=wrapped_html, text=wrapped_text,
-            attachments=attachments, from_addr=fallback_from, reply_to=fallback_reply,
-        )
-    return ok
+
+    # Platform send: keep the operator's NAME ("Op via NEPOOL Operator") and their
+    # address as Reply-To so the client's reply still reaches them. Delivery beats
+    # vanity. A failure HERE is a real outage on a verified domain — log it.
+    op_name = _name_part(from_addr)
+    fallback_from = (
+        f'"{op_name} via NEPOOL Operator" <{_addr_only(FROM_ADDRESS)}>'
+        if op_name else FROM_ADDRESS
+    )
+    fallback_reply = reply_to or _addr_only(from_addr)
+    return _send_via_resend(
+        to=to, subject=subject, html=wrapped_html, text=wrapped_text,
+        attachments=attachments, from_addr=fallback_from, reply_to=fallback_reply,
+    )
 
 
 def _addr_only(from_header: str) -> str:
@@ -155,6 +173,25 @@ def _name_part(from_header: str) -> str:
     if "<" in from_header:
         return from_header.split("<", 1)[0].strip().strip('"').strip("'")
     return ""
+
+
+# Free-mail providers can never be verified as a Resend *sending* domain, so a
+# "send as me" From on one of these is a guaranteed rejection. We skip the doomed
+# attempt and send from the platform default instead (operator kept as Reply-To)
+# rather than fail + log an error on every report.
+_FREE_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "yahoo.co.uk",
+    "outlook.com", "hotmail.com", "hotmail.co.uk", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com",
+    "gmx.com", "zoho.com",
+}
+
+
+def _is_free_mail(from_header: str | None) -> bool:
+    if not from_header:
+        return False
+    addr = _addr_only(from_header).lower()
+    return "@" in addr and addr.rsplit("@", 1)[1] in _FREE_MAIL_DOMAINS
 
 
 # ─── customer-facing ─────────────────────────────────────────────────────
