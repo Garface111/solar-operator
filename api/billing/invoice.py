@@ -125,8 +125,8 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("B16", "Your share of the array:"); put("C16", _pct(inv["allocation_pct"]), align=right)
     put("B17", "Your share of the generation (kWh):" if _gmpc else "Your share of production (kWh):")
     put("C17", round(inv["kwh"], 0), align=right)
-    put("B18", f"Solar credit rate: ${rate:.5f}/kWh")
-    put("C18", _money(inv["solar_value"]), align=right)
+    put("B18", "Solar credit rate:")
+    put("C18", f"${rate:.5f}/kWh", align=right)
     put("B19", "Your contractual payment share:"); put("C19", _pct(inv["billing_rate"]), align=right)
     put("B20", "Solar credit value due:"); put("C20", _money(inv["amount_owed"]), align=right)
     if inv.get("net_rate_source") == "gmp_credit_reference":
@@ -294,7 +294,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         [_arr_lbl, (f"{array_kwh:,.0f} kWh" if array_kwh else "—")],
         ["Your share of the array", _pct(inv["allocation_pct"])],
         [_shr_lbl, f"{inv['kwh']:,.0f} kWh"],
-        [f"Solar credit rate  ·  ${rate:.5f}/kWh", _money(inv["solar_value"])],
+        ["Solar credit rate", f"${rate:.5f}/kWh"],
         ["Your contractual payment share", _pct(inv["billing_rate"])],
         ["Solar credit value due", _money(inv["amount_owed"])],
     ]
@@ -315,8 +315,8 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story.append(rt)
     story.append(Spacer(1, 6))
     story.append(Paragraph(
-        f"{_shr_lbl} = {'solar generation' if _gmpc else 'array production'} × your share.  "
-        "Credit value due = your kWh × solar credit rate × your contractual payment share.", small))
+        f"{_shr_lbl} = {'solar generation' if _gmpc else 'array production'} × your share, "
+        "and the credit value due = your kWh × solar credit rate × your contractual payment share.", small))
     if inv.get("net_rate_source") == "gmp_credit_reference":
         story.append(Spacer(1, 4))
         story.append(Paragraph(
