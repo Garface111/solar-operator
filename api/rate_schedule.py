@@ -336,3 +336,96 @@ def refresh_rate_schedule(
                                 "n": d.sample_size})
     db.commit()
     return {"written": written, "skipped": skipped, "cells": details}
+
+
+# ─── 4. Offtaker credit resolution (option B: bill banked months too) ─────────
+
+# Final fallback net-metering CREDIT rate ($/kWh) when neither the bill, the
+# account's own history, nor the fleet supplies one. The validated VT solar credit
+# (EXCESS + SOLCRED) for newer arrays — see solar_credit_from_bill validation.
+DEFAULT_CREDIT_RATE = 0.2576
+
+
+def _median(vals: list[float]) -> Optional[float]:
+    return round(statistics.median(vals), 5) if vals else None
+
+
+def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
+    """Median net-metering credit rate ($/kWh) over an account's CASHED months
+    (solar_credit_usd > 0). None when the account has never cashed a credit."""
+    from .models import Bill
+    rows = db.execute(
+        select(Bill.solar_credit_usd, Bill.kwh_sent_to_grid).where(
+            Bill.account_id == utility_account_id,
+            Bill.solar_credit_usd.isnot(None), Bill.solar_credit_usd > 0,
+            Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
+    ).all()
+    return _median([float(c) / float(k) for c, k in rows if k])
+
+
+def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
+                       min_samples: int = 8) -> Optional[float]:
+    """Median credit rate across the fleet's CASHED bills in this provider + age
+    cell (so a never-cashing account is valued like its peers). None if too few."""
+    from .models import Bill, UtilityAccount, Array
+    q = (select(Bill.solar_credit_usd, Bill.kwh_sent_to_grid,
+                Array.first_connect_date, Bill.period_end)
+         .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+         .join(Array, UtilityAccount.array_id == Array.id, isouter=True)
+         .where(UtilityAccount.provider == provider,
+                Bill.solar_credit_usd.isnot(None), Bill.solar_credit_usd > 0,
+                Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0))
+    rates = []
+    for cu, k, fc, pe in db.execute(q.limit(20000)).all():
+        if not k:
+            continue
+        ped = pe.date() if isinstance(pe, datetime) else pe
+        if array_age_bucket(fc, ped) != age_bucket:
+            continue
+        rates.append(float(cu) / float(k))
+    return _median(rates) if len(rates) >= min_samples else None
+
+
+def resolve_offtaker_excess_credit(db, utility_account_id: int):
+    """OPTION B offtaker billing basis: the latest period's EXCESS sent to grid,
+    valued at the net-metering credit rate.
+
+    CASHED month → the bill's own rate (solar_credit_usd ÷ excess). BANKED month
+    (solar_credit_usd NULL/0) → a REFERENCE rate so the offtaker still pays for the
+    solar they received while the host keeps the banked credit (trued up annually):
+    the account's own cashing history → the fleet median for the array's age bucket
+    → DEFAULT_CREDIT_RATE.
+
+    Returns (excess_kwh, credit_usd, credit_rate, period_start, period_end, label,
+    rate_source) — rate_source ∈ {'bill_cash','reference'} — or None when the latest
+    bill has no excess to bill.
+    """
+    from .models import Bill, UtilityAccount, Array
+    bill = db.execute(
+        select(Bill).where(
+            Bill.account_id == utility_account_id,
+            Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0,
+            Bill.period_end.isnot(None))
+        .order_by(Bill.period_end.desc())
+    ).scalars().first()
+    if bill is None:
+        return None
+    excess = round(float(bill.kwh_sent_to_grid), 1)
+    if bill.solar_credit_usd is not None and bill.solar_credit_usd > 0:
+        rate, source = round(float(bill.solar_credit_usd) / excess, 6), "bill_cash"
+    else:
+        acct = db.get(UtilityAccount, utility_account_id)
+        arr = db.get(Array, acct.array_id) if acct and acct.array_id else None
+        provider = acct.provider if acct else None
+        ped = bill.period_end.date() if isinstance(bill.period_end, datetime) else bill.period_end
+        age = array_age_bucket(arr.first_connect_date if arr else None, ped)
+        ref = (_account_credit_rate(db, utility_account_id)
+               or (_fleet_credit_rate(db, provider=provider, age_bucket=age)
+                   if provider else None)
+               or DEFAULT_CREDIT_RATE)
+        rate, source = round(ref, 6), "reference"
+    credit = round(excess * rate, 2)
+    ps = bill.period_start.date() if bill.period_start else None
+    pe = bill.period_end.date() if bill.period_end else None
+    label = pe.strftime("%Y-%m") if pe else None
+    return excess, credit, rate, ps, pe, label, source
