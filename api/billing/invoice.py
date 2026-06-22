@@ -39,9 +39,14 @@ def invoice_for_period(match: BillingMatch, period: Period,
         "customer_name": match.customer.get("name"),
         "billing_model": match.billing_model,
         "allocation_pct": match.allocation_pct,
-        # The ARRAY's total production this period (Bruce's line 1 — "excess
-        # generation from the GMP bill"); the member's share = array × allocation.
+        # The ARRAY's total this period — for a GMP-credit offtaker this is the
+        # EXCESS sent to grid (Bruce's model), not gross production; the member's
+        # share = array/excess × allocation.
         "array_kwh": period.array_kwh,
+        # Provenance of the credit rate so the renderer can label the basis (excess
+        # vs production) honestly and flag a banked-month reference estimate.
+        "net_rate_source": (match.computed_invoice or {}).get("net_rate_source"),
+        "net_rate_note": (match.computed_invoice or {}).get("net_rate_note"),
         "project_total_kwh": match.project_totals.get("total_customer_kwh"),
         "project_total_savings": match.project_totals.get("total_savings"),
         # Per-array breakdown for multi-array offtakers (one line per array). Lives
@@ -111,17 +116,21 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
 
     put("B14", "How this period's solar credit is calculated", bold)
     rate = (inv["tariff"] or 0) + (inv["adder"] or 0)
+    _gmpc = inv.get("net_rate_source") in ("gmp_bill_credit", "gmp_credit_reference")
     akwh = inv.get("array_kwh")
     if not akwh and inv.get("allocation_pct"):
         akwh = (inv["kwh"] or 0) / inv["allocation_pct"]
-    put("B15", "Array production this period:")
+    put("B15", "Excess solar sent to grid:" if _gmpc else "Array production this period:")
     put("C15", (round(akwh) if akwh else "—"), align=right)
     put("B16", "Your share of the array:"); put("C16", _pct(inv["allocation_pct"]), align=right)
-    put("B17", "Your share of production (kWh):"); put("C17", round(inv["kwh"], 0), align=right)
+    put("B17", "Your share of the excess (kWh):" if _gmpc else "Your share of production (kWh):")
+    put("C17", round(inv["kwh"], 0), align=right)
     put("B18", f"Solar credit rate: ${rate:.5f}/kWh")
     put("C18", _money(inv["solar_value"]), align=right)
     put("B19", "Your contractual payment share:"); put("C19", _pct(inv["billing_rate"]), align=right)
     put("B20", "Solar credit value due:"); put("C20", _money(inv["amount_owed"]), align=right)
+    if inv.get("net_rate_source") == "gmp_credit_reference":
+        put("B21", "Note: excess banked this period — rate is a reference estimate (trued up annually).")
 
     put("B22", "Amount Owed:", big)
     put("C22", _money(inv["amount_owed"]), big, right)
@@ -273,13 +282,16 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story.append(Paragraph("How this period's solar credit is calculated", lbl))
     story.append(Spacer(1, 8))
     rate = (inv["tariff"] or 0) + (inv["adder"] or 0)     # excess credit + solar incentive
+    _gmpc = inv.get("net_rate_source") in ("gmp_bill_credit", "gmp_credit_reference")
+    _arr_lbl = "Excess solar sent to grid" if _gmpc else "Array production this period"
+    _shr_lbl = "Your share of the excess" if _gmpc else "Your share of production"
     array_kwh = inv.get("array_kwh")
     if not array_kwh and inv.get("allocation_pct"):
         array_kwh = (inv["kwh"] or 0) / inv["allocation_pct"]   # derive the array total
     rows = [
-        ["Array production this period", (f"{array_kwh:,.0f} kWh" if array_kwh else "—")],
+        [_arr_lbl, (f"{array_kwh:,.0f} kWh" if array_kwh else "—")],
         ["Your share of the array", _pct(inv["allocation_pct"])],
-        ["Your share of production", f"{inv['kwh']:,.0f} kWh"],
+        [_shr_lbl, f"{inv['kwh']:,.0f} kWh"],
         [f"Solar credit rate  ·  ${rate:.5f}/kWh", _money(inv["solar_value"])],
         ["Your contractual payment share", _pct(inv["billing_rate"])],
         ["Solar credit value due", _money(inv["amount_owed"])],
@@ -301,8 +313,13 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story.append(rt)
     story.append(Spacer(1, 6))
     story.append(Paragraph(
-        "Your share of production = array production × your share.  "
+        f"{_shr_lbl} = {'excess to grid' if _gmpc else 'array production'} × your share.  "
         "Credit value due = your kWh × solar credit rate × your contractual payment share.", small))
+    if inv.get("net_rate_source") == "gmp_credit_reference":
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            "Note: this period's excess was banked with the utility (not cashed), so the credit "
+            "rate shown is a reference rate for comparable months, trued up annually.", small))
     story.append(Spacer(1, 16))
 
     # ---- amount due banner (light, day skin) ---------------------------------
