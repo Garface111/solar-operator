@@ -355,6 +355,22 @@ def _normalized_allocations(sub) -> list[dict]:
     return out
 
 
+def _operator_company_name(tenant_id):
+    """The operator's own company name (what they filled out at signup) to print on
+    offtaker invoices instead of the generic 'Your solar array owner'. Falls back
+    company_name -> operator_name -> name; None only if the tenant truly set none."""
+    if not tenant_id:
+        return None
+    from ..db import SessionLocal
+    from ..models import Tenant
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+    if not t:
+        return None
+    return (getattr(t, "company_name", None) or getattr(t, "operator_name", None)
+            or getattr(t, "name", None))
+
+
 def build_manual_match(sub) -> BillingMatch:
     """Synthesize a BillingMatch for a manually-entered customer (no workbook).
 
@@ -367,6 +383,7 @@ def build_manual_match(sub) -> BillingMatch:
     from ..models import Array
     from .matcher import Period, compute_invoice
 
+    operator = _operator_company_name(getattr(sub, "tenant_id", None))
     pct = sub.allocation_pct
     warnings: list[str] = []
     array_kwh: Optional[float] = None
@@ -456,7 +473,7 @@ def build_manual_match(sub) -> BillingMatch:
             allocation_pct=pct,
             billing_rate=billing_rate, billing_model="percent_of_array",
             periods=[period], latest_period=period,
-            template={"title": "Invoice - Solar Power Generation"},
+            template={"title": "Invoice - Solar Power Generation", "operator": operator},
             computed_invoice=computed,
             project_totals={
                 "total_array_kwh": (array_kwh or 0.0),
@@ -552,7 +569,7 @@ def build_manual_match(sub) -> BillingMatch:
             allocation_pct=None,
             billing_rate=billing_rate, billing_model="percent_of_array",
             periods=[period], latest_period=period,
-            template={"title": "Invoice - Solar Power Generation"},
+            template={"title": "Invoice - Solar Power Generation", "operator": operator},
             computed_invoice=computed,
             project_totals={
                 "total_array_kwh": total_array_kwh,
@@ -625,7 +642,7 @@ def build_manual_match(sub) -> BillingMatch:
         billing_model="percent_of_array",
         periods=[period],
         latest_period=period,
-        template={"title": "Invoice - Solar Power Generation"},
+        template={"title": "Invoice - Solar Power Generation", "operator": operator},
         computed_invoice=computed,
         project_totals={
             "total_array_kwh": array_kwh,
@@ -880,8 +897,10 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # Workbook subscriptions are exempt (they invoice from the operator's uploaded
     # spreadsheet by design). This gates only the SEND — build_manual_match still
     # renders the figures for previews/drafts; we just won't put them in an email.
+    # A TEST send (is_test) ALSO bypasses it: a test goes only to the operator, so
+    # they can preview the email + invoice now, before the utility bill lands.
     _ci_guard = match.computed_invoice or {}
-    if not getattr(sub, "source_workbook", None):
+    if not is_test and not getattr(sub, "source_workbook", None):
         _src = _ci_guard.get("kwh_source")
         _has_bill = _ci_guard.get("has_utility_bill") is True
         if _src != "utility_bill" or not _has_bill:

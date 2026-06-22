@@ -1376,6 +1376,28 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         return {"ok": True, "draft": _draft_dict(d), "result": result}
 
 
+@router.post("/drafts/{draft_id}/test")
+def test_draft(draft_id: int, authorization: Optional[str] = Header(default=None)):
+    """Send a TEST copy of this draft (the exact email + invoice the offtaker would
+    get, with your edited note) to the OPERATOR — you — so you can check it before
+    approving. Goes only to you; never reaches the customer; bypasses the
+    utility-bill send gate since it's a self-test."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        sub = _get_owned(db, t.id, d.subscription_id)
+        # Attach the draft's GMP PDF for this test in-memory only (no commit — a
+        # test must not mutate the live subscription).
+        if d.gmp_invoice_pdf is not None:
+            sub.gmp_invoice_pdf = d.gmp_invoice_pdf
+        result = deliver_subscription(db, sub, t, triggered_by="test",
+                                      is_test=True, note=d.note)
+        if not result.get("ok"):
+            raise HTTPException(422, result.get("error", "test send failed"))
+        return {"ok": True, "result": result}
+
+
 @router.post("/drafts/{draft_id}/dismiss")
 def dismiss_draft(draft_id: int, authorization: Optional[str] = Header(default=None)):
     """Discard a draft without sending."""
