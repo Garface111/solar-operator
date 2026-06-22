@@ -1418,15 +1418,80 @@ def _template_dict(tpl) -> dict:
     }
 
 
+class InvoiceTemplatePut(BaseModel):
+    html: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class InvoiceTemplatePreview(BaseModel):
+    html: Optional[str] = None
+
+
 @router.get("/invoice-template")
 def get_invoice_template(authorization: Optional[str] = Header(default=None)):
-    """Status of this tenant's uploaded invoice template (no bytes)."""
+    """Status + the editable token-HTML of this tenant's invoice template (seeds the
+    default template when none saved, so the editor/preview work out of the box)."""
     t = tenant_from_session(authorization)
     from ..models import OfftakerInvoiceTemplate
+    from .template_render import DEFAULT_TEMPLATE_HTML, AVAILABLE_TOKENS
     with SessionLocal() as db:
         tpl = db.execute(select(OfftakerInvoiceTemplate).where(
             OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        d = _template_dict(tpl)
+        d["html"] = (tpl.html if tpl and tpl.html else DEFAULT_TEMPLATE_HTML)
+        d["is_default_html"] = not (tpl and tpl.html)
+        d["tokens"] = AVAILABLE_TOKENS
+        return {"ok": True, "template": d}
+
+
+@router.put("/invoice-template")
+def put_invoice_template(body: InvoiceTemplatePut,
+                         authorization: Optional[str] = Header(default=None)):
+    """Save the editable token-HTML + the enable toggle. Enabling means real offtaker
+    invoices render from this template (Stage 2); a render failure at send time falls
+    back to the standard PDF, so it can never break a send."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import OfftakerInvoiceTemplate
+    from .template_render import DEFAULT_TEMPLATE_HTML
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        if tpl is None:
+            tpl = OfftakerInvoiceTemplate(tenant_id=t.id)
+            db.add(tpl)
+        if "html" in body.model_fields_set:
+            tpl.html = body.html
+        if "enabled" in body.model_fields_set:
+            tpl.enabled = bool(body.enabled)
+            # Enabling with no custom HTML seeds the default so it works immediately.
+            if tpl.enabled and not tpl.html:
+                tpl.html = DEFAULT_TEMPLATE_HTML
+        tpl.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(tpl)
         return {"ok": True, "template": _template_dict(tpl)}
+
+
+@router.post("/invoice-template/preview")
+def preview_invoice_template(body: InvoiceTemplatePreview,
+                             authorization: Optional[str] = Header(default=None)):
+    """Render the (provided or stored) token-HTML with SAMPLE data → PDF preview."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerInvoiceTemplate
+    from .template_render import render_template_pdf, SAMPLE_CONTEXT, DEFAULT_TEMPLATE_HTML
+    html = body.html
+    if html is None:
+        with SessionLocal() as db:
+            tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+                OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+            html = (tpl.html if tpl and tpl.html else DEFAULT_TEMPLATE_HTML)
+    try:
+        pdf = render_template_pdf(html, SAMPLE_CONTEXT)
+    except Exception as e:  # noqa: BLE001 — surface a readable message to the editor
+        raise HTTPException(400, f"Couldn't render this template: {e}")
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+        headers={"Content-Disposition": "inline; filename=invoice_preview.pdf"})
 
 
 @router.post("/invoice-template")

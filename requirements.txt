@@ -7,6 +7,10 @@ httpx==0.27.2
 pdfplumber==0.11.4
 openpyxl==3.1.5
 reportlab==4.2.5
+# HTML->PDF for rendering offtaker invoices in the operator's OWN uploaded format
+# (api/billing/template_render.py). Pure-Python; rides the reportlab + Pillow already
+# present, only pulls light pure-Python deps (html5lib, pypdf, svglib).
+xhtml2pdf==0.2.16
 apscheduler==3.10.4
 python-multipart==0.0.12
 jinja2==3.1.4

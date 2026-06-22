@@ -649,6 +649,31 @@ def build_manual_match(sub) -> BillingMatch:
     )
 
 
+def _render_from_operator_template(match, sub, out_path) -> bool:
+    """If the offtaker's tenant has an ENABLED invoice template, render the invoice in
+    THEIR own format and write it to out_path. Returns True on success, False to fall
+    back to the standard PDF. NEVER raises — a bad template can't break a real send."""
+    if sub is None or not getattr(sub, "tenant_id", None):
+        return False
+    try:
+        from ..db import SessionLocal
+        from ..models import OfftakerInvoiceTemplate, Tenant
+        from .template_render import render_template_pdf, build_token_context
+        with SessionLocal() as db:
+            tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+                OfftakerInvoiceTemplate.tenant_id == sub.tenant_id)).scalars().first()
+            if not tpl or not tpl.enabled or not tpl.html:
+                return False
+            tenant = db.get(Tenant, sub.tenant_id)
+            ctx = build_token_context(match, sub, tenant)
+            pdf = render_template_pdf(tpl.html, ctx)
+        out_path.write_bytes(pdf)
+        return True
+    except Exception:  # noqa: BLE001 — fall back to the standard invoice, never break a send
+        logger.exception("operator invoice-template render failed; using standard invoice")
+        return False
+
+
 def generate_files(match: BillingMatch, formats: list[str], include_summary: bool,
                    out_dir: pathlib.Path, invoice_date: Optional[date] = None,
                    peer: Optional[dict] = None, sub=None) -> list[pathlib.Path]:
@@ -665,8 +690,12 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
     paths: list[pathlib.Path] = []
     fmts = [f.lower() for f in (formats or ["pdf"])]
     if "pdf" in fmts:
-        paths.append(invoice_mod.render_invoice_pdf(
-            match, out_dir / f"{stem}_invoice.pdf", invoice_date=invoice_date))
+        inv_pdf = out_dir / f"{stem}_invoice.pdf"
+        # Operator's OWN format when they've enabled a template; otherwise (or on any
+        # render failure) the standard branded PDF — a bad template never breaks a send.
+        if not _render_from_operator_template(match, sub, inv_pdf):
+            invoice_mod.render_invoice_pdf(match, inv_pdf, invoice_date=invoice_date)
+        paths.append(inv_pdf)
     if "xlsx" in fmts:
         paths.append(invoice_mod.render_invoice_xlsx(
             match, out_dir / f"{stem}_invoice.xlsx", invoice_date=invoice_date))
