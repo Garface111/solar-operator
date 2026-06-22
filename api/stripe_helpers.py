@@ -228,6 +228,27 @@ def reconcile_subscription_quantity(
     subscription_id is blank (no Stripe subscription on record).
     """
     if not subscription_id:
+        # A comped / canceled / demo tenant legitimately has no Stripe
+        # subscription — there is nothing to reconcile and it is NOT a billing
+        # fault, so don't log an error (-> Sentry) or fire a manual-fix alert.
+        # Only a tenant that should be billing but is missing its sub id is real.
+        from .db import SessionLocal
+        from .models import Tenant
+        _plan = _status = None
+        try:
+            with SessionLocal() as _db:
+                _t = _db.get(Tenant, tenant_id)
+                if _t is not None:
+                    _plan = (_t.plan or "").lower()
+                    _status = (_t.subscription_status or "").lower()
+        except Exception:  # pragma: no cover — fall through to the alert path
+            pass
+        if _plan in ("comped", "demo") or _status in ("comped", "canceled"):
+            logger.info(
+                "reconcile: tenant %s has no stripe_subscription_id and is "
+                "%s/%s (no active billing) — nothing to reconcile, skipping.",
+                tenant_id, _plan or "?", _status or "?")
+            return
         logger.error(
             "Cannot reconcile billing for tenant %s — no stripe_subscription_id "
             "on record. Array count = %d.", tenant_id, array_count)
