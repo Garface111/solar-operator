@@ -293,6 +293,46 @@ def _utility_bill_period_kwh(
     return round(float(bill.kwh_generated), 1), ps, pe, label
 
 
+def _utility_bill_credit(
+    db, utility_account_id: int
+) -> tuple[Optional[float], Optional[float], Optional[float],
+           Optional[date], Optional[date], Optional[str]]:
+    """OFFTAKER billing basis (Ford/Bruce's model): the latest GMP bill's SOLAR
+    CREDIT for ONE account — the EXCESS sent to grid valued at the credit the
+    utility actually gave (EXCESS + SOLCRED), NOT gross kWh × a flat rate.
+
+    Reads the most recent bill that carries a BILLABLE credit
+    (Bill.solar_credit_usd not null & > 0, with excess in kwh_sent_to_grid).
+    BANKED months and bills with no page-2 credit detail have solar_credit_usd
+    NULL and are skipped — so we never over-charge (e.g. $10,659 for a banked
+    month that earned $2). Returns (None, …) when no billable-credit bill exists
+    yet → the caller SKIPS and waits.
+
+    Returns (excess_kwh, credit_usd, credit_rate, period_start, period_end, label).
+    """
+    from ..models import Bill
+
+    bill = db.execute(
+        select(Bill)
+        .where(Bill.account_id == utility_account_id,
+               Bill.solar_credit_usd.isnot(None),
+               Bill.solar_credit_usd > 0,
+               Bill.kwh_sent_to_grid.isnot(None),
+               Bill.kwh_sent_to_grid > 0,
+               Bill.period_end.isnot(None))
+        .order_by(Bill.period_end.desc())
+    ).scalars().first()
+    if bill is None:
+        return None, None, None, None, None, None
+    excess = round(float(bill.kwh_sent_to_grid), 1)
+    credit = round(float(bill.solar_credit_usd), 2)
+    rate = round(credit / excess, 6) if excess > 0 else None
+    ps = bill.period_start.date() if bill.period_start else None
+    pe = bill.period_end.date() if bill.period_end else None
+    label = pe.strftime("%Y-%m") if pe else None
+    return excess, credit, rate, ps, pe, label
+
+
 def _normalized_allocations(sub) -> list[dict]:
     """Return a clean list of {array_id:int, allocation_pct:float} for a sub.
 
@@ -355,26 +395,40 @@ def build_manual_match(sub) -> BillingMatch:
             acct = db.get(UtilityAccount, sub.utility_account_id)
             array_name = (acct.nickname if acct and acct.nickname
                           else (f"GMP {acct.account_number}" if acct else None))
-            ub_kwh, start, end, label = _utility_bill_period_kwh(
-                db, sub.utility_account_id)
+            excess_kwh, credit_usd, credit_rate, start, end, label = \
+                _utility_bill_credit(db, sub.utility_account_id)
         kwh_source = "utility_bill"
-        if ub_kwh is None:
-            # No utility bill for this account yet → wait, don't fabricate.
+        if credit_usd is None:
+            # No BILLABLE solar credit yet: no bill, a BANKED month (excess rolled
+            # forward, not cashed), or a bill with no page-2 credit detail. Wait —
+            # NEVER substitute gross kWh × a flat rate (that over-charged a banked
+            # month $10,659 for ~$2 of real credit). array_kwh None → delivery skips.
             warnings.append(
-                "Waiting on the utility bill for this offtaker — no GMP bill "
-                "has landed yet for this account. The invoice will generate "
-                "from the paper bill once it arrives (no vendor data is used).")
-            array_kwh = None      # signals delivery/skip-if-empty to hold
+                "Waiting on a billable solar credit for this offtaker — the latest "
+                "GMP bill shows no net-metering credit yet (or the excess was "
+                "banked, not cashed). The invoice generates from the bill's "
+                "EXCESS + SOLCRED credit once it lands; no vendor data, gross kWh, "
+                "or flat rate is substituted.")
+            array_kwh = None
+            credit_rate = None
         else:
-            array_kwh = ub_kwh
+            array_kwh = excess_kwh          # bill the EXCESS sent to grid, not gross
         if not pct:
             warnings.append("No allocation % set for this offtaker.")
             pct = 0.0
         customer_kwh = round((array_kwh or 0.0) * pct, 2)
         pricing = resolve_discount_pricing(sub, period_end=end)
-        net_rate = pricing["net_rate"]
         discount = pricing["discount_pct"]
         billing_rate = 1.0 - discount
+        # The net rate IS the bill's ACTUAL solar credit rate (EXCESS + SOLCRED ÷
+        # excess kWh) — Bruce's model — unless the operator set an explicit
+        # per-customer override (net_source == 'customer'), which still wins.
+        if pricing["net_source"] == "customer":
+            net_rate, net_source = pricing["net_rate"], "customer"
+            net_note = pricing.get("net_rate_note")
+        else:
+            net_rate, net_source = (credit_rate or 0.0), "gmp_bill_credit"
+            net_note = "the bill's EXCESS + SOLCRED net-metering credit"
         period = Period(
             month=label, start=start, end=end,
             array_kwh=(array_kwh or 0.0), customer_kwh=customer_kwh,
@@ -388,17 +442,19 @@ def build_manual_match(sub) -> BillingMatch:
         computed["month"] = label
         computed["project_total_kwh"] = (array_kwh or 0.0)
         computed["array_kwh"] = (array_kwh or 0.0)
+        computed["excess_kwh"] = (array_kwh or 0.0)
+        computed["solar_credit_usd"] = credit_usd
         computed["net_rate_per_kwh"] = round(net_rate, 6)
         computed["discount_pct"] = round(discount, 6)
-        computed["effective_rate_per_kwh"] = pricing["effective_rate"]
-        computed["net_rate_source"] = pricing["net_source"]
-        computed["net_rate_note"] = pricing.get("net_rate_note")
+        computed["effective_rate_per_kwh"] = round(net_rate * billing_rate, 6)
+        computed["net_rate_source"] = net_source
+        computed["net_rate_note"] = net_note
         computed["discount_source"] = pricing["discount_source"]
-        computed["rate_per_kwh"] = pricing["effective_rate"]
+        computed["rate_per_kwh"] = round(net_rate * billing_rate, 6)
         computed["rate_source"] = pricing["discount_source"]
         computed["kwh_source"] = kwh_source           # always 'utility_bill' here
-        # has_data flag the empty-skip path checks (None kWh = nothing to bill).
-        computed["has_utility_bill"] = array_kwh is not None
+        # has_data flag the empty-skip path checks (None = nothing billable).
+        computed["has_utility_bill"] = credit_usd is not None
         return BillingMatch(
             matched=True, confidence=1.0, source="manual", data_sheet=None,
             customer={"name": sub.customer_name, "email": sub.client_email},

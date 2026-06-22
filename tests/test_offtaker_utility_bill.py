@@ -27,10 +27,13 @@ from api.models import (
 from api.billing import delivery
 
 
-def _seed(*, with_bill: bool, bill_kwh: int = 1800, vendor_kwh: float = 9999.0):
-    """One tenant, one array, one GMP account. Optionally a utility bill on the
-    account, and ALWAYS a conflicting vendor DailyGeneration so we can prove the
-    bill path ignores it."""
+def _seed(*, with_bill: bool, bill_excess: float = 1800.0,
+          bill_credit_rate: float = 0.2576, vendor_kwh: float = 9999.0,
+          bill_kwh: int = 1800):
+    """One tenant, one array, one GMP account. Optionally a utility bill carrying
+    the offtaker billing basis — EXCESS kWh sent to grid (kwh_sent_to_grid) + the
+    gross solar credit (solar_credit_usd = excess × the credit rate) — and ALWAYS a
+    conflicting vendor DailyGeneration so we can prove the bill path ignores it."""
     tid = "ten_offtk_" + _secrets.token_hex(3)
     with SessionLocal() as db:
         db.add(Tenant(id=tid, tenant_key=_secrets.token_hex(8), name="Offtaker Test",
@@ -52,15 +55,19 @@ def _seed(*, with_bill: bool, bill_kwh: int = 1800, vendor_kwh: float = 9999.0):
             db.add(Bill(tenant_id=tid, account_id=acct.id,
                         period_start=datetime(2026, 5, 1),
                         period_end=datetime(2026, 5, 31),
-                        kwh_generated=bill_kwh))
+                        kwh_generated=bill_kwh,
+                        kwh_sent_to_grid=bill_excess,
+                        solar_credit_usd=round(bill_excess * bill_credit_rate, 2)))
         db.commit()
         return tid, arr.id, acct.id
 
 
 def test_offtaker_uses_utility_bill_not_vendor():
-    """Bound offtaker invoice = allocation × the UTILITY BILL kWh, ignoring the
+    """Bound offtaker invoice = allocation × the bill's EXCESS sent to grid, valued
+    at the bill's actual net-metering credit rate (EXCESS+SOLCRED) — ignoring the
     (much larger) vendor DailyGeneration on the same array."""
-    tid, aid, acct_id = _seed(with_bill=True, bill_kwh=1800, vendor_kwh=9999.0)
+    tid, aid, acct_id = _seed(with_bill=True, bill_excess=1800.0,
+                              bill_credit_rate=0.2576, vendor_kwh=9999.0)
     sub = BillingReportSubscription(
         tenant_id=tid, customer_name="Paul Bozuwa",
         utility_account_id=acct_id, array_id=aid,
@@ -69,12 +76,17 @@ def test_offtaker_uses_utility_bill_not_vendor():
     m = delivery.build_manual_match(sub)
     assert m.matched
     ci = m.computed_invoice
-    # Source must be the utility bill, never vendor.
+    # Source is the utility bill's solar credit, never vendor.
     assert ci["kwh_source"] == "utility_bill"
     assert ci["has_utility_bill"] is True
-    # Array total = the BILL's 1800 kWh (NOT the 9999 vendor figure).
+    assert ci["net_rate_source"] == "gmp_bill_credit"
+    # Basis = the bill's EXCESS (1800 kWh), NOT the 9999 vendor figure.
     assert ci["array_kwh"] == 1800.0
-    # Customer share = 50% × 1800 = 900 kWh.
+    assert ci["excess_kwh"] == 1800.0
+    # Credit rate = the bill's actual rate; gross credit = 1800 × 0.2576 = 463.68.
+    assert abs(ci["net_rate_per_kwh"] - 0.2576) < 1e-6
+    assert ci["solar_credit_usd"] == 463.68
+    # Customer share = 50% × 1800 = 900 kWh excess.
     assert m.latest_period.customer_kwh == 900.0
 
 
@@ -117,6 +129,34 @@ def test_unbound_offtaker_skips_rather_than_invoicing_telemetry():
     assert m.matched                                       # renders for previews…
     # …but the source is telemetry, never a utility bill.
     assert m.computed_invoice["kwh_source"] != "utility_bill"
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, tid)
+        res = delivery.deliver_subscription(db, sub, tenant, is_test=True)
+    assert res.get("skipped") is True
+    assert res.get("ok") is False
+
+
+def test_offtaker_skips_banked_month_no_overcharge():
+    """REGRESSION (Londonderry: $10,659.60 charged for ~$2 of real credit): a
+    BANKED month — big EXCESS sent to grid but solar_credit_usd NULL (credited at
+    ~$0, rolled forward not cashed) — must NEVER invoice from gross kWh × a flat
+    rate. With no billable credit the offtaker SKIPS and waits."""
+    tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=9999.0)
+    with SessionLocal() as db:
+        db.add(Bill(tenant_id=tid, account_id=acct_id,
+                    period_start=datetime(2026, 5, 1),
+                    period_end=datetime(2026, 5, 31),
+                    kwh_generated=56400, kwh_sent_to_grid=56320.0,
+                    solar_credit_usd=None))            # banked → NULL → not billable
+        db.commit()
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Londonderry",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=1.0, billing_model="percent_of_array",
+        send_mode="to_me", operator_email="op@e.com",
+    )
+    m = delivery.build_manual_match(sub)
+    assert m.computed_invoice["has_utility_bill"] is False   # nothing billable
     with SessionLocal() as db:
         tenant = db.get(Tenant, tid)
         res = delivery.deliver_subscription(db, sub, tenant, is_test=True)
