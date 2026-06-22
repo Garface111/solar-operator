@@ -3186,9 +3186,20 @@ def _persist_meter_accounts(
                         and _pstart is not None and period_end > _pstart):
                     n_days = (period_end - _pstart).days + 1
                     per_day = float(gen) / n_days
-                    if _cap is None or per_day <= _cap:
-                        for _i in range(n_days):
-                            day = _pstart + timedelta(days=_i)
+                    # Never estimate today / the future / the trailing 2-day guard —
+                    # those days belong to the real inverter / GMP-API pull. Clamp the
+                    # write window so a bill running past today (or a mis-parsed
+                    # future-dated bill) can't fabricate present/future production and
+                    # mask the authoritative reading. Mirrors bill_to_daily's guard.
+                    _cutoff = now().date() - timedelta(days=2)
+                    _write_end = min(period_end, _cutoff)
+                    if _pstart > _cutoff:
+                        log.info("utility_meter: bill window starts in guard/future zone "
+                                 "(%s) — left in Bill only (array=%s)", _pstart, arr.id)
+                    elif _cap is None or per_day <= _cap:
+                        _wrote = 0
+                        day = _pstart
+                        while day <= _write_end:
                             row = db.execute(
                                 select(DailyGeneration).where(
                                     DailyGeneration.array_id == arr.id,
@@ -3204,8 +3215,10 @@ def _persist_meter_accounts(
                                 row.kwh = max(row.kwh, per_day)
                                 row.source = "bill_prorate"
                                 row.uploaded_at = now()
-                        kwh_recorded = float(gen)
-                        days_written = n_days
+                            _wrote += 1
+                            day += timedelta(days=1)
+                        kwh_recorded = per_day * _wrote
+                        days_written = _wrote
                     else:
                         log.warning("utility_meter: skip implausible prorated %.0f kWh/day "
                                     "(cap %.0f) array=%s", per_day, _cap, arr.id)

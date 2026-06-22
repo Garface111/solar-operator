@@ -8,12 +8,12 @@ DailyGeneration rows with source='bill_prorate' so the frontend can show it;
 import os
 os.environ.setdefault("SOLAR_DATA_DIR", "/tmp/ao_billdaily_test")
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import secrets
 
 from sqlalchemy import select
 from api.db import SessionLocal
-from api.models import (Tenant, Array, UtilityAccount, Bill, DailyGeneration)
+from api.models import (Tenant, Array, UtilityAccount, Bill, DailyGeneration, now)
 from api.jobs import bill_to_daily
 
 
@@ -56,6 +56,44 @@ def test_bill_prorates_and_respects_real_data():
         assert rows[date(2026, 5, 1)][1] == "bill_prorate"
         # Total days present = 10 (9 prorated + 1 real).
         assert len(rows) == 10
+
+
+def test_prorate_never_writes_today_or_future():
+    """A bill whose window runs into the FUTURE (the real GMP bug: bills dated
+    period_start → ~period_start+1mo, ending after today) must NOT fabricate
+    present or future 'production'. Days within the recency guard (today + the
+    trailing guard) and every future day are left for the real metered pull —
+    this is what was showing Bruce a flat 83 kWh estimate where SMA reported 803."""
+    today = now().date()
+    tid = "ten_b2dfut_" + secrets.token_hex(3)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="B2DFut",
+                      contact_email=f"{tid}@e.com", active=True, product="array_operator"))
+        db.flush()
+        a = Array(tenant_id=tid, name="FutureBill", region="VT")
+        db.add(a); db.flush()
+        aid = a.id
+        acc = UtilityAccount(tenant_id=tid, provider="gmp", account_number="777", array_id=aid)
+        db.add(acc); db.flush()
+        # 31-day window straddling today: starts 6 days ago, ends 24 days ahead.
+        ps = today - timedelta(days=6)
+        pe = today + timedelta(days=24)
+        db.add(Bill(tenant_id=tid, account_id=acc.id,
+                    period_start=datetime(ps.year, ps.month, ps.day),
+                    period_end=datetime(pe.year, pe.month, pe.day),
+                    kwh_generated=3100))  # 100 kWh/day over the 31-day window
+        db.commit()
+
+    bill_to_daily.transform_tenant_bills(tid)
+    cutoff = today - timedelta(days=bill_to_daily.PRORATE_RECENCY_GUARD_DAYS)
+    with SessionLocal() as db:
+        days = [d for (d,) in db.execute(
+            select(DailyGeneration.day).where(DailyGeneration.array_id == aid)).all()]
+    assert days, "expected the past portion to be prorated"
+    # Nothing today, in the guard window, or in the future.
+    assert max(days) <= cutoff, f"prorate wrote past cutoff: max={max(days)} cutoff={cutoff}"
+    # The eligible past portion (period_start .. cutoff) WAS filled.
+    assert min(days) == ps
 
 
 def test_idempotent_rerun():

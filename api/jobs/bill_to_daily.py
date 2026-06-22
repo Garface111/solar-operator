@@ -41,6 +41,16 @@ _REAL_SOURCES = {
     "gmp_portal_scrape", "utility_meter", "smarthub",
 }
 
+# bill-prorate is an ESTIMATE (a monthly bill spread flat across its days). It must
+# NEVER stand in for real metered production on days the inverter / GMP-API pull
+# still owns — that is exactly how a net-metering bill (~83 kWh/day) ended up shown
+# as "daily production" next to gross SMA output (~803 kWh/day). So we never prorate
+# today, the future, or the trailing guard window; those days wait for the
+# authoritative real reading (or honestly show as a gap). A bill window that runs
+# past the cutoff is clamped; one that STARTS past it (a future-dated / mis-parsed
+# bill) is skipped entirely.
+PRORATE_RECENCY_GUARD_DAYS = 2
+
 
 def _bill_days(b: Bill) -> Optional[tuple[date, date]]:
     """The bill's inclusive service window as dates, or None if unusable."""
@@ -95,15 +105,22 @@ def transform_array_bills(db: Session, array_id: int) -> dict:
     # When several bills (multiple meters) cover the same day, sum their per-day
     # prorate so a multi-meter array's day reflects all meters.
     prorate_by_day: dict[date, float] = {}
+    # Never estimate today / the future / the trailing guard window — real metered
+    # pulls own those days (see PRORATE_RECENCY_GUARD_DAYS).
+    cutoff = now().date() - timedelta(days=PRORATE_RECENCY_GUARD_DAYS)
     for b in bills:
         win = _bill_days(b)
         if win is None:
             continue
         ps, pe = win
-        n_days = (pe - ps).days + 1
+        if ps > cutoff:
+            # Future-dated / too-recent bill window — refuse to project it forward.
+            continue
+        n_days = (pe - ps).days + 1          # share over the bill's TRUE window
         per_day = float(b.kwh_generated) / n_days
+        write_end = min(pe, cutoff)          # only fill days up to the cutoff
         d = ps
-        while d <= pe:
+        while d <= write_end:
             prorate_by_day[d] = prorate_by_day.get(d, 0.0) + per_day
             d += timedelta(days=1)
 
