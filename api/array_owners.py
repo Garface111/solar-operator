@@ -2942,6 +2942,16 @@ def utility_meter_capture(
     if not body.accounts:
         raise HTTPException(400, "No accounts in capture payload.")
 
+    # Observability: record whether the client forwarded auth, so a "bills won't
+    # pull" report can be diagnosed without guessing (old extension / stale page
+    # JS both silently drop auth → no UtilitySession → no bill pull).
+    _auth_present = body.auth is not None
+    _auth_has_token = bool(body.auth and body.auth.get("apiToken"))
+    log.info(
+        "meter-capture: tenant=%s provider=%s accounts=%d auth_present=%s has_token=%s",
+        tenant.id, provider, len(body.accounts), _auth_present, _auth_has_token,
+    )
+
     with SessionLocal() as db:
         results = _persist_meter_accounts(db, tenant, provider, body.accounts)
 
