@@ -157,17 +157,20 @@ def test_send_welcome_smoke():
     assert "NEPOOL Operator · nepooloperator.com" in text  # rebranded from "Solar Operator · solaroperator.org"
 
 
-# ── Array Operator (dark) theme ───────────────────────────────────────────────
+# ── Array Operator (light "day") theme ────────────────────────────────────────
 
-def test_ao_theme_uses_dark_palette():
+def test_ao_theme_uses_light_day_palette():
     html = render_email_skin(
         preheader="p", intro_line="Y", body_html="<p>Z</p>",
         product="array_operator",
     )
-    # AO dark tokens present, NEPOOL light tokens absent.
+    # AO day tokens present (utility blue on cool slate); old dark tokens gone.
+    for c in ("#f6f8fb", "#ffffff", "#2563eb"):
+        assert c in html, f"AO day color {c} missing"
     for c in ("#0a0e14", "#11161f", "#3fd68a", "#7ff0bb"):
-        assert c in html, f"AO color {c} missing"
-    assert "#faf8f5" not in html  # no NEPOOL cream page bg
+        assert c not in html, f"old AO dark color {c} should be gone"
+    assert "#faf8f5" not in html  # not the NEPOOL cream page bg
+    assert "light only" in html   # forces light so clients can't invert it
     assert "Array Operator · arrayoperator.com" in html
     assert "NEPOOL Operator · nepooloperator.com" not in html
 
@@ -180,14 +183,15 @@ def test_ao_theme_default_headline_is_brand():
     assert "Array Operator" in html  # headline falls back to brand
 
 
-def test_ao_cta_uses_green_on_dark_ink():
+def test_ao_cta_uses_blue():
     html = render_email_skin(
         preheader="p", intro_line="Y", body_html="<p>b</p>",
         cta={"label": "Sign in", "url": "https://arrayoperator.com/login?token=x"},
         product="array_operator",
     )
-    assert "#3fd68a" in html       # green CTA bg
-    assert "#06140d" in html       # dark ink CTA text
+    assert "#2563eb" in html       # utility-blue CTA bg
+    assert "#ffffff" in html       # white CTA text
+    assert "#3fd68a" not in html   # no leftover octarine-green
 
 
 def test_nepool_remains_default_and_light():
@@ -195,6 +199,7 @@ def test_nepool_remains_default_and_light():
     assert "#faf8f5" in html
     assert "NEPOOL Operator · nepooloperator.com" in html
     assert "#0a0e14" not in html
+    assert "light only" in html   # NEPOOL is force-light too
 
 
 def test_text_skin_is_product_aware():

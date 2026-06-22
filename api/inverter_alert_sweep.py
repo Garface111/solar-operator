@@ -26,6 +26,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .models import Tenant, InverterAlertState
 from . import inverter_fleet, notify
+from .email_skin import render_email_skin, render_email_skin_text
 
 logger = logging.getLogger(__name__)
 
@@ -84,18 +85,32 @@ def _render_email(tenant: Tenant, items: list[dict]) -> tuple[str, str, str]:
             f'<td style="padding:8px 12px;border-bottom:1px solid #eee;color:#b45309">{what}</td></tr>'
         )
         text_rows.append(f"- {name} ({arr}): {what}")
-    html = (
-        f'<div style="font-family:system-ui,sans-serif;max-width:520px">'
-        f'<h2 style="margin:0 0 4px">Inverter alert</h2>'
-        f'<p style="color:#555;margin:0 0 16px">Array Operator spotted {n} '
-        f'inverter{"s" if n != 1 else ""} that need{"s" if n == 1 else ""} attention:</p>'
-        f'<table style="border-collapse:collapse;width:100%">{"".join(rows)}</table>'
-        f'<p style="margin:18px 0 0"><a href="https://arrayoperator.com" '
-        f'style="color:#059669;font-weight:600">Open Array Operator →</a></p>'
-        f'<p style="color:#999;font-size:12px;margin-top:20px">You set these alerts in '
-        f'Array Operator. Adjust the threshold or turn them off any time in the 🔔 Alerts panel.</p></div>'
+    intro = (
+        f'<p style="margin:0 0 16px;color:#334155;">Array Operator spotted {n} '
+        f'inverter{"s" if n != 1 else ""} that need{"s" if n == 1 else ""} a look:</p>'
     )
-    text = "Inverter alert\n\n" + "\n".join(text_rows) + "\n\nhttps://arrayoperator.com"
+    table = (
+        '<table role="presentation" cellpadding="0" cellspacing="0" width="100%" '
+        'style="border-collapse:collapse;">' + "".join(rows) + '</table>'
+    )
+    html = render_email_skin(
+        preheader=f"{n} inverter{'s' if n != 1 else ''} on your fleet need attention.",
+        headline="Inverter alert",
+        intro_line="A heads-up from your fleet watch.",
+        body_html=intro + table,
+        cta={"label": "Open Array Operator →", "url": "https://arrayoperator.com"},
+        footer_line=("You set these alerts in Array Operator — adjust the threshold "
+                     "or turn them off any time in the Alerts panel."),
+        product="array_operator",
+    )
+    text = render_email_skin_text(
+        headline="Inverter alert",
+        intro_line="A heads-up from your fleet watch.",
+        body_text=("Array Operator spotted these inverters that need attention:\n\n"
+                   + "\n".join(text_rows)),
+        cta={"label": "Open Array Operator", "url": "https://arrayoperator.com"},
+        product="array_operator",
+    )
     return subject, html, text
 
 

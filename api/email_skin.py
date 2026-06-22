@@ -8,14 +8,15 @@ Two brands share one backend (see models.Tenant.product / api.branding):
       page #faf8f5 · card #ffffff · header #064e3b · gold underline #e6b470
       CTA #047857 · wordmark strip #022c22
 
-  • Array Operator (arrayoperator.com) — DARK theme, mirrors the deep-navy +
-    octarine-green "solarpunk" design language of the AO onboarding/dashboard.
-      page #0a0e14 · card #11161f · header #0e1620 · green underline #3fd68a
-      CTA #3fd68a on dark ink #06140d · wordmark strip #070b11
+  • Array Operator (arrayoperator.com) — LIGHT "day" theme (utility blue on
+    cool slate), mirroring theme-day.css + the morning fleet digest.
+      page #f6f8fb · card #ffffff · blue accent #2563eb · CTA #2563eb
+      ink #0f172a · slate wordmark strip #0f172a
 
 Pass product="array_operator" to render in the AO theme; anything else (incl.
-None) renders NEPOOL. bgcolor attributes sit alongside style backgrounds so the
-dark theme survives Outlook's Word engine and dark-mode-naive clients.
+None) renders NEPOOL. Both themes are LIGHT and the skin forces light mode
+(color-scheme: light only) so dark-mode clients can't auto-invert them; bgcolor
+attributes sit alongside style backgrounds for Outlook's Word engine.
 
 Layout (unchanged across themes):
   ┌────────────────────────────────────────┐
@@ -69,25 +70,27 @@ _THEMES = {
         "chip_caption": "NEPOOL-GIS generation workbook",
     },
     "array_operator": {
-        "page_bg": "#0a0e14",
-        "card_bg": "#11161f",
-        "card_border": "#1e2733",
-        "header_bg": "#0e1620",
-        "header_text": "#ffffff",
-        "header_sub": "#7ff0bb",      # green tagline
-        "accent": "#3fd68a",          # octarine-green hairline under the header
-        "body_text": "#dfe7f0",
-        "muted_text": "#7d8a9b",
-        "footer_border": "#1a2330",
-        "cta_bg": "#3fd68a",
-        "cta_text": "#06140d",
-        "wordmark_bg": "#070b11",
-        "wordmark_text": "#7d8a9b",
-        "chip_bg": "#161c26",
-        "chip_border": "#243042",
-        "chip_icon_bg": "#3fd68a",
-        "chip_icon_text": "#06140d",
-        "link": "#3fd68a",
+        # Array Operator DAY skin -- light "utility blue on cool slate", matching
+        # theme-day.css + the morning fleet digest. (Was a dark navy/green skin.)
+        "page_bg": "#f6f8fb",
+        "card_bg": "#ffffff",
+        "card_border": "#e2e8f0",
+        "header_bg": "#ffffff",
+        "header_text": "#0f172a",
+        "header_sub": "#64748b",
+        "accent": "#2563eb",          # utility-blue hairline under the header
+        "body_text": "#0f172a",
+        "muted_text": "#64748b",
+        "footer_border": "#eef2f7",
+        "cta_bg": "#2563eb",
+        "cta_text": "#ffffff",
+        "wordmark_bg": "#0f172a",
+        "wordmark_text": "#94a3b8",
+        "chip_bg": "#f8fafc",
+        "chip_border": "#e2e8f0",
+        "chip_icon_bg": "#2563eb",
+        "chip_icon_text": "#ffffff",
+        "link": "#2563eb",
         "brand": "Array Operator",
         "wordmark": "Array Operator · arrayoperator.com",
         "default_tagline": "Your array, measured at its true worth — watched, valued, in dollars.",
@@ -202,10 +205,12 @@ def render_email_skin(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light">
+<style>:root{{color-scheme:light only;supported-color-schemes:light;}}</style>
 <title>{t["brand"]}</title>
 </head>
-<body style="margin:0;padding:0;background:{t["page_bg"]};" bgcolor="{t["page_bg"]}">
+<body style="margin:0;padding:0;background:{t["page_bg"]};color-scheme:light only;" bgcolor="{t["page_bg"]}">
 <span style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">{preheader}</span>
 <table cellpadding="0" cellspacing="0" border="0" width="100%" role="presentation"
   bgcolor="{t["page_bg"]}" style="background:{t["page_bg"]};padding:36px 0;">

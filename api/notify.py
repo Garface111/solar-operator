@@ -938,10 +938,15 @@ def send_warranty_claim_email(
     even when we send from the platform From address.
     """
     html = (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='color-scheme' content='light only'>"
+        "<meta name='supported-color-schemes' content='light'>"
+        "<style>:root{color-scheme:light only;supported-color-schemes:light;}</style></head>"
+        "<body bgcolor='#ffffff' style='margin:0;padding:0;background:#ffffff;color-scheme:light only;'>"
         "<div style='font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;"
-        "background:#f6f8f7;padding:18px 22px;border-left:3px solid #3fd68a;max-width:680px;'>"
-        f"<pre style='margin:0;white-space:pre-wrap;color:#10231a;'>{_escape(body_text)}</pre>"
-        "</div>"
+        "background:#f8fafc;padding:18px 22px;border-left:3px solid #2563eb;max-width:680px;'>"
+        f"<pre style='margin:0;white-space:pre-wrap;color:#0f172a;'>{_escape(body_text)}</pre>"
+        "</div></body></html>"
     )
     from_addr = None
     if from_name:
@@ -962,10 +967,15 @@ def send_internal_alert(subject: str, body: str) -> bool:
     """Plain-text notification to ourselves. Used for new signups + errors.
     Kept intentionally simple — Ford reads these on his phone at 2am."""
     html = (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='color-scheme' content='light only'>"
+        "<meta name='supported-color-schemes' content='light'>"
+        "<style>:root{color-scheme:light only;supported-color-schemes:light;}</style></head>"
+        "<body bgcolor='#faf8f5' style='margin:0;padding:0;background:#faf8f5;color-scheme:light only;'>"
         "<div style='font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;"
         "background:#faf8f5;padding:16px 20px;border-left:3px solid #e6b470;'>"
         f"<pre style='margin:0;white-space:pre-wrap;color:#1a2a1f;'>{_escape(body)}</pre>"
-        "</div>"
+        "</div></body></html>"
     )
     return _send_via_resend(
         to=INTERNAL_ALERT_TO,
