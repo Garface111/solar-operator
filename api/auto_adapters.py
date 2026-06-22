@@ -361,12 +361,26 @@ router = APIRouter()
 
 def _require_admin(key):
     expected = os.environ.get("AUTO_ADAPTERS_ADMIN_KEY")
-    if expected and key != expected:
-        raise HTTPException(status_code=403, detail="admin key required")
+    if not expected or key != expected:  # deny-by-default: closed unless a key is configured AND matches
+        raise HTTPException(status_code=403, detail="admin disabled (set AUTO_ADAPTERS_ADMIN_KEY)")
+
+
+def _auth_tenant(authorization):
+    """Gate the tenant-facing endpoints. In the full app, validate the bearer via the
+    app's tenant_from_bearer (lazy import avoids a circular import at module load). In a
+    standalone/test context where that import isn't available, require a bearer present."""
+    try:
+        from .app import tenant_from_bearer
+    except Exception:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="authorization required")
+        return None
+    return tenant_from_bearer(authorization)
 
 
 @router.get("/v1/adapters/lookup")
-def adapters_lookup(fp: str):
+def adapters_lookup(fp: str, authorization: str = Header(default=None)):
+    _auth_tenant(authorization)
     r = reg_get(fp)
     if r and r["status"] == "approved":
         return json.loads(r["spec"])
@@ -376,7 +390,8 @@ def adapters_lookup(fp: str):
 
 
 @router.post("/v1/adapters/ingest")
-async def adapters_ingest(request: Request):
+async def adapters_ingest(request: Request, authorization: str = Header(default=None)):
+    _auth_tenant(authorization)
     body = await request.json()
     cap = body.get("capture")
     fmt = body.get("fmt", "json")
@@ -429,7 +444,8 @@ def adapters_list(x_admin_key: str = Header(default=None)):
 
 
 @router.post("/v1/adapters/readings")
-async def adapters_readings(request: Request):
+async def adapters_readings(request: Request, authorization: str = Header(default=None)):
+    _auth_tenant(authorization)
     """Sink for normalized generation the extension extracted via a served adapter."""
     body = await request.json()
     source = body.get("source", "?")
