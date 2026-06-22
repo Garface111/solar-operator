@@ -149,6 +149,27 @@
         "so_bridge.js"
       ],
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.solarweb.com/*",
+        "https://*.solarweb.com/*"
+      ],
+      "js": [
+        "auto_interpreter.js",
+        "auto_content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "auto_inject.js"
+      ],
+      "matches": [
+        "https://*.solarweb.com/*"
+      ]
     }
   ],
   "action": {

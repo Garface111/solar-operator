@@ -306,6 +306,8 @@ def _conn():
     c.execute("""CREATE TABLE IF NOT EXISTS auto_adapters(
         fingerprint TEXT PRIMARY KEY, fmt TEXT, spec TEXT, status TEXT,
         reconcile REAL, source TEXT, version INTEGER, created TEXT, updated TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS auto_readings(
+        source TEXT, fingerprint TEXT, date TEXT, kwh REAL, captured_at TEXT)""")
     return c
 
 
@@ -424,3 +426,32 @@ async def adapters_approve(request: Request, x_admin_key: str = Header(default=N
 def adapters_list(x_admin_key: str = Header(default=None)):
     _require_admin(x_admin_key)
     return {"adapters": reg_all()}
+
+
+@router.post("/v1/adapters/readings")
+async def adapters_readings(request: Request):
+    """Sink for normalized generation the extension extracted via a served adapter."""
+    body = await request.json()
+    source = body.get("source", "?")
+    fp = body.get("fingerprint", "?")
+    recs = body.get("records", [])
+    now = dt.datetime.utcnow().isoformat(timespec="seconds")
+    c = _conn()
+    for r in recs:
+        c.execute("INSERT INTO auto_readings VALUES(?,?,?,?,?)",
+                  (source, fp, r.get("date"), r.get("generation_kwh"), now))
+    c.commit()
+    c.close()
+    return {"stored": len(recs), "source": source, "fingerprint": fp}
+
+
+@router.get("/v1/adapters/fleet")
+def adapters_fleet(x_admin_key: str = Header(default=None)):
+    _require_admin(x_admin_key)
+    c = _conn()
+    sites = c.execute("""SELECT source, COUNT(*), ROUND(SUM(kwh),1), MIN(date), MAX(date)
+                         FROM auto_readings GROUP BY source ORDER BY SUM(kwh) DESC""").fetchall()
+    total = c.execute("SELECT ROUND(SUM(kwh),1), COUNT(DISTINCT source) FROM auto_readings").fetchone()
+    c.close()
+    return {"sites": [{"source": s[0], "readings": s[1], "kwh": s[2], "from": s[3], "to": s[4]} for s in sites],
+            "total_kwh": total[0], "site_count": total[1]}
