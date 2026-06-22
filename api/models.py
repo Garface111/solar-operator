@@ -1152,6 +1152,12 @@ class BillingReportSubscription(Base):
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     last_invoice_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Sequential invoice numbering (Ford): the operator sets a starting number and
+    # Array Operator adds 1 per real send. `start` = the seed they entered; `next` =
+    # the running counter stamped on the next invoice. NULL on both = legacy
+    # period-date number ("2026-06").
+    invoice_number_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    invoice_number_next: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)

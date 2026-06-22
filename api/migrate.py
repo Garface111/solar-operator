@@ -732,6 +732,22 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_id")
 
+        # 2026-06-22 Sequential invoice numbering: operator sets a starting number,
+        # Array Operator adds 1 per real send. start = seed entered; next = running
+        # counter. NULL on both = legacy period-date invoice number.
+        if not column_exists(conn, "billing_report_subscriptions", "invoice_number_start"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN invoice_number_start INTEGER"
+            ))
+            print("  + billing_report_subscriptions.invoice_number_start")
+        if not column_exists(conn, "billing_report_subscriptions", "invoice_number_next"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN invoice_number_next INTEGER"
+            ))
+            print("  + billing_report_subscriptions.invoice_number_next")
+
         # 2026-06 Multi-array allocations: an offtaker can own a share of several
         # arrays at once. JSON list of {array_id, allocation_pct}. NULL = legacy
         # single array_id/allocation_pct path. JSON works on both sqlite + PG.

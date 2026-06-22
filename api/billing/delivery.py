@@ -66,8 +66,16 @@ def build_match(sub) -> BillingMatch:
         consumer (invoice/summary renderers, delivery, drafts) is unchanged.
     """
     if not sub.source_workbook:
-        return build_manual_match(sub)
-    return match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)
+        m = build_manual_match(sub)
+    else:
+        m = match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)
+    # Sequential invoice numbering: when the operator set a starting number, the
+    # running counter (invoice_number_next) replaces the default period-date number
+    # on the rendered invoice. The counter is advanced on a real send (deliver).
+    nxt = getattr(sub, "invoice_number_next", None)
+    if nxt is not None and m is not None and getattr(m, "computed_invoice", None):
+        m.computed_invoice["invoice_number"] = str(nxt)
+    return m
 
 
 # Default Vermont solar value used to price a manual customer's share when no
@@ -908,6 +916,10 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         now = datetime.utcnow()
         sub.last_sent_at = now
         sub.last_invoice_number = result["invoice_number"]
+        # Sequential numbering: this number is now used — advance the counter so the
+        # next invoice gets start+1, start+2, …
+        if getattr(sub, "invoice_number_next", None) is not None:
+            sub.invoice_number_next = sub.invoice_number_next + 1
         sub.next_send_at = next_send_at(sub.cadence, now)
         db.commit()
     if not ok:

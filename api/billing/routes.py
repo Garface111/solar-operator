@@ -107,6 +107,8 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "last_sent_at": s.last_sent_at.isoformat() if s.last_sent_at else None,
         "next_send_at": s.next_send_at.isoformat() if s.next_send_at else None,
         "last_invoice_number": s.last_invoice_number,
+        "invoice_number_start": getattr(s, "invoice_number_start", None),
+        "invoice_number_next": getattr(s, "invoice_number_next", None),
         # A trimmed preview of the parsed workbook for the UI card.
         "preview": (s.parsed_map or {}).get("computed_invoice") if s.parsed_map else None,
     }
@@ -591,6 +593,10 @@ class SubscriptionPatch(BaseModel):
     net_rate_per_kwh: Optional[float] = None
     # Per-customer 'auto-attach the captured GMP bill PDF' toggle.
     auto_attach_gmp: Optional[bool] = None
+    # Sequential invoice numbering: the operator's starting invoice number. Setting
+    # it (re)seeds the running counter so the next invoice uses it and each real send
+    # adds 1. Explicit null clears it (back to the period-date number).
+    invoice_number_start: Optional[int] = None
 
 
 @router.patch("/subscriptions/{sub_id}")
@@ -654,6 +660,23 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
             sub.net_rate_per_kwh = _validate_rate(body.net_rate_per_kwh)
         if body.auto_attach_gmp is not None:
             sub.auto_attach_gmp = body.auto_attach_gmp
+        if "invoice_number_start" in body.model_fields_set:
+            v = body.invoice_number_start
+            if v is None:
+                sub.invoice_number_start = None
+                sub.invoice_number_next = None
+            else:
+                try:
+                    n = int(v)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "invoice_number_start must be a whole number")
+                if not (0 <= n <= 9_999_999):
+                    raise HTTPException(400, "invoice_number_start must be between 0 and 9999999")
+                # Only (re)seed the running counter when the START actually changes,
+                # so saving unrelated edits never resets an in-progress sequence.
+                if sub.invoice_number_start != n or sub.invoice_number_next is None:
+                    sub.invoice_number_start = n
+                    sub.invoice_number_next = n
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
