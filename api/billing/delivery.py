@@ -801,11 +801,13 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         '<p style="background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.35);'
         'color:#ffb454;padding:10px 14px;border-radius:8px;margin:0 0 16px;font-size:13px;">'
         'Test send — this went to you, not the customer.</p>' if is_test else "")
-    subject = f"Solar invoice — {cust}" + (f" ({inv.get('invoice_number')})" if inv.get("invoice_number") else "")
+    subject = f"Your solar credit invoice — {cust}" + (f" ({inv.get('invoice_number')})" if inv.get("invoice_number") else "")
 
     def _row(label, val, strong=False):
         pad = "10px" if strong else "6px"
-        valstyle = "font-weight:700;color:#3fd68a;" if strong else ""
+        # Day-skin emerald for the money figure (matches the redesigned invoice);
+        # the old #3fd68a mint washed out on the light card.
+        valstyle = "font-weight:700;color:#047857;" if strong else ""
         return (f'<tr><td style="padding:{pad} 0;opacity:.65;">{label}</td>'
                 f'<td style="padding:{pad} 0;text-align:right;{valstyle}">{val}</td></tr>')
 
@@ -821,34 +823,39 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         note_text = note.strip() + "\n\n"
 
     intro_para = ("" if note_html
-                  else f"<p>Automatic solar report for <strong>{cust}</strong>.</p>")
+                  else f'<p>Here is the solar credit invoice for <strong>{cust}</strong>'
+                       f'{f" — {period}" if period else ""}.</p>')
     body_html = (
         f"{test_banner}"
         f"{note_html}"
         f"{intro_para}"
         f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
-        f'{_row("Period", period or "—")}'
-        f'{_row("Generation", f"{kwh:,.0f} kWh")}'
-        f'{_row("Amount due", amount_str, strong=True)}'
+        f'{_row("Billing period", period or "—")}'
+        f'{_row("Your production", f"{kwh:,.0f} kWh")}'
+        f'{_row("Solar credit value due", amount_str, strong=True)}'
         f"</table>"
         f'<p style="margin-top:18px;">The full invoice'
         f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
     )
     html = render_email_skin(
-        preheader=f"Your automatic solar report for {cust} is attached.",
-        intro_line=f"Automatic solar report for {cust}",
+        preheader=f"Your solar credit invoice for {cust} is attached.",
+        headline="Your solar credit invoice",
+        intro_line=(period or cust),
         body_html=body_html,
+        footer_line="Solar credit invoice service by Array Operator  ·  Questions? admin@solaroperator.org",
         product="array_operator",
     )
     text = render_email_skin_text(
-        intro_line=f"Automatic solar report for {cust}",
+        headline="Your solar credit invoice",
+        intro_line=(period or cust),
         body_text=(
             f"{note_text}"
-            f"Solar report for {cust}\n\n"
-            f"Period: {period or '—'}\n"
-            f"Generation: {kwh:,.0f} kWh\n"
-            f"Amount due: {amount_str}\n\n"
-            f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached."
+            f"Solar credit invoice for {cust}\n\n"
+            f"Billing period: {period or '—'}\n"
+            f"Your production: {kwh:,.0f} kWh\n"
+            f"Solar credit value due: {amount_str}\n\n"
+            f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
+            f"Questions? admin@solaroperator.org"
         ),
         product="array_operator",
     )
