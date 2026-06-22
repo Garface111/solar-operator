@@ -58,6 +58,11 @@ VALID_CADENCE = {"monthly", "quarterly"}
 VALID_FORMATS = {"pdf", "xlsx"}
 VALID_DELIVERY = {"approval", "auto"}
 
+# File-type magic bytes (checked before extension so mis-named files are caught)
+_MAGIC_PDF  = b"%PDF"
+_MAGIC_XLSX = b"PK\x03\x04"   # ZIP / OpenXML (.xlsx, .xlsm, .docx, …)
+_MAGIC_XLS  = b"\xd0\xcf\x11\xe0"  # OLE2 compound doc (.xls, .doc, …)
+
 
 def _resolved_pricing_fields(s) -> dict:
     """The pricing actually applied to this customer (auto-resolved net rate +
@@ -120,8 +125,14 @@ async def _read_upload(file: UploadFile) -> bytes:
         raise HTTPException(400, "The uploaded file is empty")
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "File too large (max 8 MB)")
+    # Detect actual file type by magic bytes before trusting the extension.
+    if data[:4] == _MAGIC_PDF:
+        raise HTTPException(
+            400, "That's a PDF — please upload the Excel (.xlsx) workbook "
+                 "(the HCT Sun spreadsheet, not a printed copy)")
     name = (file.filename or "").lower()
-    if not (name.endswith(".xlsx") or name.endswith(".xls")):
+    is_excel = data[:4] in (_MAGIC_XLSX[:4], _MAGIC_XLS)
+    if not (name.endswith(".xlsx") or name.endswith(".xls") or is_excel):
         raise HTTPException(400, "Upload an .xlsx billing workbook")
     return data
 
@@ -1431,6 +1442,14 @@ async def _read_template_upload(file: UploadFile):
         raise HTTPException(400, "File too large (max 12 MB)")
     name = (file.filename or "template").strip()
     ext = ("." + name.rsplit(".", 1)[1].lower()) if "." in name else ""
+    # Detect actual type by magic bytes and override the extension when possible.
+    if data[:4] == _MAGIC_PDF:
+        ext = ".pdf"
+    elif data[:4] == _MAGIC_XLSX[:4]:
+        if ext not in (".xlsx", ".xlsm"):
+            ext = ".xlsx"   # mis-named OpenXML file — treat as xlsx
+    elif data[:4] == _MAGIC_XLS:
+        ext = ".xls"
     if ext not in TEMPLATE_EXT:
         raise HTTPException(400, "Upload a PDF, Word doc, HTML, or image of your invoice template")
     return data, name

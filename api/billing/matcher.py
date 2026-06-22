@@ -223,12 +223,15 @@ def _candidate_sheets(wb) -> list[tuple[str, int, dict[str, int], float]]:
     workbook can legitimately contain several ledger-shaped sheets (a live
     customer ledger plus a stale "SAMPLE"/"-old" sheet); the caller picks the
     current one by recency.
+
+    Scans the first 20 rows per sheet (up from 14) so workbooks with a tall
+    title/logo block above the metadata row are still matched correctly.
     """
     cands: list[tuple[str, int, dict[str, int], float]] = []
     for ws in wb.worksheets:
-        grid = _grid(ws, max_rows=14)
+        grid = _grid(ws, max_rows=20)
         best_row, best_score, best_fmap = -1, 0.0, {}
-        for r_idx, cells in enumerate(grid[:12]):
+        for r_idx, cells in enumerate(grid[:18]):
             score, fmap = _score_header_row(cells)
             if score > best_score:
                 best_row, best_score, best_fmap = r_idx, score, fmap
