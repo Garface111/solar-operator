@@ -3112,6 +3112,17 @@ def _persist_meter_accounts(
             kwh_recorded = 0.0
             days_written = 0
 
+            # Ingest plausibility ceiling: the array's nameplate kW x 24h. A daily
+            # kWh above this is physically impossible — almost always a cumulative or
+            # billing-PERIOD total leaked into a single day. AO bills per-kWh, so we
+            # must never ingest such a value (the generation watchdog flags it after).
+            _np = db.execute(
+                select(func.coalesce(func.sum(Inverter.nameplate_kw), 0.0)).where(
+                    Inverter.array_id == arr.id, Inverter.deleted_at.is_(None)
+                )
+            ).scalar() or 0.0
+            _cap = (float(_np) * 24.0) if _np and _np > 0 else None
+
             # ── Per-day series (preferred when present) ──────────────────────
             if daily_rows:
                 for d in daily_rows:
@@ -3119,6 +3130,10 @@ def _persist_meter_accounts(
                     if day is None or d.generated_kwh is None or d.generated_kwh < 0:
                         continue
                     dk = float(d.generated_kwh)
+                    if _cap is not None and dk > _cap:
+                        log.warning("utility_meter: skip implausible daily %.0f kWh "
+                                    "(cap %.0f) array=%s day=%s", dk, _cap, arr.id, day)
+                        continue
                     row = db.execute(
                         select(DailyGeneration).where(
                             DailyGeneration.array_id == arr.id,
@@ -3138,27 +3153,45 @@ def _persist_meter_accounts(
                     kwh_recorded += dk
                     days_written += 1
             else:
-                # ── Billing-period total → one representative row ────────────
+                # ── Billing-period TOTAL: prorate across the period's days ───────
+                # NEVER write a whole period's kWh into one day — that is a physically
+                # impossible daily value that over-invoices a per-kWh plan and trips the
+                # watchdog. Spread it evenly across the billing period so each day is
+                # plausible and the period sum is preserved. If the span is unknown,
+                # skip the daily write (the Bill row above already holds the total for
+                # offtaker billing).
                 gen = period_gen
-                if gen is not None and gen > 0 and period_end is not None:
-                    gk = float(gen)
-                    row = db.execute(
-                        select(DailyGeneration).where(
-                            DailyGeneration.array_id == arr.id,
-                            DailyGeneration.day == period_end,
-                        )
-                    ).scalar_one_or_none()
-                    if row is None:
-                        db.add(DailyGeneration(
-                            tenant_id=tenant.id, array_id=arr.id, day=period_end,
-                            kwh=gk, source="utility_meter",
-                        ))
+                _pstart = _meter_day(parsed.get("period_start")) if isinstance(parsed, dict) else None
+                if (gen is not None and gen > 0 and period_end is not None
+                        and _pstart is not None and period_end > _pstart):
+                    n_days = (period_end - _pstart).days + 1
+                    per_day = float(gen) / n_days
+                    if _cap is None or per_day <= _cap:
+                        for _i in range(n_days):
+                            day = _pstart + timedelta(days=_i)
+                            row = db.execute(
+                                select(DailyGeneration).where(
+                                    DailyGeneration.array_id == arr.id,
+                                    DailyGeneration.day == day,
+                                )
+                            ).scalar_one_or_none()
+                            if row is None:
+                                db.add(DailyGeneration(
+                                    tenant_id=tenant.id, array_id=arr.id, day=day,
+                                    kwh=per_day, source="bill_prorate",
+                                ))
+                            else:
+                                row.kwh = max(row.kwh, per_day)
+                                row.source = "bill_prorate"
+                                row.uploaded_at = now()
+                        kwh_recorded = float(gen)
+                        days_written = n_days
                     else:
-                        row.kwh = max(row.kwh, gk)
-                        row.source = "utility_meter"
-                        row.uploaded_at = now()
-                    kwh_recorded = gk
-                    days_written = 1
+                        log.warning("utility_meter: skip implausible prorated %.0f kWh/day "
+                                    "(cap %.0f) array=%s", per_day, _cap, arr.id)
+                else:
+                    log.info("utility_meter: period total %.0f kWh with no usable day "
+                             "span — left in Bill only (array=%s)", float(gen or 0), arr.id)
 
             has_generation = kwh_recorded > 0
             results.append({
