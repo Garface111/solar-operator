@@ -965,6 +965,14 @@ def start():
         CronTrigger(hour=3, minute=45),
         id="generation_watchdog", replace_existing=True,
     )
+    # Weekly (Mon 13:30 UTC): GMP data-freshness watchdog — alert if any active GMP
+    # tenant has stopped capturing (extension dead / GMP login expired), so we never
+    # silently bill or report from frozen data. Weekly cadence avoids alert fatigue.
+    scheduler.add_job(
+        _run_gmp_freshness_watchdog,
+        CronTrigger(day_of_week="mon", hour=13, minute=30),
+        id="gmp_freshness_watchdog", replace_existing=True,
+    )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (metered
     # billing). Runs AFTER the 03:00 inverter pull so the day's kWh are landed.
     scheduler.add_job(
@@ -1037,6 +1045,21 @@ def _run_generation_watchdog() -> None:
         send_internal_alert(
             "Generation watchdog: unhandled exception",
             f"The billing-safety generation watchdog raised an error:\n{exc}",
+        )
+
+
+def _run_gmp_freshness_watchdog() -> None:
+    """Weekly data-freshness watchdog: alert if any active GMP tenant has stopped
+    capturing (extension dead / GMP login expired). Read-only — alerts, never
+    mutates. GMP refreshes only via the in-browser extension, so a stale tenant
+    means offtaker invoices + daily reports are built from frozen data."""
+    try:
+        from .jobs.gmp_freshness_watchdog import run_gmp_freshness_watchdog
+        run_gmp_freshness_watchdog()
+    except Exception as exc:
+        send_internal_alert(
+            "GMP freshness watchdog: unhandled exception",
+            f"The GMP data-freshness watchdog raised an error:\n{exc}",
         )
 
 
