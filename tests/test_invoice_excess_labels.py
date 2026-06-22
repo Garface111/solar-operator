@@ -1,6 +1,7 @@
-"""The rendered invoice must describe the GMP-credit basis honestly: the kWh is the
-EXCESS sent to grid (not gross "production"), and a BANKED month says its rate is a
-reference estimate. Workbook/legacy invoices keep the "production" wording.
+"""The rendered invoice describes the GMP-credit basis: the kWh shown is the EXCESS
+sent to grid (the net-metering credit basis), labeled customer-facing as "Solar
+generation" (per Ford). A BANKED month flags its rate as a reference estimate.
+Workbook/legacy invoices keep the "production" wording.
 """
 import os
 os.environ.setdefault("SOLAR_DATA_DIR", "/tmp/ao_inv_lbl_test")
@@ -43,7 +44,7 @@ def _pdf_text(match):
             return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
-def test_gmp_credit_invoice_labels_excess_and_flags_banked():
+def test_gmp_credit_invoice_labels_generation_and_flags_banked():
     tid, aid, acct_id = _seed_banked()
     sub = BillingReportSubscription(
         tenant_id=tid, customer_name="Offtaker Co",
@@ -52,6 +53,6 @@ def test_gmp_credit_invoice_labels_excess_and_flags_banked():
     m = delivery.build_manual_match(sub)
     assert m.computed_invoice["net_rate_source"] == "gmp_credit_reference"
     text = _pdf_text(m)
-    assert "Excess solar sent to grid" in text
+    assert "Solar generation sent to grid" in text
     assert "Array production this period" not in text       # not mislabeled as gross
     assert "banked" in text.lower()                          # honest reference note
