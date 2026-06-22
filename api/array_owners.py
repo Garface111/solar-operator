@@ -2948,6 +2948,7 @@ def utility_meter_capture(
         # Store the auth session when the extension passes it so the scheduler
         # can pull GMP bills autonomously. Without this, accounts exist but no
         # UtilitySession is ever stored (the AO capture path never called /v1/sync).
+        session_stored = False
         if body.auth and body.auth.get("apiToken"):
             from .sessions import session_customer_number
             api_token = body.auth["apiToken"]
@@ -2996,8 +2997,34 @@ def utility_meter_capture(
                     refresh_token=refresh_token,
                     expires_at=expires_at,
                 ))
+            session_stored = True
 
         db.commit()
+
+    # With a fresh session on file, kick off an immediate bill absorb so the
+    # owner's bills appear within minutes instead of waiting up to 6h for the
+    # scheduler tick. This is the SAME data-sponge /v1/sync fires on GMP capture:
+    # it absorbs the FULL energy record (consumption, cost, credits) for EVERY
+    # enabled account — solar or not — so non-solar GMP accounts get bills too.
+    # Best-effort, daemon thread, never blocks or fails the capture response.
+    if session_stored:
+        try:
+            from threading import Thread
+            _tid = tenant.id
+            _prov = provider
+            def _bg_absorb(tid: str, prov: str):
+                try:
+                    if prov == "gmp":
+                        from .sponge import absorb_history
+                        absorb_history(tid, "gmp")
+                    else:
+                        from .worker import pull_bills_for_tenant
+                        pull_bills_for_tenant(tid)
+                except Exception:
+                    log.exception("post-meter-capture bill absorb failed for %s", tid)
+            Thread(target=_bg_absorb, args=(_tid, _prov), daemon=True).start()
+        except Exception:
+            log.exception("failed to kick off post-meter-capture bill absorb")
 
     return {
         "ok": True,
