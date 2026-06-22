@@ -65,6 +65,11 @@ def _pct(x: Optional[float]) -> str:
     return f"{round((x or 0) * 100):g}%"
 
 
+def _rate_str(x: Optional[float]) -> str:
+    """Per-kWh rate with trailing zeros trimmed: 0.25760 -> '$0.2576/kWh'."""
+    return f"${('%.5f' % (x or 0)).rstrip('0').rstrip('.')}/kWh"
+
+
 # ─── XLSX ───────────────────────────────────────────────────────────────────
 
 def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
@@ -126,7 +131,7 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("B17", "Your share of the generation (kWh):" if _gmpc else "Your share of production (kWh):")
     put("C17", round(inv["kwh"], 0), align=right)
     put("B18", "Solar credit rate:")
-    put("C18", f"${rate:.5f}/kWh", align=right)
+    put("C18", _rate_str(rate), align=right)
     put("B19", "Your contractual payment share:"); put("C19", _pct(inv["billing_rate"]), align=right)
     put("B20", "Solar credit value due:"); put("C20", _money(inv["amount_owed"]), align=right)
     if inv.get("net_rate_source") == "gmp_credit_reference":
@@ -294,7 +299,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         [_arr_lbl, (f"{array_kwh:,.0f} kWh" if array_kwh else "—")],
         ["Your share of the array", _pct(inv["allocation_pct"])],
         [_shr_lbl, f"{inv['kwh']:,.0f} kWh"],
-        ["Solar credit rate", f"${rate:.5f}/kWh"],
+        ["Solar credit rate", _rate_str(rate)],
         ["Your contractual payment share", _pct(inv["billing_rate"])],
         ["Solar credit value due", _money(inv["amount_owed"])],
     ]
