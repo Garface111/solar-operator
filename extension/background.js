@@ -1046,6 +1046,31 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   try { await gmpKeepAlive(); } catch (e) { console.warn("[EnergyAgent] gmpKeepAlive failed", e); }
 });
 
+// ── Manual verification hook (v1.9.49) ───────────────────────────────────────
+// Force a silent GMP refresh RIGHT NOW instead of waiting for the 12h alarm — and
+// bypass the <8-day-to-expiry gate + once-a-day throttle so you can test on demand.
+// HOW TO USE: chrome://extensions → EnergyAgent → "service worker" (Inspect) → in
+// that DevTools Console run:  soTestGmpRefresh()
+// Prereq: log into greenmountainpower.com once with this extension loaded so a GMP
+// session is known. Watch for a background GMP tab to flash open ~80s, then the
+// console prints whether the token's expiry advanced (= silent refresh works).
+self.soTestGmpRefresh = async function () {
+  const s = await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD);
+  const last = s[STORAGE_KEYS.LAST_PAYLOAD];
+  console.log("[EnergyAgent/test] last GMP capture:", last);
+  if (!last || !last.tokenExpires) {
+    console.log("[EnergyAgent/test] No GMP session known yet — log into greenmountainpower.com once with this extension loaded, then re-run soTestGmpRefresh().");
+    return "no-session";
+  }
+  const prevExp = new Date(last.tokenExpires).getTime();
+  console.log("[EnergyAgent/test] token currently expires:", last.tokenExpires, "— opening GMP in a background tab to refresh (~80s)…");
+  const ok = await silentGmpRecapture(prevExp);
+  const s2 = await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD);
+  const newExp = s2[STORAGE_KEYS.LAST_PAYLOAD] && s2[STORAGE_KEYS.LAST_PAYLOAD].tokenExpires;
+  console.log(`[EnergyAgent/test] result: ${ok ? "✅ SILENT REFRESH WORKS — expiry advanced" : "⚠️ expiry did NOT advance (browser GMP session may have lapsed — sign in once and retry)"} — token now expires: ${newExp}`);
+  return ok ? "refreshed" : "no-change";
+};
+
 chrome.runtime.onInstalled.addListener(async (details) => {
   chrome.action.setBadgeText({ text: "" });
 
