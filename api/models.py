@@ -1212,6 +1212,31 @@ class ReportDraft(Base):
     )
 
 
+class OfftakerInvoiceTemplate(Base):
+    """The operator's OWN invoice template, uploaded so generated offtaker invoices
+    can reproduce THEIR exact format (Array Operator, Jun 2026).
+
+    Stage 1 (this row): store the uploaded original (`file_bytes` + `filename`) and
+    an optional editable token-HTML rendition (`html`), keyed one-per-tenant. The
+    render-from-template path that actually emits invoices in this format is gated
+    behind `enabled` (Stage 2) so a half-built template can never reach a real
+    offtaker; until then offtaker invoices keep using the standard branded PDF.
+    """
+    __tablename__ = "offtaker_invoice_templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"),
+                                           index=True, unique=True)
+    filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Editable token-HTML rendition (Jinja2 placeholders) — the render source in Stage 2.
+    html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Gate: only when True does invoice generation render from this template.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class CaptureEvent(Base):
     """One stage in a capture pipeline run (/v1/sync).
 
