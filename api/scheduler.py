@@ -856,13 +856,11 @@ def start():
         CronTrigger(day_of_week="mon", hour=9, minute=0),
         id="deliver_weekly", replace_existing=True,
     )
-    # Weekly settlement-audit digest to each Array Operator client — Mondays at
-    # 13:00 UTC (~8–9am ET), after the morning data refresh + reports.
-    scheduler.add_job(
-        deliver_weekly_audit_digest,
-        CronTrigger(day_of_week="mon", hour=13, minute=0),
-        id="deliver_weekly_audit", replace_existing=True,
-    )
+    # Weekly settlement-audit digest DECOMMISSIONED 2026-06-21 (Ford: "audit is
+    # dead"): the Array Operator Audit tab was removed (the #audit route is gone, and
+    # audit.js/audit.css were dropped from the SPA), so this email linked owners to a
+    # dead route. The job is no longer scheduled; deliver_weekly_audit_digest stays in
+    # this module for reference / future revival.
     # Monthly: 1st of every month at 09:00 UTC
     scheduler.add_job(
         deliver_monthly_reports,
