@@ -250,7 +250,7 @@ def render_summary_pdf(match: BillingMatch, out_path: pathlib.Path,
         title="Performance Summary", subtitle=cust,
         right_label="LIFETIME GENERATION",
         right_value=(f"{life:,.0f} kWh" if life is not None else ""),
-        footer_right="Performance summary", hero_h=HERO_H)
+        footer_right="Performance summary", hero_h=HERO_H, light=True)
 
     styles = getSampleStyleSheet()
     lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=11,
@@ -332,7 +332,7 @@ def render_summary_pdf(match: BillingMatch, out_path: pathlib.Path,
     pts = [(pt.get("month") or "", pt.get("kwh")) for pt in s.get("ttm_points", [])]
     story.append(brand.make_chart_flowable(
         pts, 6.6 * inch, 1.9 * inch,
-        empty_msg="No production history on record yet."))
+        empty_msg="No production history on record yet.", light=True))
 
     doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
     return out_path
