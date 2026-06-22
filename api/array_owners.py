@@ -2747,12 +2747,21 @@ def inverter_capture(
                 elif site_power_w is not None and _site_invs:
                     if _energy_sum > 0:
                         e = float(ci.energy_today_kwh) if (ci.energy_today_kwh and ci.energy_today_kwh > 0) else 0.0
-                        iv.last_power_w = round(site_power_w * (e / _energy_sum), 1)
+                        allocated = round(site_power_w * (e / _energy_sum), 1)
                     elif _np_sum > 0 and ci.nameplate_kw:
-                        iv.last_power_w = round(site_power_w * (float(ci.nameplate_kw) / _np_sum), 1)
+                        allocated = round(site_power_w * (float(ci.nameplate_kw) / _np_sum), 1)
                     else:
-                        iv.last_power_w = round(site_power_w / len(_site_invs), 1)
-                    iv.last_power_at = now()
+                        allocated = round(site_power_w / len(_site_invs), 1)
+                    # Skip sub-floor allocations: a per-inverter allocation below the
+                    # frontend's production floor (max(25W, nameplate×1%)) would stamp
+                    # a "producing" value that the card renders as OFFLINE. A genuine
+                    # low reading (clouds, startup) will record correctly on the next
+                    # capture; meanwhile leaving last_power_w null is more honest than
+                    # writing 4W that permanently says "offline" until the 24h window expires.
+                    _inv_floor = max(25.0, float(iv.nameplate_kw or ci.nameplate_kw or 0) * 10)
+                    if allocated >= _inv_floor:
+                        iv.last_power_w = allocated
+                        iv.last_power_at = now()
 
                 # Per-inverter daily kWh → InverterDaily, driving BOTH today's
                 # reading and the per-inverter SPARKLINE history (needs >=2 days,
