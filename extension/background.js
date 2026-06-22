@@ -952,27 +952,98 @@ async function sendHeartbeat() {
   }
 }
 
-// Expiry check — nudge the user before the JWT runs out (GMP only).
-chrome.alarms.create("token-expiry-check", { periodInMinutes: 60 * 12 });
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === "heartbeat") {
-    await sendHeartbeat();
-    return;
-  }
-  if (alarm.name !== "token-expiry-check") return;
+// ── GMP session keep-alive (v1.9.49) ─────────────────────────────────────────
+// Server-side token refresh is DEAD: GMP's token endpoint 403s any headless
+// (non-browser) call — "AUTHORIZATION_FAILURE" without an Origin, "Invalid CORS
+// request" with one — so the backend cron can NEVER renew an operator's JWT
+// (prod: lastRefresh=NEVER on every session). Every operator hit the ~21-day wall
+// and got a "reconnect" email. The fix lives HERE, in the browser, where it works:
+// when the JWT nears expiry we silently open greenmountainpower.com in a BACKGROUND
+// tab (NO cookie wipe → rides the operator's persistent "remember me" session).
+// GMP's own SPA restores + refreshes the token in-browser (cookie + CORS satisfied),
+// content.js reads the fresh apitoken and re-POSTs it through the existing /v1/sync
+// path — extending the session ~21 days with zero clicks, and keeping expires_at
+// far enough out that the (broken) backend refresh never even runs. If the browser
+// session has ALSO lapsed (capture can't ride it), we degrade to ONE gentle one-tap
+// reconnect notification per day. Fail-safe: never worse than the old notify-only path.
+const GMP_RECAP_AHEAD_DAYS = 8;          // begin silent refresh when < 8 days to expiry
+const GMP_RECAP_BUDGET_MS = 80 * 1000;   // background-tab lifetime: SPA load + refresh + capture
+const GMP_RECAP_ATTEMPT_KEY = "so_gmp_recap_attempt";  // YYYY-MM-DD — max 1 silent attempt/day
+const GMP_NUDGE_KEY = "so_gmp_nudge";                  // YYYY-MM-DD — max 1 notification/day
+
+// Open GMP in a background tab and let content.js capture the refreshed token.
+// Resolves true iff a fresher token actually landed (captured expiry advanced).
+async function silentGmpRecapture(prevExpiresMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    chrome.tabs.create({ url: "https://greenmountainpower.com/", active: false }, (tab) => {
+      if (chrome.runtime.lastError || !tab) { resolve(false); return; }
+      const tabId = tab.id;
+      setTimeout(async () => {
+        if (settled) return; settled = true;
+        try { chrome.tabs.remove(tabId, () => void chrome.runtime.lastError); } catch (_) {}
+        let newExp = 0;
+        try {
+          const s2 = await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD);
+          const te = s2[STORAGE_KEYS.LAST_PAYLOAD] && s2[STORAGE_KEYS.LAST_PAYLOAD].tokenExpires;
+          newExp = te ? new Date(te).getTime() : 0;
+        } catch (_) {}
+        resolve(newExp > prevExpiresMs + 60 * 1000);   // a fresh token landed
+      }, GMP_RECAP_BUDGET_MS);
+    });
+  });
+}
+
+async function gmpKeepAlive() {
   const s = await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD);
   const last = s[STORAGE_KEYS.LAST_PAYLOAD];
-  if (!last?.tokenExpires) return;
-  const msLeft = new Date(last.tokenExpires).getTime() - Date.now();
-  const daysLeft = msLeft / (1000 * 60 * 60 * 24);
-  if (daysLeft < 3 && daysLeft > 0) {
-    chrome.notifications.create({
-      type: "basic",
-      iconUrl: "icons/icon128.png",
-      title: "EnergyAgent: reconnect needed",
-      message: `Your GMP session expires in ${Math.ceil(daysLeft)} day(s). Log in to greenmountainpower.com to refresh.`,
-    });
+  if (!last || !last.tokenExpires) return;                 // no GMP session known yet
+  if ((last.provider || "gmp") !== "gmp") return;          // most-recent capture wasn't GMP
+  const expiresMs = new Date(last.tokenExpires).getTime();
+  const daysLeft = (expiresMs - Date.now()) / (1000 * 60 * 60 * 24);
+  if (daysLeft <= 0 || daysLeft >= GMP_RECAP_AHEAD_DAYS) return;  // healthy, or already gone
+
+  const today = new Date().toISOString().slice(0, 10);
+  // One silent refresh attempt per day (avoids opening a tab on every 12h tick).
+  const a = await chrome.storage.local.get(GMP_RECAP_ATTEMPT_KEY);
+  if (a[GMP_RECAP_ATTEMPT_KEY] !== today) {
+    await chrome.storage.local.set({ [GMP_RECAP_ATTEMPT_KEY]: today });
+    const ok = await silentGmpRecapture(expiresMs);
+    if (ok) { console.log("[EnergyAgent] GMP session silently refreshed in-browser"); return; }
   }
+  // Silent refresh unavailable (browser GMP session also lapsed) — gentle one-tap
+  // nudge, max once/day, only when genuinely close to expiry.
+  if (daysLeft < 3) {
+    const n = await chrome.storage.local.get(GMP_NUDGE_KEY);
+    if (n[GMP_NUDGE_KEY] !== today) {
+      await chrome.storage.local.set({ [GMP_NUDGE_KEY]: today });
+      chrome.notifications.create(`gmp-reconnect-${today}`, {
+        type: "basic",
+        iconUrl: "icons/icon128.png",
+        title: "EnergyAgent: reconnect needed",
+        message: `Your GMP session expires in ${Math.ceil(daysLeft)} day(s). Click to open greenmountainpower.com — one sign-in keeps your bill pulls running.`,
+        requireInteraction: true,
+      });
+    }
+  }
+}
+
+// One-tap recovery: clicking the GMP nudge opens the portal as an ACTIVE tab; the
+// operator signs in once, content.js rides the fresh session, and we're silent again.
+chrome.notifications.onClicked.addListener((notifId) => {
+  if (!/^gmp-reconnect-/.test(String(notifId || ""))) return;
+  chrome.tabs.create({ url: "https://greenmountainpower.com/account/login/", active: true },
+    () => void chrome.runtime.lastError);
+  try { chrome.notifications.clear(notifId, () => void chrome.runtime.lastError); } catch (_) {}
+});
+
+// Expiry check (every 12h): silently refresh the GMP JWT in-browser before it runs
+// out; only notify if the browser session has also lapsed.
+chrome.alarms.create("token-expiry-check", { periodInMinutes: 60 * 12 });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === "heartbeat") { await sendHeartbeat(); return; }
+  if (alarm.name !== "token-expiry-check") return;
+  try { await gmpKeepAlive(); } catch (e) { console.warn("[EnergyAgent] gmpKeepAlive failed", e); }
 });
 
 chrome.runtime.onInstalled.addListener(async (details) => {
