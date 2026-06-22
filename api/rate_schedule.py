@@ -76,6 +76,72 @@ def blended_rate_from_bill(raw_json: dict) -> Optional[float]:
     return rate if 0.05 < rate < 0.50 else None
 
 
+# ─── 1b. Net-metering SOLAR CREDIT from a bill (offtaker model, Ford/Bruce) ───
+
+# GMP line-item codes for the credit side of a net-metered bill (page-2 detail).
+_EXCESS_CODES = {"EXCESS", "EXCESSO"}   # kWh sent to grid, credited (base credit)
+_SOLCRED_CODES = {"SOLCRED"}            # solar incentive credit (added when present)
+
+# A net-metering credit rate below this $/kWh means the month's excess was BANKED
+# (rolled forward, not cashed) rather than credited at the energy rate — ignored
+# for offtaker billing. Normal VT solar credit ~$0.21–0.26/kWh; banked ~$0.
+BANKED_CREDIT_RATE_FLOOR = 0.05
+
+
+def _f(v) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def solar_credit_from_bill(raw_json: dict) -> Optional[dict]:
+    """The net-metering SOLAR CREDIT an array earned on ONE bill, from its page-2
+    line items (Ford/Bruce's offtaker model, Jun 2026).
+
+    An offtaker is billed for the value of the solar EXCESS sent to the grid at the
+    credit the utility ACTUALLY gave — not the retail consumption rate, not a flat
+    default. Sum the NEGATIVE credit lines:
+        EXCESS / EXCESSO  — energy sent to grid, credited (the base credit)
+        SOLCRED           — solar incentive credit (added when present)
+    SOLCRED is optional → default to the excess credit alone when absent.
+
+    Returns {excess_kwh, credit_usd, credit_rate} (credit_rate = credit_usd /
+    excess_kwh, $/kWh) or None when the bill has no usable excess, no credit, or is
+    a BANKED month (excess present but credited at ~$0 — rolled forward, not cashed;
+    ignored for offtaker billing per Bruce).
+    """
+    if not isinstance(raw_json, dict):
+        return None
+    excess_kwh = excess_usd = solcred_usd = 0.0
+    for seg in raw_json.get("billSegments", []):
+        for li in seg.get("segmentLineItems", []):
+            if li.get("unitOfMeasure") != "KWH":
+                continue
+            uc = li.get("unitCode")
+            da = _f(li.get("dollarAmount"))
+            cnt = _f(li.get("unitCount"))
+            if uc in _EXCESS_CODES:
+                if cnt:
+                    excess_kwh += cnt
+                if da is not None and da < 0:
+                    excess_usd += -da            # credit magnitude (negatives summed)
+            elif uc in _SOLCRED_CODES:
+                if da is not None and da < 0:
+                    solcred_usd += -da
+    if excess_kwh <= 0:
+        return None
+    credit_usd = round(excess_usd + solcred_usd, 2)   # SOLCRED optional → excess alone
+    if credit_usd <= 0:
+        return None
+    rate = credit_usd / excess_kwh
+    if rate < BANKED_CREDIT_RATE_FLOOR:
+        return None                                   # banked month — ignore
+    return {"excess_kwh": round(excess_kwh, 1),
+            "credit_usd": credit_usd,
+            "credit_rate": round(rate, 5)}
+
+
 def array_age_bucket(first_connect_date, as_of: Optional[date] = None) -> str:
     """'le11' if the array is ≤ AGE_THRESHOLD_YEARS old at as_of, else 'gt11'.
     Unknown install date → 'le11' (the common/newer case; conservative)."""
