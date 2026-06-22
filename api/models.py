@@ -467,6 +467,12 @@ class Bill(Base):
     is_net_metered: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)        # $ billed this period
     net_credit: Mapped[float | None] = mapped_column(Float, nullable=True)        # $ net-metering credit
+    # Gross SOLAR credit (EXCESS + SOLCRED from the page-2 line items) the array
+    # earned this period — the offtaker billing basis (excess kWh already lives in
+    # kwh_sent_to_grid). NULL means banked/unknown → the offtaker invoice SKIPS
+    # rather than over-charging from gross kWh × a flat rate. See
+    # rate_schedule.solar_credit_from_bill.
+    solar_credit_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_rate_cents_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)  # blended ¢/kWh
     supplier: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # The ENTIRE raw bill JSON — the true sponge: never lose a field we don't

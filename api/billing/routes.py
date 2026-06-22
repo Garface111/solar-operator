@@ -1359,3 +1359,108 @@ def dismiss_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         d.dismissed_at = datetime.utcnow()
         db.commit()
         return {"ok": True}
+
+
+# ─── offtaker invoice TEMPLATE (operator's own format) ──────────────────────────
+# Stage 1: upload + store the operator's invoice template per-tenant so generated
+# offtaker invoices can LATER reproduce THEIR exact format. Rendering from the
+# template (Stage 2) is gated behind `enabled`; storing one changes nothing about
+# what is actually sent today (offtaker invoices keep using the standard PDF).
+
+TEMPLATE_MAX_BYTES = 12 * 1024 * 1024  # 12 MB
+TEMPLATE_EXT = {".pdf", ".html", ".htm", ".docx", ".doc", ".png", ".jpg", ".jpeg"}
+
+
+async def _read_template_upload(file: UploadFile):
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty")
+    if len(data) > TEMPLATE_MAX_BYTES:
+        raise HTTPException(400, "File too large (max 12 MB)")
+    name = (file.filename or "template").strip()
+    ext = ("." + name.rsplit(".", 1)[1].lower()) if "." in name else ""
+    if ext not in TEMPLATE_EXT:
+        raise HTTPException(400, "Upload a PDF, Word doc, HTML, or image of your invoice template")
+    return data, name
+
+
+def _template_dict(tpl) -> dict:
+    return {
+        "has_template": tpl is not None and (tpl.file_bytes is not None or bool(tpl.html)),
+        "filename": getattr(tpl, "filename", None),
+        "content_type": getattr(tpl, "content_type", None),
+        "enabled": bool(getattr(tpl, "enabled", False)),
+        "has_html": bool(getattr(tpl, "html", None)),
+        "updated_at": tpl.updated_at.isoformat() if tpl and tpl.updated_at else None,
+    }
+
+
+@router.get("/invoice-template")
+def get_invoice_template(authorization: Optional[str] = Header(default=None)):
+    """Status of this tenant's uploaded invoice template (no bytes)."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerInvoiceTemplate
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        return {"ok": True, "template": _template_dict(tpl)}
+
+
+@router.post("/invoice-template")
+async def upload_invoice_template(file: UploadFile = File(...),
+                                  authorization: Optional[str] = Header(default=None)):
+    """Upload (or replace) the operator's own invoice template. Stored per-tenant;
+    does NOT change what is sent today (render-from-template is gated, Stage 2)."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    data, name = await _read_template_upload(file)
+    from ..models import OfftakerInvoiceTemplate
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        if tpl is None:
+            tpl = OfftakerInvoiceTemplate(tenant_id=t.id)
+            db.add(tpl)
+        tpl.filename = name[:300]
+        tpl.content_type = file.content_type or "application/octet-stream"
+        tpl.file_bytes = data
+        if name.lower().endswith((".html", ".htm")):
+            try:
+                tpl.html = data.decode("utf-8", "replace")
+            except Exception:
+                pass
+        tpl.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(tpl)
+        return {"ok": True, "template": _template_dict(tpl)}
+
+
+@router.get("/invoice-template/file")
+def get_invoice_template_file(authorization: Optional[str] = Header(default=None)):
+    """Stream the stored original template file (inline preview / download)."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerInvoiceTemplate
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        if not tpl or not tpl.file_bytes:
+            raise HTTPException(404, "No invoice template on file")
+        ct = tpl.content_type or "application/octet-stream"
+        fn = "".join(c for c in (tpl.filename or "template") if c.isalnum() or c in "._- ") or "template"
+        return StreamingResponse(io.BytesIO(tpl.file_bytes), media_type=ct,
+            headers={"Content-Disposition": "inline; filename=" + fn})
+
+
+@router.delete("/invoice-template")
+def delete_invoice_template(authorization: Optional[str] = Header(default=None)):
+    """Remove the tenant's invoice template."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import OfftakerInvoiceTemplate
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        if tpl:
+            db.delete(tpl)
+            db.commit()
+        return {"ok": True}
