@@ -126,6 +126,16 @@ _site_cache: dict[str, tuple] = {}
 # API-pulled vendors (SolarEdge) refresh on every fetch, so this never applies.
 _POWER_FRESH = timedelta(hours=24)
 
+# A per-inverter reading captured THIS recently is treated as a live instant —
+# trusted as-is, regardless of the regional daylight proxy, exactly like a freshly
+# polled vendor value. A capture from minutes ago reflects real current output, and
+# the crude central-VT _is_daylight() proxy (no per-array lat/long) must not blank
+# it (it would zero a genuine mid-day Chint per-inverter reading whenever the
+# regional sun-calc reads night in UTC reckoning). Older retained captures (beyond
+# this window, up to _POWER_FRESH) stay daylight-gated so a 2pm capture never claims
+# "producing" at 9pm.
+_POWER_LIVE_FRESH = timedelta(minutes=15)
+
 # Vendor monitoring portals — the "origin site" that sources each inverter's data.
 # Owners click an array/inverter to jump to the vendor's deep-link for analysis.
 _PORTAL_BASE = {
@@ -581,11 +591,19 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
     if pw is not None and _report_is_stale(m.get("last_report")):
         pw = None
     base = pw if pw is not None else None
-    if base is None and daylight and (
-        iv.last_power_w is not None and iv.last_power_at is not None
-        and (now() - iv.last_power_at) <= _POWER_FRESH
-    ):
-        base = iv.last_power_w
+    # Stored per-inverter capture fallback. Extension-captured vendors (Chint,
+    # Fronius, SMA) have no live API feed — the real measured watts live in
+    # iv.last_power_w, stamped at capture time. A reading captured just now is a
+    # current instant, so trust it like a freshly polled vendor value (NOT
+    # daylight-gated) — otherwise the coordinate-less regional sun proxy blanks a
+    # genuine mid-day per-inverter reading. Only an OLDER retained capture stays
+    # daylight-gated, so a stale reading never reads "producing" at night.
+    if base is None and iv.last_power_w is not None and iv.last_power_at is not None:
+        age = now() - iv.last_power_at
+        if age <= _POWER_LIVE_FRESH:
+            base = iv.last_power_w                 # live instant — trust as-is
+        elif daylight and age <= _POWER_FRESH:
+            base = iv.last_power_w                 # retained reading — day-gated
     # Cross-tenant upward correction (daylight only — nothing to borrow at night).
     if daylight and borrow and iv.serial:
         bw = borrow.get((str(iv.vendor or "").lower(), str(iv.serial)))
