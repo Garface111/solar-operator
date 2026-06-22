@@ -42,15 +42,24 @@
   let lastLoginState = null;
   let warnedLogin = false;
 
-  function readJwt() {
+  // Returns full auth object {apiToken, apiTokenExpires, refreshToken} or null.
+  // Forwarded to the backend so a UtilitySession is stored → bills auto-pull.
+  function readAuth() {
     try {
       const raw = localStorage.getItem(GMP_KEY);
       if (!raw) return null;
       const outer = JSON.parse(raw);
-      if (outer && outer.user && outer.user.apitoken) return String(outer.user.apitoken);
+      const u = outer && outer.user;
+      if (!u || !u.apitoken) return null;
+      return {
+        apiToken: String(u.apitoken),
+        apiTokenExpires: u.apitokenExpires || null,
+        refreshToken: u.refreshtoken || null,
+      };
     } catch (e) { LOG("failed to parse gmp-vue", e); }
     return null;
   }
+  function readJwt() { const a = readAuth(); return a ? a.apiToken : null; }
 
   function hasIntent() {
     return new Promise((res) => {
@@ -131,11 +140,12 @@
       return;
     }
 
-    // Assemble and ship. Accounts with no solar are kept and marked honestly by
-    // the backend (has_generation=false) — we never drop them here.
+    // Assemble and ship. Include auth so the backend stores a UtilitySession
+    // (needed for scheduled bill pulls — accounts exist without it otherwise).
     const payload = {
       provider: "gmp",
       capturedAt: new Date().toISOString(),
+      auth: readAuth(),
       accounts: accounts.map((a) => ({
         account_number: a.account_number,
         nickname: a.nickname || null,

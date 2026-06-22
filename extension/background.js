@@ -377,6 +377,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       kind: "utility_meter",
       accounts,
       accountCount: accounts.length,
+      auth: p.auth || null,
       at: new Date().toISOString(),
     };
     broadcastToSoTabs(landed);

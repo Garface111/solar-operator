@@ -36,7 +36,7 @@ from .adapters import gmp as gmp_adapter
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
-from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, now
+from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, UtilitySession, now
 from .models import Inverter, InverterDaily
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
@@ -2880,6 +2880,7 @@ class UtilityMeterAccount(BaseModel):
 class UtilityMeterCaptureBody(BaseModel):
     provider: str
     accounts: list[UtilityMeterAccount]
+    auth: Optional[dict] = None   # {apiToken, apiTokenExpires?, refreshToken?} → UtilitySession
 
 
 # Utilities allowed to ingest GENERATION via the meter-capture path. Kept
@@ -2943,6 +2944,59 @@ def utility_meter_capture(
 
     with SessionLocal() as db:
         results = _persist_meter_accounts(db, tenant, provider, body.accounts)
+
+        # Store the auth session when the extension passes it so the scheduler
+        # can pull GMP bills autonomously. Without this, accounts exist but no
+        # UtilitySession is ever stored (the AO capture path never called /v1/sync).
+        if body.auth and body.auth.get("apiToken"):
+            from .sessions import session_customer_number
+            api_token = body.auth["apiToken"]
+            refresh_token = body.auth.get("refreshToken")
+            expires_at = None
+            raw_expires = body.auth.get("apiTokenExpires")
+            if raw_expires:
+                try:
+                    expires_at = datetime.fromisoformat(
+                        str(raw_expires).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                except Exception:
+                    pass
+            acct_dicts = [
+                {"customer_number": a.summary.get("customerNumber")}
+                for a in body.accounts
+            ]
+            session_cust = session_customer_number(acct_dicts)
+            cust_predicate = (
+                UtilitySession.customer_number == session_cust
+                if session_cust is not None
+                else UtilitySession.customer_number.is_(None)
+            )
+            existing = db.execute(
+                select(UtilitySession)
+                .where(
+                    UtilitySession.tenant_id == tenant.id,
+                    UtilitySession.provider == provider,
+                    cust_predicate,
+                )
+                .order_by(UtilitySession.captured_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                existing.api_token = api_token
+                existing.refresh_token = refresh_token
+                existing.expires_at = expires_at
+                existing.captured_at = now()
+                existing.refresh_failures = 0
+            else:
+                db.add(UtilitySession(
+                    tenant_id=tenant.id,
+                    provider=provider,
+                    customer_number=session_cust,
+                    api_token=api_token,
+                    refresh_token=refresh_token,
+                    expires_at=expires_at,
+                ))
+
         db.commit()
 
     return {
