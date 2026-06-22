@@ -29,6 +29,7 @@ import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from . import inverters
 from .adapters import gmp as gmp_adapter
@@ -40,6 +41,34 @@ from .models import Inverter, InverterDaily
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
+
+
+def _safe_create_array(db, tenant_id, name, **kw):
+    """Create an Array, surviving a concurrent capture that inserted the same
+    (tenant_id, name) first. The extension fires several capture POSTs per login,
+    so two requests can both miss an existing array and race the INSERT —
+    uq_array_per_tenant then 500s the loser. Roll back ONLY the failed insert (a
+    SAVEPOINT, not the whole capture) and reuse/revive the row that won.
+    Returns (array, created)."""
+    arr = Array(tenant_id=tenant_id, name=name, **kw)
+    try:
+        with db.begin_nested():          # SAVEPOINT around just this insert
+            db.add(arr)
+            db.flush()
+        return arr, True
+    except IntegrityError:
+        try:
+            db.expunge(arr)              # drop the rolled-back instance, if still attached
+        except Exception:
+            pass
+        won = db.execute(
+            select(Array).where(Array.tenant_id == tenant_id, Array.name == name)
+        ).scalars().first()
+        if won is None:
+            raise
+        if won.deleted_at is not None:
+            won.deleted_at = None
+        return won, False
 
 router = APIRouter()
 
@@ -2531,17 +2560,12 @@ def inverter_capture(
                 or by_name.get(site_name.lower())
             created = False
             if arr is None:
-                arr = Array(
-                    tenant_id=tenant.id, name=site_name,
-                    client_id=None, fuel_type="solar",
-                )
-                db.add(arr)
-                db.flush()
+                arr, created = _safe_create_array(
+                    db, tenant.id, site_name, client_id=None, fuel_type="solar")
                 by_name[site_name.lower()] = arr
                 by_id[arr.id] = arr
                 if site_key:
                     by_site_id[site_key] = arr
-                created = True
             else:
                 if arr.deleted_at is not None:
                     # Re-capturing a previously-deleted array reactivates it (the
@@ -2642,6 +2666,7 @@ def inverter_capture(
                         drow.source = "extension_pull"
                         drow.uploaded_at = now()
                         backfilled_days += 1
+            db.flush()  # surface this site's daily rows so a sibling site on the SAME array updates them, never racing a duplicate (uq_daily_array_day)
 
             # When the capture drilled into a system's analysis chart, we get one
             # entry per real inverter. Persist each as an Inverter row (idempotent
@@ -3019,16 +3044,11 @@ def _persist_meter_accounts(
             arr = by_acct_number.get(acct_num) or by_name.get(name.lower())
             created = False
             if arr is None:
-                arr = Array(
-                    tenant_id=tenant.id, name=name,
-                    client_id=None, fuel_type="solar",
-                )
-                db.add(arr)
-                db.flush()
+                arr, created = _safe_create_array(
+                    db, tenant.id, name, client_id=None, fuel_type="solar")
                 by_name[name.lower()] = arr
                 if acct_num:
                     by_acct_number[acct_num] = arr
-                created = True
             elif arr.deleted_at is not None:
                 # Reusing a soft-deleted array (its name kept the constraint slot)
                 # — reactivate it rather than colliding. Generation is flowing again.
@@ -3193,6 +3213,7 @@ def _persist_meter_accounts(
                     log.info("utility_meter: period total %.0f kWh with no usable day "
                              "span — left in Bill only (array=%s)", float(gen or 0), arr.id)
 
+            db.flush()  # flush this account's daily rows before the next account (sibling accounts on the SAME array update, never race a duplicate)
             has_generation = kwh_recorded > 0
             results.append({
                 "account_number": acct_num,
