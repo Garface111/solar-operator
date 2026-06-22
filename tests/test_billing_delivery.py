@@ -305,35 +305,34 @@ def test_manual_subscription_rejects_bad_allocation(client):
     assert r.status_code == 400
 
 
-def test_manual_subscription_computes_customer_share_on_send(client, monkeypatch):
-    """A manual sub with no workbook still produces a real invoice: the
-    customer share = allocation_pct × the array's period generation."""
+def test_manual_unbound_subscription_is_blocked_from_sending(client, monkeypatch):
+    """GUARDRAIL: a manual offtaker NOT bound to a GMP utility account has no
+    settled utility bill to invoice from, so send-now is BLOCKED — it must NEVER
+    email an invoice synthesized from generation telemetry (DailyGeneration / GMP
+    hourly data). The send-now endpoint returns 422 with an actionable message,
+    and no email goes out. (The share is still COMPUTED for previews/drafts; we
+    just refuse to put telemetry figures in a customer invoice.)"""
     tid, auth = _make_tenant()
-    # 30 days × 100 kWh = 3000 kWh for the array's recent month.
+    # Healthy generation exists (30 × 100 = 3000 kWh) — yet still must not send,
+    # because telemetry is not a settled utility bill.
     aid = _make_array_with_generation(tid, kwh_per_day=100.0, days=30)
     sub_id = _create_manual(client, auth, customer_name="Share Test",
                             array_id=aid, allocation_pct="0.10",
                             send_mode="to_me").json()["subscription"]["id"]
 
-    captured = {}
+    sent = {"called": False}
 
-    def fake_send(to, subject, html, text, attachments=None, from_addr=None,
-                  reply_to=None, product="nepool"):
-        captured.update(to=to, attachments=attachments)
+    def fake_send(*args, **kwargs):
+        sent["called"] = True
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
     r = client.post(f"/v1/array-operator/billing/subscriptions/{sub_id}/send-now",
                     params={"test": "true"}, headers={"Authorization": auth})
-    assert r.status_code == 200, r.text
-    result = r.json()["result"]
-    assert result["ok"]
-    # 10% of 3000 kWh = 300 kWh → priced at the default VT net rate (0.21,
-    # provider default) with the default 10% discount: 300 × 0.21 × 0.9 = 56.70.
-    assert result["amount_owed"] == pytest.approx(56.70, abs=0.5)
-    # An invoice attachment was produced from the synthesized match.
-    names = [a["filename"] for a in captured["attachments"]]
-    assert any(n.endswith("_invoice.pdf") for n in names)
+    assert r.status_code == 422, r.text
+    assert "gmp utility" in r.json()["detail"].lower()
+    # Crucially: no telemetry-based invoice was emailed.
+    assert sent["called"] is False
 
 
 def test_manual_subscription_array_must_be_owned(client):

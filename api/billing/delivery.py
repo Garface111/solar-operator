@@ -780,16 +780,35 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     if not match.matched or not match.latest_period:
         return {"ok": False, "error": "no current billing period in the stored workbook"}
 
-    # OFFTAKER ↔ UTILITY BILL guard: a utility-bound offtaker is billed ONLY from
-    # the utility's paper bill. If no bill has landed for the period yet, do NOT
-    # send a $0/blank invoice — skip and wait. (build_manual_match flags this via
-    # computed_invoice.has_utility_bill === False; vendor data is never used.)
+    # ── OFFTAKER ↔ UTILITY BILL guardrail (Ford's rule) ───────────────────────
+    # A typed/manual offtaker (no uploaded workbook) is invoiced EXCLUSIVELY from
+    # the GMP utility PAPER BILL. We only EMAIL when the computed invoice resolved
+    # to a real utility bill. Two ways it can fail to:
+    #   • bound to a GMP account but no bill has landed for this period yet
+    #     (kwh_source == 'utility_bill' but has_utility_bill is False), or
+    #   • never bound to a GMP account at all, so build_manual_match fell back to
+    #     generation TELEMETRY (kwh_source 'daily_csv' / 'gmp_api' / a '+'-joined
+    #     multi-array mix) — exactly the silent-wrong-invoice case.
+    # In either case SKIP and wait rather than emailing a telemetry-based invoice.
+    # Workbook subscriptions are exempt (they invoice from the operator's uploaded
+    # spreadsheet by design). This gates only the SEND — build_manual_match still
+    # renders the figures for previews/drafts; we just won't put them in an email.
     _ci_guard = match.computed_invoice or {}
-    if getattr(sub, "utility_account_id", None) is not None and _ci_guard.get("has_utility_bill") is False:
-        return {"ok": False, "skipped": True,
-                "error": "waiting on the utility bill for this offtaker — "
-                         "no GMP bill has landed for this period yet (no vendor "
-                         "data is substituted)"}
+    if not getattr(sub, "source_workbook", None):
+        _src = _ci_guard.get("kwh_source")
+        _has_bill = _ci_guard.get("has_utility_bill") is True
+        if _src != "utility_bill" or not _has_bill:
+            if getattr(sub, "utility_account_id", None) is not None:
+                _reason = ("waiting on the utility bill for this offtaker — no GMP "
+                           "bill has landed for this period yet (no vendor data is "
+                           "substituted)")
+            else:
+                _reason = ("this offtaker isn't linked to a GMP utility bill, so "
+                           "there is no settled bill to invoice from. Link it to a "
+                           "GMP utility account to start sending — generation "
+                           "telemetry is never substituted")
+            return {"ok": False, "skipped": True, "error": _reason,
+                    "kwh_source": _src}
 
     # For a real (non-test) send honor the slider; a test always goes to_me.
     if is_test:

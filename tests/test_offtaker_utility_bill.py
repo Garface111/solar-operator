@@ -98,3 +98,27 @@ def test_offtaker_skips_when_no_utility_bill():
         res = delivery.deliver_subscription(db, sub, tenant, is_test=True)
     assert res.get("skipped") is True
     assert res.get("ok") is False
+
+
+def test_unbound_offtaker_skips_rather_than_invoicing_telemetry():
+    """GUARDRAIL: an offtaker with NO utility_account_id (never bound to a GMP
+    account) must NOT be invoiced from generation telemetry. Even with healthy
+    vendor DailyGeneration on the array, deliver_subscription SKIPS — the only
+    valid invoice source for a typed offtaker is the GMP paper bill. This closes
+    the silent 'unbound → daily_csv telemetry invoice' gap."""
+    tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=12000.0)
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Unbound Co",
+        utility_account_id=None, array_id=aid,   # NEVER bound to the GMP account
+        allocation_pct=0.5, billing_model="percent_of_array",
+        send_mode="to_me", operator_email="op@e.com",
+    )
+    m = delivery.build_manual_match(sub)
+    assert m.matched                                       # renders for previews…
+    # …but the source is telemetry, never a utility bill.
+    assert m.computed_invoice["kwh_source"] != "utility_bill"
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, tid)
+        res = delivery.deliver_subscription(db, sub, tenant, is_test=True)
+    assert res.get("skipped") is True
+    assert res.get("ok") is False
