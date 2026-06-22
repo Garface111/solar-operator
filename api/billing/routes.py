@@ -199,6 +199,7 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
 
 @router.get("/subscriptions")
 def list_subscriptions(authorization: Optional[str] = Header(default=None)):
+    from ..models import UtilityAccount
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         rows = db.execute(
@@ -207,7 +208,18 @@ def list_subscriptions(authorization: Optional[str] = Header(default=None)):
                    BillingReportSubscription.deleted_at.is_(None))
             .order_by(BillingReportSubscription.created_at.desc())
         ).scalars().all()
-        return {"ok": True, "subscriptions": [_sub_dict(s) for s in rows]}
+        subs = [_sub_dict(s) for s in rows]
+        # Enrich each sub with the LINKED utility account's display name so the
+        # card can say which GMP bill feeds the offtaker (the UI only had the id).
+        ua_ids = {d["utility_account_id"] for d in subs if d.get("utility_account_id")}
+        if ua_ids:
+            amap = {a.id: (a.nickname or (f"GMP {a.account_number}" if a.account_number else None))
+                    for a in db.execute(
+                        select(UtilityAccount).where(UtilityAccount.id.in_(ua_ids))
+                    ).scalars().all()}
+            for d in subs:
+                d["utility_account_name"] = amap.get(d.get("utility_account_id"))
+        return {"ok": True, "subscriptions": subs}
 
 
 def _parse_formats(raw: Optional[str]) -> list[str]:
