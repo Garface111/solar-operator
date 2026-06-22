@@ -39,6 +39,9 @@ def invoice_for_period(match: BillingMatch, period: Period,
         "customer_name": match.customer.get("name"),
         "billing_model": match.billing_model,
         "allocation_pct": match.allocation_pct,
+        # The ARRAY's total production this period (Bruce's line 1 — "excess
+        # generation from the GMP bill"); the member's share = array × allocation.
+        "array_kwh": period.array_kwh,
         "project_total_kwh": match.project_totals.get("total_customer_kwh"),
         "project_total_savings": match.project_totals.get("total_savings"),
         # Per-array breakdown for multi-array offtakers (one line per array). Lives
@@ -90,8 +93,8 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
         if align:
             ws[cell].alignment = align
 
-    put("B2", tpl.get("title", "Invoice - Solar Power Generation"), big)
-    put("B4", tpl.get("operator", "HCT Sun Enterprises, LLC"), bold)
+    put("B2", tpl.get("title") or "Solar Credit Invoice", big)
+    put("B4", tpl.get("operator") or "Your solar array owner", bold)
     if tpl.get("phone"):
         put("C4", tpl["phone"])
     if tpl.get("attn"):
@@ -106,25 +109,30 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("B12", "Time Period Covered:")
     put("C12", f"{inv['period_start']} → {inv['period_end']}", align=right)
 
-    put("B14", "Note — actual results for the billing period", bold)
-    put("B15", "kWh:"); put("C15", round(inv["kwh"], 0), align=right)
-    put("B16", f"Solar Credit Rate: ${inv['tariff']:.5f}/kWh")
-    put("C16", _money(inv["net_value"]), align=right)
-    put("B17", f"Incentive Rate: ${inv['adder']:.5f}/kWh")
-    put("C17", _money(inv["incentive_value"]), align=right)
-    put("B18", "Solar Value:"); put("C18", _money(inv["solar_value"]), align=right)
-    put("B19", f"Billing Rate: {_pct(inv['billing_rate'])}")
-    put("C19", _money(inv["billed_value"]), align=right)
-    put("B20", "Solar Savings:"); put("C20", _money(inv["solar_savings"]), align=right)
+    put("B14", "How this period's solar credit is calculated", bold)
+    rate = (inv["tariff"] or 0) + (inv["adder"] or 0)
+    akwh = inv.get("array_kwh")
+    if not akwh and inv.get("allocation_pct"):
+        akwh = (inv["kwh"] or 0) / inv["allocation_pct"]
+    put("B15", "Array production this period:")
+    put("C15", (round(akwh) if akwh else "—"), align=right)
+    put("B16", "Your share of the array:"); put("C16", _pct(inv["allocation_pct"]), align=right)
+    put("B17", "Your share of production (kWh):"); put("C17", round(inv["kwh"], 0), align=right)
+    put("B18", f"Solar credit rate: ${rate:.5f}/kWh")
+    put("C18", _money(inv["solar_value"]), align=right)
+    put("B19", "Your contractual payment share:"); put("C19", _pct(inv["billing_rate"]), align=right)
+    put("B20", "Solar credit value due:"); put("C20", _money(inv["amount_owed"]), align=right)
 
     put("B22", "Amount Owed:", big)
     put("C22", _money(inv["amount_owed"]), big, right)
-    put("B23", tpl.get("payable_to", "Please make check payable to HCT Sun Enterprises, LLC"))
+    put("B23", tpl.get("payable_to") or f"Please make payment to {tpl.get('operator') or 'your solar array owner'}.")
 
     put("B26", "Project Total kWh generation:")
     put("C26", round(inv.get("project_total_kwh") or 0, 0), align=right)
     put("B27", "Project total financial savings:")
     put("C27", _money(inv.get("project_total_savings")), align=right)
+
+    put("B29", "Solar credit invoice service provided by ArrayOperator.com  ·  admin@solaroperator.org")
 
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,22 +176,26 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     HERO_H = 1.55 * inch
-    GREEN_DK = colors.HexColor(brand.GREEN_DK)
-    INKDK = colors.HexColor(brand.INKDK)
-    MUTEDDK = colors.HexColor(brand.MUTEDDK)
-    operator_name = tpl.get("operator", "HCT Sun Enterprises, LLC")
-    title = tpl.get("title", "Solar Power Invoice")
+    # Day-skin palette (light): slate ink, utility-blue chrome, emerald money.
+    INKDK = colors.HexColor(brand.DAY_INK)
+    MUTEDDK = colors.HexColor(brand.DAY_MUTED)
+    GREEN_DK = colors.HexColor(brand.DAY_GREEN)   # the money / credit figure
+    BLUE = colors.HexColor(brand.DAY_BLUE)
+    LINE_C = colors.HexColor(brand.DAY_LINE)
+    operator_name = tpl.get("operator") or "Your solar array owner"
+    title = tpl.get("title") or "Solar Credit Invoice"
 
     decorate = brand.make_hero_decorator(
         title=title, subtitle=operator_name,
         right_label="AMOUNT DUE", right_value=brand._money(inv["amount_owed"]),
-        footer_right=f"Invoice {inv['invoice_number']}", hero_h=HERO_H)
+        footer_left="Solar credit invoice service provided by ArrayOperator.com  ·  admin@solaroperator.org",
+        footer_right=f"Invoice {inv['invoice_number']}", hero_h=HERO_H, light=True)
 
     styles = getSampleStyleSheet()
     lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=11,
                          textColor=INKDK, fontName="Helvetica-Bold")
     small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8.5,
-                           textColor=MUTEDDK)
+                           textColor=MUTEDDK, leading=12)
     # Wrapping style for the bill-to / period values: a long customer name must
     # WRAP within its column, not overflow into the period cell (plain table
     # strings don't wrap → they bleed across the column boundary).
@@ -193,7 +205,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
 
     doc = SimpleDocTemplate(
         str(out_path), pagesize=letter,
-        topMargin=HERO_H + 0.35 * inch, bottomMargin=0.8 * inch,
+        topMargin=HERO_H + 0.3 * inch, bottomMargin=0.6 * inch,
         leftMargin=0.85 * inch, rightMargin=0.85 * inch)
     story = []
 
@@ -255,45 +267,58 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         story.append(bt)
         story.append(Spacer(1, 16))
 
-    # ---- line items ----------------------------------------------------------
-    story.append(Paragraph("Actual results for the billing period", lbl))
+    # ---- the solar-credit calculation (the operator's "invoice guts") --------
+    # array production → your share → your kWh → credit rate → payment share →
+    # credit value due. Mirrors the line-by-line math the array owner spec'd.
+    story.append(Paragraph("How this period's solar credit is calculated", lbl))
     story.append(Spacer(1, 8))
+    rate = (inv["tariff"] or 0) + (inv["adder"] or 0)     # excess credit + solar incentive
+    array_kwh = inv.get("array_kwh")
+    if not array_kwh and inv.get("allocation_pct"):
+        array_kwh = (inv["kwh"] or 0) / inv["allocation_pct"]   # derive the array total
     rows = [
-        ["Energy produced", f"{inv['kwh']:,.0f} kWh"],
-        [f"Solar credit rate  ·  ${inv['tariff']:.5f}/kWh", _money(inv["net_value"])],
-        [f"Incentive rate  ·  ${inv['adder']:.5f}/kWh", _money(inv["incentive_value"])],
-        ["Solar value", _money(inv["solar_value"])],
-        [f"Billing rate  ·  {_pct(inv['billing_rate'])}", _money(inv["billed_value"])],
-        ["Your solar savings", _money(inv["solar_savings"])],
+        ["Array production this period", (f"{array_kwh:,.0f} kWh" if array_kwh else "—")],
+        ["Your share of the array", _pct(inv["allocation_pct"])],
+        ["Your share of production", f"{inv['kwh']:,.0f} kWh"],
+        [f"Solar credit rate  ·  ${rate:.5f}/kWh", _money(inv["solar_value"])],
+        ["Your contractual payment share", _pct(inv["billing_rate"])],
+        ["Solar credit value due", _money(inv["amount_owed"])],
     ]
     rt = Table(rows, colWidths=[4.4 * inch, 2.2 * inch])
     rt.setStyle(TableStyle([
         ("FONTSIZE", (0, 0), (-1, -1), 10),
-        ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
         ("TEXTCOLOR", (0, 0), (-1, -1), INKDK),
-        ("TEXTCOLOR", (1, -1), (1, -1), GREEN_DK),
+        ("TEXTCOLOR", (0, 0), (0, 2), MUTEDDK),             # production-chain rows quieter
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor(brand.LINE)),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, LINE_C),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),  # emphasize the value-due row
+        ("FONTSIZE", (0, -1), (-1, -1), 11),
+        ("TEXTCOLOR", (1, -1), (1, -1), GREEN_DK),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.8, BLUE),
         ("TOPPADDING", (0, 0), (-1, -1), 7),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
     ]))
     story.append(rt)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "Your share of production = array production × your share.  "
+        "Credit value due = your kWh × solar credit rate × your contractual payment share.", small))
     story.append(Spacer(1, 16))
 
-    # ---- amount due banner (juicy green) -------------------------------------
-    owed = Table([["AMOUNT DUE", _money(inv["amount_owed"])]],
+    # ---- amount due banner (light, day skin) ---------------------------------
+    owed = Table([[f"AMOUNT DUE  ·  payable to {_xesc(operator_name)}", _money(inv["amount_owed"])]],
                  colWidths=[4.4 * inch, 2.2 * inch])
     owed.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (0, 0), 11),
+        ("FONTSIZE", (0, 0), (0, 0), 10.5),
         ("FONTNAME", (1, 0), (1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (1, 0), (1, 0), 18),
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#06140d")),
-        ("TEXTCOLOR", (0, 0), (0, 0), colors.HexColor(brand.GOOD2)),
-        ("TEXTCOLOR", (1, 0), (1, 0), colors.HexColor(brand.GOOD2)),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(brand.DAY_GREENBG)),
+        ("TEXTCOLOR", (0, 0), (0, 0), INKDK),
+        ("TEXTCOLOR", (1, 0), (1, 0), GREEN_DK),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("LINEBEFORE", (0, 0), (0, -1), 3, GREEN_DK),
         ("TOPPADDING", (0, 0), (-1, -1), 13),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 13),
         ("LEFTPADDING", (0, 0), (-1, -1), 16),
@@ -301,14 +326,36 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         ("ROUNDEDCORNERS", [7, 7, 7, 7]),
     ]))
     story.append(owed)
-    story.append(Spacer(1, 8))
-    story.append(Paragraph(
-        tpl.get("payable_to", f"Please make check payable to {operator_name}."),
-        small))
-    story.append(Spacer(1, 22))
+    story.append(Spacer(1, 12))
 
-    # ---- monthly energy chart (the juicy finish) -----------------------------
-    story.append(Paragraph("Monthly energy produced", lbl))
+    # ---- payment terms + master-account-holder contact -----------------------
+    pay_to = tpl.get("payable_to") or f"Please make payment to {operator_name}."
+    bits = []
+    if tpl.get("attn"):
+        bits.append(_xesc(str(tpl["attn"])))
+    if tpl.get("phone"):
+        bits.append(_xesc(str(tpl["phone"])))
+    cmail = tpl.get("email") or match.customer.get("email")
+    if cmail:
+        bits.append(_xesc(str(cmail)))
+    contact_line = ("<br/>" + "  ·  ".join(bits)) if bits else ""
+    terms = Table([
+        [Paragraph("<b>Payment</b>", small), Paragraph("<b>Questions about this invoice?</b>", small)],
+        [Paragraph(f"Due within 28 days. {_xesc(pay_to)}", small),
+         Paragraph(f"Contact {_xesc(operator_name)}{contact_line}", small)],
+    ], colWidths=[3.3 * inch, 3.3 * inch])
+    terms.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.4, LINE_C),
+        ("TOPPADDING", (0, 0), (-1, 0), 10),
+        ("TOPPADDING", (0, 1), (-1, 1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(terms)
+    story.append(Spacer(1, 12))
+
+    # ---- monthly energy chart (the juicy finish, day skin) -------------------
+    story.append(Paragraph("Your monthly production", lbl))
     story.append(Spacer(1, 4))
     story.append(Paragraph(
         f"Your share of the array's generation, by month  ·  "
@@ -318,8 +365,8 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     pts = [((p.month or (p.end.strftime("%b") if p.end else "")), p.customer_kwh)
            for p in match.periods if p.customer_kwh is not None][-12:]
     story.append(brand.make_chart_flowable(
-        pts, 6.6 * inch, 1.7 * inch,
-        empty_msg="No monthly production data yet."))
+        pts, 6.6 * inch, 1.45 * inch,
+        empty_msg="No monthly production data yet.", light=True))
 
     doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
     return out_path
