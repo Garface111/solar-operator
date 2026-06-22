@@ -7,9 +7,10 @@
 // adapter exists yet, it uploads the capture so the backend can synthesize one. A new
 // portal therefore needs NO new content script - just an approved adapter (data).
 //
-// Default OFF: with the flag unset this script does nothing (no hook injected, no
-// network), so the proven per-portal scripts are completely unaffected. Pilot host
-// is SolarWeb only (see manifest).
+// Default ON for the pilot: with the flag unset the generic path is ACTIVE on the
+// pilot host (SolarWeb only). Set chrome.storage.local `so_auto_adapter` = false to
+// kill it. It only ever runs on the pilot host, so the proven per-portal scripts on
+// every other site are unaffected regardless.
 (function () {
   "use strict";
   var PILOT_HOSTS = ["www.solarweb.com", "solarweb.com"];
@@ -29,7 +30,7 @@
 
   chrome.storage.local.get([FLAG_KEY, "api_endpoint", "tenant_key"], function (s) {
     s = s || {};
-    if (s[FLAG_KEY] !== true) return;                              // FLAG OFF -> fully inert
+    if (s[FLAG_KEY] === false) return;                            // explicit kill switch; ON by default
     if (PILOT_HOSTS.indexOf(location.hostname) === -1) return;     // pilot host only
 
     var sc = document.createElement("script");                    // inject the MAIN-world hook
