@@ -863,6 +863,13 @@ def delete_subscription(sub_id: int, authorization: Optional[str] = Header(defau
         sub = _get_owned(db, t.id, sub_id)
         sub.deleted_at = datetime.utcnow()
         sub.enabled = False
+        # Dismiss any pending drafts so a deleted offtaker leaves nothing behind in
+        # the approval inbox (they used to orphan there — the "(sample)" leftovers).
+        for d in db.execute(select(ReportDraft).where(
+                ReportDraft.subscription_id == sub.id,
+                ReportDraft.status == "pending")).scalars().all():
+            d.status = "dismissed"
+            d.dismissed_at = datetime.utcnow()
         db.commit()
         return {"ok": True}
 
