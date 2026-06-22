@@ -40,6 +40,7 @@ import logging
 import re
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
+from html import escape as _html_escape
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -370,6 +371,127 @@ def _find_template_sheet(wb):
         if "template" in (ws.title or "").lower():
             return ws
     return None
+
+
+# ─── invoice-sheet finder (operator's own invoice-template upload) ───────────
+# "Find the correct page of a spreadsheet": locate the sheet that IS the
+# customer's invoice (the bill they pay) wherever it sits in the workbook — by
+# title hint + invoice-ish content, NOT by position or an exact "Template" name.
+
+_INVOICE_TITLE_HINTS = {
+    "template": 4, "invoice": 4, "bill": 2, "remit": 2, "statement": 2,
+}
+# Content tokens that mark a sheet as an actual invoice (not a data ledger).
+_INVOICE_CONTENT_SCORES = {
+    "amount due": 3, "amount owed": 3, "total due": 3, "payable to": 3,
+    "remit": 2, "bill to": 2, "invoice #": 2, "invoice no": 2,
+    "invoice number": 2, "invoice": 2, "due date": 1, "attn": 1, "statement": 1,
+}
+
+
+def _looks_like_ledger(blob: str) -> bool:
+    """The monthly DATA ledger / true-up sheet — NOT the invoice the customer pays."""
+    return ("tariff" in blob and "adder" in blob) or "whole array" in blob
+
+
+def _score_invoice_sheet(title: str, grid: list[list[Any]]) -> float:
+    blob = " \n ".join(_s(c) for row in grid for c in row if c is not None)
+    score = 0.0
+    tl = (title or "").lower()
+    for hint, pts in _INVOICE_TITLE_HINTS.items():
+        if hint not in tl:
+            continue
+        if hint == "bill" and "billing" in tl:
+            continue   # a "Billing" sheet is the ledger, not the invoice
+        score += pts
+        break
+    for tok, pts in _INVOICE_CONTENT_SCORES.items():
+        if tok in blob:
+            score += pts
+    if _looks_like_ledger(blob):
+        score -= 6           # data ledger / true-up is not the invoice
+    return score
+
+
+def find_invoice_sheet(wb):
+    """The worksheet that IS the customer's invoice, scored across the whole
+    workbook (handles "page 4", non-'Template' names). None if nothing scores."""
+    best, best_score = None, 0.0
+    for ws in wb.worksheets:
+        grid = _grid(ws, max_rows=60)
+        sc = _score_invoice_sheet(ws.title or "", grid)
+        if sc > best_score:
+            best, best_score = ws, sc
+    return best if best_score >= 2 else None
+
+
+def _sheet_to_html_table(ws, max_rows: int = 80, max_cols: int = 16) -> str:
+    """Render a worksheet's used cells to a plain HTML table (xhtml2pdf-safe).
+    Trims trailing empty rows/cols so the layout reflects the real invoice."""
+    grid = _grid(ws, max_rows=max_rows, max_cols=max_cols)
+    while grid and not any(_clean(c) for c in grid[-1]):
+        grid.pop()
+    if not grid:
+        return ""
+    last_col = 0
+    for r in grid:
+        for ci in range(len(r)):
+            if _clean(r[ci]):
+                last_col = max(last_col, ci)
+    rows_html = []
+    for r in grid:
+        cells = []
+        for ci in range(last_col + 1):
+            v = r[ci] if ci < len(r) else None
+            cells.append("<td>%s</td>" % _html_escape(_clean(v) or ""))
+        rows_html.append("<tr>%s</tr>" % "".join(cells))
+    return '<table class="xl">%s</table>' % "".join(rows_html)
+
+
+# NOTE: contains literal % ("width:100%") and {{ tokens }}, so it is assembled
+# with .replace() — NOT %-format or str.format (both would choke on those).
+_EXCEL_TEMPLATE_SHELL = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  @page { size: letter; margin: 0.75in; }
+  body { font-family: Helvetica, Arial, sans-serif; color:#1a2230; font-size:10pt; }
+  table.xl { width:100%; border-collapse:collapse; }
+  table.xl td { padding:3pt 5pt; border-bottom:0.5pt solid #e2e7f0; vertical-align:top; }
+</style></head>
+<body>
+__INVOICE_TABLE__
+<p style="margin-top:18pt; color:#5a6678; font-size:9pt;">
+  This layout was lifted from your spreadsheet's invoice sheet. Replace any value
+  with a token (e.g. {{ amount_due }}, {{ offtaker_name }}, {{ period_end }}) to
+  make it fill automatically each period.</p>
+</body></html>"""
+
+
+def excel_to_template_html(file_bytes: bytes) -> tuple[Optional[str], Optional[str]]:
+    """Find the invoice sheet in an uploaded workbook and convert it to editable
+    token-HTML (Stage-1 seed for the operator's invoice template).
+
+    Returns (sheet_name, html). (None, None) when the workbook can't be opened or
+    has no sheets; (sheet_name, None) when the sheet is empty.
+    """
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("excel_to_template_html: cannot open workbook: %s", e)
+        return None, None
+    try:
+        ws = find_invoice_sheet(wb) or (wb.worksheets[0] if wb.worksheets else None)
+        if ws is None:
+            return None, None
+        table = _sheet_to_html_table(ws)
+        if not table:
+            return ws.title, None
+        return ws.title, _EXCEL_TEMPLATE_SHELL.replace("__INVOICE_TABLE__", table)
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
 
 
 def _detect_billing_model(wb, periods: list[Period]) -> tuple[str, dict]:
