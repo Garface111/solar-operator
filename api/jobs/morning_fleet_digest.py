@@ -38,9 +38,9 @@ from .. import inverter_fleet, notify, branding
 
 log = logging.getLogger(__name__)
 
-# Status dot colors — green (ok) / amber (warn) / red (critical), matching the
+# Status dot colors — blue (ok) / amber (warn) / red (critical), matching the
 # fleet alert "level" produced by inverter_fleet._array_alert().
-_LEVEL_COLOR = {"ok": "#16a34a", "warn": "#d97706", "critical": "#dc2626"}
+_LEVEL_COLOR = {"ok": "#2563eb", "warn": "#d97706", "critical": "#dc2626"}
 _LEVEL_LABEL = {"ok": "Healthy", "warn": "Needs a look", "critical": "Attention"}
 
 # Plain-language phrasing for a flagged inverter's status.
@@ -132,10 +132,19 @@ def _ranked_arrays(tree: dict) -> list[dict]:
 def build_digest_html(tenant, tree: dict) -> str:
     """Render the morning fleet-health digest as a self-contained HTML email.
 
-    Mobile-friendly, inline-CSS only, dark-on-light, no external assets. Pure
-    function of (tenant, tree): no DB, no I/O — so it's trivially testable and
-    safe to render a sample from a fake tree.
+    Array Operator DAY skin: a light, control-room "utility blue on cool slate"
+    look matching the product's default theme (theme-day.css). Forces light mode
+    (color-scheme: light only + explicit bgcolors) so dark-mode mail clients
+    don't auto-invert it. Mobile-friendly, inline-CSS only, no external assets.
+    Pure function of (tenant, tree): no DB, no I/O -- trivially testable.
     """
+    # ---- Array Operator day palette (mirrors theme-day.css) -----------------
+    PAGE, CARD, TILE = "#f6f8fb", "#ffffff", "#f8fafc"
+    INK, MUTED, FAINT, BODY = "#0f172a", "#64748b", "#94a3b8", "#334155"
+    LINE, LINE2 = "#e2e8f0", "#eef2f7"
+    BLUE, BLUE_DEEP = "#2563eb", "#1d4ed8"
+    BLUE_BG, BLUE_BORDER, BLUE_TEXT = "#eff6ff", "#bfdbfe", "#1e40af"
+
     summary = tree.get("summary", {}) or {}
     arrays_total = int(summary.get("arrays_total", 0) or 0)
     inverters_total = int(summary.get("inverters_total", 0) or 0)
@@ -147,89 +156,97 @@ def build_digest_html(tenant, tree: dict) -> str:
     producing_label = "Producing now" if is_daylight else "Asleep (sun down)"
     producing_value = "Yes" if is_daylight else "Resting"
 
-    # ── banner: green all-clear, or amber/red attention callout ──────────────
+    has_critical = any(
+        (c.get("alert", {}) or {}).get("level") == "critical"
+        for c in tree.get("columns", [])
+    )
+
+    # ---- banner: blue all-clear, or amber/red attention callout -------------
     if attention == 0:
         banner = (
-            '<div style="background:#ecfdf5;border:1px solid #a7f3d0;'
-            'border-radius:10px;padding:16px 20px;margin:0 0 22px;">'
-            '<span style="font-size:18px;font-weight:700;color:#047857;">'
-            '✓ All systems healthy</span>'
-            '<div style="color:#065f46;font-size:14px;margin-top:4px;">'
-            'Every inverter we can see is producing as expected this morning.</div>'
-            '</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:0 0 22px;"><tr>'
+            f'<td bgcolor="{BLUE_BG}" style="background:{BLUE_BG};border:1px solid {BLUE_BORDER};'
+            f'border-radius:12px;padding:15px 18px;">'
+            f'<table role="presentation" cellpadding="0" cellspacing="0"><tr>'
+            f'<td style="vertical-align:middle;padding-right:13px;">'
+            f'<div style="width:34px;height:34px;border-radius:50%;background:{BLUE};'
+            f'color:#ffffff;font-size:18px;font-weight:700;text-align:center;'
+            f'line-height:34px;">&#10003;</div></td>'
+            f'<td style="vertical-align:middle;">'
+            f'<div style="font-size:17px;font-weight:700;color:{BLUE_DEEP};line-height:1.2;">'
+            f'All systems healthy</div>'
+            f'<div style="color:{BLUE_TEXT};font-size:13px;margin-top:2px;">'
+            f'Every inverter we can see is producing as expected this morning.</div>'
+            f'</td></tr></table></td></tr></table>'
         )
     else:
-        # red if any array is critical, else amber.
-        worst = "warn"
-        for col in tree.get("columns", []):
-            if (col.get("alert", {}) or {}).get("level") == "critical":
-                worst = "critical"
-                break
         bg, border, fg = (
-            ("#fef2f2", "#fecaca", "#b91c1c") if worst == "critical"
+            ("#fef2f2", "#fecaca", "#b91c1c") if has_critical
             else ("#fffbeb", "#fde68a", "#b45309")
         )
         noun = "inverter needs" if attention == 1 else "inverters need"
         banner = (
-            f'<div style="background:{bg};border:1px solid {border};'
-            f'border-radius:10px;padding:16px 20px;margin:0 0 22px;">'
-            f'<span style="font-size:18px;font-weight:700;color:{fg};">'
-            f'⚠ {attention} {noun} attention</span>'
-            f'<div style="color:{fg};font-size:14px;margin-top:4px;">'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:0 0 22px;"><tr>'
+            f'<td bgcolor="{bg}" style="background:{bg};border:1px solid {border};'
+            f'border-radius:12px;padding:15px 18px;">'
+            f'<div style="font-size:17px;font-weight:700;color:{fg};">'
+            f'&#9888; {attention} {noun} attention</div>'
+            f'<div style="color:{fg};font-size:13px;margin-top:3px;">'
             f'Details are in Highlights below — open Array Operator for the full picture.</div>'
-            f'</div>'
+            f'</td></tr></table>'
         )
 
-    # ── KPI tiles ────────────────────────────────────────────────────────────
-    def _kpi(value: str, label: str, color: str = "#0f172a") -> str:
+    # ---- KPI tiles (2x2 grid -- reads well on phones) -----------------------
+    attn_color = BLUE if attention == 0 else ("#dc2626" if has_critical else "#d97706")
+
+    def _kpi(value: str, label: str, color: str = INK) -> str:
         return (
-            '<td style="padding:6px;width:25%;vertical-align:top;">'
-            '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;'
-            'padding:14px 10px;text-align:center;">'
-            f'<div style="font-size:24px;font-weight:700;color:{color};line-height:1;">{value}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:6px;">{label}</div>'
-            '</div></td>'
+            f'<td width="50%" style="padding:5px;vertical-align:top;">'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+            f'<tr><td bgcolor="{TILE}" style="background:{TILE};border:1px solid {LINE};'
+            f'border-radius:12px;padding:16px 12px;text-align:center;">'
+            f'<div style="font-size:26px;font-weight:700;color:{color};line-height:1;">{value}</div>'
+            f'<div style="font-size:12px;color:{MUTED};margin-top:6px;letter-spacing:.2px;">{label}</div>'
+            f'</td></tr></table></td>'
         )
 
-    attn_color = "#16a34a" if attention == 0 else (
-        "#dc2626" if any((c.get("alert", {}) or {}).get("level") == "critical"
-                         for c in tree.get("columns", [])) else "#d97706"
-    )
     kpis = (
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="border-collapse:separate;margin:0 0 22px;"><tr>'
+        'style="margin:0 0 18px;"><tr>'
         + _kpi(str(arrays_total), "Arrays")
         + _kpi(str(inverters_total), "Inverters")
+        + '</tr><tr>'
         + _kpi(str(attention), "Need attention", attn_color)
         + _kpi(producing_value, producing_label)
         + '</tr></table>'
     )
 
-    # ── highlights: best / worst array, alert callouts, flagged inverters ────
+    # ---- highlights ---------------------------------------------------------
     highlight_rows: list[str] = []
     ranked = _ranked_arrays(tree)
     if ranked:
         best = ranked[0]
         highlight_rows.append(
-            f'<li style="margin:6px 0;color:#065f46;">'
+            f'<li style="margin:6px 0;color:{BLUE_DEEP};">'
             f'<b>Top producer:</b> {_html.escape(best["col"].get("array_name", "Array"))}'
             f' — {_fmt_kwh(best["kwh"])} on its latest day.</li>'
         )
         if len(ranked) > 1:
             worst_a = ranked[-1]
             highlight_rows.append(
-                f'<li style="margin:6px 0;color:#334155;">'
+                f'<li style="margin:6px 0;color:{BODY};">'
                 f'<b>Lowest producer:</b> {_html.escape(worst_a["col"].get("array_name", "Array"))}'
                 f' — {_fmt_kwh(worst_a["kwh"])} on its latest day.</li>'
             )
     else:
         why = "the fleet is asleep right now" if not is_daylight else "no recent daily data has landed yet"
         highlight_rows.append(
-            f'<li style="margin:6px 0;color:#64748b;">'
+            f'<li style="margin:6px 0;color:{MUTED};">'
             f'No recent production numbers to rank — {why}.</li>'
         )
 
-    # arrays carrying an alert, called out in amber/red
     for col in tree.get("columns", []):
         alert = col.get("alert", {}) or {}
         level = alert.get("level", "ok")
@@ -242,29 +259,29 @@ def build_digest_html(tenant, tree: dict) -> str:
                 f' ({alert.get("count", 0)} affected).</li>'
             )
 
-    # individual flagged inverters
     for fi in _flagged_inverters(tree)[:8]:
         color = _LEVEL_COLOR["critical"] if fi["rank"] >= 4 else _LEVEL_COLOR["warn"]
         highlight_rows.append(
             f'<li style="margin:6px 0;color:{color};">'
             f'<b>{_html.escape(fi["name"])}</b> '
-            f'<span style="color:#64748b;">({_html.escape(fi["array_name"])})</span>'
+            f'<span style="color:{MUTED};">({_html.escape(fi["array_name"])})</span>'
             f' — {_html.escape(fi["phrase"])}.</li>'
         )
 
     highlights = (
-        '<h2 style="font-size:15px;color:#0f172a;margin:0 0 8px;">Highlights</h2>'
-        '<ul style="margin:0 0 22px;padding-left:20px;font-size:14px;line-height:1.5;">'
+        f'<div style="font-size:12px;color:{FAINT};margin:0 0 9px;text-transform:uppercase;'
+        f'letter-spacing:.6px;font-weight:700;">Highlights</div>'
+        '<ul style="margin:0 0 22px;padding-left:20px;font-size:14px;line-height:1.55;">'
         + "".join(highlight_rows)
         + '</ul>'
     )
 
-    # ── per-array summary rows (name, status dot, recent output) ─────────────
+    # ---- per-array summary rows ---------------------------------------------
     arr_rows: list[str] = []
     for col in tree.get("columns", []):
         alert = col.get("alert", {}) or {}
         level = alert.get("level", "ok")
-        dot = _LEVEL_COLOR.get(level, "#94a3b8")
+        dot = _LEVEL_COLOR.get(level, FAINT)
         state = _LEVEL_LABEL.get(level, "Healthy")
         kwh = _recent_kwh(col)
         day = _recent_day(col)
@@ -273,67 +290,74 @@ def build_digest_html(tenant, tree: dict) -> str:
         else:
             output = _fmt_kwh(kwh)
             if day:
-                output += f' <span style="color:#94a3b8;">({_html.escape(str(day))})</span>'
+                output += f' <span style="color:{FAINT};">({_html.escape(str(day))})</span>'
         name = _html.escape(col.get("array_name", "Array"))
         invs = col.get("inverter_count", 0)
         arr_rows.append(
             '<tr>'
-            '<td style="padding:10px 12px;border-bottom:1px solid #eef2f7;">'
-            f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
-            f'background:{dot};margin-right:8px;"></span>'
-            f'<b style="color:#0f172a;">{name}</b>'
-            f'<div style="color:#94a3b8;font-size:12px;margin-left:18px;">{invs} inverter'
+            f'<td style="padding:11px 14px;border-bottom:1px solid {LINE2};">'
+            f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;'
+            f'background:{dot};margin-right:9px;"></span>'
+            f'<b style="color:{INK};">{name}</b>'
+            f'<div style="color:{FAINT};font-size:12px;margin-left:18px;margin-top:2px;">{invs} inverter'
             f'{"s" if invs != 1 else ""} · {state}</div></td>'
-            f'<td style="padding:10px 12px;border-bottom:1px solid #eef2f7;text-align:right;'
-            f'color:#334155;font-size:14px;white-space:nowrap;">{output}</td>'
+            f'<td style="padding:11px 14px;border-bottom:1px solid {LINE2};text-align:right;'
+            f'color:{BODY};font-size:14px;white-space:nowrap;">{output}</td>'
             '</tr>'
         )
 
     if arr_rows:
         per_array = (
-            '<h2 style="font-size:15px;color:#0f172a;margin:0 0 8px;">Your arrays</h2>'
-            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-            'style="border-collapse:collapse;border:1px solid #eef2f7;border-radius:10px;'
-            'overflow:hidden;margin:0 0 22px;">'
+            f'<div style="font-size:12px;color:{FAINT};margin:0 0 9px;text-transform:uppercase;'
+            f'letter-spacing:.6px;font-weight:700;">Your arrays</div>'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{CARD}" '
+            f'style="border-collapse:collapse;border:1px solid {LINE2};border-radius:12px;'
+            f'overflow:hidden;margin:0 0 22px;">'
             + "".join(arr_rows)
             + '</table>'
         )
     else:
         per_array = (
-            '<p style="color:#64748b;font-size:14px;margin:0 0 22px;">'
+            f'<p style="color:{MUTED};font-size:14px;margin:0 0 22px;">'
             'No arrays are connected yet — add one in Array Operator to start '
             'watching it here.</p>'
         )
 
     dash = "https://arrayoperator.com"
-    # ── assemble ─────────────────────────────────────────────────────────────
+    # ---- assemble -----------------------------------------------------------
     return (
-        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
-        f'<title>Morning fleet health — {fleet}</title></head>'
-        '<body style="margin:0;padding:0;background:#f1f5f9;">'
-        '<div style="display:none;max-height:0;overflow:hidden;">'
+        '<meta name="color-scheme" content="light only">'
+        '<meta name="supported-color-schemes" content="light">'
+        f'<title>Morning fleet health — {fleet}</title>'
+        '<style>:root{color-scheme:light only;supported-color-schemes:light;}'
+        'body,table,td{color-scheme:light only;}</style></head>'
+        f'<body bgcolor="{PAGE}" style="margin:0;padding:0;background:{PAGE};color-scheme:light only;">'
+        '<div style="display:none;max-height:0;overflow:hidden;opacity:0;">'
         f'Your morning fleet health for {today}.</div>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{PAGE}" '
+        f'style="background:{PAGE};padding:24px 12px;"><tr><td align="center">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="background:#f1f5f9;padding:24px 12px;"><tr><td align="center">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="max-width:560px;background:#ffffff;border-radius:14px;'
-        'box-shadow:0 1px 3px rgba(15,23,42,.08);overflow:hidden;'
-        'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;">'
-        '<tr><td style="padding:24px 28px 8px;">'
-        '<div style="font-size:13px;color:#059669;font-weight:600;letter-spacing:.3px;'
+        f'bgcolor="{CARD}" style="max-width:560px;background:{CARD};border-radius:16px;'
+        f'border:1px solid {LINE};box-shadow:0 1px 3px rgba(15,23,42,.06);overflow:hidden;'
+        'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">'
+        f'<tr><td style="height:4px;line-height:4px;font-size:0;background:{BLUE};'
+        f'background:linear-gradient(90deg,{BLUE_DEEP},{BLUE},#3b82f6);">&nbsp;</td></tr>'
+        f'<tr><td bgcolor="{CARD}" style="padding:24px 28px 8px;">'
+        f'<div style="font-size:12px;color:{BLUE};font-weight:700;letter-spacing:.6px;'
         'text-transform:uppercase;">Array Operator · Morning fleet health</div>'
-        f'<h1 style="font-size:22px;color:#0f172a;margin:6px 0 2px;">{fleet}</h1>'
-        f'<div style="color:#64748b;font-size:14px;">{today}</div>'
+        f'<h1 style="font-size:23px;color:{INK};margin:7px 0 2px;font-weight:700;">{fleet}</h1>'
+        f'<div style="color:{MUTED};font-size:14px;">{today}</div>'
         '</td></tr>'
-        '<tr><td style="padding:18px 28px 4px;">'
+        f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
         + banner + kpis + highlights + per_array +
         '</td></tr>'
-        '<tr><td style="padding:4px 28px 26px;">'
-        f'<a href="{dash}" style="display:inline-block;background:#059669;color:#ffffff;'
-        'text-decoration:none;font-weight:600;font-size:14px;padding:11px 20px;'
-        'border-radius:8px;">Open Array Operator →</a>'
-        '<p style="color:#94a3b8;font-size:12px;margin:20px 0 0;line-height:1.5;">'
+        f'<tr><td bgcolor="{CARD}" style="padding:4px 28px 26px;">'
+        f'<a href="{dash}" style="display:inline-block;background:{BLUE};color:#ffffff;'
+        'text-decoration:none;font-weight:600;font-size:14px;padding:12px 22px;'
+        'border-radius:9px;">Open Array Operator →</a>'
+        f'<p style="color:{FAINT};font-size:12px;margin:20px 0 0;line-height:1.5;">'
         'You\'re getting this because morning fleet-health digests are on for your '
         'account. Production figures are the latest daily readings we have; an '
         'em-dash means no recent data, never an estimate. Manage or turn off these '
