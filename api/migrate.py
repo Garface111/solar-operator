@@ -781,6 +781,8 @@ def main():
             ("avg_rate_cents_kwh",  "ALTER TABLE bills ADD COLUMN avg_rate_cents_kwh DOUBLE PRECISION"),
             ("supplier",            "ALTER TABLE bills ADD COLUMN supplier VARCHAR(120)"),
             ("raw_json",            "ALTER TABLE bills ADD COLUMN raw_json JSONB"),
+            # 2026-06-22 gross solar credit (EXCESS+SOLCRED) — offtaker billing basis.
+            ("solar_credit_usd",    "ALTER TABLE bills ADD COLUMN solar_credit_usd DOUBLE PRECISION"),
         ]:
             if not column_exists(conn, "bills", col):
                 conn.execute(text(sql))

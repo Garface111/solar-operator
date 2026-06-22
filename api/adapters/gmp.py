@@ -410,6 +410,13 @@ def _extract_full_record(bill: dict) -> dict[str, Any]:
     # Net-metering credit: a NEGATIVE bill total IS the credit the owner earned.
     net_credit = -total_cost if (total_cost is not None and total_cost < 0) else None
 
+    # Gross SOLAR credit (EXCESS + SOLCRED) the array earned — the OFFTAKER billing
+    # basis. None for banked months (excess credited at ~$0) so the offtaker invoice
+    # skips them instead of over-charging from gross kWh × a flat rate.
+    from ..rate_schedule import solar_credit_from_bill
+    _sc = solar_credit_from_bill(bill)
+    solar_credit_usd = _sc["credit_usd"] if _sc else None
+
     # Blended rate (¢/kWh): |cost| / kWh consumed, only when both meaningful.
     # Guard the divide-by-tiny artifact: a solar bill with ~0 consumption but
     # fixed charges produces an absurd rate (e.g. $29 / 2 kWh = 1456¢). Require a
@@ -437,6 +444,7 @@ def _extract_full_record(bill: dict) -> dict[str, Any]:
         "kwh_sent_to_grid": sent,
         "total_cost": total_cost,
         "net_credit": net_credit,
+        "solar_credit_usd": solar_credit_usd,
         "avg_rate_cents_kwh": avg_rate,
         "supplier": "Green Mountain Power",
         "is_net_metered": is_nm,
@@ -549,6 +557,7 @@ def bill_json_to_metrics(bill: dict) -> dict[str, Any]:
         "is_net_metered":      full["is_net_metered"],
         "total_cost":          full["total_cost"],
         "net_credit":          full["net_credit"],
+        "solar_credit_usd":    full["solar_credit_usd"],
         "avg_rate_cents_kwh":  full["avg_rate_cents_kwh"],
         "supplier":            full["supplier"],
         "raw_json":            bill,   # the authoritative full record — never lose a field

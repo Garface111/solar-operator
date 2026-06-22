@@ -179,6 +179,7 @@ def rederive_from_raw(tenant_id: str | None = None, batch: int = 500) -> dict:
             b.is_net_metered = full["is_net_metered"]
             b.total_cost = full["total_cost"]
             b.net_credit = full["net_credit"]
+            b.solar_credit_usd = full["solar_credit_usd"]
             b.avg_rate_cents_kwh = full["avg_rate_cents_kwh"]
             b.supplier = full["supplier"]
             updated += 1
