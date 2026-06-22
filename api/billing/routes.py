@@ -1431,7 +1431,8 @@ def dismiss_draft(draft_id: int, authorization: Optional[str] = Header(default=N
 # what is actually sent today (offtaker invoices keep using the standard PDF).
 
 TEMPLATE_MAX_BYTES = 12 * 1024 * 1024  # 12 MB
-TEMPLATE_EXT = {".pdf", ".html", ".htm", ".docx", ".doc", ".png", ".jpg", ".jpeg"}
+TEMPLATE_EXT = {".pdf", ".html", ".htm", ".docx", ".doc", ".png", ".jpg", ".jpeg",
+                ".xlsx", ".xls", ".xlsm"}  # Excel: we find the invoice sheet & seed HTML
 
 
 async def _read_template_upload(file: UploadFile):
@@ -1560,11 +1561,26 @@ async def upload_invoice_template(file: UploadFile = File(...),
         tpl.filename = name[:300]
         tpl.content_type = file.content_type or "application/octet-stream"
         tpl.file_bytes = data
-        if name.lower().endswith((".html", ".htm")):
+        lname = name.lower()
+        is_excel = (lname.endswith((".xlsx", ".xls", ".xlsm"))
+                    or data[:4] == _MAGIC_XLSX[:4] or data[:4] == _MAGIC_XLS)
+        if lname.endswith((".html", ".htm")):
             try:
                 tpl.html = data.decode("utf-8", "replace")
             except Exception:
                 pass
+        elif is_excel:
+            # Find the invoice sheet anywhere in the workbook and seed editable
+            # token-HTML from it (Stage-1; rendering stays opt-in). Never fatal —
+            # a failed extract just leaves the editor on the default template.
+            try:
+                from .matcher import excel_to_template_html
+                sheet, html = excel_to_template_html(data)
+                if html:
+                    tpl.html = html
+                    logger.info("invoice template: seeded HTML from Excel sheet %r", sheet)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("invoice template Excel extract failed: %s", e)
         tpl.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(tpl)
