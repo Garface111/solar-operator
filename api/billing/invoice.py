@@ -373,19 +373,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story.append(terms)
     story.append(Spacer(1, 12))
 
-    # ---- monthly energy chart (the juicy finish, day skin) -------------------
-    story.append(Paragraph("Your monthly production", lbl))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        f"Your share of the array's generation, by month  ·  "
-        f"project total {(inv.get('project_total_kwh') or 0):,.0f} kWh", small))
-    story.append(Spacer(1, 8))
-    # Most recent ~12 months that carry a kWh value (never fabricated).
-    pts = [((p.month or (p.end.strftime("%b") if p.end else "")), p.customer_kwh)
-           for p in match.periods if p.customer_kwh is not None][-12:]
-    story.append(brand.make_chart_flowable(
-        pts, 6.6 * inch, 1.45 * inch,
-        empty_msg="No monthly production data yet.", light=True))
-
+    # The monthly production chart lives in the separate generation report, not on
+    # the invoice — drop the second-page chart from offtaker invoices (Ford).
     doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
     return out_path
