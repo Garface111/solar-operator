@@ -188,13 +188,24 @@
   // don't yet have the site list. Sites the owner hasn't opened simply have no
   // inverters yet (we keep them with site-level power so they still show up).
   function assemble() {
-    if (!siteListJson || !Array.isArray(siteListJson.data) || !siteListJson.data.length) return null;
+    // Build from the dashboard site list when we have it (richest: site names +
+    // installed capacity). BUT also emit sites we only have DEVICE data for: a
+    // user who lands on / deep-links to a site-detail page never triggers
+    // /api/asset/site/retrieve, so requiring the list meant their inverters would
+    // NEVER ship even though busTypeDevices loaded. Union both sources by site id.
+    const listById = new Map();
+    if (siteListJson && Array.isArray(siteListJson.data)) {
+      for (const st of siteListJson.data) if (st && st.id != null) listById.set(String(st.id), st);
+    }
+    const ids = new Set();
+    for (const k of listById.keys()) ids.add(k);
+    for (const k of deviceJsonBySite.keys()) ids.add(String(k));
+    if (!ids.size) return null;
     const sites = [];
-    for (const st of siteListJson.data) {
-      const sid = st.id;
+    for (const sid of ids) {
+      const st = listById.get(sid) || {};
       const name = st.siteName || (sid ? "Chint site " + sid : "Chint site");
-      const devJson = sid != null && deviceJsonBySite.has(String(sid))
-        ? deviceJsonBySite.get(String(sid)) : null;
+      const devJson = deviceJsonBySite.has(sid) ? deviceJsonBySite.get(sid) : null;
       const inverters = devJson ? invertersFrom(devJson) : [];
       // Prefer the site's live power from the busTypeDevices response field
       // `currentPowerWithUnit` (e.g. "72.7 KW" -> 72700 W); the old numeric
