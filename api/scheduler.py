@@ -253,10 +253,12 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
     """
     from .delivery import deliver_for_client
     from .notify import send_internal_alert
+    from .jobs.report_digests import record_scheduled_batch
 
     sent: list[int] = []
     failed: list[int] = []
     skipped_empty: list[int] = []
+    results: list[dict] = []  # full per-client outcome → operator delivery receipt
     with SessionLocal() as db:
         # All client rows that EITHER explicitly match the cadence OR
         # inherit it from the tenant
@@ -276,6 +278,10 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
             c.id for (c, t) in rows
             if (t.active or t.subscription_status in ("comped", "trialing"))
         ]
+        # name + tenant per candidate, so a client that RAISES mid-send still
+        # lands a labeled row in the operator's receipt.
+        cand_set = set(candidates)
+        cand_meta = {c.id: (c.name, t.id) for (c, t) in rows if c.id in cand_set}
 
     for cid in candidates:
         try:
@@ -289,12 +295,25 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
                 sent.append(cid)
             else:
                 failed.append(cid)
+            results.append(result)
         except Exception as e:
             failed.append(cid)
+            cname, ctid = cand_meta.get(cid, (f"client {cid}", None))
+            results.append({"ok": False, "client_id": cid, "client_name": cname,
+                            "tenant": ctid, "error": str(e),
+                            "reason": "report generation failed"})
             send_internal_alert(
                 f"Scheduled delivery failed ({frequency})",
                 f"Client: {cid}\nError: {e}",
             )
+
+    # Persist the batch so the post-send receipt job can confirm delivery and
+    # report skips/failures to the operator. Best-effort: logging must never
+    # break the actual delivery run.
+    try:
+        record_scheduled_batch(frequency, results)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("record_scheduled_batch failed (%s): %s", frequency, e)
 
     # Internal-alert on failures AND on skipped-empty clients, so the operator
     # learns which clients have no data instead of silently sending nothing.
@@ -873,6 +892,24 @@ def start():
         CronTrigger(month="1,4,7,10", day=1, hour=9, minute=0),
         id="deliver_quarterly", replace_existing=True,
     )
+    # Daily 11:00 UTC: post-send DELIVERY RECEIPT to each NEPOOL operator — what
+    # went out to whom + Resend-confirmed delivered/bounced, ~2h after the 09:00
+    # sends so the delivery webhooks have landed. Data-driven off ReportDelivery,
+    # so a missed run self-heals on the next tick.
+    scheduler.add_job(
+        _run_delivery_receipts,
+        CronTrigger(hour=11, minute=0),
+        id="report_delivery_receipts", replace_existing=True,
+    )
+    # Daily 14:00 UTC: 2-DAY-AHEAD REVIEW digest — when a weekly/monthly/quarterly
+    # batch is exactly 2 days out, email each NEPOOL operator what will be sent to
+    # whom (recipient + data-ready/skip + last delivery health) so they can review
+    # before it goes.
+    scheduler.add_job(
+        _run_presend_reviews,
+        CronTrigger(hour=14, minute=0),
+        id="report_presend_reviews", replace_existing=True,
+    )
     # Array Operator automatic billing reports (invoice + summary), on the
     # cadence each subscription chose. 1st of month / 1st of quarter / Sept 1
     # for annual true-ups — all 09:00 UTC, matching the NEPOOL cadence above.
@@ -1133,6 +1170,38 @@ def _run_morning_fleet_digest() -> None:
         send_internal_alert(
             "Morning fleet digest: unhandled exception",
             f"The morning fleet-health digest job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_delivery_receipts() -> None:
+    """Post-send delivery receipt to NEPOOL operators (what went out + confirmed
+    delivered). Wrapper so import/build errors can't crash the scheduler."""
+    try:
+        from .jobs.report_digests import run_delivery_receipts
+        result = run_delivery_receipts()
+        if result.get("operators"):
+            logger.info("report_delivery_receipts: operators=%d rows=%d",
+                        result.get("operators", 0), result.get("rows", 0))
+    except Exception as exc:
+        send_internal_alert(
+            "Report delivery receipts: unhandled exception",
+            f"The post-send delivery-receipt job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_presend_reviews() -> None:
+    """2-day-ahead 'here's what will go out, review it' digest to NEPOOL operators.
+    Wrapper so import/build errors can't crash the scheduler."""
+    try:
+        from .jobs.report_digests import run_presend_reviews
+        result = run_presend_reviews()
+        if result.get("operators"):
+            logger.info("report_presend_reviews: operators=%d cadences=%s",
+                        result.get("operators", 0), result.get("cadences"))
+    except Exception as exc:
+        send_internal_alert(
+            "Report pre-send reviews: unhandled exception",
+            f"The 2-day-ahead report review job raised an unexpected error:\n{exc}",
         )
 
 

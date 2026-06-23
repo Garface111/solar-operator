@@ -302,6 +302,40 @@ class Client(Base):
     )
 
 
+class ReportDelivery(Base):
+    """Durable per-client record of one SCHEDULED report batch (June 2026).
+
+    Closes the "did it actually go out, and did it land?" gap the Resend webhook
+    docstring calls out. scheduler._deliver_clients_with_frequency writes one row
+    per client it processes — sent, skipped (no data), or failed. ~2h later
+    jobs/report_digests.run_delivery_receipts() reads these rows, cross-references
+    per-client Resend delivery health (Client.last_delivered_at / last_bounced_at
+    vs sent_at), emails the operator a "what went out to whom + confirmed
+    delivered" receipt, and stamps receipt_sent_at so each batch is reported
+    exactly once. Denormalized (client_name/recipient copied in, no FKs) so it
+    survives client/tenant cleanup as a historical record.
+    """
+    __tablename__ = "report_deliveries"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), index=True)
+    client_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    client_name: Mapped[str] = mapped_column(String(200))
+    recipient: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    cadence: Mapped[str] = mapped_column(String(16))  # weekly | monthly | quarterly
+    # sent | skipped_empty | no_recipient | send_failed | failed | inactive
+    status: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    # Stamped when the operator receipt covering this row has been sent (NULL =
+    # not yet receipted). The receipt job filters on this to be exactly-once.
+    receipt_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        Index("ix_report_deliveries_tenant_pending", "tenant_id", "receipt_sent_at"),
+    )
+
+
 class Array(Base):
     """A generation array that mints renewable-energy certificates. A logical
     unit that maps to one OR MORE utility accounts (e.g. Bruce's 'Starlake' =

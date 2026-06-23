@@ -904,6 +904,20 @@ def main():
             added.append("history_backfilled_at")
             print("  + inverter_connections.history_backfilled_at")
 
+        # 2026-06-23 NEPOOL report digests: per-batch delivery log behind the
+        # operator's pre-send review + post-send delivery receipt. The
+        # report_deliveries table is created by init_db()/create_all above;
+        # ensure its indexes idempotently for environments that predate them.
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_report_deliveries_tenant_pending "
+            "ON report_deliveries (tenant_id, receipt_sent_at)",
+            "CREATE INDEX IF NOT EXISTS ix_report_deliveries_sent_at "
+            "ON report_deliveries (sent_at)",
+        ]:
+            conn.execute(text(idx_sql))
+        print(f"  {'✓' if inspect(conn).has_table('report_deliveries') else '✗ MISSING'} "
+              f"table report_deliveries")
+
     print("=== Migration complete ===")
 
 
