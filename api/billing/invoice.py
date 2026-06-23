@@ -199,11 +199,15 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     operator_name = tpl.get("operator") or "Your solar array owner"
     title = tpl.get("title") or "Solar Credit Invoice"
 
+    # White-label: the offtaker invoice is the OPERATOR's document, sent to their
+    # customer under their own name — so we suppress the Array Operator sun-glyph,
+    # wordmark, and the "service provided by ArrayOperator.com" footer attribution.
     decorate = brand.make_hero_decorator(
         title=title, subtitle=operator_name,
         right_label="AMOUNT DUE", right_value=brand._money(inv["amount_owed"]),
-        footer_left="Solar credit invoice service provided by ArrayOperator.com  ·  admin@solaroperator.org",
-        footer_right=f"Invoice {inv['invoice_number']}", hero_h=HERO_H, light=True)
+        footer_left=operator_name,
+        footer_right=f"Invoice {inv['invoice_number']}", hero_h=HERO_H, light=True,
+        show_brand=False)
 
     styles = getSampleStyleSheet()
     lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=11,
