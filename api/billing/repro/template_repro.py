@@ -123,14 +123,23 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
     #    (e.g. "Valley Village (Valley Cares, Inc)") get the name substring replaced,
     #    so no template-sample identity leaks onto the offtaker's invoice.
     sample = (cell_map.get("sample_name") or "").strip()
+    # Match the name AND a punctuation-stripped core ("Valley Cares, Inc." vs the
+    # bill-to's "(Valley Cares, Inc)") so a trailing . or ) can't defeat the swap.
+    variants = [v for v in (sample, sample.rstrip(" .,;:)(")) if len(v) >= 3]
     wrote_name = False
-    if sample:
+    if variants:
         for sh in wb.worksheets:
             for row in sh.iter_rows():
                 for cell in row:
-                    if isinstance(cell.value, str) and sample in cell.value:
-                        cell.value = (customer_name if cell.value.strip() == sample
-                                      else cell.value.replace(sample, customer_name))
+                    if not isinstance(cell.value, str):
+                        continue
+                    val = cell.value
+                    for v in variants:
+                        if v in val:
+                            val = (customer_name if val.strip() == v
+                                   else val.replace(v, customer_name))
+                    if val != cell.value:
+                        cell.value = val
                         wrote_name = True
     out = io.BytesIO()
     wb.save(out)
