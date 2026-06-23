@@ -275,7 +275,10 @@ def _write_ledger_row(ws, field_map: dict[str, int], period: Period,
     # explicitly supplied customer_kwh (e.g. the real parsed value on refresh).
     customer_kwh = period.customer_kwh
     if customer_kwh is None and period.array_kwh is not None and pct:
-        customer_kwh = round(period.array_kwh * pct)
+        # 2 decimals to match the share used to compute amount_owed everywhere else
+        # (delivery.build_*_match); a whole-int kWh here diverges the rendered total
+        # from the verify guard's expected amount.
+        customer_kwh = round(period.array_kwh * pct, 2)
 
     # Columns we set as literal INPUTS (everything else is cloned/translated).
     literal_inputs: dict[int, Any] = {}
@@ -359,7 +362,10 @@ def _refresh_template_pointers(wb, new_row: int) -> None:
         for row in ws.iter_rows():
             for cell in row:
                 v = cell.value
-                if isinstance(v, str) and ("new row" in v.lower() or "row #" in v.lower()):
+                # Match the exact HCT pointer label only — a substring like 'row #'
+                # collides with incidental notes ('Total row #', 'see row # 12') and
+                # would clobber a real cell to the right with an integer.
+                if isinstance(v, str) and v.strip().lower().rstrip(":") in ("new row #", "new row"):
                     ws.cell(row=cell.row, column=cell.column + 1).value = new_row
 
 

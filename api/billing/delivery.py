@@ -697,18 +697,18 @@ def _render_from_repro(match, sub, out_path) -> bool:
         if not _repro_render.renderer_available():
             return False
         from .repro.pipeline import reproduce_for_subscription
-        # verify=False → skip the AI vision call at send time, but the deterministic
-        # numeric guard still runs; res.ok is False only when it FAILED.
+        # verify=False → skip the AI vision call at send time; the deterministic
+        # fail-closed numeric guard runs. Ship ONLY when positively verified
+        # (ok is True) — an unverifiable/unreadable render falls back to standard.
         res = reproduce_for_subscription(sub, period_data=match.latest_period, verify=False)
-        if res.pdf and res.ok is not False:
+        if res.pdf and res.ok is True:
             out_path.write_bytes(res.pdf)
             logger.info("repro: pixel-perfect invoice PDF for sub %s via %s "
-                        "(verified=%s, rounds=%s)", getattr(sub, "id", "?"),
-                        res.backend, res.ok, res.rounds)
+                        "(verified, rounds=%s)", getattr(sub, "id", "?"),
+                        res.backend, res.rounds)
             return True
-        if res.ok is False:
-            logger.warning("repro: numeric guard failed for sub %s — falling back to "
-                           "standard invoice", getattr(sub, "id", "?"))
+        logger.warning("repro: not verified for sub %s (ok=%s) — falling back to "
+                       "standard invoice", getattr(sub, "id", "?"), getattr(res, "ok", None))
         return False
     except Exception:  # noqa: BLE001 — never break a send
         logger.exception("repro render failed; falling back to template/standard invoice")

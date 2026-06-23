@@ -71,11 +71,18 @@ def test_pipeline_degrades_without_renderer(monkeypatch):
     assert res.verdict.skipped
 
 
-def test_numeric_guard_graceful():
-    from api.billing.repro.verify import amount_present, extract_pdf_numbers
-    assert amount_present(b"not a pdf", expected=5.20) is True   # unreadable → don't block
-    assert amount_present(b"anything", expected=None) is True    # nothing to check
+def test_numeric_guard_fail_closed():
+    # Money gate: every uncertain path must FAIL CLOSED (False → fall back to
+    # the standard invoice), never wave an unverified render through.
+    from api.billing.repro.verify import amount_present, extract_pdf_numbers, _parse_signed
+    assert amount_present(b"not a pdf", expected=5.20) is False   # unreadable → fail closed
+    assert amount_present(b"anything", expected=None) is False    # nothing to verify → fail closed
+    assert amount_present(b"anything", expected=0.0) is True      # $0 / banked → trivially fine
     assert extract_pdf_numbers(b"not a pdf") == []
+    # Sign awareness: a credit / accounting-negative is NOT a positive total.
+    assert _parse_signed("Amount Due: -$50.00") == [-50.0]
+    assert _parse_signed("($1,234.56)") == [-1234.56]
+    assert _parse_signed("$50.00") == [50.0]
 
 
 def test_refine_filler_receives_override(monkeypatch):

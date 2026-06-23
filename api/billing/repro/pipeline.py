@@ -75,9 +75,10 @@ def reproduce_invoice(fill: Filler, *,
             except render.RenderError as e:
                 log.warning("repro render failed (%s): %s", backend, e)
 
-        # Deterministic guard (cheap, always on when we have a PDF + expectation).
+        # Deterministic guard — FAIL-CLOSED. Runs whenever we have a PDF; with no
+        # expected amount it returns False (can't verify ⇒ don't trust the render).
         numeric_ok: Optional[bool] = None
-        if pdf is not None and expected_amount is not None:
+        if pdf is not None:
             numeric_ok = amount_present(pdf, expected_amount)
 
         # AI vision check (optional, informational; only when asked + a PNG).
@@ -85,15 +86,16 @@ def reproduce_invoice(fill: Filler, *,
         if verify and png is not None:
             verdict = ai_verify(png, reference_png)
 
-        # Overall: fail only on a hard signal (numeric guard False, or AI says no).
+        # Overall: ok is True ONLY when positively verified; anything uncertain is
+        # False (→ caller falls back). Money gate: never ship the unverified.
         if pdf is None:
-            ok: Optional[bool] = None                      # nothing to verify
-        elif numeric_ok is False or verdict.ok is False:
+            ok: Optional[bool] = None                      # no render at all → caller's choice
+        elif verdict.ok is False or numeric_ok is False:
             ok = False
         elif numeric_ok is True or verdict.ok is True:
             ok = True
         else:
-            ok = None                                      # rendered but nothing to check against
+            ok = False                                     # rendered but unverifiable → fail closed
 
         result = ReproResult(xlsx=xlsx, pdf=pdf, png=png, verdict=verdict,
                              backend=backend, rounds=rnd, ok=ok, numeric_ok=numeric_ok)

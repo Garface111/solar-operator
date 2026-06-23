@@ -26,43 +26,81 @@ from .llm import call_json, llm_available
 log = logging.getLogger(__name__)
 
 
-# ─── deterministic numeric guard (no AI, no reference) ───────────────────────
-# The hard correctness gate: extract the rendered invoice's numbers and confirm
-# the expected Amount Due is actually printed on it. If a column was mismapped,
-# the total won't appear where we expect — so this catches a bad fill BEFORE it
-# is ever attached, and the send path falls back to the standard invoice.
+# ─── deterministic numeric guard (no AI, no reference) — FAIL-CLOSED ──────────
+# The hard correctness gate (hardened after adversarial review wf_74388645): it is
+# a MONEY gate, so every uncertain path resolves to "don't trust this render → fall
+# back to the standard invoice", never "ship it anyway". It confirms the expected
+# Amount Due is printed NEXT TO ITS LABEL (cell-anchored, not just present anywhere
+# on the page) and with the right SIGN, so a mismapped column or a sign-flipped /
+# credit total is caught instead of waved through.
 
-_NUM_RE = re.compile(r"-?\$?\s?([0-9][0-9,]*(?:\.[0-9]+)?)")
+# Labels that mark the FINAL total (distinct from Net Rate / Solar Savings lines).
+_AMOUNT_DUE_LABELS = ("amount due", "final amount owed", "amount owed",
+                      "total due", "balance due", "total amount due")
+# A number token, capturing a leading '-' OR surrounding ( ) as an accounting negative.
+_NUM_TOKEN = re.compile(r"(\()?\s*(-?)\$?\s?([0-9][0-9,]*(?:\.[0-9]+)?)\s*(\))?")
 
 
-def extract_pdf_numbers(pdf_bytes: bytes) -> list[float]:
-    """All numeric tokens in a PDF's text (commas stripped). Empty on failure."""
-    try:
-        import pdfplumber
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            text = "\n".join((p.extract_text() or "") for p in pdf.pages)
-    except Exception as e:  # noqa: BLE001
-        log.warning("extract_pdf_numbers failed: %s", e)
-        return []
+def _parse_signed(text: str) -> list[float]:
+    """Signed numeric values in `text` ('-$50' / '($50.00)' → -50.0; '$50' → 50.0)."""
     out: list[float] = []
-    for m in _NUM_RE.finditer(text):
+    for m in _NUM_TOKEN.finditer(text):
+        neg = (m.group(2) == "-") or (m.group(1) == "(" and m.group(4) == ")")
         try:
-            out.append(float(m.group(1).replace(",", "")))
+            out.append((-1.0 if neg else 1.0) * float(m.group(3).replace(",", "")))
         except ValueError:
             continue
     return out
 
 
+def _pdf_lines(pdf_bytes: bytes) -> Optional[list[str]]:
+    """The PDF's text lines, or None when the PDF can't be read (unreadable ≠ no text)."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+    except Exception as e:  # noqa: BLE001
+        log.warning("pdf text extraction failed: %s", e)
+        return None
+    return text.splitlines()
+
+
+def extract_pdf_numbers(pdf_bytes: bytes) -> list[float]:
+    """All SIGNED numeric tokens in a PDF's text. [] on an unreadable PDF."""
+    lines = _pdf_lines(pdf_bytes)
+    return _parse_signed("\n".join(lines)) if lines is not None else []
+
+
 def amount_present(pdf_bytes: bytes, expected: Optional[float], tol: float = 0.01) -> bool:
-    """Is the expected Amount Due actually printed on the rendered invoice?
-    True (pass) when expected is None (nothing to check) or the value appears
-    within `tol`. False means the fill is suspect — don't ship this render."""
+    """FAIL-CLOSED: True only when the expected Amount Due is positively confirmed
+    on the render. False (→ fall back to the standard invoice) when the PDF is
+    unreadable, the value is missing, the labeled total is wrong, or the sign is
+    flipped. expected=None → False (nothing to verify ⇒ don't trust the render)."""
     if expected is None:
-        return True
-    nums = extract_pdf_numbers(pdf_bytes)
-    if not nums:
-        return True  # can't read the PDF text → don't block on the numeric guard
-    return any(abs(n - float(expected)) <= tol for n in nums)
+        return False
+    exp = float(expected)
+    if abs(exp) < 0.005:
+        return True                              # a $0 / banked balance is trivially fine
+
+    def near(n: float) -> bool:
+        return abs(n - exp) <= tol               # sign-sensitive: -exp won't match +exp
+
+    lines = _pdf_lines(pdf_bytes)
+    if not lines:
+        return False                             # unreadable render → fail closed
+
+    # 1) Cell-anchored: the value on (or just under) an Amount-Due label line.
+    label_seen = False
+    for i, ln in enumerate(lines):
+        if any(lbl in ln.lower() for lbl in _AMOUNT_DUE_LABELS):
+            label_seen = True
+            window = ln + " " + (lines[i + 1] if i + 1 < len(lines) else "")
+            if any(near(n) for n in _parse_signed(window)):
+                return True
+    if label_seen:
+        return False                             # labeled total present but WRONG → fail closed
+    # 2) No recognizable amount-due label at all → weak page-wide presence (sign-aware).
+    return any(near(n) for n in _parse_signed("\n".join(lines)))
 
 VERDICT_SCHEMA = {
     "type": "object",

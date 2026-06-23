@@ -58,35 +58,92 @@ def build_template_cell_map(template_bytes: bytes) -> Optional[dict]:
     return None
 
 
+def _set_template_identity(template_bytes: bytes, data_sheet: Optional[str],
+                           name: str) -> Optional[bytes]:
+    """Write the offtaker's name into the template's metadata CUSTOMER cell and
+    CLEAR the sample's acct/meter, so a template reused for a different offtaker
+    doesn't carry the sample customer's identity. Returns new bytes, or None when
+    the customer cell can't be located (caller must then refuse — fail closed)."""
+    import io as _io
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(_io.BytesIO(template_bytes))            # keep formulas
+    except Exception:  # noqa: BLE001
+        return None
+    sheets = [data_sheet] if data_sheet in wb.sheetnames else wb.sheetnames
+    for sn in sheets:
+        ws = wb[sn]
+        for r in range(1, 9):
+            cols: dict = {}
+            for c in range(1, min(ws.max_column or 0, 18) + 1):
+                v = ws.cell(row=r, column=c).value
+                if not isinstance(v, str):
+                    continue
+                lv = v.strip().lower()
+                if lv == "customer" or lv.startswith("customer"):
+                    cols["name"] = c
+                elif "acct" in lv or "account" in lv:
+                    cols["acct"] = c
+                elif "meter" in lv:
+                    cols["meter"] = c
+            if "name" in cols and len(cols) >= 2:                  # a real metadata row
+                ws.cell(row=r + 1, column=cols["name"]).value = name
+                for k in ("acct", "meter"):
+                    if k in cols:
+                        ws.cell(row=r + 1, column=cols[k]).value = None
+                out = _io.BytesIO()
+                wb.save(out)
+                return out.getvalue()
+    return None
+
+
 def reproduce_in_template(template_bytes: bytes, *, period,
-                          customer_name: Optional[str] = None,
+                          customer_name: str,
                           cell_map: Optional[dict] = None,
                           expected_amount: Optional[float] = None,
                           verify: bool = False) -> Optional[ReproResult]:
-    """Fill the operator's template with one offtaker's period data and render it
-    pixel-perfect. `period` is a dict/Period the fill understands (array_kwh,
-    customer_kwh, tariff, adder, dates, month). Pass cached `cell_map` to skip the
-    mapping step. Returns a ReproResult (ok None/True/False), or None when the
-    template can't be mapped at all."""
+    """Fill the operator's template with ONE offtaker's period data + identity and
+    render it pixel-perfect. `customer_name` is REQUIRED — the template is reused
+    across offtakers, so we must stamp the right bill-to.
+
+    FAIL-CLOSED on identity: writes the name into the metadata CUSTOMER cell, then
+    confirms the name actually rendered on the PDF; returns None (caller falls back)
+    if the customer cell can't be set or the name doesn't appear — never ships one
+    offtaker's invoice under another's name. Returns None when the template can't be
+    mapped at all. (Not yet wired into the live send path — needs this safety + review.)"""
     from ..invoice_writer import populate_invoice_workbook
+    from .verify import _pdf_lines
 
     cm = cell_map or build_template_cell_map(template_bytes)
     if not cm or "month" not in (cm.get("field_map") or {}):
         return None
 
-    sub = types.SimpleNamespace(
-        source_workbook=template_bytes,
-        parsed_map=cm,
-        customer_name=(customer_name or (cm.get("customer") or {}).get("name") or "Offtaker"),
-    )
+    # Stamp the offtaker's identity into the template (fail closed if we can't).
+    stamped = _set_template_identity(template_bytes, cm.get("data_sheet"), customer_name)
+    if stamped is None:
+        log.warning("reproduce_in_template: could not set bill-to identity — refusing "
+                    "to render (would carry the template's sample customer)")
+        return None
+
+    sub = types.SimpleNamespace(source_workbook=stamped, parsed_map=cm,
+                                customer_name=customer_name)
 
     def fill(field_map_override):
-        fm = field_map_override or cm.get("field_map")
-        return populate_invoice_workbook(sub, period, field_map_override=fm)
+        return populate_invoice_workbook(sub, period,
+                                         field_map_override=field_map_override or cm.get("field_map"))
 
     def remap(_mismatches):
         r = ai_field_map(template_bytes)
         return r.get("field_map") if r else None
 
-    return reproduce_invoice(fill, expected_amount=expected_amount,
-                             verify=verify, remap=remap)
+    res = reproduce_invoice(fill, expected_amount=expected_amount, verify=verify, remap=remap)
+
+    # Identity guard: the offtaker's name MUST appear on the rendered invoice.
+    if res and res.pdf:
+        lines = _pdf_lines(res.pdf)
+        nm = (customer_name or "").strip().lower()
+        if nm and (lines is None or not any(nm in ln.lower() for ln in lines)):
+            log.warning("reproduce_in_template: customer name %r not on the render — "
+                        "refusing (wrong-identity guard)", customer_name)
+            return None
+    return res
