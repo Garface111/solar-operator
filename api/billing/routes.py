@@ -1383,6 +1383,34 @@ async def attach_gmp_invoice(draft_id: int, file: UploadFile = File(...),
         return {"ok": True, "draft": _draft_dict(d)}
 
 
+@router.get("/drafts/{draft_id}/gmp-bill")
+def get_draft_gmp_bill(draft_id: int, authorization: Optional[str] = Header(default=None)):
+    """Stream the GMP utility-bill PDF that rides with this draft — the manually
+    attached one if present, else the auto-captured bill for the period (the same
+    PDF the send path attaches). 404 when none is captured yet (the 'pending' chip)."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        if d.gmp_invoice_pdf:
+            fn = "".join(c for c in (d.gmp_filename or "gmp_bill.pdf")
+                         if c.isalnum() or c in "._- ") or "gmp_bill.pdf"
+            return StreamingResponse(io.BytesIO(d.gmp_invoice_pdf), media_type="application/pdf",
+                headers={"Content-Disposition": "inline; filename=" + fn})
+        sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
+        array_id = getattr(sub, "array_id", None)
+        if sub is not None and getattr(sub, "auto_attach_gmp", False) and array_id:
+            try:
+                from ..reports import gmp_bill_pdf_read as gbp
+                found = gbp.get_bill_pdf_for_period(array_id, db=db)
+            except Exception:
+                found = None
+            if found and found.get("bytes"):
+                return StreamingResponse(io.BytesIO(found["bytes"]),
+                    media_type=found.get("content_type") or "application/pdf",
+                    headers={"Content-Disposition": "inline; filename=gmp_bill.pdf"})
+        raise HTTPException(404, "No GMP bill captured for this period yet")
+
+
 class DraftPatch(BaseModel):
     note: Optional[str] = None
 
@@ -1648,27 +1676,39 @@ def get_invoice_template_file(authorization: Optional[str] = Header(default=None
 
 @router.get("/invoice-template/preview.pdf")
 def get_invoice_template_preview_pdf(authorization: Optional[str] = Header(default=None)):
-    """Render OUR REPRODUCTION of the operator's template — the token-HTML the
-    system generated from their upload (excel_to_template_html) — to a PDF with
-    sample data. This is the duplication that actually gets sent to non-workbook
-    offtakers, so the operator can see how faithfully we reproduced their format.
-    Powers the inline preview next to the template card."""
+    """Render OUR REPRODUCTION of the operator's template, the RIGHT way: the real
+    uploaded file rendered by the real engine (xlsx/Word → Gotenberg/LibreOffice;
+    PDF passthrough) — pixel-identical to their format. Deep-research finding: never
+    reproduce a document by converting it to HTML (the lossy anti-pattern); fill/
+    render the real artifact. Token-HTML is kept only as a last-resort fallback for
+    image/HTML templates or when no renderer is configured."""
     t = tenant_from_session(authorization)
     from ..models import OfftakerInvoiceTemplate
-    from .template_render import (render_template_pdf, SAMPLE_CONTEXT,
-                                  DEFAULT_TEMPLATE_HTML)
     with SessionLocal() as db:
         tpl = db.execute(select(OfftakerInvoiceTemplate).where(
             OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
-        if not tpl or (not tpl.html and not tpl.file_bytes):
+        if not tpl or (not tpl.file_bytes and not tpl.html):
             raise HTTPException(404, "No invoice template on file")
-        # The reproduction is the token-HTML (seeded from their upload, or the
-        # default when none); render it with sample data exactly as a real send.
-        html = tpl.html or DEFAULT_TEMPLATE_HTML
-        try:
-            pdf = render_template_pdf(html, SAMPLE_CONTEXT)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(422, f"Couldn't render template preview: {e}")
+        fb = bytes(tpl.file_bytes) if tpl.file_bytes else b""
+        name = (tpl.filename or "template").lower()
+        pdf = None
+        if fb[:4] == b"%PDF":
+            pdf = fb                                    # already a PDF — passthrough
+        elif (fb[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
+              or name.endswith((".xlsx", ".xls", ".docx", ".doc", ".odt", ".ods"))):
+            try:
+                from .repro import render as _repro_render
+                if _repro_render.renderer_available():
+                    pdf = _repro_render.render_office_to_pdf(fb, tpl.filename or "template.xlsx")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("template preview headless render failed: %s", e)
+        if pdf is None:
+            from .template_render import (render_template_pdf, SAMPLE_CONTEXT,
+                                          DEFAULT_TEMPLATE_HTML)
+            try:
+                pdf = render_template_pdf(tpl.html or DEFAULT_TEMPLATE_HTML, SAMPLE_CONTEXT)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(422, f"Couldn't render template preview: {e}")
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
         headers={"Content-Disposition": "inline; filename=template_preview.pdf"})
 
