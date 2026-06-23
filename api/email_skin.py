@@ -63,8 +63,8 @@ _THEMES = {
         "footer_border": "#e5ddd0",
         "cta_bg": "#047857",          # site --primary / .btn-primary
         "cta_text": "#ffffff",
-        "wordmark_bg": "#064e3b",     # deep-emerald grounding strip (site --primary-active)
-        "wordmark_text": "#cfe4d3",
+        "wordmark_bg": "#c3e6cb",     # soft light-green footer (matches the mint header family)
+        "wordmark_text": "#0d3b2e",   # deep emerald ink, readable on the light strip
         "chip_bg": "#fbf8f0",         # site .btn-secondary cream
         "chip_border": "#e5ddd0",
         "chip_icon_bg": "#047857",
@@ -72,6 +72,12 @@ _THEMES = {
         "link": "#047857",
         "brand": "NEPOOL Operator",
         "wordmark": "NEPOOL Operator · nepooloperator.com",
+        # HTML-only wordmark so the domain link is on-brand emerald (not the
+        # client's default-blue autolink) on the light footer. Plain `wordmark`
+        # above stays for the text/plain fallback (render_email_skin_text).
+        "wordmark_html": ('NEPOOL Operator · <a href="https://nepooloperator.com" '
+                          'style="color:#065f46;text-decoration:none;font-weight:600;">'
+                          'nepooloperator.com</a>'),
         "default_tagline": "Quarterly NEPOOL-GIS generation reports, made simple.",
         "footer_default": "Sent by NEPOOL Operator — solar accounting for the rest of us.",
         "chip_caption": "NEPOOL-GIS generation workbook",
@@ -235,7 +241,7 @@ def render_email_skin(
 {_footer}
       </td></tr>
       <tr><td bgcolor="{t["wordmark_bg"]}" style="background:{t["wordmark_bg"]};padding:14px 36px;font-family:{_FONT};font-size:11px;color:{t["wordmark_text"]};text-align:center;border-radius:0 0 10px 10px;letter-spacing:0.04em;">
-{t["wordmark"]}
+{t.get("wordmark_html") or t["wordmark"]}
       </td></tr>
     </table>
   </td></tr>
