@@ -1648,3 +1648,98 @@ def delete_invoice_template(authorization: Optional[str] = Header(default=None))
             db.delete(tpl)
             db.commit()
         return {"ok": True}
+
+
+# ─── file library — every stored file we hold for the operator ───────────────
+# A small repository for the Offtaker Invoice Generator: the operator's uploaded
+# invoice template, any uploaded billing workbooks, and captured GMP utility-bill
+# PDFs — newest first, so the UI features the latest upload. Each entry carries a
+# `download` URL the frontend fetches (with the session bearer) and opens as a blob.
+
+_BILLING_BASE = "/v1/array-operator/billing"
+
+
+@router.get("/files")
+def list_files(authorization: Optional[str] = Header(default=None)):
+    """List every stored file for this operator, newest-first."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerInvoiceTemplate, Bill, UtilityAccount
+    files: list[dict] = []
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        if tpl and tpl.file_bytes:
+            ts = tpl.updated_at or tpl.created_at
+            files.append({
+                "key": "template", "kind": "template",
+                "name": tpl.filename or "invoice template",
+                "role": "Invoice template" + (" · in use" if tpl.enabled else ""),
+                "content_type": tpl.content_type,
+                "size": len(tpl.file_bytes),
+                "uploaded_at": ts.isoformat() if ts else None,
+                "download": f"{_BILLING_BASE}/invoice-template/file",
+            })
+        subs = db.execute(select(BillingReportSubscription).where(
+            BillingReportSubscription.tenant_id == t.id,
+            BillingReportSubscription.deleted_at.is_(None))).scalars().all()
+        for s in subs:
+            if s.source_workbook:
+                files.append({
+                    "key": f"workbook-{s.id}", "kind": "workbook",
+                    "name": s.source_filename or "billing workbook.xlsx",
+                    "role": f"Billing workbook · {s.customer_name}",
+                    "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "size": len(s.source_workbook),
+                    "uploaded_at": s.updated_at.isoformat() if s.updated_at else None,
+                    "download": f"{_BILLING_BASE}/files/workbook/{s.id}",
+                })
+        bills = db.execute(
+            select(Bill, UtilityAccount.nickname)
+            .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+            .where(Bill.tenant_id == t.id, Bill.pdf_bytes.isnot(None))
+            .order_by(Bill.bill_date.desc().nullslast()).limit(24)
+        ).all()
+        for b, nick in bills:
+            per = b.bill_date.strftime("%Y-%m") if b.bill_date else "bill"
+            label = nick or f"GMP {b.account_id}"
+            ts = b.pulled_at or b.bill_date
+            files.append({
+                "key": f"gmp-{b.id}", "kind": "gmp_bill",
+                "name": f"GMP bill — {label} {per}.pdf",
+                "role": f"GMP utility bill · {label}",
+                "content_type": b.pdf_content_type or "application/pdf",
+                "size": len(b.pdf_bytes) if b.pdf_bytes else 0,
+                "uploaded_at": ts.isoformat() if ts else None,
+                "download": f"{_BILLING_BASE}/files/gmp-bill/{b.id}",
+            })
+    files.sort(key=lambda f: f.get("uploaded_at") or "", reverse=True)
+    return {"files": files, "count": len(files)}
+
+
+@router.get("/files/workbook/{sub_id}")
+def get_workbook_file(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Stream an uploaded billing workbook (inline view / download)."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        s = _get_owned(db, t.id, sub_id)
+        if not s.source_workbook:
+            raise HTTPException(404, "No workbook on file")
+        fn = "".join(c for c in (s.source_filename or "workbook.xlsx")
+                     if c.isalnum() or c in "._- ") or "workbook.xlsx"
+        return StreamingResponse(io.BytesIO(s.source_workbook),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "inline; filename=" + fn})
+
+
+@router.get("/files/gmp-bill/{bill_id}")
+def get_gmp_bill_file(bill_id: int, authorization: Optional[str] = Header(default=None)):
+    """Stream a captured GMP utility-bill PDF (inline view / download)."""
+    t = tenant_from_session(authorization)
+    from ..models import Bill
+    with SessionLocal() as db:
+        b = db.get(Bill, bill_id)
+        if not b or b.tenant_id != t.id or not b.pdf_bytes:
+            raise HTTPException(404, "No GMP bill PDF on file")
+        return StreamingResponse(io.BytesIO(b.pdf_bytes),
+            media_type=b.pdf_content_type or "application/pdf",
+            headers={"Content-Disposition": "inline; filename=gmp_bill.pdf"})
