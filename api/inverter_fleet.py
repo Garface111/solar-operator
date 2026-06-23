@@ -514,7 +514,12 @@ def _cross_tenant_live_by_serial(db, inverters: list) -> dict:
     if not serials:
         return {}
     wanted_serials = {s for _v, s in serials}
-    fresh_after = now() - _POWER_FRESH
+    # Only borrow a sibling reading that is itself genuinely CURRENT (same live
+    # window we'd trust our own capture in) — a 6h-old reading from another tenant is
+    # not "this window," and importing it is how a dead array lit up as producing.
+    # Also exclude demo/test/seed tenants so sample data never bleeds into a real
+    # fleet (the same Fronius GUIDs live in ~10 demo tenants).
+    fresh_after = now() - _POWER_LIVE_FRESH
     rows = db.execute(
         select(Inverter).where(
             Inverter.serial.in_(wanted_serials),
@@ -522,6 +527,8 @@ def _cross_tenant_live_by_serial(db, inverters: list) -> dict:
             Inverter.last_power_w.isnot(None),
             Inverter.last_power_at.isnot(None),
             Inverter.last_power_at >= fresh_after,
+            ~Inverter.tenant_id.like("ten_demo%"),
+            ~Inverter.tenant_id.like("%readonly%"),
         )
     ).scalars().all()
     best: dict[tuple, float] = {}
@@ -602,24 +609,25 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
     base = pw if pw is not None else None
     # Stored per-inverter capture fallback. Extension-captured vendors (Chint,
     # Fronius, SMA) have no live API feed — the real measured watts live in
-    # iv.last_power_w, stamped at capture time. A reading captured just now is a
-    # current instant, so trust it like a freshly polled vendor value (NOT
-    # daylight-gated) — otherwise the coordinate-less regional sun proxy blanks a
-    # genuine mid-day per-inverter reading. Only an OLDER retained capture stays
-    # daylight-gated, so a stale reading never reads "producing" at night.
-    if base is None and iv.last_power_w is not None and iv.last_power_at is not None:
-        age = now() - iv.last_power_at
-        if age <= _POWER_LIVE_FRESH:
-            base = iv.last_power_w                 # live instant — trust as-is
-        elif daylight and age <= _POWER_FRESH:
-            base = iv.last_power_w                 # retained reading — day-gated
-    # Cross-tenant upward correction (daylight only — nothing to borrow at night).
-    if daylight and borrow and iv.serial:
+    # iv.last_power_w, stamped at OUR capture time. HONESTY GATE: that value is a
+    # real "now" ONLY when we captured it within _POWER_LIVE_FRESH. An older capture
+    # is NOT live — the source may have stopped reporting hours ago while our hourly
+    # background scrape kept re-reading the SAME frozen value (the West Chester bug:
+    # data stopped at midday, yet we showed it "producing"). So a stale capture
+    # yields NO live number; the card shows "last synced Xh ago" instead of lying.
+    # (Was: an up-to-24h capture displayed as live during daylight.)
+    own_fresh = (iv.last_power_at is not None and (now() - iv.last_power_at) <= _POWER_LIVE_FRESH)
+    if base is None and iv.last_power_w is not None and own_fresh:
+        base = iv.last_power_w                     # captured just now — a live instant
+    # Cross-tenant upward correction — ONLY when THIS owner's own reading is itself
+    # fresh. The borrow exists to fix a fresh-but-bogus near-zero on a SHARED system
+    # (another tenant read the true wattage THIS window); it must never resurrect a
+    # stale/zero array by importing an unrelated tenant's older reading. Daylight
+    # only (nothing to borrow at night).
+    if daylight and borrow and iv.serial and own_fresh:
         bw = borrow.get((str(iv.vendor or "").lower(), str(iv.serial)))
         if bw is not None and (base is None or bw > base):
             return bw
-    if base is None and pw is None and not daylight:
-        return None
     return base
 
 
