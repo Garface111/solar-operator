@@ -2721,12 +2721,31 @@ def inverter_capture(
                     db.add(iv)
                     db.flush()
                 else:
-                    # Refresh source pointer; NEVER clobber owner array_id/position.
+                    # Refresh source pointer; NEVER clobber a VALID owner grouping.
                     iv.source_site_id = site.site_id
                     if iv.source_array_id is None:
                         iv.source_array_id = arr.id
                     if iv.deleted_at is not None:
                         iv.deleted_at = None
+                    # HEAL AN ORPHANED OWNER LINK. If this inverter's array is gone —
+                    # soft-deleted, missing, or in a DIFFERENT tenant (possible from
+                    # earlier cross-tenant test data) — its telemetry is live but it
+                    # never shows in the sandbox because the array it points at isn't
+                    # rendered. Re-link it to THIS capture's live array so it reappears.
+                    # A live, in-tenant array is left untouched (respect the owner's
+                    # deliberate drag-to-regroup).
+                    _cur = db.get(Array, iv.array_id) if iv.array_id else None
+                    if _cur is None or _cur.deleted_at is not None or _cur.tenant_id != tenant.id:
+                        _maxpos = db.execute(
+                            select(Inverter.position).where(
+                                Inverter.tenant_id == tenant.id,
+                                Inverter.array_id == arr.id,
+                                Inverter.deleted_at.is_(None),
+                            ).order_by(Inverter.position.desc())
+                        ).scalars().first()
+                        iv.array_id = arr.id
+                        iv.source_array_id = arr.id
+                        iv.position = (_maxpos or 0) + 1
                 iv.name = ci.name or iv.name or serial
                 iv.model = ci.model or iv.model
                 if ci.nameplate_kw is not None:
