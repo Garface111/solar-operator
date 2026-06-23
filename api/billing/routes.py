@@ -938,8 +938,19 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
                         io.BytesIO(blob), media_type=media,
                         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
                 from . import invoice as inv
-                p = (inv.render_invoice_pdf(match, tmpd / "p.pdf") if fmt == "pdf"
-                     else inv.render_invoice_xlsx(match, tmpd / "p.xlsx"))
+                p = None
+                if fmt == "pdf":
+                    # Mirror the SEND chain so the preview is exactly what gets
+                    # delivered: pixel-perfect repro → operator template → standard.
+                    from .delivery import (_render_from_repro,
+                                           _render_from_operator_template)
+                    pp = tmpd / "p.pdf"
+                    if (_render_from_repro(match, sub, pp)
+                            or _render_from_operator_template(match, sub, pp)):
+                        p = pp
+                if p is None:
+                    p = (inv.render_invoice_pdf(match, tmpd / "p.pdf") if fmt == "pdf"
+                         else inv.render_invoice_xlsx(match, tmpd / "p.xlsx"))
             else:
                 from . import summary as summ
                 p = (summ.render_summary_pdf(match, tmpd / "p.pdf") if fmt == "pdf"
