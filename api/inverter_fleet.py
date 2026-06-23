@@ -136,6 +136,14 @@ _POWER_FRESH = timedelta(hours=24)
 # "producing" at 9pm.
 _POWER_LIVE_FRESH = timedelta(minutes=15)
 
+# A captured value only counts as "live now" if the SOURCE itself reported this
+# recently — otherwise we captured a frozen value from a source that stopped (the
+# West Chester case: source stuck at midday while we kept re-scraping it). Generous
+# enough to tolerate a normal vendor reporting interval (Fronius/SMA report every
+# few-to-15 min), tight enough to catch a real stop. Only gates when we actually
+# have the source's own timestamp (source_last_data_at).
+_SOURCE_LIVE_FRESH = timedelta(hours=1)
+
 # Vendor monitoring portals — the "origin site" that sources each inverter's data.
 # Owners click an array/inverter to jump to the vendor's deep-link for analysis.
 _PORTAL_BASE = {
@@ -617,14 +625,20 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
     # yields NO live number; the card shows "last synced Xh ago" instead of lying.
     # (Was: an up-to-24h capture displayed as live during daylight.)
     own_fresh = (iv.last_power_at is not None and (now() - iv.last_power_at) <= _POWER_LIVE_FRESH)
-    if base is None and iv.last_power_w is not None and own_fresh:
+    # ...AND the SOURCE was still reporting when we captured it — a fresh capture of a
+    # source that stopped hours ago is a frozen value, not "now". Only gates when we
+    # actually have the source's own timestamp; without one, the own-capture gate
+    # stands alone (Tier-1 behavior, backward-compatible).
+    src_live = (iv.source_last_data_at is None
+                or (now() - iv.source_last_data_at) <= _SOURCE_LIVE_FRESH)
+    if base is None and iv.last_power_w is not None and own_fresh and src_live:
         base = iv.last_power_w                     # captured just now — a live instant
     # Cross-tenant upward correction — ONLY when THIS owner's own reading is itself
-    # fresh. The borrow exists to fix a fresh-but-bogus near-zero on a SHARED system
-    # (another tenant read the true wattage THIS window); it must never resurrect a
-    # stale/zero array by importing an unrelated tenant's older reading. Daylight
-    # only (nothing to borrow at night).
-    if daylight and borrow and iv.serial and own_fresh:
+    # fresh AND its source is live. The borrow exists to fix a fresh-but-bogus near-zero
+    # on a SHARED system (another tenant read the true wattage THIS window); it must
+    # never resurrect a stale/zero array by importing an unrelated tenant's older
+    # reading. Daylight only (nothing to borrow at night).
+    if daylight and borrow and iv.serial and own_fresh and src_live:
         bw = borrow.get((str(iv.vendor or "").lower(), str(iv.serial)))
         if bw is not None and (base is None or bw > base):
             return bw
@@ -841,17 +855,22 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
                 "current_power_w": _live_power_w(iv, m, daylight=daylight, borrow=borrow_live),
-                # Extension-captured vendors have no telemetry last_report; use
-                # last_power_at as a heartbeat proxy so _source_status() can flag
-                # a stale session (no daytime capture for >_EXT_SOURCE_STALE_HOURS).
+                # Freshness basis. For extension vendors prefer the SOURCE's own
+                # last-data time (source_last_data_at) — the real "is this current?"
+                # signal (Fronius LastImport / SMA reading ts) — falling back to OUR
+                # capture time (last_power_at) only when no source ts was captured
+                # (older rows, or SMA before it ships its timestamp).
                 "last_report": (
                     u.get("last_report") or m.get("last_report")
-                    or (
-                        iv.last_power_at.isoformat()
-                        if iv.last_power_at and iv.vendor in _EXT_CAPTURED_VENDORS
-                        else None
-                    )
+                    or (iv.source_last_data_at.isoformat()
+                        if iv.source_last_data_at and iv.vendor in _EXT_CAPTURED_VENDORS
+                        else (iv.last_power_at.isoformat()
+                              if iv.last_power_at and iv.vendor in _EXT_CAPTURED_VENDORS
+                              else None))
                 ),
+                # True when last_report above is the SOURCE's REAL timestamp (not the
+                # capture-time proxy) — so a stale state can read as a genuine outage.
+                "has_src_ts": bool(iv.source_last_data_at and iv.vendor in _EXT_CAPTURED_VENDORS),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,
                 "origin_url": _portal_link(iv.vendor, iv.source_site_id),
@@ -897,7 +916,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
         # from a capture gap fired falsely on every array the owner hadn't
         # re-opened lately. Married to how we actually pull: for capture-only
         # vendors a stale gap is "unpolled" (no outage banner), never "stale".
-        if _is_ext_only and src_status.get("state") == "stale":
+        # ...UNLESS we now have the source's OWN timestamp (source_last_data_at): then
+        # a stale state is a REAL source outage (the inverter stopped reporting to its
+        # vendor), so keep "stale" and show the honest outage banner like SolarEdge.
+        # Only the capture-time-proxy gap stays "unpolled".
+        _has_src_ts = any(r.get("has_src_ts") for r in inv_rows)
+        if _is_ext_only and src_status.get("state") == "stale" and not _has_src_ts:
             src_status = {**src_status, "state": "unpolled"}
 
         # ARRAY-LEVEL live power (server-computed, authoritative). Sum the

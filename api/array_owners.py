@@ -2481,6 +2481,22 @@ class InverterCaptureBody(BaseModel):
     sites: list[CaptureSite]
 
 
+def _parse_src_ts(s):
+    """Parse a SOURCE last-data timestamp (ISO string from the extension) into a
+    naive-UTC datetime, matching how last_power_at is stored. Returns None on a
+    missing/garbage value — we never fabricate a source time."""
+    if not s:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 # Vendors allowed to ingest readings this way (no usable backend API key path).
 _CAPTURE_VENDORS = {"fronius", "chint", "sma"}
 
@@ -2774,6 +2790,14 @@ def inverter_capture(
                 if ci.nameplate_kw is not None:
                     iv.nameplate_kw = ci.nameplate_kw
                 iv.last_seen_at = now()
+                # SOURCE's own last-data timestamp (Fronius LastImport / SMA reading ts):
+                # WHEN the inverter last reported to its vendor portal — the real freshness
+                # signal, kept distinct from our capture time (last_power_at). Prefer a
+                # per-inverter ts if the device carried one, else the site's. Only ever
+                # advances on a genuine source timestamp; never guessed.
+                _src_ts = _parse_src_ts(getattr(ci, "last_report", None)) or _parse_src_ts(site.last_report)
+                if _src_ts is not None:
+                    iv.source_last_data_at = _src_ts
 
                 # Live current power. PREFER the inverter's OWN reading when the
                 # portal exposed it per device (Chint commDevice.currentPower; and

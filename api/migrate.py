@@ -778,6 +778,11 @@ def main():
         for col, sql in [
             ("last_power_w",  "ALTER TABLE inverters ADD COLUMN last_power_w DOUBLE PRECISION"),
             ("last_power_at", "ALTER TABLE inverters ADD COLUMN last_power_at TIMESTAMP"),
+            # SOURCE's own last-data timestamp (Fronius LastImport, SMA reading ts) —
+            # the real freshness signal, distinct from last_power_at (OUR capture time).
+            # Lets the fleet flag a source that stopped reporting even while we keep
+            # re-scraping its frozen value (the West Chester "producing when stopped" bug).
+            ("source_last_data_at", "ALTER TABLE inverters ADD COLUMN source_last_data_at TIMESTAMP"),
         ]:
             if not column_exists(conn, "inverters", col):
                 conn.execute(text(sql))

@@ -885,6 +885,11 @@ class Inverter(Base):
     # "—" instead of implying the panels are producing hours later / at night.
     last_power_w: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_power_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # The SOURCE's own last-data timestamp (Fronius LastImport, SMA reading ts) — when
+    # the inverter last reported to ITS vendor portal. Distinct from last_power_at (when
+    # WE captured): a stale source_last_data_at means the data is frozen even if we keep
+    # re-scraping it, so freshness + live-power gating keys off this when present.
+    source_last_data_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
