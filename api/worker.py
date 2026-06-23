@@ -139,7 +139,7 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
     # the CURRENT bill's PDF bytes durably onto its bill row so auto-attach has
     # the real utility PDF for the latest period. Best-effort: never fail the
     # pull over a PDF fetch (auth/format issues surface in the result).
-    pdf_capture = _capture_current_bill_pdf(db, tenant_id, account, adapter)
+    pdf_capture = _capture_current_bill_pdf(db, tenant_id, account, adapter, jwt)
     return {
         "account": account.account_number, "nickname": account.nickname,
         "status": "ok", "source": "json",
@@ -151,16 +151,16 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
 
 
 def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
-                              adapter) -> dict:
-    """Fetch the account's CURRENT bill PDF and persist its bytes onto the most
-    recent Bill row for that account. Durable storage for auto-attach. Returns a
-    small status dict; never raises (best-effort alongside the JSON pull)."""
-    current_bill_url = (account.extra or {}).get("currentBillUrlBinary") or \
-                       (account.extra or {}).get("current_bill_url")
-    if not current_bill_url:
-        return {"saved": False, "reason": "no current_bill_url"}
-    if not hasattr(adapter, "fetch_bill_pdf"):
-        return {"saved": False, "reason": "adapter has no fetch_bill_pdf"}
+                              adapter, jwt: str | None = None) -> dict:
+    """Persist the CURRENT bill's PDF bytes onto its bill row, for auto-attach.
+
+    PRIMARY (works for EVERY account, including the managed-customer / offtaker
+    accounts whose extension capture never grabbed a per-account currentBillUrl):
+    the GMP /transactions endpoint hands a per-bill PDF link (`urlBinary`) for any
+    account the operator's JWT can see. FALLBACK: the account's own stored
+    currentBillUrl (present only for the operator's primary accounts). Best-effort
+    — never raises into the pull. Returns a small status dict."""
+    from datetime import timedelta
     # Newest bill row for this account is where the current PDF belongs.
     bill = db.execute(
         select(Bill).where(Bill.account_id == account.id)
@@ -170,6 +170,31 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
         return {"saved": False, "reason": "no bill row to attach to"}
     if bill.pdf_bytes:
         return {"saved": False, "reason": "already captured", "bill_id": bill.id}
+
+    # ── PRIMARY: transactions → urlBinary (works for managed/offtaker accounts) ──
+    if jwt and hasattr(adapter, "fetch_transactions") and hasattr(adapter, "fetch_bill_pdf_binary"):
+        try:
+            txns = adapter.fetch_transactions(
+                account.account_number, jwt,
+                datetime.utcnow() - timedelta(days=400), datetime.utcnow() + timedelta(days=1))
+            docs = sorted(
+                [t for t in txns if isinstance(t, dict) and t.get("urlBinary")],
+                key=lambda t: t.get("date") or "", reverse=True)
+            if docs:
+                data, ctype = adapter.fetch_bill_pdf_binary(docs[0]["urlBinary"])
+                bill.pdf_bytes = data
+                bill.pdf_content_type = ctype or "application/pdf"
+                return {"saved": True, "bill_id": bill.id, "bytes": len(data), "via": "transactions"}
+        except Exception:  # noqa: BLE001 — fall through to the legacy currentBillUrl path
+            pass
+
+    # ── FALLBACK: the account's own currentBillUrl (operator's primary accounts) ──
+    current_bill_url = (account.extra or {}).get("currentBillUrlBinary") or \
+                       (account.extra or {}).get("current_bill_url")
+    if not current_bill_url:
+        return {"saved": False, "reason": "no transactions doc and no current_bill_url"}
+    if not hasattr(adapter, "fetch_bill_pdf"):
+        return {"saved": False, "reason": "adapter has no fetch_bill_pdf"}
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
     safe = (account.nickname or account.account_number).replace(" ", "_").replace("/", "_")
     pdf_path = BILLS_DIR / tenant_id / f"{ts}_{account.provider}_{safe}.pdf"
@@ -184,7 +209,7 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
     bill.pdf_bytes = data
     bill.pdf_content_type = content_type or "application/pdf"
     bill.pdf_path = str(pdf_path)
-    return {"saved": True, "bill_id": bill.id, "bytes": len(data)}
+    return {"saved": True, "bill_id": bill.id, "bytes": len(data), "via": "currentBillUrl"}
 
 
 def _pull_via_pdf(db, tenant_id: str, account: UtilityAccount, adapter) -> dict:

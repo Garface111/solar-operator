@@ -326,6 +326,57 @@ def fetch_bills_json(account_number: str, jwt: str, timeout: int = 30) -> list[d
     return r.json()
 
 
+def fetch_transactions(account_number: str, jwt: str, start, end, timeout: int = 40) -> list[dict]:
+    """List an account's billing TRANSACTIONS — each carries the bill-document
+    links the GMP web app uses (`url` = Utilitec HTML redirector; `urlBinary` =
+    base64-PDF JSON). Crucially this works for EVERY account the operator's token
+    can see, INCLUDING managed customers whose extension capture never grabbed a
+    per-account currentBillUrl. Grounded on the live /transactions endpoint
+    (recovered 2026-06-23). Bearer JWT. Raises ValueError on non-200."""
+    headers = {
+        "Authorization": f"Bearer {jwt}",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://greenmountainpower.com",
+        "Referer": "https://greenmountainpower.com/",
+        "GMP-Source": "web",
+        "User-Agent": "Mozilla/5.0 (Solar Operator)",
+    }
+    sd = start.strftime("%Y-%m-%dT00:00:00-04:00") if hasattr(start, "strftime") else str(start)
+    ed = end.strftime("%Y-%m-%dT00:00:00-04:00") if hasattr(end, "strftime") else str(end)
+    url = f"{GMP_API_BASE}/api/v2/accounts/{account_number}/transactions"
+    with httpx.Client(timeout=timeout, headers=headers) as c:
+        r = c.get(url, params={"startDate": sd, "endDate": ed})
+    if r.status_code != 200:
+        raise ValueError(f"GMP transactions returned HTTP {r.status_code}")
+    data = r.json()
+    return data if isinstance(data, list) else (data.get("transactions") or data.get("items") or [])
+
+
+def fetch_bill_pdf_binary(url_binary: str, out_path: "pathlib.Path | None" = None,
+                          timeout: int = 40) -> tuple[bytes, str]:
+    """Fetch a bill PDF from a transactions `urlBinary` link. GMP's Utilitec doc
+    service returns the PDF as a base64 string wrapped in JSON; decode to bytes.
+    No GMP auth needed (the URL itself is the capability). Returns (bytes,
+    content_type). Raises on transport failure or non-PDF payload."""
+    import base64, json as _json
+    headers = {"User-Agent": "Mozilla/5.0 (Solar Operator)",
+               "Accept": "application/json, */*"}
+    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as c:
+        r = c.get(url_binary)
+        r.raise_for_status()
+    body = r.text.strip()
+    try:
+        body = _json.loads(body)            # response is a JSON string "..."
+    except (ValueError, TypeError):
+        body = body.strip('"')              # tolerate raw base64
+    data = base64.b64decode(body)
+    if data[:4] != b"%PDF":
+        raise ValueError(f"decoded {len(data)} bytes are not a PDF")
+    if out_path is not None:
+        out_path.write_bytes(data)
+    return data, "application/pdf"
+
+
 def _extract_kwh_generated(bill: dict) -> float | None:
     """Largest non-zero KWH GENERATE line item across all segments.
 
