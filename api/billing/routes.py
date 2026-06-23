@@ -1283,14 +1283,39 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         if ci.get("period_start") or ci.get("period_end"):
             period_label = f"{ci.get('period_start') or '—'} → {ci.get('period_end') or '—'}"
 
-        # Idempotent: reuse a pending draft for the same period/invoice number.
-        existing = db.execute(
+        # Idempotent + self-healing. A draft generated BEFORE the customer's
+        # first utility bill landed has invoice_number=None and no period; once
+        # the bill arrives its invoice_number/period drift to e.g. "2026-05", so
+        # the old strict `invoice_number == inv_no` match MISSED that placeholder
+        # and spawned a SECOND pending draft — a stale $0 duplicate in the
+        # approval inbox (hit live on Paul Bozuwa / HCT Sun, draft 8, hand-
+        # refreshed via a prod script). Instead, refresh THE pending draft that
+        # belongs to this period — same invoice number, same period label, or the
+        # not-yet-periodised placeholder (invoice_number NULL) — and fold any
+        # extra duplicates into one so the invariant "one pending draft per
+        # (subscription, period)" holds going forward.
+        pendings = db.execute(
             select(ReportDraft).where(
                 ReportDraft.subscription_id == sub.id,
                 ReportDraft.status == "pending",
-                ReportDraft.invoice_number == inv_no,
-            )
-        ).scalars().first()
+            ).order_by(ReportDraft.created_at.asc())
+        ).scalars().all()
+
+        def _same_period(dr: ReportDraft) -> bool:
+            if inv_no is not None and dr.invoice_number == inv_no:
+                return True            # exact period key — true idempotency
+            if dr.invoice_number is None:
+                return True            # pre-bill placeholder — adopt it now
+            if period_label is not None and dr.period_label == period_label:
+                return True            # invoice number reformatted, same period
+            return False
+
+        matches = [dr for dr in pendings if _same_period(dr)]
+        existing = matches[0] if matches else None
+        for dup in matches[1:]:        # collapse pre-existing duplicates
+            dup.status = "dismissed"
+            dup.dismissed_at = datetime.utcnow()
+
         d = existing or ReportDraft(
             tenant_id=t.id, subscription_id=sub.id,
             customer_name=sub.customer_name, status="pending")

@@ -68,6 +68,56 @@ def test_generate_draft_is_idempotent_per_period(client):
     assert len(inbox) == 1
 
 
+def test_pre_bill_null_draft_is_refreshed_not_duplicated(client):
+    """A draft created BEFORE the customer's first utility bill lands has
+    invoice_number=NULL (no period). When a bill later arrives and generate_draft
+    runs, the now-populated invoice_number must NOT spawn a second pending draft —
+    it must REFRESH the placeholder in place. (The Paul Bozuwa / HCT Sun draft-8
+    bug: a stale $0 duplicate landed in the approval inbox.)"""
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+
+    # The pre-bill placeholder: a pending draft with no period / NULL invoice_number.
+    with SessionLocal() as db:
+        ph = ReportDraft(tenant_id=tid, subscription_id=sub_id,
+                         customer_name="Norwich Fire District", status="pending",
+                         invoice_number=None, period_label=None, amount_usd=None)
+        db.add(ph)
+        db.commit()
+        ph_id = ph.id
+
+    # The first bill lands → generate the draft for the real period.
+    r = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth))
+    assert r.status_code == 200, r.text
+    d = r.json()["draft"]
+
+    # Same row, refreshed in place — and now carries the landed period's numbers.
+    assert d["id"] == ph_id
+    assert d["invoice_number"] == "2026-05"   # was NULL, now the bill's period key
+    assert d["amount_usd"] and d["amount_usd"] > 0  # no longer a stale $0 draft
+    # Exactly ONE pending draft for the subscription — not a duplicate.
+    inbox = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    assert [x["id"] for x in inbox] == [ph_id]
+
+
+def test_generate_draft_collapses_preexisting_duplicate_pendings(client):
+    """Self-heal: if duplicate pending drafts already exist for the subscription
+    (the bug's leftovers), generate_draft folds them into ONE and refreshes it,
+    leaving a single pending draft for the (subscription, period)."""
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth).json()["subscription"]["id"]
+    with SessionLocal() as db:
+        for _ in range(2):
+            db.add(ReportDraft(tenant_id=tid, subscription_id=sub_id,
+                               customer_name="Norwich Fire District",
+                               status="pending", invoice_number=None))
+        db.commit()
+    r = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth))
+    assert r.status_code == 200, r.text
+    inbox = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    assert len(inbox) == 1, inbox  # two placeholders collapsed to one
+
+
 def test_attach_gmp_pdf_then_present_on_draft(client):
     tid, auth = _make_tenant()
     sub_id = _upload(client, auth).json()["subscription"]["id"]
