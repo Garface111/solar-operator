@@ -113,15 +113,16 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
     ws = wb[sheet] if sheet in wb.sheetnames else (wb.worksheets[0] if wb.worksheets else None)
     if ws is None:
         return None
-    # 1) Write this offtaker's value into each mapped display cell (overwriting the
-    #    template's sample value / formula). Number formats render the raw values.
+    # 1) Write this offtaker's value into each mapped display cell. Mapped cells are
+    #    OFFTAKER-SPECIFIC (amount, kWh, dates…), so a field that's absent from values
+    #    is BLANKED, never left showing the template sample's number (values.get→None).
     for (r, c), token in (cell_map.get("cells") or {}).items():
-        if token in values:
-            ws.cell(row=r, column=c).value = values[token]
-    # 2) Swap the sample customer's name for the offtaker's, wherever it appears —
-    #    exact-match cells become the offtaker name; cells that merely CONTAIN it
-    #    (e.g. "Valley Village (Valley Cares, Inc)") get the name substring replaced,
-    #    so no template-sample identity leaks onto the offtaker's invoice.
+        ws.cell(row=r, column=c).value = values.get(token)
+    # 2) Swap the sample customer's name for the offtaker's. Exact-match cells become
+    #    the offtaker name unconditionally; a cell that merely CONTAINS the name (e.g.
+    #    "Valley Village (Valley Cares, Inc)") is rewritten ONLY when the name is long
+    #    enough AND dominates the cell — so a short/embedded token can't clobber an
+    #    unrelated label (e.g. "Sun" inside "HCT Sun Enterprises").
     sample = (cell_map.get("sample_name") or "").strip()
     # Match the name AND a punctuation-stripped core ("Valley Cares, Inc." vs the
     # bill-to's "(Valley Cares, Inc)") so a trailing . or ) can't defeat the swap.
@@ -133,11 +134,14 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
                 for cell in row:
                     if not isinstance(cell.value, str):
                         continue
-                    val = cell.value
-                    for v in variants:
-                        if v in val:
-                            val = (customer_name if val.strip() == v
-                                   else val.replace(v, customer_name))
+                    val, stripped = cell.value, cell.value.strip()
+                    if any(stripped == v for v in variants):           # whole cell IS the name
+                        cell.value = customer_name
+                        wrote_name = True
+                        continue
+                    for v in variants:                                  # embedded, name-dominant only
+                        if len(v) >= 6 and v in val and len(v) / max(len(stripped), 1) >= 0.5:
+                            val = val.replace(v, customer_name)
                     if val != cell.value:
                         cell.value = val
                         wrote_name = True
@@ -150,6 +154,20 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+def _references_other_sheet(formula: str, others: list) -> bool:
+    """True only if `formula` has a GENUINE cross-sheet reference to one of `others`
+    — `Sheet!…` or quoted `'Sheet'!…` with Excel's apostrophe-doubling — not a mere
+    title substring (which would false-blank an intra-sheet cell) and catching the
+    quoted/apostrophe form (which a bare-title test would miss → #REF!)."""
+    up = formula.upper()
+    for t in others:
+        if (t.upper() + "!") in up:                       # Data!A1
+            return True
+        if ("'" + t.replace("'", "''").upper() + "'!") in up:   # 'Bob''s Data'!A1
+            return True
+    return False
 
 
 def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
@@ -179,7 +197,7 @@ def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
             cached = invd[cell.coordinate].value if invd is not None else None
             if cached is not None:
                 cell.value = cached
-            elif any(t in v for t in others):       # no cache + cross-sheet ref → #REF risk
+            elif _references_other_sheet(v, others):   # no cache + real cross-sheet ref → #REF risk
                 cell.value = None
             # else: no cache, intra-sheet only → leave it (LibreOffice recalculates)
     for name in others:
@@ -189,6 +207,33 @@ def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
         wb.active = 0
     except Exception:
         pass
+
+
+def _detect_sample_leak(pdf_bytes: bytes, sample_values: dict, offtaker_values: dict):
+    """A template-SAMPLE offtaker-specific number we meant to replace must not survive
+    on the render. Returns a description if one does (and it isn't also the offtaker's
+    own value), else None. Only the MAPPED (offtaker-specific) fields are checked —
+    shared array-level figures (net rate, array meter) aren't in this set, so a
+    legitimately-shared number is never flagged. This catches the leak the Amount-Due
+    guard is blind to: an unmapped/duplicate cell frozen to the sample's $/kWh."""
+    from .verify import _pdf_lines, _parse_signed
+    lines = _pdf_lines(pdf_bytes)
+    if not lines:
+        return None
+    page = {round(n, 2) for n in _parse_signed("\n".join(lines))}
+    off = {round(float(v), 2) for v in offtaker_values.values() if isinstance(v, (int, float))}
+    for token, sv in (sample_values or {}).items():
+        if not isinstance(sv, (int, float)):
+            continue
+        s = round(float(sv), 2)
+        if abs(s) < 0.005:
+            continue
+        ov = offtaker_values.get(token)
+        if isinstance(ov, (int, float)) and round(float(ov), 2) == s:
+            continue                                   # offtaker's value coincides — fine
+        if s in page and s not in off:
+            return f"sample '{token}' value {sv} still on the render"
+    return None
 
 
 def reproduce_in_template(template_bytes: bytes, *, offtaker_match,
@@ -226,6 +271,13 @@ def reproduce_in_template(template_bytes: bytes, *, offtaker_match,
         nm = (customer_name or "").strip().lower()
         if nm and (lines is None or not any(nm in ln.lower() for ln in lines)):
             log.warning("reproduce_in_template: name %r not on render — refusing", customer_name)
+            return None
+        # Sample-leak guard: no template-sample offtaker number may survive (the
+        # amount guard only checks Amount Due — this catches a stale duplicate/second
+        # $ or kWh cell). On a leak, fall back to the standard invoice.
+        leak = _detect_sample_leak(res.pdf, _template_self_values(template_bytes, cm), values)
+        if leak:
+            log.warning("reproduce_in_template: %s — refusing (fall back to standard)", leak)
             return None
     return res
 
