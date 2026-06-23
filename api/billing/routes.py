@@ -1699,12 +1699,22 @@ def get_invoice_template_preview_pdf(authorization: Optional[str] = Header(defau
             pdf = fb                                    # already a PDF — passthrough
         elif (fb[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
               or name.endswith((".xlsx", ".xls", ".docx", ".doc", ".odt", ".ods"))):
-            try:
-                from .repro import render as _repro_render
-                if _repro_render.renderer_available():
-                    pdf = _repro_render.render_office_to_pdf(fb, tpl.filename or "template.xlsx")
-            except Exception as e:  # noqa: BLE001
-                logger.warning("template preview headless render failed: %s", e)
+            # OUR reproduction (direct-cell-write pipeline), not the raw upload — for
+            # xlsx, write a sample through the same path a real send uses so the pane
+            # shows what our engine produces. Falls back to a plain render otherwise.
+            if fb[:4] == b"PK\x03\x04":
+                try:
+                    from .repro.template_repro import reproduce_template_preview
+                    pdf = reproduce_template_preview(fb)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("template reproduction preview failed: %s", e)
+            if pdf is None:
+                try:
+                    from .repro import render as _repro_render
+                    if _repro_render.renderer_available():
+                        pdf = _repro_render.render_office_to_pdf(fb, tpl.filename or "template.xlsx")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("template preview headless render failed: %s", e)
         if pdf is None:
             from .template_render import (render_template_pdf, SAMPLE_CONTEXT,
                                           DEFAULT_TEMPLATE_HTML)

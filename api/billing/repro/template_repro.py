@@ -170,3 +170,53 @@ def reproduce_in_template(template_bytes: bytes, *, offtaker_match,
             log.warning("reproduce_in_template: name %r not on render — refusing", customer_name)
             return None
     return res
+
+
+def _template_self_values(template_bytes: bytes, cell_map: dict) -> dict:
+    """The template's OWN (internally-coherent) values at each mapped cell, read
+    data_only so formula cells yield their cached result. Used to echo a faithful,
+    self-consistent sample through the reproduction pipeline for the settings preview."""
+    from openpyxl import load_workbook
+    out: dict = {}
+    try:
+        wb = load_workbook(io.BytesIO(template_bytes), data_only=True)
+    except Exception:  # noqa: BLE001
+        return out
+    sheet = cell_map.get("sheet")
+    ws = wb[sheet] if sheet in wb.sheetnames else (wb.worksheets[0] if wb.worksheets else None)
+    if ws is not None:
+        for (r, c), token in (cell_map.get("cells") or {}).items():
+            v = ws.cell(row=r, column=c).value
+            if v is not None:
+                out[token] = v
+    try:
+        wb.close()
+    except Exception:
+        pass
+    return out
+
+
+def reproduce_template_preview(template_bytes: bytes, *,
+                               sample_name: str = "Sample Offtaker") -> Optional[bytes]:
+    """OUR reproduction of the operator's template for the settings preview — the
+    SAME direct-cell-write pipeline a real send uses, so the operator sees exactly
+    what our engine produces (and can spot any infidelity), not their raw upload.
+
+    Echoes the template's own coherent numbers (consistent with its rate labels) and
+    swaps in a clearly-sample bill-to so the pane is visibly our reconstruction.
+    Returns rendered PDF bytes, or None to fall back to a plain render."""
+    from .render import render_office_to_pdf, renderer_available
+    if not renderer_available():
+        return None
+    cm = build_template_cell_map(template_bytes)
+    if not cm:
+        return None
+    values = _template_self_values(template_bytes, cm)
+    filled = _fill_template_cells(template_bytes, cm, values, sample_name)
+    if filled is None:
+        return None
+    try:
+        return render_office_to_pdf(filled, "reproduction_preview.xlsx")
+    except Exception as e:  # noqa: BLE001
+        log.warning("reproduce_template_preview render failed: %s", e)
+        return None
