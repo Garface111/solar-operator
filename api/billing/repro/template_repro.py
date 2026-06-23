@@ -145,7 +145,10 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
                     if val != cell.value:
                         cell.value = val
                         wrote_name = True
-    # 3) Isolate to the invoice sheet: a multi-sheet upload (Data ledger, Trends, a
+    # 3) Auto-fit columns so the renderer doesn't clip overflow text (LibreOffice
+    #    font metrics ≠ Excel's; a neighbor value blocks the overflow).
+    _autofit_columns(ws)
+    # 4) Isolate to the invoice sheet: a multi-sheet upload (Data ledger, Trends, a
     #    SAMPLE tab…) must NOT render its other sheets into the invoice — and an
     #    offtaker must never receive the operator's raw ledger. Flatten the invoice
     #    sheet's formulas to the file's own cached values (so it stays self-contained
@@ -168,6 +171,55 @@ def _references_other_sheet(formula: str, others: list) -> bool:
         if ("'" + t.replace("'", "''").upper() + "'!") in up:   # 'Bob''s Data'!A1
             return True
     return False
+
+
+def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
+    """Widen columns so text the renderer would CLIP becomes visible — Excel overflows
+    a long label across empty neighbors, but LibreOffice's font metrics differ (esp.
+    for a font it lacks, e.g. the template's 'Chalkboard'), and a value in a neighbor
+    cell blocks the overflow and truncates the label (…'rate o' instead of '…rate of
+    $2,100.00'). For each text cell, estimate its rendered width; if that exceeds its
+    own column PLUS the empty columns it can overflow into (until a non-empty cell),
+    widen its column by the shortfall. Never shrinks; capped so a long free-text line
+    that legitimately overflows the page can't bloat a column. Also cures '#####'
+    (a number too wide for its column)."""
+    from openpyxl.utils import get_column_letter
+    mr = min(ws.max_row or 1, 80)
+    mc = min(ws.max_column or 1, 20)
+
+    def cw(ci):
+        d = ws.column_dimensions.get(get_column_letter(ci))
+        return d.width if d and d.width else 8.43
+
+    def occupied(r, ci):
+        v = ws.cell(row=r, column=ci).value
+        return v is not None and str(v).strip() != ""
+
+    def disp_len(v):
+        if isinstance(v, bool):
+            return 3
+        if isinstance(v, (int, float)):
+            return max(len(str(v)), len(f"{abs(v):,.2f}") + 2)   # account for $ , . formatting
+        return len(str(v))
+
+    need: dict = {}
+    for r in range(1, mr + 1):
+        for ci in range(1, mc + 1):
+            cell = ws.cell(row=r, column=ci)
+            v = cell.value
+            if v is None or (isinstance(v, str) and (not v.strip() or v.startswith("="))):
+                continue
+            size = (cell.font.size or 11) if cell.font else 11
+            est = disp_len(v) * size * factor
+            avail = cw(ci)
+            cc = ci + 1
+            while cc <= mc and not occupied(r, cc):
+                avail += cw(cc)
+                cc += 1
+            if est > avail:
+                need[ci] = max(need.get(ci, 0.0), cw(ci) + (est - avail))
+    for ci, w in need.items():
+        ws.column_dimensions[get_column_letter(ci)].width = min(w, cap)
 
 
 def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:

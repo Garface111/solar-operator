@@ -132,7 +132,23 @@ def reproduce_for_subscription(sub, period_data=None, *,
     expected = (match.computed_invoice or {}).get("amount_owed")
 
     def fill(field_map_override):
-        return populate_invoice_workbook(sub, period, field_map_override=field_map_override)
+        xb = populate_invoice_workbook(sub, period, field_map_override=field_map_override)
+        # Auto-fit columns so the renderer doesn't clip overflow text (same font-metric
+        # issue as the operator-template path). Best-effort; original on any failure.
+        try:
+            import io
+            from openpyxl import load_workbook
+            from ..matcher import find_invoice_sheet
+            from .template_repro import _autofit_columns
+            wb = load_workbook(io.BytesIO(xb))
+            ws = find_invoice_sheet(wb)
+            if ws is not None:
+                _autofit_columns(ws)
+                b = io.BytesIO(); wb.save(b)
+                return b.getvalue()
+        except Exception:  # noqa: BLE001
+            log.warning("autofit on workbook fill failed; using unfitted", exc_info=True)
+        return xb
 
     def remap(_mismatches):
         from .analyze import ai_field_map
