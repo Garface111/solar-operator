@@ -877,12 +877,20 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
         # because their last_report proxy (last_power_at) only advances during
         # production — a normal overnight gap must not trigger SOURCE OFFLINE.
         _arr_vendors = {iv.vendor for iv in ivs}
-        _stale_h = (
-            _EXT_SOURCE_STALE_HOURS
-            if _arr_vendors and _arr_vendors.issubset(_EXT_CAPTURED_VENDORS)
-            else _SOURCE_STALE_HOURS
-        )
-        src_status = _source_status(inv_rows, stale_hours=_stale_h)
+        _is_ext_only = bool(_arr_vendors) and _arr_vendors.issubset(_EXT_CAPTURED_VENDORS)
+        src_status = _source_status(inv_rows, stale_hours=_SOURCE_STALE_HOURS)
+        # "SOURCE OFFLINE" only means something for vendors we actively POLL
+        # (SolarEdge), where last_report is the SOURCE's own telemetry clock — a
+        # gap there genuinely means the site stopped reporting to its vendor.
+        # Extension-captured vendors (Fronius/SMA/Chint) are different: we only
+        # have data when the owner's browser captures it, so last_report is OUR
+        # capture time and a gap reflects how recently they logged in — NOT a
+        # source outage. We can't pull them on a schedule, so claiming "offline"
+        # from a capture gap fired falsely on every array the owner hadn't
+        # re-opened lately. Married to how we actually pull: for capture-only
+        # vendors a stale gap is "unpolled" (no outage banner), never "stale".
+        if _is_ext_only and src_status.get("state") == "stale":
+            src_status = {**src_status, "state": "unpolled"}
 
         # ARRAY-LEVEL live power (server-computed, authoritative). Sum the
         # per-inverter live readings so the card no longer has to aggregate
