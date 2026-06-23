@@ -118,15 +118,19 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
     for (r, c), token in (cell_map.get("cells") or {}).items():
         if token in values:
             ws.cell(row=r, column=c).value = values[token]
-    # 2) Swap the sample customer's name for the offtaker's, wherever it appears.
+    # 2) Swap the sample customer's name for the offtaker's, wherever it appears —
+    #    exact-match cells become the offtaker name; cells that merely CONTAIN it
+    #    (e.g. "Valley Village (Valley Cares, Inc)") get the name substring replaced,
+    #    so no template-sample identity leaks onto the offtaker's invoice.
     sample = (cell_map.get("sample_name") or "").strip()
     wrote_name = False
     if sample:
         for sh in wb.worksheets:
             for row in sh.iter_rows():
                 for cell in row:
-                    if isinstance(cell.value, str) and cell.value.strip() == sample:
-                        cell.value = customer_name
+                    if isinstance(cell.value, str) and sample in cell.value:
+                        cell.value = (customer_name if cell.value.strip() == sample
+                                      else cell.value.replace(sample, customer_name))
                         wrote_name = True
     out = io.BytesIO()
     wb.save(out)
