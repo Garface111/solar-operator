@@ -1188,7 +1188,7 @@ def _get_owned(db, tenant_id: str, sub_id: int) -> BillingReportSubscription:
 #  I go over it and approve it or modify it and then send." Nothing reaches a
 #  real customer until the operator clicks Approve & send.
 
-def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None) -> dict:
+def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=None) -> dict:
     return {
         "id": d.id,
         "subscription_id": d.subscription_id,
@@ -1203,6 +1203,12 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None) -> dict:
         "has_gmp_pdf": d.gmp_invoice_pdf is not None,
         "gmp_filename": d.gmp_filename,
         "note": d.note,
+        # Email-envelope fields so the inbox can render a FAITHFUL reproduction of
+        # the message the offtaker receives (from/to/subject + which attachments).
+        "client_email": getattr(sub, "client_email", None) if sub else None,
+        "send_mode": getattr(sub, "send_mode", None) if sub else None,
+        "include_summary": (getattr(sub, "include_summary", True) if sub else True),
+        "operator_name": operator_name,
         # Auto-attach state (resolved from the subscription when provided):
         #   auto_attach_gmp   — is the toggle on for this customer
         #   gmp_auto_status   — "ready" (a captured bill PDF will attach) |
@@ -1256,7 +1262,8 @@ def list_drafts(status: str = Query(default="pending"),
         for d in rows:
             sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
             out.append(_draft_dict(d, sub=sub,
-                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub)))
+                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub),
+                                   operator_name=getattr(t, "name", None)))
         return {"drafts": out}
 
 
