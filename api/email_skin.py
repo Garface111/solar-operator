@@ -3,10 +3,11 @@ Product-aware email skin — shared HTML/text wrapper for all outbound emails.
 
 Two brands share one backend (see models.Tenant.product / api.branding):
 
-  • NEPOOL Operator (nepooloperator.com) — LIGHT theme, mirrors the cream +
-    emerald + gold design language of the NEPOOL site/landing.
-      page #faf8f5 · card #ffffff · header #064e3b · gold underline #e6b470
-      CTA #047857 · wordmark strip #022c22
+  • NEPOOL Operator (nepooloperator.com) — LIGHT "solarpunk" theme pulled straight
+    from the live site tokens: warm cream, white cards, emerald-700, and the hero's
+    sky→mint wash on the header (was a heavy dark-emerald block).
+      page #f4f1e4 · card #ffffff · header mint #dcebda (sky→mint→cream gradient)
+      emerald accent/CTA #047857 · warm ink #2a2520 · wordmark strip #064e3b
 
   • Array Operator (arrayoperator.com) — LIGHT "day" theme (utility blue on
     cool slate), mirroring theme-day.css + the morning fleet digest.
@@ -44,22 +45,28 @@ _ARRAY = "array_operator"
 # ── Per-product design tokens ────────────────────────────────────────────────
 _THEMES = {
     "nepool": {
-        "page_bg": "#faf8f5",
+        # Pulled from the live nepooloperator.com tokens so the email reads as the
+        # SAME solarpunk-light brand: warm cream page, white cards, emerald-700
+        # primary, and the hero's sky→mint→cream wash on the header (vs the old
+        # heavy dark-emerald block). header_gradient is progressive enhancement —
+        # Gmail/Apple render the wash, Outlook falls back to the solid mint bgcolor.
+        "page_bg": "#f4f1e4",         # site --bg (warm cream, NOT pure white)
         "card_bg": "#ffffff",
-        "card_border": "#e8e2d9",
-        "header_bg": "#064e3b",
-        "header_text": "#ffffff",
-        "header_sub": "#d1fae5",
-        "accent": "#e6b470",          # gold hairline under the header
-        "body_text": "#1a2a1f",
-        "muted_text": "#6b7c6e",
-        "footer_border": "#f0ead9",
-        "cta_bg": "#047857",
+        "card_border": "#e5ddd0",     # site --border
+        "header_bg": "#dcebda",       # solarpunk mint (hero mid-band) — solid fallback
+        "header_gradient": "linear-gradient(180deg,#cfe6ef 0%,#d8ebd9 46%,#e7f1e1 100%)",
+        "header_text": "#0d3b2e",     # deep emerald ink, readable on mint
+        "header_sub": "#3f6b56",      # muted emerald
+        "accent": "#047857",          # emerald hairline under the header (site --primary)
+        "body_text": "#2a2520",       # site --fg (warm ink)
+        "muted_text": "#6b5e55",      # site --fg-muted
+        "footer_border": "#e5ddd0",
+        "cta_bg": "#047857",          # site --primary / .btn-primary
         "cta_text": "#ffffff",
-        "wordmark_bg": "#022c22",
+        "wordmark_bg": "#064e3b",     # deep-emerald grounding strip (site --primary-active)
         "wordmark_text": "#cfe4d3",
-        "chip_bg": "#f6f1e9",
-        "chip_border": "#e8e2d9",
+        "chip_bg": "#fbf8f0",         # site .btn-secondary cream
+        "chip_border": "#e5ddd0",
         "chip_icon_bg": "#047857",
         "chip_icon_text": "#ffffff",
         "link": "#047857",
@@ -217,7 +224,7 @@ def render_email_skin(
   <tr><td align="center">
     <table cellpadding="0" cellspacing="0" border="0" width="580" role="presentation"
       bgcolor="{t["card_bg"]}" style="max-width:580px;width:100%;background:{t["card_bg"]};border:1px solid {t["card_border"]};border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">
-      <tr><td bgcolor="{t["header_bg"]}" style="background:{t["header_bg"]};padding:28px 36px;border-radius:10px 10px 0 0;border-bottom:3px solid {t["accent"]};">
+      <tr><td bgcolor="{t["header_bg"]}" style="background:{t["header_bg"]};background:{t.get("header_gradient") or t["header_bg"]};padding:28px 36px;border-radius:10px 10px 0 0;border-bottom:3px solid {t["accent"]};">
         <div style="font-family:{_FONT};font-size:22px;font-weight:600;color:{t["header_text"]};line-height:1.25;letter-spacing:-0.01em;">{_headline}</div>
         <div style="font-family:{_FONT};font-size:13px;color:{t["header_sub"]};margin-top:8px;line-height:1.45;">{_tagline}</div>
       </td></tr>

@@ -113,23 +113,23 @@ def _chip(label: str, color: str, bg: str) -> str:
 
 
 def _row(left_html: str, right_html: str) -> str:
-    return (f'<tr><td style="padding:9px 0;border-bottom:1px solid #e5ebf1;'
+    return (f'<tr><td style="padding:9px 0;border-bottom:1px solid #e5ddd0;'
             f'vertical-align:top;">{left_html}</td>'
-            f'<td style="padding:9px 0;border-bottom:1px solid #e5ebf1;'
+            f'<td style="padding:9px 0;border-bottom:1px solid #e5ddd0;'
             f'text-align:right;vertical-align:top;white-space:nowrap;">{right_html}</td></tr>')
 
 
 def _client_cell(name: str, sub: str | None) -> str:
-    out = f'<strong style="color:#1f2d3d;">{_html.escape(name)}</strong>'
+    out = f'<strong style="color:#2a2520;">{_html.escape(name)}</strong>'
     if sub:
-        out += (f'<div style="color:#5a6675;font-size:13px;margin-top:2px;">'
+        out += (f'<div style="color:#6b5e55;font-size:13px;margin-top:2px;">'
                 f'{_html.escape(sub)}</div>')
     return out
 
 
 def _section_header(title: str) -> str:
     return (f'<p style="margin:22px 0 4px;font-size:13px;font-weight:700;'
-            f'letter-spacing:.02em;text-transform:uppercase;color:#33414f;">'
+            f'letter-spacing:.02em;text-transform:uppercase;color:#5b5147;">'
             f'{_html.escape(title)}</p>')
 
 
@@ -374,7 +374,7 @@ def _build_receipt_email(op_name: str, sent_date_str: str, cadences: list[str],
                 sub = f"{sub} · {it['reason']}"
             out += _row(_client_cell(it["name"], sub), _chip(chip, color, bg))
         if len(items) > _LIST_CAP:
-            out += _row(f'<span style="color:#5a6675;">+{len(items)-_LIST_CAP} more</span>', "")
+            out += _row(f'<span style="color:#6b5e55;">+{len(items)-_LIST_CAP} more</span>', "")
         out += "</table>"
         return out
 
