@@ -137,7 +137,9 @@
   // query channel Measurement.GridMs.TotW.Pv at the PLANT-level component (the
   // plantId itself) gives whole-site AC power in WATTS, 15-min buckets. The LAST
   // entry with a finite numeric value is "now". Returns a number (W) or null.
+  let _smaLastSourceTs = null;   // SMA source's last live-data timestamp (gauge ts), per plant
   async function fetchSiteLivePowerW(plantId) {
+    _smaLastSourceTs = null;
     // PRIMARY: the portal's own live-power gauge — a single clean watts number.
     // GET /api/v1/widgets/gauge/power?componentId=<plantId>&type=PvProduction
     //   -> {"value":40691,"timestamp":"...","min":0,"max":140000}  (watts)
@@ -145,7 +147,12 @@
     try {
       const g = await getJson(UIAPI + "/api/v1/widgets/gauge/power?componentId="
         + encodeURIComponent(String(plantId)) + "&type=PvProduction");
-      if (g && typeof g.value === "number" && isFinite(g.value)) return g.value;
+      if (g && typeof g.value === "number" && isFinite(g.value)) {
+        // The gauge's timestamp IS the source's last live-data time — keep it so the
+        // backend can tell fresh data from a frozen value we keep re-scraping.
+        try { const _d = new Date(g.timestamp); if (!isNaN(_d.getTime())) _smaLastSourceTs = _d.toISOString(); } catch (_) {}
+        return g.value;
+      }
     } catch (e) {
       LOG("gauge/power fetch failed, trying measurements/search:", e && e.message || e);
     }
@@ -363,6 +370,7 @@
       current_power_w: currentPowerW,
       error_count_today: inverters.filter((iv) => iv.status === "fault").length,
       status: (typeof currentPowerW === "number" && currentPowerW > 0) ? "producing" : "idle",
+      last_report: _smaLastSourceTs,              // source's last live-data time (gauge ts) — honest freshness
       daily,                                      // ~7 days site history for instant graph
       inverters,
     };
