@@ -62,15 +62,27 @@ def _fleet_name(tenant) -> str:
     )
 
 
-def _recent_kwh(col: dict) -> float | None:
-    """The array's most recent daily kWh reading, or None if it has no history.
+def _vendor_daily(col: dict) -> list:
+    """The array's VENDOR (inverter-telemetry) daily series — NOT the GMP utility
+    meter. This is an INVERTER-health digest (Bruce: "only show vendor data here"),
+    so every kWh figure reads from vendor data only. Bonus: it sidesteps the GMP
+    bill-prorate future-dated kWh that was leaking into vendor+GMP arrays. Falls
+    back to the combined `daily` only when a tree carries no split (older builds)."""
+    split = col.get("daily_split") or {}
+    v = split.get("vendor")
+    if v is not None:
+        return v
+    return col.get("daily") or []
 
-    `daily` is ascending [{date, kwh}, ...]; the last point is the freshest day.
-    Returns None (not 0.0) when there is genuinely no data, so callers can SAY
-    "no recent data" instead of printing a fabricated zero.
+
+def _recent_kwh(col: dict) -> float | None:
+    """The array's most recent VENDOR daily kWh reading, or None if no history.
+
+    Ascending [{date, kwh}, ...]; the last point is the freshest day. Returns
+    None (not 0.0) when there is genuinely no data, so callers can SAY "no recent
+    data" instead of printing a fabricated zero.
     """
-    daily = col.get("daily") or []
-    for pt in reversed(daily):
+    for pt in reversed(_vendor_daily(col)):
         kwh = pt.get("kwh")
         if kwh is not None:
             try:
@@ -81,9 +93,8 @@ def _recent_kwh(col: dict) -> float | None:
 
 
 def _recent_day(col: dict) -> str | None:
-    """The date string of the array's most recent daily reading, or None."""
-    daily = col.get("daily") or []
-    for pt in reversed(daily):
+    """The date string of the array's most recent VENDOR daily reading, or None."""
+    for pt in reversed(_vendor_daily(col)):
         if pt.get("kwh") is not None:
             return pt.get("date")
     return None
@@ -96,11 +107,24 @@ def _fmt_kwh(kwh: float | None) -> str:
     return f"{kwh:,.1f} kWh"
 
 
-def _flagged_inverters(tree: dict) -> list[dict]:
-    """Every inverter across the fleet whose status is not 'ok', with its array
-    name attached, worst-first. Drives the 'inverter flagged for attention' lines."""
+def _vendor_columns(tree: dict) -> list[dict]:
+    """Only the INVERTER (vendor) arrays — those with at least one inverter. The
+    digest is an inverter-health report, so GMP-only utility-bill arrays (zero
+    inverters) are excluded from the count, the list, and the highlights (Bruce:
+    "I only have N arrays in my sandbox … only show vendor data here")."""
+    return [c for c in tree.get("columns", []) if int(c.get("inverter_count") or 0) > 0]
+
+
+def _array_has_flag(col: dict) -> bool:
+    """True when this array contains at least one non-'ok' inverter."""
+    return any((inv.get("status") or "ok") != "ok" for inv in col.get("inverters", []))
+
+
+def _flagged_inverters(cols: list[dict]) -> list[dict]:
+    """Every inverter across the given arrays whose status is not 'ok', with its
+    array name attached, worst-first. Drives the 'inverter flagged' lines."""
     out: list[dict] = []
-    for col in tree.get("columns", []):
+    for col in cols:
         for inv in col.get("inverters", []):
             st = inv.get("status") or "ok"
             if st != "ok":
@@ -115,11 +139,11 @@ def _flagged_inverters(tree: dict) -> list[dict]:
     return out
 
 
-def _ranked_arrays(tree: dict) -> list[dict]:
+def _ranked_arrays(cols: list[dict]) -> list[dict]:
     """Arrays that have a real recent kWh reading, sorted best → worst by it.
     Arrays with no data are excluded (we never rank on an invented number)."""
     scored = []
-    for col in tree.get("columns", []):
+    for col in cols:
         kwh = _recent_kwh(col)
         if kwh is not None:
             scored.append({"col": col, "kwh": kwh})
@@ -146,10 +170,13 @@ def build_digest_html(tenant, tree: dict) -> str:
     BLUE_BG, BLUE_BORDER, BLUE_TEXT = "#eff6ff", "#bfdbfe", "#1e40af"
 
     summary = tree.get("summary", {}) or {}
-    arrays_total = int(summary.get("arrays_total", 0) or 0)
-    inverters_total = int(summary.get("inverters_total", 0) or 0)
-    attention = int(summary.get("attention", 0) or 0)
     is_daylight = bool(summary.get("is_daylight", False))
+    # VENDOR (inverter) arrays only — drop GMP-only utility-bill arrays so the
+    # counts + list match what the owner sees in their inverter sandbox.
+    cols = _vendor_columns(tree)
+    arrays_total = len(cols)
+    inverters_total = sum(int(c.get("inverter_count") or 0) for c in cols)
+    attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
 
     fleet = _html.escape(_fleet_name(tenant))
     today = datetime.now(timezone.utc).strftime("%A, %B %-d, %Y")
@@ -158,7 +185,7 @@ def build_digest_html(tenant, tree: dict) -> str:
 
     has_critical = any(
         (c.get("alert", {}) or {}).get("level") == "critical"
-        for c in tree.get("columns", [])
+        for c in cols
     )
 
     # ---- banner: blue all-clear, or amber/red attention callout -------------
@@ -224,61 +251,61 @@ def build_digest_html(tenant, tree: dict) -> str:
     )
 
     # ---- highlights ---------------------------------------------------------
+    # Bruce's rule: when inverters need attention, the digest is JUST the list of
+    # exactly which ones — no top/lowest-producer chatter, no whole-fleet table.
+    # When all-healthy, keep the richer producer highlights.
     highlight_rows: list[str] = []
-    ranked = _ranked_arrays(tree)
-    if ranked:
-        best = ranked[0]
-        highlight_rows.append(
-            f'<li style="margin:6px 0;color:{BLUE_DEEP};">'
-            f'<b>Top producer:</b> {_html.escape(best["col"].get("array_name", "Array"))}'
-            f' — {_fmt_kwh(best["kwh"])} on its latest day.</li>'
-        )
-        if len(ranked) > 1:
-            worst_a = ranked[-1]
-            highlight_rows.append(
-                f'<li style="margin:6px 0;color:{BODY};">'
-                f'<b>Lowest producer:</b> {_html.escape(worst_a["col"].get("array_name", "Array"))}'
-                f' — {_fmt_kwh(worst_a["kwh"])} on its latest day.</li>'
-            )
-    else:
-        why = "the fleet is asleep right now" if not is_daylight else "no recent daily data has landed yet"
-        highlight_rows.append(
-            f'<li style="margin:6px 0;color:{MUTED};">'
-            f'No recent production numbers to rank — {why}.</li>'
-        )
-
-    for col in tree.get("columns", []):
-        alert = col.get("alert", {}) or {}
-        level = alert.get("level", "ok")
-        if level in ("warn", "critical"):
-            color = _LEVEL_COLOR[level]
-            headline = _html.escape(alert.get("headline") or _LEVEL_LABEL[level])
+    flagged = _flagged_inverters(cols)
+    if attention > 0:
+        for fi in flagged[:12]:
+            color = _LEVEL_COLOR["critical"] if fi["rank"] >= 4 else _LEVEL_COLOR["warn"]
             highlight_rows.append(
                 f'<li style="margin:6px 0;color:{color};">'
-                f'<b>{_html.escape(col.get("array_name", "Array"))}:</b> {headline}'
-                f' ({alert.get("count", 0)} affected).</li>'
+                f'<b>{_html.escape(fi["name"])}</b> '
+                f'<span style="color:{MUTED};">({_html.escape(fi["array_name"])})</span>'
+                f' — {_html.escape(fi["phrase"])}.</li>'
             )
-
-    for fi in _flagged_inverters(tree)[:8]:
-        color = _LEVEL_COLOR["critical"] if fi["rank"] >= 4 else _LEVEL_COLOR["warn"]
-        highlight_rows.append(
-            f'<li style="margin:6px 0;color:{color};">'
-            f'<b>{_html.escape(fi["name"])}</b> '
-            f'<span style="color:{MUTED};">({_html.escape(fi["array_name"])})</span>'
-            f' — {_html.escape(fi["phrase"])}.</li>'
-        )
+        highlights_label = "Inverters needing attention"
+    else:
+        ranked = _ranked_arrays(cols)
+        if ranked:
+            best = ranked[0]
+            highlight_rows.append(
+                f'<li style="margin:6px 0;color:{BLUE_DEEP};">'
+                f'<b>Top producer:</b> {_html.escape(best["col"].get("array_name", "Array"))}'
+                f' — {_fmt_kwh(best["kwh"])} on its latest day.</li>'
+            )
+            if len(ranked) > 1:
+                worst_a = ranked[-1]
+                highlight_rows.append(
+                    f'<li style="margin:6px 0;color:{BODY};">'
+                    f'<b>Lowest producer:</b> {_html.escape(worst_a["col"].get("array_name", "Array"))}'
+                    f' — {_fmt_kwh(worst_a["kwh"])} on its latest day.</li>'
+                )
+        else:
+            why = "the fleet is asleep right now" if not is_daylight else "no recent daily data has landed yet"
+            highlight_rows.append(
+                f'<li style="margin:6px 0;color:{MUTED};">'
+                f'No recent production numbers to rank — {why}.</li>'
+            )
+        highlights_label = "Highlights"
 
     highlights = (
         f'<div style="font-size:12px;color:{FAINT};margin:0 0 9px;text-transform:uppercase;'
-        f'letter-spacing:.6px;font-weight:700;">Highlights</div>'
+        f'letter-spacing:.6px;font-weight:700;">{highlights_label}</div>'
         '<ul style="margin:0 0 22px;padding-left:20px;font-size:14px;line-height:1.55;">'
         + "".join(highlight_rows)
         + '</ul>'
     )
 
     # ---- per-array summary rows ---------------------------------------------
+    # On an attention day, show ONLY the arrays that hold a flagged inverter (the
+    # ones the flagged list points at) — not the whole fleet. All-healthy days
+    # show every vendor array. Either way: vendor arrays only.
+    table_cols = [c for c in cols if _array_has_flag(c)] if attention > 0 else cols
+    table_label = "Arrays needing attention" if attention > 0 else "Your arrays"
     arr_rows: list[str] = []
-    for col in tree.get("columns", []):
+    for col in table_cols:
         alert = col.get("alert", {}) or {}
         level = alert.get("level", "ok")
         dot = _LEVEL_COLOR.get(level, FAINT)
@@ -309,7 +336,7 @@ def build_digest_html(tenant, tree: dict) -> str:
     if arr_rows:
         per_array = (
             f'<div style="font-size:12px;color:{FAINT};margin:0 0 9px;text-transform:uppercase;'
-            f'letter-spacing:.6px;font-weight:700;">Your arrays</div>'
+            f'letter-spacing:.6px;font-weight:700;">{table_label}</div>'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{CARD}" '
             f'style="border-collapse:collapse;border:1px solid {LINE2};border-radius:12px;'
             f'overflow:hidden;margin:0 0 22px;">'
@@ -371,10 +398,12 @@ def build_digest_text(tenant, tree: dict) -> str:
     """A short plain-text fallback for the digest (mirrors the HTML's substance).
     Honest about missing data; never invents kWh."""
     summary = tree.get("summary", {}) or {}
-    attention = int(summary.get("attention", 0) or 0)
+    is_daylight = bool(summary.get("is_daylight", False))
     fleet = _fleet_name(tenant)
     today = datetime.now(timezone.utc).strftime("%A, %B %-d, %Y")
-    is_daylight = bool(summary.get("is_daylight", False))
+    # Vendor (inverter) arrays only — mirrors the HTML.
+    cols = _vendor_columns(tree)
+    attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
 
     lines = [f"Morning fleet health — {fleet}", today, ""]
     if attention == 0:
@@ -383,22 +412,29 @@ def build_digest_text(tenant, tree: dict) -> str:
         lines.append(f"{attention} inverter(s) need attention this morning.")
     lines += [
         "",
-        f"Arrays: {summary.get('arrays_total', 0)}   "
-        f"Inverters: {summary.get('inverters_total', 0)}   "
+        f"Arrays: {len(cols)}   "
+        f"Inverters: {sum(int(c.get('inverter_count') or 0) for c in cols)}   "
         f"Need attention: {attention}   "
         f"Producing now: {'yes' if is_daylight else 'asleep'}",
         "",
-        "Arrays:",
     ]
-    for col in tree.get("columns", []):
+    if attention > 0:
+        # Just the flagged inverters + the arrays that hold them.
+        lines.append("Inverters needing attention:")
+        for fi in _flagged_inverters(cols)[:12]:
+            lines.append(f"  ! {fi['name']} ({fi['array_name']}): {fi['phrase']}")
+        table_cols = [c for c in cols if _array_has_flag(c)]
+        lines += ["", "Arrays needing attention:"]
+    else:
+        table_cols = cols
+        lines.append("Arrays:")
+    for col in table_cols:
         alert = col.get("alert", {}) or {}
         state = _LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
         kwh = _recent_kwh(col)
         out = (_fmt_kwh(kwh) if kwh is not None
                else ("asleep" if not is_daylight else "no recent data"))
         lines.append(f"  - {col.get('array_name', 'Array')}: {state}, {out}")
-    for fi in _flagged_inverters(tree)[:8]:
-        lines.append(f"  ! {fi['name']} ({fi['array_name']}): {fi['phrase']}")
     lines += ["", "Open Array Operator: https://arrayoperator.com"]
     return "\n".join(lines)
 
