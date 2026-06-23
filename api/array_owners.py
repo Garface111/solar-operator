@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, time as dtime
 from types import SimpleNamespace
@@ -41,6 +42,24 @@ from .models import Inverter, InverterDaily
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
+
+
+# Devices a monitoring portal lists ALONGSIDE inverters but which are NOT inverters
+# — the SMA Energy Data Manager (model "EDMM-10" / names like "…Datamanager"),
+# Sunny Home Manager, energy meters, gateways, cluster controllers. They never
+# produce, so capturing one would add a phantom permanently-0 kW "inverter".
+_NON_INVERTER_RE = re.compile(
+    r"\bedmm\b|data\s*manager|datamanager|home\s*manager|energy\s*meter|\bmeter\b"
+    r"|webconnect|gateway|cluster\s*controller",
+    re.I,
+)
+
+
+def _is_non_inverter_device(name, model) -> bool:
+    """True when a captured 'inverter' is really a logger/meter/gateway (see above).
+    Defense-in-depth: the extension filters these at capture, but this also catches
+    payloads from older extension versions and any future portal that lists them."""
+    return bool(_NON_INVERTER_RE.search(f"{name or ''} {model or ''}"))
 
 
 def _safe_create_array(db, tenant_id, name, **kw):
@@ -2696,6 +2715,10 @@ def inverter_capture(
             for ci in (site.inverters or []):
                 serial = str(ci.serial or "").strip()
                 if not serial:
+                    continue
+                # Never persist a non-inverter device (SMA Data Manager, meter, …)
+                # as an inverter — it would show as a permanently-0 kW phantom.
+                if _is_non_inverter_device(getattr(ci, "name", None), getattr(ci, "model", None)):
                     continue
                 iv = db.execute(
                     select(Inverter).where(

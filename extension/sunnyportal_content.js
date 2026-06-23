@@ -291,6 +291,13 @@
       // qualifies if it reports live power OR today's energy OR just has an id.
       .filter((d) => {
         if (!d || d.componentType !== "Device") return false;
+        // EXCLUDE non-inverter devices SMA lists alongside inverters — the Energy
+        // Data Manager (model EDMM-10 / names like "…Datamanager"), Sunny Home
+        // Manager, energy meters, gateways. They never produce (no pvPower/energy),
+        // so the hasId fallback below would otherwise capture them AS inverters
+        // (they'd show up as a permanently-0 kW "dead" inverter).
+        const tag = `${d.product || ""} ${d.name || ""}`.toLowerCase();
+        if (/\bedmm\b|data\s*manager|datamanager|home\s*manager|energy\s*meter|\bmeter\b|webconnect|gateway|cluster\s*controller/.test(tag)) return false;
         const hasPower = typeof d.pvPower === "number";
         const hasEnergy = typeof d.totWhOutToday === "number";
         const hasId = d.serial != null || d.componentId != null;
