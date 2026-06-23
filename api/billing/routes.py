@@ -1699,6 +1699,39 @@ def get_invoice_template_preview_pdf(default: bool = False,
     their own template against our default."""
     t = tenant_from_session(authorization)
     if default:
+        # OUR default format = the REAL Array Operator invoice renderer
+        # (invoice.render_invoice_pdf — the same one a live send uses), rendered
+        # from the operator's LATEST computable offtaker so the button shows their
+        # actual latest invoice in our standard layout, not a generic token-HTML
+        # sample. (Old behavior rendered DEFAULT_TEMPLATE_HTML + SAMPLE_CONTEXT —
+        # a fake mock that never reflected the real invoice.) Falls back to that
+        # sample only when the operator has no offtaker with a computable invoice.
+        import tempfile, pathlib as _pl
+        from . import invoice as _inv
+        chosen = None
+        with SessionLocal() as db:
+            subs = db.execute(select(BillingReportSubscription).where(
+                BillingReportSubscription.tenant_id == t.id,
+                BillingReportSubscription.deleted_at.is_(None),
+            ).order_by(BillingReportSubscription.id.desc())).scalars().all()
+            for s in subs:
+                try:
+                    m = build_match(s)
+                except Exception:  # noqa: BLE001
+                    continue
+                ci = m.computed_invoice or {}
+                if m.matched and isinstance(ci.get("amount_owed"), (int, float)) and ci.get("amount_owed"):
+                    chosen = m
+                    break
+        if chosen is not None:
+            try:
+                with tempfile.TemporaryDirectory(prefix="ao-defprev-") as tmp:
+                    p = _inv.render_invoice_pdf(chosen, _pl.Path(tmp) / "default.pdf")
+                    pdf = p.read_bytes()
+                return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                    headers={"Content-Disposition": "inline; filename=default_format_preview.pdf"})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("default-format real-invoice render failed, falling back: %s", e)
         from .template_render import (render_template_pdf, SAMPLE_CONTEXT,
                                       DEFAULT_TEMPLATE_HTML)
         try:
