@@ -1185,7 +1185,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const st = await recapGetState();
     if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("chint-live: recap busy — skip tick"); return; }
     const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
-    await recaptureVendor("chint");           // resolves on capture or watchdog timeout
+    await recaptureVendor("chint", { newWindow: true });   // separate background window; resolves on capture/watchdog
     const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
     const ok = !!(after.ok && after.at && after.at !== before.at);
     const cur = (await chintLiveGet()) || { on: true, fails: 0 };
@@ -1307,23 +1307,41 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Open ONE vendor's portal in a background tab, arm the capture intent, and let
   // the existing content script do its thing. A watchdog closes the tab if the
   // capture never lands (expired session) and fires the gentle nudge.
-  async function recaptureVendor(vendor) {
+  async function recaptureVendor(vendor, opts) {
     const url = RECAP_VENDORS[vendor];
     if (!url) return;
+    const newWindow = !!(opts && opts.newWindow);
     try { await chrome.storage.local.set({ so_capture_intent: { vendor, ts: Date.now() } }); } catch (_) {}
     await new Promise((resolve) => {
-      chrome.tabs.create({ url, active: false }, async (tab) => {   // background tab — invisible
-        if (chrome.runtime.lastError || !tab) { await recapMaybeNudge(vendor); resolve(); return; }
-        await recapSetState({ running: true, vendor, tabId: tab.id, startedAt: Date.now() });
+      // Arm the watchdog + in-flight state once we have the tab id, whichever
+      // surface opened it. recapFinish closes the tab (and, for a one-tab window,
+      // the whole window) when the capture lands or the watchdog times out.
+      const armed = async (tabId) => {
+        if (tabId == null) { await recapMaybeNudge(vendor); resolve(); return; }
+        await recapSetState({ running: true, vendor, tabId, startedAt: Date.now() });
         setTimeout(async () => {
           const st = await recapGetState();
-          if (st && st.running && st.vendor === vendor && st.tabId === tab.id) {
+          if (st && st.running && st.vendor === vendor && st.tabId === tabId) {
             rlog("watchdog timeout for", vendor, "(likely expired session)");
             await recapFinish(vendor, false, []);
           }
           resolve();
         }, TAB_BUDGET_MS);
-      });
+      };
+      if (newWindow) {
+        // CHINT live-mode: refresh in a SEPARATE minimized, unfocused window so it
+        // never adds a tab to — or steals focus from — the owner's current window.
+        chrome.windows.create({ url, focused: false, state: "minimized" }, (win) => {
+          const tab = win && win.tabs && win.tabs[0];
+          if (chrome.runtime.lastError || !tab) { armed(null); return; }
+          armed(tab.id);
+        });
+      } else {
+        chrome.tabs.create({ url, active: false }, (tab) => {   // background tab in the current window
+          if (chrome.runtime.lastError || !tab) { armed(null); return; }
+          armed(tab.id);
+        });
+      }
     });
   }
 
