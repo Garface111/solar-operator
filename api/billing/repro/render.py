@@ -155,3 +155,70 @@ def render_pdf_first_page_png(pdf_bytes: bytes, dpi: int = 120) -> bytes | None:
     except Exception as e:  # noqa: BLE001
         log.warning("pymupdf render failed: %s", e)
         return None
+
+
+# Labels that mark an actual invoice page (vs a Data ledger / Trends / chart sheet).
+_INVOICE_PAGE_MARKERS = ("amount due", "amount owed", "total due", "payable to",
+                         "bill to", "invoice number", "invoice no", "remit")
+
+
+def trim_pdf_to_invoice_page(pdf_bytes: bytes, expected_amount: float | None) -> bytes:
+    """A rendered multi-SHEET workbook is a multi-page PDF (Data ledger, Trends,
+    annual True-Up…); the offtaker should receive ONLY their invoice. Keep the
+    contiguous run of pages that look like an invoice AND carry THIS invoice's
+    expected total — which excludes the Data/Trends pages (no markers) and a SEPARATE
+    annual true-up invoice (different total). Deterministic and best-effort: falls
+    back to markers-only, then to the original PDF, so it can never blank a send."""
+    try:
+        import io as _io
+        import pdfplumber
+        from pypdf import PdfReader, PdfWriter
+        from .verify import _parse_signed
+    except Exception as e:  # noqa: BLE001
+        log.warning("trim_pdf_to_invoice_page: deps unavailable (%s); leaving PDF whole", e)
+        return pdf_bytes
+    try:
+        with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+            texts = [(pg.extract_text() or "").lower() for pg in pdf.pages]
+    except Exception as e:  # noqa: BLE001
+        log.warning("trim_pdf_to_invoice_page: unreadable PDF (%s); leaving whole", e)
+        return pdf_bytes
+    if len(texts) <= 1:
+        return pdf_bytes
+
+    def markers(t: str) -> bool:
+        return any(k in t for k in _INVOICE_PAGE_MARKERS)
+
+    def amount(t: str) -> bool:
+        return expected_amount is not None and any(
+            abs(n - float(expected_amount)) <= 0.01 for n in _parse_signed(t))
+
+    keep = [i for i, t in enumerate(texts) if markers(t) and amount(t)]
+    if not keep:
+        keep = [i for i, t in enumerate(texts) if markers(t)]
+    if not keep:
+        return pdf_bytes                                 # nothing recognizable → don't trim
+    # contiguous run from the first invoice page (keeps a 2-page invoice whole, but
+    # stops before a later separate invoice that opens its own "invoice number").
+    start = keep[0]
+    run = [start]
+    for i in range(start + 1, len(texts)):
+        if i in keep or (markers(texts[i]) and "invoice number" not in texts[i]):
+            run.append(i)
+        else:
+            break
+    if len(run) == len(texts):
+        return pdf_bytes
+    try:
+        reader = PdfReader(_io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+        for i in run:
+            writer.add_page(reader.pages[i])
+        out = _io.BytesIO()
+        writer.write(out)
+        log.info("trim_pdf_to_invoice_page: %d→%d pages (kept %s)",
+                 len(texts), len(run), [i + 1 for i in run])
+        return out.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("trim_pdf_to_invoice_page: rewrite failed (%s); leaving whole", e)
+        return pdf_bytes

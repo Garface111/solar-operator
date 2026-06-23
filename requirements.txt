@@ -5,6 +5,9 @@ sqlalchemy==2.0.35
 psycopg2-binary==2.9.10
 httpx==0.27.2
 pdfplumber==0.11.4
+# Explicit (already pulled transitively by xhtml2pdf/svglib): used to trim a rendered
+# multi-sheet workbook down to just the offtaker's invoice page (repro/render.py).
+pypdf>=4.0
 openpyxl==3.1.5
 reportlab==4.2.5
 # HTML->PDF for rendering offtaker invoices in the operator's OWN uploaded format

@@ -743,7 +743,12 @@ def _render_from_repro(match, sub, out_path) -> bool:
         # (ok is True) — an unverifiable/unreadable render falls back to standard.
         res = reproduce_for_subscription(sub, period_data=match.latest_period, verify=False)
         if res.pdf and res.ok is True:
-            out_path.write_bytes(res.pdf)
+            # A multi-sheet workbook renders every sheet (Data ledger, Trends, annual
+            # True-Up); the offtaker should receive ONLY their invoice page. Trim to it
+            # deterministically by this invoice's expected total (best-effort, never blanks).
+            expected = (match.computed_invoice or {}).get("amount_owed")
+            pdf = _repro_render.trim_pdf_to_invoice_page(res.pdf, expected)
+            out_path.write_bytes(pdf)
             logger.info("repro: pixel-perfect invoice PDF for sub %s via %s "
                         "(verified, rounds=%s)", getattr(sub, "id", "?"),
                         res.backend, res.rounds)
