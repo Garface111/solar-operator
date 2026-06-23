@@ -1185,7 +1185,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const st = await recapGetState();
     if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("chint-live: recap busy — skip tick"); return; }
     const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
-    await recaptureVendor("chint", { newWindow: true, budgetMs: 60 * 1000 });   // short budget so it self-closes fast (success closes on capture ~18s)
+    await recaptureVendor("chint", { budgetMs: 60 * 1000 });   // background tab (same path as the hourly Fronius/SMA refresh) -- no separate window, no taskbar blip; self-closes on capture (~18s) or the 60s watchdog
     const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
     const ok = !!(after.ok && after.at && after.at !== before.at);
     const cur = (await chintLiveGet()) || { on: true, fails: 0 };
