@@ -1646,6 +1646,45 @@ def get_invoice_template_file(authorization: Optional[str] = Header(default=None
             headers={"Content-Disposition": "inline; filename=" + fn})
 
 
+@router.get("/invoice-template/preview.pdf")
+def get_invoice_template_preview_pdf(authorization: Optional[str] = Header(default=None)):
+    """Render the operator's stored invoice TEMPLATE to a PDF preview — their
+    actual uploaded file headless-rendered (xlsx/Word → Gotenberg; PDF passthrough),
+    falling back to the editable token-HTML with sample data. Powers the inline
+    template preview next to the template card."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerInvoiceTemplate
+    with SessionLocal() as db:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == t.id)).scalars().first()
+        if not tpl or (not tpl.file_bytes and not tpl.html):
+            raise HTTPException(404, "No invoice template on file")
+        fb = bytes(tpl.file_bytes) if tpl.file_bytes else b""
+        name = (tpl.filename or "template").lower()
+        pdf = None
+        if fb[:4] == b"%PDF":
+            pdf = fb                                    # already a PDF — passthrough
+        elif (fb[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
+              or name.endswith((".xlsx", ".xls", ".docx", ".doc", ".odt", ".ods"))):
+            try:
+                from .repro import render as _repro_render
+                if _repro_render.renderer_available():
+                    pdf = _repro_render.render_office_to_pdf(fb, tpl.filename or "template.xlsx")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("template preview headless render failed: %s", e)
+        if pdf is None:
+            # Image/HTML templates, or no renderer: render the editable token-HTML
+            # with sample data so the operator still sees a representative preview.
+            from .template_render import (render_template_pdf, SAMPLE_CONTEXT,
+                                          DEFAULT_TEMPLATE_HTML)
+            try:
+                pdf = render_template_pdf(tpl.html or DEFAULT_TEMPLATE_HTML, SAMPLE_CONTEXT)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(422, f"Couldn't render template preview: {e}")
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+        headers={"Content-Disposition": "inline; filename=template_preview.pdf"})
+
+
 @router.delete("/invoice-template")
 def delete_invoice_template(authorization: Optional[str] = Header(default=None)):
     """Remove the tenant's invoice template."""

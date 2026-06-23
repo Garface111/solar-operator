@@ -59,22 +59,28 @@ def active_backend() -> str:
     return "none"
 
 
-def render_xlsx_to_pdf(xlsx_bytes: bytes) -> bytes:
-    """Render a workbook to a single PDF, preserving the operator's exact layout.
-    Raises RenderUnavailable when no backend is configured, RenderError on failure."""
+def render_office_to_pdf(file_bytes: bytes, filename: str = "invoice.xlsx") -> bytes:
+    """Render any LibreOffice-convertible office doc (xlsx/xls/docx/doc/odt/ods…)
+    to a single PDF, preserving the original's exact layout. The filename's
+    extension tells the engine which converter to use. Raises RenderUnavailable
+    when no backend is configured, RenderError on failure."""
     if GOTENBERG_URL:
-        return _render_gotenberg(xlsx_bytes)
+        return _render_gotenberg(file_bytes, filename)
     if SOFFICE_BIN:
-        return _render_soffice(xlsx_bytes)
+        return _render_soffice(file_bytes, filename)
     raise RenderUnavailable(
         "no headless renderer configured (set GOTENBERG_URL or install libreoffice-calc)")
 
 
-def _render_gotenberg(xlsx_bytes: bytes) -> bytes:
+def render_xlsx_to_pdf(xlsx_bytes: bytes) -> bytes:
+    """Render a workbook to PDF (thin wrapper over render_office_to_pdf)."""
+    return render_office_to_pdf(xlsx_bytes, "invoice.xlsx")
+
+
+def _render_gotenberg(file_bytes: bytes, filename: str = "invoice.xlsx") -> bytes:
     import httpx
     url = f"{GOTENBERG_URL}/forms/libreoffice/convert"
-    files = {"files": ("invoice.xlsx", xlsx_bytes,
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    files = {"files": (filename, file_bytes, "application/octet-stream")}
     try:
         r = httpx.post(url, files=files, timeout=RENDER_TIMEOUT_S)
         r.raise_for_status()
@@ -85,17 +91,26 @@ def _render_gotenberg(xlsx_bytes: bytes) -> bytes:
     return r.content
 
 
-def _render_soffice(xlsx_bytes: bytes) -> bytes:
+def _safe_office_name(filename: str) -> str:
+    """A safe local filename keeping the original extension (so LibreOffice picks
+    the right converter)."""
+    ext = ("." + filename.rsplit(".", 1)[1].lower()) if "." in filename else ".xlsx"
+    if len(ext) > 6 or not ext[1:].isalnum():
+        ext = ".xlsx"
+    return "doc" + ext
+
+
+def _render_soffice(file_bytes: bytes, filename: str = "invoice.xlsx") -> bytes:
     with tempfile.TemporaryDirectory(prefix="repro-render-") as tmp:
         tmpd = pathlib.Path(tmp)
-        src = tmpd / "invoice.xlsx"
-        src.write_bytes(xlsx_bytes)
+        src = tmpd / _safe_office_name(filename)
+        src.write_bytes(file_bytes)
         # A private profile dir avoids clashing with any interactive LibreOffice.
         profile = (tmpd / "profile").as_uri()
         cmd = [
             SOFFICE_BIN, "--headless", "--nologo", "--nofirststartwizard",
             f"-env:UserInstallation={profile}",
-            "--convert-to", "pdf:calc_pdf_Export", "--outdir", str(tmpd), str(src),
+            "--convert-to", "pdf", "--outdir", str(tmpd), str(src),
         ]
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=RENDER_TIMEOUT_S)
@@ -104,7 +119,7 @@ def _render_soffice(xlsx_bytes: bytes) -> bytes:
                 f"soffice failed (rc={e.returncode}): {e.stderr.decode('utf-8','replace')[:400]}") from e
         except subprocess.TimeoutExpired as e:
             raise RenderError(f"soffice timed out after {RENDER_TIMEOUT_S}s") from e
-        out = tmpd / "invoice.pdf"
+        out = tmpd / (src.stem + ".pdf")
         if not out.exists():
             raise RenderError("soffice produced no PDF")
         return out.read_bytes()
