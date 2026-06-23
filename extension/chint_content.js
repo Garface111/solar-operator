@@ -51,6 +51,11 @@
   let siteListJson = null;                     // parsed /api/asset/site/retrieve
   const deviceJsonBySite = new Map();          // siteId -> parsed busTypeDevices
   const dailyBySite = new Map();               // siteId -> [{date,kwh}] (history backfill)
+  // serial -> last genuinely-nonzero live watts seen THIS session. Lets us OMIT a
+  // transient/partial 0 (a mid-reload blip) so the backend keeps the prior good live
+  // value instead of flashing a false "0 kW, live now" inside its 15-min fresh window.
+  // A REAL off-state (status offline/fault) keeps its 0 — only unexplained 0s are held.
+  const lastGoodPower = new Map();
 
   function tryParse(body) { try { return JSON.parse(body); } catch (_) { return null; } }
 
@@ -160,14 +165,27 @@
         const serial = String(dvc.sn || dvc.assetAlias || dvc.id || "").trim();
         if (!serial) continue;
         const powerW = num(dvc.currentPower);
+        const st = mapStatus(dvc.statusName, powerW);
+        // Honesty: don't ship a transient/partial 0 over a known-good live value.
+        // A real off-state (offline/fault) legitimately reads 0 → keep it. An
+        // unexplained 0/null while we just saw real watts is a mid-reload blip →
+        // OMIT current_power_w so the backend retains the prior good reading
+        // (its write at array_owners.py:2786 only fires when the field is present).
+        let outPower = powerW;
+        if (powerW != null && powerW > 0) {
+          lastGoodPower.set(serial, powerW);
+        } else if ((powerW == null || powerW === 0) && st !== "offline" && st !== "fault"
+                   && lastGoodPower.has(serial)) {
+          outPower = null;
+        }
         out.push({
           serial,
           name: String(dvc.assetAlias || dvc.sn || serial),
           model: dvc.model || null,
           nameplate_kw: null,
           energy_today_kwh: num(dvc.eToday),
-          current_power_w: powerW,
-          status: mapStatus(dvc.statusName, powerW),
+          current_power_w: outPower,
+          status: st,
         });
       }
     }
@@ -256,6 +274,15 @@
     const intent = await hasIntent();
     if (!intent) { lastErr = "capture not requested from Array Operator (click “Log in with Chint” there first)"; return; }
 
+    // First tick of this window: nudge the SPA to RE-FETCH its own data with its own
+    // valid per-request token (replaying the token is banned — 4010). chint_inject.js
+    // (MAIN world) does a hash-route bounce; a harmless same-route no-op if the SPA
+    // already auto-refreshes. This is what makes the silent 4-min background cycle
+    // produce FRESH readings instead of whatever the tab happened to load.
+    if (polls === 1) {
+      try { window.postMessage({ type: "SO_CHINT_FORCE_REFRESH" }, location.origin); } catch (_) {}
+    }
+
     const payload = assemble();
     if (!payload) {
       // Log the "waiting" state only once, not every tick (avoids console spam).
@@ -286,8 +313,13 @@
     // day-count, so opening a new site OR the production chart loading later both
     // change the hash and trigger a fresh emit (the chart often arrives AFTER the
     // inverters, so without the day-count the history would never ship).
+    // Quantize live watts into 250 W bands so a GENUINE production change re-emits
+    // (today's signature omits power entirely, so the live kW would never update),
+    // while raw jitter on a plateau still suppresses the emit — no POST storm against
+    // the un-rate-limited ingest endpoint.
+    const qp = (w) => (w == null ? "_" : Math.round(w / 250) * 250);
     const sig = sites.map((s) =>
-      s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh).join(",")
+      s.site_id + "|" + (s.inverters || []).map((i) => i.serial + ":" + i.energy_today_kwh + ":" + qp(i.current_power_w)).join(",")
       + "|d" + ((s.daily || []).length)
     ).join("||");
     const h = await hashString(sig);

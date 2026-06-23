@@ -721,6 +721,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               so_capture_intent: { vendor: "chint", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
+          // v1.9.53: arm CHINT live-mode (a fast 4-min background recapture that keeps
+          // live power fresh) on this explicit Connect-Chint click — the opt-in.
+          try { if (typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) { /* non-fatal */ }
         }
         // v1.9.23: GMP utility-meter PRODUCTION capture — arm the gmp intent so
         // gmp_meter_content.js reads the owner's solar generation on this explicit
@@ -1145,6 +1148,67 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   function rlog(...a) { try { console.log("[EnergyAgent/recap]", ...a); } catch (_) {} }
 
+  // ── CHINT live mode (v1.9.53) ────────────────────────────────────────────────
+  // A fast 4-min cadence layered on THIS background-tab machinery so Chint live
+  // power tracks the portal instead of freezing at the last manual capture. Opt-in:
+  // armed only by an explicit AO "Connect Chint" click. Reuses recaptureVendor /
+  // recapPost / recapFinish + the so_recap_state single-flight, so it can never race
+  // the hourly cycle. Degrades to an honest one/day reconnect nudge after repeated
+  // dead cycles (lapsed session) — never silent staleness.
+  const CHINT_LIVE_ALARM = "chint-live";
+  const CHINT_LIVE_PERIOD_MIN = 4;          // ~3.75x margin inside the backend 15-min fresh window
+  const CHINT_LIVE_KEY = "so_chint_live";   // { on, armedAt, lastOkAt, fails }
+  const CHINT_LIVE_MAX_FAILS = 6;           // ~24 min of dead cycles → disable + nudge
+  async function chintLiveGet() { const s = await chrome.storage.local.get(CHINT_LIVE_KEY); return s[CHINT_LIVE_KEY] || null; }
+  async function chintLiveSet(v) { try { await chrome.storage.local.set({ [CHINT_LIVE_KEY]: v }); } catch (_) {} }
+  async function armChintLive() {
+    await chintLiveSet({ on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
+    try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: 1 }); } catch (_) {}
+    rlog("chint live-mode ARMED — refresh every", CHINT_LIVE_PERIOD_MIN, "min via a background tab");
+  }
+  async function disarmChintLive(reason) {
+    const v = (await chintLiveGet()) || {};
+    await chintLiveSet({ ...v, on: false });
+    try { chrome.alarms.clear(CHINT_LIVE_ALARM, () => void chrome.runtime.lastError); } catch (_) {}
+    rlog("chint live-mode DISARMED:", reason || "");
+  }
+  self.__soArmChintLive = armChintLive;       // called by the OPEN_UTILITY_PORTAL chint branch
+  self.__soDisarmChintLive = disarmChintLive;
+  // One fast tick: open ONE invisible background Chint tab via the shared recapture
+  // path (arms intent, POSTs via recapPost, closes the tab), then update the fail
+  // counter from the recorded outcome (so_recap_last).
+  async function runChintLiveTick() {
+    const live = await chintLiveGet();
+    if (!live || !live.on) { try { chrome.alarms.clear(CHINT_LIVE_ALARM, () => void chrome.runtime.lastError); } catch (_) {} return; }  // self-heal zombie alarm
+    const { tenantKey } = await recapSettings();
+    if (!tenantKey) { rlog("chint-live: no tenant key — skip"); return; }
+    const st = await recapGetState();
+    if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("chint-live: recap busy — skip tick"); return; }
+    const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
+    await recaptureVendor("chint");           // resolves on capture or watchdog timeout
+    const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
+    const ok = !!(after.ok && after.at && after.at !== before.at);
+    const cur = (await chintLiveGet()) || { on: true, fails: 0 };
+    if (!cur.on) return;                       // disarmed mid-tick
+    if (ok) { await chintLiveSet({ ...cur, fails: 0, lastOkAt: Date.now() }); return; }
+    const fails = (cur.fails || 0) + 1;
+    await chintLiveSet({ ...cur, fails });
+    if (fails >= CHINT_LIVE_MAX_FAILS) {
+      rlog("chint-live:", fails, "dead cycles — disabling + nudging");
+      await disarmChintLive("max-fails");
+      await recapMaybeNudge("chint");          // honest reconnect, not silent stale
+    }
+  }
+  // Owner toggles live-mode from Array Operator.
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== "SET_CHINT_LIVE") return;
+    (async () => {
+      try { if (msg.on) await armChintLive(); else await disarmChintLive("toggle-off"); sendResponse({ ok: true, on: !!msg.on }); }
+      catch (e) { sendResponse({ ok: false, error: String(e && e.message || e) }); }
+    })();
+    return true;
+  });
+
   async function recapSettings() {
     const s = await chrome.storage.local.get([STORAGE_KEYS.TENANT_KEY, STORAGE_KEYS.ENDPOINT]);
     return {
@@ -1375,8 +1439,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     if (!tenantKey) { rlog("no tenant key — owner not connected; skip"); return; }
     const s = await chrome.storage.local.get(LAST_KEY);
     const known = s[LAST_KEY] || {};
+    // CHINT live-mode SUPERSEDES the hourly cycle for chint (its own 4-min alarm
+    // drives it) — excluding it here prevents two background tabs racing the shared
+    // so_recap_state. Fronius/SMA (and chint when live-mode is off) still ride hourly.
+    const liveOn = !!((await chintLiveGet()) || {}).on;
     const vendors = Object.keys(RECAP_VENDORS).filter(
-      (v) => Object.keys(known).length === 0 || known[v]
+      (v) => (Object.keys(known).length === 0 || known[v]) && !(v === "chint" && liveOn)
     );
     if (!vendors.length) return;
     const st = await recapGetState();
@@ -1418,6 +1486,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm && alarm.name === RECAP_ALARM) {
       runRecaptureCycle().catch((e) => rlog("cycle error", e && e.message || e));
+    } else if (alarm && alarm.name === CHINT_LIVE_ALARM) {
+      runChintLiveTick().catch((e) => rlog("chint-live error", e && e.message || e));
     }
   });
   // Kick one shortly after install/update so the bars freshen without waiting 3h.

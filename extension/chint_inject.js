@@ -68,4 +68,31 @@
     };
     L("fetch hook installed");
   } catch (e) { L("fetch hook FAILED", e && e.message); }
+
+  // ── Forced re-fetch (relayed from chint_content.js) ──────────────────────────
+  // The isolated-world content script can't make the SPA re-issue its OWN authed
+  // requests (replaying the per-request token 4010s). Here in the MAIN world we
+  // bounce the app's hash route so it re-enters and re-fetches with its valid token;
+  // the passive hooks above then observe the fresh responses. We ONLY drive the
+  // app's OWN router — we NEVER craft, replay, or modify an API request.
+  try {
+    window.addEventListener("message", function (e) {
+      if (e.source !== window || e.origin !== location.origin) return;
+      var d = e.data;
+      if (!d || d.type !== "SO_CHINT_FORCE_REFRESH") return;
+      try {
+        var ov = "#/dashboard/overview";
+        var h0 = location.hash;
+        if (h0 && h0 !== ov) {
+          location.hash = ov;                                  // leave then return → re-enter
+          setTimeout(function () { try { location.hash = h0; } catch (_) {} }, 400);
+        } else {
+          location.hash = ov + "?r=" + Date.now();             // already here → cache-bust re-enter
+          setTimeout(function () { try { location.hash = ov; } catch (_) {} }, 60);
+        }
+        L("force-refresh: hash-route bounce");
+      } catch (_) {}
+    });
+    L("force-refresh listener installed");
+  } catch (e) { L("force-refresh listener FAILED", e && e.message); }
 })();
