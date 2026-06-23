@@ -701,6 +701,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               so_capture_intent: { vendor: "fronius", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
+          try { if (typeof self.__soArmLive === "function") await self.__soArmLive("fronius"); } catch (_) { /* non-fatal */ }
         }
         // v1.9.2: same for SMA ennexOS (Sunny Portal). Not in the wipe list —
         // ride the owner's existing session.
@@ -710,6 +711,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               so_capture_intent: { vendor: "sma", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
+          try { if (typeof self.__soArmLive === "function") await self.__soArmLive("sma"); } catch (_) { /* non-fatal */ }
         }
         // v1.9.12: Chint / CPS — the real owner portal is
         // monitor.chintpowersystems.com (HAR-grounded 2026-06-16); the older
@@ -1199,6 +1201,56 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       await recapMaybeNudge("chint");          // honest reconnect, not silent stale
     }
   }
+  // -- Fronius / SMA live mode (generalized from Chint's) ----------------------
+  // Same opt-in fast-refresh pattern as Chint, armed on an explicit "Connect" click,
+  // so Fronius/SMA live power tracks the portal instead of freezing between hourly
+  // recaptures. A 10-min cadence (vs Chint's 4) keeps a capture inside the backend's
+  // live window without hammering the portal. Degrades to a one/day reconnect nudge
+  // after repeated dead cycles (lapsed session) -- never silent staleness. Reuses the
+  // shared recaptureVendor / recapPost / recapFinish + so_recap_state single-flight.
+  const LIVE_PERIOD_MIN = { fronius: 10, sma: 10 };
+  const LIVE_MAX_FAILS = 6;
+  const _liveKey = (v) => "so_live_" + v;
+  async function liveGet(v) { const k = _liveKey(v); const s = await chrome.storage.local.get(k); return s[k] || null; }
+  async function liveSet(v, val) { try { await chrome.storage.local.set({ [_liveKey(v)]: val }); } catch (_) {} }
+  async function armLive(vendor) {
+    if (!RECAP_VENDORS[vendor] || !LIVE_PERIOD_MIN[vendor]) return;
+    const per = LIVE_PERIOD_MIN[vendor];
+    await liveSet(vendor, { on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
+    try { chrome.alarms.create("live-" + vendor, { periodInMinutes: per, delayInMinutes: 1 }); } catch (_) {}
+    rlog(vendor, "live-mode ARMED -- refresh every", per, "min via a background tab");
+  }
+  async function disarmLive(vendor, reason) {
+    const v = (await liveGet(vendor)) || {};
+    await liveSet(vendor, { ...v, on: false });
+    try { chrome.alarms.clear("live-" + vendor, () => void chrome.runtime.lastError); } catch (_) {}
+    rlog(vendor, "live-mode DISARMED:", reason || "");
+  }
+  self.__soArmLive = armLive;     // fronius/sma connect-arm calls this
+  self.__soDisarmLive = disarmLive;
+  async function runLiveTick(vendor) {
+    const live = await liveGet(vendor);
+    if (!live || !live.on) { try { chrome.alarms.clear("live-" + vendor, () => void chrome.runtime.lastError); } catch (_) {} return; }
+    const { tenantKey } = await recapSettings();
+    if (!tenantKey) { rlog(vendor + "-live: no tenant key -- skip"); return; }
+    const st = await recapGetState();
+    if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog(vendor + "-live: recap busy -- skip tick"); return; }
+    const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
+    await recaptureVendor(vendor, { budgetMs: 60 * 1000 });
+    const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
+    const ok = !!(after.ok && after.at && after.at !== before.at);
+    const cur = (await liveGet(vendor)) || { on: true, fails: 0 };
+    if (!cur.on) return;
+    if (ok) { await liveSet(vendor, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
+    const fails = (cur.fails || 0) + 1;
+    await liveSet(vendor, { ...cur, fails });
+    if (fails >= LIVE_MAX_FAILS) {
+      rlog(vendor + "-live:", fails, "dead cycles -- disabling + nudging");
+      await disarmLive(vendor, "max-fails");
+      await recapMaybeNudge(vendor);
+    }
+  }
+
   // Owner toggles live-mode from Array Operator.
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || msg.type !== "SET_CHINT_LIVE") return;
@@ -1469,9 +1521,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // CHINT live-mode SUPERSEDES the hourly cycle for chint (its own 4-min alarm
     // drives it) — excluding it here prevents two background tabs racing the shared
     // so_recap_state. Fronius/SMA (and chint when live-mode is off) still ride hourly.
-    const liveOn = !!((await chintLiveGet()) || {}).on;
+    const chintLiveOn = !!((await chintLiveGet()) || {}).on;
+    const _fsLiveOn = { fronius: !!((await liveGet("fronius")) || {}).on, sma: !!((await liveGet("sma")) || {}).on };
     const vendors = Object.keys(RECAP_VENDORS).filter(
-      (v) => (Object.keys(known).length === 0 || known[v]) && !(v === "chint" && liveOn)
+      (v) => (Object.keys(known).length === 0 || known[v])
+        && !(v === "chint" && chintLiveOn) && !_fsLiveOn[v]
     );
     if (!vendors.length) return;
     const st = await recapGetState();
@@ -1515,6 +1569,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       runRecaptureCycle().catch((e) => rlog("cycle error", e && e.message || e));
     } else if (alarm && alarm.name === CHINT_LIVE_ALARM) {
       runChintLiveTick().catch((e) => rlog("chint-live error", e && e.message || e));
+    } else if (alarm && alarm.name === "live-fronius") {
+      runLiveTick("fronius").catch((e) => rlog("fronius-live error", e && e.message || e));
+    } else if (alarm && alarm.name === "live-sma") {
+      runLiveTick("sma").catch((e) => rlog("sma-live error", e && e.message || e));
     }
   });
   // Kick one shortly after install/update so the bars freshen without waiting 3h.
