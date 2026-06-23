@@ -1185,7 +1185,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const st = await recapGetState();
     if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("chint-live: recap busy — skip tick"); return; }
     const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
-    await recaptureVendor("chint", { newWindow: true });   // separate background window; resolves on capture/watchdog
+    await recaptureVendor("chint", { newWindow: true, budgetMs: 60 * 1000 });   // short budget so it self-closes fast (success closes on capture ~18s)
     const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
     const ok = !!(after.ok && after.at && after.at !== before.at);
     const cur = (await chintLiveGet()) || { on: true, fails: 0 };
@@ -1298,7 +1298,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const st = await recapGetState();
     await recapRecordLast(vendor, ok, sites);
     if (!ok) await recapMaybeNudge(vendor);
-    if (st && typeof st.tabId === "number") {
+    // Close the recap surface the instant we're done. For a separate background
+    // window (chint live-mode) remove the WHOLE window so it can't linger as an
+    // empty/minimized frame; otherwise just the background tab. (Ford: it must
+    // delete itself when done -- not pop up and stick around.)
+    if (st && typeof st.windowId === "number") {
+      try { chrome.windows.remove(st.windowId, () => void chrome.runtime.lastError); } catch (_) {}
+    } else if (st && typeof st.tabId === "number") {
       try { chrome.tabs.remove(st.tabId, () => void chrome.runtime.lastError); } catch (_) {}
     }
     await recapClearState();
@@ -1311,14 +1317,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const url = RECAP_VENDORS[vendor];
     if (!url) return;
     const newWindow = !!(opts && opts.newWindow);
+    const budgetMs = (opts && typeof opts.budgetMs === "number") ? opts.budgetMs : TAB_BUDGET_MS;
     try { await chrome.storage.local.set({ so_capture_intent: { vendor, ts: Date.now() } }); } catch (_) {}
     await new Promise((resolve) => {
       // Arm the watchdog + in-flight state once we have the tab id, whichever
       // surface opened it. recapFinish closes the tab (and, for a one-tab window,
       // the whole window) when the capture lands or the watchdog times out.
-      const armed = async (tabId) => {
+      const armed = async (tabId, windowId) => {
         if (tabId == null) { await recapMaybeNudge(vendor); resolve(); return; }
-        await recapSetState({ running: true, vendor, tabId, startedAt: Date.now() });
+        await recapSetState({ running: true, vendor, tabId, windowId: (typeof windowId === "number" ? windowId : null), startedAt: Date.now() });
         setTimeout(async () => {
           const st = await recapGetState();
           if (st && st.running && st.vendor === vendor && st.tabId === tabId) {
@@ -1326,15 +1333,17 @@ chrome.runtime.onInstalled.addListener(async (details) => {
             await recapFinish(vendor, false, []);
           }
           resolve();
-        }, TAB_BUDGET_MS);
+        }, budgetMs);
       };
       if (newWindow) {
-        // CHINT live-mode: refresh in a SEPARATE minimized, unfocused window so it
-        // never adds a tab to — or steals focus from — the owner's current window.
-        chrome.windows.create({ url, focused: false, state: "minimized" }, (win) => {
+        // CHINT live-mode: refresh in a SEPARATE minimized, unfocused popup window so
+        // it never steals focus or adds a tab to the owner's window -- as close to
+        // invisible as MV3 allows. recapFinish removes the WHOLE window the instant
+        // capture lands (or the short watchdog fires), so it self-deletes.
+        chrome.windows.create({ url, focused: false, state: "minimized", type: "popup" }, (win) => {
           const tab = win && win.tabs && win.tabs[0];
-          if (chrome.runtime.lastError || !tab) { armed(null); return; }
-          armed(tab.id);
+          if (chrome.runtime.lastError || !win || !tab) { armed(null); return; }
+          armed(tab.id, win.id);
         });
       } else {
         chrome.tabs.create({ url, active: false }, (tab) => {   // background tab in the current window
