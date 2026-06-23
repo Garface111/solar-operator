@@ -678,6 +678,47 @@ def _render_from_operator_template(match, sub, out_path) -> bool:
         return False
 
 
+def _render_from_operator_template_repro(match, sub, out_path) -> bool:
+    """Pixel-perfect path for offtakers WITHOUT their own workbook: reproduce the
+    invoice in the operator's ENABLED Excel template — write THIS offtaker's
+    computed values into the template's mapped display cells + swap their name, and
+    headless-render (Gotenberg). FAIL-CLOSED on amount + identity (template_repro),
+    so a mismatched fill falls back instead of mailing the template's sample numbers.
+    Gated on REPRO_ENABLED + an enabled xlsx template + a renderer. Never raises."""
+    if sub is None or getattr(sub, "source_workbook", None):
+        return False                                  # workbook offtakers: _render_from_repro handles
+    try:
+        from ..db import SessionLocal
+        from .repro import repro_enabled
+        if not repro_enabled():
+            return False
+        from .repro import render as _repro_render
+        if not _repro_render.renderer_available():
+            return False
+        from ..models import OfftakerInvoiceTemplate
+        from .repro.template_repro import reproduce_in_template
+        with SessionLocal() as db:
+            tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+                OfftakerInvoiceTemplate.tenant_id == sub.tenant_id)).scalars().first()
+            if not tpl or not tpl.enabled or not tpl.file_bytes:
+                return False
+            fb = bytes(tpl.file_bytes)
+        if fb[:4] != b"PK\x03\x04":                   # xlsx only (PDF/Word/HTML → token-HTML path)
+            return False
+        name = ((match.customer or {}).get("name")
+                or getattr(sub, "customer_name", None) or "Offtaker")
+        res = reproduce_in_template(fb, offtaker_match=match, customer_name=name)
+        if res and res.pdf and res.ok is True:
+            out_path.write_bytes(res.pdf)
+            logger.info("repro: pixel-perfect operator-template invoice for sub %s",
+                        getattr(sub, "id", "?"))
+            return True
+        return False
+    except Exception:  # noqa: BLE001 — never break a send
+        logger.exception("operator-template repro failed; falling back")
+        return False
+
+
 def _render_from_repro(match, sub, out_path) -> bool:
     """Pixel-perfect path: fill the operator's OWN workbook for this period and
     render it to PDF with the headless engine (Gotenberg). It IS their file, so
@@ -734,11 +775,13 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
         inv_pdf = out_dir / f"{stem}_invoice.pdf"
         # Invoice PDF, best fidelity first, each step falling back to the next so a
         # failure never breaks a send:
-        #   1. repro — fill their OWN workbook + headless-render (pixel-perfect;
-        #      flagged, workbook subs only);
-        #   2. operator token-HTML template (when they've enabled one);
-        #   3. the standard branded PDF.
+        #   1. repro — fill their OWN workbook + headless-render (workbook subs);
+        #   2. operator-template repro — write this offtaker's values into the
+        #      operator's ENABLED xlsx template + headless-render (non-workbook subs);
+        #   both pixel-perfect, flagged, fail-closed.
+        #   3. operator token-HTML template; 4. the standard branded PDF.
         if not (_render_from_repro(match, sub, inv_pdf)
+                or _render_from_operator_template_repro(match, sub, inv_pdf)
                 or _render_from_operator_template(match, sub, inv_pdf)):
             invoice_mod.render_invoice_pdf(match, inv_pdf, invoice_date=invoice_date)
         paths.append(inv_pdf)
