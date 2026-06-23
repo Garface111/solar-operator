@@ -71,7 +71,8 @@ class InvoiceWriterError(Exception):
 
 # ─── public entry point ─────────────────────────────────────────────────────
 
-def populate_invoice_workbook(sub, period_data: Optional[Union[Period, dict]] = None) -> bytes:
+def populate_invoice_workbook(sub, period_data: Optional[Union[Period, dict]] = None,
+                              *, field_map_override: Optional[dict] = None) -> bytes:
     """Return .xlsx bytes of the customer's OWN workbook, populated for a period.
 
     `sub` is a BillingReportSubscription. `period_data` selects the month to
@@ -98,7 +99,10 @@ def populate_invoice_workbook(sub, period_data: Optional[Union[Period, dict]] = 
 
     parsed = sub.parsed_map or {}
     data_sheet = parsed.get("data_sheet") or match.data_sheet
-    field_map: dict[str, int] = parsed.get("field_map") or match.field_map or {}
+    # field_map_override lets the repro refine loop re-fill with an AI-corrected
+    # column map when the verify guard found the numbers landed wrong.
+    field_map: dict[str, int] = (field_map_override
+                                 or parsed.get("field_map") or match.field_map or {})
     if not data_sheet or "month" not in field_map:
         raise InvoiceWriterError(
             "stored workbook structure is incomplete (no ledger sheet / column map)"

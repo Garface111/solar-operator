@@ -62,12 +62,30 @@ def test_pipeline_degrades_without_renderer(monkeypatch):
     monkeypatch.setattr(R, "GOTENBERG_URL", None)
     monkeypatch.setattr(R, "SOFFICE_BIN", None)
     xlsx = _sample_xlsx()
-    res = reproduce_invoice(lambda: xlsx, verify=False)
+    res = reproduce_invoice(lambda _ov=None: xlsx, verify=False)
     assert isinstance(res, ReproResult)
     assert res.xlsx == xlsx
     assert res.pdf is None
+    assert res.ok is None                   # nothing to verify without a renderer
     assert res.deliverable == xlsx          # falls back to the .xlsx
     assert res.verdict.skipped
+
+
+def test_numeric_guard_graceful():
+    from api.billing.repro.verify import amount_present, extract_pdf_numbers
+    assert amount_present(b"not a pdf", expected=5.20) is True   # unreadable → don't block
+    assert amount_present(b"anything", expected=None) is True    # nothing to check
+    assert extract_pdf_numbers(b"not a pdf") == []
+
+
+def test_refine_filler_receives_override(monkeypatch):
+    # No renderer → ok=None, so the loop returns round 1 and the filler is called
+    # once with override=None. Proves the 1-arg filler contract.
+    monkeypatch.setattr(R, "GOTENBERG_URL", None)
+    monkeypatch.setattr(R, "SOFFICE_BIN", None)
+    seen = []
+    reproduce_invoice(lambda ov=None: (seen.append(ov), _sample_xlsx())[1], verify=False)
+    assert seen == [None]
 
 
 def test_verify_skips_without_png_or_key():

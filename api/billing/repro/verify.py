@@ -15,13 +15,54 @@ never blocks delivery.
 """
 from __future__ import annotations
 
+import io
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .llm import call_json, llm_available
 
 log = logging.getLogger(__name__)
+
+
+# ─── deterministic numeric guard (no AI, no reference) ───────────────────────
+# The hard correctness gate: extract the rendered invoice's numbers and confirm
+# the expected Amount Due is actually printed on it. If a column was mismapped,
+# the total won't appear where we expect — so this catches a bad fill BEFORE it
+# is ever attached, and the send path falls back to the standard invoice.
+
+_NUM_RE = re.compile(r"-?\$?\s?([0-9][0-9,]*(?:\.[0-9]+)?)")
+
+
+def extract_pdf_numbers(pdf_bytes: bytes) -> list[float]:
+    """All numeric tokens in a PDF's text (commas stripped). Empty on failure."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+    except Exception as e:  # noqa: BLE001
+        log.warning("extract_pdf_numbers failed: %s", e)
+        return []
+    out: list[float] = []
+    for m in _NUM_RE.finditer(text):
+        try:
+            out.append(float(m.group(1).replace(",", "")))
+        except ValueError:
+            continue
+    return out
+
+
+def amount_present(pdf_bytes: bytes, expected: Optional[float], tol: float = 0.01) -> bool:
+    """Is the expected Amount Due actually printed on the rendered invoice?
+    True (pass) when expected is None (nothing to check) or the value appears
+    within `tol`. False means the fill is suspect — don't ship this render."""
+    if expected is None:
+        return True
+    nums = extract_pdf_numbers(pdf_bytes)
+    if not nums:
+        return True  # can't read the PDF text → don't block on the numeric guard
+    return any(abs(n - float(expected)) <= tol for n in nums)
 
 VERDICT_SCHEMA = {
     "type": "object",

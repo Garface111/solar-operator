@@ -1,16 +1,21 @@
 """
-Repro pipeline — fill → render → verify, with a refine hook.
+Repro pipeline — fill → render → VERIFY → refine.
 
-reproduce_invoice() is renderer/AI-agnostic: give it a `xlsx_filler` (a callable
-that returns the filled workbook bytes) and it renders to PDF/PNG and verifies.
-reproduce_for_subscription() wires the filler to the proven pixel-exact fill
-(invoice_writer.populate_invoice_workbook), so the common case is one call.
+The fill is deterministic and pixel-exact (it IS the operator's file), so the
+thing that can still go wrong is a MISMAPPED column: the right layout with a
+number in the wrong place. The verify loop guards exactly that:
 
-The deterministic fill means a single round is usually enough — the numbers come
-straight from the period data, not from the model. The refine loop exists for the
-case the VERIFY step finds a structural miss (a column mapped to the wrong cell):
-the hook can re-derive the field_map (repro.analyze) and re-fill. Wired as a
-1-round default now; the loop body is where that correction lands next.
+  1. fill the workbook (optionally with an AI-corrected column map),
+  2. headless-render to PDF,
+  3. VERIFY — a deterministic numeric guard (is the expected Amount Due actually
+     printed on it?) plus, when enabled, an AI vision check for visible breakage,
+  4. if the guard fails and a remap is available, re-derive the column map and
+     loop (bounded rounds); else stop.
+
+`reproduce_invoice` returns ReproResult.ok: True (verified), False (verification
+FAILED — caller should not ship this render), or None (couldn't verify, e.g. no
+renderer). The send path attaches the pixel PDF only when ok is not False, so a
+bad map falls back to the standard invoice instead of mailing wrong numbers.
 """
 from __future__ import annotations
 
@@ -19,66 +24,121 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from . import render
-from .verify import Verdict, ai_verify
+from .verify import Verdict, ai_verify, amount_present
 
 log = logging.getLogger(__name__)
+
+# fill(field_map_override|None) -> xlsx bytes
+Filler = Callable[[Optional[dict]], bytes]
+# remap(mismatches) -> a corrected field_map, or None when no remap is possible
+Remapper = Callable[[list], Optional[dict]]
 
 
 @dataclass
 class ReproResult:
-    xlsx: bytes                       # the filled workbook — pixel-exact (it IS their file)
-    pdf: Optional[bytes]              # rendered PDF, or None when no renderer is configured
-    png: Optional[bytes]             # first-page PNG (for verify / preview), best-effort
-    verdict: Verdict                 # AI fidelity check (verdict.skipped when not run)
-    backend: str                     # 'gotenberg' | 'soffice' | 'none'
-    rounds: int                      # refine rounds taken
+    xlsx: bytes
+    pdf: Optional[bytes]
+    png: Optional[bytes]
+    verdict: Verdict
+    backend: str
+    rounds: int
+    ok: Optional[bool]                # True verified · False failed · None unverifiable
+    numeric_ok: Optional[bool] = None
 
     @property
     def deliverable(self) -> bytes:
-        """What to actually send: the rendered PDF when we have one, else the
-        .xlsx itself (still their exact format — just not flattened to PDF)."""
+        """The PDF when we have one, else the .xlsx (still their exact format)."""
         return self.pdf if self.pdf else self.xlsx
 
 
-def reproduce_invoice(xlsx_filler: Callable[[], bytes], *,
+def reproduce_invoice(fill: Filler, *,
+                      expected_amount: Optional[float] = None,
                       reference_png: Optional[bytes] = None,
                       verify: bool = True,
-                      max_rounds: int = 1) -> ReproResult:
-    """Fill → render → verify. Never raises on a render/verify gap — it degrades
-    (no PDF, skipped verdict) so a caller can still deliver the .xlsx."""
-    xlsx = xlsx_filler()
-    pdf: Optional[bytes] = None
-    png: Optional[bytes] = None
-    backend = render.active_backend()
-    rounds = 1
+                      remap: Optional[Remapper] = None,
+                      max_rounds: int = 2) -> ReproResult:
+    """Fill → render → verify, refining the column map up to max_rounds when the
+    numeric guard fails. Never raises on a render/verify gap — degrades to a
+    .xlsx-only result with ok=None."""
+    override: Optional[dict] = None
+    result: Optional[ReproResult] = None
 
-    if render.renderer_available():
+    for rnd in range(1, max_rounds + 1):
+        xlsx = fill(override)
+        backend = render.active_backend()
+        pdf: Optional[bytes] = None
+        png: Optional[bytes] = None
+        if render.renderer_available():
+            try:
+                pdf = render.render_xlsx_to_pdf(xlsx)
+                png = render.render_pdf_first_page_png(pdf)
+            except render.RenderError as e:
+                log.warning("repro render failed (%s): %s", backend, e)
+
+        # Deterministic guard (cheap, always on when we have a PDF + expectation).
+        numeric_ok: Optional[bool] = None
+        if pdf is not None and expected_amount is not None:
+            numeric_ok = amount_present(pdf, expected_amount)
+
+        # AI vision check (optional, informational; only when asked + a PNG).
+        verdict = Verdict(ok=None, summary="verification not requested")
+        if verify and png is not None:
+            verdict = ai_verify(png, reference_png)
+
+        # Overall: fail only on a hard signal (numeric guard False, or AI says no).
+        if pdf is None:
+            ok: Optional[bool] = None                      # nothing to verify
+        elif numeric_ok is False or verdict.ok is False:
+            ok = False
+        elif numeric_ok is True or verdict.ok is True:
+            ok = True
+        else:
+            ok = None                                      # rendered but nothing to check against
+
+        result = ReproResult(xlsx=xlsx, pdf=pdf, png=png, verdict=verdict,
+                             backend=backend, rounds=rnd, ok=ok, numeric_ok=numeric_ok)
+
+        if ok is not False or pdf is None:
+            return result                                   # accept / unverifiable → done
+
+        # Refine: ask for a corrected column map and re-fill next round.
+        if not remap or rnd >= max_rounds:
+            break
         try:
-            pdf = render.render_xlsx_to_pdf(xlsx)
-            png = render.render_pdf_first_page_png(pdf)
-        except render.RenderError as e:
-            log.warning("repro render failed (%s); delivering .xlsx: %s", backend, e)
-    else:
-        log.info("repro: no renderer configured; delivering .xlsx only")
+            new_override = remap(verdict.mismatches)
+        except Exception as e:  # noqa: BLE001
+            log.warning("repro remap failed: %s", e)
+            new_override = None
+        if not new_override or new_override == override:
+            break
+        log.info("repro: verify failed (round %d); refining column map and retrying", rnd)
+        override = new_override
 
-    verdict = Verdict(ok=None, summary="verification not requested")
-    if verify:
-        verdict = ai_verify(png, reference_png)
-
-    # Refine hook: when verify finds a STRUCTURAL miss (not just a number), a
-    # future round re-derives the field_map from verdict.mismatches and re-fills.
-    # The fill is deterministic from data, so we don't loop on numeric noise.
-    # (Left as a single round until the remap-from-verdict path is built.)
-    return ReproResult(xlsx=xlsx, pdf=pdf, png=png, verdict=verdict,
-                       backend=backend, rounds=rounds)
+    return result  # type: ignore[return-value]
 
 
 def reproduce_for_subscription(sub, period_data=None, *,
                                reference_png: Optional[bytes] = None,
                                verify: bool = True) -> ReproResult:
-    """Reproduce the invoice for a billing subscription using its stored workbook
-    (the pixel-exact fill), then render + verify."""
+    """Reproduce the invoice for a billing subscription from its stored workbook,
+    with the numeric guard + AI refine wired in."""
     from ..invoice_writer import populate_invoice_workbook
-    return reproduce_invoice(
-        lambda: populate_invoice_workbook(sub, period_data),
-        reference_png=reference_png, verify=verify)
+    from ..delivery import build_match
+
+    match = build_match(sub)
+    period = period_data if period_data is not None else match.latest_period
+    expected = (match.computed_invoice or {}).get("amount_owed")
+
+    def fill(field_map_override):
+        return populate_invoice_workbook(sub, period, field_map_override=field_map_override)
+
+    def remap(_mismatches):
+        from .analyze import ai_field_map
+        wb = getattr(sub, "source_workbook", None)
+        if not wb:
+            return None
+        r = ai_field_map(bytes(wb))
+        return r.get("field_map") if r else None
+
+    return reproduce_invoice(fill, expected_amount=expected,
+                             reference_png=reference_png, verify=verify, remap=remap)
