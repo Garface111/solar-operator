@@ -678,6 +678,37 @@ def _render_from_operator_template(match, sub, out_path) -> bool:
         return False
 
 
+def _render_from_repro(match, sub, out_path) -> bool:
+    """Pixel-perfect path: fill the operator's OWN workbook for this period and
+    render it to PDF with the headless engine (Gotenberg). It IS their file, so
+    the PDF matches their format down to the pixel.
+
+    Gated on REPRO_ENABLED and workbook subscriptions (a stored source_workbook);
+    requires a configured renderer. NEVER raises — returns False so the caller
+    falls back to the operator-template / standard invoice and a render outage or
+    odd workbook can't break a send."""
+    try:
+        from .repro import repro_enabled
+        if not repro_enabled():
+            return False
+        if sub is None or not getattr(sub, "source_workbook", None):
+            return False
+        from .repro import render as _repro_render
+        if not _repro_render.renderer_available():
+            return False
+        from .repro.pipeline import reproduce_for_subscription
+        res = reproduce_for_subscription(sub, period_data=match.latest_period, verify=False)
+        if res.pdf:
+            out_path.write_bytes(res.pdf)
+            logger.info("repro: rendered pixel-perfect invoice PDF for sub %s via %s",
+                        getattr(sub, "id", "?"), res.backend)
+            return True
+        return False
+    except Exception:  # noqa: BLE001 — never break a send
+        logger.exception("repro render failed; falling back to template/standard invoice")
+        return False
+
+
 def generate_files(match: BillingMatch, formats: list[str], include_summary: bool,
                    out_dir: pathlib.Path, invoice_date: Optional[date] = None,
                    peer: Optional[dict] = None, sub=None) -> list[pathlib.Path]:
@@ -695,9 +726,14 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
     fmts = [f.lower() for f in (formats or ["pdf"])]
     if "pdf" in fmts:
         inv_pdf = out_dir / f"{stem}_invoice.pdf"
-        # Operator's OWN format when they've enabled a template; otherwise (or on any
-        # render failure) the standard branded PDF — a bad template never breaks a send.
-        if not _render_from_operator_template(match, sub, inv_pdf):
+        # Invoice PDF, best fidelity first, each step falling back to the next so a
+        # failure never breaks a send:
+        #   1. repro — fill their OWN workbook + headless-render (pixel-perfect;
+        #      flagged, workbook subs only);
+        #   2. operator token-HTML template (when they've enabled one);
+        #   3. the standard branded PDF.
+        if not (_render_from_repro(match, sub, inv_pdf)
+                or _render_from_operator_template(match, sub, inv_pdf)):
             invoice_mod.render_invoice_pdf(match, inv_pdf, invoice_date=invoice_date)
         paths.append(inv_pdf)
     if "xlsx" in fmts:
