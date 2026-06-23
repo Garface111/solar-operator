@@ -57,6 +57,8 @@ def build_token_context(match, sub=None, tenant=None) -> dict:
         "kwh": _num(inv.get("kwh")),
         "rate": ("${:.5f}".format(float(tariff)) if tariff not in (None, "") else ""),
         "amount_due": _money(inv.get("amount_owed")),
+        "solar_value": _money(inv.get("solar_value")),
+        "billed_value": _money(inv.get("billed_value")),
         "solar_savings": _money(inv.get("solar_savings")),
         "operator_name": (getattr(tenant, "company_name", None)
                           or getattr(tenant, "operator_name", None)
@@ -69,8 +71,8 @@ def build_token_context(match, sub=None, tenant=None) -> dict:
 # The tokens we advertise in the UI (so operators know what they can place).
 AVAILABLE_TOKENS = [
     "offtaker_name", "offtaker_email", "invoice_number", "invoice_date", "due_date",
-    "period_start", "period_end", "kwh", "rate", "amount_due", "solar_savings",
-    "operator_name", "company_name",
+    "period_start", "period_end", "kwh", "rate", "amount_due", "solar_value",
+    "billed_value", "solar_savings", "operator_name", "company_name",
 ]
 
 

@@ -425,57 +425,216 @@ def find_invoice_sheet(wb):
     return best if best_score >= 2 else None
 
 
-def _sheet_to_html_table(ws, max_rows: int = 80, max_cols: int = 16) -> str:
-    """Render a worksheet's used cells to a plain HTML table (xhtml2pdf-safe).
-    Trims trailing empty rows/cols so the layout reflects the real invoice."""
-    grid = _grid(ws, max_rows=max_rows, max_cols=max_cols)
-    while grid and not any(_clean(c) for c in grid[-1]):
-        grid.pop()
-    if not grid:
+# ── Excel-invoice → faithful, tokenized HTML template ────────────────────────
+# A crude text grid mangled real invoices (lost column widths, bold, alignment,
+# number formatting) AND baked the sample's static numbers in — so an enabled
+# template rendered the SAMPLE's $ and kWh onto every offtaker. This converter
+# (1) preserves layout (widths, bold, alignment, $/%/date formatting, merges) and
+# (2) replaces clearly-labelled data cells with {{ tokens }} so each invoice fills
+# with that offtaker's real numbers via build_token_context.
+
+# Label substring (lowercased, on a cell) → token that replaces the row's value.
+# Order matters — first contained substring wins, so the more specific
+# "billing at the estimated" precedes "billing rate".
+_TOKEN_LABELS = [
+    ("amount due", "{{ amount_due }}"), ("amount owed", "{{ amount_due }}"),
+    ("final amount", "{{ amount_due }}"),
+    ("billing at the estimated", "{{ amount_due }}"),   # flat-rate "billed this period" cell
+    ("invoice number", "{{ invoice_number }}"), ("invoice no", "{{ invoice_number }}"),
+    ("invoice date", "{{ invoice_date }}"),
+    ("due date", "{{ due_date }}"),
+    ("solar value", "{{ solar_value }}"),
+    ("billing rate", "{{ billed_value }}"),             # the $ this rate produces
+    ("solar savings", "{{ solar_savings }}"),
+]
+
+
+def _excel_disp(value, number_format: str) -> str:
+    """A cell's DISPLAYED string, honoring its number format ($ / % / date / int)
+    — so we never dump a raw float like 3519.0629599999997 onto the invoice."""
+    if value is None:
         return ""
-    last_col = 0
-    for r in grid:
-        for ci in range(len(r)):
-            if _clean(r[ci]):
-                last_col = max(last_col, ci)
-    rows_html = []
-    for r in grid:
-        cells = []
-        for ci in range(last_col + 1):
-            v = r[ci] if ci < len(r) else None
-            cells.append("<td>%s</td>" % _html_escape(_clean(v) or ""))
-        rows_html.append("<tr>%s</tr>" % "".join(cells))
-    return '<table class="xl">%s</table>' % "".join(rows_html)
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%b %d, %Y")
+    if isinstance(value, (int, float)):
+        nf = number_format or ""
+        if "%" in nf:
+            return f"{value * 100:.0f}%"
+        if "$" in nf or "accounting" in nf.lower():
+            return f"${value:,.2f}"
+        if abs(value - round(value)) < 1e-9:
+            return f"{int(round(value)):,}"
+        return f"{value:,.2f}"
+    return str(value)
 
 
-# NOTE: contains literal % ("width:100%") and {{ tokens }}, so it is assembled
-# with .replace() — NOT %-format or str.format (both would choke on those).
+def _content_bounds(ws, max_rows: int, max_cols: int):
+    """(r0, r1, c0, c1) of the invoice's real content. Honors the sheet's PRINT
+    AREA when set (so scratch cells in far columns are excluded), else the full
+    used range trimmed of trailing empties."""
+    pa = getattr(ws, "print_area", None)
+    if pa:
+        try:
+            from openpyxl.utils import range_boundaries
+            ref = pa.split(",")[0].split("!")[-1].replace("$", "")
+            c0, r0, c1, r1 = range_boundaries(ref)
+            return r0, min(r1, r0 + max_rows - 1), c0, min(c1, c0 + max_cols - 1)
+        except Exception:  # noqa: BLE001 — fall back to used-range trimming
+            pass
+    r0, c0 = 1, 1
+    r1 = min(ws.max_row or 0, max_rows)
+    c1 = min(ws.max_column or 0, max_cols)
+
+    def row_has(r):
+        return any(ws.cell(row=r, column=c).value not in (None, "") for c in range(c0, c1 + 1))
+
+    def col_has(c):
+        return any(ws.cell(row=r, column=c).value not in (None, "") for r in range(r0, r1 + 1))
+
+    while r1 >= r0 and not row_has(r1):
+        r1 -= 1
+    while c1 >= c0 and not col_has(c1):
+        c1 -= 1
+    return r0, r1, c0, c1
+
+
+def _build_token_map(ws, r0: int, r1: int, c0: int, c1: int, covered: set) -> dict:
+    """Map (row, col) → token for clearly-labelled data cells, so the invoice
+    fills per-period instead of showing the uploaded sample's frozen numbers."""
+    tok: dict = {}
+
+    def value_cell_right(r, c):
+        for cc in range(c + 1, c1 + 1):
+            if (r, cc) in covered:
+                continue
+            v = ws.cell(row=r, column=cc).value
+            if v not in (None, ""):
+                return cc
+        return None
+
+    for r in range(r0, r1 + 1):
+        for c in range(c0, c1 + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            s = _s(v)
+            token = None
+            if s.startswith("kwh"):                     # "KWH:" row
+                token = "{{ kwh }}"
+            else:
+                for lab, t in _TOKEN_LABELS:
+                    if lab in s:
+                        token = t
+                        break
+            if token:
+                vc = value_cell_right(r, c)
+                if vc is not None:
+                    tok[(r, vc)] = token
+        # "Time Period Covered:  From … To …" — map the two dates in that row.
+        rowtxt = " ".join(_s(ws.cell(row=r, column=c).value)
+                          for c in range(c0, c1 + 1)
+                          if ws.cell(row=r, column=c).value not in (None, ""))
+        if "period covered" in rowtxt:
+            dates = [c for c in range(c0, c1 + 1)
+                     if isinstance(ws.cell(row=r, column=c).value, (date, datetime))]
+            if len(dates) >= 2:
+                tok[(r, dates[0])] = "{{ period_start }}"
+                tok[(r, dates[1])] = "{{ period_end }}"
+    return tok
+
+
+# NOTE: contains literal % ("width:100%") and {{ tokens }} → assembled with
+# .replace(), never %-format / str.format (both choke on those).
 _EXCEL_TEMPLATE_SHELL = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-  @page { size: letter; margin: 0.75in; }
-  body { font-family: Helvetica, Arial, sans-serif; color:#1a2230; font-size:10pt; }
-  table.xl { width:100%; border-collapse:collapse; }
-  table.xl td { padding:3pt 5pt; border-bottom:0.5pt solid #e2e7f0; vertical-align:top; }
+  @page { size: letter; margin: 0.6in; }
+  body { font-family: Helvetica, Arial, sans-serif; color:#16202b; font-size:11pt; }
+  table.xl { width:100%; border-collapse:collapse; table-layout:fixed; }
+  table.xl td { padding:2px 5px; vertical-align:top; line-height:1.3; word-wrap:break-word; }
 </style></head>
 <body>
 __INVOICE_TABLE__
-<p style="margin-top:18pt; color:#5a6678; font-size:9pt;">
-  This layout was lifted from your spreadsheet's invoice sheet. Replace any value
-  with a token (e.g. {{ amount_due }}, {{ offtaker_name }}, {{ period_end }}) to
-  make it fill automatically each period.</p>
 </body></html>"""
 
 
+def _sheet_to_invoice_html(ws, max_rows: int = 70, max_cols: int = 16) -> str:
+    """Faithful HTML rendering of an invoice sheet: column widths, bold, alignment,
+    number formats and merged cells preserved; labelled data cells tokenized."""
+    r0, r1, c0, c1 = _content_bounds(ws, max_rows, max_cols)
+    if r1 < r0 or c1 < c0:
+        return ""
+
+    # Merged cells → colspan/rowspan on the top-left, skip the covered cells.
+    covered: set = set()
+    span: dict = {}
+    for m in ws.merged_cells.ranges:
+        for r in range(m.min_row, m.max_row + 1):
+            for c in range(m.min_col, m.max_col + 1):
+                if (r, c) != (m.min_row, m.min_col):
+                    covered.add((r, c))
+        span[(m.min_row, m.min_col)] = (m.max_row - m.min_row + 1, m.max_col - m.min_col + 1)
+
+    tok = _build_token_map(ws, r0, r1, c0, c1, covered)
+
+    # Column widths → percentages so proportions survive (table-layout:fixed).
+    from openpyxl.utils import get_column_letter
+    raw_w = []
+    for c in range(c0, c1 + 1):
+        cd = ws.column_dimensions.get(get_column_letter(c))
+        raw_w.append(cd.width if (cd and cd.width) else 8.43)
+    total_w = sum(raw_w) or 1.0
+    colgroup = "".join(f'<col style="width:{w / total_w * 100:.2f}%">' for w in raw_w)
+
+    rows_html = []
+    for r in range(r0, r1 + 1):
+        tds = []
+        for c in range(c0, c1 + 1):
+            if (r, c) in covered:
+                continue
+            cell = ws.cell(row=r, column=c)
+            if (r, c) in tok:
+                inner = tok[(r, c)]                       # token braces, unescaped
+            else:
+                inner = _html_escape(_excel_disp(cell.value, cell.number_format))
+            styles = []
+            al = cell.alignment.horizontal if cell.alignment else None
+            if al in ("right", "center", "left"):
+                styles.append(f"text-align:{al}")
+            elif isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                styles.append("text-align:right")
+            f = cell.font
+            if f and f.bold:
+                styles.append("font-weight:700")
+            if f and f.size:
+                styles.append(f"font-size:{max(9, min(18, round(float(f.size) * 0.8)))}px")
+            attrs = ""
+            sp = span.get((r, c))
+            if sp:
+                if sp[0] > 1:
+                    attrs += f' rowspan="{sp[0]}"'
+                if sp[1] > 1:
+                    attrs += f' colspan="{sp[1]}"'
+            style = f' style="{";".join(styles)}"' if styles else ""
+            tds.append(f"<td{attrs}{style}>{inner or '&nbsp;'}</td>")
+        rows_html.append("<tr>" + "".join(tds) + "</tr>")
+
+    table = f'<table class="xl"><colgroup>{colgroup}</colgroup>{"".join(rows_html)}</table>'
+    return _EXCEL_TEMPLATE_SHELL.replace("__INVOICE_TABLE__", table)
+
+
 def excel_to_template_html(file_bytes: bytes) -> tuple[Optional[str], Optional[str]]:
-    """Find the invoice sheet in an uploaded workbook and convert it to editable
-    token-HTML (Stage-1 seed for the operator's invoice template).
+    """Find the invoice sheet in an uploaded workbook and convert it to faithful,
+    tokenized HTML (the operator's invoice-template seed).
 
     Returns (sheet_name, html). (None, None) when the workbook can't be opened or
-    has no sheets; (sheet_name, None) when the sheet is empty.
+    has no sheets; (sheet_name, None) when the sheet is empty. data_only (not
+    read_only) so we get both cached values AND cell styles/number formats.
     """
     try:
         from openpyxl import load_workbook
-        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
     except Exception as e:  # noqa: BLE001
         logger.warning("excel_to_template_html: cannot open workbook: %s", e)
         return None, None
@@ -483,10 +642,8 @@ def excel_to_template_html(file_bytes: bytes) -> tuple[Optional[str], Optional[s
         ws = find_invoice_sheet(wb) or (wb.worksheets[0] if wb.worksheets else None)
         if ws is None:
             return None, None
-        table = _sheet_to_html_table(ws)
-        if not table:
-            return ws.title, None
-        return ws.title, _EXCEL_TEMPLATE_SHELL.replace("__INVOICE_TABLE__", table)
+        html = _sheet_to_invoice_html(ws)
+        return ws.title, (html or None)
     finally:
         try:
             wb.close()
