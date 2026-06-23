@@ -141,9 +141,54 @@ def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
                     if val != cell.value:
                         cell.value = val
                         wrote_name = True
+    # 3) Isolate to the invoice sheet: a multi-sheet upload (Data ledger, Trends, a
+    #    SAMPLE tab…) must NOT render its other sheets into the invoice — and an
+    #    offtaker must never receive the operator's raw ledger. Flatten the invoice
+    #    sheet's formulas to the file's own cached values (so it stays self-contained
+    #    once the sheets it referenced are gone), then drop every other sheet.
+    _isolate_to_invoice_sheet(wb, ws, template_bytes)
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue() if (wrote_name or not sample) else out.getvalue()
+    return out.getvalue()
+
+
+def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
+    """Leave the workbook with ONLY `ws` (the invoice sheet), self-contained, so the
+    headless render is exactly one invoice — not the operator's whole workbook.
+    Flatten formulas to the original file's Excel-cached results; where a cell has no
+    cache, keep an intra-sheet formula (LibreOffice recalculates) but null any that
+    reference a now-deleted sheet (which would otherwise render as #REF!)."""
+    from openpyxl import load_workbook
+    inv_title = ws.title
+    others = [s.title for s in wb.worksheets if s.title != inv_title]
+    if not others:
+        ws.sheet_state = "visible"
+        return
+    invd = None
+    try:
+        wbd = load_workbook(io.BytesIO(original_bytes), data_only=True)
+        if inv_title in wbd.sheetnames:
+            invd = wbd[inv_title]
+    except Exception as e:  # noqa: BLE001
+        log.warning("_isolate: data_only load failed (%s); keeping formulas", e)
+    for row in ws.iter_rows():
+        for cell in row:
+            v = cell.value
+            if not (isinstance(v, str) and v.startswith("=")):
+                continue
+            cached = invd[cell.coordinate].value if invd is not None else None
+            if cached is not None:
+                cell.value = cached
+            elif any(t in v for t in others):       # no cache + cross-sheet ref → #REF risk
+                cell.value = None
+            # else: no cache, intra-sheet only → leave it (LibreOffice recalculates)
+    for name in others:
+        del wb[name]
+    ws.sheet_state = "visible"
+    try:
+        wb.active = 0
+    except Exception:
+        pass
 
 
 def reproduce_in_template(template_bytes: bytes, *, offtaker_match,
