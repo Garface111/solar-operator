@@ -1685,14 +1685,28 @@ def get_invoice_template_file(authorization: Optional[str] = Header(default=None
 
 
 @router.get("/invoice-template/preview.pdf")
-def get_invoice_template_preview_pdf(authorization: Optional[str] = Header(default=None)):
+def get_invoice_template_preview_pdf(default: bool = False,
+                                     authorization: Optional[str] = Header(default=None)):
     """Render OUR REPRODUCTION of the operator's template, the RIGHT way: the real
     uploaded file rendered by the real engine (xlsx/Word → Gotenberg/LibreOffice;
     PDF passthrough) — pixel-identical to their format. Deep-research finding: never
     reproduce a document by converting it to HTML (the lossy anti-pattern); fill/
     render the real artifact. Token-HTML is kept only as a last-resort fallback for
-    image/HTML templates or when no renderer is configured."""
+    image/HTML templates or when no renderer is configured.
+
+    ?default=1 renders OUR DEFAULT invoice format (the standard Array Operator layout)
+    with the same sample data instead of the reproduction, so the operator can compare
+    their own template against our default."""
     t = tenant_from_session(authorization)
+    if default:
+        from .template_render import (render_template_pdf, SAMPLE_CONTEXT,
+                                      DEFAULT_TEMPLATE_HTML)
+        try:
+            pdf = render_template_pdf(DEFAULT_TEMPLATE_HTML, SAMPLE_CONTEXT)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(422, f"Couldn't render default-format preview: {e}")
+        return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+            headers={"Content-Disposition": "inline; filename=default_format_preview.pdf"})
     from ..models import OfftakerInvoiceTemplate
     with SessionLocal() as db:
         tpl = db.execute(select(OfftakerInvoiceTemplate).where(
