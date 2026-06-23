@@ -279,6 +279,11 @@ def reproduce_in_template(template_bytes: bytes, *, offtaker_match,
         if leak:
             log.warning("reproduce_in_template: %s — refusing (fall back to standard)", leak)
             return None
+        # Auto-center: crop to content + uniform margins so the invoice isn't left
+        # wherever the template's print area landed it. After the guards (text is
+        # unchanged, so they still hold).
+        from .render import center_pdf_to_content
+        res.pdf = center_pdf_to_content(res.pdf)
     return res
 
 
@@ -315,7 +320,7 @@ def reproduce_template_preview(template_bytes: bytes, *,
     Echoes the template's own coherent numbers (consistent with its rate labels) and
     swaps in a clearly-sample bill-to so the pane is visibly our reconstruction.
     Returns rendered PDF bytes, or None to fall back to a plain render."""
-    from .render import render_office_to_pdf, renderer_available
+    from .render import render_office_to_pdf, renderer_available, center_pdf_to_content
     if not renderer_available():
         return None
     cm = build_template_cell_map(template_bytes)
@@ -326,7 +331,7 @@ def reproduce_template_preview(template_bytes: bytes, *,
     if filled is None:
         return None
     try:
-        return render_office_to_pdf(filled, "reproduction_preview.xlsx")
+        return center_pdf_to_content(render_office_to_pdf(filled, "reproduction_preview.xlsx"))
     except Exception as e:  # noqa: BLE001
         log.warning("reproduce_template_preview render failed: %s", e)
         return None

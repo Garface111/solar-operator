@@ -748,6 +748,7 @@ def _render_from_repro(match, sub, out_path) -> bool:
             # deterministically by this invoice's expected total (best-effort, never blanks).
             expected = (match.computed_invoice or {}).get("amount_owed")
             pdf = _repro_render.trim_pdf_to_invoice_page(res.pdf, expected)
+            pdf = _repro_render.center_pdf_to_content(pdf)   # crop to content → centered, no waste
             out_path.write_bytes(pdf)
             logger.info("repro: pixel-perfect invoice PDF for sub %s via %s "
                         "(verified, rounds=%s)", getattr(sub, "id", "?"),

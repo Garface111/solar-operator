@@ -222,3 +222,41 @@ def trim_pdf_to_invoice_page(pdf_bytes: bytes, expected_amount: float | None) ->
     except Exception as e:  # noqa: BLE001
         log.warning("trim_pdf_to_invoice_page: rewrite failed (%s); leaving whole", e)
         return pdf_bytes
+
+
+def center_pdf_to_content(pdf_bytes: bytes, margin_pt: float = 26.0) -> bytes:
+    """Crop each page's box to its actual content + a UNIFORM margin, so the invoice
+    sits centered (equal margins all round) with no wasted page whitespace — instead
+    of wherever the template's print area happened to land it on the sheet. Best-
+    effort: returns the original on any failure, so it can never blank/corrupt a send."""
+    try:
+        import io as _io
+        import pdfplumber
+        from pypdf import PdfReader, PdfWriter
+    except Exception as e:  # noqa: BLE001
+        log.warning("center_pdf_to_content: deps unavailable (%s)", e)
+        return pdf_bytes
+    try:
+        reader = PdfReader(_io.BytesIO(pdf_bytes))
+        writer = PdfWriter()
+        with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+            for i, pg in enumerate(pdf.pages):
+                page = reader.pages[i]
+                objs = (pg.chars or []) + (pg.rects or []) + (pg.lines or [])
+                if objs:
+                    x0 = max(0.0, min(o["x0"] for o in objs) - margin_pt)
+                    x1 = min(pg.width, max(o["x1"] for o in objs) + margin_pt)
+                    top = max(0.0, min(o["top"] for o in objs) - margin_pt)
+                    bottom = min(pg.height, max(o["bottom"] for o in objs) + margin_pt)
+                    if x1 - x0 > 20 and bottom - top > 20:
+                        H = pg.height                       # pdfplumber top-down → PDF bottom-up
+                        page.mediabox.lower_left = (x0, H - bottom)
+                        page.mediabox.upper_right = (x1, H - top)
+                        page.cropbox.lower_left = (x0, H - bottom)
+                        page.cropbox.upper_right = (x1, H - top)
+                writer.add_page(page)
+        out = _io.BytesIO(); writer.write(out)
+        return out.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("center_pdf_to_content failed (%s); leaving PDF as-is", e)
+        return pdf_bytes
