@@ -2548,6 +2548,17 @@ def inverter_capture(
     if not body.sites:
         raise HTTPException(400, "No sites in capture payload.")
 
+    # Observability: which tenant this capture authenticated as + per-site device
+    # counts. Makes "captured but nothing shows" trivially diagnosable (is it the
+    # wrong tenant? a 0-device payload?). Counts only — no serials/PII.
+    log.info(
+        "inverter-capture: tenant=%s provider=%s sites=%d per_site_devices=%s",
+        tenant.id, provider, len(body.sites),
+        [(str(s.site_id), (s.name or "")[:24],
+          len([c for c in (s.inverters or []) if str(c.serial or "").strip()]))
+         for s in body.sites],
+    )
+
     today = now().date()
     results: list[dict] = []
 
