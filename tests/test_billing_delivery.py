@@ -350,6 +350,39 @@ def test_manual_subscription_array_must_be_owned(client):
     assert r.status_code == 404
 
 
+def test_patch_subscription_with_utility_account_id_succeeds(client):
+    """REGRESSION: the edit-offtaker form re-sends utility_account_id on every save
+    (the GMP bill picker is pre-selected to the current bill). patch_subscription
+    referenced UtilityAccount WITHOUT importing it in scope → NameError → 500
+    'Save failed.' for every edit of a GMP-bound offtaker. The PATCH must succeed
+    and re-bind the bill (refreshing array_id from the account)."""
+    from api.db import SessionLocal
+    from api.models import Array, UtilityAccount
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        arr = Array(tenant_id=tid, name="Shelburne", region="VT")
+        db.add(arr); db.flush()
+        acct = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp",
+                              account_number="GMP-" + secrets.token_hex(2),
+                              nickname="Shelburne GMP")
+        db.add(acct); db.flush()
+        acct_id = acct.id
+        db.commit()
+    sub_id = _create_manual(client, auth, customer_name="Rick Lunt",
+                            utility_account_id=str(acct_id), allocation_pct="0.25",
+                            client_email="rick@example.test").json()["subscription"]["id"]
+    # Edit-save replays the same fields the form sends, incl. utility_account_id.
+    r = client.patch(
+        f"/v1/array-operator/billing/subscriptions/{sub_id}",
+        json={"customer_name": "Rick Lunt", "utility_account_id": acct_id,
+              "allocation_pct": 0.25, "discount_pct": 0.10, "cadence": "monthly"},
+        headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    with SessionLocal() as db:
+        s = db.get(BillingReportSubscription, sub_id)
+        assert s.utility_account_id == acct_id
+
+
 # ─── scheduler ──────────────────────────────────────────────────────────────
 
 

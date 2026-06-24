@@ -683,6 +683,7 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
         if body.utility_account_id is not None:
             # Re-bind the offtaker's billing source to a different GMP utility bill.
             # Mirror creation: validate ownership + GMP, refresh array_id from it.
+            from ..models import UtilityAccount
             acct = db.get(UtilityAccount, body.utility_account_id)
             if acct is None or acct.tenant_id != t.id or acct.deleted_at is not None:
                 raise HTTPException(404, f"Utility account {body.utility_account_id} not found")
