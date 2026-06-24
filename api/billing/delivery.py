@@ -75,6 +75,13 @@ def build_match(sub) -> BillingMatch:
     nxt = getattr(sub, "invoice_number_next", None)
     if nxt is not None and m is not None and getattr(m, "computed_invoice", None):
         m.computed_invoice["invoice_number"] = str(nxt)
+    # Budget billing: a per-offtaker fixed final amount the operator entered overrides
+    # the calculated Amount Due. All line items still compute/show; only the total is
+    # this number. (Flagged so the invoice + email can note it's a budget bill.)
+    budget = getattr(sub, "budget_amount_usd", None)
+    if budget is not None and m is not None and getattr(m, "computed_invoice", None):
+        m.computed_invoice["amount_owed"] = float(budget)
+        m.computed_invoice["budget_override"] = True
     return m
 
 

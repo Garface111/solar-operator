@@ -771,6 +771,16 @@ def main():
             ))
             print("  + billing_report_subscriptions.utility_account_id")
 
+        # 2026-06-24 Budget billing: a per-offtaker FIXED final amount the operator
+        # enters that overrides the calculated Amount Due (the line items still show;
+        # only the total becomes the operator's number).
+        if not column_exists(conn, "billing_report_subscriptions", "budget_amount_usd"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN budget_amount_usd DOUBLE PRECISION"
+            ))
+            print("  + billing_report_subscriptions.budget_amount_usd")
+
         # 2026-06-16 Live current power for extension-captured inverters.
         # The inverters table came free via create_all, but an EXISTING prod table
         # won't gain new columns from create_all — add them explicitly so the

@@ -486,6 +486,36 @@ def test_offtaker_email_is_white_labeled_to_the_operator(client, monkeypatch):
     assert cap["reply_to"] == op_email
 
 
+def test_budget_amount_overrides_calculated_total(client):
+    """Budget billing: a per-offtaker fixed final amount overrides the calculated
+    Amount Due (line items still compute), set via PATCH; clearing it restores it."""
+    from api.billing import delivery
+    from api.db import SessionLocal
+    from api.models import BillingReportSubscription
+    _B = "/v1/array-operator/billing"
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, "norwich.xlsx").json()["subscription"]["id"]
+    with SessionLocal() as db:
+        base = (delivery.build_match(db.get(BillingReportSubscription, sub_id))
+                .computed_invoice or {}).get("amount_owed")
+    assert isinstance(base, (int, float)) and base != 250.0
+    # Set the budget override.
+    r = client.patch(f"{_B}/subscriptions/{sub_id}",
+                     json={"budget_amount_usd": 250.0}, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    with SessionLocal() as db:
+        ci = (delivery.build_match(db.get(BillingReportSubscription, sub_id))
+              .computed_invoice or {})
+    assert ci["amount_owed"] == 250.0 and ci.get("budget_override") is True
+    # Clearing it restores the calculated total.
+    client.patch(f"{_B}/subscriptions/{sub_id}",
+                 json={"budget_amount_usd": None}, headers={"Authorization": auth})
+    with SessionLocal() as db:
+        ci = (delivery.build_match(db.get(BillingReportSubscription, sub_id))
+              .computed_invoice or {})
+    assert ci["amount_owed"] == base and not ci.get("budget_override")
+
+
 # ─── billing rate ($/kWh): global default + per-customer override ────────────
 
 

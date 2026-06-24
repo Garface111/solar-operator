@@ -1209,6 +1209,11 @@ class BillingReportSubscription(Base):
     # period-date number ("2026-06").
     invoice_number_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     invoice_number_next: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Budget billing (Paul): a per-offtaker FIXED final amount the operator enters
+    # that OVERRIDES the calculated Amount Due. All the line items still compute and
+    # show on the invoice; only the total becomes this number. NULL = use the
+    # calculated amount.
+    budget_amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)

@@ -114,6 +114,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "last_invoice_number": s.last_invoice_number,
         "invoice_number_start": getattr(s, "invoice_number_start", None),
         "invoice_number_next": getattr(s, "invoice_number_next", None),
+        "budget_amount_usd": getattr(s, "budget_amount_usd", None),
         # A trimmed preview of the parsed workbook for the UI card.
         "preview": (s.parsed_map or {}).get("computed_invoice") if s.parsed_map else None,
     }
@@ -626,6 +627,9 @@ class SubscriptionPatch(BaseModel):
     # it (re)seeds the running counter so the next invoice uses it and each real send
     # adds 1. Explicit null clears it (back to the period-date number).
     invoice_number_start: Optional[int] = None
+    # Budget billing: a fixed final amount that overrides the calculated Amount Due
+    # (line items still show). Explicit null clears it (back to the calculated total).
+    budget_amount_usd: Optional[float] = None
 
 
 @router.patch("/subscriptions/{sub_id}")
@@ -717,6 +721,18 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                 if sub.invoice_number_start != n or sub.invoice_number_next is None:
                     sub.invoice_number_start = n
                     sub.invoice_number_next = n
+        if "budget_amount_usd" in body.model_fields_set:
+            v = body.budget_amount_usd
+            if v is None:
+                sub.budget_amount_usd = None
+            else:
+                try:
+                    amt = float(v)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "budget_amount_usd must be a number")
+                if amt < 0:
+                    raise HTTPException(400, "budget_amount_usd can't be negative")
+                sub.budget_amount_usd = amt
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
@@ -1286,6 +1302,7 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         "discount_pct": (getattr(sub, "discount_pct", None) if sub else None),
         "net_rate_per_kwh": (getattr(sub, "net_rate_per_kwh", None) if sub else None),
         "utility_account_id": (getattr(sub, "utility_account_id", None) if sub else None),
+        "budget_amount_usd": (getattr(sub, "budget_amount_usd", None) if sub else None),
         "has_workbook": ((getattr(sub, "source_workbook", None) is not None) if sub else False),
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "sent_at": d.sent_at.isoformat() if d.sent_at else None,
