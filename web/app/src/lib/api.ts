@@ -459,6 +459,23 @@ export interface BillingSummary {
   /** No-upfront-payment: a live (trialing) tenant can have no card on file.
    *  Drives the "Add payment method" CTA and the paused-no-card banner. */
   has_payment_method: boolean;
+  /** Which plan shape to render: "array" (NEPOOL per-array), "kwh" (Array Operator
+   *  monitoring), or "invoicing" (Array Operator per-offtaker). Absent on legacy
+   *  responses → render as "array". The two AO bases carry the dual-model fields. */
+  billing_basis?: "array" | "kwh" | "invoicing";
+  // ── Array Operator dual model (present when billing_basis is "kwh" / "invoicing") ──
+  /** Monitoring (per-kWh) plan. */
+  mtd_kwh?: number;
+  rate_cents_per_kwh?: number; // decimal cents per kWh (e.g. 0.5)
+  blended_cents_per_kwh?: number;
+  monitoring_total_cents?: number; // month-to-date, decimal cents
+  /** Invoicing (per-offtaker) plan. */
+  offtaker_count?: number;
+  invoicing_base_cents?: number; // $100 base
+  invoicing_base_includes?: number; // offtakers the base covers (4)
+  invoicing_per_offtaker_cents?: number; // $25 beyond the base
+  invoicing_setup_cents?: number; // $250 one-time
+  invoicing_total_cents?: number;
 }
 
 /** What the tenant is billed for: array count (the Stripe quantity) × per-array

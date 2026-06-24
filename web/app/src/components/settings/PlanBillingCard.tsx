@@ -17,6 +17,49 @@ interface Props {
   account: Account;
 }
 
+/** One plan row in the Array Operator dual-model billing card. The active plan is
+ *  highlighted with a "Current plan" pill + accent; the other is shown muted as an
+ *  available option, so the operator always sees both plans we offer. */
+function PlanRow({
+  active,
+  name,
+  tagline,
+  price,
+  detail,
+}: {
+  active: boolean;
+  name: string;
+  tagline: string;
+  price: string;
+  detail: string;
+}) {
+  return (
+    <div
+      className={`rounded-xl border px-4 py-3 ${
+        active ? "border-primary-200 bg-primary-50" : "border-cream-border bg-white"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-zinc-900">{name}</span>
+          {active && (
+            <span className="rounded-full bg-primary-600 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+              Current plan
+            </span>
+          )}
+        </div>
+        <span className={`text-sm font-semibold ${active ? "text-primary-900" : "text-zinc-500"}`}>
+          {price}
+        </span>
+      </div>
+      <p className="mt-0.5 text-xs text-zinc-500">{tagline}</p>
+      <p className={`mt-1 text-sm ${active ? "font-medium text-zinc-800" : "text-zinc-400"}`}>
+        {detail}
+      </p>
+    </div>
+  );
+}
+
 export function PlanBillingCard({ account }: Props) {
   const toast = useToast();
   const [billing, setBilling] = useState<BillingSummary | null>(null);
@@ -179,10 +222,48 @@ export function PlanBillingCard({ account }: Props) {
         {/* Billing summary */}
         {billing && (
           <div className="border-t border-cream-border px-5 py-4">
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
               Billing
             </p>
-            {billing.billable_arrays > 0 ? (
+            {billing.billing_basis === "kwh" || billing.billing_basis === "invoicing" ? (
+              /* ARRAY OPERATOR — dual model: both plans shown, the active one
+                 highlighted. Monitoring (per-kWh) + Invoicing (per-offtaker). */
+              <div className="space-y-2.5">
+                <PlanRow
+                  active={billing.billing_basis === "kwh"}
+                  name="Monitoring"
+                  tagline="Pay for what you generate — fleet health & lost-production alerts"
+                  price={`${billing.rate_cents_per_kwh ?? 0.5}¢/kWh`}
+                  detail={
+                    billing.billing_basis === "kwh"
+                      ? `${(billing.mtd_kwh ?? 0).toLocaleString()} kWh this month · ${fmtMoney(
+                          billing.monitoring_total_cents ?? 0,
+                          billing.currency,
+                        )}/mo so far`
+                      : "Billed monthly on metered generation"
+                  }
+                />
+                <PlanRow
+                  active={billing.billing_basis === "invoicing"}
+                  name="Invoicing"
+                  tagline="Automatic offtaker invoices, generated &amp; sent for you"
+                  price={`${fmtMoney(billing.invoicing_base_cents ?? 10000, billing.currency)}/mo`}
+                  detail={
+                    billing.billing_basis === "invoicing"
+                      ? `${billing.offtaker_count ?? 0} offtaker${
+                          billing.offtaker_count === 1 ? "" : "s"
+                        } · ${fmtMoney(
+                          (billing.invoicing_total_cents ?? 0) || (billing.invoicing_base_cents ?? 10000),
+                          billing.currency,
+                        )}/mo`
+                      : `includes ${billing.invoicing_base_includes ?? 4} offtakers, then ${fmtMoney(
+                          billing.invoicing_per_offtaker_cents ?? 2500,
+                          billing.currency,
+                        )}/offtaker`
+                  }
+                />
+              </div>
+            ) : billing.billable_arrays > 0 ? (
               billing.full_unit_cents && billing.price_cents < billing.full_unit_cents ? (
                 <p className="text-sm text-zinc-700">
                   <span className="font-semibold text-zinc-900">
@@ -229,9 +310,14 @@ export function PlanBillingCard({ account }: Props) {
                 arrays are added.
               </p>
             )}
-            <p className="mt-1.5 text-xs text-zinc-500">
-              Arrays count toward your bill as soon as they&apos;re added. We sync with
-              Stripe automatically; you&apos;ll see the change on your next statement.
+            <p className="mt-2 text-xs text-zinc-500">
+              {billing.billing_basis === "invoicing"
+                ? "Offtakers count toward your bill as soon as they’re added."
+                : billing.billing_basis === "kwh"
+                  ? "Your generation is metered automatically."
+                  : "Arrays count toward your bill as soon as they’re added."}{" "}
+              We sync with Stripe automatically; you&apos;ll see the change on your next
+              statement.
             </p>
           </div>
         )}

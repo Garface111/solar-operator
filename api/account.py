@@ -1734,18 +1734,41 @@ def _billing_summary_kwh(t: Tenant) -> dict:
             )
         ).scalar() or 0.0
     mtd_kwh = float(mtd_kwh)
-    total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
+    monitoring_total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
+
+    # DUAL MODEL: Array Operator bills two jobs on two plans. Compute BOTH so the
+    # card can show the dual model and mark the active one. The active plan is the
+    # per-offtaker INVOICING plan when billing_plan='invoicing', else the per-kWh
+    # MONITORING meter (the AO default).
+    from . import pricing_ao_invoicing as inv_pricing
+    from .stripe_helpers import is_ao_invoicing, billable_offtaker_count
+    with SessionLocal() as db2:
+        offtaker_count = billable_offtaker_count(db2, t.id)
+    invoicing_total_cents = inv_pricing.compute_monthly_cents(offtaker_count)
+    active = ("invoicing"
+              if is_ao_invoicing(getattr(t, "product", None), getattr(t, "billing_plan", None))
+              else "kwh")
     return {
-        "billing_basis": "kwh",
+        "billing_basis": active,        # which AO plan is currently active
+        "currency": "usd",
+        "has_payment_method": t.stripe_payment_method_id is not None,
+        # ── Monitoring (per-kWh) plan block ──
         "billable_arrays": int(billable_arrays),
         "mtd_kwh": round(mtd_kwh, 1),
         "period_start": month_start.isoformat(),
-        # Decimal cents per kWh (sub-cent): headline rate + blended actual.
-        "rate_cents_per_kwh": ao_pricing.FULL_UNIT_CENTS,
+        "rate_cents_per_kwh": ao_pricing.FULL_UNIT_CENTS,        # decimal cents/kWh
         "blended_cents_per_kwh": ao_pricing.blended_unit_cents(mtd_kwh),
-        "total_cents": total_cents,  # month-to-date estimate, decimal cents
-        "currency": "usd",
-        "has_payment_method": t.stripe_payment_method_id is not None,
+        "monitoring_total_cents": monitoring_total_cents,        # month-to-date, decimal cents
+        # ── Invoicing (per-offtaker) plan block ──
+        "offtaker_count": int(offtaker_count),
+        "invoicing_base_cents": inv_pricing.BASE_CENTS,
+        "invoicing_base_includes": inv_pricing.BASE_INCLUDES_OFFTAKERS,
+        "invoicing_per_offtaker_cents": inv_pricing.PER_OFFTAKER_CENTS,
+        "invoicing_setup_cents": inv_pricing.SETUP_CENTS,
+        "invoicing_total_cents": invoicing_total_cents,
+        # The active plan's total (back-compat: whichever plan is active).
+        "total_cents": (invoicing_total_cents if active == "invoicing"
+                        else monitoring_total_cents),
     }
 
 
