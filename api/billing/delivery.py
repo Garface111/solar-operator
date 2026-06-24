@@ -380,6 +380,17 @@ def _operator_company_name(tenant_id):
             or getattr(t, "name", None))
 
 
+def _platform_from_email(product) -> str:
+    """Just the address part of the platform From, so the operator's display name
+    can ride on the platform's verified sending domain when they haven't set up a
+    sending domain of their own."""
+    import re
+    from .. import branding
+    fa = branding.from_address(product)
+    m = re.search(r"<([^>]+)>", fa)
+    return m.group(1) if m else fa
+
+
 def build_manual_match(sub) -> BillingMatch:
     """Synthesize a BillingMatch for a manually-entered customer (no workbook).
 
@@ -950,12 +961,15 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         f'<p style="margin-top:18px;">The full invoice'
         f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
     )
+    # White-label: the offtaker should see THEIR operator, never Array Operator.
+    operator = _operator_company_name(getattr(sub, "tenant_id", None)) or "your solar provider"
     html = render_email_skin(
         preheader=f"Your solar credit invoice for {cust} is attached.",
         headline="Your solar credit invoice",
         intro_line=(period or cust),
         body_html=body_html,
-        footer_line="Solar credit invoice service by Array Operator  ·  Questions? admin@solaroperator.org",
+        footer_line=f"Solar credit invoice from {operator}.  ·  Questions? just reply to this email.",
+        wordmark=operator,
         product="array_operator",
     )
     text = render_email_skin_text(
@@ -968,8 +982,9 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
             f"Your production: {kwh:,.0f} kWh\n"
             f"Solar credit value due: {amount_str}\n\n"
             f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
-            f"Questions? admin@solaroperator.org"
+            f"Questions? Just reply to this email."
         ),
+        wordmark=operator,
         product="array_operator",
     )
     return subject, html, text
@@ -1053,15 +1068,24 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         attachments = [_b64(p) for p in paths]
         subject, html, text = _email_html(match, sub, is_test, note=note)
 
-        from_addr = None
+        # White-label the sender: the offtaker sees the OPERATOR, not Array
+        # Operator. Send under the operator's name — from their own verified
+        # sending domain if they configured one, else the platform's sending
+        # address carrying their display name — and route replies to the operator.
+        product = getattr(tenant, "product", "array_operator")
+        op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
+        op_email = getattr(tenant, "contact_email", None)
         if getattr(tenant, "send_from_email", None):
-            nm = getattr(tenant, "send_from_name", None) or getattr(tenant, "company_name", None)
-            from_addr = f'"{nm}" <{tenant.send_from_email}>' if nm else tenant.send_from_email
+            from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name else tenant.send_from_email)
+        elif op_name:
+            from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
+        else:
+            from_addr = None
 
         ok = _send_via_resend(
             to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
             attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
-            product=getattr(tenant, "product", "array_operator"),
+            reply_to=(op_email or None), product=product,
         )
 
     result = {"ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,

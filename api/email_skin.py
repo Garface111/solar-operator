@@ -144,6 +144,7 @@ def render_email_skin(
     body_html: str,
     cta: dict | None = None,
     footer_line: str | None = None,
+    wordmark: str | None = None,
     attachment_label: str | None = None,
     attachment_size_bytes: int | None = None,
     attachment_caption: str | None = None,
@@ -221,7 +222,7 @@ def render_email_skin(
 <meta name="color-scheme" content="light only">
 <meta name="supported-color-schemes" content="light">
 <style>:root{{color-scheme:light only;supported-color-schemes:light;}}</style>
-<title>{t["brand"]}</title>
+<title>{_headline}</title>
 </head>
 <body style="margin:0;padding:0;background:{t["page_bg"]};color-scheme:light only;" bgcolor="{t["page_bg"]}">
 <span style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">{preheader}</span>
@@ -241,7 +242,7 @@ def render_email_skin(
 {_footer}
       </td></tr>
       <tr><td bgcolor="{t["wordmark_bg"]}" style="background:{t["wordmark_bg"]};padding:14px 36px;font-family:{_FONT};font-size:11px;color:{t["wordmark_text"]};text-align:center;border-radius:0 0 10px 10px;letter-spacing:0.04em;">
-{t.get("wordmark_html") or t["wordmark"]}
+{wordmark if wordmark is not None else (t.get("wordmark_html") or t["wordmark"])}
       </td></tr>
     </table>
   </td></tr>
@@ -257,6 +258,7 @@ def render_email_skin_text(
     body_text: str,
     cta: dict | None = None,
     attachment_label: str | None = None,
+    wordmark: str | None = None,
     product: str | None = "nepool",
 ) -> str:
     """Return a clean plain-text fallback. Headline in ALL CAPS, CTA as label: url."""
@@ -271,5 +273,5 @@ def render_email_skin_text(
         parts += ["", f"{cta['label']}: {cta['url']}"]
     if attachment_label:
         parts += ["", f"📎 Attached: {attachment_label}"]
-    parts += ["", "—", t["wordmark"]]
+    parts += ["", "—", wordmark if wordmark is not None else t["wordmark"]]
     return "\n".join(parts)

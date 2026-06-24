@@ -456,6 +456,36 @@ def test_offtaker_send_bccs_the_operator(client, monkeypatch):
     assert op_email not in to_list                 # operator is NOT a visible recipient
 
 
+def test_offtaker_email_is_white_labeled_to_the_operator(client, monkeypatch):
+    """The offtaker invoice email carries NO Array Operator branding — it's sent
+    under the OPERATOR's name, replies route to the operator's inbox, and the
+    footer + wordmark show the operator instead of Array Operator."""
+    from api import scheduler
+    tid, auth = _make_tenant()                     # _make_tenant names it "Billing Test Operator"
+    op_email = f"{tid}@operator.test"
+    sub_id = _upload(client, auth, "norwich.xlsx", cadence="monthly",
+                     delivery_mode="auto", send_mode="to_client",
+                     client_email="offtaker@example.test").json()["subscription"]["id"]
+    cap = {}
+
+    def fake_send(to, subject, html, text, attachments=None, cc=None, bcc=None,
+                  from_addr=None, reply_to=None, product="nepool", **kw):
+        cap.update(html=html, text=text, from_addr=from_addr, reply_to=reply_to)
+        return True
+
+    monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+    assert sub_id in scheduler.deliver_billing_reports("monthly")["sent"]
+    # No Array Operator branding anywhere the offtaker sees:
+    assert "Array Operator" not in cap["html"]
+    assert "arrayoperator.com" not in cap["html"]
+    assert "admin@solaroperator.org" not in cap["html"]
+    assert "Array Operator" not in cap["text"]
+    # White-labeled to the operator + replies routed to them:
+    assert "Billing Test Operator" in cap["html"]
+    assert "Billing Test Operator" in (cap["from_addr"] or "")
+    assert cap["reply_to"] == op_email
+
+
 # ─── billing rate ($/kWh): global default + per-customer override ────────────
 
 
