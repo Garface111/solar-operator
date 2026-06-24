@@ -55,6 +55,15 @@ class Tenant(Base):
     product: Mapped[str] = mapped_column(
         String(32), default="nepool", server_default="nepool", nullable=False
     )
+    # Optional billing-plan override WITHIN a product. For Array Operator, selects
+    # which meter the tenant pays on:
+    #   null / "" / "kwh" → per-kWh monitoring meter (the AO default)
+    #   "invoicing"        → per-OFFTAKER licensed plan (auto-invoicing only; $100
+    #                        base incl 4 offtakers + $25/offtaker, $250 setup —
+    #                        api/pricing_ao_invoicing.py)
+    # Ignored for NEPOOL (always per-array). Null for every existing tenant so
+    # nothing changes until a tenant is explicitly put on the invoicing plan.
+    billing_plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 

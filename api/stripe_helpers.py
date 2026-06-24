@@ -52,8 +52,40 @@ def _ao_kwh_price_id() -> str:
 
 
 def is_array_operator(product: str | None) -> bool:
-    """True when a tenant bills on the Array Operator per-kWh meter."""
+    """True when a tenant is on the Array Operator product (owner app)."""
     return (product or "nepool") == "array_operator"
+
+
+def _ao_invoicing_price_id() -> str:
+    """Resolve the AO per-offtaker invoicing (licensed) price id from env."""
+    return os.getenv("STRIPE_AO_INVOICING_PRICE_ID", "")
+
+
+def _ao_invoicing_setup_price_id() -> str:
+    """Resolve the AO invoicing one-time $250 setup price id from env (optional —
+    leave unset to launch without a setup fee / to grandfather early customers)."""
+    return os.getenv("STRIPE_AO_INVOICING_SETUP_PRICE_ID", "")
+
+
+def is_ao_invoicing(product: str | None, billing_plan: str | None) -> bool:
+    """True when a tenant bills on the Array Operator per-OFFTAKER invoicing plan
+    (product == array_operator AND billing_plan == 'invoicing'). This is a LICENSED
+    line whose Stripe quantity = the tenant's offtaker count — distinct from the AO
+    per-kWh meter."""
+    return is_array_operator(product) and (billing_plan or "").strip().lower() == "invoicing"
+
+
+def billable_offtaker_count(db, tenant_id: str) -> int:
+    """Canonical "how many offtakers does this tenant pay for" on the invoicing plan
+    = active, non-deleted BillingReportSubscription rows. Single source of truth so
+    the Stripe quantity and any 'next charge' estimate can never disagree."""
+    from .models import BillingReportSubscription
+    return int(db.execute(
+        select(func.count()).select_from(BillingReportSubscription).where(
+            BillingReportSubscription.tenant_id == tenant_id,
+            BillingReportSubscription.deleted_at.is_(None),
+        )
+    ).scalar() or 0)
 
 
 def billable_array_count(db, tenant_id: str) -> int:
@@ -145,23 +177,47 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
                 Array.excluded.is_(False),
             )
         ).scalar() or 0
+        offtaker_count = billable_offtaker_count(db, t.id)
         customer_id = t.stripe_customer_id
         pm_id = t.stripe_payment_method_id
         email = t.contact_email
         product = getattr(t, "product", "nepool")
+        billing_plan = getattr(t, "billing_plan", None)
 
-    array_price_id = array_price_id_for_product(product)
-    ao = is_array_operator(product)
+    invoicing = is_ao_invoicing(product, billing_plan)
+    # AO per-kWh meter only when on AO product AND NOT on the invoicing plan.
+    ao = is_array_operator(product) and not invoicing
 
     quantity = max(int(array_count), 1)
     items: list[dict] = []
     add_invoice_items: list[dict] = []
-    if ao:
+    if invoicing:
+        # Per-OFFTAKER LICENSED line — quantity = offtaker count. REFUSE rather than
+        # fall back to a wrong price (mis-billing is worse than a clean failure).
+        inv_price = _ao_invoicing_price_id()
+        if not inv_price:
+            send_internal_alert(
+                "⚠️ AO invoicing price id missing",
+                f"Tenant {tenant_id} ({email}) is on billing_plan='invoicing' but "
+                "STRIPE_AO_INVOICING_PRICE_ID is not set. Run "
+                "scripts/create_ao_invoicing_price.py and set the env var. No "
+                "subscription created (refusing to mis-bill on a fallback price).",
+            )
+            return {"ok": False, "error": "ao-invoicing-price-missing"}
+        items.append({"price": inv_price, "quantity": max(int(offtaker_count), 1)})
+        # Optional one-time $250 setup — leave STRIPE_AO_INVOICING_SETUP_PRICE_ID
+        # unset to WAIVE it (e.g. grandfathered early customers like Paul).
+        inv_setup = _ao_invoicing_setup_price_id()
+        if inv_setup:
+            add_invoice_items.append({"price": inv_setup, "quantity": 1})
+    elif ao:
         # Per-kWh metered line — Stripe REJECTS `quantity` on a metered price.
         # No setup fee on the owner side. Usage is reported by the usage-report job.
+        array_price_id = array_price_id_for_product(product)
         if array_price_id:
             items.append({"price": array_price_id})
     else:
+        array_price_id = array_price_id_for_product(product)
         if array_price_id:
             items.append({"price": array_price_id, "quantity": quantity})
         # The $250 setup is a ONE-TIME price. Stripe REJECTS a one_time price in
@@ -199,14 +255,19 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
             t.trial_ends_at = None
             db.commit()
 
-    meter = "per-kWh (metered)" if ao else f"per-array qty {quantity}"
+    meter = (f"per-offtaker qty {max(int(offtaker_count), 1)}" if invoicing
+             else "per-kWh (metered)" if ao else f"per-array qty {quantity}")
     send_internal_alert(
         f"✅ Subscription resumed: {tenant_id}",
         f"Tenant {tenant_id} ({email}) added a card and resumed. "
-        f"Arrays: {array_count}, billed: {meter}. Subscription: {sub_id}"
+        f"Arrays: {array_count}, offtakers: {offtaker_count}, billed: {meter}. "
+        f"Subscription: {sub_id}"
     )
     return {"ok": True, "subscription_id": sub_id, "array_count": int(array_count),
-            "quantity": (None if ao else quantity), "metered": ao}
+            "quantity": (max(int(offtaker_count), 1) if invoicing
+                         else None if ao else quantity),
+            "metered": ao, "invoicing": invoicing,
+            "offtaker_count": int(offtaker_count)}
 
 
 def reconcile_subscription_quantity(
@@ -325,4 +386,65 @@ def reconcile_subscription_quantity(
             f"quantity={array_count} failed: {e}\n\n"
             f"Stripe is still billing for the old quantity. Fix it manually in "
             f"the Stripe dashboard (proration_behavior=create_prorations)."
+        )
+
+
+def reconcile_offtaker_quantity(tenant_id: str) -> None:
+    """Bring an AO INVOICING subscription's licensed line to the tenant's current
+    offtaker count (call after a BillingReportSubscription is added or removed).
+
+    Mirrors reconcile_subscription_quantity but for the per-offtaker invoicing plan:
+    matches the invoicing price (NOT the per-array set) and uses the offtaker count.
+    Kept SEPARATE so an array-count reconcile can never touch an invoicing line and
+    vice-versa. Best-effort — never raises. No-op unless the tenant is on the
+    invoicing plan with a live subscription and the invoicing price id is set.
+    """
+    from .db import SessionLocal
+    from .models import Tenant
+
+    inv_price = _ao_invoicing_price_id()
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if t is None or not is_ao_invoicing(getattr(t, "product", None),
+                                            getattr(t, "billing_plan", None)):
+            return
+        subscription_id = t.stripe_subscription_id
+        email = t.contact_email
+        offtaker_count = billable_offtaker_count(db, t.id)
+    if not subscription_id or not inv_price:
+        return
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        return
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+
+    try:
+        sub = stripe.Subscription.retrieve(subscription_id)
+        line = None
+        for item in sub["items"]["data"]:
+            if item["price"]["id"] == inv_price:
+                line = item
+                break
+        if line is None:
+            raise RuntimeError(
+                f"no invoicing line ({inv_price}) on subscription {subscription_id}")
+        target_qty = max(int(offtaker_count), 1)   # Stripe requires quantity >= 1
+        if line.get("quantity") == target_qty:
+            return
+        stripe.SubscriptionItem.modify(
+            line["id"], quantity=target_qty,
+            proration_behavior="create_prorations",
+        )
+        logger.info(
+            "Reconciled AO invoicing subscription %s for tenant %s: offtakers → %d",
+            subscription_id, tenant_id, target_qty)
+    except Exception as e:  # noqa: BLE001 — must never block callers
+        logger.exception(
+            "AO invoicing reconciliation FAILED for tenant %s (sub %s, "
+            "offtakers=%d): %s", tenant_id, subscription_id, offtaker_count, e)
+        send_internal_alert(
+            "⚠️ AO invoicing reconciliation failed",
+            f"Tenant {tenant_id} ({email}) changed offtaker count to "
+            f"{offtaker_count}, but updating subscription {subscription_id} failed: "
+            f"{e}\n\nStripe is still billing the old quantity — fix it manually "
+            f"(proration_behavior=create_prorations)."
         )

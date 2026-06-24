@@ -280,6 +280,18 @@ def _validate_discount(pct):
     return d
 
 
+def _sync_invoicing_quantity(tenant_id: str) -> None:
+    """After an offtaker (BillingReportSubscription) is added or removed, keep the
+    AO invoicing Stripe quantity in sync with the offtaker count. No-op unless the
+    tenant is on the per-offtaker invoicing plan; best-effort so a Stripe hiccup
+    never fails the offtaker mutation itself."""
+    try:
+        from ..stripe_helpers import reconcile_offtaker_quantity
+        reconcile_offtaker_quantity(tenant_id)
+    except Exception:  # noqa: BLE001 — the reconcile alerts on real failures
+        pass
+
+
 @router.post("/subscriptions")
 async def create_subscription(
     file: Optional[UploadFile] = File(default=None),
@@ -381,6 +393,7 @@ async def create_subscription(
         )
         db.add(sub)
         db.commit()
+        _sync_invoicing_quantity(t.id)
         return {"ok": True, "subscription": _sub_dict(sub)}
 
 
@@ -477,6 +490,7 @@ async def _create_manual_subscription(
             )
             db.add(sub)
             db.commit()
+            _sync_invoicing_quantity(t.id)
             return {"ok": True, "subscription": _sub_dict(sub)}
 
     # Parse the optional multi-array allocations list.
@@ -574,6 +588,7 @@ async def _create_manual_subscription(
         )
         db.add(sub)
         db.commit()
+        _sync_invoicing_quantity(t.id)
         return {"ok": True, "subscription": _sub_dict(sub)}
 
 
@@ -895,6 +910,7 @@ def delete_subscription(sub_id: int, authorization: Optional[str] = Header(defau
             d.status = "dismissed"
             d.dismissed_at = datetime.utcnow()
         db.commit()
+        _sync_invoicing_quantity(t.id)
         return {"ok": True}
 
 
