@@ -183,7 +183,18 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
     widen its column by the shortfall. Never shrinks; capped so a long free-text line
     that legitimately overflows the page can't bloat a column. Also cures '#####'
     (a number too wide for its column)."""
+    import re
     from openpyxl.utils import get_column_letter
+
+    def _fmt_is_dateish(nf: str) -> bool:
+        """True for a date/time number format (renders like 12/31/2026). Dates need a
+        FIXED width reservation: unlike text, a too-narrow date shows '###', it does
+        not overflow into the next cell — which is exactly the bug this cures."""
+        if not nf or nf == "General":
+            return False
+        s = re.sub(r'\[[^\]]*\]|"[^"]*"', "", nf)     # drop [color]/[$-409] + quoted literals
+        return bool(re.search(r"[yd]", s, re.I) or "m" in s.lower()) and not re.search(r"[#0]", s)
+
     mr = min(ws.max_row or 1, 80)
     mc = min(ws.max_column or 1, 20)
 
@@ -198,6 +209,8 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
     def disp_len(v):
         if isinstance(v, bool):
             return 3
+        if isinstance(v, (_dt.datetime, _dt.date)):
+            return 12                                            # a rendered date, not str()'s 19
         if isinstance(v, (int, float)):
             return max(len(str(v)), len(f"{abs(v):,.2f}") + 2)   # account for $ , . formatting
         return len(str(v))
@@ -207,15 +220,33 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
         for ci in range(1, mc + 1):
             cell = ws.cell(row=r, column=ci)
             v = cell.value
-            if v is None or (isinstance(v, str) and (not v.strip() or v.startswith("="))):
+            if v is None or (isinstance(v, str) and not v.strip()):
                 continue
+            nf = cell.number_format or ""
+            is_formula = isinstance(v, str) and v.startswith("=")
+            # Dates + numbers can't spill into an empty neighbor the way text does —
+            # too narrow, they render as '###'. So size their OWN column to fit and
+            # don't credit neighbor width. Text keeps the overflow allowance. Formula
+            # cells are sized off their number format (the value isn't computed yet).
+            if _fmt_is_dateish(nf):
+                chars, numeric_like = 12, True               # e.g. 12/31/2026
+            elif is_formula:
+                if re.search(r"[#0]", nf):
+                    chars, numeric_like = 13, True            # a number-producing formula
+                else:
+                    continue                                  # text formula — can't size it
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                chars, numeric_like = disp_len(v), True
+            else:
+                chars, numeric_like = disp_len(v), False
             size = (cell.font.size or 11) if cell.font else 11
-            est = disp_len(v) * size * factor
+            est = chars * size * factor
             avail = cw(ci)
-            cc = ci + 1
-            while cc <= mc and not occupied(r, cc):
-                avail += cw(cc)
-                cc += 1
+            if not numeric_like:
+                cc = ci + 1
+                while cc <= mc and not occupied(r, cc):
+                    avail += cw(cc)
+                    cc += 1
             if est > avail:
                 need[ci] = max(need.get(ci, 0.0), cw(ci) + (est - avail))
     for ci, w in need.items():
