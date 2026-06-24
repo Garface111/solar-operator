@@ -820,14 +820,22 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
         gmp_path = out_dir / f"{safe}_GMP_invoice.pdf"
         gmp_path.write_bytes(bytes(sub.gmp_invoice_pdf))
         paths.append(gmp_path)
-    elif sub is not None and getattr(sub, "auto_attach_gmp", False) \
-            and getattr(sub, "array_id", None) is not None:
+    elif sub is not None and getattr(sub, "auto_attach_gmp", False):
         try:
             from ..reports import gmp_bill_pdf_read as gbp
             ci = match.computed_invoice or {}
             ps = _parse_iso_date(ci.get("period_start"))
             pe = _parse_iso_date(ci.get("period_end"))
-            found = gbp.get_bill_pdf_for_period(sub.array_id, ps, pe)
+            # Prefer the offtaker's BOUND utility account (the invoice's actual
+            # source bill); fall back to the array's GMP accounts for legacy
+            # array-based subscriptions with no bound account.
+            uaid = getattr(sub, "utility_account_id", None)
+            if uaid is not None:
+                found = gbp.get_bill_pdf_for_account(uaid, ps, pe)
+            elif getattr(sub, "array_id", None) is not None:
+                found = gbp.get_bill_pdf_for_period(sub.array_id, ps, pe)
+            else:
+                found = None
             if found and found.get("bytes"):
                 gmp_path = out_dir / f"{safe}_GMP_bill.pdf"
                 gmp_path.write_bytes(found["bytes"])

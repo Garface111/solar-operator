@@ -78,6 +78,45 @@ def _bill_pdf_bytes(bill: Bill) -> Optional[bytes]:
     return None
 
 
+def _pick_bill_pdf(
+    db: Session,
+    acct_ids: list[int],
+    period_start: Optional[date],
+    period_end: Optional[date],
+) -> Optional[dict[str, Any]]:
+    """The captured PDF for the newest bill (within [period_start, period_end]
+    when given) across `acct_ids`, or None. Shared by the array- and account-
+    keyed entry points below."""
+    if not acct_ids:
+        return None
+    q = select(Bill).where(Bill.account_id.in_(acct_ids))
+    # Order newest-first so the latest matching bill wins; the period filter
+    # below narrows to the requested window when one is given.
+    q = q.order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
+    for bill in db.execute(q).scalars().all():
+        # Period filter (inclusive overlap) when a window is given.
+        if period_start is not None and bill.period_end is not None:
+            if bill.period_end.date() < period_start:
+                continue
+        if period_end is not None and bill.period_start is not None:
+            if bill.period_start.date() > period_end:
+                continue
+        data = _bill_pdf_bytes(bill)
+        if data:
+            ps = bill.period_start.date() if bill.period_start else None
+            pe = bill.period_end.date() if bill.period_end else None
+            label = pe.strftime("%Y-%m") if pe else "period"
+            return {
+                "bytes": data,
+                "filename": f"GMP_bill_{label}.pdf",
+                "content_type": getattr(bill, "pdf_content_type", None) or "application/pdf",
+                "account_id": bill.account_id,
+                "period_start": ps,
+                "period_end": pe,
+            }
+    return None
+
+
 def get_bill_pdf_for_period(
     array_id: int,
     period_start: Optional[date] = None,
@@ -94,42 +133,51 @@ def get_bill_pdf_for_period(
          "account_id": int, "period_start": date|None, "period_end": date|None}
     or None when no DURABLE PDF is captured yet (the norm until ingestion lands
     persisted bytes). Never returns a fabricated/placeholder PDF.
+
+    Prefer get_bill_pdf_for_account() when the offtaker is bound to a SPECIFIC
+    GMP account — that returns the exact bill the invoice was computed from,
+    rather than whichever of the array's accounts has the newest captured PDF.
     """
     _own = db is None
     if _own:
         db = SessionLocal()
     try:
-        acct_ids = _gmp_account_ids_for_array(db, array_id)
-        if not acct_ids:
-            return None
-        q = select(Bill).where(Bill.account_id.in_(acct_ids))
-        # Order newest-first so the latest matching bill wins; the period filter
-        # below narrows to the requested window when one is given.
-        q = q.order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
-        for bill in db.execute(q).scalars().all():
-            # Period filter (inclusive overlap) when a window is given.
-            if period_start is not None and bill.period_end is not None:
-                if bill.period_end.date() < period_start:
-                    continue
-            if period_end is not None and bill.period_start is not None:
-                if bill.period_start.date() > period_end:
-                    continue
-            data = _bill_pdf_bytes(bill)
-            if data:
-                ps = bill.period_start.date() if bill.period_start else None
-                pe = bill.period_end.date() if bill.period_end else None
-                label = pe.strftime("%Y-%m") if pe else "period"
-                return {
-                    "bytes": data,
-                    "filename": f"GMP_bill_{label}.pdf",
-                    "content_type": getattr(bill, "pdf_content_type", None) or "application/pdf",
-                    "account_id": bill.account_id,
-                    "period_start": ps,
-                    "period_end": pe,
-                }
-        return None
+        return _pick_bill_pdf(db, _gmp_account_ids_for_array(db, array_id),
+                              period_start, period_end)
     except Exception:  # noqa: BLE001 — provisional ingestion side / missing column
         logger.warning("GMP bill-PDF read failed for array %s", array_id, exc_info=True)
+        return None
+    finally:
+        if _own:
+            db.close()
+
+
+def get_bill_pdf_for_account(
+    utility_account_id: int,
+    period_start: Optional[date] = None,
+    period_end: Optional[date] = None,
+    *,
+    db: Optional[Session] = None,
+) -> Optional[dict[str, Any]]:
+    """The captured GMP bill PDF for ONE specific utility account, or None.
+
+    This is the offtaker-correct lookup: an offtaker invoice is computed from the
+    bill of the account it's BOUND to (BillingReportSubscription.utility_account_id),
+    so the auto-attached PDF must come from that SAME account — not whichever of the
+    array's sibling accounts happens to have the newest captured bill. Same return
+    shape as get_bill_pdf_for_period(); None when the account isn't a live GMP
+    account or has no durable PDF captured for the window.
+    """
+    _own = db is None
+    if _own:
+        db = SessionLocal()
+    try:
+        ua = db.get(UtilityAccount, utility_account_id)
+        if ua is None or ua.provider != "gmp" or ua.deleted_at is not None:
+            return None
+        return _pick_bill_pdf(db, [utility_account_id], period_start, period_end)
+    except Exception:  # noqa: BLE001 — provisional ingestion side / missing column
+        logger.warning("GMP bill-PDF read failed for account %s", utility_account_id, exc_info=True)
         return None
     finally:
         if _own:

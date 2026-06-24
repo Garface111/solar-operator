@@ -1294,11 +1294,20 @@ def _resolve_gmp_auto_status(db, sub) -> Optional[str]:
     when it doesn't)."""
     if sub is None or not getattr(sub, "auto_attach_gmp", False):
         return None
-    array_id = getattr(sub, "array_id", None)
-    if array_id is None:
-        return "no_gmp"
     try:
         from ..reports import gmp_bill_pdf_read as gbp
+        # Prefer the offtaker's BOUND utility account — the exact bill the invoice is
+        # computed from, so the attached PDF matches the invoice's source. (The old
+        # array-keyed path returned whichever of the array's sibling accounts had the
+        # newest captured PDF, which can be the wrong bill.) Fall back to the array's
+        # GMP accounts for legacy array-based subscriptions with no bound account.
+        uaid = getattr(sub, "utility_account_id", None)
+        if uaid is not None:
+            found = gbp.get_bill_pdf_for_account(uaid, db=db)
+            return "ready" if (found and found.get("bytes")) else "pending"
+        array_id = getattr(sub, "array_id", None)
+        if array_id is None:
+            return "no_gmp"
         if not gbp.has_capturable_gmp_account(array_id, db=db):
             return "no_gmp"
         found = gbp.get_bill_pdf_for_period(array_id, db=db)
