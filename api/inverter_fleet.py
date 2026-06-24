@@ -654,8 +654,13 @@ _VENDOR_SOURCES = {
     "extension_pull", "extension_pull_corrected",
     "csv", "manual",                      # operator-supplied independent production
 }
+# NOTE: 'bill_prorate' is deliberately NOT here (audit #9). It's a monthly utility bill
+# smeared flat across its days — an ESTIMATE, not a settled meter reading — so it must
+# not blend into the "Utility meter · settled generation" stream as if it were one. It
+# still appears in the BLENDED array-production view (_array_daily); it's just never
+# mislabeled as settled-meter data.
 _UTILITY_SOURCES = {
-    "gmp_api", "gmp_portal_scrape", "utility_meter", "smarthub", "bill_prorate",
+    "gmp_api", "gmp_portal_scrape", "utility_meter", "smarthub",
 }
 
 
