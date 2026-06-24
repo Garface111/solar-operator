@@ -345,6 +345,36 @@ def main():
                 conn.execute(text(sql))
                 print(f"  + tenants.{col}")
 
+        # 2026-06-24 Inverter alerts are now ON BY DEFAULT (Ford): the fleet watch
+        # should page an operator about a down inverter without them first finding a
+        # toggle. One-time flip existing tenants false→true and move the column
+        # default to true. Gated on the column's CURRENT default so it runs exactly
+        # once and never clobbers a later deliberate per-tenant opt-out. (comm_gap
+        # false positives from the extension capture cadence are separately
+        # suppressed in inverter_alert_sweep, so "on" never means false spam.)
+        # information_schema is Postgres-only; the try/except no-ops on sqlite dev,
+        # where the model's server_default="true" already covers fresh DBs.
+        try:
+            cur_default = conn.execute(text(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = 'tenants' "
+                "AND column_name = 'inverter_alerts_enabled'"
+            )).scalar()
+            if cur_default is None or "false" in str(cur_default).lower():
+                res = conn.execute(text(
+                    "UPDATE tenants SET inverter_alerts_enabled = true "
+                    "WHERE inverter_alerts_enabled = false"
+                ))
+                conn.execute(text(
+                    "ALTER TABLE tenants "
+                    "ALTER COLUMN inverter_alerts_enabled SET DEFAULT true"
+                ))
+                n = res.rowcount if res.rowcount is not None else 0
+                print(f"  ~ tenants.inverter_alerts_enabled default → true "
+                      f"(one-time flip, {n} tenant(s))")
+        except Exception as _e:
+            print(f"  (inverter_alerts_enabled default flip skipped: {_e})")
+
         # 2026-06-03 V1: quarterly is now the operator default. Flip RECENT test
         # signups (last 7 days) that still carry the old 'monthly' engineer-default
         # over to 'quarterly'. We deliberately bound this to created_at > now-7d so

@@ -162,8 +162,13 @@ class Tenant(Base):
     # inverter_alert_threshold_pct of its array peers for at least the grace window.
     # threshold = sensitivity slider (e.g. 50 → alert under 50% of peers); a fully
     # dark inverter always trips regardless. De-dup so we email once per incident.
+    # ON BY DEFAULT (2026-06-24): the fleet watch should page an operator the
+    # moment an inverter goes down without them first hunting for a toggle.
+    # migrate.py one-time-flips existing tenants false→true. comm_gap false
+    # positives from the extension capture cadence are suppressed in
+    # inverter_alert_sweep, so "on" never means false spam.
     inverter_alerts_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false", nullable=False)
+        Boolean, default=True, server_default="true", nullable=False)
     inverter_alert_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
     inverter_alert_threshold_pct: Mapped[int] = mapped_column(
         Integer, default=50, server_default="50", nullable=False)
