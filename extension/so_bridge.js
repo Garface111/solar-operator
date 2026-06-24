@@ -58,6 +58,29 @@
       return;
     }
 
+    // Page asks the extension to RE-SCRAPE a vendor portal NOW (the spreadsheet view's
+    // per-vendor Refresh button). Background opens a silent background tab, captures
+    // fresh power, and POSTs it to the backend; we relay the result so the page can
+    // refetch. SO_RECAPTURE { vendor, reqId } → SO_RECAPTURE_DONE { reqId, ok, captured }.
+    if (data.type === "SO_RECAPTURE") {
+      const reqId = data.reqId || null;
+      const vendor = String(data.vendor || "").toLowerCase();
+      if (!vendor) {
+        window.postMessage({ type: "SO_RECAPTURE_DONE", reqId, ok: false, error: "missing-vendor" }, "*");
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "TRIGGER_RECAPTURE", vendor }, (resp) => {
+        window.postMessage({
+          type: "SO_RECAPTURE_DONE",
+          reqId,
+          ok: !!(resp && resp.ok),
+          captured: !!(resp && resp.captured),
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, "*");
+      });
+      return;
+    }
+
     if (data.type === "SO_PAIR") {
       const reqId = data.reqId || null;
       const tenantKey = String(data.tenantKey || "").trim();

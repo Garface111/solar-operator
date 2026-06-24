@@ -1341,6 +1341,37 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } finally { _liveBusy = false; }
   }
 
+  // ON-DEMAND recapture — fired by the AO spreadsheet's per-vendor Refresh button (via
+  // so_bridge → TRIGGER_RECAPTURE). Same silent background-tab machinery as the live
+  // ticks, but explicit, so it works even when live-mode is off. Single-flight: declines
+  // while any recapture is already in flight. Resolves after the capture lands (the
+  // content script POSTs fresh power straight to the backend), so the page can refetch.
+  async function recaptureNow(vendor) {
+    vendor = String(vendor || "").toLowerCase();
+    if (!RECAP_VENDORS[vendor]) return { ok: false, error: "unsupported-vendor" };
+    if (_liveBusy) return { ok: false, error: "busy" };
+    const { tenantKey } = await recapSettings();
+    if (!tenantKey) return { ok: false, error: "not-paired" };
+    const st = await recapGetState();
+    if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) return { ok: false, error: "busy" };
+    _liveBusy = true;
+    const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
+    try {
+      await recaptureVendor(vendor, { budgetMs: 90 * 1000 });
+      const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
+      return { ok: true, captured: !!(after.ok && after.at && after.at !== before.at) };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message || e) };
+    } finally { _liveBusy = false; }
+  }
+  self.__soRecaptureNow = recaptureNow;
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== "TRIGGER_RECAPTURE") return;
+    recaptureNow(msg.vendor).then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    return true;   // async sendResponse — held open through the background capture
+  });
+
   // Owner toggles live-mode from Array Operator.
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || msg.type !== "SET_CHINT_LIVE") return;
