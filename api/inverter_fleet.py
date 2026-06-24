@@ -90,13 +90,16 @@ def _nameplate_from_model(vendor, model):
 
 def _eff_nameplate_kw(iv, m):
     """Effective nameplate: the reported value if we have one, else the API
-    telemetry value, else (Chint only) the rating parsed from the model code."""
-    if iv.nameplate_kw is not None:
-        return iv.nameplate_kw
+    telemetry value, else (Chint only) the rating parsed from the model code.
+    getattr-guarded so it's safe on any inverter-like object (real Inverter rows
+    carry these columns; lightweight test stand-ins may not)."""
+    np = getattr(iv, "nameplate_kw", None)
+    if np is not None:
+        return np
     mp = m.get("nameplate_kw")
     if mp is not None:
         return mp
-    return _nameplate_from_model(iv.vendor, iv.model or m.get("model"))
+    return _nameplate_from_model(getattr(iv, "vendor", None), getattr(iv, "model", None) or m.get("model"))
 
 
 def _sane_live_power_w(power_w, nameplate_kw):
