@@ -44,3 +44,14 @@ def test_yesterdays_capture_blanked():
              last_power_at=fleet.now() - timedelta(hours=26),
              source_last_data_at=fleet.now() - timedelta(hours=26))
     assert fleet._live_power_w(iv, {}, daylight=True) is None
+
+
+def test_realtime_captured_power_shows_live():
+    # After the GetActualPvSystemData fix: per-inverter power now comes from Solar.web's
+    # REALTIME feed (fresh value + fresh source ts), not the lagging devwork chart that
+    # left Waterford stuck OFFLINE on a stale near-zero. A fresh realtime capture shows
+    # the real live watts.
+    iv = _iv(last_power_w=12588.0,
+             last_power_at=fleet.now() - timedelta(minutes=2),
+             source_last_data_at=fleet.now() - timedelta(minutes=2))
+    assert fleet._live_power_w(iv, {}, daylight=True) == 12588.0

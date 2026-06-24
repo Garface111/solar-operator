@@ -260,6 +260,43 @@
     return { site, byDevice };
   }
 
+  // Per-inverter LIVE power from the SAME endpoint Solar.web's REALTIME tab uses
+  // (GetActualPvSystemData) — the authoritative instantaneous AC power per device.
+  // The analysis 'devwork' chart used by captureInverters lags 30-60 min and isn't a
+  // live feed (it left Waterford's cards stuck on a stale near-zero ~4W). Response:
+  //   { series:[{ data:[{ name:"Primo 12.5-1 208-240 (1)", custom:{power:12.588,unit:"kW"} }] }],
+  //     SensorData:[{ FormatedDateTimeStamp:"06/24/2026 03:34 PM" }] }
+  // Returns { byName: {displayName: watts}, ts: ISO, count }. Keyed by display name —
+  // which equals the inverter name captureInverters already derives from devwork.
+  async function getRealtimePerInverter(pvSystemId) {
+    try {
+      const r = await getJson("/ActualData/GetActualPvSystemData?pvSystemId=" +
+        encodeURIComponent(pvSystemId) + "&_=" + Date.now());
+      const data = (((r || {}).series || [])[0] || {}).data || [];
+      const byName = {};
+      for (const d of data) {
+        const nm = String((d && d.name) || "").trim();
+        const kw = (d && d.custom && typeof d.custom.power === "number") ? d.custom.power : null;
+        if (nm && kw != null && kw >= 0) byName[nm] = Math.round(kw * 1000);   // kW -> W
+      }
+      let ts = null;
+      try {
+        const stamp = (((r || {}).SensorData || [])[0] || {}).FormatedDateTimeStamp;
+        const dt = stamp ? new Date(stamp) : null;
+        if (dt && !isNaN(dt.getTime())) {
+          // Clamp a future-dated parse (browser TZ ≠ system TZ skew) to now — a live
+          // reading is never from the future, and the data IS current at capture.
+          ts = dt.getTime() > Date.now() ? new Date().toISOString() : dt.toISOString();
+        }
+      } catch (_) {}
+      if (!ts) ts = new Date().toISOString();
+      return { byName, ts, count: Object.keys(byName).length };
+    } catch (e) {
+      LOG("GetActualPvSystemData realtime per-inverter fetch failed:", e && e.message ? e.message : e);
+      return { byName: {}, ts: null, count: 0 };
+    }
+  }
+
   async function captureFlow() {
     // 1. System list — names, inverter counts, today's energy, specific yield.
     const listResp = await getJson("/PvSystems/GetPvSystemsForListView?_=" + Date.now());
@@ -300,6 +337,21 @@
       const energyToday = typeof s.EnergyTodayInkWh === "number" ? s.EnergyTodayInkWh : null;
       let inverters = [];
       try { inverters = await captureInverters(s.PvSystemId); } catch (_) { inverters = []; }
+      // Override per-inverter current power with the REALTIME feed (authoritative live
+      // AC power) — the devwork point captureInverters used lags and was leaving cards
+      // stuck OFFLINE on a stale near-zero. Match by display name; carry the realtime
+      // timestamp so the backend's source-freshness signal is honest.
+      try {
+        const rt = await getRealtimePerInverter(s.PvSystemId);
+        if (rt.count) {
+          let applied = 0;
+          for (const iv of inverters) {
+            const w = rt.byName[iv.name];
+            if (w != null) { iv.current_power_w = w; iv.last_report = rt.ts; applied++; }
+          }
+          LOG("realtime per-inverter power applied:", applied, "of", inverters.length, "@", rt.ts);
+        }
+      } catch (_) {}
       // History backfill: the inverters' serials ARE the Fronius deviceIds, so
       // reuse them to pull the last ~7 days from the same chart endpoint. Returns
       // BOTH site-level totals (array graph) and per-device history (sparklines).

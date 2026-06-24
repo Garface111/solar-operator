@@ -2442,10 +2442,15 @@ class CaptureInverter(BaseModel):
     energy_today_kwh: Optional[float] = None
     peak_power_kw: Optional[float] = None
     # Live instantaneous AC power in WATTS, when the portal exposes it PER
-    # inverter (Chint's commDevice.currentPower does; Fronius only gives a
-    # site-level reading, so its inverters leave this None and the backend
-    # allocates the site total across them by energy share — see ingest).
+    # inverter (Chint's commDevice.currentPower; Fronius's REALTIME endpoint
+    # GetActualPvSystemData → series[].data[].custom.power). When absent the
+    # backend allocates the site total across inverters by energy share (ingest).
     current_power_w: Optional[float] = None
+    # The SOURCE's own timestamp for current_power_w (Fronius realtime
+    # FormatedDateTimeStamp). Drives source_last_data_at so the freshness/“source
+    # offline” signal reflects the real feed, not our capture time. Falls back to
+    # the site's last_report when absent.
+    last_report: Optional[str] = None
     # Optional PER-INVERTER daily-kWh history → persisted to InverterDaily so the
     # per-inverter SPARKLINE renders real history on connect (needs >=2 days),
     # not just "no history yet". Distinct from CaptureSite.daily (array-level →
