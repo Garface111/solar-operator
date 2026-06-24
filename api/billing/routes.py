@@ -1580,6 +1580,75 @@ def dismiss_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         return {"ok": True}
 
 
+@router.post("/drafts/{draft_id}/ai-email")
+def ai_email_for_draft(draft_id: int, authorization: Optional[str] = Header(default=None)):
+    """Write a tailored cover email for this draft from the REAL invoice figures +
+    the context that applies (budget/flat bill, annual true-up, banked-not-cashed
+    credits, $0 period). Returns the text for the operator to review/edit — it does
+    NOT save or send. Plain text, no invented numbers."""
+    t = tenant_from_session(authorization)
+    from .repro.llm import call_json, llm_available, LLMUnavailable
+    if not llm_available():
+        raise HTTPException(503, "AI email isn't configured (no ANTHROPIC_API_KEY).")
+    with SessionLocal() as db:
+        d = _get_owned_draft(db, t.id, draft_id)
+        sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
+        ci = {}
+        if sub is not None:
+            try:
+                ci = build_match(sub).computed_invoice or {}
+            except Exception:  # noqa: BLE001
+                ci = {}
+        operator = (getattr(t, "company_name", None) or getattr(t, "operator_name", None)
+                    or getattr(t, "name", None) or "your solar operator")
+        amt = d.amount_usd
+        ctx = {
+            "offtaker_name": d.customer_name,
+            "billing_period": d.period_label,
+            "their_production_kwh": d.customer_kwh,
+            "amount_due_usd": amt,
+            "is_budget_bill": getattr(sub, "budget_amount_usd", None) is not None,
+            "is_annual_trueup": bool(getattr(sub, "annual_trueup", False)),
+            "solar_credit_rate_per_kwh": ci.get("net_rate_per_kwh"),
+            "credit_banked_not_cashed": ci.get("net_rate_source") == "gmp_credit_reference",
+            "zero_due": isinstance(amt, (int, float)) and abs(amt) < 0.005,
+            "operator_company": operator,
+            "attachments": "the invoice PDF" + (
+                " and a production summary" if getattr(sub, "include_summary", True) else ""),
+        }
+        system = (
+            "You write the short cover email a solar operator sends to an offtaker "
+            "alongside their solar-credit invoice. Warm, professional, concise — 3 to 5 "
+            "sentences. Use ONLY the real figures provided. Reflect whichever context "
+            "applies: a flat/budget bill (do not imply it was metered this period), an "
+            "annual true-up, credits that were BANKED not cashed (trued up later), or a "
+            "$0 period. Open with a simple greeting, mention the billing period and the "
+            "amount, note that the attachments are included, and sign off as the "
+            "operator's company. Reference the figures plainly but DO NOT claim that "
+            "kWh times the rate equals the total — a discount may apply, so the "
+            "arithmetic won't line up. Plain text only — no subject line, no markdown, "
+            "no placeholder brackets, no invented numbers."
+        )
+        try:
+            out = call_json(
+                system=system,
+                user_text="Invoice context (JSON):\n" + json.dumps(ctx, default=str),
+                max_tokens=600,
+                schema={"type": "object",
+                        "properties": {"email": {"type": "string"}},
+                        "required": ["email"],
+                        "additionalProperties": False})
+        except LLMUnavailable:
+            raise HTTPException(503, "AI email isn't configured.")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ai-email generation failed: %s", e)
+            raise HTTPException(502, "Couldn't write the email right now — try again.")
+        email = (out.get("email") or "").strip()
+        if not email:
+            raise HTTPException(502, "The AI returned an empty email — try again.")
+        return {"ok": True, "email": email}
+
+
 # ─── offtaker invoice TEMPLATE (operator's own format) ──────────────────────────
 # Stage 1: upload + store the operator's invoice template per-tenant so generated
 # offtaker invoices can LATER reproduce THEIR exact format. Rendering from the
