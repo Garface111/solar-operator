@@ -93,9 +93,30 @@ function broadcastToSoTabs(message) {
         });
       }
     });
+    // After a SUCCESSFUL capture from a user-initiated connect, bring the operator
+    // back to the Array Operator tab they started from (set in OPEN_UTILITY_PORTAL).
+    if (message && message.type === "SO_CAPTURE_LANDED" && message.ok) focusReturnTab();
   } catch (e) {
     console.warn("[EnergyAgent] broadcastToSoTabs failed:", e);
   }
+}
+
+// Focus the AO tab the operator launched a foreground vendor connect from, then
+// clear it (one-shot). No-op if none stored or it's stale (>10 min). This is the
+// "bring me back to our tab once the data's collected" behavior.
+function focusReturnTab() {
+  try {
+    chrome.storage.local.get("so_return_tab", (st) => {
+      const rt = st && st.so_return_tab;
+      if (!rt || typeof rt.tabId !== "number") return;
+      if (Date.now() - (rt.ts || 0) > 10 * 60 * 1000) { chrome.storage.local.remove("so_return_tab"); return; }
+      try { chrome.tabs.update(rt.tabId, { active: true }, () => void chrome.runtime.lastError); } catch (_) {}
+      if (typeof rt.windowId === "number") {
+        try { chrome.windows.update(rt.windowId, { focused: true }, () => void chrome.runtime.lastError); } catch (_) {}
+      }
+      chrome.storage.local.remove("so_return_tab");
+    });
+  } catch (_) { /* non-fatal */ }
 }
 
 async function getSettings() {
@@ -653,6 +674,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // The Add Client modal sets true because the operator is actively
     // about to sign in — making them switch tabs manually is silly.
     const active = msg.active === true;
+    // Remember the Array Operator tab the operator launched this from, so we can
+    // bring them back to it automatically once the vendor data lands (they're about
+    // to be sent to the vendor portal in a FOREGROUND tab to log in). One-shot.
+    if (active && sender && sender.tab && typeof sender.tab.id === "number") {
+      try { chrome.storage.local.set({ so_return_tab: { tabId: sender.tab.id, windowId: sender.tab.windowId, ts: Date.now() } }); } catch (_) { /* non-fatal */ }
+    }
     if (!/^https:\/\//i.test(url)) {
       sendResponse({ ok: false, error: "invalid-url" });
       return; // sync response, no need to return true
