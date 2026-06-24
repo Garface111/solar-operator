@@ -30,6 +30,8 @@ EXTENSION_INSTALL_URL = os.getenv(
 
 def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      attachments: list[dict] | None = None,
+                     cc: list[str] | str | None = None,
+                     bcc: list[str] | str | None = None,
                      from_addr: str | None = None,
                      reply_to: str | None = None,
                      product: str = "nepool",
@@ -39,7 +41,9 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
 
     from_addr overrides the platform default From header (V2 "send as me").
     reply_to sets a Reply-To so replies still reach a tenant even when we fell
-    back to the platform From for an unverified domain."""
+    back to the platform From for an unverified domain.
+    cc / bcc add carbon-copy recipients (e.g. the operator BCC'd on every
+    offtaker invoice so they always see what the customer received)."""
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — logging email instead of sending.")
         logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or html[:500])
@@ -61,6 +65,10 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     }
     if text:
         params["text"] = text
+    if cc:
+        params["cc"] = [cc] if isinstance(cc, str) else list(cc)
+    if bcc:
+        params["bcc"] = [bcc] if isinstance(bcc, str) else list(bcc)
     # Always set a Reply-To to the monitored support inbox so a brand-domain
     # From (whose mailbox may not receive) never strands a customer reply.
     # An explicit reply_to (e.g. report "send as me") is respected as-is.

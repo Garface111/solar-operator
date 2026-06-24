@@ -165,8 +165,9 @@ def test_send_now_test_goes_to_operator(client, monkeypatch):
     captured = {}
 
     def fake_send(to, subject, html, text, attachments=None, from_addr=None,
-                  reply_to=None, product="nepool"):
-        captured.update(to=to, subject=subject, attachments=attachments, product=product)
+                  reply_to=None, product="nepool", cc=None, bcc=None, **kw):
+        captured.update(to=to, subject=subject, attachments=attachments,
+                        product=product, cc=cc, bcc=bcc)
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
@@ -369,6 +370,33 @@ def test_scheduler_monthly_billing_delivers(client, monkeypatch):
     # And it stamped the schedule on our sub.
     with SessionLocal() as db:
         assert db.get(BillingReportSubscription, sub_id).last_sent_at is not None
+
+
+def test_offtaker_send_bccs_the_operator(client, monkeypatch):
+    """Every invoice emailed to an offtaker (send_mode=to_client) BCCs the operator,
+    so the operator always gets a copy of exactly what the customer received — even
+    though the message goes To the customer."""
+    from api import scheduler
+    tid, auth = _make_tenant()
+    op_email = f"{tid}@operator.test"          # _make_tenant sets this as contact_email
+    sub_id = _upload(client, auth, "norwich.xlsx", cadence="monthly",
+                     delivery_mode="auto", send_mode="to_client",
+                     client_email="offtaker@example.test").json()["subscription"]["id"]
+
+    captured = {}
+
+    def fake_send(to, subject, html, text, attachments=None, cc=None, bcc=None,
+                  from_addr=None, reply_to=None, product="nepool", **kw):
+        captured.update(to=to, cc=cc, bcc=bcc)
+        return True
+
+    monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+    result = scheduler.deliver_billing_reports("monthly")
+    assert sub_id in result["sent"]
+    to_list = captured["to"] if isinstance(captured["to"], list) else [captured["to"]]
+    assert "offtaker@example.test" in to_list      # the customer is the To
+    assert captured["bcc"] == [op_email]           # the operator is BCC'd
+    assert op_email not in to_list                 # operator is NOT a visible recipient
 
 
 # ─── billing rate ($/kWh): global default + per-customer override ────────────

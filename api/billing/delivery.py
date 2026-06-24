@@ -1026,6 +1026,12 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     if not to:
         return {"ok": False, "error": "; ".join(problems) or "no recipients"}
 
+    # The operator is BCC'd on every offtaker invoice so they ALWAYS get a copy of
+    # exactly what the customer received — unless they're already a direct recipient
+    # (to_me puts them in To, to_both cc's them) or this is a test (already to_me).
+    op_bcc = sub.operator_email or getattr(tenant, "contact_email", None)
+    bcc = [op_bcc] if (op_bcc and not is_test and op_bcc not in to and op_bcc not in cc) else []
+
     formats = sub.formats or ["pdf"]
     with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
         try:
@@ -1045,11 +1051,11 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
 
         ok = _send_via_resend(
             to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
-            attachments=attachments, from_addr=from_addr,
+            attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
             product=getattr(tenant, "product", "array_operator"),
         )
 
-    result = {"ok": bool(ok), "to": to, "cc": cc,
+    result = {"ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
               "attachments": [p.name for p in paths],
               "invoice_number": (match.computed_invoice or {}).get("invoice_number"),
               "amount_owed": (match.computed_invoice or {}).get("amount_owed"),
