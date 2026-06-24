@@ -934,8 +934,13 @@ def send_now(sub_id: int, test: bool = Query(default=True),
 @router.get("/subscriptions/{sub_id}/preview")
 def preview(sub_id: int, kind: str = Query(default="invoice"),
             fmt: str = Query(default="pdf"),
+            variant: Optional[str] = Query(default=None),
             authorization: Optional[str] = Header(default=None)):
-    """Render the current invoice or summary on demand for download."""
+    """Render the current invoice or summary on demand for download.
+
+    variant (invoice PDF only): "default" forces OUR standard format; "template"
+    forces the operator's template even when it's toggled off (a preview-only
+    compare for the approval-inbox buttons); None = exactly what gets sent."""
     t = tenant_from_session(authorization)
     if fmt not in VALID_FORMATS:
         raise HTTPException(400, "fmt must be pdf or xlsx")
@@ -972,12 +977,20 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
                 if fmt == "pdf":
                     # Mirror the SEND chain so the preview is exactly what gets
                     # delivered: own-workbook repro → operator-template repro →
-                    # operator token-HTML template → standard.
+                    # operator token-HTML template → standard. `variant` lets the
+                    # approval-inbox compare buttons force one side (see docstring).
                     from .delivery import (_render_from_repro,
                                            _render_from_operator_template_repro,
                                            _render_from_operator_template)
                     pp = tmpd / "p.pdf"
-                    if (_render_from_repro(match, sub, pp)
+                    if variant == "default":
+                        pass                          # force OUR standard format
+                    elif variant == "template":       # force the template (even if off)
+                        if (_render_from_repro(match, sub, pp)
+                                or _render_from_operator_template_repro(match, sub, pp, force=True)
+                                or _render_from_operator_template(match, sub, pp, force=True)):
+                            p = pp
+                    elif (_render_from_repro(match, sub, pp)
                             or _render_from_operator_template_repro(match, sub, pp)
                             or _render_from_operator_template(match, sub, pp)):
                         p = pp

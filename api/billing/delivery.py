@@ -662,10 +662,11 @@ def build_manual_match(sub) -> BillingMatch:
     )
 
 
-def _render_from_operator_template(match, sub, out_path) -> bool:
+def _render_from_operator_template(match, sub, out_path, force: bool = False) -> bool:
     """If the offtaker's tenant has an ENABLED invoice template, render the invoice in
     THEIR own format and write it to out_path. Returns True on success, False to fall
-    back to the standard PDF. NEVER raises — a bad template can't break a real send."""
+    back to the standard PDF. NEVER raises — a bad template can't break a real send.
+    force=True ignores the enabled flag (preview-only compare of the template)."""
     if sub is None or not getattr(sub, "tenant_id", None):
         return False
     try:
@@ -675,7 +676,7 @@ def _render_from_operator_template(match, sub, out_path) -> bool:
         with SessionLocal() as db:
             tpl = db.execute(select(OfftakerInvoiceTemplate).where(
                 OfftakerInvoiceTemplate.tenant_id == sub.tenant_id)).scalars().first()
-            if not tpl or not tpl.enabled or not tpl.html:
+            if not tpl or (not force and not tpl.enabled) or not tpl.html:
                 return False
             tenant = db.get(Tenant, sub.tenant_id)
             ctx = build_token_context(match, sub, tenant)
@@ -687,7 +688,7 @@ def _render_from_operator_template(match, sub, out_path) -> bool:
         return False
 
 
-def _render_from_operator_template_repro(match, sub, out_path) -> bool:
+def _render_from_operator_template_repro(match, sub, out_path, force: bool = False) -> bool:
     """Pixel-perfect path for offtakers WITHOUT their own workbook: reproduce the
     invoice in the operator's ENABLED Excel template — write THIS offtaker's
     computed values into the template's mapped display cells + swap their name, and
@@ -709,7 +710,7 @@ def _render_from_operator_template_repro(match, sub, out_path) -> bool:
         with SessionLocal() as db:
             tpl = db.execute(select(OfftakerInvoiceTemplate).where(
                 OfftakerInvoiceTemplate.tenant_id == sub.tenant_id)).scalars().first()
-            if not tpl or not tpl.enabled or not tpl.file_bytes:
+            if not tpl or (not force and not tpl.enabled) or not tpl.file_bytes:
                 return False
             fb = bytes(tpl.file_bytes)
         if fb[:4] != b"PK\x03\x04":                   # xlsx only (PDF/Word/HTML → token-HTML path)
