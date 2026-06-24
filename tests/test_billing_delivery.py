@@ -383,6 +383,30 @@ def test_patch_subscription_with_utility_account_id_succeeds(client):
         assert s.utility_account_id == acct_id
 
 
+def test_invoice_template_defaults_on_and_toggles_both_ways(client):
+    """Uploading a template defaults it to ON (Ford: use their template by default).
+    The PUT enable toggle must work BOTH ways — regression: put_invoice_template
+    referenced an undefined `is_excel` (NameError -> 500 on every toggle) and force-
+    re-enabled whenever html existed, so 'Default format' could never stick."""
+    tid, auth = _make_tenant()
+    files = {"file": ("invoice.html",
+                      b"<html><body>Invoice {{amount_due}}</body></html>", "text/html")}
+    r = client.post("/v1/array-operator/billing/invoice-template",
+                    files=files, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert r.json()["template"]["enabled"] is True          # default ON on upload
+    # Switch to the standard format — must succeed (was 500) and STICK (was bouncing on).
+    r = client.put("/v1/array-operator/billing/invoice-template",
+                   json={"enabled": False}, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert r.json()["template"]["enabled"] is False
+    # Switch back to the template.
+    r = client.put("/v1/array-operator/billing/invoice-template",
+                   json={"enabled": True}, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert r.json()["template"]["enabled"] is True
+
+
 # ─── scheduler ──────────────────────────────────────────────────────────────
 
 

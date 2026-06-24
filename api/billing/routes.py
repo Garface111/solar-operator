@@ -1631,13 +1631,6 @@ def put_invoice_template(body: InvoiceTemplatePut,
             if tpl.enabled and not tpl.html:
                 tpl.html = DEFAULT_TEMPLATE_HTML
         tpl.updated_at = datetime.utcnow()
-        # Default a freshly uploaded template to ON — uploading IS the opt-in, so the
-        # operator no longer has to separately flip "use this template for my offtaker
-        # invoices" (the gap that made an uploaded template preview correctly yet send
-        # the default format). Only when it's actually renderable (xlsx → pixel repro,
-        # or seeded token-HTML); they can still turn it off on the card.
-        if is_excel or tpl.html:
-            tpl.enabled = True
         db.commit()
         db.refresh(tpl)
         return {"ok": True, "template": _template_dict(tpl)}
@@ -1702,6 +1695,12 @@ async def upload_invoice_template(file: UploadFile = File(...),
                     logger.info("invoice template: seeded HTML from Excel sheet %r", sheet)
             except Exception as e:  # noqa: BLE001
                 logger.warning("invoice template Excel extract failed: %s", e)
+        # A freshly uploaded template is used by DEFAULT — uploading IS the opt-in,
+        # so the operator doesn't have to separately flip it on (they switch to the
+        # standard format with the slider). Only when it's actually renderable
+        # (xlsx pixel repro, or seeded token-HTML); otherwise leave it off.
+        if is_excel or tpl.html:
+            tpl.enabled = True
         tpl.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(tpl)
