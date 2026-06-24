@@ -1760,6 +1760,23 @@ def _billing_summary_kwh(t: Tenant) -> dict:
 
     today = datetime.now(tz=timezone.utc).date()
     month_start = today.replace(day=1)
+    # WINDOW: match the Stripe metered billing CYCLE so the displayed bill equals what
+    # is actually charged. The meter bills usage within the subscription's current
+    # period (e.g. the 21st→21st), NOT the calendar month — using month_start here made
+    # the display ($388.66 on 84,147 calendar-month kWh) disagree with the real cycle
+    # charge ($157.34 on 32,743 cycle kWh). For a live metered sub, use its current
+    # period start (the exact window jobs/usage_report reports against); for a trial
+    # tenant (no sub) or any Stripe hiccup, fall back to the calendar month.
+    from .jobs.usage_report import tenant_period_kwh, _period_start_date
+    period_start = month_start
+    sub_id = getattr(t, "stripe_subscription_id", None)
+    if sub_id:
+        try:
+            ps = _period_start_date(sub_id)
+            if ps:
+                period_start = ps
+        except Exception:  # noqa: BLE001 — never fail the summary on a Stripe hiccup
+            pass
     with SessionLocal() as db:
         billable_arrays = db.execute(
             select(func.count()).select_from(Array).where(
@@ -1768,23 +1785,9 @@ def _billing_summary_kwh(t: Tenant) -> dict:
                 Array.excluded.is_(False),
             )
         ).scalar() or 0
-        # HONESTY + parity with the Stripe meter (jobs/usage_report.tenant_period_kwh):
-        # sum only REAL metered generation. Exclude source='bill_prorate' (a monthly
-        # utility bill smeared flat across its days — an estimate), so the displayed
-        # "$X this month · N kWh generated" matches what we actually bill and "generated"
-        # is true. NULL source (legacy) kept via coalesce.
-        mtd_kwh = db.execute(
-            select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
-            .select_from(DailyGeneration)
-            .join(Array, Array.id == DailyGeneration.array_id)
-            .where(
-                DailyGeneration.tenant_id == t.id,
-                DailyGeneration.day >= month_start,
-                Array.deleted_at.is_(None),
-                Array.excluded.is_(False),
-                func.coalesce(DailyGeneration.source, "") != "bill_prorate",
-            )
-        ).scalar() or 0.0
+        # Same query the meter uses (excludes bill_prorate estimate rows) → the
+        # displayed kWh/$ equals what Stripe actually bills, to the penny.
+        mtd_kwh = tenant_period_kwh(db, t.id, period_start)
     mtd_kwh = float(mtd_kwh)
     monitoring_total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
 
@@ -1807,7 +1810,7 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         # ── Monitoring (per-kWh) plan block ──
         "billable_arrays": int(billable_arrays),
         "mtd_kwh": round(mtd_kwh, 1),
-        "period_start": month_start.isoformat(),
+        "period_start": period_start.isoformat(),
         "rate_cents_per_kwh": ao_pricing.FULL_UNIT_CENTS,        # decimal cents/kWh
         "blended_cents_per_kwh": ao_pricing.blended_unit_cents(mtd_kwh),
         "monitoring_total_cents": monitoring_total_cents,        # month-to-date, decimal cents
