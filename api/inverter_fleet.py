@@ -38,25 +38,53 @@ from .inverters import peer_analysis
 log = logging.getLogger(__name__)
 
 # ── Nameplate fallback from the model code ────────────────────────────────────
-# Chint/CPS inverters never report a per-unit nameplate: the portal exposes
-# capacity only at the SITE level (installedCapacity), and busTypeDevices has no
-# per-device rated field. But the MODEL CODE names the AC kW rating — e.g.
-# "SCA50KTL-DO/US-480" = 50 kW, "SC36KTL-DO/US-480" = 36 kW. We parse that as a
-# grounded denominator for "% of rated" at READ time (we deliberately do NOT
-# stamp it into Inverter.nameplate_kw — that column stays "what the source
-# actually reported"; a parsed spec is derived, not reported). Unknown patterns
-# return None so the cell shows blank rather than a guessed number.
+# Some vendors never report a per-unit nameplate, but the MODEL CODE names the AC
+# rating — so we parse it as a grounded denominator for "% of rated" at READ time
+# (we deliberately do NOT stamp it into Inverter.nameplate_kw — that column stays
+# "what the source actually reported"; a parsed spec is derived, not reported).
+# Unknown patterns return None so the cell shows blank rather than a guessed number.
+#
+#   Chint/CPS — portal exposes capacity only at the SITE level (installedCapacity),
+#     busTypeDevices has no per-device rated field. Model names kW directly, e.g.
+#     "SCA50KTL-DO/US-480" = 50 kW, "SC36KTL-DO/US-480" = 36 kW.
+#   SolarEdge — the Monitoring API frequently omits per-inverter nameplate. The
+#     model encodes the AC rating: residential SE#### = WATTS (SE10000 = 10 kW,
+#     SE7600 = 7.6 kW), optionally with an H (HD-Wave) + region suffix; commercial
+#     three-phase SE##K / SE##.#K = KILOWATTS (SE33.3KUS = 33.3 kW, SE100KUS = 100).
 _CHINT_MODEL_KW = re.compile(r"SC[A-Z]{0,3}(\d{1,3}(?:\.\d+)?)KTL", re.IGNORECASE)
+_SE_MODEL_KW = re.compile(r"\bSE(\d{1,3}(?:\.\d+)?)K", re.IGNORECASE)   # SE33.3KUS → kW
+_SE_MODEL_W = re.compile(r"\bSE(\d{3,5})(?!\d)", re.IGNORECASE)         # SE10000   → W
 
 def _nameplate_from_model(vendor, model):
-    if not model or (vendor or "").lower() != "chint":
+    if not model:
         return None
-    mm = _CHINT_MODEL_KW.search(str(model))
-    if not mm:
-        return None
-    try:
-        kw = float(mm.group(1))
-    except (TypeError, ValueError):
+    v = (vendor or "").lower()
+    s = str(model)
+    kw = None
+    if v == "chint":
+        mm = _CHINT_MODEL_KW.search(s)
+        if mm:
+            try:
+                kw = float(mm.group(1))
+            except (TypeError, ValueError):
+                kw = None
+    elif v == "solaredge":
+        # K-form (kW) is more specific — try it first so SE100KUS isn't misread as
+        # 100 W by the watt pattern.
+        mk = _SE_MODEL_KW.search(s)
+        if mk:
+            try:
+                kw = float(mk.group(1))
+            except (TypeError, ValueError):
+                kw = None
+        else:
+            mw = _SE_MODEL_W.search(s)
+            if mw:
+                try:
+                    kw = float(mw.group(1)) / 1000.0
+                except (TypeError, ValueError):
+                    kw = None
+    if kw is None:
         return None
     return kw if 0 < kw <= 1000 else None
 
