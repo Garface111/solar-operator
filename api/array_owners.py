@@ -2628,6 +2628,50 @@ def inverter_capture(
                 if site_key and site_key not in by_site_id:
                     by_site_id[site_key] = arr
 
+            # CROSS-VENDOR SPLIT (fixes "my CHINT inverters never show up"). A
+            # capture can name-match an EXISTING array that already holds ANOTHER
+            # vendor's inverters — e.g. a CHINT site called "Londonderry" matching a
+            # SolarEdge "Londonderry" array — and merge into it, burying this
+            # vendor's inverters inside a foreign array so the owner never sees them
+            # as their own. If the matched array already holds OTHER-vendor
+            # inverters, peel THIS vendor into its own "<name> (<Vendor>)" array and
+            # move any of this vendor's inverters already stranded in the mixed array
+            # over to it — healing the bad merge on the next capture. Single-vendor
+            # arrays (the norm) never trigger this.
+            if arr is not None and not created:
+                _other = db.execute(
+                    select(Inverter.id).where(
+                        Inverter.array_id == arr.id,
+                        Inverter.deleted_at.is_(None),
+                        Inverter.vendor != provider,
+                    ).limit(1)
+                ).first()
+                if _other is not None:
+                    _vname = f"{arr.name} ({provider.capitalize()})"
+                    _varr = by_name.get(_vname.strip().lower())
+                    if _varr is None:
+                        _varr, _ = _safe_create_array(
+                            db, tenant.id, _vname,
+                            client_id=arr.client_id,
+                            fuel_type=getattr(arr, "fuel_type", None) or "solar")
+                        by_name[_vname.strip().lower()] = _varr
+                        by_id[_varr.id] = _varr
+                    elif _varr.deleted_at is not None:
+                        _varr.deleted_at = None
+                    for _iv in db.execute(
+                        select(Inverter).where(
+                            Inverter.array_id == arr.id,
+                            Inverter.deleted_at.is_(None),
+                            Inverter.vendor == provider,
+                        )
+                    ).scalars().all():
+                        _iv.array_id = _varr.id
+                        _iv.source_array_id = _varr.id
+                    db.flush()
+                    if site_key:
+                        by_site_id[site_key] = _varr
+                    arr = _varr
+
             # NOTE: nameplate hinting via Inverter rows is a follow-up — the
             # Array is the owner-facing grouping, and the value/peer model
             # consumes the kWh reading recorded below.
