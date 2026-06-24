@@ -313,10 +313,16 @@ def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
             # sheets below; intra-sheet ones LibreOffice recalculates. (No more
             # nulling, which was the source of Paul's broken/blank invoice cells.)
     # Keep the data tabs so cross-tab formulas still resolve, but HIDE them so the
-    # render outputs only the invoice page.
+    # render outputs only the invoice page. A template can carry a SECOND invoice sheet
+    # (Paul's has 'NFD Template' + 'NFD Template-old'); LibreOffice still exports a
+    # hidden sheet that has its own print area, so the PDF ends up with a duplicate
+    # invoice. Clearing the print area on every hidden sheet keeps it out of the render
+    # (formula refs are unaffected — they don't depend on print areas).
     for name in others:
         try:
-            wb[name].sheet_state = "hidden"
+            osh = wb[name]
+            osh.sheet_state = "hidden"
+            osh.print_area = None
         except Exception:  # noqa: BLE001
             pass
     ws.sheet_state = "visible"

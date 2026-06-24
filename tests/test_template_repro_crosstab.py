@@ -85,3 +85,18 @@ def test_autofit_gives_substituted_font_dates_a_generous_width():
     calibri = width_after("Calibri")      # standard → tuned
     assert chalk > 25.0, chalk            # wide enough for a 16pt substituted date
     assert chalk > calibri                # more than the standard-font allowance
+
+
+def test_isolate_clears_print_area_on_hidden_sheets():
+    """A template can carry a SECOND invoice sheet (Paul's: 'NFD Template' +
+    'NFD Template-old'). LibreOffice exports a hidden sheet that still has a print
+    area, so the PDF gets a DUPLICATE invoice. Isolate clears the print area on every
+    hidden sheet so only the chosen invoice renders."""
+    wb = openpyxl.Workbook()
+    inv = wb.active; inv.title = "Invoice"; inv["A1"] = "real"
+    dup = wb.create_sheet("Invoice Copy"); dup["A1"] = "dupe"; dup.print_area = "A1:B5"
+    buf = io.BytesIO(); wb.save(buf)
+    _isolate_to_invoice_sheet(wb, inv, buf.getvalue())
+    assert wb["Invoice Copy"].sheet_state == "hidden"
+    assert not wb["Invoice Copy"].print_area          # cleared → won't render as a duplicate
+    assert inv.sheet_state == "visible"
