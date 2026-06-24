@@ -97,6 +97,35 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
+  // The site/retrieve response carries weekETrend[] — the last ~7 days of daily
+  // site kWh as [{name:"20260610", value:"996.2"}]. The dashboard fetches it on
+  // load (we ALREADY observe site/retrieve), so this is free, passive history —
+  // no extra navigation, no auth replay. Map it to [{date:"YYYY-MM-DD", kwh}].
+  function weekTrendDaily(st) {
+    const wt = st && Array.isArray(st.weekETrend) ? st.weekETrend : [];
+    const out = [];
+    for (const p of wt) {
+      const m = /^(\d{4})(\d{2})(\d{2})$/.exec(String((p && p.name) || ""));
+      if (!m) continue;
+      const kwh = Number(p && p.value);
+      if (!isFinite(kwh) || kwh < 0) continue;
+      out.push({ date: m[1] + "-" + m[2] + "-" + m[3], kwh: Math.round(kwh * 10) / 10 });
+    }
+    return out;
+  }
+  // Merge daily kWh series by date, max-wins (matches the backend's dedup), ascending.
+  function mergeDaily() {
+    const m = new Map();
+    for (let i = 0; i < arguments.length; i++) {
+      for (const d of (arguments[i] || [])) {
+        if (!d || !d.date || d.kwh == null) continue;
+        const prev = m.get(d.date);
+        if (prev == null || d.kwh > prev) m.set(d.date, d.kwh);
+      }
+    }
+    return Array.from(m.keys()).sort().map((k) => ({ date: k, kwh: m.get(k) }));
+  }
+
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.origin !== location.origin) return;
     const d = e.data;
@@ -243,7 +272,7 @@
         current_power_w: liveW,
         error_count_today: inverters.filter((iv) => iv.status === "fault").length,
         status: (liveW || 0) > 0 ? "producing" : "idle",
-        daily: (sid != null && dailyBySite.has(String(sid))) ? dailyBySite.get(String(sid)) : [],       // real site daily kWh (chart-integrated) for instant history
+        daily: mergeDaily(weekTrendDaily(st), (sid != null && dailyBySite.has(String(sid))) ? dailyBySite.get(String(sid)) : []),   // 7-day weekETrend (site list) + chart-integrated history
         inverters,
       });
     }
