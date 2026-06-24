@@ -761,6 +761,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             )
         ).scalar() or 0
         all_set = _compute_all_set(db, t.id)
+        from .stripe_helpers import ao_plan_features
+        _plan_features = ao_plan_features(t.product, getattr(t, "billing_plan", None))
         return {
             "tenant_id": t.id,
             # Activation code the customer pastes into the Chrome extension.
@@ -771,6 +773,12 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "company_name": t.company_name or t.name,
             "email": t.contact_email,
             "product": t.product or "nepool",
+            # Array Operator plan + entitlements: which tabs/features are available,
+            # and whether the operator has picked a plan yet (drives the login
+            # plan-picker + tab gating). plan_features = {plan, plan_chosen,
+            # vendor_data, invoicing}. See stripe_helpers.ao_plan_features.
+            "billing_plan": getattr(t, "billing_plan", None),
+            "plan_features": _plan_features,
             "plan": t.plan,
             "active": t.active,
             # Shared read-only demo tenant flag. Drives the SPA demo banner and
@@ -813,6 +821,50 @@ def account_me(authorization: Optional[str] = Header(default=None)):
                 "refresh_failures": last_sess.refresh_failures if last_sess else 0,
             } if last_sess else None,
         }
+
+
+class SelectPlanBody(BaseModel):
+    plan: str  # "monitoring" | "invoicing" | "both"
+
+
+@router.post("/v1/account/select-plan")
+def select_plan(body: SelectPlanBody,
+                authorization: Optional[str] = Header(default=None)):
+    """Set the Array Operator tenant's plan — which features/tabs they get.
+
+    Called by the login plan-picker and the upgrade prompts. Sets the ENTITLEMENT
+    (billing_plan). For a trialing tenant (no live subscription) that's all that's
+    needed — when they add a card, create_subscription_for_tenant bills the lines
+    this plan grants. We do NOT mutate an existing live subscription here (changing a
+    paid plan's Stripe lines is a separate billing action), beyond syncing the
+    invoicing-line quantity. Returns the updated plan_features.
+    """
+    from .stripe_helpers import (
+        is_array_operator, ao_plan_features, reconcile_offtaker_quantity,
+    )
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    plan = (body.plan or "").strip().lower()
+    if plan not in ("monitoring", "invoicing", "both"):
+        raise HTTPException(422, "plan must be 'monitoring', 'invoicing', or 'both'")
+    with SessionLocal() as db:
+        db_t = db.get(Tenant, t.id)
+        if db_t is None:
+            raise HTTPException(404, "tenant not found")
+        # The plan-picker is an Array Operator concept; if a tenant reaches it,
+        # ensure they're on the AO product so the entitlement + billing apply.
+        if not is_array_operator(db_t.product):
+            db_t.product = "array_operator"
+        db_t.billing_plan = plan
+        db.commit()
+        prod, bp = db_t.product, db_t.billing_plan
+    # Keep the invoicing line quantity in sync if they now bill invoicing on a live sub.
+    try:
+        reconcile_offtaker_quantity(t.id)
+    except Exception:  # noqa: BLE001 — never fail the plan selection on a Stripe hiccup
+        pass
+    return {"ok": True, "billing_plan": plan,
+            "plan_features": ao_plan_features(prod, bp)}
 
 
 @router.get("/v1/account/sponge")

@@ -67,12 +67,43 @@ def _ao_invoicing_setup_price_id() -> str:
     return os.getenv("STRIPE_AO_INVOICING_SETUP_PRICE_ID", "")
 
 
+# The three Array Operator plans the operator picks at login. null/"" = not chosen
+# yet (the plan-picker prompts). "monitoring" = live vendor data, "invoicing" =
+# offtaker invoices, "both" = both.
+_AO_PLANS = {"monitoring", "invoicing", "both"}
+
+
 def is_ao_invoicing(product: str | None, billing_plan: str | None) -> bool:
-    """True when a tenant bills on the Array Operator per-OFFTAKER invoicing plan
-    (product == array_operator AND billing_plan == 'invoicing'). This is a LICENSED
-    line whose Stripe quantity = the tenant's offtaker count — distinct from the AO
-    per-kWh meter."""
-    return is_array_operator(product) and (billing_plan or "").strip().lower() == "invoicing"
+    """True when a tenant bills on the Array Operator per-OFFTAKER invoicing LINE —
+    plan 'invoicing' OR 'both'. A LICENSED line whose Stripe quantity = the tenant's
+    offtaker count."""
+    return is_array_operator(product) and (billing_plan or "").strip().lower() in ("invoicing", "both")
+
+
+def is_ao_monitoring(product: str | None, billing_plan: str | None) -> bool:
+    """True when a tenant bills on the Array Operator per-kWh MONITORING meter —
+    plan 'monitoring', 'both', or the AO default when no plan is chosen yet (null)."""
+    if not is_array_operator(product):
+        return False
+    return (billing_plan or "").strip().lower() in ("monitoring", "both", "")
+
+
+def ao_plan_features(product: str | None, billing_plan: str | None) -> dict:
+    """What an Array Operator tenant can ACCESS, derived from its chosen plan.
+
+    Returns {plan, plan_chosen, vendor_data, invoicing}. NEPOOL (non-AO) tenants get
+    everything True with plan_chosen True — the plan-picker + tab gating are AO-only.
+    """
+    if not is_array_operator(product):
+        return {"plan": None, "plan_chosen": True, "vendor_data": True, "invoicing": True}
+    p = (billing_plan or "").strip().lower()
+    chosen = p in _AO_PLANS
+    return {
+        "plan": p if chosen else None,
+        "plan_chosen": chosen,
+        "vendor_data": p in ("monitoring", "both"),
+        "invoicing": p in ("invoicing", "both"),
+    }
 
 
 def billable_offtaker_count(db, tenant_id: str) -> int:
@@ -184,38 +215,42 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         product = getattr(t, "product", "nepool")
         billing_plan = getattr(t, "billing_plan", None)
 
-    invoicing = is_ao_invoicing(product, billing_plan)
-    # AO per-kWh meter only when on AO product AND NOT on the invoicing plan.
-    ao = is_array_operator(product) and not invoicing
+    ao = is_array_operator(product)
+    has_invoicing = is_ao_invoicing(product, billing_plan)    # plan 'invoicing' or 'both'
+    has_monitoring = is_ao_monitoring(product, billing_plan)  # plan 'monitoring', 'both', or AO default
 
     quantity = max(int(array_count), 1)
     items: list[dict] = []
     add_invoice_items: list[dict] = []
-    if invoicing:
-        # Per-OFFTAKER LICENSED line — quantity = offtaker count. REFUSE rather than
-        # fall back to a wrong price (mis-billing is worse than a clean failure).
-        inv_price = _ao_invoicing_price_id()
-        if not inv_price:
-            send_internal_alert(
-                "⚠️ AO invoicing price id missing",
-                f"Tenant {tenant_id} ({email}) is on billing_plan='invoicing' but "
-                "STRIPE_AO_INVOICING_PRICE_ID is not set. Run "
-                "scripts/create_ao_invoicing_price.py and set the env var. No "
-                "subscription created (refusing to mis-bill on a fallback price).",
-            )
-            return {"ok": False, "error": "ao-invoicing-price-missing"}
-        items.append({"price": inv_price, "quantity": max(int(offtaker_count), 1)})
-        # Optional one-time $250 setup — leave STRIPE_AO_INVOICING_SETUP_PRICE_ID
-        # unset to WAIVE it (e.g. grandfathered early customers like Paul).
-        inv_setup = _ao_invoicing_setup_price_id()
-        if inv_setup:
-            add_invoice_items.append({"price": inv_setup, "quantity": 1})
-    elif ao:
-        # Per-kWh metered line — Stripe REJECTS `quantity` on a metered price.
-        # No setup fee on the owner side. Usage is reported by the usage-report job.
-        array_price_id = array_price_id_for_product(product)
-        if array_price_id:
-            items.append({"price": array_price_id})
+    if ao:
+        # Array Operator — bill the line(s) the chosen plan grants. "both" = BOTH
+        # lines (per-offtaker invoicing + per-kWh monitoring). Default (no plan
+        # chosen yet) bills the monitoring meter so a card-on-file never bills $0.
+        if has_invoicing:
+            # Per-OFFTAKER LICENSED line — quantity = offtaker count. REFUSE rather
+            # than fall back to a wrong price (mis-billing is worse than failing).
+            inv_price = _ao_invoicing_price_id()
+            if not inv_price:
+                send_internal_alert(
+                    "⚠️ AO invoicing price id missing",
+                    f"Tenant {tenant_id} ({email}) is on a plan with invoicing "
+                    f"(billing_plan={billing_plan!r}) but STRIPE_AO_INVOICING_PRICE_ID "
+                    "is not set. Run scripts/create_ao_invoicing_price.py and set the "
+                    "env var. No subscription created (refusing to mis-bill).",
+                )
+                return {"ok": False, "error": "ao-invoicing-price-missing"}
+            items.append({"price": inv_price, "quantity": max(int(offtaker_count), 1)})
+            # Optional one-time $250 setup — leave STRIPE_AO_INVOICING_SETUP_PRICE_ID
+            # unset to WAIVE it (e.g. grandfathered early customers like Paul).
+            inv_setup = _ao_invoicing_setup_price_id()
+            if inv_setup:
+                add_invoice_items.append({"price": inv_setup, "quantity": 1})
+        if has_monitoring or not has_invoicing:
+            # Per-kWh metered line — Stripe REJECTS `quantity` on a metered price.
+            # Usage is reported by the usage-report job; no setup fee.
+            kwh_price = _ao_kwh_price_id()
+            if kwh_price:
+                items.append({"price": kwh_price})
     else:
         array_price_id = array_price_id_for_product(product)
         if array_price_id:
@@ -255,19 +290,25 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
             t.trial_ends_at = None
             db.commit()
 
-    meter = (f"per-offtaker qty {max(int(offtaker_count), 1)}" if invoicing
-             else "per-kWh (metered)" if ao else f"per-array qty {quantity}")
+    if ao:
+        _parts = []
+        if has_invoicing:
+            _parts.append(f"per-offtaker qty {max(int(offtaker_count), 1)}")
+        if has_monitoring or not has_invoicing:
+            _parts.append("per-kWh (metered)")
+        meter = " + ".join(_parts) or "per-kWh (metered)"
+    else:
+        meter = f"per-array qty {quantity}"
     send_internal_alert(
         f"✅ Subscription resumed: {tenant_id}",
         f"Tenant {tenant_id} ({email}) added a card and resumed. "
-        f"Arrays: {array_count}, offtakers: {offtaker_count}, billed: {meter}. "
-        f"Subscription: {sub_id}"
+        f"Arrays: {array_count}, offtakers: {offtaker_count}, "
+        f"plan: {billing_plan or '(default)'}, billed: {meter}. Subscription: {sub_id}"
     )
     return {"ok": True, "subscription_id": sub_id, "array_count": int(array_count),
-            "quantity": (max(int(offtaker_count), 1) if invoicing
-                         else None if ao else quantity),
-            "metered": ao, "invoicing": invoicing,
-            "offtaker_count": int(offtaker_count)}
+            "offtaker_count": int(offtaker_count), "metered": ao,
+            "has_invoicing": has_invoicing, "has_monitoring": has_monitoring,
+            "billing_plan": (billing_plan or None)}
 
 
 def reconcile_subscription_quantity(
