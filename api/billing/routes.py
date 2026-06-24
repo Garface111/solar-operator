@@ -1601,9 +1601,16 @@ def ai_email_for_draft(draft_id: int, authorization: Optional[str] = Header(defa
                 ci = {}
         operator = (getattr(t, "company_name", None) or getattr(t, "operator_name", None)
                     or getattr(t, "name", None) or "your solar operator")
-        amt = d.amount_usd
+        # The ReportDraft row is a FROZEN snapshot — the offtaker's CURRENT name + the
+        # recomputed amount live on the subscription / fresh match (this is exactly what
+        # _draft_dict overlays for the card). Read d.* directly and you resurrect stale
+        # values, e.g. a since-corrected name typo. Mirror the live overlay here.
+        name = (getattr(sub, "customer_name", None) or d.customer_name) if sub else d.customer_name
+        amt = ci.get("amount_owed")
+        if amt is None:
+            amt = d.amount_usd
         ctx = {
-            "offtaker_name": d.customer_name,
+            "offtaker_name": name,
             "billing_period": d.period_label,
             "their_production_kwh": d.customer_kwh,
             "amount_due_usd": amt,

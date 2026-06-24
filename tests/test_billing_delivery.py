@@ -516,6 +516,36 @@ def test_budget_amount_overrides_calculated_total(client):
     assert ci["amount_owed"] == base and not ci.get("budget_override")
 
 
+def test_ai_email_uses_live_subscription_name_not_frozen_draft(client, monkeypatch):
+    """The AI cover email must address the offtaker by their CURRENT name (from the
+    subscription), not the frozen ReportDraft snapshot — which can still hold a
+    since-corrected typo (the 'Brtuce' bug)."""
+    import api.billing.repro.llm as LLM
+    from api.models import ReportDraft
+    _B = "/v1/array-operator/billing"
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, "norwich.xlsx").json()["subscription"]["id"]
+    client.post(f"{_B}/subscriptions/{sub_id}/draft", headers={"Authorization": auth})
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+        sub.customer_name = "Bruce Genereaux"            # corrected name (lives on sub)
+        d = (db.query(ReportDraft).filter_by(subscription_id=sub_id)
+             .order_by(ReportDraft.id.desc()).first())
+        d.customer_name = "Brtuce"                        # stale frozen snapshot
+        draft_id = d.id
+        db.commit()
+    cap = {}
+    def fake_call_json(*, system, user_text, **kw):
+        cap["user_text"] = user_text
+        return {"email": "Hello,"}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(LLM, "call_json", fake_call_json)
+    r = client.post(f"{_B}/drafts/{draft_id}/ai-email", headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert "Bruce Genereaux" in cap["user_text"]
+    assert "Brtuce" not in cap["user_text"]
+
+
 # ─── billing rate ($/kWh): global default + per-customer override ────────────
 
 
