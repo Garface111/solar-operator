@@ -98,6 +98,24 @@ def _eff_nameplate_kw(iv, m):
         return mp
     return _nameplate_from_model(iv.vendor, iv.model or m.get("model"))
 
+
+def _sane_live_power_w(power_w, nameplate_kw):
+    """Safety net for the W/kW unit bug in extension capture. Solar.web auto-scales the
+    realtime unit (W/kW/MW); the extension once assumed kW and ×1000'd a watts reading,
+    inflating it 1000x (a 12.5 kW Primo read "2575 kW" = 20600% of rated). If a per-
+    inverter live value is physically impossible (>3x nameplate) but lands in a sane range
+    at 1/1000, it's that unit error — recover the true watts. If still absurd after /1000,
+    drop it (never display known-garbage as live). Sane value or no nameplate → unchanged."""
+    if power_w is None or not nameplate_kw or nameplate_kw <= 0:
+        return power_w
+    cap_w = nameplate_kw * 1000.0
+    if power_w > cap_w * 3.0:
+        recovered = power_w / 1000.0
+        if recovered <= cap_w * 1.5:
+            return round(recovered, 1)
+        return None
+    return power_w
+
 # ── Daylight (for the card "Sleeping" night state) ────────────────────────────
 # The liquid-fill cards must distinguish "zero output because the sun is down"
 # (calm "Sleeping" pool) from "zero output because of a fault" (alarming). That
@@ -731,8 +749,8 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
     if borrow and iv.serial and capture_live:
         bw = borrow.get((str(iv.vendor or "").lower(), str(iv.serial)))
         if bw is not None and (base is None or bw > base):
-            return bw
-    return base
+            base = bw
+    return _sane_live_power_w(base, _eff_nameplate_kw(iv, m))
 
 
 # ── Two distinct data streams: VENDOR (inverter telemetry) vs UTILITY (meter) ──

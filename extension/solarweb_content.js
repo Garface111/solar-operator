@@ -276,8 +276,15 @@
       const byName = {};
       for (const d of data) {
         const nm = String((d && d.name) || "").trim();
-        const kw = (d && d.custom && typeof d.custom.power === "number") ? d.custom.power : null;
-        if (nm && kw != null && kw >= 0) byName[nm] = Math.round(kw * 1000);   // kW -> W
+        const c = (d && d.custom) || {};
+        const p = (typeof c.power === "number") ? c.power : null;
+        if (!nm || p == null || p < 0) continue;
+        // Solar.web AUTO-SCALES the realtime unit (W / kW / MW by magnitude), so we MUST
+        // honor custom.unit. Blindly assuming kW inflated a watts reading 1000x — a 12.5 kW
+        // Primo showed "2575 kW" (it was 2575 W = 2.575 kW). Convert to watts by the unit.
+        const u = String(c.unit || "kW").trim().toLowerCase();
+        const mult = u === "w" ? 1 : u === "mw" ? 1e6 : u === "gw" ? 1e9 : 1000;   // default kW
+        byName[nm] = Math.round(p * mult);
       }
       let ts = null;
       try {
