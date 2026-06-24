@@ -223,11 +223,17 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
 
 
 def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
-    """Leave the workbook with ONLY `ws` (the invoice sheet), self-contained, so the
-    headless render is exactly one invoice — not the operator's whole workbook.
-    Flatten formulas to the original file's Excel-cached results; where a cell has no
-    cache, keep an intra-sheet formula (LibreOffice recalculates) but null any that
-    reference a now-deleted sheet (which would otherwise render as #REF!)."""
+    """Render exactly ONE invoice (the `ws` sheet) — not the operator's whole
+    workbook — WITHOUT breaking the cross-tab references some templates use.
+
+    Paul's templates vary: the self-contained ones flatten cleanly, but others pull
+    straight from a data tab (e.g. `=+NFD!G6`). The old approach DELETED every other
+    sheet, which turned those cross-tab formulas into #REF! (or, when we pre-nulled
+    them, silently dropped the data). Instead we KEEP the other sheets but HIDE them:
+    LibreOffice excludes hidden sheets from the PDF, yet still resolves formulas that
+    reference them — verified on the prod Gotenberg renderer. We still flatten cells
+    that carry an Excel-cached result (frozen, consistent); any cell without a cache
+    keeps its formula and resolves live against the hidden sheets."""
     from openpyxl import load_workbook
     inv_title = ws.title
     others = [s.title for s in wb.worksheets if s.title != inv_title]
@@ -249,15 +255,20 @@ def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
             cached = invd[cell.coordinate].value if invd is not None else None
             if cached is not None:
                 cell.value = cached
-            elif _references_other_sheet(v, others):   # no cache + real cross-sheet ref → #REF risk
-                cell.value = None
-            # else: no cache, intra-sheet only → leave it (LibreOffice recalculates)
+            # else: leave the formula — cross-sheet refs resolve against the hidden
+            # sheets below; intra-sheet ones LibreOffice recalculates. (No more
+            # nulling, which was the source of Paul's broken/blank invoice cells.)
+    # Keep the data tabs so cross-tab formulas still resolve, but HIDE them so the
+    # render outputs only the invoice page.
     for name in others:
-        del wb[name]
+        try:
+            wb[name].sheet_state = "hidden"
+        except Exception:  # noqa: BLE001
+            pass
     ws.sheet_state = "visible"
     try:
-        wb.active = 0
-    except Exception:
+        wb.active = wb.sheetnames.index(inv_title)
+    except Exception:  # noqa: BLE001
         pass
 
 
