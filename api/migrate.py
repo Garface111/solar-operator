@@ -859,6 +859,38 @@ def main():
             except Exception as _e:
                 print(f"  (auto_attach_gmp default flip skipped: {_e})")
 
+        # 2026-06-24 AO performance summary is now OPT-IN (Ford): off by default so it
+        # never auto-attaches to an offtaker invoice unless the operator ticks "Attach
+        # Array Operator's summary data" on the draft card. The column already exists
+        # (create_all, Python-side default, no DB default). One-time flip existing rows
+        # true→false + set the DB default false; gated on the column default so a later
+        # per-offtaker opt-in (include_summary=true) survives migrate re-runs.
+        if not column_exists(conn, "billing_report_subscriptions", "include_summary"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN include_summary BOOLEAN DEFAULT false NOT NULL"
+            ))
+            print("  + billing_report_subscriptions.include_summary")
+        else:
+            try:
+                cur_default = conn.execute(text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_name = 'billing_report_subscriptions' "
+                    "AND column_name = 'include_summary'"
+                )).scalar()
+                if cur_default is None or "false" not in str(cur_default).lower():
+                    conn.execute(text(
+                        "UPDATE billing_report_subscriptions SET include_summary = false "
+                        "WHERE include_summary = true"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE billing_report_subscriptions "
+                        "ALTER COLUMN include_summary SET DEFAULT false"
+                    ))
+                    print("  ~ billing_report_subscriptions.include_summary default → false (one-time flip)")
+            except Exception as _e:
+                print(f"  (include_summary default flip skipped: {_e})")
+
         # 2026-06-18 Durable bill-PDF bytes (auto-attach GMP bill). pdf_path was
         # ephemeral; persist the actual bytes in-row so the PDF survives redeploys.
         for col, sql in [

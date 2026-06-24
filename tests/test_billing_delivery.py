@@ -157,6 +157,10 @@ def test_send_now_test_goes_to_operator(client, monkeypatch):
     sub_id = _upload(client, auth, "fairlee.xlsx",
                      send_mode="to_client", client_email="town@fairlee.gov",
                      formats='["pdf","xlsx"]').json()["subscription"]["id"]
+    # The Array Operator performance summary is OPT-IN (off by default) — turn it on
+    # so this test exercises the summary-attached path (and the include_summary PATCH).
+    client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                 json={"include_summary": True}, headers={"Authorization": auth})
 
     captured = {}
 

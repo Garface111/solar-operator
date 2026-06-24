@@ -1194,7 +1194,10 @@ class BillingReportSubscription(Base):
 
     # Format choices (Ford: "you should be able to choose")
     formats: Mapped[dict | None] = mapped_column(JSON, default=lambda: ["pdf"])
-    include_summary: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The Array Operator performance summary is OPT-IN (Ford 2026-06-24): off by
+    # default so it never auto-attaches to an offtaker invoice unless the operator
+    # ticks "Attach Array Operator's summary data" on the draft card.
+    include_summary: Mapped[bool] = mapped_column(Boolean, default=False)
 
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -310,7 +310,7 @@ async def create_subscription(
     cc_emails: Optional[str] = Form(default=None),
     operator_email: Optional[str] = Form(default=None),
     formats: Optional[str] = Form(default=None),
-    include_summary: bool = Form(default=True),
+    include_summary: bool = Form(default=False),  # AO summary opt-in (Ford 2026-06-24)
     annual_trueup: bool = Form(default=False),
     enabled: bool = Form(default=True),
     authorization: Optional[str] = Header(default=None),
