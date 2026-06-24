@@ -173,6 +173,18 @@ def _references_other_sheet(formula: str, others: list) -> bool:
     return False
 
 
+# Fonts the headless renderer (LibreOffice) ships with or maps 1:1. A cell font NOT
+# in this set is likely substituted with a WIDER fallback, so a date/number sized for
+# the original font overflows to '###'. We widen those more aggressively (see below).
+_SAFE_FONTS = {
+    "", "calibri", "calibri light", "arial", "arial narrow", "times new roman",
+    "helvetica", "verdana", "tahoma", "courier new", "georgia", "cambria",
+    "trebuchet ms", "century gothic", "garamond", "book antiqua",
+    "liberation sans", "liberation serif", "liberation mono", "dejavu sans",
+    "dejavu serif", "carlito", "caladea",
+}
+
+
 def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
     """Widen columns so text the renderer would CLIP becomes visible — Excel overflows
     a long label across empty neighbors, but LibreOffice's font metrics differ (esp.
@@ -224,11 +236,12 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
                 continue
             nf = cell.number_format or ""
             is_formula = isinstance(v, str) and v.startswith("=")
+            is_date = _fmt_is_dateish(nf)
             # Dates + numbers can't spill into an empty neighbor the way text does —
             # too narrow, they render as '###'. So size their OWN column to fit and
             # don't credit neighbor width. Text keeps the overflow allowance. Formula
             # cells are sized off their number format (the value isn't computed yet).
-            if _fmt_is_dateish(nf):
+            if is_date:
                 chars, numeric_like = 12, True               # e.g. 12/31/2026
             elif is_formula:
                 if re.search(r"[#0]", nf):
@@ -240,7 +253,17 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
             else:
                 chars, numeric_like = disp_len(v), False
             size = (cell.font.size or 11) if cell.font else 11
-            est = chars * size * factor
+            if numeric_like:
+                fname = ((cell.font.name if cell.font else "") or "").strip().lower()
+                # A font the renderer lacks (e.g. the template's 'Chalkboard') is
+                # substituted with a WIDER one, and a DATE can't spill into a neighbor
+                # so it shows '###'. Give substitution-risk date cells a generous
+                # allowance. Numbers fit far more easily (short, e.g. '789.64') and over-
+                # widening them only spreads the layout — they keep the tuned factor.
+                ff = factor * (2.2 if (is_date and fname not in _SAFE_FONTS) else 1.0)
+            else:
+                ff = factor
+            est = chars * size * ff
             avail = cw(ci)
             if not numeric_like:
                 cc = ci + 1

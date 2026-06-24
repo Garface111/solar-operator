@@ -64,3 +64,24 @@ def test_autofit_widens_narrow_date_and_number_columns():
     _autofit_columns(ws)
     assert ws.column_dimensions["B"].width > 8.0, ws.column_dimensions["B"].width
     assert ws.column_dimensions["D"].width > 8.0, ws.column_dimensions["D"].width
+
+
+def test_autofit_gives_substituted_font_dates_a_generous_width():
+    """The actual Paul bug: a date in 'Chalkboard' (a font the renderer lacks) is
+    substituted with a WIDER font, so it overflows a column that looks wide enough by
+    Excel's metric and renders '###'. _autofit_columns gives a non-standard-font date a
+    generous allowance — comfortably more than the same date in a standard font."""
+    from openpyxl.styles import Font
+
+    def width_after(font_name):
+        wb = openpyxl.Workbook(); ws = wb.active
+        ws.column_dimensions["E"].width = 13.5           # Paul's actual column width
+        c = ws["E2"]; c.value = "=TODAY()"; c.number_format = "mm-dd-yy"
+        c.font = Font(name=font_name, size=16.0)
+        _autofit_columns(ws)
+        return ws.column_dimensions["E"].width
+
+    chalk = width_after("Chalkboard")     # substituted → generous
+    calibri = width_after("Calibri")      # standard → tuned
+    assert chalk > 25.0, chalk            # wide enough for a 16pt substituted date
+    assert chalk > calibri                # more than the standard-font allowance
