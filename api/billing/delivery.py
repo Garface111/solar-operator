@@ -192,15 +192,18 @@ def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:
     return p["effective_rate"], src
 
 
-def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str]]:
+def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str], Optional[str]]:
     """The array's most recent full-month generation: (array_kwh, start, end,
-    month_label). Prefers DailyGeneration; falls back to Bill.kwh_generated.
-    Returns (None, None, None, None) when the array has no data yet."""
+    month_label, dom_source). Prefers DailyGeneration; falls back to Bill.kwh_generated.
+    dom_source ∈ 'daily_csv' (metered/uploaded) | 'bill_prorate' (estimate-dominated
+    month) | 'utility_bill' (a real bill) | None. Returns (None,)*5 when no data yet."""
     from ..models import DailyGeneration, Bill, UtilityAccount
 
-    # Prefer DailyGeneration: pick the latest (year, month) that has rows.
+    # Prefer DailyGeneration: pick the latest (year, month) that has rows. Track the
+    # SOURCE so provenance is honest (audit #8): a month dominated by 'bill_prorate'
+    # (a flat-smeared utility bill) is an ESTIMATE, not metered/uploaded data.
     rows = db.execute(
-        select(DailyGeneration.day, DailyGeneration.kwh)
+        select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
         .where(DailyGeneration.array_id == array_id)
         .order_by(DailyGeneration.day.desc())
     ).all()
@@ -211,9 +214,13 @@ def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date
         total = sum(float(r.kwh or 0) for r in month_rows)
         days = sorted(r.day for r in month_rows)
         label = latest_day.strftime("%Y-%m")
-        return round(total, 1), days[0], days[-1], label
+        prorate = sum(float(r.kwh or 0) for r in month_rows
+                      if (r.source or "") == "bill_prorate")
+        dom = "bill_prorate" if (total > 0 and prorate >= 0.5 * total) else "daily_csv"
+        return round(total, 1), days[0], days[-1], label, dom
 
-    # Fallback: the array's bills (kwh_generated) for the most recent period.
+    # Fallback: the array's bills (kwh_generated) for the most recent period — a real
+    # utility-bill figure (provenance 'utility_bill', not the prorated daily estimate).
     bill = db.execute(
         select(Bill)
         .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
@@ -226,8 +233,8 @@ def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date
         ps = bill.period_start.date() if bill.period_start else None
         pe = bill.period_end.date() if bill.period_end else None
         label = pe.strftime("%Y-%m") if pe else None
-        return round(float(bill.kwh_generated), 1), ps, pe, label
-    return None, None, None, None
+        return round(float(bill.kwh_generated), 1), ps, pe, label, "utility_bill"
+    return None, None, None, None, None
 
 
 def _array_period_kwh_sourced(
@@ -264,9 +271,11 @@ def _array_period_kwh_sourced(
         logger.warning("GMP daily-read unavailable for array %s; falling back",
                        array_id, exc_info=True)
 
-    # 2) Legacy fallback: DailyGeneration → Bill.
-    kwh, start, end, label = _array_period_kwh(db, array_id)
-    return kwh, start, end, label, ("daily_csv" if kwh is not None else None)
+    # 2) Legacy fallback: DailyGeneration → Bill, with honest provenance from
+    #    _array_period_kwh (daily_csv = metered/uploaded, bill_prorate = estimate-
+    #    dominated month, utility_bill = a real bill) instead of a blanket 'daily_csv'.
+    kwh, start, end, label, dom = _array_period_kwh(db, array_id)
+    return kwh, start, end, label, (dom if kwh is not None else None)
 
 
 def _utility_bill_period_kwh(
