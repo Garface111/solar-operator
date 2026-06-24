@@ -1716,6 +1716,11 @@ def _billing_summary_kwh(t: Tenant) -> dict:
                 Array.excluded.is_(False),
             )
         ).scalar() or 0
+        # HONESTY + parity with the Stripe meter (jobs/usage_report.tenant_period_kwh):
+        # sum only REAL metered generation. Exclude source='bill_prorate' (a monthly
+        # utility bill smeared flat across its days — an estimate), so the displayed
+        # "$X this month · N kWh generated" matches what we actually bill and "generated"
+        # is true. NULL source (legacy) kept via coalesce.
         mtd_kwh = db.execute(
             select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
             .select_from(DailyGeneration)
@@ -1725,6 +1730,7 @@ def _billing_summary_kwh(t: Tenant) -> dict:
                 DailyGeneration.day >= month_start,
                 Array.deleted_at.is_(None),
                 Array.excluded.is_(False),
+                func.coalesce(DailyGeneration.source, "") != "bill_prorate",
             )
         ).scalar() or 0.0
     mtd_kwh = float(mtd_kwh)

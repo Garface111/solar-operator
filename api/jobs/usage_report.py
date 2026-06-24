@@ -54,9 +54,16 @@ def _period_start_date(subscription_id: str):
 
 
 def tenant_period_kwh(db, tenant_id: str, since_date) -> float:
-    """Sum DailyGeneration.kwh for all of a tenant's billable arrays since
-    `since_date` (inclusive). Excludes soft-deleted and excluded arrays so the
-    meter matches what the owner actually sees on their dashboard."""
+    """Sum REAL metered DailyGeneration.kwh for all of a tenant's billable arrays
+    since `since_date` (inclusive). Excludes soft-deleted/excluded arrays so the
+    meter matches the dashboard.
+
+    HONESTY (we bill what we actually metered, never an estimate): excludes
+    source='bill_prorate' rows — a monthly utility bill smeared flat across its
+    days (jobs/bill_to_daily.py). Those are an estimate of daily generation, so
+    they must not raise the kWh quantity we report to Stripe. Every other source
+    (extension_pull / utility_meter / gmp_api / smarthub / solaredge / csv) is a
+    real reading and stays. NULL source (legacy rows) is kept via coalesce."""
     total = db.execute(
         select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
         .select_from(DailyGeneration)
@@ -66,6 +73,7 @@ def tenant_period_kwh(db, tenant_id: str, since_date) -> float:
             DailyGeneration.day >= since_date,
             Array.deleted_at.is_(None),
             Array.excluded.is_(False),
+            func.coalesce(DailyGeneration.source, "") != "bill_prorate",
         )
     ).scalar() or 0.0
     return float(total)
