@@ -1028,33 +1028,28 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # Workbook subscriptions are exempt (they invoice from the operator's uploaded
     # spreadsheet by design). This gates only the SEND — build_manual_match still
     # renders the figures for previews/drafts; we just won't put them in an email.
-    # A TEST send (is_test) may PREVIEW a BOUND offtaker that's merely awaiting this
-    # period's bill — it goes only to the operator. But an UNBOUND offtaker has no
-    # utility bill to invoice from AT ALL: its figures could only come from
-    # generation telemetry, which must NEVER appear in an invoice — so it is blocked
-    # even for a test send (previewing a telemetry-derived "invoice" still
-    # misrepresents the offtaker-billing rule).
+    # The OFFTAKER<->UTILITY-BILL guard applies even to a TEST send: previewing a
+    # telemetry-derived "invoice" (to the operator) still misrepresents the rule that
+    # offtaker invoices come EXCLUSIVELY from the settled GMP paper bill. So if the
+    # computed invoice didn't resolve to a real utility bill — bound to a GMP account
+    # but this period's bill hasn't landed, OR never bound at all (only telemetry
+    # available) — SKIP and wait, test or not. Workbook subscriptions are exempt.
     _ci_guard = match.computed_invoice or {}
     if not getattr(sub, "source_workbook", None):
         _src = _ci_guard.get("kwh_source")
         _has_bill = _ci_guard.get("has_utility_bill") is True
-        _bound = getattr(sub, "utility_account_id", None) is not None
         if _src != "utility_bill" or not _has_bill:
-            if not _bound:
-                # No GMP account linked → no settled bill exists. Block always.
-                return {"ok": False, "skipped": True,
-                        "error": ("this offtaker isn't linked to a GMP utility bill, "
-                                   "so there is no settled bill to invoice from. Link "
-                                   "it to a GMP utility account to start sending — "
-                                   "generation telemetry is never substituted"),
-                        "kwh_source": _src}
-            if not is_test:
-                # Bound, but this period's bill hasn't landed yet → wait (real send).
-                return {"ok": False, "skipped": True,
-                        "error": ("waiting on the utility bill for this offtaker — no "
-                                   "GMP bill has landed for this period yet (no vendor "
-                                   "data is substituted)"),
-                        "kwh_source": _src}
+            if getattr(sub, "utility_account_id", None) is not None:
+                _reason = ("waiting on the utility bill for this offtaker — no GMP "
+                           "bill has landed for this period yet (no vendor data is "
+                           "substituted)")
+            else:
+                _reason = ("this offtaker isn't linked to a GMP utility bill, so "
+                           "there is no settled bill to invoice from. Link it to a "
+                           "GMP utility account to start sending — generation "
+                           "telemetry is never substituted")
+            return {"ok": False, "skipped": True, "error": _reason,
+                    "kwh_source": _src}
 
     # For a real (non-test) send honor the slider; a test always goes to_me.
     if is_test:

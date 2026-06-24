@@ -504,3 +504,85 @@ def reconcile_offtaker_quantity(tenant_id: str) -> None:
             f"{e}\n\nStripe is still billing the old quantity — fix it manually "
             f"(proration_behavior=create_prorations)."
         )
+
+
+def migrate_ao_subscription_lines(tenant_id: str) -> None:
+    """Bring a LIVE Array Operator subscription's LINES in line with the tenant's
+    currently-chosen plan — ADD or REMOVE the per-kWh monitoring meter and the
+    per-offtaker invoicing line so a plan change (monitoring↔invoicing↔both) actually
+    changes what they're billed, with proration.
+
+    Call after Tenant.billing_plan changes. reconcile_offtaker_quantity owns the
+    invoicing line's QUANTITY; this owns which lines EXIST. Best-effort — never
+    raises. No-op for a non-AO tenant or one with no live subscription (a trialing
+    tenant gets the right lines when they first add a card). Idempotent: re-selecting
+    the same plan finds the lines already correct and touches nothing in Stripe.
+    """
+    from .db import SessionLocal
+    from .models import Tenant
+
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        return
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if t is None or not is_array_operator(getattr(t, "product", None)):
+            return
+        subscription_id = getattr(t, "stripe_subscription_id", None)
+        product = t.product
+        billing_plan = getattr(t, "billing_plan", None)
+        email = t.contact_email
+        offtaker_count = billable_offtaker_count(db, t.id)
+    if not subscription_id:
+        return   # trialing — no live sub; lines are set when they first add a card
+
+    want_invoicing = is_ao_invoicing(product, billing_plan)    # 'invoicing' or 'both'
+    want_monitoring = is_ao_monitoring(product, billing_plan)  # 'monitoring', 'both', or default
+    inv_price = _ao_invoicing_price_id()
+    kwh_price = _ao_kwh_price_id()
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+
+    try:
+        sub = stripe.Subscription.retrieve(subscription_id)
+        items = sub["items"]["data"]
+        inv_line = next((i for i in items if i["price"]["id"] == inv_price), None) if inv_price else None
+        kwh_line = next((i for i in items if i["price"]["id"] == kwh_price), None) if kwh_price else None
+
+        # ADD required-but-missing lines FIRST — a subscription must always keep at
+        # least one item, so we never leave it empty between a remove and an add.
+        if want_invoicing and inv_line is None:
+            if not inv_price:
+                send_internal_alert(
+                    "⚠️ AO invoicing price id missing (plan change)",
+                    f"Tenant {tenant_id} ({email}) changed to a plan with invoicing but "
+                    "STRIPE_AO_INVOICING_PRICE_ID is unset — invoicing line NOT added. "
+                    "Run scripts/create_ao_invoicing_price.py and set the env var.")
+            else:
+                stripe.SubscriptionItem.create(
+                    subscription=subscription_id, price=inv_price,
+                    quantity=max(int(offtaker_count), 1),
+                    proration_behavior="create_prorations")
+        if want_monitoring and kwh_line is None and kwh_price:
+            # Metered price — no quantity (Stripe rejects it); usage-report drives volume.
+            stripe.SubscriptionItem.create(
+                subscription=subscription_id, price=kwh_price,
+                proration_behavior="create_prorations")
+
+        # REMOVE lines the new plan no longer includes.
+        if not want_invoicing and inv_line is not None:
+            stripe.SubscriptionItem.delete(
+                inv_line["id"], proration_behavior="create_prorations")
+        if not want_monitoring and kwh_line is not None:
+            stripe.SubscriptionItem.delete(
+                kwh_line["id"], proration_behavior="create_prorations")
+
+        logger.info(
+            "Migrated AO subscription %s lines for tenant %s: plan=%s "
+            "(invoicing=%s, monitoring=%s)", subscription_id, tenant_id,
+            billing_plan, want_invoicing, want_monitoring)
+    except Exception as e:  # noqa: BLE001 — must never block the plan selection
+        logger.exception("AO subscription line migration FAILED for tenant %s", tenant_id)
+        send_internal_alert(
+            "⚠️ AO plan-change line migration failed",
+            f"Tenant {tenant_id} ({email}) changed plan to {billing_plan!r} but updating "
+            f"subscription {subscription_id} lines failed: {e}\n\nFix manually in Stripe "
+            "(add/remove the metered + invoicing lines, proration_behavior=create_prorations).")

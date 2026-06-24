@@ -149,8 +149,9 @@ def test_attention_names_flagged_inverter():
     # the underperformer too
     assert "BR-1" in html
     assert "underperforming vs its neighbors" in html
-    # array-level alert headline surfaced
-    assert "Inverter fault — service drafted" in html
+    # the array holding the faulted inverter is identified (the digest names the
+    # flagged inverter + its array in plain language, not the internal headline)
+    assert "South Field" in html
 
 
 def test_attention_no_green_banner():
@@ -159,12 +160,25 @@ def test_attention_no_green_banner():
 
 
 def test_no_data_array_is_honest():
-    """An array with no daily history must never show a fabricated kWh."""
-    html = digest.build_digest_html(_tenant(), _attention_tree())
-    # the data-less "New Array" appears in the per-array table...
-    assert "New Array" in html
-    # ...and the digest says "no recent data" rather than inventing a number.
-    assert "no recent data" in html
+    """An array WITH inverters but NO daily history must show 'no recent data',
+    never a fabricated kWh. (A 0-inverter array isn't a vendor array so the digest
+    omits it entirely; and on an attention day only flagged arrays are listed — so we
+    assert the honesty rule on a healthy day where every vendor array is shown.)"""
+    tree = {
+        "generated_at": "2026-06-17T12:00:00Z",
+        "columns": [{
+            "array_id": 9, "array_name": "Fresh Connect", "inverter_count": 1,
+            "alert": {"level": "ok", "count": 0, "status": "ok", "headline": "All clear"},
+            "inverters": [{"inverter_id": 91, "name": "FC-1", "status": "ok"}],
+            "daily": [],   # freshly connected — no history yet
+            "is_daylight": True,
+        }],
+        "summary": {"arrays_total": 1, "inverters_total": 1,
+                    "attention": 0, "is_daylight": True},
+    }
+    html = digest.build_digest_html(_tenant(), tree)
+    assert "Fresh Connect" in html       # shown on a healthy day...
+    assert "no recent data" in html      # ...honestly, never a fabricated kWh
 
 
 def test_subject_lines():

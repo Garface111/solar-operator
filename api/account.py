@@ -841,6 +841,7 @@ def select_plan(body: SelectPlanBody,
     """
     from .stripe_helpers import (
         is_array_operator, ao_plan_features, reconcile_offtaker_quantity,
+        migrate_ao_subscription_lines,
     )
     t = tenant_from_session(authorization)
     require_not_demo(t)
@@ -858,8 +859,11 @@ def select_plan(body: SelectPlanBody,
         db_t.billing_plan = plan
         db.commit()
         prod, bp = db_t.product, db_t.billing_plan
-    # Keep the invoicing line quantity in sync if they now bill invoicing on a live sub.
+    # Migrate a LIVE paid subscription's lines to the new plan (add/remove the per-kWh
+    # meter + per-offtaker invoicing line, with proration), then sync the invoicing
+    # line's quantity. Both are best-effort no-ops for a trialing tenant (no sub yet).
     try:
+        migrate_ao_subscription_lines(t.id)
         reconcile_offtaker_quantity(t.id)
     except Exception:  # noqa: BLE001 — never fail the plan selection on a Stripe hiccup
         pass
@@ -1800,9 +1804,18 @@ def _billing_summary_kwh(t: Tenant) -> dict:
     with SessionLocal() as db2:
         offtaker_count = billable_offtaker_count(db2, t.id)
     invoicing_total_cents = inv_pricing.compute_monthly_cents(offtaker_count)
-    active = ("invoicing"
-              if is_ao_invoicing(getattr(t, "product", None), getattr(t, "billing_plan", None))
-              else "kwh")
+    # Which AO line(s) the chosen plan bills: 'both' bills the per-kWh meter AND the
+    # per-offtaker invoicing line, so the displayed total must SUM them (showing only
+    # one understated a 'both' customer's next charge). monitoring / no-plan-yet → the
+    # meter; invoicing-only → the invoicing line.
+    from .stripe_helpers import is_ao_monitoring
+    _prod, _plan = getattr(t, "product", None), getattr(t, "billing_plan", None)
+    _mon_active = is_ao_monitoring(_prod, _plan)
+    _inv_active = is_ao_invoicing(_prod, _plan)
+    active = ("both" if (_mon_active and _inv_active)
+              else "invoicing" if _inv_active else "kwh")
+    combined_total_cents = ((monitoring_total_cents if _mon_active else 0.0)
+                            + (invoicing_total_cents if _inv_active else 0.0))
     return {
         "billing_basis": active,        # which AO plan is currently active
         "currency": "usd",
@@ -1821,9 +1834,8 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         "invoicing_per_offtaker_cents": inv_pricing.PER_OFFTAKER_CENTS,
         "invoicing_setup_cents": inv_pricing.SETUP_CENTS,
         "invoicing_total_cents": invoicing_total_cents,
-        # The active plan's total (back-compat: whichever plan is active).
-        "total_cents": (invoicing_total_cents if active == "invoicing"
-                        else monitoring_total_cents),
+        # The active plan's total — 'both' sums the per-kWh meter + invoicing line.
+        "total_cents": combined_total_cents,
     }
 
 
