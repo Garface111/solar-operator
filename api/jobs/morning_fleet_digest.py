@@ -35,6 +35,7 @@ from sqlalchemy import select
 from ..db import SessionLocal
 from ..models import Tenant
 from .. import inverter_fleet, notify, branding
+from ..stripe_helpers import ao_gets_vendor_emails
 
 log = logging.getLogger(__name__)
 
@@ -460,6 +461,13 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
     to = (getattr(tenant, "contact_email", None) or "").strip()
     if not to:
         log.info("morning_digest: tenant %s has no contact_email — skipping", tenant.id)
+        return False
+
+    # Invoicing-only AO accounts bought offtaker invoicing, not fleet monitoring —
+    # a vendor-data health digest is noise for them. (monitoring/both/no-plan still get it.)
+    if not ao_gets_vendor_emails(getattr(tenant, "product", None),
+                                 getattr(tenant, "billing_plan", None)):
+        log.info("morning_digest: tenant %s is invoicing-only — skipping vendor digest", tenant.id)
         return False
 
     tree = inverter_fleet.build_fleet_tree(db, tenant)

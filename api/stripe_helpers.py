@@ -106,6 +106,21 @@ def ao_plan_features(product: str | None, billing_plan: str | None) -> dict:
     }
 
 
+def ao_gets_vendor_emails(product: str | None, billing_plan: str | None) -> bool:
+    """Whether a tenant should receive VENDOR-DATA emails — the morning fleet-health
+    digest and the inverter down/underperformance alerts.
+
+    Suppressed ONLY for an Array Operator account explicitly on the invoicing-ONLY
+    plan: they bought offtaker invoicing, not fleet monitoring, so vendor-health
+    email is noise to them. Everyone else keeps receiving it — 'monitoring', 'both',
+    a not-yet-chosen plan (null), and all non-AO (NEPOOL) tenants. We deliberately do
+    NOT key this off ao_plan_features()['vendor_data'] (which is False for null) so a
+    legacy monitoring customer who never re-picked a plan is never silenced."""
+    if not is_array_operator(product):
+        return True
+    return (billing_plan or "").strip().lower() != "invoicing"
+
+
 def billable_offtaker_count(db, tenant_id: str) -> int:
     """Canonical "how many offtakers does this tenant pay for" on the invoicing plan
     = active, non-deleted BillingReportSubscription rows. Single source of truth so

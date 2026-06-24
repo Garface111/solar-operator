@@ -10,7 +10,10 @@ Pure functions over a fleet-tree dict — no DB, no network.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from api import inverter_alert_sweep as sweep
+from api.stripe_helpers import ao_gets_vendor_emails
 
 
 def _inv(name, status, *, power=None, nameplate=20.0, peer_index=None, inverter_id=None):
@@ -133,3 +136,31 @@ def test_underperforming_respects_threshold():
     ])
     flagged = sweep._flagged_inverters(_tree(col), 50)
     assert [f["inv"]["name"] for f in flagged] == ["A"]
+
+
+# ── invoicing-only accounts don't get vendor-data emails ──────────────────────
+
+def test_ao_gets_vendor_emails_predicate():
+    AO = "array_operator"
+    # Suppressed ONLY for explicit invoicing-only AO accounts.
+    assert ao_gets_vendor_emails(AO, "invoicing") is False
+    # Everyone else keeps getting them — incl. 'both' (has monitoring too) and the
+    # not-yet-chosen (null) plan, so a legacy monitoring customer is never silenced.
+    assert ao_gets_vendor_emails(AO, "monitoring") is True
+    assert ao_gets_vendor_emails(AO, "both") is True
+    assert ao_gets_vendor_emails(AO, None) is True
+    assert ao_gets_vendor_emails(AO, "") is True
+    # Non-AO (NEPOOL) tenants are never gated by AO plans.
+    assert ao_gets_vendor_emails("nepool", "invoicing") is True
+    assert ao_gets_vendor_emails(None, None) is True
+
+
+def test_sweep_tenant_skips_invoicing_only_before_any_db_work():
+    # db=None is safe: the invoicing-only gate returns 0 before build_fleet_tree.
+    t = SimpleNamespace(
+        id="t1", inverter_alerts_enabled=True, product="array_operator",
+        billing_plan="invoicing", inverter_alert_email="x@y.com",
+        contact_email="x@y.com", inverter_alert_grace_hours=12,
+        inverter_alert_threshold_pct=50,
+    )
+    assert sweep.sweep_tenant(None, t) == 0

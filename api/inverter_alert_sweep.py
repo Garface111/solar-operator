@@ -27,6 +27,7 @@ from .db import SessionLocal
 from .models import Tenant, InverterAlertState
 from . import inverter_fleet, notify
 from .email_skin import render_email_skin, render_email_skin_text
+from .stripe_helpers import ao_gets_vendor_emails
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,11 @@ def _render_email(tenant: Tenant, items: list[dict]) -> tuple[str, str, str]:
 def sweep_tenant(db, tenant: Tenant) -> int:
     """Process one tenant. Returns the number of inverters emailed about."""
     if not getattr(tenant, "inverter_alerts_enabled", False):
+        return 0
+    # Invoicing-only AO accounts bought offtaker invoicing, not fleet monitoring —
+    # vendor-health alerts are noise for them. (monitoring/both/no-plan still alert.)
+    if not ao_gets_vendor_emails(getattr(tenant, "product", None),
+                                 getattr(tenant, "billing_plan", None)):
         return 0
     to = getattr(tenant, "inverter_alert_email", None) or tenant.contact_email
     if not to:
