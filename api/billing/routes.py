@@ -594,6 +594,9 @@ class SubscriptionPatch(BaseModel):
     # the manual customer to the array whose generation is split.
     allocation_pct: Optional[float] = None
     array_id: Optional[int] = None
+    # Re-bind the offtaker to a different GMP utility bill (the billing source).
+    # Validated to a GMP account the operator owns; array_id is refreshed from it.
+    utility_account_id: Optional[int] = None
     # Per-customer billing rate override ($/kWh). Send a number to set it, or
     # explicit null to CLEAR it (fall back to the operator's global rate). We
     # use model_fields_set in the handler to tell "null to clear" from "omitted".
@@ -662,6 +665,16 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
             if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
                 raise HTTPException(404, "Array not found")
             sub.array_id = body.array_id
+        if body.utility_account_id is not None:
+            # Re-bind the offtaker's billing source to a different GMP utility bill.
+            # Mirror creation: validate ownership + GMP, refresh array_id from it.
+            acct = db.get(UtilityAccount, body.utility_account_id)
+            if acct is None or acct.tenant_id != t.id or acct.deleted_at is not None:
+                raise HTTPException(404, f"Utility account {body.utility_account_id} not found")
+            if (acct.provider or "").lower() != "gmp":
+                raise HTTPException(400, "Offtaker invoices bind to a GMP utility account.")
+            sub.utility_account_id = body.utility_account_id
+            sub.array_id = acct.array_id
         if "rate_per_kwh" in body.model_fields_set:
             # null clears the override; a number sets it (validated).
             sub.rate_per_kwh = _validate_rate(body.rate_per_kwh)
