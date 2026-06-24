@@ -1249,7 +1249,10 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
     return {
         "id": d.id,
         "subscription_id": d.subscription_id,
-        "customer_name": d.customer_name,
+        # Display name follows the LIVE subscription (renaming the offtaker
+        # anywhere updates the draft card + email preview), not the draft's frozen
+        # snapshot. Falls back to the draft's stored name if the sub is gone.
+        "customer_name": ((getattr(sub, "customer_name", None) or d.customer_name) if sub else d.customer_name),
         "status": d.status,
         "period_label": d.period_label,
         "array_total_kwh": d.array_total_kwh,

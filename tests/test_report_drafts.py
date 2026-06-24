@@ -58,6 +58,26 @@ def test_generate_draft_then_appears_in_inbox(client):
     assert [x["id"] for x in inbox] == [d["id"]]
 
 
+def test_draft_display_name_follows_live_subscription(client):
+    """REGRESSION: renaming the offtaker must update the draft card + email preview.
+    _draft_dict follows the LIVE subscription name, not the draft's frozen snapshot
+    (bug: edited 'Brtuce' -> 'Bruce Genereaux' but the draft still showed 'Brtuce')."""
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        sub = BillingReportSubscription(
+            tenant_id=tid, customer_name="Bruce Genereaux",
+            allocation_pct=0.12, billing_model="percent_of_array")
+        db.add(sub); db.flush()
+        sub_id = sub.id
+        db.add(ReportDraft(tenant_id=tid, subscription_id=sub_id,
+                           customer_name="Brtuce", status="pending"))  # stale frozen name
+        db.commit()
+    inbox = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
+    mine = [x for x in inbox if x["subscription_id"] == sub_id]
+    assert mine, "draft missing from inbox"
+    assert mine[0]["customer_name"] == "Bruce Genereaux"  # live name, not the frozen 'Brtuce'
+
+
 def test_generate_draft_is_idempotent_per_period(client):
     tid, auth = _make_tenant()
     sub_id = _upload(client, auth).json()["subscription"]["id"]
