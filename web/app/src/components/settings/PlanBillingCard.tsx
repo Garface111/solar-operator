@@ -247,19 +247,13 @@ export function PlanBillingCard({ account }: Props) {
                   active={billing.billing_basis === "invoicing"}
                   name="Invoicing"
                   tagline="Automatic offtaker invoices, generated &amp; sent for you"
-                  price={`${fmtMoney(billing.invoicing_base_cents ?? 10000, billing.currency)}/mo`}
+                  price={`${fmtMoney(billing.invoicing_per_offtaker_cents ?? 2000, billing.currency)}/offtaker`}
                   detail={
                     billing.billing_basis === "invoicing"
                       ? `${billing.offtaker_count ?? 0} offtaker${
                           billing.offtaker_count === 1 ? "" : "s"
-                        } · ${fmtMoney(
-                          (billing.invoicing_total_cents ?? 0) || (billing.invoicing_base_cents ?? 10000),
-                          billing.currency,
-                        )}/mo`
-                      : `includes ${billing.invoicing_base_includes ?? 4} offtakers, then ${fmtMoney(
-                          billing.invoicing_per_offtaker_cents ?? 2500,
-                          billing.currency,
-                        )}/offtaker`
+                        } · ${fmtMoney(billing.invoicing_total_cents ?? 0, billing.currency)}/mo`
+                      : "Billed per offtaker, monthly"
                   }
                 />
               </div>

@@ -24,10 +24,11 @@ from api.stripe_helpers import (
 
 
 def test_constants():
-    assert BASE_CENTS == 10_000           # $100/mo base
-    assert BASE_INCLUDES_OFFTAKERS == 4
-    assert PER_OFFTAKER_CENTS == 2_500    # $25/offtaker beyond
-    assert SETUP_CENTS == 25_000          # $250 one-time setup
+    # Flat $20/offtaker, no base/floor (Ford, Jun 2026).
+    assert PER_OFFTAKER_CENTS == 2_000    # $20/offtaker
+    assert SETUP_CENTS == 25_000          # $250 one-time setup (waivable)
+    assert BASE_CENTS == 0                # no base in the flat model
+    assert BASE_INCLUDES_OFFTAKERS == 0
 
 
 def test_zero_is_free():
@@ -36,30 +37,19 @@ def test_zero_is_free():
     assert compute_monthly_cents(-3) == 0
 
 
-def test_floor_covers_up_to_four():
-    # 1..4 offtakers all cost the base ($100) — the floor.
-    for n in (1, 2, 3, 4):
-        assert compute_monthly_cents(n) == 10_000, f"{n} offtakers should be $100"
-
-
-def test_pauls_anchor():
-    # Paul: 4 offtakers = $100/mo (the WTP signal this plan is built on).
-    assert compute_monthly_cents(4) == 10_000
-
-
-def test_per_offtaker_beyond_base():
-    assert compute_monthly_cents(5) == 12_500    # $125
-    assert compute_monthly_cents(6) == 15_000    # $150
-    assert compute_monthly_cents(10) == 25_000   # $250
-    assert compute_monthly_cents(20) == 50_000   # $500
+def test_flat_per_offtaker():
+    # Every offtaker is a flat $20 — no base, no floor.
+    assert compute_monthly_cents(1) == 2_000     # $20
+    assert compute_monthly_cents(2) == 4_000     # $40
+    assert compute_monthly_cents(4) == 8_000     # $80 (Paul's 4)
+    assert compute_monthly_cents(5) == 10_000    # $100
+    assert compute_monthly_cents(10) == 20_000   # $200
+    assert compute_monthly_cents(20) == 40_000   # $400
 
 
 def test_stripe_tiers_shape():
-    tiers = stripe_tiers()
-    assert tiers == [
-        {"up_to": 4, "flat_amount": 10_000, "unit_amount": 0},
-        {"up_to": "inf", "unit_amount": 2_500},
-    ]
+    # A single flat per-unit tier: every offtaker at $20.
+    assert stripe_tiers() == [{"up_to": "inf", "unit_amount": 2_000}]
 
 
 def test_is_ao_invoicing_detection():
