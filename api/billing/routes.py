@@ -1260,6 +1260,16 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         #                       | None (toggle off / not resolvable)
         "auto_attach_gmp": (getattr(sub, "auto_attach_gmp", False) if sub else None),
         "gmp_auto_status": gmp_auto_status,
+        # Editable offtaker details, surfaced so the approval inbox can edit the
+        # offtaker inline (live-update) without leaving the draft. These mirror the
+        # SubscriptionPatch fields; the money-affecting ones (allocation/discount/
+        # rate/utility bill) recompute the draft via generate_draft on change.
+        "cadence": (getattr(sub, "cadence", None) if sub else None),
+        "cc_emails": (getattr(sub, "cc_emails", None) if sub else None),
+        "discount_pct": (getattr(sub, "discount_pct", None) if sub else None),
+        "net_rate_per_kwh": (getattr(sub, "net_rate_per_kwh", None) if sub else None),
+        "utility_account_id": (getattr(sub, "utility_account_id", None) if sub else None),
+        "has_workbook": ((getattr(sub, "source_workbook", None) is not None) if sub else False),
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "sent_at": d.sent_at.isoformat() if d.sent_at else None,
     }
