@@ -24,6 +24,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from datetime import timedelta, date as _date, datetime
 from typing import Optional
@@ -35,6 +36,39 @@ from .models import Array, DailyGeneration, Inverter, InverterConnection, Invert
 from .inverters import peer_analysis
 
 log = logging.getLogger(__name__)
+
+# ── Nameplate fallback from the model code ────────────────────────────────────
+# Chint/CPS inverters never report a per-unit nameplate: the portal exposes
+# capacity only at the SITE level (installedCapacity), and busTypeDevices has no
+# per-device rated field. But the MODEL CODE names the AC kW rating — e.g.
+# "SCA50KTL-DO/US-480" = 50 kW, "SC36KTL-DO/US-480" = 36 kW. We parse that as a
+# grounded denominator for "% of rated" at READ time (we deliberately do NOT
+# stamp it into Inverter.nameplate_kw — that column stays "what the source
+# actually reported"; a parsed spec is derived, not reported). Unknown patterns
+# return None so the cell shows blank rather than a guessed number.
+_CHINT_MODEL_KW = re.compile(r"SC[A-Z]{0,3}(\d{1,3}(?:\.\d+)?)KTL", re.IGNORECASE)
+
+def _nameplate_from_model(vendor, model):
+    if not model or (vendor or "").lower() != "chint":
+        return None
+    mm = _CHINT_MODEL_KW.search(str(model))
+    if not mm:
+        return None
+    try:
+        kw = float(mm.group(1))
+    except (TypeError, ValueError):
+        return None
+    return kw if 0 < kw <= 1000 else None
+
+def _eff_nameplate_kw(iv, m):
+    """Effective nameplate: the reported value if we have one, else the API
+    telemetry value, else (Chint only) the rating parsed from the model code."""
+    if iv.nameplate_kw is not None:
+        return iv.nameplate_kw
+    mp = m.get("nameplate_kw")
+    if mp is not None:
+        return mp
+    return _nameplate_from_model(iv.vendor, iv.model or m.get("model"))
 
 # ── Daylight (for the card "Sleeping" night state) ────────────────────────────
 # The liquid-fill cards must distinguish "zero output because the sun is down"
@@ -847,7 +881,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
             meta_by_serial[iv.serial] = m
             units.append({
                 "id": iv.serial,
-                "nameplate_kw": iv.nameplate_kw if iv.nameplate_kw is not None else m.get("nameplate_kw"),
+                "nameplate_kw": _eff_nameplate_kw(iv, m),
                 "daily": m.get("daily", []),
                 "error_code": m.get("error_code"),
                 "last_report": m.get("last_report"),
@@ -878,7 +912,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "name": iv.name or m.get("name") or iv.serial,
                 "model": iv.model or m.get("model"),
                 "vendor": iv.vendor,
-                "nameplate_kw": iv.nameplate_kw if iv.nameplate_kw is not None else m.get("nameplate_kw"),
+                "nameplate_kw": _eff_nameplate_kw(iv, m),
                 "peer_index": u.get("peer_index"),
                 "status": u.get("status", "ok"),
                 "diagnosis": u.get("diagnosis"),
