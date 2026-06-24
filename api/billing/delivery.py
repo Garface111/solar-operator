@@ -1028,24 +1028,33 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # Workbook subscriptions are exempt (they invoice from the operator's uploaded
     # spreadsheet by design). This gates only the SEND — build_manual_match still
     # renders the figures for previews/drafts; we just won't put them in an email.
-    # A TEST send (is_test) ALSO bypasses it: a test goes only to the operator, so
-    # they can preview the email + invoice now, before the utility bill lands.
+    # A TEST send (is_test) may PREVIEW a BOUND offtaker that's merely awaiting this
+    # period's bill — it goes only to the operator. But an UNBOUND offtaker has no
+    # utility bill to invoice from AT ALL: its figures could only come from
+    # generation telemetry, which must NEVER appear in an invoice — so it is blocked
+    # even for a test send (previewing a telemetry-derived "invoice" still
+    # misrepresents the offtaker-billing rule).
     _ci_guard = match.computed_invoice or {}
-    if not is_test and not getattr(sub, "source_workbook", None):
+    if not getattr(sub, "source_workbook", None):
         _src = _ci_guard.get("kwh_source")
         _has_bill = _ci_guard.get("has_utility_bill") is True
+        _bound = getattr(sub, "utility_account_id", None) is not None
         if _src != "utility_bill" or not _has_bill:
-            if getattr(sub, "utility_account_id", None) is not None:
-                _reason = ("waiting on the utility bill for this offtaker — no GMP "
-                           "bill has landed for this period yet (no vendor data is "
-                           "substituted)")
-            else:
-                _reason = ("this offtaker isn't linked to a GMP utility bill, so "
-                           "there is no settled bill to invoice from. Link it to a "
-                           "GMP utility account to start sending — generation "
-                           "telemetry is never substituted")
-            return {"ok": False, "skipped": True, "error": _reason,
-                    "kwh_source": _src}
+            if not _bound:
+                # No GMP account linked → no settled bill exists. Block always.
+                return {"ok": False, "skipped": True,
+                        "error": ("this offtaker isn't linked to a GMP utility bill, "
+                                   "so there is no settled bill to invoice from. Link "
+                                   "it to a GMP utility account to start sending — "
+                                   "generation telemetry is never substituted"),
+                        "kwh_source": _src}
+            if not is_test:
+                # Bound, but this period's bill hasn't landed yet → wait (real send).
+                return {"ok": False, "skipped": True,
+                        "error": ("waiting on the utility bill for this offtaker — no "
+                                   "GMP bill has landed for this period yet (no vendor "
+                                   "data is substituted)"),
+                        "kwh_source": _src}
 
     # For a real (non-test) send honor the slider; a test always goes to_me.
     if is_test:
@@ -1194,14 +1203,20 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
     if array_total is None and cust_kwh is not None and pct:
         array_total = round(cust_kwh / pct, 1)
 
-    # Idempotent per (subscription, invoice period).
-    existing = db.execute(
-        select(ReportDraft).where(
-            ReportDraft.subscription_id == sub.id,
-            ReportDraft.status == "pending",
-            ReportDraft.invoice_number == inv_no,
-        )
-    ).scalars().first()
+    # Idempotent per (subscription, billing PERIOD) — keyed off the stable
+    # period_label, NOT invoice_number. The invoice number changes on regeneration
+    # (e.g. a bumped sequence or a different period_end), which let a regenerated
+    # draft DUPLICATE for the same period; period_label (period_start → period_end)
+    # is stable for a given billing period, so we update the one draft in place.
+    existing = None
+    if period_label is not None:
+        existing = db.execute(
+            select(ReportDraft).where(
+                ReportDraft.subscription_id == sub.id,
+                ReportDraft.status == "pending",
+                ReportDraft.period_label == period_label,
+            )
+        ).scalars().first()
     draft = existing or ReportDraft(
         tenant_id=sub.tenant_id, subscription_id=sub.id,
         customer_name=sub.customer_name, status="pending")
