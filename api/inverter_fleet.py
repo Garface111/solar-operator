@@ -450,6 +450,22 @@ _SOURCE_STALE_HOURS = 6.0
 _EXT_SOURCE_STALE_HOURS = 26.0
 _EXT_CAPTURED_VENDORS = {"fronius", "sma", "chint"}
 
+# A telemetry/source timestamp older than this is GARBAGE, not a real "last reported"
+# time — e.g. a 1970 Unix-epoch value from a missing/zero SMA gauge reading, which
+# parses as a valid (but absurd) ISO date and otherwise reads as "20628 days ago" +
+# a false SOURCE-OFFLINE banner. Every AO array + vendor portal is well post-2015, so
+# anything older is treated as absent (callers fall back to a real timestamp or None).
+_TS_SANITY_FLOOR_YEAR = 2015
+
+
+def _sane_dt(dt):
+    """Return dt only if it's a plausibly-real timestamp (year >= the sanity floor);
+    None for a missing / epoch / garbage value so callers degrade honestly."""
+    try:
+        return dt if (dt is not None and dt.year >= _TS_SANITY_FLOOR_YEAR) else None
+    except (AttributeError, TypeError):
+        return None
+
 
 def _source_status(inv_rows: list[dict], *, stale_hours: float = _SOURCE_STALE_HOURS) -> dict:
     """Array-level source-data freshness from the inverters' last_report.
@@ -472,6 +488,8 @@ def _source_status(inv_rows: list[dict], *, stale_hours: float = _SOURCE_STALE_H
             dt = datetime.fromisoformat(str(lr).replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
+            if dt.year < _TS_SANITY_FLOOR_YEAR:
+                continue   # garbage epoch ts — not a real report (never "20628 days ago")
             stamps.append(dt)
         except (ValueError, TypeError):
             continue
@@ -867,15 +885,16 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 # (older rows, or SMA before it ships its timestamp).
                 "last_report": (
                     u.get("last_report") or m.get("last_report")
-                    or (iv.source_last_data_at.isoformat()
-                        if iv.source_last_data_at and iv.vendor in _EXT_CAPTURED_VENDORS
-                        else (iv.last_power_at.isoformat()
-                              if iv.last_power_at and iv.vendor in _EXT_CAPTURED_VENDORS
+                    or (_sane_dt(iv.source_last_data_at).isoformat()
+                        if _sane_dt(iv.source_last_data_at) and iv.vendor in _EXT_CAPTURED_VENDORS
+                        else (_sane_dt(iv.last_power_at).isoformat()
+                              if _sane_dt(iv.last_power_at) and iv.vendor in _EXT_CAPTURED_VENDORS
                               else None))
                 ),
                 # True when last_report above is the SOURCE's REAL timestamp (not the
                 # capture-time proxy) — so a stale state can read as a genuine outage.
-                "has_src_ts": bool(iv.source_last_data_at and iv.vendor in _EXT_CAPTURED_VENDORS),
+                # _sane_dt guards a garbage (1970-epoch) gauge ts from claiming this.
+                "has_src_ts": bool(_sane_dt(iv.source_last_data_at) and iv.vendor in _EXT_CAPTURED_VENDORS),
                 "source_array_id": iv.source_array_id,
                 "moved": iv.source_array_id is not None and iv.source_array_id != iv.array_id,
                 "origin_url": _portal_link(iv.vendor, iv.source_site_id),

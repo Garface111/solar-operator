@@ -956,6 +956,22 @@ def main():
         print(f"  {'✓' if inspect(conn).has_table('report_deliveries') else '✗ MISSING'} "
               f"table report_deliveries")
 
+        # 2026-06-24 Scrub GARBAGE (epoch / pre-2015) inverters.source_last_data_at — a
+        # missing/zero SMA gauge reading serialized as 1970-01-01 and surfaced as
+        # "20628 days ago" + a false SOURCE-OFFLINE banner. The read path now guards it
+        # (_sane_dt), but a re-capture only SETS the field on a truthy parse and never
+        # clears a stale value, so scrub the existing junk once here.
+        try:
+            _res = conn.execute(text(
+                "UPDATE inverters SET source_last_data_at = NULL "
+                "WHERE source_last_data_at IS NOT NULL AND source_last_data_at < '2015-01-01'"
+            ))
+            _n = _res.rowcount if _res.rowcount is not None else 0
+            if _n:
+                print(f"  ~ inverters.source_last_data_at: nulled {_n} garbage epoch value(s)")
+        except Exception as _e:
+            print(f"  (source_last_data_at scrub skipped: {_e})")
+
     print("=== Migration complete ===")
 
 

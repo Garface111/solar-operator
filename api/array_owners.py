@@ -2494,6 +2494,11 @@ def _parse_src_ts(s):
         return None
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    # Reject a garbage epoch/pre-2015 value (e.g. a missing/zero SMA gauge reading
+    # that serialized as 1970-01-01) — storing it would surface as "20628 days ago"
+    # + a false SOURCE-OFFLINE banner. Never fabricate a source time; treat it as absent.
+    if dt.year < 2015:
+        return None
     return dt
 
 
