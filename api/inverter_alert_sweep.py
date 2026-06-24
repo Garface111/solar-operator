@@ -167,8 +167,9 @@ def _render_email(tenant: Tenant, items: list[dict]) -> tuple[str, str, str]:
         intro_line="A heads-up from your fleet watch.",
         body_html=intro + table,
         cta={"label": "Open Array Operator →", "url": "https://arrayoperator.com"},
-        footer_line=("You set these alerts in Array Operator — adjust the threshold "
-                     "or turn them off any time in the Alerts panel."),
+        footer_line=("Array Operator watches your fleet and emails you when an "
+                     "inverter needs attention — adjust the threshold or turn these "
+                     "off any time from the 🔔 Alerts button on your dashboard."),
         product="array_operator",
     )
     text = render_email_skin_text(
