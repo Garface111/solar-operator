@@ -158,7 +158,14 @@ def analyze_cohort(
                 f"No telemetry for {stale_h:.0f}h. Production unknown — likely "
                 "gateway/Wi-Fi dropout, not necessarily a power fault."
             )
-        elif u["peer_index"] is not None and u["peer_index"] < UNDERPERFORM_THRESHOLD:
+        elif (u["peer_index"] is not None and u["peer_index"] < UNDERPERFORM_THRESHOLD
+              and u.get("daily")):
+            # Real underperformance requires real history to compare against. An
+            # inverter with NO captured daily series has peer_index ~0 purely because
+            # its window energy is 0 — that's MISSING DATA, not underproduction (it
+            # may be producing fine right now, as live power shows). The `and
+            # u.get("daily")` guard drops the no-history case to the branch below so
+            # we never falsely flag it "underperforming / 100% below peers".
             deficit = round((1 - u["peer_index"]) * 100)
             u["status"] = "underperforming"
             u["diagnosis"] = (
@@ -168,11 +175,18 @@ def analyze_cohort(
             )
         else:
             u["status"] = "ok"
-            u["diagnosis"] = (
-                "Pulling its weight relative to cohort nameplate."
-                if not degenerate
-                else "Reporting normally (solo unit — no peers to compare against)."
-            )
+            if not u.get("daily"):
+                # Healthy by default until we have data to say otherwise — its daily
+                # series simply hasn't synced yet (common right after a connect, or a
+                # per-device history capture gap). Live power, if any, still shows.
+                u["diagnosis"] = (
+                    "Reporting — not enough captured history yet to peer-compare "
+                    "(its daily series hasn't synced)."
+                )
+            elif degenerate:
+                u["diagnosis"] = "Reporting normally (solo unit — no peers to compare against)."
+            else:
+                u["diagnosis"] = "Pulling its weight relative to cohort nameplate."
         if u["status"] != "ok":
             attention += 1
 

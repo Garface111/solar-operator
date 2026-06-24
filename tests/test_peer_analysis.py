@@ -101,6 +101,27 @@ def test_shaded_string_underperforms():
     assert "below its nameplate share" in units["U6"]["diagnosis"]
 
 
+def test_no_history_unit_not_flagged_underperforming():
+    """An inverter whose daily series hasn't synced (empty daily → window_kwh 0,
+    peer_index ~0) must NOT be flagged 'underperforming' — that's MISSING DATA, not
+    underproduction. (Bruce's Tannery Brook SMA unit 191213319: producing 18.8 kW
+    live with 0 days of captured history, was falsely shown as a 100%-below error.)"""
+    weather = [1.0] * (WINDOW + 1)
+    cohort = [
+        {"id": "H1", "nameplate_kw": 20.0, "daily": _daily(20.0, weather=weather),
+         "error_code": None, "last_report": _fresh_ts()},
+        {"id": "H2", "nameplate_kw": 20.0, "daily": _daily(20.0, weather=weather),
+         "error_code": None, "last_report": _fresh_ts()},
+        # No captured daily history yet (fresh report — its series just hasn't synced).
+        {"id": "NEW", "nameplate_kw": 20.0, "daily": [],
+         "error_code": None, "last_report": _fresh_ts()},
+    ]
+    units = _by_id(pa.analyze_cohort(cohort))
+    assert units["NEW"]["status"] != "underperforming", units["NEW"]
+    assert units["NEW"]["status"] == "ok"
+    assert "history" in units["NEW"]["diagnosis"].lower()
+
+
 def test_vendor_fault_takes_precedence():
     cohort = _demo_cohort()
     cohort[0]["error_code"] = "18xC4 — AC relay open"
