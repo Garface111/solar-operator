@@ -138,11 +138,15 @@ _POWER_LIVE_FRESH = timedelta(minutes=15)
 
 # A captured value only counts as "live now" if the SOURCE itself reported this
 # recently — otherwise we captured a frozen value from a source that stopped (the
-# West Chester case: source stuck at midday while we kept re-scraping it). Generous
-# enough to tolerate a normal vendor reporting interval (Fronius/SMA report every
-# few-to-15 min), tight enough to catch a real stop. Only gates when we actually
-# have the source's own timestamp (source_last_data_at).
-_SOURCE_LIVE_FRESH = timedelta(hours=1)
+# West Chester case: source stuck at midday while we kept re-scraping it). Set to
+# match _SOURCE_STALE_HOURS (the SOURCE-OFFLINE banner threshold, 6h) so the live
+# number and the banner can NEVER disagree: a site within the window shows its power
+# and no banner; past it, the power blanks AND the banner fires. Must be generous —
+# Fronius's Solar.web "LastImport" lags 1–2h behind its live feed even while a site
+# is actively producing (Waterford: producing, LastImport 1.9h). A tight 1h window
+# wrongly blanked those producing arrays ("shows on Solar.web but no live feed here").
+# Only gates when we actually have the source's own timestamp (source_last_data_at).
+_SOURCE_LIVE_FRESH = timedelta(hours=6)
 
 # Vendor monitoring portals — the "origin site" that sources each inverter's data.
 # Owners click an array/inverter to jump to the vendor's deep-link for analysis.
@@ -634,29 +638,35 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
         pw = None
     base = pw if pw is not None else None
     # Stored per-inverter capture fallback. Extension-captured vendors (Chint,
-    # Fronius, SMA) have no live API feed — the real measured watts live in
-    # iv.last_power_w, stamped at OUR capture time. HONESTY GATE: that value is a
-    # real "now" ONLY when we captured it within _POWER_LIVE_FRESH. An older capture
-    # is NOT live — the source may have stopped reporting hours ago while our hourly
-    # background scrape kept re-reading the SAME frozen value (the West Chester bug:
-    # data stopped at midday, yet we showed it "producing"). So a stale capture
-    # yields NO live number; the card shows "last synced Xh ago" instead of lying.
-    # (Was: an up-to-24h capture displayed as live during daylight.)
-    own_fresh = (iv.last_power_at is not None and (now() - iv.last_power_at) <= _POWER_LIVE_FRESH)
-    # ...AND the SOURCE was still reporting when we captured it — a fresh capture of a
-    # source that stopped hours ago is a frozen value, not "now". Only gates when we
-    # actually have the source's own timestamp; without one, the own-capture gate
-    # stands alone (Tier-1 behavior, backward-compatible).
-    src_live = (iv.source_last_data_at is None
-                or (now() - iv.source_last_data_at) <= _SOURCE_LIVE_FRESH)
-    if base is None and iv.last_power_w is not None and own_fresh and src_live:
-        base = iv.last_power_w                     # captured just now — a live instant
-    # Cross-tenant upward correction — ONLY when THIS owner's own reading is itself
-    # fresh AND its source is live. The borrow exists to fix a fresh-but-bogus near-zero
-    # on a SHARED system (another tenant read the true wattage THIS window); it must
-    # never resurrect a stale/zero array by importing an unrelated tenant's older
-    # reading. Daylight only (nothing to borrow at night).
-    if daylight and borrow and iv.serial and own_fresh and src_live:
+    # Fronius, SMA) have NO live API feed — the real measured watts live in
+    # iv.last_power_w, stamped at OUR capture time. Show it as "Current kW" when ALL:
+    #   • own_recent — we captured it within _POWER_FRESH (a day); an older value is
+    #     dropped so yesterday's reading never shows as "now".
+    #   • src_live   — the SOURCE was still reporting when captured (within
+    #     _SOURCE_LIVE_FRESH, the SAME window as the SOURCE-OFFLINE banner so the
+    #     number and the banner can't disagree). Fronius's Solar.web LastImport lags
+    #     1–2h behind its live feed even while producing, so this must be generous
+    #     (Waterford: producing, LastImport 1.9h → SHOWN; West Chester: stopped 7h
+    #     ago → blanked + bannered).
+    #   • daylight   — never report a captured midday value as "producing" after dark
+    #     (the SMA 9pm bug). _is_daylight is a real solar-elevation calc, so it won't
+    #     blank a genuine daytime reading.
+    # REGRESSION FIXED: this had collapsed to a 15-min "own_fresh" window with no
+    # daylight tier, which blanked every extension array between its (hourly) recaptures
+    # — Ford's "Waterford produces on Solar.web but shows no live feed here".
+    _lpa = getattr(iv, "last_power_at", None)
+    _slda = getattr(iv, "source_last_data_at", None)
+    _lpw = getattr(iv, "last_power_w", None)
+    own_recent = (_lpa is not None and (now() - _lpa) <= _POWER_FRESH)
+    src_live = (_slda is None or (now() - _slda) <= _SOURCE_LIVE_FRESH)
+    capture_live = own_recent and src_live and daylight
+    if base is None and _lpw is not None and capture_live:
+        base = _lpw
+    # Cross-tenant upward correction — only while THIS owner's own reading is itself
+    # live (recent capture + source reporting + daylight). Fixes a fresh-but-bogus
+    # near-zero on a SHARED system (another tenant read the true wattage this window);
+    # never resurrects a stale/zero array from an unrelated tenant's older reading.
+    if borrow and iv.serial and capture_live:
         bw = borrow.get((str(iv.vendor or "").lower(), str(iv.serial)))
         if bw is not None and (base is None or bw > base):
             return bw
