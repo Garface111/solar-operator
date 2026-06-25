@@ -88,6 +88,24 @@ def tenant_nameplate_kw(db, tenant_id: str) -> int:
     return int(round(total))
 
 
+def ao_nameplate_rate_cents() -> int | None:
+    """The nameplate price's unit_amount (cents per kW-month) from Stripe, or None.
+    Read from the LIVE price so the in-app bill display always matches what Stripe
+    charges (no drift when the rate is changed — that drift was exactly the bug
+    where the 'Your bill' panel still showed per-kWh after the switch)."""
+    import os as _os
+    pid = _ao_nameplate_price_id()
+    if not pid or not _os.getenv("STRIPE_SECRET_KEY"):
+        return None
+    try:
+        stripe.api_key = _os.getenv("STRIPE_SECRET_KEY", "")
+        p = stripe.Price.retrieve(pid)
+        amt = p.get("unit_amount") if isinstance(p, dict) else getattr(p, "unit_amount", None)
+        return int(amt) if amt is not None else None
+    except Exception:  # noqa: BLE001 — never fail a billing read on a Stripe hiccup
+        return None
+
+
 def ao_monitoring_item(db, tenant_id: str) -> dict | None:
     """The Stripe subscription line for AO MONITORING. Prefers the per-kW NAMEPLATE
     price (licensed; quantity = registered nameplate kW, min 1). Falls back to the

@@ -1857,6 +1857,10 @@ def _billing_summary_kwh(t: Tenant) -> dict:
                 period_start = ps
         except Exception:  # noqa: BLE001 — never fail the summary on a Stripe hiccup
             pass
+    from .stripe_helpers import (
+        _ao_nameplate_price_id, tenant_nameplate_kw, ao_nameplate_rate_cents,
+    )
+    nameplate_active = bool(_ao_nameplate_price_id())
     with SessionLocal() as db:
         billable_arrays = db.execute(
             select(func.count()).select_from(Array).where(
@@ -1868,8 +1872,18 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         # Same query the meter uses (excludes bill_prorate estimate rows) → the
         # displayed kWh/$ equals what Stripe actually bills, to the penny.
         mtd_kwh = tenant_period_kwh(db, t.id, period_start)
+        nameplate_kw = tenant_nameplate_kw(db, t.id) if nameplate_active else 0
     mtd_kwh = float(mtd_kwh)
-    monitoring_total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
+    if nameplate_active:
+        # MONITORING is now billed on REGISTERED NAMEPLATE (kW) — match the live
+        # Stripe charge exactly: quantity (kW) × the price's unit_amount (cents/kW).
+        rate_cents_per_kw = ao_nameplate_rate_cents() or 30
+        monitoring_basis = "nameplate"
+        monitoring_total_cents = float(max(nameplate_kw, 1) * rate_cents_per_kw)
+    else:
+        rate_cents_per_kw = None
+        monitoring_basis = "kwh"
+        monitoring_total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
 
     # DUAL MODEL: Array Operator bills two jobs on two plans. Compute BOTH so the
     # card can show the dual model and mark the active one. The active plan is the
@@ -1897,13 +1911,17 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         "currency": "usd",
         "has_payment_method": t.stripe_payment_method_id is not None,
         **_card_brief(t),
-        # ── Monitoring (per-kWh) plan block ──
+        # ── Monitoring plan block ──
+        # monitoring_basis: "nameplate" (per-kW, the live model) or "kwh" (legacy).
+        "monitoring_basis": monitoring_basis,
+        "nameplate_kw": int(nameplate_kw),
+        "rate_cents_per_kw": rate_cents_per_kw,                  # cents / kW-month (nameplate)
         "billable_arrays": int(billable_arrays),
         "mtd_kwh": round(mtd_kwh, 1),
         "period_start": period_start.isoformat(),
-        "rate_cents_per_kwh": ao_pricing.FULL_UNIT_CENTS,        # decimal cents/kWh
+        "rate_cents_per_kwh": ao_pricing.FULL_UNIT_CENTS,        # decimal cents/kWh (legacy)
         "blended_cents_per_kwh": ao_pricing.blended_unit_cents(mtd_kwh),
-        "monitoring_total_cents": monitoring_total_cents,        # month-to-date, decimal cents
+        "monitoring_total_cents": monitoring_total_cents,        # decimal cents
         # ── Invoicing (per-offtaker) plan block ──
         "offtaker_count": int(offtaker_count),
         "invoicing_base_cents": inv_pricing.BASE_CENTS,
