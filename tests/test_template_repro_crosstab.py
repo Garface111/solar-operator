@@ -87,32 +87,24 @@ def test_autofit_gives_substituted_font_dates_a_generous_width():
     assert chalk > calibri                # more than the standard-font allowance
 
 
-def test_isolate_drops_unreferenced_sheets():
-    """When the invoice has NO cross-tab dependency, the other tabs aren't needed —
-    isolate DROPS them entirely. That's the cleanest fix for a SECOND invoice sheet
-    (Paul's 'NFD Template' + 'NFD Template-old', which LibreOffice would export as a
-    DUPLICATE page), and it also removes any chart/drawing XML that openpyxl re-saves
-    into markup the headless renderer REJECTS (which was failing the convert → the
-    caller fell back to the raw upload, '###' dates and all)."""
+def test_isolate_keeps_sheets_hidden_clears_print_area_and_strips_charts():
+    """Every other tab is KEPT (hidden) so cross-tab refs still resolve (a template's
+    'Total Array KwH'/'Net Rate' cells pull from the data tab — deleting it makes them
+    #REF!). On each kept tab: the print area is cleared (so a hidden SECOND invoice sheet
+    can't export a DUPLICATE page) and charts are STRIPPED (openpyxl re-saves chart XML the
+    headless renderer REJECTS → the whole convert fails → the caller falls back to the lossy
+    token-HTML invoice with the template's frozen sample numbers + blank dates)."""
+    from openpyxl.chart import BarChart, Reference
     wb = openpyxl.Workbook()
     inv = wb.active; inv.title = "Invoice"; inv["A1"] = "real"
     dup = wb.create_sheet("Invoice Copy"); dup["A1"] = "dupe"; dup.print_area = "A1:B5"
-    buf = io.BytesIO(); wb.save(buf)
-    _isolate_to_invoice_sheet(wb, inv, buf.getvalue())
-    assert "Invoice Copy" not in wb.sheetnames        # dropped → cannot render a duplicate
-    assert inv.sheet_state == "visible"
-
-
-def test_isolate_clears_print_area_when_tabs_kept_for_crosstab():
-    """When the invoice genuinely references another tab (so the tabs are KEPT hidden
-    for the refs to resolve), a kept hidden sheet's print area is cleared so it can't
-    export as a duplicate invoice page."""
-    wb = openpyxl.Workbook()
-    inv = wb.active; inv.title = "Invoice"; inv["A1"] = "=Data!A1"   # live cross-tab ref
-    wb.create_sheet("Data")["A1"] = 7
-    dup = wb.create_sheet("Invoice Copy"); dup["A1"] = "dupe"; dup.print_area = "A1:B5"
+    trend = wb.create_sheet("Trend"); trend["A1"] = 1; trend["A2"] = 2
+    ch = BarChart(); ch.add_data(Reference(trend, min_col=1, min_row=1, max_row=2))
+    trend.add_chart(ch, "C1")
     buf = io.BytesIO(); wb.save(buf)
     _isolate_to_invoice_sheet(wb, inv, buf.getvalue())
     assert wb["Invoice Copy"].sheet_state == "hidden"
-    assert not wb["Invoice Copy"].print_area          # cleared → won't render as a duplicate
+    assert not wb["Invoice Copy"].print_area          # cleared → won't render a duplicate
+    assert wb["Trend"].sheet_state == "hidden"
+    assert len(wb["Trend"]._charts) == 0              # chart stripped → won't break the render
     assert inv.sheet_state == "visible"
