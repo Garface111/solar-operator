@@ -857,7 +857,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
         const update = { [STORAGE_KEYS.TENANT_KEY]: tenantKey };
-        if (msg.endpoint && typeof msg.endpoint === "string") {
+        // SECURITY: only accept a KNOWN endpoint, never an arbitrary one — a page-supplied
+        // endpoint could repoint sync to an attacker's server (defense-in-depth; the page
+        // bridge no longer forwards `endpoint` at all).
+        if (msg.endpoint && typeof msg.endpoint === "string" &&
+            (msg.endpoint === PROD_ENDPOINT || msg.endpoint === FALLBACK_ENDPOINT)) {
           update[STORAGE_KEYS.ENDPOINT] = msg.endpoint;
         }
         await chrome.storage.local.set(update);

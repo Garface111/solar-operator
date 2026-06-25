@@ -21,12 +21,26 @@
 //   SO_CAPTURE_LANDED     { ok, provider, accountCount, at, error? }
 
 (() => {
+  // SECURITY: the manifest matches WILDCARD subdomains (*.arrayoperator.com, etc.), but
+  // the bridge must only run on the REAL app origins — a rogue/unexpected subdomain (or an
+  // unrelated page on a matched host) must NOT be able to drive the protocol. Be inert
+  // anywhere else, and target every reply at the page's own origin (never "*", which would
+  // also reach a cross-origin embedder).
+  const ALLOWED_ORIGINS = new Set([
+    "https://nepooloperator.com", "https://www.nepooloperator.com",
+    "https://arrayoperator.com", "https://www.arrayoperator.com",
+    "https://solaroperator.org", "https://www.solaroperator.org",
+    "https://web-production-49c83.up.railway.app",
+  ]);
+  if (!ALLOWED_ORIGINS.has(location.origin)) return;
+  const TARGET = location.origin;
+
   // ── Announce presence so the SPA can detect us synchronously. ───────
   try {
     window.postMessage({
       type: "SO_EXTENSION_PRESENT",
       version: chrome.runtime.getManifest().version,
-    }, "*");
+    }, TARGET);
   } catch (_) { /* manifest unavailable in odd contexts — non-fatal */ }
 
   // ── Page → bridge → background ──────────────────────────────────────
@@ -43,7 +57,7 @@
       // capture intent (e.g. vec vs wec on a shared smarthub.coop host).
       const provider = (data.provider || data.vendor || "") + "";
       if (!url || !/^https:\/\//i.test(url)) {
-        window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, "*");
+        window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, TARGET);
         return;
       }
       chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url, active, provider, vendor: provider }, (resp) => {
@@ -53,7 +67,7 @@
           reqId,
           ok: !!ok,
           error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
-        }, "*");
+        }, TARGET);
       });
       return;
     }
@@ -66,7 +80,7 @@
       const reqId = data.reqId || null;
       const vendor = String(data.vendor || "").toLowerCase();
       if (!vendor) {
-        window.postMessage({ type: "SO_RECAPTURE_DONE", reqId, ok: false, error: "missing-vendor" }, "*");
+        window.postMessage({ type: "SO_RECAPTURE_DONE", reqId, ok: false, error: "missing-vendor" }, TARGET);
         return;
       }
       chrome.runtime.sendMessage({ type: "TRIGGER_RECAPTURE", vendor }, (resp) => {
@@ -76,7 +90,7 @@
           ok: !!(resp && resp.ok),
           captured: !!(resp && resp.captured),
           error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
-        }, "*");
+        }, TARGET);
       });
       return;
     }
@@ -84,12 +98,14 @@
     if (data.type === "SO_PAIR") {
       const reqId = data.reqId || null;
       const tenantKey = String(data.tenantKey || "").trim();
-      const endpoint = typeof data.endpoint === "string" ? data.endpoint : undefined;
       if (!tenantKey) {
-        window.postMessage({ type: "SO_PAIR_ACK", reqId, ok: false, error: "missing-tenant-key" }, "*");
+        window.postMessage({ type: "SO_PAIR_ACK", reqId, ok: false, error: "missing-tenant-key" }, TARGET);
         return;
       }
-      chrome.runtime.sendMessage({ type: "SO_PAIR", tenantKey, endpoint }, (resp) => {
+      // SECURITY: do NOT forward a page-supplied `endpoint` — a malicious in-page script
+      // could repoint sync to an attacker's server. The extension uses its built-in
+      // endpoint; a real dev override goes through the popup, not the page bridge.
+      chrome.runtime.sendMessage({ type: "SO_PAIR", tenantKey }, (resp) => {
         const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
         window.postMessage({
           type: "SO_PAIR_ACK",
@@ -98,7 +114,7 @@
           version: resp ? resp.version : undefined,
           lastSyncAt: resp ? resp.lastSyncAt : undefined,
           error: err,
-        }, "*");
+        }, TARGET);
       });
       return;
     }
@@ -117,7 +133,7 @@
           lastPayload: resp ? resp.lastPayload : undefined,
           loginState: resp ? resp.loginState : undefined,
           error: err,
-        }, "*");
+        }, TARGET);
       });
       return;
     }
@@ -133,7 +149,7 @@
           ok: !!(resp && resp.ok),
           wiped: resp ? resp.wiped : undefined,
           error: err,
-        }, "*");
+        }, TARGET);
       });
       return;
     }
@@ -156,7 +172,7 @@
           ok: !!(resp && resp.ok),
           status: resp ? resp.status : undefined,   // only for op==="status"
           error: err,
-        }, "*");
+        }, TARGET);
       });
       return;
     }
@@ -166,7 +182,7 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || typeof msg !== "object") return;
     if (msg.type === "SO_LOGIN_STATE" || msg.type === "SO_CAPTURE_LANDED" || msg.type === "SO_CAPTURE_FAILED") {
-      window.postMessage(msg, "*");
+      window.postMessage(msg, TARGET);
     }
     // We don't need to keep the channel open for an async response —
     // background broadcasts are fire-and-forget.
