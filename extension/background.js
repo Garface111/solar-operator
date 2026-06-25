@@ -1436,6 +1436,81 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function recapGetState() { const s = await chrome.storage.local.get(STATE_KEY); return s[STATE_KEY] || null; }
   async function recapClearState() { try { await chrome.storage.local.remove(STATE_KEY); } catch (_) {} }
 
+  // ── Recap-tab REAPER — kills orphaned background capture tabs ────────────────
+  // Why tabs piled up (Ford: "tons and tons of tabs"): the single-slot so_recap_state
+  // only tracks the LATEST recap, and the setTimeout close-watchdog dies when Chrome
+  // terminates the idle MV3 worker (~30s, well under the 150s budget) — so a tab whose
+  // capture never lands is orphaned and never closed. Fix: track EVERY recap surface in
+  // a list and reap any that outlive the budget on a 1-min chrome.alarm (alarms WAKE the
+  // worker, so the reap fires even after it was killed) + on browser startup/update.
+  const RECAP_TABS_KEY = "so_recap_tabs";   // [{tabId, windowId, openedAt}]
+  async function _recapTabsGet() {
+    const s = await chrome.storage.local.get(RECAP_TABS_KEY);
+    return Array.isArray(s[RECAP_TABS_KEY]) ? s[RECAP_TABS_KEY] : [];
+  }
+  async function _recapTabsSet(list) {
+    try { await chrome.storage.local.set({ [RECAP_TABS_KEY]: list }); } catch (_) {}
+  }
+  function _closeRecapSurface(e) {
+    if (e && typeof e.windowId === "number") {
+      try { chrome.windows.remove(e.windowId, () => void chrome.runtime.lastError); } catch (_) {}
+    } else if (e && typeof e.tabId === "number") {
+      try { chrome.tabs.remove(e.tabId, () => void chrome.runtime.lastError); } catch (_) {}
+    }
+  }
+  async function recapTrackTab(tabId, windowId) {
+    if (typeof tabId !== "number") return;
+    const list = await _recapTabsGet();
+    list.push({ tabId, windowId: (typeof windowId === "number" ? windowId : null), openedAt: Date.now() });
+    await _recapTabsSet(list);
+  }
+  async function recapUntrackTab(tabId) {
+    if (typeof tabId !== "number") return;
+    const list = await _recapTabsGet();
+    const keep = list.filter((e) => e.tabId !== tabId);
+    if (keep.length !== list.length) await _recapTabsSet(keep);
+  }
+  // Close + untrack every recap surface open longer than maxAgeMs (an orphan whose
+  // close-watchdog never fired). A fresh, mid-capture tab (< maxAgeMs) is left alone.
+  async function reapStaleRecapTabs(maxAgeMs) {
+    const now = Date.now();
+    const list = await _recapTabsGet();
+    if (!list.length) return;
+    const fresh = [];
+    for (const e of list) {
+      if ((now - (e.openedAt || 0)) > maxAgeMs) _closeRecapSurface(e);
+      else fresh.push(e);
+    }
+    if (fresh.length !== list.length) await _recapTabsSet(fresh);
+  }
+  // Browser startup/update: any TRACKED recap predates this wake, so none is genuinely
+  // in-flight — close them all + clear the list.
+  async function reapTrackedRecapTabs() {
+    const list = await _recapTabsGet();
+    list.forEach(_closeRecapSurface);
+    await _recapTabsSet([]);
+  }
+  // One-time cleanup of the EXISTING pile (tabs the pre-reaper builds already orphaned,
+  // which aren't in the tracked list): sweep the recap hostnames and close INACTIVE,
+  // unpinned, unfocused tabs sitting on them. Conservative — never touches the user's
+  // active tab. Run on install/update only, not every startup.
+  function reapLegacyVendorTabs() {
+    try {
+      const pats = Object.values(RECAP_VENDORS).map((u) => {
+        try { return "*://" + new URL(u).hostname + "/*"; } catch (_) { return null; }
+      }).filter(Boolean);
+      if (!pats.length) return;
+      chrome.tabs.query({ url: pats, active: false, pinned: false }, (tabs) => {
+        if (chrome.runtime.lastError || !Array.isArray(tabs)) return;
+        for (const t of tabs) {
+          if (t && !t.highlighted && typeof t.id === "number") {
+            try { chrome.tabs.remove(t.id, () => void chrome.runtime.lastError); } catch (_) {}
+          }
+        }
+      });
+    } catch (_) {}
+  }
+
   async function recapRecordLast(vendor, ok, sites) {
     try {
       const s = await chrome.storage.local.get(LAST_KEY);
@@ -1502,6 +1577,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } else if (st && typeof st.tabId === "number") {
       try { chrome.tabs.remove(st.tabId, () => void chrome.runtime.lastError); } catch (_) {}
     }
+    if (st && typeof st.tabId === "number") await recapUntrackTab(st.tabId);
     await recapClearState();
   }
 
@@ -1536,6 +1612,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const armed = async (tabId, windowId) => {
         if (tabId == null) { await recapMaybeNudge(vendor); resolve(); return; }
         await recapSetState({ running: true, vendor, tabId, windowId: (typeof windowId === "number" ? windowId : null), startedAt: Date.now() });
+        await recapTrackTab(tabId, windowId);   // so the alarm reaper can kill it even if this worker dies before the watchdog
         setTimeout(async () => {
           const st = await recapGetState();
           if (st && st.running && st.vendor === vendor && st.tabId === tabId) {
@@ -1728,7 +1805,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Timer: fire the cycle every RECAP_PERIOD_MIN while Chrome runs. Alarms persist
   // across service-worker sleeps, so this keeps working without a live page.
   chrome.alarms.create(RECAP_ALARM, { periodInMinutes: RECAP_PERIOD_MIN, delayInMinutes: 2 });
+  // Reaper: every minute, kill any recap tab that outlived the budget. An alarm (unlike
+  // the setTimeout watchdog) WAKES the terminated MV3 worker, so orphans always get closed.
+  chrome.alarms.create("recap-reaper", { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === "recap-reaper") {
+      reapStaleRecapTabs(TAB_BUDGET_MS).catch(() => {});
+      return;
+    }
     if (alarm && alarm.name === RECAP_ALARM) {
       runRecaptureCycle().catch((e) => rlog("cycle error", e && e.message || e));
     } else if (alarm && alarm.name === CHINT_LIVE_ALARM) {
@@ -1748,9 +1832,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // onStartup covers a plain browser relaunch (persisted alarms usually survive it, but
   // this is the belt-and-suspenders re-assert).
   async function _onWake() {
+    try { await reapTrackedRecapTabs(); } catch (_) {}   // close any recap tab orphaned before this wake
     try { await autoArmKnownLive(); } catch (_) {}
     setTimeout(() => runRecaptureCycle().catch(() => {}), 8000);
   }
-  chrome.runtime.onInstalled.addListener(() => { _onWake(); });
+  // onInstalled (install + version-update, incl. an unpacked reload) ALSO sweeps the
+  // existing pile of orphaned vendor tabs the pre-reaper builds left behind.
+  chrome.runtime.onInstalled.addListener(() => { reapLegacyVendorTabs(); _onWake(); });
   chrome.runtime.onStartup.addListener(() => { _onWake(); });
 })();
