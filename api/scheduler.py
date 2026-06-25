@@ -506,17 +506,19 @@ def finalize_expired_trials():
             product = getattr(t, "product", "nepool")
             try:
                 from .stripe_helpers import (
-                    array_price_id_for_product, is_array_operator,
+                    array_price_id_for_product, is_array_operator, ao_monitoring_item,
                 )
                 ao = is_array_operator(product)
                 price_id = array_price_id_for_product(product)
                 items = []
                 add_invoice_items = []
                 if ao:
-                    # Array Operator = per-kWh METERED line, NO quantity, NO setup
-                    # fee. Usage is reported by report_usage_for_all_owners().
-                    if price_id:
-                        items.append({"price": price_id})
+                    # Array Operator monitoring = per-kW NAMEPLATE line (quantity =
+                    # registered nameplate kW; the daily nameplate-sync keeps it
+                    # current). No setup fee.
+                    mi = ao_monitoring_item(db, t.id)
+                    if mi:
+                        items.append(mi)
                 else:
                     if price_id:
                         items.append({"price": price_id, "quantity": quantity})
@@ -1010,12 +1012,21 @@ def start():
         CronTrigger(day_of_week="mon", hour=13, minute=30),
         id="gmp_freshness_watchdog", replace_existing=True,
     )
-    # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (metered
-    # billing). Runs AFTER the 03:00 inverter pull so the day's kWh are landed.
+    # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (LEGACY
+    # metered billing). Self-skips subs with no metered line (i.e. nameplate subs),
+    # so it's a harmless no-op once a tenant is migrated to per-kW nameplate.
     scheduler.add_job(
         _run_usage_report,
         CronTrigger(hour=4, minute=0),
         id="ao_usage_report", replace_existing=True,
+    )
+    # Daily at 04:05 UTC: sync Array Operator per-kW NAMEPLATE billing quantity to
+    # each sub's registered nameplate (kW). The authoritative quantity mechanism +
+    # safety net for the nameplate billing model.
+    scheduler.add_job(
+        _run_nameplate_sync,
+        CronTrigger(hour=4, minute=5),
+        id="ao_nameplate_sync", replace_existing=True,
     )
     # Hourly: inverter down/underperformance email-alert sweep (Array Operator).
     # Safe to run frequently — the per-incident grace window + de-dup state
@@ -1114,6 +1125,23 @@ def _run_usage_report() -> None:
         send_internal_alert(
             "Array Operator usage report: unhandled exception",
             f"The per-kWh usage-report job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_nameplate_sync() -> None:
+    """Sync per-kW nameplate billing quantity for all Array Operator owners."""
+    try:
+        from .jobs.nameplate_sync import sync_ao_nameplate_for_all_owners
+        result = sync_ao_nameplate_for_all_owners()
+        logger.info(
+            "ao_nameplate_sync: synced=%d skipped=%d errors=%d",
+            len(result.get("synced", [])), result.get("skipped", 0),
+            len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Array Operator nameplate sync: unhandled exception",
+            f"The per-kW nameplate-sync job raised an unexpected error:\n{exc}",
         )
 
 

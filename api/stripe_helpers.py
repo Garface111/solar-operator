@@ -51,6 +51,57 @@ def _ao_kwh_price_id() -> str:
     )
 
 
+# Array Operator NAMEPLATE billing (Jun 2026): owner monitoring is billed on
+# REGISTERED INVERTER NAMEPLATE (kW), not metered kWh. Deterministic + immune to
+# capture gaps — Fronius/SMA have no backend API, so daily-kWh capture is partial
+# and we were under-billing. A LICENSED per-kW recurring price ($0.50/kW-month);
+# the subscription-item quantity = the tenant's summed inverter nameplate (kW).
+# When STRIPE_AO_NAMEPLATE_PRICE_ID is set it SUPERSEDES the per-kWh metered price
+# for the monitoring line (the per-offtaker invoicing line is unaffected).
+def _ao_nameplate_price_id() -> str:
+    """Resolve the AO per-kW NAMEPLATE (licensed) price id from env at call time."""
+    return os.getenv("STRIPE_AO_NAMEPLATE_PRICE_ID", "")
+
+
+def tenant_nameplate_kw(db, tenant_id: str) -> int:
+    """Total REGISTERED inverter nameplate (kW, rounded) across a tenant's billable
+    arrays — the quantity AO monitoring bills on. Uses each inverter's stored
+    nameplate, falling back to a model-code-derived rating (the SAME derivation the
+    dashboard/fleet-tree uses), so the billed capacity matches what the owner sees.
+    Excludes soft-deleted / excluded arrays. Cheap — no telemetry pull."""
+    from .models import Inverter, Array
+    from .inverter_fleet import _nameplate_from_model
+    rows = db.execute(
+        select(Inverter).join(Array, Array.id == Inverter.array_id).where(
+            Inverter.tenant_id == tenant_id,
+            Inverter.deleted_at.is_(None),
+            Array.deleted_at.is_(None),
+            Array.excluded.is_(False),
+        )
+    ).scalars().all()
+    total = 0.0
+    for iv in rows:
+        np = getattr(iv, "nameplate_kw", None) or _nameplate_from_model(
+            getattr(iv, "vendor", None), getattr(iv, "model", None))
+        if np:
+            total += float(np)
+    return int(round(total))
+
+
+def ao_monitoring_item(db, tenant_id: str) -> dict | None:
+    """The Stripe subscription line for AO MONITORING. Prefers the per-kW NAMEPLATE
+    price (licensed; quantity = registered nameplate kW, min 1). Falls back to the
+    legacy per-kWh metered price only if the nameplate price isn't configured yet.
+    Returns None when no monitoring price is configured at all."""
+    np_price = _ao_nameplate_price_id()
+    if np_price:
+        return {"price": np_price, "quantity": max(tenant_nameplate_kw(db, tenant_id), 1)}
+    kwh_price = _ao_kwh_price_id()
+    if kwh_price:
+        return {"price": kwh_price}   # legacy metered line (Stripe rejects quantity)
+    return None
+
+
 def is_array_operator(product: str | None) -> bool:
     """True when a tenant is on the Array Operator product (owner app)."""
     return (product or "nepool") == "array_operator"
@@ -167,14 +218,19 @@ def array_price_id_for_product(product: str | None) -> str:
     alert, rather than create a broken/empty subscription.
     """
     if is_array_operator(product):
-        ao = _ao_kwh_price_id()
+        # Monitoring price: per-kW NAMEPLATE (licensed) preferred, legacy per-kWh
+        # metered as fallback. Callers that build subscription items should use
+        # ao_monitoring_item() (it carries the nameplate quantity); this returns
+        # just the id for code that only needs the price.
+        ao = _ao_nameplate_price_id() or _ao_kwh_price_id()
         if ao:
             return ao
         send_internal_alert(
-            "⚠️ Array Operator per-kWh price id missing",
-            "An array_operator tenant needs billing but STRIPE_AO_KWH_PRICE_ID "
-            "is not set. Falling back to the NEPOOL price. Run "
-            "scripts/create_array_operator_prices.py and set the env var.",
+            "⚠️ Array Operator monitoring price id missing",
+            "An array_operator tenant needs billing but neither "
+            "STRIPE_AO_NAMEPLATE_PRICE_ID nor STRIPE_AO_KWH_PRICE_ID is set. "
+            "Falling back to the NEPOOL price. Run scripts/create_ao_nameplate_price.py "
+            "and set the env var.",
         )
     return os.getenv("STRIPE_ARRAY_PRICE_ID", "")
 
@@ -229,6 +285,8 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         email = t.contact_email
         product = getattr(t, "product", "nepool")
         billing_plan = getattr(t, "billing_plan", None)
+        # Build the monitoring line (per-kW nameplate) while the session is open.
+        monitoring_item = ao_monitoring_item(db, t.id)
 
     ao = is_array_operator(product)
     has_invoicing = is_ao_invoicing(product, billing_plan)    # plan 'invoicing' or 'both'
@@ -261,11 +319,10 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
             if inv_setup:
                 add_invoice_items.append({"price": inv_setup, "quantity": 1})
         if has_monitoring or not has_invoicing:
-            # Per-kWh metered line — Stripe REJECTS `quantity` on a metered price.
-            # Usage is reported by the usage-report job; no setup fee.
-            kwh_price = _ao_kwh_price_id()
-            if kwh_price:
-                items.append({"price": kwh_price})
+            # Per-kW NAMEPLATE monitoring line (quantity = registered nameplate kW;
+            # the daily nameplate-sync job keeps it current). No setup fee.
+            if monitoring_item:
+                items.append(monitoring_item)
     else:
         array_price_id = array_price_id_for_product(product)
         if array_price_id:
@@ -310,8 +367,11 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         if has_invoicing:
             _parts.append(f"per-offtaker qty {max(int(offtaker_count), 1)}")
         if has_monitoring or not has_invoicing:
-            _parts.append("per-kWh (metered)")
-        meter = " + ".join(_parts) or "per-kWh (metered)"
+            if monitoring_item and "quantity" in monitoring_item:
+                _parts.append(f"per-kW nameplate qty {monitoring_item['quantity']}")
+            else:
+                _parts.append("per-kWh (metered)")
+        meter = " + ".join(_parts) or "per-kW nameplate"
     else:
         meter = f"per-array qty {quantity}"
     send_internal_alert(
@@ -389,14 +449,17 @@ def reconcile_subscription_quantity(
     try:
         sub = stripe.Subscription.retrieve(subscription_id)
 
-        # If ANY line on this subscription is metered, this tenant is billed by
-        # usage (Array Operator) — array-count reconciliation does not apply.
+        # Array Operator is never reconciled by ARRAY count: a per-kWh line is
+        # metered, and a per-kW NAMEPLATE line is synced by the nameplate-sync job
+        # (quantity = nameplate kW, not array count). Skip if either is present.
+        _np_price = _ao_nameplate_price_id()
         for item in sub["items"]["data"]:
             recurring = item["price"].get("recurring") or {}
-            if recurring.get("usage_type") == "metered":
+            if recurring.get("usage_type") == "metered" or item["price"]["id"] == _np_price:
                 logger.info(
-                    "reconcile: subscription %s for tenant %s is metered (per-kWh) "
-                    "— skipping array-quantity reconciliation", subscription_id, tenant_id)
+                    "reconcile: subscription %s for tenant %s is Array Operator "
+                    "(metered or per-kW nameplate) — skipping array-quantity reconciliation",
+                    subscription_id, tenant_id)
                 return
 
         if not known_price_ids:
