@@ -87,13 +87,29 @@ def test_autofit_gives_substituted_font_dates_a_generous_width():
     assert chalk > calibri                # more than the standard-font allowance
 
 
-def test_isolate_clears_print_area_on_hidden_sheets():
-    """A template can carry a SECOND invoice sheet (Paul's: 'NFD Template' +
-    'NFD Template-old'). LibreOffice exports a hidden sheet that still has a print
-    area, so the PDF gets a DUPLICATE invoice. Isolate clears the print area on every
-    hidden sheet so only the chosen invoice renders."""
+def test_isolate_drops_unreferenced_sheets():
+    """When the invoice has NO cross-tab dependency, the other tabs aren't needed —
+    isolate DROPS them entirely. That's the cleanest fix for a SECOND invoice sheet
+    (Paul's 'NFD Template' + 'NFD Template-old', which LibreOffice would export as a
+    DUPLICATE page), and it also removes any chart/drawing XML that openpyxl re-saves
+    into markup the headless renderer REJECTS (which was failing the convert → the
+    caller fell back to the raw upload, '###' dates and all)."""
     wb = openpyxl.Workbook()
     inv = wb.active; inv.title = "Invoice"; inv["A1"] = "real"
+    dup = wb.create_sheet("Invoice Copy"); dup["A1"] = "dupe"; dup.print_area = "A1:B5"
+    buf = io.BytesIO(); wb.save(buf)
+    _isolate_to_invoice_sheet(wb, inv, buf.getvalue())
+    assert "Invoice Copy" not in wb.sheetnames        # dropped → cannot render a duplicate
+    assert inv.sheet_state == "visible"
+
+
+def test_isolate_clears_print_area_when_tabs_kept_for_crosstab():
+    """When the invoice genuinely references another tab (so the tabs are KEPT hidden
+    for the refs to resolve), a kept hidden sheet's print area is cleared so it can't
+    export as a duplicate invoice page."""
+    wb = openpyxl.Workbook()
+    inv = wb.active; inv.title = "Invoice"; inv["A1"] = "=Data!A1"   # live cross-tab ref
+    wb.create_sheet("Data")["A1"] = 7
     dup = wb.create_sheet("Invoice Copy"); dup["A1"] = "dupe"; dup.print_area = "A1:B5"
     buf = io.BytesIO(); wb.save(buf)
     _isolate_to_invoice_sheet(wb, inv, buf.getvalue())

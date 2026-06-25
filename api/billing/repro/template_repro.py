@@ -312,17 +312,35 @@ def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
             # else: leave the formula — cross-sheet refs resolve against the hidden
             # sheets below; intra-sheet ones LibreOffice recalculates. (No more
             # nulling, which was the source of Paul's broken/blank invoice cells.)
-    # Keep the data tabs so cross-tab formulas still resolve, but HIDE them so the
-    # render outputs only the invoice page. A template can carry a SECOND invoice sheet
-    # (Paul's has 'NFD Template' + 'NFD Template-old'); LibreOffice still exports a
-    # hidden sheet that has its own print area, so the PDF ends up with a duplicate
-    # invoice. Clearing the print area on every hidden sheet keeps it out of the render
-    # (formula refs are unaffected — they don't depend on print areas).
+    # Now decide what to do with the OTHER tabs. After the flatten above, check whether
+    # the invoice sheet STILL has any formula that genuinely references another tab.
+    #   • None do  → DROP every other tab. Nothing points at them, so keeping them only
+    #     risks the render: openpyxl re-saves a tab's chart/drawing XML (e.g. a
+    #     'TTM Trendline' chart sheet) into markup Gotenberg's LibreOffice can REJECT,
+    #     which fails the whole convert → reproduce_*_template returns None → the caller
+    #     falls back to rendering the RAW upload (the template's own sample customer,
+    #     unswapped, with '###' date columns). That was the regression from KEEPING all
+    #     tabs for cross-tab refs: previously they were deleted, so no chart XML ever
+    #     reached the renderer.
+    #   • Some do  → KEEP all other tabs (hidden) so those refs still resolve, but STRIP
+    #     their charts/images (never rendered from a hidden sheet anyway) so the same
+    #     chart XML can't break the save, and clear their print areas so a hidden second
+    #     invoice sheet can't export a duplicate page.
+    inv_refs_others = any(
+        isinstance(c.value, str) and c.value.startswith("=")
+        and _references_other_sheet(c.value, others)
+        for row in ws.iter_rows() for c in row
+    )
     for name in others:
         try:
+            if not inv_refs_others:
+                del wb[name]
+                continue
             osh = wb[name]
             osh.sheet_state = "hidden"
             osh.print_area = None
+            osh._charts = []
+            osh._images = []
         except Exception:  # noqa: BLE001
             pass
     ws.sheet_state = "visible"
