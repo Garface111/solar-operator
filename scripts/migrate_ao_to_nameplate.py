@@ -36,8 +36,8 @@ def main() -> None:
     if not key:
         sys.exit("STRIPE_SECRET_KEY not set.")
     live = key.startswith("sk_live_")
-    if live and not CONFIRM_LIVE:
-        sys.exit("REFUSING live migration without --confirm-live. (Default run is a dry run.)")
+    # Default run is a DRY RUN (safe in live mode too — it only prints). Mutations
+    # happen only with --confirm-live.
     do_it = CONFIRM_LIVE
     import stripe
     stripe.api_key = key
@@ -76,7 +76,9 @@ def main() -> None:
                   f"drop metered {[it['price']['id'] for it in metered]} -> "
                   f"nameplate {np_price} qty {kw} kW (${kw*0.50:.2f}/mo); keep {other}")
             if do_it:
-                new_items = [{"id": it["id"], "deleted": True} for it in metered]
+                # clear_usage=True is REQUIRED by Stripe to remove a metered item.
+                new_items = [{"id": it["id"], "deleted": True, "clear_usage": True}
+                             for it in metered]
                 new_items.append({"price": np_price, "quantity": kw})
                 stripe.Subscription.modify(
                     sub_id, items=new_items, proration_behavior="none",
