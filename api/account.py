@@ -1724,6 +1724,27 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
     return _billing_summary_arrays(t)
 
 
+def _card_brief(t: Tenant) -> dict:
+    """The tenant's default card brand + last4 (+ MM/YY) from Stripe, so the account
+    page can show 'Visa •••• 4242' instead of a bare 'Card on file'. Best-effort: any
+    hiccup (no key, no card, Stripe down) yields nulls and never breaks the summary."""
+    import os as _os
+    pm_id = getattr(t, "stripe_payment_method_id", None)
+    if not pm_id or not _os.getenv("STRIPE_SECRET_KEY"):
+        return {"card_brand": None, "card_last4": None, "card_exp": None}
+    try:
+        import stripe
+        stripe.api_key = _os.getenv("STRIPE_SECRET_KEY", "")
+        pm = stripe.PaymentMethod.retrieve(pm_id)
+        card = (pm.get("card") if isinstance(pm, dict) else getattr(pm, "card", None)) or {}
+        g = (lambda k: card.get(k) if isinstance(card, dict) else getattr(card, k, None))
+        em, ey = g("exp_month"), g("exp_year")
+        exp = f"{int(em):02d}/{int(ey) % 100:02d}" if em and ey else None
+        return {"card_brand": g("brand") or None, "card_last4": g("last4") or None, "card_exp": exp}
+    except Exception:  # noqa: BLE001 — never fail the billing summary on a Stripe hiccup
+        return {"card_brand": None, "card_last4": None, "card_exp": None}
+
+
 def _billing_summary_arrays(t: Tenant) -> dict:
     """Per-array (NEPOOL) billing summary — the original behavior."""
     with SessionLocal() as db:
@@ -1747,6 +1768,7 @@ def _billing_summary_arrays(t: Tenant) -> dict:
         # Drives the dashboard "Add payment method" CTA + paused-no-card banner.
         # No-upfront-payment: a tenant can be live (trialing) with no card yet.
         "has_payment_method": t.stripe_payment_method_id is not None,
+        **_card_brief(t),
     }
 
 
@@ -1820,6 +1842,7 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         "billing_basis": active,        # which AO plan is currently active
         "currency": "usd",
         "has_payment_method": t.stripe_payment_method_id is not None,
+        **_card_brief(t),
         # ── Monitoring (per-kWh) plan block ──
         "billable_arrays": int(billable_arrays),
         "mtd_kwh": round(mtd_kwh, 1),
