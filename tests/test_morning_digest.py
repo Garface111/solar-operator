@@ -107,11 +107,13 @@ def test_healthy_renders_valid_html_with_green_banner():
 
 def test_healthy_kpis_present():
     html = digest.build_digest_html(_tenant(), _healthy_tree())
-    # KPI labels
-    assert "Arrays" in html
-    assert "Inverters" in html
-    assert "Need attention" in html
-    # KPI values (2 arrays, 3 inverters, 0 attention)
+    # health hero (mirrors the dashboard's "% fleet healthy" card)
+    assert "Fleet healthy" in html
+    assert "100" in html                 # 100% healthy: 0 flagged of 3 inverters
+    # stat strip (2 arrays, 3 inverters, 0 need a look)
+    assert "arrays" in html
+    assert "inverters" in html
+    assert "need a look" in html
     assert ">2<" in html
     assert ">3<" in html
     assert ">0<" in html

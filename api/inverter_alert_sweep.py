@@ -64,6 +64,26 @@ def _is_producing(inv: dict) -> bool:
     return p is not None and p > _live_floor_w(inv)
 
 
+# A peer must be producing this fraction of its rated power before we'll use it as
+# evidence that a dark sibling is faulted. At dawn/under fog the whole array sits
+# at a few % of rated, where one inverter reading ~0 is weather, not a fault — so
+# we only call "dark" when peers are GENUINELY up (the array is producing for real).
+MEANINGFUL_FRAC = 0.15
+
+
+def _meaningfully_producing(inv: dict) -> bool:
+    p = inv.get("current_power_w")
+    if p is None or p <= _live_floor_w(inv):
+        return False
+    np = inv.get("nameplate_kw")
+    if np:
+        try:
+            return p >= float(np) * 1000.0 * MEANINGFUL_FRAC
+        except (TypeError, ValueError):
+            pass
+    return True  # no nameplate to judge against — fall back to the idle floor above
+
+
 def _real_source_outage(col: dict) -> bool:
     """True when a comm_gap on this array is a REAL stop in reporting, not just
     our extension capture cadence. Extension-captured vendors (Fronius/SMA/Chint)
@@ -113,8 +133,8 @@ def _live_dark_inverters(tree: dict) -> list[dict]:
         if src.get("state") in (None, "none") or age is None or age > LIVE_DARK_MAX_AGE_HOURS:
             continue
         invs = col.get("inverters", [])
-        if sum(1 for i in invs if _is_producing(i)) < 2:
-            continue  # not enough lit peers to call any sibling dark
+        if sum(1 for i in invs if _meaningfully_producing(i)) < 2:
+            continue  # array isn't genuinely up yet (dawn/fog) — don't call anything dark
         for inv in invs:
             if (inv.get("status") == "ok"
                     and inv.get("current_power_w") is not None
@@ -200,7 +220,10 @@ def sweep_tenant(db, tenant: Tenant) -> int:
     threshold = int(getattr(tenant, "inverter_alert_threshold_pct", 50) or 50)
 
     try:
-        tree = inverter_fleet.build_fleet_tree(db, tenant)
+        # Stable verdicts (complete-days-only + cohort-relative comm-gap) so the
+        # 14-day/down incidents never fire on dawn weather noise. The live_dark
+        # path below still reads the live current_power_w for same-day outages.
+        tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
     except Exception:
         logger.exception("alert sweep: build_fleet_tree failed for %s", tenant.id)
         return 0

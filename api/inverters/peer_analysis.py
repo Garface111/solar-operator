@@ -75,6 +75,8 @@ def analyze_cohort(
     *,
     now: Optional[datetime] = None,
     window_days: int = WINDOW_DAYS,
+    complete_days_only: bool = False,
+    tz_name: Optional[str] = None,
 ) -> dict:
     """Run peer-relative analysis over a cohort of generation units.
 
@@ -90,6 +92,24 @@ def analyze_cohort(
     unit gains: peer_index, window_kwh, stale_hours, status, diagnosis.
 
     The input list is not mutated; enriched copies are returned.
+
+    STABLE MODE (complete_days_only=True) — for the e-mail alert path:
+    The live dashboard judges health on data INCLUDING today, which is correct
+    for "what's happening right now". But the daily digest / alert sweep run in
+    the early morning, when *today* is a partial, just-waking day: captures land
+    unevenly, the whole array is at a few % of rated under dawn fog, and a 24h
+    wall-clock "no telemetry" trips for the whole fleet simply because solar
+    inverters don't report overnight. All three produce false "underperforming /
+    dead / gone quiet" alarms (Bruce: "the sun's variability, fog, etc early in
+    the am will give erroneous results"). Stable mode is the fix he asked for —
+    "pick up noon of the prior day":
+      * drop TODAY's partial local day so verdicts run on settled, complete days
+        (a full day integrates out the morning weather — better than one noon
+        snapshot a passing cloud could ruin);
+      * judge "gone quiet" COHORT-RELATIVE — an inverter is quiet only when it's
+        far staler than its freshest peer, so an overnight lull (everyone stale
+        together) never trips it; a single dead gateway still does.
+    `tz_name` (e.g. "America/New_York") sets which local day counts as "today".
     """
     now = now or datetime.now(timezone.utc)
     cohort_size = len(units)
@@ -98,8 +118,36 @@ def analyze_cohort(
     # Work on shallow copies so callers' dicts are untouched.
     out_units: list[dict] = [dict(u) for u in units]
 
+    # STABLE MODE: drop today's partial local day so the verdict is judged only on
+    # complete, settled days (kills the dawn false positives).
+    if complete_days_only:
+        ref = now
+        if tz_name:
+            try:
+                from zoneinfo import ZoneInfo
+                ref = now.astimezone(ZoneInfo(tz_name))
+            except Exception:
+                ref = now  # bad tz name -> fall back to UTC "today"
+        today_local = ref.date().isoformat()
+        for u in out_units:
+            u["daily"] = [
+                d for d in (u.get("daily") or [])
+                if d.get("date") and str(d["date"]) < today_local
+            ]
+
     for u in out_units:
         u["nameplate_kw"] = _infer_nameplate(u)
+
+    # Cohort-relative comm-gap baseline: the freshest last_report across the cohort.
+    # In stable mode a unit is "gone quiet" only when it's COMM_GAP_HOURS staler
+    # than this freshest peer — so a uniform overnight/weekend lull (no captures
+    # for anyone) never flags, while one genuinely-dropped device still does.
+    _cohort_stales = []
+    for u in out_units:
+        _ts = _parse_ts(u.get("last_report"))
+        if _ts is not None:
+            _cohort_stales.append((now - _ts).total_seconds() / 3600)
+    cohort_min_stale = min(_cohort_stales) if _cohort_stales else None
 
     total_nameplate = sum(u["nameplate_kw"] or 0.0 for u in out_units) or 1.0
     window_energy = {
@@ -152,12 +200,25 @@ def analyze_cohort(
                 f"Zero output for {zero_streak} days while {peers_that_day} "
                 "peers produced. Hard failure or open AC disconnect."
             )
-        elif stale_h is not None and stale_h > COMM_GAP_HOURS:
+        elif stale_h is not None and (
+            # Stable mode: quiet only RELATIVE to the freshest peer (an overnight
+            # lull is uniform, so it never trips). Live mode: absolute 24h clock.
+            (cohort_min_stale is not None and (stale_h - cohort_min_stale) > COMM_GAP_HOURS)
+            if complete_days_only else stale_h > COMM_GAP_HOURS
+        ):
+            if complete_days_only and cohort_min_stale is not None:
+                lag = stale_h - cohort_min_stale
+                u["diagnosis"] = (
+                    f"No telemetry for {stale_h:.0f}h — {lag:.0f}h longer than its "
+                    "freshest peer, so this is the device, not an overnight lull. "
+                    "Likely gateway/Wi-Fi dropout, not necessarily a power fault."
+                )
+            else:
+                u["diagnosis"] = (
+                    f"No telemetry for {stale_h:.0f}h. Production unknown — likely "
+                    "gateway/Wi-Fi dropout, not necessarily a power fault."
+                )
             u["status"] = "comm_gap"
-            u["diagnosis"] = (
-                f"No telemetry for {stale_h:.0f}h. Production unknown — likely "
-                "gateway/Wi-Fi dropout, not necessarily a power fault."
-            )
         elif (u["peer_index"] is not None and u["peer_index"] < UNDERPERFORM_THRESHOLD
               and u.get("daily")):
             # Real underperformance requires real history to compare against. An

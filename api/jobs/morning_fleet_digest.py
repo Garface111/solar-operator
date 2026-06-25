@@ -226,29 +226,42 @@ def build_digest_html(tenant, tree: dict) -> str:
             f'</td></tr></table>'
         )
 
-    # ---- KPI tiles (2x2 grid -- reads well on phones) -----------------------
-    attn_color = BLUE if attention == 0 else ("#dc2626" if has_critical else "#d97706")
-
-    def _kpi(value: str, label: str, color: str = INK) -> str:
-        return (
-            f'<td width="50%" style="padding:5px;vertical-align:top;">'
-            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
-            f'<tr><td bgcolor="{TILE}" style="background:{TILE};border:1px solid {LINE};'
-            f'border-radius:12px;padding:16px 12px;text-align:center;">'
-            f'<div style="font-size:26px;font-weight:700;color:{color};line-height:1;">{value}</div>'
-            f'<div style="font-size:12px;color:{MUTED};margin-top:6px;letter-spacing:.2px;">{label}</div>'
-            f'</td></tr></table></td>'
-        )
-
+    # ---- health hero (mirrors the dashboard's headline "% fleet healthy") ----
+    # Big health number + meter + a compact stat strip, the way the in-app Fleet
+    # health card reads (Bruce asked the email to look like the dashboard). Health
+    # % = share of inverters NOT flagged; email-safe (tables, solid colors).
+    flagged_n = len(_flagged_inverters(cols))
+    health_pct = round(100 * (inverters_total - flagged_n) / inverters_total) if inverters_total else 100
+    hero_color = BLUE if flagged_n == 0 else ("#dc2626" if has_critical else "#d97706")
+    meter_fill = max(3, min(100, health_pct))
+    look_color = BLUE if flagged_n == 0 else hero_color
     kpis = (
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        'style="margin:0 0 18px;"><tr>'
-        + _kpi(str(arrays_total), "Arrays")
-        + _kpi(str(inverters_total), "Inverters")
-        + '</tr><tr>'
-        + _kpi(str(attention), "Need attention", attn_color)
-        + _kpi(producing_value, producing_label)
-        + '</tr></table>'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{CARD}" '
+        f'style="margin:0 0 18px;border:1px solid {LINE};border-radius:14px;'
+        f'box-shadow:0 1px 3px rgba(15,23,42,.05);"><tr><td style="padding:20px 22px;">'
+        # big % + label
+        f'<div style="font-size:48px;font-weight:800;color:{hero_color};line-height:.95;'
+        f'letter-spacing:-1.5px;">{health_pct}'
+        f'<span style="font-size:22px;color:{FAINT};font-weight:700;letter-spacing:0;">%</span></div>'
+        f'<div style="font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:{FAINT};'
+        f'font-weight:700;margin:5px 0 0;">Fleet healthy</div>'
+        # meter (nested-table fill for client-safe %-width)
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="margin:14px 0 0;table-layout:fixed;"><tr>'
+        f'<td bgcolor="{LINE2}" style="background:{LINE2};border-radius:99px;font-size:0;line-height:0;">'
+        f'<table role="presentation" width="{meter_fill}%" cellpadding="0" cellspacing="0"><tr>'
+        f'<td bgcolor="{hero_color}" style="background:{hero_color};height:8px;border-radius:99px;'
+        f'font-size:0;line-height:8px;">&nbsp;</td></tr></table></td></tr></table>'
+        # stat strip
+        f'<div style="margin:14px 0 0;font-size:13.5px;color:{MUTED};">'
+        f'<b style="color:{INK};">{arrays_total}</b> arrays'
+        f'<span style="color:{LINE};"> &nbsp;&middot;&nbsp; </span>'
+        f'<b style="color:{INK};">{inverters_total}</b> inverters'
+        f'<span style="color:{LINE};"> &nbsp;&middot;&nbsp; </span>'
+        f'<b style="color:{look_color};">{flagged_n}</b> need a look'
+        f'<span style="color:{LINE};"> &nbsp;&middot;&nbsp; </span>'
+        f'<span style="color:{FAINT};">{producing_label}</span>'
+        f'</td></tr></table>'
     )
 
     # ---- highlights ---------------------------------------------------------
@@ -379,7 +392,7 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'<div style="color:{MUTED};font-size:14px;">{today}</div>'
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
-        + banner + kpis + highlights + per_array +
+        + kpis + banner + highlights + per_array +
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:4px 28px 26px;">'
         f'<a href="{dash}" style="display:inline-block;background:{BLUE};color:#ffffff;'
@@ -470,7 +483,10 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
         log.info("morning_digest: tenant %s is invoicing-only — skipping vendor digest", tenant.id)
         return False
 
-    tree = inverter_fleet.build_fleet_tree(db, tenant)
+    # Stable verdicts: judge health on COMPLETE days only (drop today's partial
+    # dawn day) + cohort-relative "gone quiet", so morning fog/cloud variability
+    # never produces a false "needs attention" digest (Bruce's noon-prior-day fix).
+    tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
     html = build_digest_html(tenant, tree)
     text = build_digest_text(tenant, tree)
     subject = _subject(tenant, tree)

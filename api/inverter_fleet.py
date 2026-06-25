@@ -864,10 +864,23 @@ def _array_daily_split(db, array_id: int, days: int = 14) -> dict:
 
 
 
-def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict:
+# Fleet-local timezone for "what day is it" when judging health on COMPLETE days
+# (stable_verdicts). Every Array Operator customer today is Vermont/GMP-territory,
+# so Eastern is correct; make this per-tenant when a non-ET fleet onboards.
+_FLEET_TZ = "America/New_York"
+
+
+def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
+                     stable_verdicts: bool = False) -> dict:
     """Owner-grouped 3-tier tree. Inverters are read from the persisted table
     (owner's arrangement), telemetry pulled from each one's SOURCE site, then
     peer-analyzed WITHIN each owner array group — so a drag changes real cohorts.
+
+    stable_verdicts=True is the E-MAIL path (morning digest / alert sweep): it
+    judges each inverter's health on COMPLETE days only (drops today's partial
+    dawn day) and uses a cohort-relative "gone quiet" test, so early-morning
+    weather variability stops producing false "needs attention" alarms. The live
+    dashboard leaves it False so it keeps showing the real-time picture.
     """
     inverters = discover_and_persist(db, tenant, force_refresh=force_refresh)
 
@@ -936,7 +949,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False) -> dict
                 "last_report": m.get("last_report"),
             })
 
-        analyzed = peer_analysis.analyze_cohort(units) if units else {"units": []}
+        analyzed = peer_analysis.analyze_cohort(
+            units,
+            complete_days_only=stable_verdicts,
+            tz_name=_FLEET_TZ if stable_verdicts else None,
+        ) if units else {"units": []}
         an_by_id = {u["id"]: u for u in analyzed["units"]}
 
         inv_rows = []
