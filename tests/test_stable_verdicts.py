@@ -77,6 +77,39 @@ def test_overnight_staleness_is_not_comm_gap_but_a_dead_gateway_is():
     assert stable2["A"]["status"] == "ok"
 
 
+def test_capture_gaps_do_not_fake_underperformance():
+    # The real bug on Bruce's fleet: capture gaps store missing days as 0, so an
+    # inverter that simply captured FEWER days has a low window sum and reads
+    # "underperforming" though its output on the days it reported matches peers.
+    full = [{"date": f"2026-06-{d:02d}", "kwh": 32.0} for d in range(10, 24)]   # 14 complete days
+    sparse = [{"date": f"2026-06-{d:02d}", "kwh": (32.0 if d in (12, 16, 20, 23) else 0.0)}
+              for d in range(10, 24)]                                            # only 4 real days
+    units = [
+        _unit("A", 7.6, [dict(x) for x in full], _at(2)),
+        _unit("B", 7.6, [dict(x) for x in full], _at(2)),
+        _unit("C", 7.6, [dict(x) for x in sparse], _at(2)),
+    ]
+    live = {u["id"]: u for u in pa.analyze_cohort([dict(x) for x in units], now=NOW)["units"]}
+    stable = {u["id"]: u for u in pa.analyze_cohort([dict(x) for x in units], now=NOW,
+                                                    complete_days_only=True, tz_name=TZ)["units"]}
+    assert live["C"]["status"] == "underperforming"      # the false positive (raw window sum)
+    assert stable["C"]["status"] == "ok", (stable["C"]["status"], stable["C"]["peer_index"])
+
+
+def test_genuine_everyday_deficit_still_flags_in_stable_mode():
+    # Reports every day but at ~62% of peers -> a real deficit, must still flag.
+    full = [{"date": f"2026-06-{d:02d}", "kwh": 32.0} for d in range(10, 24)]
+    weak = [{"date": f"2026-06-{d:02d}", "kwh": 20.0} for d in range(10, 24)]
+    units = [
+        _unit("A", 7.6, [dict(x) for x in full], _at(2)),
+        _unit("B", 7.6, [dict(x) for x in full], _at(2)),
+        _unit("C", 7.6, [dict(x) for x in weak], _at(2)),
+    ]
+    stable = {u["id"]: u for u in pa.analyze_cohort([dict(x) for x in units], now=NOW,
+                                                    complete_days_only=True, tz_name=TZ)["units"]}
+    assert stable["C"]["status"] == "underperforming", (stable["C"]["status"], stable["C"]["peer_index"])
+
+
 def test_genuine_dead_still_flags_in_stable_mode():
     # C produced zero for two COMPLETE days while peers produced -> dead, even
     # after dropping today.

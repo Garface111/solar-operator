@@ -42,6 +42,7 @@ UNDERPERFORM_THRESHOLD = 0.85   # peer_index below this => underperforming
 DEAD_DAYS = 2                   # zero output this many days (peers alive) => dead
 COMM_GAP_HOURS = 24             # no telemetry within => comm_gap
 WINDOW_DAYS = 14                # analysis window (informational; caller windows the data)
+MIN_PEER_DAYS = 3               # stable mode: need >= this many reporting days to peer-judge
 
 
 def _parse_ts(value: str | None) -> Optional[datetime]:
@@ -162,15 +163,52 @@ def analyze_cohort(
             if d["kwh"] > 0:
                 peers_alive_by_day[d["date"]] = peers_alive_by_day.get(d["date"], 0) + 1
 
+    # STABLE MODE: a per-day cohort baseline (energy + nameplate of the units that
+    # actually REPORTED that day) for a peer_index robust to unequal captured-day
+    # counts. Capture gaps store missing days as 0/absent, so an inverter that
+    # simply captured FEWER days has a smaller window sum and looks
+    # "underperforming" even when its output on the days it DID report matches its
+    # peers exactly (Bruce's "Primo (7) flagged but all working"). Comparing mean
+    # per-active-day output-per-kW — not raw window totals — fixes that: a missing
+    # day counts neither for nor against, while a unit that reports every day at a
+    # genuine deficit is still caught.
+    day_energy: dict[str, float] = {}
+    day_nameplate: dict[str, float] = {}
+    if complete_days_only:
+        for u in out_units:
+            npk = u["nameplate_kw"] or 0.0
+            for d in u.get("daily", []):
+                if d.get("kwh") and d["kwh"] > 0 and npk > 0:
+                    day_energy[d["date"]] = day_energy.get(d["date"], 0.0) + d["kwh"]
+                    day_nameplate[d["date"]] = day_nameplate.get(d["date"], 0.0) + npk
+
     attention = 0
     for u in out_units:
         e = window_energy[id(u)]
         share_e = e / cohort_energy
         share_np = (u["nameplate_kw"] or 0.0) / total_nameplate
         # Peer index is only meaningful with >= 2 units in the cohort.
-        u["peer_index"] = (
-            round(share_e / share_np, 2) if (share_np and not degenerate) else None
-        )
+        if complete_days_only:
+            # Mean of this unit's per-active-day (output-per-kW vs the cohort's
+            # output-per-kW that same day). Missing/zero days are skipped, so a
+            # sparse-but-healthy capture reads ~1.0; a real every-day deficit < 0.85.
+            npk = u["nameplate_kw"] or 0.0
+            ratios = []
+            for d in u.get("daily", []):
+                if d.get("kwh") and d["kwh"] > 0 and npk > 0:
+                    be, bnp = day_energy.get(d["date"], 0.0), day_nameplate.get(d["date"], 0.0)
+                    if be > 0 and bnp > 0:
+                        cohort_per_kw = be / bnp
+                        if cohort_per_kw > 0:
+                            ratios.append((d["kwh"] / npk) / cohort_per_kw)
+            u["peer_index"] = (
+                round(sum(ratios) / len(ratios), 2)
+                if (len(ratios) >= MIN_PEER_DAYS and not degenerate) else None
+            )
+        else:
+            u["peer_index"] = (
+                round(share_e / share_np, 2) if (share_np and not degenerate) else None
+            )
         u["window_kwh"] = round(e, 1)
 
         # Trailing zero-day streak while at least one peer produced.
