@@ -236,6 +236,49 @@ def list_subscriptions(authorization: Optional[str] = Header(default=None)):
         return {"ok": True, "subscriptions": subs}
 
 
+@router.get("/list-bundle")
+def list_bundle(authorization: Optional[str] = Header(default=None)):
+    """One round-trip for the Reports / offtaker-list view.
+
+    The tab needs three things to render the offtaker cards and their edit
+    dropdowns: the subscriptions, the tenant's arrays, and the GMP utility
+    accounts. The frontend used to fetch these as three parallel calls — and one
+    of them was the *full fleet-tree* (per-inverter peer analysis), which is by
+    far the heaviest. This folds all three into a single cheap call: the
+    subscriptions + utility-accounts payloads are produced by the very same
+    handlers (so the shapes stay byte-identical), and arrays are a LIGHT direct
+    query (id / name / client) instead of the fleet-tree, since the offtaker
+    dropdown only needs to name the arrays, not analyze them.
+    """
+    from ..models import Array
+
+    t = tenant_from_session(authorization)
+    arrays = []
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Array)
+            .where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
+            .order_by(Array.name)
+        ).scalars().all()
+        arrays = [
+            {
+                "id": a.id,
+                "name": a.name,
+                "client_name": (a.client.name if (a.client_id and a.client) else None),
+            }
+            for a in rows
+        ]
+    # Reuse the existing endpoints' logic verbatim so the shapes never drift.
+    subs = list_subscriptions(authorization)
+    uacc = list_utility_accounts(authorization)
+    return {
+        "ok": True,
+        "subscriptions": subs.get("subscriptions", []),
+        "arrays": arrays,
+        "utility_accounts": uacc.get("utility_accounts", []),
+    }
+
+
 def _parse_formats(raw: Optional[str]) -> list[str]:
     if not raw:
         return ["pdf"]
