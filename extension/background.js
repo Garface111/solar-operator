@@ -1124,6 +1124,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     }
   }
 
+  // v1.9.63: chint silent live-mode is removed (can't capture without a site click).
+  // Clear the 4-min alarm a prior version armed + mark it off, and reap a recapture tab
+  // orphaned by an MV3 worker termination so they don't pile up (Ford: "came back to a
+  // bunch of chint tabs").
+  try { chrome.alarms.clear("chint-live", () => void chrome.runtime.lastError); } catch (_) {}
+  try { await chrome.storage.local.set({ so_chint_live: { on: false } }); } catch (_) {}
+  try { if (typeof self.__soReapOrphanRecapture === "function") await self.__soReapOrphanRecapture(); } catch (_) {}
+
   // v1.5.2: retro-inject so_bridge.js into any SO tabs the user already had
   // open at install/update time. Content scripts declared in manifest only
   // fire on future navigations, so without this the onboarding page sits
@@ -1204,9 +1212,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function chintLiveGet() { const s = await chrome.storage.local.get(CHINT_LIVE_KEY); return s[CHINT_LIVE_KEY] || null; }
   async function chintLiveSet(v) { try { await chrome.storage.local.set({ [CHINT_LIVE_KEY]: v }); } catch (_) {} }
   async function armChintLive() {
-    await chintLiveSet({ on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
-    try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: _liveDelayMin("chint") }); } catch (_) {}
-    rlog("chint live-mode ARMED — refresh every", CHINT_LIVE_PERIOD_MIN, "min via a background tab");
+    // DISABLED (v1.9.63): Chint can't be captured silently — its per-inverter data only
+    // loads after the owner CLICKS into a site, so a background tab never gets it. The
+    // 4-min loop just spawned failing tabs that orphaned (MV3 kills the close-watchdog),
+    // piling up (Ford: "came back to a bunch of chint tabs"). Force OFF + clear any alarm
+    // a prior version armed. Chint refreshes when the owner opens the portal.
+    await chintLiveSet({ on: false, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
+    try { chrome.alarms.clear(CHINT_LIVE_ALARM, () => void chrome.runtime.lastError); } catch (_) {}
+    rlog("chint live-mode is DISABLED — cannot capture silently (needs a site click)");
   }
   async function disarmChintLive(reason) {
     const v = (await chintLiveGet()) || {};
@@ -1274,9 +1287,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // armChintLive) zeroes fails. Idempotent: chrome.alarms.create replaces same-named.
   async function reArmLive(vendor) {
     if (vendor === "chint") {
-      const cur = (await chintLiveGet()) || {};
-      await chintLiveSet({ on: true, armedAt: cur.armedAt || Date.now(), lastOkAt: cur.lastOkAt || 0, fails: cur.fails || 0 });
-      try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: _liveDelayMin("chint") }); } catch (_) {}
+      // chint silent live-mode is disabled (see armChintLive) — never re-arm it.
+      await chintLiveSet({ on: false });
+      try { chrome.alarms.clear(CHINT_LIVE_ALARM, () => void chrome.runtime.lastError); } catch (_) {}
+      return;
     } else {
       if (!LIVE_PERIOD_MIN[vendor]) return;
       const cur = (await liveGet(vendor)) || {};
@@ -1349,6 +1363,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function recaptureNow(vendor) {
     vendor = String(vendor || "").toLowerCase();
     if (!RECAP_VENDORS[vendor]) return { ok: false, error: "unsupported-vendor" };
+    // Chint can't be captured silently (needs a site click) — don't open a futile
+    // background tab; the page falls back to a plain server refetch, and the owner uses
+    // the vendor-name button to open the portal for a real refresh.
+    if (vendor === "chint") return { ok: false, error: "chint-foreground-only" };
     if (_liveBusy) return { ok: false, error: "busy" };
     const { tenantKey } = await recapSettings();
     if (!tenantKey) return { ok: false, error: "not-paired" };
@@ -1483,12 +1501,27 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await recapClearState();
   }
 
+  // Close any recapture tab/window left over from a PRIOR cycle. The MV3 service worker
+  // can be terminated before the close-watchdog setTimeout fires, orphaning the surface;
+  // without this they accumulate (Ford's "bunch of chint tabs"). Safe because callers
+  // only reach recaptureVendor after the single-flight check, so any existing state is
+  // stale. Called before opening a new surface + on install/update.
+  async function reapOrphanRecapture() {
+    const st = await recapGetState();
+    if (!st) return;
+    if (typeof st.windowId === "number") { try { chrome.windows.remove(st.windowId, () => void chrome.runtime.lastError); } catch (_) {} }
+    else if (typeof st.tabId === "number") { try { chrome.tabs.remove(st.tabId, () => void chrome.runtime.lastError); } catch (_) {} }
+    await recapClearState();
+  }
+  self.__soReapOrphanRecapture = reapOrphanRecapture;
+
   // Open ONE vendor's portal in a background tab, arm the capture intent, and let
   // the existing content script do its thing. A watchdog closes the tab if the
   // capture never lands (expired session) and fires the gentle nudge.
   async function recaptureVendor(vendor, opts) {
     const url = RECAP_VENDORS[vendor];
     if (!url) return;
+    await reapOrphanRecapture();   // never stack a new surface on a leftover one
     const newWindow = !!(opts && opts.newWindow);
     const budgetMs = (opts && typeof opts.budgetMs === "number") ? opts.budgetMs : TAB_BUDGET_MS;
     try { await chrome.storage.local.set({ so_capture_intent: { vendor, ts: Date.now() } }); } catch (_) {}
@@ -1639,14 +1672,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     if (!tenantKey) { rlog("no tenant key — owner not connected; skip"); return; }
     const s = await chrome.storage.local.get(LAST_KEY);
     const known = s[LAST_KEY] || {};
-    // CHINT live-mode SUPERSEDES the hourly cycle for chint (its own 4-min alarm
-    // drives it) — excluding it here prevents two background tabs racing the shared
-    // so_recap_state. Fronius/SMA (and chint when live-mode is off) still ride hourly.
-    const chintLiveOn = !!((await chintLiveGet()) || {}).on;
+    // CHINT is excluded from ALL silent recapture: its per-inverter data only loads
+    // after the owner CLICKS into a site (/api/asset/site/busTypeDevices), so a
+    // silently-opened background tab never captures it — every silent tick failed and
+    // the tab orphaned (MV3 kills the close-watchdog), piling up. Chint refreshes only
+    // on a foreground portal open. Fronius/SMA (whose data loads on the dashboard) ride
+    // hourly here, unless their own live-mode alarm already drives them.
     const _fsLiveOn = { fronius: !!((await liveGet("fronius")) || {}).on, sma: !!((await liveGet("sma")) || {}).on };
     const vendors = Object.keys(RECAP_VENDORS).filter(
       (v) => (Object.keys(known).length === 0 || known[v])
-        && !(v === "chint" && chintLiveOn) && !_fsLiveOn[v]
+        && v !== "chint" && !_fsLiveOn[v]
     );
     if (!vendors.length) return;
     if (_liveBusy) { rlog("cycle: recapture in flight (sync lock) — skip"); return; }
