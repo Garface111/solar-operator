@@ -3,7 +3,7 @@
 Owner monitoring is billed on REGISTERED INVERTER NAMEPLATE (kW), not metered
 kWh — deterministic and immune to capture gaps (Fronius/SMA have no backend API,
 so daily-kWh capture is partial). This creates a LICENSED, recurring, per-unit
-price ($0.30 / kW / month) on the existing "Array Operator — Monitoring" product.
+price ($0.15 / kW / month) on the existing "Array Operator — Monitoring" product.
 The subscription-item quantity = the tenant's summed inverter nameplate (kW),
 kept current by api/jobs/nameplate_sync.py.
 
@@ -13,7 +13,7 @@ Run (live): railway ssh --service web "cd /app && python -m scripts.create_ao_na
 import os
 import sys
 
-RATE_CENTS_PER_KW = 30   # $0.30 / kW / month
+RATE_CENTS_PER_KW = 15   # $0.15 / kW / month
 DRY_RUN = "--dry-run" in sys.argv
 CONFIRM_LIVE = "--confirm-live" in sys.argv
 
@@ -65,7 +65,7 @@ def main() -> None:
             product=product.id, currency="usd",
             unit_amount=RATE_CENTS_PER_KW,
             recurring={"interval": "month", "usage_type": "licensed"},
-            nickname="AO nameplate $0.30/kW-mo",
+            nickname="AO nameplate $0.15/kW-mo",
             metadata={"basis": "inverter_nameplate_kw"},
         )
         print(f"  created nameplate price: {price.id}")
