@@ -665,10 +665,26 @@ def test_inverter_capture_per_inverter_idempotent(client):
 
 def test_fleet_tree_renders_fronius_comb(client):
     """The sandbox fleet tree shows the captured Fronius inverters as a real comb,
-    peer-analyzed — the laggard flagged, fed from InverterDaily (no API conn)."""
+    peer-analyzed on STABLE (complete-day) verdicts — the laggard flagged, fed
+    from InverterDaily history (no API conn). The /fleet-tree endpoint now uses
+    stable_verdicts, which judges health on COMPLETE days only and needs a few
+    reporting days, so we seed real prior-day history (today's partial day is
+    intentionally ignored — that's the dawn/capture-gap false-positive fix)."""
+    from api.models import Inverter, InverterDaily
+    from datetime import date, timedelta
     tid, key = _make_tenant()
     client.post("/v1/array-owners/inverter-capture",
                 json=_fronius_payload_with_inverters(), headers=_auth(key))
+    # Seed 5 prior COMPLETE days; dev-3 consistently the laggard (~6 kWh vs ~41).
+    with SessionLocal() as db:
+        inv_by_sn = {i.serial: i.id for i in db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid)).scalars()}
+        for n in range(1, 6):
+            d = date.today() - timedelta(days=n)
+            for sn, kwh in (("dev-1", 41.0), ("dev-2", 41.0), ("dev-3", 6.0)):
+                db.add(InverterDaily(tenant_id=tid, inverter_id=inv_by_sn[sn],
+                                     day=d, kwh=kwh, source="extension_pull"))
+        db.commit()
     resp = client.get("/v1/array-owners/fleet-tree", headers=_auth(key))
     assert resp.status_code == 200, resp.text
     tree = resp.json()
@@ -677,11 +693,12 @@ def test_fleet_tree_renders_fronius_comb(client):
     assert col["inverter_count"] == 3
     serials = sorted(i["sn"] for i in col["inverters"])
     assert serials == ["dev-1", "dev-2", "dev-3"]
-    # The laggard (dev-3, 6 kWh vs ~41) must have a low peer_index / attention.
+    # The laggard (dev-3, ~6 kWh vs ~41 every day) must flag on complete-day data.
     lag = next(i for i in col["inverters"] if i["sn"] == "dev-3")
     healthy = next(i for i in col["inverters"] if i["sn"] == "dev-1")
     assert lag["peer_index"] is not None
     assert lag["peer_index"] < healthy["peer_index"]
+    assert lag["status"] == "underperforming"
 
 
 def test_inverter_capture_rebinds_by_site_id_after_rename(client):

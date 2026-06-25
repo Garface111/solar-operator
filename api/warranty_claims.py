@@ -218,7 +218,10 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
     from . import inverter_fleet
 
     if tree is None:
-        tree = inverter_fleet.build_fleet_tree(db, tenant)
+        # stable_verdicts: a warranty claim emails a vendor, so it must never fire
+        # on a dawn / capture-gap false "dead". Use the same complete-day verdicts
+        # the dashboard + alerts use. (dead/fault on settled data still opens one.)
+        tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
 
     rate = get_energy_rate(None)
 

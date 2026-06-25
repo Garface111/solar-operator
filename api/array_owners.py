@@ -1085,7 +1085,14 @@ def fleet_tree(force: int = 0, authorization: str | None = Header(default=None))
     tenant = _tenant_from_bearer(authorization)
     from . import inverter_fleet
     with SessionLocal() as db:
-        return inverter_fleet.build_fleet_tree(db, tenant, force_refresh=bool(force))
+        # stable_verdicts: judge inverter HEALTH on complete days + per-active-day
+        # peer comparison (immune to dawn weather + capture-gap days that fake
+        # "underperforming"), the SAME logic the email digest/alerts use — so the
+        # app and the emails never disagree about which inverters need attention.
+        # Live elements (current kW, daylight, live-dark overlay) are computed
+        # independently of the verdict, so the dashboard stays real-time.
+        return inverter_fleet.build_fleet_tree(db, tenant, force_refresh=bool(force),
+                                               stable_verdicts=True)
 
 
 class ReassignInverterBody(BaseModel):
