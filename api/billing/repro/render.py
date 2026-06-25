@@ -63,9 +63,21 @@ def render_office_to_pdf(file_bytes: bytes, filename: str = "invoice.xlsx") -> b
     """Render any LibreOffice-convertible office doc (xlsx/xls/docx/doc/odt/ods…)
     to a single PDF, preserving the original's exact layout. The filename's
     extension tells the engine which converter to use. Raises RenderUnavailable
-    when no backend is configured, RenderError on failure."""
+    when no backend is configured, RenderError on failure.
+
+    Prefers Gotenberg when GOTENBERG_URL is set (a dedicated render service), but
+    FALLS BACK to a bundled LibreOffice (`soffice`) if Gotenberg is unreachable or
+    errors — so a Gotenberg outage/misconfiguration can't blank every invoice render.
+    With libreoffice-calc shipped in the image (railpack.json aptPackages), the app is
+    self-contained and renders even with no Gotenberg at all."""
     if GOTENBERG_URL:
-        return _render_gotenberg(file_bytes, filename)
+        try:
+            return _render_gotenberg(file_bytes, filename)
+        except Exception as e:  # noqa: BLE001 — fall back to local LibreOffice if present
+            if SOFFICE_BIN:
+                log.warning("gotenberg render failed (%s); falling back to local LibreOffice", e)
+                return _render_soffice(file_bytes, filename)
+            raise
     if SOFFICE_BIN:
         return _render_soffice(file_bytes, filename)
     raise RenderUnavailable(
