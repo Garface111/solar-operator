@@ -807,7 +807,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "has_password": bool(t.password_hash),
             # No-upfront-payment: a live trial can have no card yet. Drives the
             # trial banner CTA and the read-only pause gating in the dashboard.
-            "has_payment_method": t.stripe_payment_method_id is not None,
+            "has_payment_method": _resolve_pm_id(t) is not None,
             "accounts_count": int(accounts_count),
             "connected_providers": connected_providers,
             "bills_count": int(bills_count),
@@ -1724,12 +1724,66 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
     return _billing_summary_arrays(t)
 
 
+def _backfill_pm_id(tenant_id: str, pm_id: str) -> None:
+    """Persist a payment-method id we recovered from Stripe so we never have to
+    re-ask Stripe for this tenant (and so every other has_payment_method callsite
+    that reads the column directly — scheduler, admin funnel — agrees)."""
+    try:
+        with SessionLocal() as db:
+            row = db.get(Tenant, tenant_id)
+            if row and not row.stripe_payment_method_id:
+                row.stripe_payment_method_id = pm_id
+                db.commit()
+    except Exception:  # noqa: BLE001 — backfill is best-effort, never block the request
+        pass
+
+
+def _resolve_pm_id(t: Tenant) -> Optional[str]:
+    """The tenant's card payment-method id — the source of truth for "has a card on file".
+
+    Prefer the persisted column. If it's empty but the tenant has a Stripe customer,
+    ASK STRIPE (the customer's invoice-default PM, else any attached card) and backfill
+    the column. This heals the case where a card was added but the webhook that writes
+    stripe_payment_method_id never landed (Bruce's "I have a card but still see the
+    add-a-card nudge"). No customer / no key / genuinely no card → None, with no Stripe
+    call when there's no customer to ask."""
+    import os as _os
+    if getattr(t, "stripe_payment_method_id", None):
+        return t.stripe_payment_method_id
+    cus = getattr(t, "stripe_customer_id", None)
+    if not cus or not _os.getenv("STRIPE_SECRET_KEY"):
+        return None
+    try:
+        import stripe
+        stripe.api_key = _os.getenv("STRIPE_SECRET_KEY", "")
+        cust = stripe.Customer.retrieve(cus)
+        inv = (cust.get("invoice_settings") if isinstance(cust, dict)
+               else getattr(cust, "invoice_settings", None)) or {}
+        pm = (inv.get("default_payment_method") if isinstance(inv, dict)
+              else getattr(inv, "default_payment_method", None))
+        if not pm:  # no invoice-default → take any attached card
+            cards = stripe.PaymentMethod.list(customer=cus, type="card", limit=1)
+            data = (cards.get("data") if isinstance(cards, dict) else getattr(cards, "data", None)) or []
+            if data:
+                pm = (data[0].get("id") if isinstance(data[0], dict) else getattr(data[0], "id", None))
+        if pm:
+            _backfill_pm_id(t.id, pm)
+            try:  # reflect on the in-memory tenant so repeat calls this request skip Stripe
+                t.stripe_payment_method_id = pm
+            except Exception:  # noqa: BLE001
+                pass
+            return pm
+    except Exception:  # noqa: BLE001 — never fail a read on a Stripe hiccup
+        pass
+    return None
+
+
 def _card_brief(t: Tenant) -> dict:
     """The tenant's default card brand + last4 (+ MM/YY) from Stripe, so the account
     page can show 'Visa •••• 4242' instead of a bare 'Card on file'. Best-effort: any
     hiccup (no key, no card, Stripe down) yields nulls and never breaks the summary."""
     import os as _os
-    pm_id = getattr(t, "stripe_payment_method_id", None)
+    pm_id = _resolve_pm_id(t)
     if not pm_id or not _os.getenv("STRIPE_SECRET_KEY"):
         return {"card_brand": None, "card_last4": None, "card_exp": None}
     try:
