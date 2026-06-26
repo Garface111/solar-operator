@@ -364,6 +364,12 @@ def build_digest_html(tenant, tree: dict) -> str:
             'watching it here.</p>'
         )
 
+    # Ford: on an attention day the per-array table just repeats the "Inverters
+    # needing attention" list above — drop it. (The "Your arrays" overview still
+    # shows on all-healthy days.)
+    if attention > 0:
+        per_array = ""
+
     dash = "https://arrayoperator.com"
     # ---- assemble -----------------------------------------------------------
     return (
@@ -433,22 +439,19 @@ def build_digest_text(tenant, tree: dict) -> str:
         "",
     ]
     if attention > 0:
-        # Just the flagged inverters + the arrays that hold them.
+        # Just the flagged inverters — the per-array table is dropped (it repeats this).
         lines.append("Inverters needing attention:")
         for fi in _flagged_inverters(cols)[:12]:
             lines.append(f"  ! {fi['name']} ({fi['array_name']}): {fi['phrase']}")
-        table_cols = [c for c in cols if _array_has_flag(c)]
-        lines += ["", "Arrays needing attention:"]
     else:
-        table_cols = cols
         lines.append("Arrays:")
-    for col in table_cols:
-        alert = col.get("alert", {}) or {}
-        state = _LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
-        kwh = _recent_kwh(col)
-        out = (_fmt_kwh(kwh) if kwh is not None
-               else ("asleep" if not is_daylight else "no recent data"))
-        lines.append(f"  - {col.get('array_name', 'Array')}: {state}, {out}")
+        for col in cols:
+            alert = col.get("alert", {}) or {}
+            state = _LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
+            kwh = _recent_kwh(col)
+            out = (_fmt_kwh(kwh) if kwh is not None
+                   else ("asleep" if not is_daylight else "no recent data"))
+            lines.append(f"  - {col.get('array_name', 'Array')}: {state}, {out}")
     lines += ["", "Open Array Operator: https://arrayoperator.com"]
     return "\n".join(lines)
 
