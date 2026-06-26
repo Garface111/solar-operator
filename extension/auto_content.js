@@ -39,7 +39,12 @@
     sc.remove();
 
     window.addEventListener("message", function (e) {
-      if (e.source !== window || !e.data || e.data.__ea_auto !== true) return;
+      // Same-window AND same-origin: auto_inject.js posts with location.origin as
+      // the target, so legitimate messages always carry our own origin. Rejecting
+      // foreign origins stops a cross-origin iframe from spoofing or reading these
+      // captured portal-data bodies.
+      if (e.source !== window || e.origin !== window.location.origin) return;
+      if (!e.data || e.data.__ea_auto !== true) return;
       handle(e.data.fmt, e.data.body, s);
     });
   });
