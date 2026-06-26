@@ -324,7 +324,21 @@ def _extract_json_block(raw: str) -> dict:
     start = raw.find("{")
     end = raw.rfind("}")
     if start != -1 and end != -1 and end > start:
-        return json.loads(raw[start : end + 1])
+        candidate = raw[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as e:
+            # Preserve the malformed text so adapter-spec failures are debuggable
+            # rather than silently surfacing a bare ValueError upstream.
+            logger.warning(
+                "LLM extraction: JSON parse failed (%s). Raw response (truncated): %r",
+                e, raw[:2000],
+            )
+            raise ValueError(f"malformed JSON in LLM response: {e}") from e
+    logger.warning(
+        "LLM extraction: no JSON object found in response. Raw (truncated): %r",
+        raw[:2000],
+    )
     raise ValueError("no JSON object in LLM response")
 
 
