@@ -6,7 +6,7 @@
 // page already received.
 (function () {
   "use strict";
-  function post(fmt, body) { try { window.postMessage({ __ea_auto: true, fmt: fmt, body: body }, "*"); } catch (e) {} }
+  function post(fmt, body) { try { window.postMessage({ __ea_auto: true, fmt: fmt, body: body }, location.origin); } catch (e) {} }
   function looksData(t) {
     return typeof t === "string" && t.length > 40 &&
       (t.trim().charAt(0) === "{" || t.trim().charAt(0) === "[") &&
