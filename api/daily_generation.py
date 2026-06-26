@@ -84,6 +84,32 @@ def _detect_columns(rows: list[list[str]]) -> Optional[tuple[int, int, int]]:
 
 # ── main ingest logic ──────────────────────────────────────────────────────────
 
+def _format_parse_error(all_rows: list[list[str]]) -> str:
+    """Build a human-readable 400 message: what we expected + a sample of the
+    file rendered as a small aligned table (instead of raw lists-of-lists)."""
+    sample = [r for r in all_rows[:3] if r]
+    if sample:
+        n_cols = max(len(r) for r in sample)
+        widths = [0] * n_cols
+        for r in sample:
+            for j, cell in enumerate(r):
+                widths[j] = max(widths[j], len(str(cell).strip()))
+        lines = []
+        for r in sample:
+            cells = [str(r[j]).strip().ljust(widths[j]) if j < len(r) else "".ljust(widths[j])
+                     for j in range(n_cols)]
+            lines.append(" | ".join(cells).rstrip())
+        table = "\n".join(lines)
+    else:
+        table = "(no readable rows)"
+    return (
+        "We couldn't read this CSV. We need a date column and a generation (kWh) "
+        "column — either a header row naming them (e.g. \"date\", \"kWh\") or, with "
+        "no header, the date in the first column and kWh in the second.\n"
+        f"What we saw (first rows):\n{table}"
+    )
+
+
 def _parse_csv_rows(
     content: bytes,
 ) -> tuple[list[tuple[date, float]], int, str]:
@@ -116,12 +142,8 @@ def _parse_csv_rows(
             date_col, kwh_col = 0, 1
             fmt = "no-header-fallback"
         else:
-            # Could not parse — return informative 400 with first 3 rows
-            sample = all_rows[:3]
-            raise HTTPException(
-                400,
-                f"Could not detect CSV format. First 3 rows: {sample}",
-            )
+            # Could not parse — return readable guidance with a sample table
+            raise HTTPException(400, _format_parse_error(all_rows))
 
     parsed: list[tuple[date, float]] = []
     skipped = 0
