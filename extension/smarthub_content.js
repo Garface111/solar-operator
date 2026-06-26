@@ -563,7 +563,11 @@
   }
 
   function fmtDateMDY(ts) {
+    // Guard against non-numeric / non-finite timestamps (null, "abc", Infinity)
+    // that would otherwise yield "NaN/NaN/NaN" in bill records sent upstream.
+    if (typeof ts !== "number" || !isFinite(ts)) return "";
     const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
     return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
   }
 
