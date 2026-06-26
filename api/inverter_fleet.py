@@ -801,7 +801,11 @@ def _array_daily(db, array_id: int, days: int = 14) -> list[dict]:
         .limit(days)
     ).scalars().all()
     return [
-        {"date": r.day.isoformat(), "kwh": round(float(r.kwh or 0.0), 2)}
+        {"date": r.day.isoformat(), "kwh": round(float(r.kwh or 0.0), 2),
+         # Provenance so callers can tell a MEASURED day (extension/GMP/API pull,
+         # CSV upload) from an ESTIMATE split out of a utility bill (bill_prorate)
+         # — never render an estimate as if it were metered. See AO data-honesty audit.
+         "source": r.source or "csv"}
         for r in sorted(rows, key=lambda x: x.day)
     ]
 
@@ -1079,9 +1083,13 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         # (today's row), independent of the flaky instantaneous feed.
         _today_iso = now().date().isoformat()
         _daily_rows = _array_daily(db, arr.id)
-        _today_kwh = next(
-            (r["kwh"] for r in _daily_rows if r.get("date") == _today_iso), None
+        _today_row = next(
+            (r for r in _daily_rows if r.get("date") == _today_iso), None
         )
+        _today_kwh = _today_row["kwh"] if _today_row else None
+        # Provenance for "produced today": the array-level row's own source, or
+        # "live" when we fall back to summing per-inverter telemetry below.
+        _today_source = _today_row.get("source") if _today_row else None
         # SolarEdge (and any API-polled vendor) writes the array-level DailyGeneration
         # row only on the nightly pull, so today's array total is blank intraday — while
         # the extension vendors (SMA/Fronius/Chint) write a daily row the moment they
@@ -1099,7 +1107,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             ]
             if _inv_today:
                 _today_kwh = round(sum(_inv_today), 2)
+                _today_source = "live"
         produced_today_kwh = _today_kwh if (_today_kwh and _today_kwh > 0) else None
+        # Only attribute a source when we actually have a value to show.
+        produced_today_source = _today_source if produced_today_kwh is not None else None
+        produced_today_is_estimated = produced_today_source == "bill_prorate"
 
         columns.append({
             "array_id": arr.id,
@@ -1116,6 +1128,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             # of truth that the flaky instantaneous live feed is NOT). Lets the
             # card show "produced today" instead of "not producing" when live≈0.
             "produced_today_kwh": produced_today_kwh,
+            # Provenance for produced_today_kwh: "csv"/"gmp"/"smarthub"/vendor =
+            # measured; "bill_prorate" = estimated from a utility bill; "live" =
+            # summed per-inverter telemetry. is_estimated lets the card render an
+            # estimated day distinctly instead of as a metered reading.
+            "produced_today_source": produced_today_source,
+            "produced_today_is_estimated": produced_today_is_estimated,
             "alert": _array_alert(inv_rows),
             "inverters": inv_rows,
             "origin_links": origin_links,
