@@ -795,6 +795,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (chrome.runtime.lastError) {
           sendResponse({ ok: false, error: chrome.runtime.lastError.message });
         } else {
+          // For a BACKGROUND (silent) Fronius/SMA capture tab — the dashboard "sync"
+          // chip — register it so the nav-driven auto-login self-heals a lapsed session
+          // (fills vault creds when the portal bounces to its SSO login). Foreground
+          // tabs (onboarding/owner-present, possibly a NEW account) are left alone.
+          try {
+            if (!active && typeof self.__soRegisterAutoLoginTab === "function") {
+              // DOT-ANCHORED allowlist (host is page-supplied via SO_OPEN_PORTAL): match
+              // only the genuine vendor portals, never an attacker-registrable lookalike
+              // like "evilsolarweb.com". Mirrors the manifest host_permissions entries.
+              const v = (host === "www.solarweb.com" || host.endsWith(".solarweb.com")) ? "fronius"
+                : (host === "ennexos.sunnyportal.com" || host.endsWith(".sunnyportal.com")) ? "sma"
+                : null;
+              if (v) self.__soRegisterAutoLoginTab(tab && tab.id, v);
+            }
+          } catch (_) { /* non-fatal */ }
           sendResponse({ ok: true, tabId: tab && tab.id });
         }
       });
@@ -955,6 +970,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, status: await SoVault.status() });
       } else if (msg.type === "SO_VAULT_SET") {
         const ok = await SoVault.set(msg.vendor, msg.username, msg.password);
+        if (ok) {
+          // Saving a portal password is an explicit "I use this vendor" signal: clear
+          // any auto-login pause so the new creds get a fresh try, and arm tight
+          // live-mode (Fronius/SMA) so production refreshes every few minutes and the
+          // next silent recapture self-heals a lapsed session with these creds.
+          try { if (typeof self.__soAutoLoginResetFails === "function") self.__soAutoLoginResetFails(msg.vendor); } catch (_) {}
+          try { if ((msg.vendor === "fronius" || msg.vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(msg.vendor); } catch (_) {}
+        }
         sendResponse({ ok });
       } else if (msg.type === "SO_VAULT_CLEAR") {
         await SoVault.clear(msg.vendor);
@@ -1170,6 +1193,35 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // read+set with NO await between, so the second tick in the same wake sees it set and
   // bails. so_recap_state stays as the durable/watchdog + cross-SW-restart backstop.
   let _liveBusy = false;
+  // ── AUTO-LOGIN state (navigation-driven, v1.9.71) ──────────────────────────
+  // The portals redirect a DEAD session to a separate SSO origin with NO content
+  // script (Fronius -> login.online.fronius.com / WSO2; SMA -> login.sma.energy /
+  // Keycloak), so the old "content script broadcasts login_required" trigger could
+  // only ever run soFillLoginForm on the dashboard page (which has no password
+  // field). We now ALSO watch our OWN capture tabs via chrome.tabs.onUpdated and
+  // fill the form the instant such a tab lands on a known SSO login origin.
+  const _autoLoginSubmittedTab = new Set();   // tabIds we already submitted creds on (never resubmit the same tab → no lockout loop)
+  const _autoLoginAttemptsTab = new Map();    // tabId -> attempts (form-not-ready retries)
+  const _openPortalTabs = new Map();          // tabId -> vendor, for BACKGROUND SO_OPEN_PORTAL capture tabs (the dashboard "sync" chip) so the nav auto-login fires for them too
+  // vendor -> consecutive submits that did NOT yield a capture (wrong pw / changed form).
+  // PERSISTED in chrome.storage (NOT in-memory): the MV3 service worker is torn down
+  // between the 6-min live ticks, so an in-memory counter would reset to 0 every tick and
+  // the pause would never trigger — letting a wrong password resubmit forever and lock the
+  // owner's portal account. Persisting it is what actually makes the lockout guard work.
+  const AUTOLOGIN_FAILS_KEY = "so_autologin_fails";   // { fronius: n, sma: n }
+  async function autoLoginFailsGet(vendor) {
+    try { const s = await chrome.storage.local.get(AUTOLOGIN_FAILS_KEY); return Number((s[AUTOLOGIN_FAILS_KEY] || {})[vendor]) || 0; } catch (_) { return 0; }
+  }
+  async function autoLoginFailsSet(vendor, n) {
+    try {
+      const s = await chrome.storage.local.get(AUTOLOGIN_FAILS_KEY);
+      const m = s[AUTOLOGIN_FAILS_KEY] || {};
+      if (!n || n <= 0) delete m[vendor]; else m[vendor] = n;
+      await chrome.storage.local.set({ [AUTOLOGIN_FAILS_KEY]: m });
+    } catch (_) {}
+  }
+  const AUTOLOGIN_MAX_TAB_ATTEMPTS = 5;
+  const AUTOLOGIN_MAX_VENDOR_FAILS = 3;
   // Distinct per-vendor phase + jitter so the live alarms don't march in lockstep
   // (avoids same-wake collisions) and a fleet-wide Web Store update doesn't synchronize
   // every browser's first tick onto the single web replica.
@@ -1317,7 +1369,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const st = await recapGetState();
       if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog(vendor + "-live: recap busy -- skip tick"); return; }
       const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
-      await recaptureVendor(vendor, { budgetMs: 60 * 1000 });
+      await recaptureVendor(vendor, { budgetMs: 150 * 1000 });   // headroom for a full SSO re-login + redirect + sequential recapture on a lapsed session
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
       const ok = !!(after.ok && after.at && after.at !== before.at);
       const cur = (await liveGet(vendor)) || { on: true, fails: 0 };
@@ -1353,7 +1405,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     _liveBusy = true;
     const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
     try {
-      await recaptureVendor(vendor, { budgetMs: 90 * 1000 });
+      await recaptureVendor(vendor, { budgetMs: 150 * 1000 });   // headroom for a full SSO re-login + redirect + sequential recapture on a lapsed session
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
       return { ok: true, captured: !!(after.ok && after.at && after.at !== before.at) };
     } catch (e) {
@@ -1487,6 +1539,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   async function recapRecordLast(vendor, ok, sites) {
     try {
+      if (ok && vendor) await autoLoginFailsSet(vendor, 0);   // a capture landed → auto-login worked; clear the pause counter
       const s = await chrome.storage.local.get(LAST_KEY);
       const m = s[LAST_KEY] || {};
       m[vendor] = { at: new Date().toISOString(), ok, sites: Array.isArray(sites) ? sites.length : 0 };
@@ -1621,100 +1674,218 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // executeScript({func,args}) can pass the decrypted creds straight into the page
   // without writing them to disk. The creds live only in the worker's memory for
   // this call and are NEVER sent to our backend — we just type into the real form.
-  function soFillLoginForm(username, password, vendor) {
+  // Returns a Promise (executeScript awaits it) of:
+  //   "submitted"       — typed username+password and triggered submit
+  //   "filled-username" — identifier-first step: typed username + clicked continue
+  //                       (the password step arrives via a later navigation/retry)
+  //   "no-form"         — no usable field appeared (page still loading / wrong page)
+  //   "already-in"      — a logged-in dashboard (no login form) — nothing to do
+  // It POLLS for the form (a server-rendered SSO page can lag the "complete" event)
+  // and, for an identifier-first flow, waits in-place for the password step so a
+  // single call can finish a two-step WSO2/Keycloak login when it AJAXes the second
+  // step in. The creds live only in this call's arguments — never written to disk,
+  // never sent to our backend; we just type into the portal's OWN form.
+  async function soFillLoginForm(username, password, vendor) {
     if (!username || !password) return "no-form";
     // Grounded per-vendor selectors (verified 2026-06-16 against the live login
     // DOMs): SMA Keycloak login.sma.energy → #username/#password; Fronius WSO2
-    // login.fronius.com → #usernameUserInput/#password. These are the PRIMARY path;
-    // the generic matcher below is the fallback if a portal reworks its form.
+    // login(.online).fronius.com → #usernameUserInput/#password. PRIMARY path; the
+    // generic matcher is the fallback if a portal reworks its form.
     const HINTS = {
-      sma: { user: "#username", pass: "#password", btn: "button[type=\"submit\"]" },
+      sma: { user: "#username", pass: "#password", btn: "#kc-login, button[type=\"submit\"]" },
       fronius: { user: "#usernameUserInput", pass: "#password", btn: "#login-button, [data-testid=\"login-page-continue-login-button\"], button[type=\"submit\"]" },
     };
-    function vis(el) { return el && el.offsetParent !== null && !el.disabled; }
-
-    let pw = null, user = null, btn = null;
-    const hint = HINTS[vendor];
-    if (hint) {
-      const hp = document.querySelector(hint.pass);
-      const hu = document.querySelector(hint.user);
-      if (vis(hp) && vis(hu)) { pw = hp; user = hu; btn = document.querySelector(hint.btn); }
-    }
-
-    // Generic fallback (vendor-agnostic): first visible password field + nearest
-    // username/email field in the same form.
-    if (!pw || !user) {
-      const pwFields = Array.from(document.querySelectorAll('input[type="password"]')).filter(vis);
-      if (!pwFields.length) return "already-in";
-      pw = pwFields[0];
-      const form = pw.form || document;
-      const candidates = Array.from(form.querySelectorAll(
-        'input[type="text"], input[type="email"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i]'
-      )).filter((el) => vis(el) && el.type !== "password");
-      user = candidates[0] || null;
-      if (!user) return "no-form";
-    }
-
-    function setVal(el, val) {
+    const hint = HINTS[vendor] || null;
+    const vis = (el) => el && el.offsetParent !== null && !el.disabled;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const findUser = () => {
+      if (hint) { const u = document.querySelector(hint.user); if (vis(u)) return u; }
+      return Array.from(document.querySelectorAll(
+        'input[type="text"], input[type="email"], input[type="tel"], input[name*="user" i], input[name*="email" i], input[id*="user" i], input[id*="email" i]'
+      )).filter((el) => vis(el) && el.type !== "password")[0] || null;
+    };
+    const findPass = () => {
+      if (hint) { const p = document.querySelector(hint.pass); if (vis(p)) return p; }
+      return Array.from(document.querySelectorAll('input[type="password"]')).filter(vis)[0] || null;
+    };
+    const findBtn = (scope) => {
+      const root = scope || document;
+      if (hint && hint.btn) { const b = root.querySelector(hint.btn); if (vis(b)) return b; }
+      return root.querySelector(
+        'button[type="submit"], input[type="submit"], button[name*="login" i], button[id*="login" i], button[id*="signin" i], button[id*="next" i], button[id*="continue" i]'
+      );
+    };
+    const setVal = (el, val) => {
       const proto = el.tagName === "TEXTAREA"
         ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
       setter.call(el, val);
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-    try {
-      user.focus(); setVal(user, username);
-      pw.focus(); setVal(pw, password);
-    } catch (_) { return "no-form"; }
-    if (!btn || !vis(btn)) {
-      btn = (pw.form || document).querySelector(
-        'button[type="submit"], input[type="submit"], button[name*="login" i], button[id*="login" i], button[id*="signin" i]'
-      );
-    }
-    setTimeout(() => {
+    };
+    const submit = (btn, ref) => setTimeout(() => {
       try {
         if (btn && btn.offsetParent !== null) { btn.click(); return; }
-        if (pw.form && pw.form.requestSubmit) { pw.form.requestSubmit(); return; }
-        pw.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+        if (ref && ref.form && ref.form.requestSubmit) { ref.form.requestSubmit(); return; }
+        if (ref) ref.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
       } catch (_) {}
-    }, 350);
-    return "submitted";
+    }, 300);
+
+    // Poll up to ~6s for a username/password field to appear.
+    let pw = null, user = null;
+    for (let i = 0; i < 20; i++) {
+      pw = findPass(); user = findUser();
+      if (pw || user) break;
+      await sleep(300);
+    }
+    if (!pw && !user) return "no-form";
+
+    if (pw && user) {                       // combined form (the grounded happy path)
+      try { user.focus(); setVal(user, username); pw.focus(); setVal(pw, password); } catch (_) { return "no-form"; }
+      submit(findBtn(pw.form), pw);
+      return "submitted";
+    }
+    if (pw && !user) {                       // password-only second step
+      try { pw.focus(); setVal(pw, password); } catch (_) { return "no-form"; }
+      submit(findBtn(pw.form), pw);
+      return "submitted";
+    }
+    // Identifier-first step (WSO2/Keycloak): type username, continue, then wait for
+    // the password step to render (it may AJAX in OR navigate — if it navigates this
+    // call's context is torn down and the onUpdated trigger re-fires for step two).
+    try { user.focus(); setVal(user, username); } catch (_) { return "no-form"; }
+    submit(findBtn(user.form), user);
+    for (let i = 0; i < 20; i++) {
+      await sleep(300);
+      const p2 = findPass();
+      if (p2) {
+        try { p2.focus(); setVal(p2, password); } catch (_) { return "filled-username"; }
+        submit(findBtn(p2.form), p2);
+        return "submitted";
+      }
+    }
+    return "filled-username";
   }
 
-  // Once per in-flight recap, attempt auto-login when a content script reports the
-  // session is gone. Guards: vault must hold creds for the vendor, auto-login must
-  // be enabled (opt-out), and we only try ONCE per recap tab (so a wrong password
-  // can't loop-submit and lock the account). On submit the existing content-script
-  // poll rides the new session and captures normally.
-  const _autoLoginTried = new Set();   // tabIds we've already tried, this SW lifetime
-  async function recapTryAutoLogin(vendor, tabId, state) {
+  // Is `tabId` a background tab WE opened for capture (single-surface recapture OR a
+  // concurrent "Sync all" tab)? Returns its vendor, else null. This is the security
+  // gate: auto-login ONLY ever fills a tab we control — never the owner's own tabs.
+  async function _captureTabVendor(tabId) {
+    if (typeof tabId !== "number") return null;
+    const op = _openPortalTabs.get(tabId); if (op) return op;                  // dashboard "sync" chip background tab
+    try { const sy = _syncTabs.get(tabId); if (sy && sy.vendor) return sy.vendor; } catch (_) {}   // "Sync all" tab
+    const st = await recapGetState();
+    if (st && st.running && st.tabId === tabId && st.vendor) return st.vendor;  // single-surface recapture tab
+    return null;
+  }
+
+  // Vendor SSO login origins a dead session redirects to. These have NO content
+  // script (different origin from the dashboard), so the chrome.tabs.onUpdated hook
+  // below is the ONLY thing that can drive their login form.
+  const _LOGIN_HOSTS = [
+    { re: /^login(\.|-).*\.fronius\.com$/i, vendor: "fronius" },   // login.online.fronius.com / login.fronius.com (WSO2)
+    { re: /^login\.fronius\.com$/i, vendor: "fronius" },
+    { re: /^login\.sma\.energy$/i, vendor: "sma" },                // SMA Keycloak
+  ];
+  function _loginVendorForUrl(url) {
+    let h; try { h = new URL(url).hostname; } catch (_) { return null; }
+    for (const e of _LOGIN_HOSTS) if (e.re.test(h)) return e.vendor;
+    return null;
+  }
+  function _safeHost(url) { try { return new URL(url).hostname; } catch (_) { return String(url || "").slice(0, 60); } }
+
+  // Fill + submit a vendor's login form on one of OUR capture tabs using the vault
+  // creds. Guards: vault holds creds + auto-login enabled (opt-out); never resubmit
+  // the SAME tab (lockout-loop guard); cap form-not-ready retries per tab; and PAUSE
+  // a vendor after AUTOLOGIN_MAX_VENDOR_FAILS submits that didn't yield a capture
+  // (wrong password / changed form) so a 6-min live loop can't keep hammering a bad
+  // password across fresh tabs and lock the account. Cleared on any success or a
+  // creds re-save. On a real submit the portal redirects back to the dashboard, the
+  // content script re-polls the now-valid session, and the normal capture path runs.
+  async function tryAutoLoginOnTab(vendor, tabId) {
     try {
-      if (state !== "login_required") return;
       if (typeof tabId !== "number") return;
-      const st = await recapGetState();
-      if (!st || !st.running || st.vendor !== vendor || st.tabId !== tabId) return; // only during OUR recap
-      if (_autoLoginTried.has(tabId)) return;            // never resubmit on the same tab
-      if (typeof SoVault === "undefined") return;
-      if (!(await SoVault.isEnabled(vendor))) { rlog("auto-login opted out for", vendor); return; }
+      if (typeof SoVault === "undefined" || !SoVault.VENDORS.includes(vendor)) return;
+      if (_autoLoginSubmittedTab.has(tabId)) return;                       // already submitted on this exact tab
+      const fails = await autoLoginFailsGet(vendor);
+      if (fails >= AUTOLOGIN_MAX_VENDOR_FAILS) {
+        rlog("auto-login: PAUSED for", vendor, "after", fails, "failed attempts — re-save the password (or sign in once) to retry");
+        return;
+      }
+      const attempts = _autoLoginAttemptsTab.get(tabId) || 0;
+      if (attempts >= AUTOLOGIN_MAX_TAB_ATTEMPTS) { rlog("auto-login: max attempts on tab", tabId, "for", vendor); return; }
+      if (!(await SoVault.isEnabled(vendor))) { rlog("auto-login: opted out for", vendor); return; }
       const creds = await SoVault.get(vendor);
-      if (!creds) { rlog("no stored creds for", vendor, "(one-click recovery will nudge)"); return; }
-      _autoLoginTried.add(tabId);
-      rlog("auto-login: filling login form for", vendor, "tab", tabId);
+      if (!creds) { rlog("auto-login: no stored creds for", vendor, "(one-click recovery will nudge)"); return; }
+      _autoLoginAttemptsTab.set(tabId, attempts + 1);
+      rlog("auto-login: ATTEMPT", attempts + 1, "— filling", vendor, "login form on tab", tabId);
       const res = await chrome.scripting.executeScript({
         target: { tabId },
         func: soFillLoginForm,
         args: [creds.username, creds.password, vendor],
-        world: "MAIN",   // run in page context so the portal framework sees the input events
+        world: "MAIN",   // page context so the portal framework sees the input events (creds are
+                         // visible only to the genuine vendor login page — same as typing manually)
       });
       const outcome = res && res[0] && res[0].result;
-      rlog("auto-login outcome for", vendor, "=>", outcome);
-      // After a submit the page navigates + the content script re-polls; the normal
-      // capture path takes over. If "no-form"/"already-in", we do nothing further and
-      // the watchdog/one-click recovery handles it.
+      rlog("auto-login OUTCOME for", vendor, "=>", outcome);
+      if (outcome === "submitted") {
+        _autoLoginSubmittedTab.add(tabId);
+        // Optimistic-pessimist: count it as a fail until a capture clears it. A real login
+        // lands a capture within seconds → recapRecordLast / the sync observer reset it to
+        // 0; a wrong password never does, so it climbs to the cap and PAUSES (persisted, so
+        // the pause survives the worker death between live ticks — the whole point).
+        await autoLoginFailsSet(vendor, (await autoLoginFailsGet(vendor)) + 1);
+      }
+      // "filled-username" / "no-form" / "already-in": leave the tab un-submitted so a
+      // later navigation (e.g. the password step) can retry, up to the attempt cap.
     } catch (e) {
-      rlog("auto-login error", vendor, e && e.message || e);
+      rlog("auto-login error", vendor, "tab", tabId, e && e.message || e);
     }
+  }
+  self.__soTryAutoLoginOnTab = tryAutoLoginOnTab;
+  self.__soAutoLoginResetFails = (v) => { try { if (v) autoLoginFailsSet(v, 0); } catch (_) {} };
+  // Register a BACKGROUND SO_OPEN_PORTAL capture tab (the dashboard "sync" chip) so the
+  // nav-driven auto-login recognizes it as ours. Called from the OPEN_UTILITY_PORTAL
+  // handler. Only fronius/sma (vault vendors with an SSO login origin) — chint is
+  // foreground-only and SolarEdge logs in same-origin.
+  self.__soRegisterAutoLoginTab = (tabId, vendor) => {
+    try { if (typeof tabId === "number" && (vendor === "fronius" || vendor === "sma")) _openPortalTabs.set(tabId, vendor); } catch (_) {}
+  };
+
+  // PRIMARY TRIGGER (v1.9.71): when one of OUR capture tabs navigates to a vendor's
+  // SSO login page, fill the form. This is what makes auto-login actually fire on a
+  // DEAD session — the dashboard's content script can't, because the login lives on a
+  // different origin it isn't injected into. Fires for BOTH the single-surface
+  // recapture AND the concurrent "Sync all" tabs (gap #2). Every other tab is ignored.
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!changeInfo || changeInfo.status !== "complete") return;   // wait until the form is in the DOM
+    const url = (tab && tab.url) || changeInfo.url;
+    if (!url || !_loginVendorForUrl(url)) return;                  // not a vendor SSO login page → ignore
+    (async () => {
+      const ourVendor = await _captureTabVendor(tabId);
+      if (!ourVendor) return;                                      // not a tab we opened for capture → never touch it
+      rlog("auto-login: our", ourVendor, "capture tab", tabId, "landed on SSO login page", _safeHost(url), "— attempting auto-login");
+      await tryAutoLoginOnTab(ourVendor, tabId);
+    })().catch((e) => rlog("auto-login(nav) error", e && e.message || e));
+  });
+  // Forget per-tab auto-login state when the tab closes (keeps the sets bounded).
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    _autoLoginSubmittedTab.delete(tabId);
+    _autoLoginAttemptsTab.delete(tabId);
+    _openPortalTabs.delete(tabId);
+  });
+
+  // SECONDARY TRIGGER: a content script reported the session is gone while still on
+  // the dashboard origin (some portals show login same-origin). Route it through the
+  // same engine, gated to OUR capture tabs (covers single-surface AND sync-all).
+  async function recapTryAutoLogin(vendor, tabId, state) {
+    try {
+      if (state !== "login_required") return;
+      if (typeof tabId !== "number") return;
+      const ourVendor = await _captureTabVendor(tabId);
+      if (!ourVendor) { rlog("auto-login: login_required on tab", tabId, "— not one of our capture tabs, ignoring"); return; }
+      await tryAutoLoginOnTab(ourVendor, tabId);
+    } catch (e) { rlog("auto-login(msg) error", e && e.message || e); }
   }
   // Expose for the LOGIN_STATE_DETECTED handler (outside this IIFE).
   self.__soRecapTryAutoLogin = recapTryAutoLogin;
@@ -1831,9 +2002,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Observer: when a SYNC tab reports its capture, close it (after a beat so its POST
   // finishes). Observe-only — never consumes the message, so the real *_CAPTURED
   // handlers still run and persist the reading.
+  const _SYNC_CAPTURED_VENDOR = { SOLAREDGE_CAPTURED: "solaredge", FRONIUS_CAPTURED: "fronius", SMA_CAPTURED: "sma", CHINT_CAPTURED: "chint" };
   chrome.runtime.onMessage.addListener((msg, sender) => {
     try {
       if (!msg || !SYNC_CAPTURED.has(msg.type)) return;
+      const v = _SYNC_CAPTURED_VENDOR[msg.type];
+      // ANY capture of this vendor (sync-all, dashboard-chip, single-surface, or the
+      // page-driven Connect flow) means the session is valid → clear the auto-login pause
+      // counter. Keyed on the message type, so it covers paths that skip recapFinish.
+      if (v) autoLoginFailsSet(v, 0);
       const tabId = sender && sender.tab && sender.tab.id;
       if (tabId != null && _syncTabs.has(tabId)) {
         _syncTabs.delete(tabId);
