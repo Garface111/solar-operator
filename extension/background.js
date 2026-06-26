@@ -814,7 +814,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const domain = String(msg.domain || "");
     const reqId = msg.reqId || "";
     const allowed = ["greenmountainpower.com", "smarthub.coop"];
-    if (!allowed.some((d) => domain.endsWith(d))) {
+    // Exact-or-subdomain match only. A bare endsWith() lets a look-alike apex
+    // like "notgreenmountainpower.com" satisfy endsWith("greenmountainpower.com")
+    // and wipe the victim's real utility cookies — require a dot boundary.
+    const domainAllowed = allowed.some((d) => domain === d || domain.endsWith("." + d));
+    if (!domainAllowed) {
       sendResponse({ ok: false, error: "domain-not-allowed" });
       return;
     }
