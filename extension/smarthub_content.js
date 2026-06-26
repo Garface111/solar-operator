@@ -777,6 +777,11 @@
     if (current !== lastUrl) {
       lastUrl = current;
       pollCount = 0;
+      // Clear the once-per-page API-capture latch so navigating to a fresh page
+      // (e.g. an operator switching to a different customer's account in the SPA)
+      // can run a new capture. The sendCapture() fingerprint dedup still prevents
+      // re-sending an identical payload.
+      apiCaptureDone = false;
       tryScrape();
       broadcastLoginState();
     }
