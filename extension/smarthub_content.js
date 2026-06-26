@@ -416,10 +416,20 @@
       let billTimestamp = null;
 
       if (pdfUrl) {
+        // Pull params by regex first so a malformed pdfUrl (which makes
+        // `new URL()` throw) never drops a valid account number / uuid.
+        const qParam = (name) => {
+          const m = pdfUrl.match(new RegExp("[?&]" + name + "=([^&#]*)"));
+          return m ? decodeURIComponent(m[1]) : null;
+        };
+        billUuid = qParam("uuid");
+        billTimestamp = qParam("timestamp");
+        if (!accountId) accountId = qParam("account") || "";
         try {
+          // Prefer the spec-correct URL parser when the href is well-formed.
           const u = new URL(pdfUrl);
-          billUuid = u.searchParams.get("uuid");
-          billTimestamp = u.searchParams.get("timestamp");
+          billUuid = u.searchParams.get("uuid") ?? billUuid;
+          billTimestamp = u.searchParams.get("timestamp") ?? billTimestamp;
           if (!accountId) accountId = u.searchParams.get("account") || "";
         } catch (_) {}
       }
