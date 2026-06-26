@@ -605,12 +605,22 @@
       for (const acctNbr of acctNbrs) {
         let rows;
         try {
-          const res = await fetch(
-            `/services/secured/billing/history/overview?acctNbr=${encodeURIComponent(acctNbr)}`,
-            { credentials: "include" }
-          );
-          if (!res.ok) continue;
-          rows = await res.json();
+          // Bound the request so a stalled fetch can't keep apiCaptureInFlight
+          // latched forever (the page-session capture lock). 15s is generous for
+          // a billing-history overview; AbortController guarantees the finally
+          // below runs and the latch clears.
+          const ctrl = new AbortController();
+          const to = setTimeout(() => ctrl.abort(), 15000);
+          try {
+            const res = await fetch(
+              `/services/secured/billing/history/overview?acctNbr=${encodeURIComponent(acctNbr)}`,
+              { credentials: "include", signal: ctrl.signal }
+            );
+            if (!res.ok) continue;
+            rows = await res.json();
+          } finally {
+            clearTimeout(to);
+          }
         } catch (_) {
           continue;
         }
@@ -792,8 +802,11 @@
       // Clear the once-per-page API-capture latch so navigating to a fresh page
       // (e.g. an operator switching to a different customer's account in the SPA)
       // can run a new capture. The sendCapture() fingerprint dedup still prevents
-      // re-sending an identical payload.
+      // re-sending an identical payload. Also clear apiCaptureInFlight: if a prior
+      // capture's fetch stalled, its finally never ran, so the in-flight latch
+      // would otherwise lock out every future capture for the page session.
       apiCaptureDone = false;
+      apiCaptureInFlight = false;
       tryScrape();
       broadcastLoginState();
     }
