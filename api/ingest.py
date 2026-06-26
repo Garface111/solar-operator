@@ -388,7 +388,15 @@ def _call_openai(text: str, api_key: str) -> dict:
     )
     resp.raise_for_status()
     body = resp.json()
-    content = body["choices"][0]["message"]["content"]
+    try:
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        # Defensive: an unexpected response shape (e.g. an error envelope
+        # surfaced with a 200, or a future schema change) should produce a
+        # clear, debuggable message instead of an opaque KeyError/IndexError.
+        raise ValueError(
+            f"unexpected OpenAI response shape ({e}): {str(body)[:500]}"
+        ) from e
     return _extract_json_block(content)
 
 
