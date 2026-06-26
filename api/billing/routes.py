@@ -1416,6 +1416,30 @@ def list_drafts(status: str = Query(default="pending"),
         return {"drafts": out}
 
 
+@router.get("/subscriptions/{sub_id}/draft-versions")
+def draft_versions(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """All draft VERSIONS for one offtaker — one per billing period, LATEST FIRST — so the
+    operator can look back at older invoices in the approval inbox. The newest is the live
+    pending draft; earlier periods are superseded/sent. Read-only."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        drafts = db.execute(
+            select(ReportDraft).where(ReportDraft.subscription_id == sub.id)
+            .order_by(ReportDraft.created_at.desc())
+        ).scalars().all()
+        # Dedupe to the most-recent draft per billing period; sort latest period first.
+        seen, out = set(), []
+        for d in drafts:
+            key = d.period_label or ("#" + str(d.id))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(d)
+        out.sort(key=lambda d: (d.period_label or ""), reverse=True)
+        return {"versions": [_draft_dict(d, sub) for d in out]}
+
+
 @router.post("/subscriptions/{sub_id}/draft")
 def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=None)):
     """Build a pending draft for this subscription's latest billing period, from
