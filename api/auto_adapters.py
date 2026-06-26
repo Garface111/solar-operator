@@ -114,6 +114,17 @@ def _fval(rec, path, is_xml):
     return _get_dot(rec, path)
 
 
+def _to_kwh(value, scale, field):
+    """value * scale as float, raising a CONTEXTUAL error naming the offending
+    field/value instead of a bare 'could not convert string to float'. extract()
+    runs against an LLM-chosen path, so a wrong path lands on non-numeric data —
+    a legible message turns the repair-loop feedback (and logs) actionable."""
+    try:
+        return round(float(value) * float(scale if scale is not None else 1), 3)
+    except (TypeError, ValueError) as e:
+        raise ValueError("non-numeric %s value %r (scale=%r): %s" % (field, value, scale, e))
+
+
 def extract(spec, raw):
     """Run a declarative spec against a raw capture -> (records, computed_kwh, summary_kwh)."""
     is_xml = spec["format"] == "xml"
@@ -126,7 +137,7 @@ def extract(spec, raw):
         if g is None:
             continue
         out.append({"date": _parse_date(_fval(r, fd["date"]["path"], is_xml), fd["date"].get("parse", "iso")),
-                    "generation_kwh": round(float(g) * float(fd["generation_kwh"].get("scale", 1)), 3)})
+                    "generation_kwh": _to_kwh(g, fd["generation_kwh"].get("scale", 1), "generation_kwh")})
     computed = round(sum(x["generation_kwh"] for x in out), 3)
     summary = None
     st = spec.get("summary_total_kwh")
@@ -137,7 +148,7 @@ def extract(spec, raw):
         else:
             sv = _get_dot(root, st["path"])
         if sv is not None:
-            summary = round(float(sv) * float(st.get("scale", 1)), 3)
+            summary = _to_kwh(sv, st.get("scale", 1), "summary_total_kwh")
     return out, computed, summary
 
 
