@@ -1314,6 +1314,20 @@ def _get_owned(db, tenant_id: str, sub_id: int) -> BillingReportSubscription:
 #  I go over it and approve it or modify it and then send." Nothing reaches a
 #  real customer until the operator clicks Approve & send.
 
+def _calc_credit_for_budget(sub):
+    """The CALCULATED solar credit value (pre-budget-override) for a budget-billed
+    offtaker, so the email preview can show it alongside the budgeted amount as two
+    distinct rows. None when there's no budget. Best-effort — a slow/unreadable
+    workbook just yields None (the preview falls back to a single row)."""
+    if sub is None or getattr(sub, "budget_amount_usd", None) is None:
+        return None
+    try:
+        ci = build_match(sub).computed_invoice or {}
+        return ci.get("solar_credit_value")
+    except Exception:  # noqa: BLE001 — never break draft serialization on a parse hiccup
+        return None
+
+
 def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=None) -> dict:
     return {
         "id": d.id,
@@ -1356,6 +1370,9 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         "net_rate_per_kwh": (getattr(sub, "net_rate_per_kwh", None) if sub else None),
         "utility_account_id": (getattr(sub, "utility_account_id", None) if sub else None),
         "budget_amount_usd": (getattr(sub, "budget_amount_usd", None) if sub else None),
+        # Calculated solar credit value (pre-budget-override). When a budget is set the
+        # email shows BOTH: this value + the budgeted amount (amount_usd). None otherwise.
+        "solar_credit_value": _calc_credit_for_budget(sub),
         "has_workbook": ((getattr(sub, "source_workbook", None) is not None) if sub else False),
         "created_at": d.created_at.isoformat() if d.created_at else None,
         "sent_at": d.sent_at.isoformat() if d.sent_at else None,

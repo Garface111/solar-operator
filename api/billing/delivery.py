@@ -80,8 +80,13 @@ def build_match(sub) -> BillingMatch:
     # this number. (Flagged so the invoice + email can note it's a budget bill.)
     budget = getattr(sub, "budget_amount_usd", None)
     if budget is not None and m is not None and getattr(m, "computed_invoice", None):
-        m.computed_invoice["amount_owed"] = float(budget)
-        m.computed_invoice["budget_override"] = True
+        ci = m.computed_invoice
+        # Preserve the CALCULATED solar credit value before the fixed budget total
+        # overrides the amount owed, so the email + invoice can show BOTH as distinct
+        # rows: what the solar credit was worth vs. the budgeted amount actually billed.
+        ci.setdefault("solar_credit_value", ci.get("amount_owed"))
+        ci["amount_owed"] = float(budget)
+        ci["budget_override"] = True
     return m
 
 
@@ -956,6 +961,20 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     intro_para = ("" if note_html
                   else f'<p>Here is the solar credit invoice for <strong>{cust}</strong>'
                        f'{f" — {period}" if period else ""}.</p>')
+    # Budget billing shows TWO distinct figures — the calculated solar credit value
+    # AND the fixed budgeted amount actually billed; otherwise just the one amount due.
+    budget_override = bool(inv.get("budget_override"))
+    credit_val = inv.get("solar_credit_value")
+    credit_str = f"${credit_val:,.2f}" if isinstance(credit_val, (int, float)) else amount_str
+    if budget_override and isinstance(credit_val, (int, float)):
+        amount_rows_html = (
+            _row("Solar credit value due", credit_str)
+            + _row("Budgeted amount", amount_str, strong=True)
+        )
+        amount_rows_text = f"Solar credit value due: {credit_str}\nBudgeted amount: {amount_str}\n"
+    else:
+        amount_rows_html = _row("Solar credit value due", amount_str, strong=True)
+        amount_rows_text = f"Solar credit value due: {amount_str}\n"
     body_html = (
         f"{test_banner}"
         f"{note_html}"
@@ -963,7 +982,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
         f'{_row("Billing period", period or "—")}'
         f'{_row("Your production", f"{kwh:,.0f} kWh")}'
-        f'{_row("Solar credit value due", amount_str, strong=True)}'
+        f'{amount_rows_html}'
         f"</table>"
         f'<p style="margin-top:18px;">The full invoice'
         f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
@@ -987,7 +1006,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
             f"Solar credit invoice for {cust}\n\n"
             f"Billing period: {period or '—'}\n"
             f"Your production: {kwh:,.0f} kWh\n"
-            f"Solar credit value due: {amount_str}\n\n"
+            f"{amount_rows_text}\n"
             f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
             f"Questions? Just reply to this email."
         ),
