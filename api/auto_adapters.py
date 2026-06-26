@@ -20,6 +20,7 @@ env var is set (open in dev when unset). The live agent tier shells to a local
 """
 import datetime as dt
 import json
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,8 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, Header, HTTPException, Request
+
+log = logging.getLogger(__name__)
 
 
 # ============ generic interpreter (DATA-driven extraction) ============
@@ -262,8 +265,14 @@ def agent(raw_text, fmt, feedback=None):
         m = re.search(r"\{.*\}", p.stdout, re.S)
         if m:
             return json.loads(m.group(0)), "agent (live)"
-    except Exception:
-        pass
+        log.warning("auto_adapters.agent: no JSON object in agent output (fmt=%s)", fmt)
+    except json.JSONDecodeError as e:
+        # The agent returned text that looked like JSON but didn't parse — log the
+        # reason instead of silently falling through, so a recurring bad-output
+        # pattern is visible. Control flow unchanged: caller retries / falls back.
+        log.warning("auto_adapters.agent: malformed JSON spec from agent (fmt=%s): %s", fmt, e)
+    except Exception as e:
+        log.warning("auto_adapters.agent: synthesis subprocess failed (fmt=%s): %s", fmt, e)
     return None, "agent (error)"
 
 
@@ -277,8 +286,12 @@ def synthesize(raw_text, fmt):
                 ok, _, d = validate(recs, c, s)
                 if ok:
                     return spec, "heuristic", d, True
-            except Exception:
-                pass
+            except Exception as e:
+                # Heuristic spec didn't apply to this payload — expected fallback
+                # to the agent tier, but log so a systematically-broken heuristic
+                # is diagnosable instead of invisible.
+                log.debug("auto_adapters.synthesize: heuristic extract failed, "
+                          "falling back to agent (fmt=%s): %s", fmt, e)
     feedback = None
     for _ in range(2):  # synth -> validate -> repair loop
         spec, src = agent(raw_text, fmt, feedback)
@@ -408,7 +421,11 @@ async def adapters_ingest(request: Request, authorization: str = Header(default=
         try:  # health-probe the cached adapter against this fresh capture
             recs, c, s = extract(json.loads(existing["spec"]), raw_text)
             ok, _reasons, d = validate(recs, c, s)
-        except Exception:
+        except Exception as e:
+            # Cached adapter failed to apply (portal changed, or a corrupt stored
+            # spec) — log it; flow continues to the auto-repair synth below.
+            log.info("auto_adapters.ingest: cached adapter probe failed for fp=%s, "
+                     "auto-repairing: %s", fp, e)
             ok, d = False, None
         if ok:
             return {"fingerprint": fp, "status": existing["status"], "result": "cache_hit", "reconcile": d}
