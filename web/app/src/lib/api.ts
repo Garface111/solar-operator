@@ -1221,6 +1221,8 @@ export interface DailyCsvUploadResult {
   rows_skipped: number;
   date_range: { start: string; end: string } | null;
   source: string;
+  /** "header-detected" (named columns found) or "no-header-fallback" (assumed date,kWh). */
+  detected_format?: string;
 }
 
 export interface DailyCoverage {

@@ -187,7 +187,7 @@ async def upload_daily_csv(
         if not content:
             raise HTTPException(400, "Uploaded file is empty")
 
-        parsed_rows, rows_skipped, _fmt = _parse_csv_rows(content)
+        parsed_rows, rows_skipped, fmt = _parse_csv_rows(content)
 
         # Bulk-fetch existing rows so we can distinguish insert vs update
         days = [d for d, _ in parsed_rows]
@@ -229,6 +229,9 @@ async def upload_daily_csv(
             "end": all_days[-1].isoformat(),
         },
         "source": "csv",
+        # How we interpreted the file: "header-detected" (named columns found)
+        # vs "no-header-fallback" (assumed date,kWh in the first two columns).
+        "detected_format": fmt,
     }
 
 

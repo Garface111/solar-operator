@@ -460,7 +460,11 @@ function ArrayRow({
       const range = result.date_range
         ? ` (${result.date_range.start} → ${result.date_range.end})`
         : "";
-      toast.success(`Uploaded ${total} days${range}`);
+      const fmtNote =
+        result.detected_format === "no-header-fallback"
+          ? " · no header found, read column 1 as date and column 2 as kWh"
+          : "";
+      toast.success(`Uploaded ${total} days${range}${fmtNote}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
     } finally {
