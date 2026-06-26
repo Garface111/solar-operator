@@ -951,6 +951,18 @@ def main():
             except Exception as _e:
                 print(f"  (include_summary default flip skipped: {_e})")
 
+        # 2026-06-26 "Come review your next bill" dedup marker. When a new GMP
+        # bill lands for an offtaker, api/jobs/new_bill_review emails the OPERATOR
+        # a "your next invoice is ready to review" prompt; this column stores the
+        # latest bill PERIOD already emailed so each new bill fires exactly once.
+        if not column_exists(conn, "billing_report_subscriptions", "review_emailed_period"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN review_emailed_period VARCHAR(20)"
+            ))
+            added.append("review_emailed_period")
+            print("  + billing_report_subscriptions.review_emailed_period")
+
         # 2026-06-18 Durable bill-PDF bytes (auto-attach GMP bill). pdf_path was
         # ephemeral; persist the actual bytes in-row so the PDF survives redeploys.
         for col, sql in [

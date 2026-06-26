@@ -1225,6 +1225,13 @@ class BillingReportSubscription(Base):
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     last_invoice_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # "Come review your next bill" dedup (Jun 2026, Ford's GMP-update trigger).
+    # The latest GMP-bill PERIOD label (YYYY-MM of the bill's period_end) for
+    # which api/jobs/new_bill_review already emailed the operator a "your next
+    # invoice is ready to review" prompt. The daily sweep only fires when a NEWER
+    # bill period lands than the one stored here, so each new GMP bill triggers
+    # exactly one review email per offtaker. NULL = never review-emailed yet.
+    review_emailed_period: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Sequential invoice numbering (Ford): the operator sets a starting number and
     # Array Operator adds 1 per real send. `start` = the seed they entered; `next` =
     # the running counter stamped on the next invoice. NULL on both = legacy
