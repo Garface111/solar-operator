@@ -1782,10 +1782,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Vendor SSO login origins a dead session redirects to. These have NO content
   // script (different origin from the dashboard), so the chrome.tabs.onUpdated hook
   // below is the ONLY thing that can drive their login form.
+  // Match ANY Fronius/SMA identity-provider host: the dashboards live on solarweb.com
+  // and sunnyportal.com, so once one of OUR fronius/sma capture tabs lands on a
+  // fronius.com / sma.energy host it IS the auth flow (login.fronius.com / auth.fronius.com
+  // [WSO2], login.sma.energy [Keycloak] — verified login.online.fronius.com does NOT resolve,
+  // so don't key on it). Anchored with (^|\.) so a lookalike like "notfronius.com" or
+  // "fronius.com.attacker.net" can't match; _captureTabVendor is the second gate.
   const _LOGIN_HOSTS = [
-    { re: /^login(\.|-).*\.fronius\.com$/i, vendor: "fronius" },   // login.online.fronius.com / login.fronius.com (WSO2)
-    { re: /^login\.fronius\.com$/i, vendor: "fronius" },
-    { re: /^login\.sma\.energy$/i, vendor: "sma" },                // SMA Keycloak
+    { re: /(^|\.)fronius\.com$/i, vendor: "fronius" },
+    { re: /(^|\.)sma\.energy$/i, vendor: "sma" },
   ];
   function _loginVendorForUrl(url) {
     let h; try { h = new URL(url).hostname; } catch (_) { return null; }
