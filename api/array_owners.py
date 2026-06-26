@@ -391,12 +391,33 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 .group_by(DailyGeneration.array_id)
             ).all():
                 life_by_array[aid] = (float(kwh or 0.0), last)
-            for aid, d, k in db.execute(
-                select(DailyGeneration.array_id, DailyGeneration.day, DailyGeneration.kwh)
+            for aid, d, k, src in db.execute(
+                select(DailyGeneration.array_id, DailyGeneration.day,
+                       DailyGeneration.kwh, DailyGeneration.source)
                 .where(DailyGeneration.array_id.in_(array_ids), DailyGeneration.day >= window_start)
                 .order_by(DailyGeneration.array_id, DailyGeneration.day)
             ).all():
-                series_by_array[aid].append({"date": d.isoformat(), "kwh": float(k or 0.0)})
+                series_by_array[aid].append(
+                    {"date": d.isoformat(), "kwh": float(k or 0.0), "source": src or "csv"})
+
+        # ── data-honesty: which arrays carry ESTIMATED (bill_prorate) kWh ─────
+        # The kWh aggregates above SUM across every DailyGeneration source, so a
+        # value can silently blend metered rows with an estimate split out of a
+        # utility bill. Flag the estimate so the card never shows it as measured.
+        # One grouped query: arrays with any bill_prorate row today, and in the
+        # whole window (covers month/lifetime cards). (See AO data-honesty audit.)
+        est_today: set[int] = set()
+        est_window: set[int] = set()
+        if array_ids:
+            for aid, day in db.execute(
+                select(DailyGeneration.array_id, DailyGeneration.day)
+                .where(DailyGeneration.array_id.in_(array_ids),
+                       DailyGeneration.source == "bill_prorate")
+                .group_by(DailyGeneration.array_id, DailyGeneration.day)
+            ).all():
+                est_window.add(aid)
+                if day == today:
+                    est_today.add(aid)
 
         for arr in arrays:
             today_kwh = today_by_array.get(arr.id, 0.0)
@@ -447,9 +468,15 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 "client_name": arr.client.name if arr.client else None,
                 "fuel_type": arr.fuel_type,
                 "live": live,
-                "today": {"kwh": round(today_kwh, 3)} if has_today else None,
+                # is_estimated: today's figure includes a bill_prorate row (split
+                # from a utility bill), not a metered reading — UI marks it.
+                "today": ({"kwh": round(today_kwh, 3),
+                           "is_estimated": arr.id in est_today} if has_today else None),
                 "month": {"kwh": round(month_kwh, 3)},
                 "lifetime": {"kwh": round(lifetime_kwh, 3)},
+                # True when ANY kWh in the window (month/lifetime cards) is an
+                # estimate split from a utility bill rather than metered data.
+                "has_estimated": arr.id in est_window,
                 "value": value,
                 "health": health,
                 # Daily kWh over the peer window (ascending) for the owner
