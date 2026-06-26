@@ -249,7 +249,11 @@ def get_daily_coverage(
             raise HTTPException(404, "Array not found")
 
         rows = db.execute(
-            select(DailyGeneration.day, DailyGeneration.source).where(
+            select(
+                DailyGeneration.day,
+                DailyGeneration.source,
+                DailyGeneration.uploaded_at,
+            ).where(
                 DailyGeneration.array_id == array_id,
             )
         ).all()
@@ -260,16 +264,23 @@ def get_daily_coverage(
             "first_day": None,
             "last_day": None,
             "source_counts": {},
+            # No rows => nothing has ever been ingested for this array. The UI can
+            # use the null here to show "no data yet" vs (when populated) staleness.
+            "last_upload_at": None,
         }
 
     source_counts: dict[str, int] = {}
-    for _, src in rows:
+    for _, src, _ts in rows:
         source_counts[src] = source_counts.get(src, 0) + 1
 
-    all_days = sorted(d for d, _ in rows)
+    upload_times = [ts for _, _, ts in rows if ts is not None]
+    last_upload_at = max(upload_times).isoformat() if upload_times else None
+
+    all_days = sorted(d for d, _, _ in rows)
     return {
         "day_count": len(all_days),
         "first_day": all_days[0].isoformat(),
         "last_day": all_days[-1].isoformat(),
         "source_counts": source_counts,
+        "last_upload_at": last_upload_at,
     }

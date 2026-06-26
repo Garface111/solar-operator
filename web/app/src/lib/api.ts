@@ -1230,6 +1230,9 @@ export interface DailyCoverage {
   first_day: string | null;
   last_day: string | null;
   source_counts: Record<string, number>;
+  /** Most recent ingest time; null if nothing has ever been uploaded. Lets the
+   *  UI distinguish "no data yet" from "data exists but is stale". */
+  last_upload_at?: string | null;
 }
 
 export async function uploadDailyCsv(
