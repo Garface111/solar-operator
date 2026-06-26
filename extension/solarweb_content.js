@@ -373,10 +373,17 @@
           if (dh && dh.length) iv.daily = dh;          // per-inverter sparkline history
         }
       } catch (_) { daily = []; }
+      // Site-level nameplate is DERIVED from today's energy ÷ specific yield —
+      // a best-effort estimate, NOT a measured spec rating. Flag it so the
+      // backend/dashboard/billing never treat it as an authoritative nameplate.
+      const derivedPeakKw = deriveNameplateKw(energyToday, s.KwhPerKwp);
       sites.push({
         site_id: s.PvSystemId,
         name: s.PvSystemName || null,
-        peak_power_kw: deriveNameplateKw(energyToday, s.KwhPerKwp),
+        peak_power_kw: derivedPeakKw,
+        // true when peak_power_kw came from the energy÷yield derivation above
+        // (its only source here); downstream marks it "~est." not measured.
+        peak_power_kw_estimated: derivedPeakKw != null,
         inverter_count: typeof s.InverterCount === "number" ? s.InverterCount : null,
         energy_today_kwh: energyToday,
         kwh_per_kwp: typeof s.KwhPerKwp === "number" ? s.KwhPerKwp : null,
