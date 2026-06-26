@@ -1082,6 +1082,23 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         _today_kwh = next(
             (r["kwh"] for r in _daily_rows if r.get("date") == _today_iso), None
         )
+        # SolarEdge (and any API-polled vendor) writes the array-level DailyGeneration
+        # row only on the nightly pull, so today's array total is blank intraday — while
+        # the extension vendors (SMA/Fronius/Chint) write a daily row the moment they
+        # capture. Each SolarEdge inverter's LIVE telemetry already carries today's kWh,
+        # so when the array-level today row is missing, sum the per-inverter series for
+        # today. Display-only (no DailyGeneration write) so billing/history stay sourced
+        # from the nightly pull. Fixes Bruce: "SolarEdge total kWh for the day not showing
+        # like the other vendors."
+        if not (_today_kwh and _today_kwh > 0):
+            _inv_today = [
+                d["kwh"]
+                for row in inv_rows
+                for d in (row.get("daily") or [])
+                if d.get("date") == _today_iso and d.get("kwh") is not None
+            ]
+            if _inv_today:
+                _today_kwh = round(sum(_inv_today), 2)
         produced_today_kwh = _today_kwh if (_today_kwh and _today_kwh > 0) else None
 
         columns.append({

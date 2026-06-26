@@ -701,6 +701,55 @@ def test_fleet_tree_renders_fronius_comb(client):
     assert lag["status"] == "underperforming"
 
 
+def test_fleet_tree_produced_today_falls_back_to_per_inverter_sum(client):
+    """When the array-level DailyGeneration row for TODAY is missing — the case for
+    API-polled vendors like SolarEdge, which only write that row on the nightly pull
+    — the array's produced_today_kwh falls back to summing each inverter's live daily
+    series for today. So the daily total shows intraday like the extension vendors do.
+    (Bruce: 'SolarEdge total kWh for the day not showing like the other vendors.')"""
+    from api.models import Inverter, InverterDaily, DailyGeneration
+    from datetime import date, timedelta
+    tid, key = _make_tenant()
+    client.post("/v1/array-owners/inverter-capture",
+                json=_fronius_payload_with_inverters(), headers=_auth(key))
+    today = date.today()
+    with SessionLocal() as db:
+        inv_by_sn = {i.serial: i.id for i in db.execute(
+            select(Inverter).where(Inverter.tenant_id == tid)).scalars()}
+        # Simulate the SolarEdge condition: clear every TODAY row the Fronius capture
+        # wrote — both the per-inverter rows AND the array-level DailyGeneration row —
+        # so the array has NO array-level today total (as SolarEdge does intraday).
+        for r in db.execute(select(InverterDaily).where(
+                InverterDaily.tenant_id == tid,
+                InverterDaily.day == today)).scalars().all():
+            db.delete(r)
+        for r in db.execute(select(DailyGeneration).where(
+                DailyGeneration.tenant_id == tid,
+                DailyGeneration.day == today)).scalars().all():
+            db.delete(r)
+        db.flush()  # apply the deletes before re-inserting today's rows
+        # A few prior complete days (so the comb is healthy) + TODAY per-inverter only.
+        for n in range(1, 4):
+            d = today - timedelta(days=n)
+            for sn in ("dev-1", "dev-2", "dev-3"):
+                db.add(InverterDaily(tenant_id=tid, inverter_id=inv_by_sn[sn],
+                                     day=d, kwh=40.0, source="extension_pull"))
+        for sn, kwh in (("dev-1", 12.5), ("dev-2", 10.0), ("dev-3", 7.5)):
+            db.add(InverterDaily(tenant_id=tid, inverter_id=inv_by_sn[sn],
+                                 day=today, kwh=kwh, source="api_live"))
+        db.commit()
+        # The bug precondition now holds: no array-level DailyGeneration row for today.
+        assert db.execute(select(DailyGeneration).where(
+            DailyGeneration.tenant_id == tid,
+            DailyGeneration.day == today)).first() is None
+
+    resp = client.get("/v1/array-owners/fleet-tree", headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    col = next(c for c in resp.json()["columns"] if c["array_name"] == "Waterford")
+    # 12.5 + 10.0 + 7.5 summed from the per-inverter series → shown as today's total.
+    assert col["produced_today_kwh"] == 30.0
+
+
 def test_inverter_capture_rebinds_by_site_id_after_rename(client):
     """STABLE SITE ANCHOR: after the owner renames the array, a re-capture (which
     still carries the same Fronius PvSystemId site_id but the OLD portal name)
