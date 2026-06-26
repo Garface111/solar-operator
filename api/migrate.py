@@ -51,6 +51,15 @@ def main():
             # referential, NULL for every existing tenant → no fan-out until a
             # link is deliberately established (api.tenant_link.link_by_email).
             ("linked_tenant_id",       "ALTER TABLE tenants ADD COLUMN linked_tenant_id VARCHAR(32)"),
+            # Operator-level BYO generation spreadsheet (Jun 2026). Mirrors the
+            # per-subscription tracker columns but keyed to the TENANT. Additive +
+            # nullable — NULL for every existing tenant; no auto-append in v1, so
+            # these never touch the live billing path. BYTEA/JSON/TIMESTAMP work on
+            # both sqlite dev + Postgres prod.
+            ("tracker_workbook",       "ALTER TABLE tenants ADD COLUMN tracker_workbook BYTEA"),
+            ("tracker_filename",       "ALTER TABLE tenants ADD COLUMN tracker_filename VARCHAR(300)"),
+            ("tracker_map",            "ALTER TABLE tenants ADD COLUMN tracker_map JSON"),
+            ("tracker_updated_at",     "ALTER TABLE tenants ADD COLUMN tracker_updated_at TIMESTAMP"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):

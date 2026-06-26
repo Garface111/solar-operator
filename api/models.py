@@ -220,6 +220,24 @@ class Tenant(Base):
     # link is deliberately established. Reversible by nulling both sides.
     linked_tenant_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
+    # ── Operator-level BYO generation spreadsheet (Jun 2026) ─────────────
+    # Mirrors the per-subscription tracker (BillingReportSubscription.tracker_*)
+    # but keyed to the TENANT instead of one offtaker: the operator uploads ONE
+    # running generation sheet for their whole operation; we detect its columns
+    # (api/billing/sheet_tracker.detect_structure) and keep it on file so they
+    # can download it. ADDITIVE + nullable — NULL for every existing tenant, no
+    # auto-append in v1 (deferred), and it never touches the live invoice/billing
+    # path. Same storage shape as the per-sub tracker so the frontend renderer is
+    # reusable.
+    #   tracker_workbook — the stored xlsx bytes (CSV uploads normalized to xlsx)
+    #   tracker_filename — original upload name (for the download filename)
+    #   tracker_map      — the detected structure (sheet/header_row/columns/…)
+    #   tracker_updated_at — last upload time
+    tracker_workbook: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    tracker_filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    tracker_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    tracker_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     clients: Mapped[list["Client"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
