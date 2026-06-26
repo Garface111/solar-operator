@@ -1083,36 +1083,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   try { await gmpKeepAlive(); } catch (e) { console.warn("[EnergyAgent] gmpKeepAlive failed", e); }
 });
 
-// ── Manual verification hook (v1.9.49) ───────────────────────────────────────
-// Force a silent GMP refresh RIGHT NOW instead of waiting for the 12h alarm — and
-// bypass the <8-day-to-expiry gate + once-a-day throttle so you can test on demand.
-// HOW TO USE: chrome://extensions → EnergyAgent → "service worker" (Inspect) → in
-// that DevTools Console run:  soTestGmpRefresh()
-// Prereq: log into greenmountainpower.com once with this extension loaded so a GMP
-// session is known. Watch for a background GMP tab to flash open ~80s, then the
-// console prints whether the token's expiry advanced (= silent refresh works).
-self.soTestGmpRefresh = async function () {
-  const before = (await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD))[STORAGE_KEYS.LAST_PAYLOAD];
-  console.log("[EnergyAgent/test] GMP capture before:", before);
-  if (!before || !before.tokenExpires) {
-    console.log("[EnergyAgent/test] No GMP session known yet — log into greenmountainpower.com once with this extension loaded, then re-run soTestGmpRefresh().");
-    return "no-session";
-  }
-  const prevExp = new Date(before.tokenExpires).getTime();
-  const prevHash = before.tokenHash || null;
-  console.log("[EnergyAgent/test] opening GMP in a BACKGROUND tab to re-capture (~80s, no sign-in expected)…");
-  await silentGmpRecapture(prevExp);
-  const after = (await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD))[STORAGE_KEYS.LAST_PAYLOAD];
-  const newExp = after && after.tokenExpires ? new Date(after.tokenExpires).getTime() : 0;
-  const changed = !!after && (after.tokenHash !== prevHash || newExp > prevExp + 1000);
-  if (changed) {
-    console.log("[EnergyAgent/test] ✅ SILENT REFRESH WORKS — a fresh token was captured in the background, no sign-in. expires now:", after.tokenExpires);
-  } else {
-    console.log("[EnergyAgent/test] ℹ️ token unchanged. EITHER your token is still fresh so GMP didn't reissue it (expected right after login — re-test when it's nearer the ~21-day expiry), OR your browser GMP session has lapsed (open greenmountainpower.com in a normal tab; if it shows the login page, sign in once, then re-run). before/after expiry:", before.tokenExpires, "->", after && after.tokenExpires);
-  }
-  return changed ? "refreshed" : "unchanged";
-};
-
 chrome.runtime.onInstalled.addListener(async (details) => {
   chrome.action.setBadgeText({ text: "" });
 
