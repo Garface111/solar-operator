@@ -21,6 +21,7 @@ import {
   type QuarterReport,
   listClients,
   getReports,
+  sendSampleReport,
 } from "../lib/api";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -117,6 +118,33 @@ export default function NepoolReportsTab() {
   // first user interaction so subsequent loadData calls don't reset it.
   const [expandedSet, setExpandedSet] = useState<Set<string> | null>(null);
   const defaultApplied = useRef(false);
+
+  // ── "Send myself a test report" — a real [SAMPLE] workbook to the operator's
+  // own inbox, no client ever contacted (POST /v1/account/send-sample-report). ──
+  const [sampleSending, setSampleSending] = useState(false);
+  const [sampleMsg, setSampleMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const handleSendSample = useCallback(() => {
+    setSampleSending(true);
+    setSampleMsg(null);
+    sendSampleReport()
+      .then((r) => {
+        setSampleMsg({
+          ok: true,
+          text: r.sent_to
+            ? `Sent a [SAMPLE] report to ${r.sent_to}.`
+            : "Sample report sent to your email.",
+        });
+      })
+      .catch((err) =>
+        // The endpoint 4xx's with helpful guidance ("Add a client and array
+        // first", "Add an email address first") — surface it verbatim.
+        setSampleMsg({
+          ok: false,
+          text: err instanceof Error ? err.message : "Couldn't send the sample.",
+        }),
+      )
+      .finally(() => setSampleSending(false));
+  }, []);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -231,6 +259,34 @@ export default function NepoolReportsTab() {
 
       {/* 5. Next run countdown + send-now */}
       <NextRunCard onSent={loadData} />
+
+      {/* Send myself a test report — a real [SAMPLE] workbook to the operator's
+          own inbox so they can preview before any client is ever contacted. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cream-border bg-cream px-5 py-4 shadow-sm">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-zinc-700">
+            Send myself a test report
+          </p>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            Emails a real <span className="font-medium">[SAMPLE]</span> workbook to your
+            address only — no client is contacted.
+          </p>
+          {sampleMsg && (
+            <p
+              className={`mt-1.5 text-xs ${sampleMsg.ok ? "text-primary-600" : "text-red-600"}`}
+            >
+              {sampleMsg.text}
+            </p>
+          )}
+        </div>
+        <Button
+          variant="secondary"
+          onClick={handleSendSample}
+          disabled={sampleSending}
+        >
+          {sampleSending ? "Sending…" : "Send test report"}
+        </Button>
+      </div>
 
       {/* 5. Report history — vertical timeline */}
       <div>
