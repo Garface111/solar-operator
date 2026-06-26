@@ -212,8 +212,14 @@
         for (const pt of pts) {
           const x = pt.x, y = pt.y;
           if (x == null || y == null) continue;
-          const day = new Date(x).toISOString().slice(0, 10);
+          // Guard against a malformed timestamp: new Date(bad).toISOString()
+          // throws RangeError("Invalid time value") and would abort the whole
+          // capture. Skip the unparseable point instead of crashing.
+          const dt = new Date(x);
+          if (isNaN(dt.getTime())) continue;
+          const day = dt.toISOString().slice(0, 10);
           const kwh = Number(y);
+          if (!Number.isFinite(kwh)) continue;  // non-numeric reading -> skip
           let gen = 0;
           if (flow === "RETURN") gen = Math.max(0, kwh);
           else if (kwh < 0) gen = Math.abs(kwh);
