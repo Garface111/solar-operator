@@ -58,9 +58,23 @@
 
   function r3(x) { return Math.round(x * 1000) / 1000; }
 
+  // Parse a raw portal response, distinguishing a malformed/non-JSON response
+  // (the portal changed or returned an error page) from an adapter-logic failure
+  // downstream. Callers wrap extract() in a try/catch; this makes the *reason*
+  // legible instead of a bare "Unexpected token" SyntaxError.
+  function parseJson(raw, ctx) {
+    if (typeof raw !== "string") return raw;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      var snippet = String(raw).slice(0, 120).replace(/\s+/g, " ");
+      throw new Error("response not JSON (" + (ctx || "parse") + "): " + (e && e.message ? e.message : e) + " — got: " + snippet);
+    }
+  }
+
   function extract(spec, raw) {
     if (spec.format !== "json") throw new Error("client runs JSON adapters; XML handled server-side");
-    var root = (typeof raw === "string") ? JSON.parse(raw) : raw;
+    var root = parseJson(raw, "extract");
     var recs = jsonRecords(root, spec.records), fd = spec.fields, out = [], i, rrec, gpath, g;
     for (i = 0; i < recs.length; i++) {
       rrec = recs[i];
@@ -101,7 +115,7 @@
 
   function fingerprint(raw, fmt) {
     if (fmt === "xml") { var m = String(raw).match(/<([\w:]+)[\s>]/); return "xml:" + (m ? m[1].split(":").pop() : "?"); }
-    var obj = (typeof raw === "string") ? JSON.parse(raw) : raw;
+    var obj = parseJson(raw, "fingerprint");
     var keys = (obj && typeof obj === "object" && !Array.isArray(obj)) ? Object.keys(obj).sort().join(",") : "list";
     return "json:" + keys;
   }
