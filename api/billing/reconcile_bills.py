@@ -26,8 +26,10 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from sqlalchemy import func
+
 from ..models import (
-    BillingReportSubscription, Array, UtilityAccount, Bill,
+    BillingReportSubscription, Array, UtilityAccount, Bill, DailyGeneration,
 )
 
 # kWh agreement tolerance: GMP bills are whole-kWh; our daily sums can carry a
@@ -82,6 +84,77 @@ def _verdict(our_kwh: Optional[float], gmp_kwh: Optional[float]) -> tuple[str, O
     if abs(delta) <= _ABS_TOL_KWH or abs(pct) <= _PCT_TOL:
         return "match", delta, pct
     return "mismatch", delta, pct
+
+
+def _mismatch_reason(
+    db: Session,
+    array_id: int,
+    status: str,
+    inv_start: Optional[date],
+    inv_end: Optional[date],
+    bill: Optional[Bill],
+) -> Optional[str]:
+    """Plain-English explanation of WHY a row doesn't cleanly match, grounded in
+    real signals — so an operator can tell a data-quality artifact from a genuine
+    billing-model problem before trusting the number. Never fabricates: returns
+    None when the row is a clean match (no explanation needed).
+
+      • no_bill        → no captured GMP bill linked to this array yet.
+      • no_invoice_data→ our invoice produced no array kWh for the period.
+      • mismatch       → distinguish (a) ESTIMATE: our production is a prorated
+                         bill smear (no real meter reads in the window) from
+                         (b) TIMING: the bill period and invoice period don't
+                         overlap, from (c) a real per-array delta.
+    """
+    if status == "match":
+        return None
+    if status == "no_bill":
+        return "No captured GMP bill linked to this array yet — awaiting utility data."
+    if status == "no_invoice_data":
+        return "Our invoice produced no kWh for this array over the period."
+
+    # status == "mismatch": probe the real data source for the invoice window.
+    metered = 0
+    prorated = 0
+    if inv_start is not None and inv_end is not None:
+        metered = db.execute(
+            select(func.count(DailyGeneration.id)).where(
+                DailyGeneration.array_id == array_id,
+                DailyGeneration.day >= inv_start,
+                DailyGeneration.day <= inv_end,
+                func.coalesce(DailyGeneration.source, "") != "bill_prorate",
+            )
+        ).scalar() or 0
+        prorated = db.execute(
+            select(func.count(DailyGeneration.id)).where(
+                DailyGeneration.array_id == array_id,
+                DailyGeneration.day >= inv_start,
+                DailyGeneration.day <= inv_end,
+                DailyGeneration.source == "bill_prorate",
+            )
+        ).scalar() or 0
+
+    # Timing: does the bill's period actually overlap the invoice period?
+    if bill is not None and inv_start is not None and inv_end is not None:
+        bs = bill.period_start.date() if bill.period_start else None
+        be = bill.period_end.date() if bill.period_end else None
+        if bs is not None and be is not None and (be < inv_start or bs > inv_end):
+            return ("Bill period and invoice period don't overlap — comparing "
+                    "different months, so the delta is a timing gap, not a real "
+                    "discrepancy.")
+
+    if metered == 0 and prorated > 0:
+        return ("Our figure is a prorated bill estimate (no metered daily reads "
+                "in this window yet) — expect drift vs. the bill total until real "
+                "reads land.")
+    if metered == 0 and prorated == 0:
+        return ("No daily generation rows for this array in the period — our kWh "
+                "comes from the invoice fallback, not measured reads.")
+    if prorated > 0:
+        return ("Period mixes measured reads with prorated bill estimates — "
+                "partial data, so some drift is expected.")
+    return ("Both sides have real data — this delta reflects a genuine "
+            "production/billing difference worth a closer look.")
 
 
 def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
@@ -152,6 +225,7 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
             "delta_kwh": delta,
             "delta_pct": pct,
             "status": status,
+            "mismatch_reason": _mismatch_reason(db, aid, status, start, end, bill),
             "gmp_bill_period": bp,
             "gmp_total_cost": (float(bill.total_cost) if (bill and bill.total_cost is not None) else None),
         })
