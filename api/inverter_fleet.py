@@ -894,6 +894,37 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     ).scalars().all()
     array_by_id = {a.id: a for a in arrays}
 
+    # ── batched InverterConnection map (was N+1) ──────────────────────────────
+    # _resolve_connection fired one SELECT per inverter in the loop below, so an
+    # array with 20 inverters cost 20 round-trips per fleet-tree build. Load
+    # every connection for this tenant's arrays once and resolve in-memory.
+    _all_array_ids = list(array_by_id.keys())
+    _conn_by_array: dict[int, InverterConnection] = {}
+    if _all_array_ids:
+        for c in db.execute(
+            select(InverterConnection)
+            .where(InverterConnection.array_id.in_(_all_array_ids))
+        ).scalars().all():
+            _conn_by_array.setdefault(c.array_id, c)
+
+    def _conn_for(src_arr: Array):
+        """In-memory equivalent of _resolve_connection: pre-loaded row, then the
+        legacy SolarEdge-columns virtual connection fallback."""
+        if src_arr is None:
+            return None
+        conn = _conn_by_array.get(src_arr.id)
+        if conn is not None:
+            return conn
+        if src_arr.solaredge_api_key and src_arr.solaredge_site_id:
+            from types import SimpleNamespace
+            return SimpleNamespace(
+                id=None, vendor="solaredge",
+                config={"api_key": src_arr.solaredge_api_key,
+                        "site_id": src_arr.solaredge_site_id},
+                status="ok",
+            )
+        return None
+
     # Group persisted inverters by their OWNER array_id.
     by_array: dict[int, list[Inverter]] = defaultdict(list)
     for iv in inverters:
@@ -920,7 +951,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             conn_vendor = iv.vendor
             # find the source connection's creds
             src_arr = array_by_id.get(iv.source_array_id) or arr
-            conn = _resolve_connection(db, src_arr)
+            conn = _conn_for(src_arr)
             tel_map = {}
             if conn is not None and (conn.config or {}).get("api_key") and (conn.config or {}).get("site_id"):
                 tel_map = _telemetry_for_site(conn_vendor, conn.config["api_key"],
