@@ -847,7 +847,7 @@ class PublicUtilityRequest(BaseModel):
 
 
 @router.post("/request-utility")
-def public_request_utility(body: PublicUtilityRequest):
+def public_request_utility(body: PublicUtilityRequest, request: Request):
     """Prospect-submitted utility-addition request from the public home page.
 
     Same routing as the authenticated /v1/account/request-utility (emails Ford,
@@ -856,6 +856,12 @@ def public_request_utility(body: PublicUtilityRequest):
     `willing_to_help` box lets them volunteer to help expand coverage.
     """
     from .utility_request import submit_utility_request
+
+    # Unauthenticated + fans out to email + the Hermes webhook — throttle per-IP
+    # so it can't be used to flood Ford's inbox or the add-a-utility webhook.
+    from . import ratelimit
+    ratelimit.enforce(request, "public_request_utility_ip", max_hits=8, window_s=600,
+                      message="Too many requests from your network — please try again in a few minutes.")
 
     name = (body.utility_name or "").strip()
     if not name:

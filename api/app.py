@@ -16,7 +16,7 @@ Admin (no auth in MVP — guard with a deploy-time env in prod):
   GET  /admin/tenants           — list all
 """
 from __future__ import annotations
-import io, os, pathlib, secrets, shutil, json, logging, tarfile
+import io, os, pathlib, secrets, shutil, json, logging, tarfile, hmac
 from datetime import datetime
 from typing import Any
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
@@ -1369,7 +1369,7 @@ def _require_admin(x_admin_key: str | None = Header(default=None)) -> None:
         if _ON_RAILWAY:
             raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
         return  # local dev only — open
-    if x_admin_key != ADMIN_API_KEY:
+    if not hmac.compare_digest(x_admin_key or "", ADMIN_API_KEY):
         raise HTTPException(403, "Invalid or missing X-Admin-Key")
 
 

@@ -6,6 +6,7 @@ Claude Code agent can pull new ones and write back its review. Added by CC 2026-
 The model is defined here (on the shared Base) so create_all picks it up at startup
 — no models.py edit, no migration needed for a brand-new table.
 """
+import hmac
 import os
 from datetime import datetime
 
@@ -54,7 +55,7 @@ def _check_admin(key_header: str | None, key_query: str | None) -> None:
     key = key_header or key_query
     if not ADMIN_API_KEY:
         raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
-    if key != ADMIN_API_KEY:
+    if not hmac.compare_digest(key or "", ADMIN_API_KEY):
         raise HTTPException(403, "Invalid or missing admin key")
 
 

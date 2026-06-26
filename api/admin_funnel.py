@@ -5,6 +5,7 @@ GET /admin/funnel        -> server-rendered HTML dashboard (auto-refresh)
 
 Added by CC 2026-06-21 to watch signups -> card -> trial -> paid as outreach ramps.
 """
+import hmac
 import os
 from collections import Counter
 from datetime import datetime
@@ -23,7 +24,7 @@ def _check(key_header: str | None, key_query: str | None) -> None:
     key = key_header or key_query
     if not ADMIN_API_KEY:
         raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
-    if key != ADMIN_API_KEY:
+    if not hmac.compare_digest(key or "", ADMIN_API_KEY):
         raise HTTPException(403, "Invalid or missing admin key")
 
 
