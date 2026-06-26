@@ -121,10 +121,24 @@ def _array_price_cents() -> tuple[int, str]:
 
 # Fallback: derive a stable secret from DATABASE_URL so it survives restarts
 # but is unique per environment. Set SESSION_SECRET explicitly in prod for
-# real rotation control.
+# real rotation control — otherwise a DATABASE_URL change silently invalidates
+# every session, and anyone who learns the connection string can forge tokens.
 if not SESSION_SECRET:
     seed = os.getenv("DATABASE_URL", "") or "fallback-dev-secret"
     SESSION_SECRET = hashlib.sha256(seed.encode()).hexdigest()
+    _on_railway = bool(
+        os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+        or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+    )
+    if _on_railway:
+        logger.warning(
+            "SESSION_SECRET is unset in production — falling back to a "
+            "DATABASE_URL-derived key. Set SESSION_SECRET explicitly so the "
+            "session HMAC key isn't tied to (or leakable via) the connection "
+            "string, and so a DB-URL change doesn't invalidate all sessions."
+        )
+    else:
+        logger.info("SESSION_SECRET unset — using DATABASE_URL-derived dev fallback.")
 
 
 router = APIRouter()
