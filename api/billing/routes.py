@@ -1483,6 +1483,14 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         for dup in matches[1:]:        # collapse pre-existing duplicates
             dup.status = "dismissed"
             dup.dismissed_at = datetime.utcnow()
+        # SUPERSEDE older-period drafts: build_match always uses the LATEST bill, so any
+        # OTHER pending draft is from an earlier period and must not linger — otherwise the
+        # approval inbox can surface a stale bill (Paul Bozuwa: a May $3,167 draft sat in
+        # front of the new June one). Keep exactly ONE pending draft per offtaker: this one.
+        for dr in pendings:
+            if dr not in matches:
+                dr.status = "dismissed"
+                dr.dismissed_at = datetime.utcnow()
 
         d = existing or ReportDraft(
             tenant_id=t.id, subscription_id=sub.id,
