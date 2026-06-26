@@ -167,6 +167,11 @@ body {
   background: #059669;
   box-shadow: 0 0 0 2px #e6b470, 0 2px 8px 0 rgb(0 0 0 / 0.06);
 }
+.btn-primary:focus-visible {
+  outline: none;
+  background: #059669;
+  box-shadow: 0 0 0 3px #34d399, 0 2px 8px 0 rgb(0 0 0 / 0.06);
+}
 
 /* ── Footer ──────────────────────────────────────────────────────────────── */
 .footer {
@@ -188,6 +193,11 @@ a:hover { text-decoration: underline; color: #047857; }
   width: 100%; display: flex; justify-content: space-between; align-items: center;
   background: none; border: 0; cursor: pointer; font-size: 12.5px; font-weight: 600;
   color: #18181b; padding: 4px 0;
+}
+.al-head:focus-visible {
+  outline: none;
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px #34d399;
 }
 .al-chev { color: #71717a; font-size: 11px; }
 .al-body { margin-top: 6px; }
