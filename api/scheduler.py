@@ -912,6 +912,17 @@ def start():
         CronTrigger(hour=14, minute=0),
         id="report_presend_reviews", replace_existing=True,
     )
+    # Daily 13:00 UTC: "come review your next bill" — when a NEW GMP bill has
+    # landed for an offtaker (a newer bill period than we last prompted on), draft
+    # their invoice and email the OPERATOR a "ready to review" prompt to the
+    # Reports page. Deduped per bill period (review_emailed_period), so each new
+    # GMP update fires exactly one prompt. Decoupled from the cadence run above so
+    # the operator hears the moment the bill is captured, not on the 1st.
+    scheduler.add_job(
+        _run_new_bill_reviews,
+        CronTrigger(hour=13, minute=0),
+        id="new_bill_review_prompts", replace_existing=True,
+    )
     # Array Operator automatic billing reports (invoice + summary), on the
     # cadence each subscription chose. 1st of month / 1st of quarter / Sept 1
     # for annual true-ups — all 09:00 UTC, matching the NEPOOL cadence above.
@@ -1230,6 +1241,23 @@ def _run_presend_reviews() -> None:
         send_internal_alert(
             "Report pre-send reviews: unhandled exception",
             f"The 2-day-ahead report review job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_new_bill_reviews() -> None:
+    """When a new GMP bill lands for an offtaker, email the Array Operator a
+    'your next invoice is ready to review' prompt. Daily sweep, deduped per bill
+    period. Wrapper so import/build errors can't crash the scheduler."""
+    try:
+        from .jobs.new_bill_review import run_new_bill_reviews
+        result = run_new_bill_reviews()
+        if result.get("emailed"):
+            logger.info("new_bill_reviews: emailed=%d candidates=%d",
+                        result.get("emailed", 0), len(result.get("candidates", [])))
+    except Exception as exc:
+        send_internal_alert(
+            "New-bill review prompts: unhandled exception",
+            f"The 'come review your next bill' job raised an unexpected error:\n{exc}",
         )
 
 
