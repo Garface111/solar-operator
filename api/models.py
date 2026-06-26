@@ -204,6 +204,22 @@ class Tenant(Base):
     # operator's numeric estimate). NULL for tenants who pre-date this field.
     # Used only for the "You're all set!" dashboard milestone check.
 
+    # ── Cross-product sibling link (Jun 2026) ────────────────────────────
+    # A person can own a NEPOOL tenant AND an Array Operator tenant on the same
+    # email — two SEPARATE rows with different `product`. When their two tenants
+    # are linked (opt-in, verified-email-scoped, set bidirectionally by
+    # api.tenant_link), ONE extension install's captures fan out into BOTH: the
+    # GMP/utility + inverter telemetry the extension reports for one product's
+    # tenant is ALSO replayed into the linked sibling, so a single install feeds
+    # the NEPOOL reports side and the AO monitoring side at once.
+    #
+    # Self-referential, nullable, NOT a hard FK constraint (kept loose so nulling
+    # one side never trips referential integrity and an orphaned id is harmless —
+    # the fan-out path re-validates the sibling exists + is the other product
+    # before writing). Null for every existing tenant → nothing fans out until a
+    # link is deliberately established. Reversible by nulling both sides.
+    linked_tenant_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
     arrays: Mapped[list["Array"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     clients: Mapped[list["Client"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")

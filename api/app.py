@@ -1267,6 +1267,18 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         except Exception:
             log.exception("SSE broadcast failed for tenant %s", tenant.id)
 
+    # FAN-OUT (feature-flagged, default OFF): if this tenant is cross-product
+    # LINKED, mirror the captured utility SESSION + ACCOUNTS into the sibling and
+    # kick its own bill/history absorb — the same durable capture the primary got,
+    # so ONE GMP login feeds both the NEPOOL and AO tenants. The sibling's bills +
+    # generation are produced by ITS absorb run from the mirrored session (the
+    # same mechanism the primary uses), never fabricated. We mirror the durable
+    # capture only — the primary-tenant autopop Client creation + SSE are UI
+    # side-effects of the capturing tenant, not data the sibling needs. Sibling
+    # failure never breaks this response (primary already committed).
+    from .capture_fanout import fanout
+    fanout(tenant, lambda sib: _sync_replay_into_sibling(sib, normalized))
+
     return {
         "ok": True,
         "tenant": tenant.id,
@@ -1277,6 +1289,115 @@ async def sync(request: Request, authorization: str | None = Header(default=None
         "is_new_client": capture_result == "created",
         "client": {"id": capture_client_id, "name": capture_client_name} if capture_client_id else None,
     }
+
+
+def _sync_replay_into_sibling(tenant: Tenant, normalized: dict) -> None:
+    """Mirror a /v1/sync capture's durable state — the utility SESSION and
+    ACCOUNTS — into a linked sibling tenant, then kick the same best-effort
+    history/bill absorb. Used by the cross-product fan-out so one GMP login feeds
+    both products. Uses the SAME upsert keys as the primary sync path
+    (customer_number bucket for sessions, (tenant,provider,account_number) for
+    accounts) so a re-capture refreshes in place and never duplicates."""
+    from .sessions import session_customer_number
+    provider = normalized["provider"]
+    expires_at = None
+    if normalized["auth"].get("apiTokenExpires"):
+        try:
+            expires_at = datetime.fromisoformat(
+                normalized["auth"]["apiTokenExpires"].replace("Z", "+00:00")
+            ).replace(tzinfo=None)
+        except Exception:
+            pass
+    api_token = normalized["auth"].get("apiToken", "")
+    refresh_token = normalized["auth"].get("refreshToken")
+    raw_payload = {"user": normalized["user"]}
+    session_customer = session_customer_number(normalized["accounts"])
+
+    with SessionLocal() as db:
+        # Upsert the session under the same customer_number bucket as the primary.
+        cust_predicate = (
+            UtilitySession.customer_number == session_customer
+            if session_customer is not None
+            else UtilitySession.customer_number.is_(None)
+        )
+        existing_sess = db.execute(
+            select(UtilitySession)
+            .where(UtilitySession.tenant_id == tenant.id,
+                   UtilitySession.provider == provider,
+                   cust_predicate)
+            .order_by(UtilitySession.captured_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing_sess is not None:
+            existing_sess.api_token = api_token
+            existing_sess.refresh_token = refresh_token
+            existing_sess.expires_at = expires_at
+            existing_sess.captured_at = now()
+            existing_sess.raw_payload = raw_payload
+            existing_sess.refresh_failures = 0
+        else:
+            db.add(UtilitySession(
+                tenant_id=tenant.id, provider=provider,
+                customer_number=session_customer,
+                api_token=api_token, refresh_token=refresh_token,
+                expires_at=expires_at, raw_payload=raw_payload,
+            ))
+
+        # Upsert accounts (same key as the primary path).
+        for a in normalized["accounts"]:
+            if not a.get("account_number"):
+                continue
+            row = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.tenant_id == tenant.id,
+                    UtilityAccount.provider == provider,
+                    UtilityAccount.account_number == a["account_number"],
+                )
+            ).scalar_one_or_none()
+            extra = a.get("extra") or {}
+            if a.get("current_bill_url"):
+                extra["currentBillUrlBinary"] = a["current_bill_url"]
+            if row is None:
+                row = UtilityAccount(
+                    tenant_id=tenant.id, provider=provider,
+                    account_number=a["account_number"],
+                    customer_number=a.get("customer_number"),
+                    nickname=a.get("nickname"),
+                    service_address=a.get("service_address"),
+                    extra=extra,
+                )
+                db.add(row)
+            else:
+                if row.deleted_at is not None:
+                    row.deleted_at = None
+                    row.array_id = None
+                row.customer_number = a.get("customer_number") or row.customer_number
+                row.nickname = a.get("nickname") or row.nickname
+                row.service_address = a.get("service_address") or row.service_address
+                row.extra = {**(row.extra or {}), **extra}
+                row.last_seen = now()
+            row.is_residential = classify_residential(provider, a)
+        db.commit()
+
+    # Kick the sibling's own absorb so its bills/generation materialize from the
+    # mirrored session — same mechanism the primary capture uses. Best-effort.
+    try:
+        from threading import Thread
+        _tid = tenant.id
+        def _bg(tid: str, prov: str | None):
+            try:
+                if prov == "gmp":
+                    from .sponge import absorb_history
+                    absorb_history(tid, "gmp")
+                else:
+                    from .worker import pull_bills_for_tenant
+                    pull_bills_for_tenant(tid)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "sibling-sync absorb failed for %s", tid)
+        Thread(target=_bg, args=(_tid, provider), daemon=True).start()
+    except Exception:
+        logging.getLogger(__name__).exception("failed to kick sibling-sync absorb")
 
 
 # ---- tenant-facing ------------------------------------------------------
@@ -1413,6 +1534,35 @@ def admin_list_tenants(_: None = Depends(_require_admin)):
              "created_at": t.created_at.isoformat()}
             for t in ts
         ]
+
+
+@app.post("/admin/tenants/link-by-email")
+def admin_link_tenants_by_email(body: dict, _: None = Depends(_require_admin)):
+    """Establish the cross-product sibling LINK for one email so a single
+    extension install feeds BOTH the user's NEPOOL and Array Operator tenants.
+
+    Opt-in, one email at a time, verified-email-scoped: resolves the CANONICAL
+    (active, non-duplicate) tenant per product and links those bidirectionally.
+    DRY-RUN unless body {"apply": true}. Reversible via /admin/tenants/unlink.
+    The fan-out of captures into the sibling is SEPARATELY gated behind the
+    FAN_OUT_TO_SIBLING env flag — linking alone changes no data flow until that
+    flag is enabled. Admin-key gated."""
+    from . import tenant_link
+    email = (body or {}).get("email")
+    if not email:
+        raise HTTPException(400, "email required")
+    return tenant_link.link_by_email(email, apply=bool((body or {}).get("apply")))
+
+
+@app.post("/admin/tenants/unlink")
+def admin_unlink_tenant(body: dict, _: None = Depends(_require_admin)):
+    """Reverse a cross-product link: null linked_tenant_id on the given tenant
+    AND its sibling. DRY-RUN unless body {"apply": true}. Admin-key gated."""
+    from . import tenant_link
+    tid = (body or {}).get("tenant_id")
+    if not tid:
+        raise HTTPException(400, "tenant_id required")
+    return tenant_link.unlink_tenant(tid, apply=bool((body or {}).get("apply")))
 
 
 @app.post("/admin/jobs/run")

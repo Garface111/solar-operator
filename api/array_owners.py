@@ -175,27 +175,31 @@ def extension_status(authorization: str | None = Header(default=None)) -> dict:
 
     Authed with the raw tenant_key bearer (reuses _capture_tenant_by_key, so a
     paused-but-recoverable tenant still resolves — the popup should keep showing
-    its numbers). One tenant_key resolves exactly ONE Tenant, which has exactly
-    ONE `product`, so this returns the single product the install is genuinely
-    linked to. The shape leaves room for a future multi-product install (the
-    `products` list + per-product blocks), but today it carries one entry.
+    its numbers). One tenant_key resolves exactly ONE Tenant.
+
+    LINKED dual-product install: when that tenant is cross-product LINKED
+    (Tenant.linked_tenant_id → api.tenant_link), this reports BOTH products with
+    per-product stats from BOTH tenants — so the popup of a single install honestly
+    shows the NEPOOL clients/reports AND the AO arrays/inverters it feeds. When the
+    tenant is unlinked, it carries exactly one product entry (unchanged behavior).
 
     Everything here is read from existing rows — nothing is fabricated. AO stats
     reuse the cached fleet-tree summary (arrays / inverters / flagged) plus a
     cheap DailyGeneration sum for today's kWh; NEPOOL stats are simple client +
-    report-delivery counts.
+    report-delivery counts. `last_capture` is the newest touch across BOTH tenants.
 
     Shape:
       {
-        "product": "array_operator" | "nepool",   # the one linked product
-        "products": ["array_operator"],            # list form (future: ≥2)
+        "product": "array_operator" | "nepool",   # the bearer tenant's own product
+        "products": ["array_operator", "nepool"],  # 1 entry, or 2 when linked
+        "linked": bool,                            # cross-product sibling linked
         "company_name": str,
         "connected": bool,                         # subscription not hard-dead
-        "array_operator": {                        # present iff product is AO
+        "array_operator": {                        # present iff an AO tenant is in scope
             "arrays": int, "inverters": int, "flagged": int,
             "kwh_today": float, "offtakers": int
         },
-        "nepool": {                                # present iff product is NEPOOL
+        "nepool": {                                # present iff a NEPOOL tenant is in scope
             "clients": int, "arrays": int,
             "last_report_at": iso|None
         },
@@ -204,127 +208,161 @@ def extension_status(authorization: str | None = Header(default=None)) -> dict:
     """
     tenant = _capture_tenant_by_key(authorization)
     product = (tenant.product or "nepool").strip() or "nepool"
+
     out: dict = {
         "product": product,
         "products": [product],
+        "linked": False,
         "company_name": tenant.company_name or tenant.name or "",
         "connected": tenant.active
         or (tenant.subscription_status in _CAPTURE_RECOVERABLE_STATUSES),
         "last_capture": None,
     }
 
-    today = date.today()
     with SessionLocal() as db:
-        # ── Last capture (any product): newest non-deleted utility account touch ──
-        last_acct = db.execute(
-            select(UtilityAccount)
-            .where(UtilityAccount.tenant_id == tenant.id,
-                   UtilityAccount.deleted_at.is_(None))
-            .order_by(UtilityAccount.last_seen.desc())
-        ).scalars().first()
-        # An inverter capture (Fronius/SMA/Chint/SolarEdge) may be fresher than the
-        # last utility-bill touch — surface whichever is newest so the popup never
-        # under-reports freshness for an inverter-only AO install.
-        last_inv = db.execute(
-            select(Inverter)
-            .where(Inverter.tenant_id == tenant.id,
-                   Inverter.deleted_at.is_(None),
-                   Inverter.last_power_at.is_not(None))
-            .order_by(Inverter.last_power_at.desc())
-        ).scalars().first()
+        # Resolve the validated cross-product sibling (if linked) so we report
+        # BOTH products. get_linked_sibling re-validates the link, so a dangling
+        # link is safely ignored (single-product behavior).
+        from .tenant_link import get_linked_sibling
+        sibling = get_linked_sibling(db, tenant)
+
+        scope = [tenant] + ([sibling] if sibling is not None else [])
+        if sibling is not None:
+            out["linked"] = True
+            sib_product = (sibling.product or "nepool").strip() or "nepool"
+            if sib_product not in out["products"]:
+                out["products"].append(sib_product)
+            # Connected if EITHER tenant is live — one install, both products.
+            out["connected"] = out["connected"] or bool(
+                sibling.active or sibling.subscription_status in _CAPTURE_RECOVERABLE_STATUSES)
+
+        # ── Last capture across ALL in-scope tenants (newest wins) ──
         cands: list[tuple[datetime, str]] = []
-        if last_acct is not None and last_acct.last_seen:
-            cands.append((last_acct.last_seen, last_acct.provider or "utility"))
-        if last_inv is not None and last_inv.last_power_at:
-            cands.append((last_inv.last_power_at, last_inv.vendor or "inverter"))
+        for t in scope:
+            cands.extend(_last_capture_candidates(db, t))
         if cands:
             at, prov = max(cands, key=lambda c: c[0])
             out["last_capture"] = {"provider": prov, "at": at.isoformat()}
 
-        if product == "array_operator":
-            # Reuse the cached fleet tree for arrays / inverters / flagged — it's
-            # the same summary the dashboard shows, so the popup never disagrees
-            # with the app. (10-min telemetry cache keeps this cheap.)
-            arrays = inverters_total = flagged = 0
-            try:
-                from . import inverter_fleet
-                tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
-                summ = tree.get("summary", {})
-                arrays = int(summ.get("arrays_total") or 0)
-                inverters_total = int(summ.get("inverters_total") or 0)
-                flagged = int(summ.get("attention") or 0)
-            except Exception:
-                # Never let a telemetry hiccup 500 the popup — fall back to a raw
-                # count so the badge still lights with honest numbers.
-                log.warning("extension-status: fleet tree failed", exc_info=True)
-                arrays = db.execute(
-                    select(func.count(Array.id)).where(
-                        Array.tenant_id == tenant.id,
-                        Array.deleted_at.is_(None),
-                        Array.excluded.is_(False))
-                ).scalar() or 0
-                inverters_total = db.execute(
-                    select(func.count(Inverter.id)).where(
-                        Inverter.tenant_id == tenant.id,
-                        Inverter.deleted_at.is_(None))
-                ).scalar() or 0
-
-            # Today's measured kWh — EXCLUDE bill_prorate (a smeared utility-bill
-            # estimate, never a real measurement; see the data-honesty audit).
-            kwh_today = db.execute(
-                select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0)).where(
-                    DailyGeneration.tenant_id == tenant.id,
-                    DailyGeneration.day == today,
-                    DailyGeneration.source != "bill_prorate")
-            ).scalar() or 0.0
-
-            # Offtakers = active billing-report subscriptions for this tenant.
-            offtakers = 0
-            try:
-                from .models import BillingReportSubscription
-                offtakers = db.execute(
-                    select(func.count(BillingReportSubscription.id)).where(
-                        BillingReportSubscription.tenant_id == tenant.id,
-                        BillingReportSubscription.deleted_at.is_(None),
-                        BillingReportSubscription.enabled.is_(True))
-                ).scalar() or 0
-            except Exception:
-                offtakers = 0
-
-            out["array_operator"] = {
-                "arrays": arrays,
-                "inverters": inverters_total,
-                "flagged": flagged,
-                "kwh_today": round(float(kwh_today), 1),
-                "offtakers": int(offtakers),
-            }
-        else:
-            # NEPOOL: clients verified + arrays + freshest report delivery.
-            from .models import Client, ReportDelivery
-            clients = db.execute(
-                select(func.count(Client.id)).where(
-                    Client.tenant_id == tenant.id,
-                    Client.deleted_at.is_(None),
-                    Client.active.is_(True))
-            ).scalar() or 0
-            arrays = db.execute(
-                select(func.count(Array.id)).where(
-                    Array.tenant_id == tenant.id,
-                    Array.deleted_at.is_(None))
-            ).scalar() or 0
-            last_rep = db.execute(
-                select(ReportDelivery.sent_at).where(
-                    ReportDelivery.tenant_id == tenant.id,
-                    ReportDelivery.status == "sent")
-                .order_by(ReportDelivery.sent_at.desc())
-            ).scalars().first()
-            out["nepool"] = {
-                "clients": int(clients),
-                "arrays": int(arrays),
-                "last_report_at": last_rep.isoformat() if last_rep else None,
-            }
+        # ── Per-product stat blocks, computed for whichever tenant owns each
+        # product. With a link this fills BOTH blocks from the two tenants. ──
+        for t in scope:
+            t_product = (t.product or "nepool").strip() or "nepool"
+            if t_product == "array_operator":
+                out["array_operator"] = _ao_status_stats(db, t)
+            else:
+                out["nepool"] = _nepool_status_stats(db, t)
 
     return out
+
+
+def _last_capture_candidates(db, tenant: Tenant) -> list[tuple[datetime, str]]:
+    """(timestamp, provider) of this tenant's freshest utility-account touch and
+    freshest inverter reading — the caller takes the global max across tenants."""
+    cands: list[tuple[datetime, str]] = []
+    last_acct = db.execute(
+        select(UtilityAccount)
+        .where(UtilityAccount.tenant_id == tenant.id,
+               UtilityAccount.deleted_at.is_(None))
+        .order_by(UtilityAccount.last_seen.desc())
+    ).scalars().first()
+    last_inv = db.execute(
+        select(Inverter)
+        .where(Inverter.tenant_id == tenant.id,
+               Inverter.deleted_at.is_(None),
+               Inverter.last_power_at.is_not(None))
+        .order_by(Inverter.last_power_at.desc())
+    ).scalars().first()
+    if last_acct is not None and last_acct.last_seen:
+        cands.append((last_acct.last_seen, last_acct.provider or "utility"))
+    if last_inv is not None and last_inv.last_power_at:
+        cands.append((last_inv.last_power_at, last_inv.vendor or "inverter"))
+    return cands
+
+
+def _ao_status_stats(db, tenant: Tenant) -> dict:
+    """Array Operator popup stats for ONE tenant: arrays / inverters / flagged
+    (from the cached fleet tree, fleet-tree-failure-tolerant), today's measured
+    kWh (excl. bill_prorate), and active offtakers."""
+    today = date.today()
+    arrays = inverters_total = flagged = 0
+    try:
+        from . import inverter_fleet
+        tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
+        summ = tree.get("summary", {})
+        arrays = int(summ.get("arrays_total") or 0)
+        inverters_total = int(summ.get("inverters_total") or 0)
+        flagged = int(summ.get("attention") or 0)
+    except Exception:
+        log.warning("extension-status: fleet tree failed", exc_info=True)
+        arrays = db.execute(
+            select(func.count(Array.id)).where(
+                Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False))
+        ).scalar() or 0
+        inverters_total = db.execute(
+            select(func.count(Inverter.id)).where(
+                Inverter.tenant_id == tenant.id,
+                Inverter.deleted_at.is_(None))
+        ).scalar() or 0
+
+    # Today's measured kWh — EXCLUDE bill_prorate (a smeared utility-bill estimate,
+    # never a real measurement; see the data-honesty audit).
+    kwh_today = db.execute(
+        select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0)).where(
+            DailyGeneration.tenant_id == tenant.id,
+            DailyGeneration.day == today,
+            DailyGeneration.source != "bill_prorate")
+    ).scalar() or 0.0
+
+    offtakers = 0
+    try:
+        from .models import BillingReportSubscription
+        offtakers = db.execute(
+            select(func.count(BillingReportSubscription.id)).where(
+                BillingReportSubscription.tenant_id == tenant.id,
+                BillingReportSubscription.deleted_at.is_(None),
+                BillingReportSubscription.enabled.is_(True))
+        ).scalar() or 0
+    except Exception:
+        offtakers = 0
+
+    return {
+        "arrays": arrays,
+        "inverters": inverters_total,
+        "flagged": flagged,
+        "kwh_today": round(float(kwh_today), 1),
+        "offtakers": int(offtakers),
+    }
+
+
+def _nepool_status_stats(db, tenant: Tenant) -> dict:
+    """NEPOOL popup stats for ONE tenant: active clients, arrays, freshest sent
+    report."""
+    from .models import Client, ReportDelivery
+    clients = db.execute(
+        select(func.count(Client.id)).where(
+            Client.tenant_id == tenant.id,
+            Client.deleted_at.is_(None),
+            Client.active.is_(True))
+    ).scalar() or 0
+    arrays = db.execute(
+        select(func.count(Array.id)).where(
+            Array.tenant_id == tenant.id,
+            Array.deleted_at.is_(None))
+    ).scalar() or 0
+    last_rep = db.execute(
+        select(ReportDelivery.sent_at).where(
+            ReportDelivery.tenant_id == tenant.id,
+            ReportDelivery.status == "sent")
+        .order_by(ReportDelivery.sent_at.desc())
+    ).scalars().first()
+    return {
+        "clients": int(clients),
+        "arrays": int(arrays),
+        "last_report_at": last_rep.isoformat() if last_rep else None,
+    }
 
 
 # ── inverter connection resolution ────────────────────────────────────────────
@@ -2863,9 +2901,28 @@ def inverter_capture(
     if not body.sites:
         raise HTTPException(400, "No sites in capture payload.")
 
-    # Observability: which tenant this capture authenticated as + per-site device
-    # counts. Makes "captured but nothing shows" trivially diagnosable (is it the
-    # wrong tenant? a 0-device payload?). Counts only — no serials/PII.
+    out = _inverter_capture_for_tenant(tenant, provider, body)
+
+    # FAN-OUT (feature-flagged, default OFF): if this tenant is cross-product
+    # LINKED, replay the SAME inverter payload into the sibling via the SAME
+    # write-logic — identical dup-safe helpers, so both products' tenants get the
+    # arrays + daily rows from one install. Sibling failure never breaks this
+    # capture (primary already committed inside _inverter_capture_for_tenant).
+    from .capture_fanout import fanout
+    fanout(tenant, lambda sib: _inverter_capture_for_tenant(sib, provider, body))
+
+    return out
+
+
+def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterCaptureBody") -> dict:
+    """The inverter-capture write-body, parameterized on the target tenant so it
+    serves BOTH the primary capture and the linked-sibling fan-out (capture_fanout
+    replays the same payload through this exact function). Opens its own session,
+    matches/creates arrays, upserts DailyGeneration / Inverter / InverterDaily
+    with the dup-safe helpers, commits, and returns the per-site summary."""
+    # Observability: which tenant this capture wrote to + per-site device counts.
+    # Makes "captured but nothing shows" trivially diagnosable (is it the wrong
+    # tenant? a 0-device payload?). Counts only — no serials/PII.
     log.info(
         "inverter-capture: tenant=%s provider=%s sites=%d per_site_devices=%s",
         tenant.id, provider, len(body.sites),
@@ -3383,6 +3440,26 @@ def utility_meter_capture(
     if not body.accounts:
         raise HTTPException(400, "No accounts in capture payload.")
 
+    out = _utility_meter_capture_for_tenant(tenant, provider, body)
+
+    # FAN-OUT (feature-flagged, default OFF): replay the SAME utility-meter
+    # payload (generation rows + the auth session that powers autonomous bill
+    # pulls) into the cross-product LINKED sibling, via the SAME write-logic.
+    # Both NEPOOL and AO consume utility generation/bills, so one install feeds
+    # both. Sibling failure never breaks this capture.
+    from .capture_fanout import fanout
+    fanout(tenant, lambda sib: _utility_meter_capture_for_tenant(sib, provider, body))
+
+    return out
+
+
+def _utility_meter_capture_for_tenant(
+    tenant: Tenant, provider: str, body: "UtilityMeterCaptureBody"
+) -> dict:
+    """The utility-meter-capture write-body, parameterized on the target tenant so
+    it serves BOTH the primary capture and the linked-sibling fan-out. Persists
+    generation, upserts the UtilitySession, and kicks the same best-effort bill
+    absorb — identical for primary and sibling."""
     # Observability: record whether the client forwarded auth, so a "bills won't
     # pull" report can be diagnosed without guessing (old extension / stale page
     # JS both silently drop auth → no UtilitySession → no bill pull).

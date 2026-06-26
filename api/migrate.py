@@ -46,6 +46,11 @@ def main():
             # Array Operator automatic warranty-claims send policy (Jun 2026)
             ("claim_send_mode",        "ALTER TABLE tenants ADD COLUMN claim_send_mode VARCHAR(16) DEFAULT 'manual' NOT NULL"),
             ("claim_grace_hours",      "ALTER TABLE tenants ADD COLUMN claim_grace_hours INTEGER DEFAULT 24 NOT NULL"),
+            # Cross-product sibling link (Jun 2026): one extension install feeds
+            # BOTH a user's NEPOOL and Array Operator tenants. Nullable, self-
+            # referential, NULL for every existing tenant → no fan-out until a
+            # link is deliberately established (api.tenant_link.link_by_email).
+            ("linked_tenant_id",       "ALTER TABLE tenants ADD COLUMN linked_tenant_id VARCHAR(32)"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):
@@ -64,6 +69,8 @@ def main():
              "ix_tenants_stripe_subscription_id"),
             ("CREATE INDEX IF NOT EXISTS ix_tenants_contact_email ON tenants (contact_email)",
              "ix_tenants_contact_email"),
+            ("CREATE INDEX IF NOT EXISTS ix_tenants_linked_tenant_id ON tenants (linked_tenant_id)",
+             "ix_tenants_linked_tenant_id"),
         ]:
             conn.execute(text(idx_sql))
 
