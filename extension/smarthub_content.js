@@ -572,7 +572,13 @@
   }
 
   function isoDay(ts) {
-    return new Date(ts).toISOString().slice(0, 10);
+    // Guard against null/NaN/non-finite timestamps that would otherwise throw
+    // (RangeError on toISOString) or yield bogus dates in billing captures.
+    // Returns null so period_start/period_end stay honestly empty rather than
+    // shipping an invalid date upstream (mirrors fmtDateMDY's guard).
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 10);
   }
 
   let apiCaptureInFlight = false;
