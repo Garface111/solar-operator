@@ -31,6 +31,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from . import inverters
 from .adapters import gmp as gmp_adapter
@@ -348,6 +349,10 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
     with SessionLocal() as db:
         arrays = db.execute(
             select(Array)
+            # Eager-load each array's client so the per-array `arr.client.name`
+            # read below doesn't fire a lazy SELECT per row (one batched IN query
+            # instead of N). This endpoint runs on every dashboard load.
+            .options(selectinload(Array.client))
             .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
             .order_by(Array.id)
         ).scalars().all()
