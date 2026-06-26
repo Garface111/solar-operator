@@ -1519,6 +1519,25 @@ def admin_array_dedup_tenant(tenant_id: str, execute: bool = False,
     return sweep_tenant(tenant_id, execute=execute)
 
 
+@app.post("/admin/new-bill-reviews/run")
+def admin_run_new_bill_reviews(
+    dry_run: bool = True,
+    to: str | None = None,
+    _: None = Depends(_require_admin),
+):
+    """"Come review your next bill" sweep — when a new GMP bill has landed for an
+    offtaker, email the OPERATOR a prompt to review the auto-prepared draft.
+
+    DRY-RUN by default (dry_run=true) → returns the rendered email + the resolved
+    OPERATOR recipients for every candidate WITHOUT sending or stamping dedup, so
+    you can verify recipient resolution + HTML/links before any real send. Pass
+    dry_run=false to actually send (deduped per bill period). Pass `to` to send a
+    one-off TEST copy to that address instead of the operators (still stamps dedup
+    so a real run isn't double-sent for the same period)."""
+    from .jobs.new_bill_review import run_new_bill_reviews
+    return run_new_bill_reviews(dry_run=dry_run, to_override=to)
+
+
 # ---- root --------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
