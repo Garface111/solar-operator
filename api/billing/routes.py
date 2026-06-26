@@ -41,6 +41,7 @@ from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Qu
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from ..db import SessionLocal
 from ..models import BillingReportSubscription, Client, ReportDraft
@@ -257,6 +258,10 @@ def list_bundle(authorization: Optional[str] = Header(default=None)):
     with SessionLocal() as db:
         rows = db.execute(
             select(Array)
+            # Eager-load the client so the `a.client.name` read below doesn't fire
+            # a lazy SELECT per array (one batched IN query instead of N). This
+            # runs on every Reports-tab view.
+            .options(selectinload(Array.client))
             .where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
             .order_by(Array.name)
         ).scalars().all()
