@@ -571,6 +571,7 @@ _SOURCE_FAMILY = {
     "fronius": ("fronius", "Fronius"),
     "sma": ("sma", "SMA"),
     "chint": ("chint", "CHINT"),
+    "locus": ("locus", "Locus Energy"),
     "extension_pull": ("inverter", "Inverter (extension)"),
     "extension_pull_corrected": ("inverter", "Inverter (extension)"),
     # operator-supplied
@@ -579,11 +580,12 @@ _SOURCE_FAMILY = {
     "bill_prorate": ("bill", "Bill (prorated)"),
 }
 # Display order for the attribution legend (the five named vendors lead).
-_SOURCE_ORDER = ["gmp", "solaredge", "fronius", "sma", "chint",
+_SOURCE_ORDER = ["gmp", "solaredge", "fronius", "sma", "chint", "locus",
                  "inverter", "csv", "manual", "bill", "other"]
 _SOURCE_LABELS = {
     "gmp": "GMP (utility meter)", "solaredge": "SolarEdge", "fronius": "Fronius",
-    "sma": "SMA", "chint": "CHINT", "inverter": "Inverter (extension)",
+    "sma": "SMA", "chint": "CHINT", "locus": "Locus Energy",
+    "inverter": "Inverter (extension)",
     "csv": "CSV upload", "manual": "Manual entry", "bill": "Bill (prorated)",
     "other": "Other",
 }
@@ -1623,6 +1625,68 @@ def connect_solaredge(
         "site_name": result.get("site_name"),
         "peak_power_kw": result.get("peak_power_kw"),
         "site_id": body.site_id,
+    }
+
+
+class LocusConnectBody(BaseModel):
+    client_id: str
+    client_secret: str
+    username: str
+    password: str
+    site_id: int
+    partner_id: str | None = None
+    timezone: str | None = None
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/locus")
+def connect_locus(
+    array_id: int,
+    body: LocusConnectBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Connect a Locus Energy (SolarNOC) site to an array — thin shim over the
+    vendor-agnostic inverter framework (same path SolarEdge uses). Validates the
+    credentials + site by pulling site details (Locus v3 OAuth2 password grant)
+    before persisting; a rejected credential (401/403) or unreachable site returns
+    400 and saves nothing.
+
+    NOTE: Locus needs API app credentials (client_id/secret) from the operator's
+    Locus/AlsoEnergy account manager — the SolarNOC *portal* login alone won't
+    authenticate the API.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    config = {
+        "client_id": (body.client_id or "").strip(),
+        "client_secret": (body.client_secret or "").strip(),
+        "username": (body.username or "").strip(),
+        "password": body.password or "",
+        "site_id": int(body.site_id),
+    }
+    if not all((config["client_id"], config["client_secret"],
+                config["username"], config["password"])):
+        raise HTTPException(
+            400, "client_id, client_secret, username and password are all required")
+    if body.partner_id:
+        config["partner_id"] = body.partner_id.strip()
+    if body.timezone:
+        config["timezone"] = body.timezone.strip()
+
+    with SessionLocal() as db:
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != tenant.id:
+            raise HTTPException(404, "Array not found")
+        try:
+            result = _connect_inverter(db, arr, "locus", config)
+        except InverterAuthError as exc:
+            raise HTTPException(400, str(exc))
+        except InverterError as exc:
+            raise HTTPException(400, f"Locus error: {exc}")
+
+    return {
+        "ok": True,
+        "site_name": result.get("site_name"),
+        "site_id": int(body.site_id),
     }
 
 
