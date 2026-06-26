@@ -2,16 +2,29 @@
   "use strict";
 
   const pillEl        = document.getElementById("status-pill");
+  const pillTextEl    = pillEl.querySelector(".pill-text");
   const toastEl       = document.getElementById("toast");
   const errorBlockEl  = document.getElementById("error-block");
   const errorMsgEl    = document.getElementById("error-msg");
   const retryBtnEl    = document.getElementById("retry-btn");
   const lastCaptureEl = document.getElementById("last-capture");
   const countTodayEl  = document.getElementById("count-today");
+  const statBlockEl   = document.getElementById("stat-block");
+  const statCellTpl   = document.getElementById("stat-cell-tpl");
+  const badgeAoEl     = document.getElementById("badge-ao");
+  const badgeNepoolEl = document.getElementById("badge-nepool");
+  const dashBtnEl     = document.getElementById("open-dashboard");
+  const secondaryBtnEl= document.getElementById("open-secondary");
+
+  // Product dashboard hosts.
+  const AO_DASHBOARD     = "https://arrayoperator.com";
+  const NEPOOL_DASHBOARD = "https://solaroperator.org/accounts";
+  const DEFAULT_API_BASE = "https://nepooloperator.com";
 
   // ── Load state from storage ───────────────────────────────────────────────
   const s = await chrome.storage.local.get([
-    "tenant_key", "last_sync", "last_payload", "last_error", "captures_today",
+    "tenant_key", "api_endpoint", "last_sync", "last_payload",
+    "last_error", "captures_today",
   ]);
 
   const hasKey = !!s.tenant_key;
@@ -19,6 +32,11 @@
   const lp = s.last_payload || null;
   const le = s.last_error   || null;
   const ct = s.captures_today || null;
+
+  // API base for the status fetch: derive from the configured sync endpoint
+  // (same default + override the background uses), stripping the /v1/sync tail.
+  const apiBase = ((s.api_endpoint || "").replace(/\/v1\/sync\/?$/, "")
+                   || DEFAULT_API_BASE).replace(/\/$/, "");
 
   // Error is "recent" if it happened within 5 min and after the last good sync.
   const ERROR_WINDOW_MS = 5 * 60 * 1000;
@@ -32,11 +50,11 @@
   } else if (isRecentError) {
     setPill("API offline", "pill-offline");
   } else {
-    setPill("Connected to EnergyAgent", "pill-connected");
+    setPill("Connected", "pill-connected");
   }
 
   function setPill(text, cls) {
-    pillEl.textContent = text;
+    pillTextEl.textContent = text;
     pillEl.className = `pill ${cls}`;
   }
 
@@ -49,7 +67,6 @@
   // ── Utility-aware portal link ─────────────────────────────────────────────
   // The footer link + retry button open the LAST-CAPTURED utility's portal,
   // not hardcoded GMP — a WEC/VEC operator should bounce back to SmartHub.
-  // smarthub_registry.js (loaded before this script) provides the host map.
   const lastProvider = (lp && lp.provider) || "gmp";
   let portalUrl = "https://greenmountainpower.com/";
   let portalName = "GMP";
@@ -57,7 +74,6 @@
     for (const [host, entry] of Object.entries(window.SMARTHUB_REGISTRY)) {
       if (entry.provider === lastProvider) {
         portalUrl = `https://${host}/`;
-        // Short label: first word of the utility name, or the code uppercased
         portalName = (entry.name || lastProvider).split(" ")[0];
         if (portalName.length <= 4) portalName = lastProvider.toUpperCase();
         break;
@@ -80,29 +96,151 @@
   // ── Count today ───────────────────────────────────────────────────────────
   const todayStr = new Date().toISOString().slice(0, 10);
   if (ct && ct.date === todayStr && ct.count > 0) {
-    countTodayEl.textContent = `${ct.count} capture${ct.count === 1 ? "" : "s"} today`;
+    countTodayEl.textContent = `${ct.count} capture${ct.count === 1 ? "" : "s"}`;
   } else {
-    countTodayEl.textContent = "0 captures today";
+    countTodayEl.textContent = "0 captures";
   }
 
-  // ── Buttons ───────────────────────────────────────────────────────────────
-  document.getElementById("open-dashboard").addEventListener("click", () => {
-    // Dashboard SPA lives at solaroperator.org/accounts (Netlify 200-proxy to
-    // Railway /app/ — see solaroperator-site/_redirects). Plain /app 404s.
-    chrome.tabs.create({ url: "https://solaroperator.org/accounts" });
+  // ── Default dashboard button (NEPOOL host) — overridden once product known ─
+  let dashUrl = NEPOOL_DASHBOARD;
+  dashBtnEl.addEventListener("click", () => chrome.tabs.create({ url: dashUrl }));
+  secondaryBtnEl.addEventListener("click", () => {
+    const u = secondaryBtnEl.dataset.url;
+    if (u) chrome.tabs.create({ url: u });
   });
 
+  // ── Settings + utility-portal footer links ────────────────────────────────
   document.getElementById("open-options").addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
   });
-
   const openPortalEl = document.getElementById("open-gmp");
   openPortalEl.textContent = `Open ${portalName}`;
   openPortalEl.addEventListener("click", (e) => {
     e.preventDefault();
     chrome.tabs.create({ url: portalUrl });
   });
+
+  // ── Product + live stats (from the backend) ───────────────────────────────
+  // One tenant_key → one Tenant → one product, so today exactly one badge lights.
+  // The dim badge stays visible so a future multi-product install can light it.
+  if (hasKey) {
+    fetchStatus(s.tenant_key).then(applyStatus).catch(() => {
+      // Offline / unauthorized: leave the storage-derived UI as-is. The badges
+      // stay dim and the dashboard button keeps its NEPOOL default.
+    });
+  }
+
+  async function fetchStatus(key) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 6000);
+    try {
+      const r = await fetch(`${apiBase}/v1/array-owners/extension-status`, {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: ctrl.signal,
+      });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      return await r.json();
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  function applyStatus(data) {
+    if (!data || !data.product) return;
+    const product = data.product;
+
+    // Light the linked badge.
+    if (product === "array_operator") {
+      badgeAoEl.classList.remove("is-dim"); badgeAoEl.classList.add("is-lit");
+    } else {
+      badgeNepoolEl.classList.remove("is-dim"); badgeNepoolEl.classList.add("is-lit");
+    }
+
+    // Product-correct dashboard button + a secondary portal shortcut.
+    if (product === "array_operator") {
+      dashUrl = AO_DASHBOARD;
+      dashBtnEl.textContent = "Open Array Operator";
+      dashBtnEl.classList.add("ao");
+    } else {
+      dashUrl = NEPOOL_DASHBOARD;
+      dashBtnEl.textContent = "Open NEPOOL Operator";
+      dashBtnEl.classList.add("nepool");
+    }
+
+    // Dense stat block.
+    renderStats(product, data);
+
+    // Prefer the backend's last_capture (covers inverter-only AO installs that
+    // have no last_payload yet) when storage has nothing fresher.
+    if (data.last_capture && data.last_capture.at && !(lp && lp.capturedAt)) {
+      const prov = (data.last_capture.provider || "").toUpperCase();
+      lastCaptureEl.textContent = `${prov} · ${timeAgo(data.last_capture.at)}`;
+    }
+  }
+
+  function statCell(num, cap, cls) {
+    const node = statCellTpl.content.cloneNode(true);
+    const numEl = node.querySelector(".stat-num");
+    numEl.textContent = num;
+    if (cls) numEl.classList.add(cls);
+    node.querySelector(".stat-cap").textContent = cap;
+    return node;
+  }
+
+  function renderStats(product, data) {
+    statBlockEl.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "stat-head";
+    const nameEl = document.createElement("span");
+    nameEl.className = "stat-head-name " + (product === "array_operator" ? "ao" : "nepool");
+    nameEl.textContent = product === "array_operator" ? "ARRAY OPERATOR" : "NEPOOL OPERATOR";
+    head.appendChild(nameEl);
+    if (data.company_name) {
+      const coEl = document.createElement("span");
+      coEl.className = "stat-head-co";
+      coEl.textContent = data.company_name;
+      head.appendChild(coEl);
+    }
+    statBlockEl.appendChild(head);
+
+    const grid = document.createElement("div");
+    grid.className = "stat-grid";
+
+    if (product === "array_operator") {
+      const ao = data.array_operator || {};
+      grid.appendChild(statCell(fmtInt(ao.arrays), "Arrays"));
+      grid.appendChild(statCell(fmtInt(ao.inverters), "Inverters"));
+      const flagged = Number(ao.flagged || 0);
+      grid.appendChild(statCell(fmtInt(flagged), "Flagged",
+        flagged > 0 ? "flag-bad" : null));
+      grid.appendChild(statCell(fmtKwh(ao.kwh_today), "kWh today"));
+    } else {
+      const np = data.nepool || {};
+      grid.className = "stat-grid cols-3";
+      grid.appendChild(statCell(fmtInt(np.clients), "Clients"));
+      grid.appendChild(statCell(fmtInt(np.arrays), "Arrays"));
+      grid.appendChild(statCell(np.last_report_at ? timeAgoShort(np.last_report_at) : "—",
+        "Last report"));
+    }
+
+    statBlockEl.appendChild(grid);
+
+    // Offtakers (per-offtaker invoicing plan, e.g. Paul) — a clean full-width
+    // footer row only when the operator actually bills offtakers.
+    if (product === "array_operator" && Number((data.array_operator || {}).offtakers || 0) > 0) {
+      const foot = document.createElement("div");
+      foot.className = "stat-foot";
+      const k = document.createElement("span"); k.className = "stat-foot-k"; k.textContent = "Offtakers billed";
+      const v = document.createElement("span"); v.className = "stat-foot-v";
+      v.textContent = fmtInt(data.array_operator.offtakers);
+      foot.appendChild(k); foot.appendChild(v);
+      statBlockEl.appendChild(foot);
+    }
+
+    statBlockEl.classList.remove("hidden");
+  }
 
   // ── Live toast on SO_CAPTURE_LANDED (while popup is open) ─────────────────
   chrome.runtime.onMessage.addListener((msg) => {
@@ -111,7 +249,8 @@
   });
 
   function showToast(ok) {
-    toastEl.textContent = ok ? "✓ Captured!" : "⚠ Capture failed";
+    toastEl.textContent = ok ? "Captured" : "Capture failed";
+    toastEl.classList.toggle("fail", !ok);
     toastEl.classList.remove("hidden", "fading");
     setTimeout(() => {
       toastEl.classList.add("fading");
@@ -120,6 +259,16 @@
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+  function fmtInt(n) {
+    const v = Number(n);
+    return Number.isFinite(v) ? String(Math.round(v)) : "—";
+  }
+  function fmtKwh(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "—";
+    if (v >= 1000) return (v / 1000).toFixed(1) + "k";
+    return v >= 100 ? String(Math.round(v)) : v.toFixed(0);
+  }
   function timeAgo(iso) {
     const ms = Date.now() - new Date(iso).getTime();
     const m = Math.round(ms / 60000);
@@ -129,6 +278,14 @@
     if (h < 24) return `${h} hr${h === 1 ? "" : "s"} ago`;
     const d = Math.round(h / 24);
     return `${d} day${d === 1 ? "" : "s"} ago`;
+  }
+  function timeAgoShort(iso) {
+    const ms = Date.now() - new Date(iso).getTime();
+    const h = Math.round(ms / 3600000);
+    if (h < 1)  return "now";
+    if (h < 24) return `${h}h`;
+    const d = Math.round(h / 24);
+    return `${d}d`;
   }
 
   // ── Auto-login section ────────────────────────────────────────────────────
@@ -155,6 +312,7 @@
     alToggle.addEventListener("click", () => {
       const open = alBody.classList.toggle("hidden") === false;
       alChev.textContent = open ? "▾" : "▸";
+      alToggle.setAttribute("aria-expanded", open ? "true" : "false");
       if (open) renderAutoLogin();
     });
   }
