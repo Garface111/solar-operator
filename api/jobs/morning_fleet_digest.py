@@ -180,9 +180,15 @@ def build_digest_html(tenant, tree: dict) -> str:
     attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
 
     fleet = _html.escape(_fleet_name(tenant))
-    today = datetime.now(timezone.utc).strftime("%A, %B %-d, %Y")
-    producing_label = "Producing now" if is_daylight else "Asleep (sun down)"
-    producing_value = "Yes" if is_daylight else "Resting"
+    # Snapshot timing — shown in Eastern (the fleets' region) so the reader knows
+    # exactly when this fleet state was captured. Falls back to UTC if tz data is absent.
+    try:
+        from zoneinfo import ZoneInfo
+        _now = datetime.now(ZoneInfo("America/New_York")); _tzlabel = "ET"
+    except Exception:
+        _now = datetime.now(timezone.utc); _tzlabel = "UTC"
+    today = _now.strftime("%A, %B %-d, %Y")
+    snapshot = _now.strftime("%-I:%M %p ") + _tzlabel
 
     has_critical = any(
         (c.get("alert", {}) or {}).get("level") == "critical"
@@ -244,7 +250,9 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'letter-spacing:-1.5px;">{health_pct}'
         f'<span style="font-size:22px;color:{FAINT};font-weight:700;letter-spacing:0;">%</span></div>'
         f'<div style="font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:{FAINT};'
-        f'font-weight:700;margin:5px 0 0;">Fleet healthy</div>'
+        f'font-weight:700;margin:5px 0 0;">Fleet health</div>'
+        f'<div style="font-size:12.5px;color:{MUTED};margin:3px 0 0;">'
+        f'{inverters_total - flagged_n} of {inverters_total} inverters reporting normally</div>'
         # meter (nested-table fill for client-safe %-width)
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
         f'style="margin:14px 0 0;table-layout:fixed;"><tr>'
@@ -259,8 +267,6 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'<b style="color:{INK};">{inverters_total}</b> inverters'
         f'<span style="color:{LINE};"> &nbsp;&middot;&nbsp; </span>'
         f'<b style="color:{look_color};">{flagged_n}</b> need a look'
-        f'<span style="color:{LINE};"> &nbsp;&middot;&nbsp; </span>'
-        f'<span style="color:{FAINT};">{producing_label}</span>'
         f'</td></tr></table>'
     )
 
@@ -395,7 +401,7 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'<div style="font-size:12px;color:{BLUE};font-weight:700;letter-spacing:.6px;'
         'text-transform:uppercase;">Array Operator · Morning fleet health</div>'
         f'<h1 style="font-size:23px;color:{INK};margin:7px 0 2px;font-weight:700;">{fleet}</h1>'
-        f'<div style="color:{MUTED};font-size:14px;">{today}</div>'
+        f'<div style="color:{MUTED};font-size:14px;">{today} &middot; snapshot as of {snapshot}</div>'
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
         + kpis + banner + highlights + per_array +
@@ -420,22 +426,29 @@ def build_digest_text(tenant, tree: dict) -> str:
     summary = tree.get("summary", {}) or {}
     is_daylight = bool(summary.get("is_daylight", False))
     fleet = _fleet_name(tenant)
-    today = datetime.now(timezone.utc).strftime("%A, %B %-d, %Y")
+    try:
+        from zoneinfo import ZoneInfo
+        _now = datetime.now(ZoneInfo("America/New_York")); _tzlabel = "ET"
+    except Exception:
+        _now = datetime.now(timezone.utc); _tzlabel = "UTC"
+    today = _now.strftime("%A, %B %-d, %Y")
+    snapshot = _now.strftime("%-I:%M %p ") + _tzlabel
     # Vendor (inverter) arrays only — mirrors the HTML.
     cols = _vendor_columns(tree)
     attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
 
-    lines = [f"Morning fleet health — {fleet}", today, ""]
+    lines = [f"Morning fleet health — {fleet}", f"{today} · snapshot as of {snapshot}", ""]
     if attention == 0:
         lines.append("All systems healthy: every inverter we can see is producing as expected.")
     else:
         lines.append(f"{attention} inverter(s) need attention this morning.")
+    inv_total = sum(int(c.get('inverter_count') or 0) for c in cols)
+    flagged_n = len(_flagged_inverters(cols))
+    health_pct = round(100 * (inv_total - flagged_n) / inv_total) if inv_total else 100
     lines += [
         "",
-        f"Arrays: {len(cols)}   "
-        f"Inverters: {sum(int(c.get('inverter_count') or 0) for c in cols)}   "
-        f"Need attention: {attention}   "
-        f"Producing now: {'yes' if is_daylight else 'asleep'}",
+        f"Fleet health: {health_pct}% ({inv_total - flagged_n} of {inv_total} inverters reporting normally)",
+        f"Arrays: {len(cols)}   Inverters: {inv_total}   Need attention: {attention}",
         "",
     ]
     if attention > 0:
