@@ -54,12 +54,19 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
     """
     existing = None
     if metrics.get("period_end"):
+        # Tolerate DUPLICATE bill rows for the same (account, period_end). Some accounts
+        # have accumulated hundreds-to-thousands from capture sprawl (Rick Lunt's had
+        # 1001), and scalar_one_or_none() then RAISED MultipleResultsFound — which crashed
+        # the WHOLE pull, so no new bill ever landed server-side (the real "GMP bill didn't
+        # update" cause). Update the most-recent matching row instead of crashing; the
+        # offtaker invoice selects by period_end DESC so the freshest row wins.
+        # (Deduping the historical rows is a separate cleanup.)
         existing = db.execute(
             select(Bill).where(
                 Bill.account_id == account.id,
                 Bill.period_end == metrics["period_end"],
-            )
-        ).scalar_one_or_none()
+            ).order_by(Bill.id.desc())
+        ).scalars().first()
 
     # Full energy-record fields — present on the JSON path (the sponge), absent
     # on the legacy PDF path (.get → None, columns nullable). raw_json is the
