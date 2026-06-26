@@ -1584,7 +1584,6 @@ def test_email(to: str | None = None, _: None = Depends(_require_admin)):
         "to": target,
         "from": FROM_ADDRESS,
         "has_api_key": bool(RESEND_API_KEY),
-        "api_key_prefix": RESEND_API_KEY[:7] if RESEND_API_KEY else None,
         "last_error": getattr(_send_via_resend, "_last_error", None),
     }
 
@@ -1720,14 +1719,24 @@ def accounts_preview(change_id: str, file_path: str = ""):
     if target.is_dir():
         target = target / "index.html"
 
-    if not target.exists() or not str(target).startswith(str(dist)):
+    # Containment check on the fully-resolved real paths so symlinks and ".."
+    # / Unicode-normalised traversal can't escape the bundle directory. A plain
+    # str.startswith on the unresolved path was bypassable (CVE-class).
+    dist_real = dist.resolve()
+    try:
+        target_real = target.resolve()
+        contained = target_real == dist_real or dist_real in target_real.parents
+    except OSError:
+        contained = False
+
+    if not contained or not target_real.exists():
         # SPA fallback: serve index.html for any unresolved path
         index = dist / "index.html"
         if index.exists():
             return FileResponse(str(index), media_type="text/html")
         raise HTTPException(404, "preview index.html not found")
 
-    return FileResponse(str(target))
+    return FileResponse(str(target_real))
 
 
 # Each SPA's build is copied into api/ before commit because Railway's Railpack
