@@ -17,6 +17,12 @@
   var FLAG_KEY = "so_auto_adapter";
   var specCache = {};      // fingerprint -> spec (this page session)
   var inFlight = {};       // fingerprint -> true while ingesting
+  // Debug breadcrumbs for the auto-adapter path. Without these, a lookup/ingest
+  // failure (backend timeout, 5xx, network error) was swallowed silently, leaving
+  // zero signal about why a portal wasn't being captured. Console-only, guarded.
+  function warn() {
+    try { console.warn.apply(console, ["[EnergyAgent auto-adapter]"].concat([].slice.call(arguments))); } catch (e) {}
+  }
 
   function base(s) {
     var ep = s.api_endpoint || "https://nepooloperator.com/v1/sync";
@@ -53,7 +59,7 @@
     var AA = globalThis.AutoAdapter;
     if (!AA) return;
     var fp;
-    try { fp = AA.fingerprint(raw, fmt); } catch (e) { return; }
+    try { fp = AA.fingerprint(raw, fmt); } catch (e) { warn("fingerprint failed:", e && e.message ? e.message : e); return; }
     if (specCache[fp]) return run(specCache[fp], raw, fp, s);
     if (inFlight[fp]) return;
 
@@ -67,7 +73,7 @@
           body: JSON.stringify({ capture: raw, fmt: fmt, source: location.hostname })
         }).then(function () { inFlight[fp] = false; });
       })
-      .catch(function () { inFlight[fp] = false; });
+      .catch(function (e) { inFlight[fp] = false; warn("adapter lookup/ingest failed for fp", fp + ":", e && e.message ? e.message : e); });
   }
 
   function run(spec, raw, fp, s) {
@@ -79,7 +85,7 @@
       fetch(base(s) + "/v1/adapters/readings", {
         method: "POST", headers: headers(s),
         body: JSON.stringify({ source: location.hostname, fingerprint: fp, records: out.records })
-      }).catch(function () {});
-    } catch (e) {}
+      }).catch(function (e) { warn("readings push failed for fp", fp + ":", e && e.message ? e.message : e); });
+    } catch (e) { warn("extract/validate failed for fp", fp + ":", e && e.message ? e.message : e); }
   }
 })();
