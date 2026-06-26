@@ -109,3 +109,9 @@ class CaptureContext:
         for ev in self._events:
             db.add(CaptureEvent(**ev))
         self._events.clear()
+
+    def discard(self) -> None:
+        """Drop any unflushed events without persisting them. Called when a flush
+        was rolled back (e.g. inside a SAVEPOINT) so the same events aren't
+        silently retried on a later commit of the same session."""
+        self._events.clear()

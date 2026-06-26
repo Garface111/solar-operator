@@ -1197,10 +1197,18 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     parse_status="parsed" if _consumed is not None else "partial",
                 ))
 
+        # CaptureEvent rows are a best-effort audit trail. Flush them inside a
+        # SAVEPOINT so a bad event can't poison — or partially commit into — the
+        # main sync transaction (accounts/arrays/sessions already added above).
+        # On failure the nested block rolls back ONLY the events, the sync still
+        # commits cleanly, and we drop the unflushed events so they aren't
+        # silently retried on a later commit.
         try:
-            ctx.flush(db)
+            with db.begin_nested():
+                ctx.flush(db)
         except Exception:
             log.warning("CaptureEvent flush failed for tenant %s", tenant.id, exc_info=True)
+            ctx.discard()
         db.commit()
 
     # DATA SPONGE: the moment they finish logging into GMP, absorb their ENTIRE
