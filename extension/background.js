@@ -1551,6 +1551,19 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // (almost always an expired portal session the owner must re-auth once).
   async function recapMaybeNudge(vendor) {
     try {
+      // Auto-login is the recovery mechanism now, and the Array Operator dashboard's
+      // freshness chip is the honest in-app staleness signal — so the intrusive OS
+      // "one-tap reconnect" toast is just noise (Ford: "these won't be necessary when we
+      // get this working — remove them"). Stay silent for every vault vendor EXCEPT the
+      // one genuinely-actionable case: auto-login tried with a saved password and GAVE UP
+      // (paused after repeated failures = a wrong/stale password the owner must fix).
+      if (typeof SoVault !== "undefined" && SoVault.VENDORS.includes(vendor)) {
+        const fails = await autoLoginFailsGet(vendor);
+        if (fails < AUTOLOGIN_MAX_VENDOR_FAILS) {
+          rlog("reconnect nudge suppressed for", vendor, "(auto-login era; in-app freshness chip signals staleness; fails=" + fails + ")");
+          return;
+        }
+      }
       const today = new Date().toISOString().slice(0, 10);
       const s = await chrome.storage.local.get(NUDGE_KEY);
       const m = s[NUDGE_KEY] || {};
@@ -1559,11 +1572,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       await chrome.storage.local.set({ [NUDGE_KEY]: m });
       const label = vendor === "fronius" ? "Fronius Solar.web"
         : vendor === "sma" ? "SMA Sunny Portal" : "Chint";
+      // Reaches here ONLY when auto-login gave up (saved password failing) — so the copy
+      // is the honest "your saved password isn't working", not a generic refresh prompt.
       chrome.notifications.create(`recap-${vendor}-${today}`, {
         type: "basic",
         iconUrl: "icons/icon128.png",
-        title: "EnergyAgent: one-tap reconnect",
-        message: `Click here to open ${label} and refresh your live production — one sign-in keeps it fresh for weeks.`,
+        title: "EnergyAgent: reconnect needed",
+        message: `Your saved ${label} password isn't signing in. Click to open ${label} and sign in once to refresh — then re-save it in the extension.`,
         requireInteraction: true,   // stay until he acts; this is his one-click recovery
       });
     } catch (_) {}
