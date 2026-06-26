@@ -188,10 +188,26 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
                 [t for t in txns if isinstance(t, dict) and t.get("urlBinary")],
                 key=lambda t: t.get("date") or "", reverse=True)
             if docs:
-                data, ctype = adapter.fetch_bill_pdf_binary(docs[0]["urlBinary"])
+                # Pick the statement doc aligned to THIS bill's period, not blindly the
+                # newest transaction — a newer unrelated doc (payment, adjustment) must
+                # not put the wrong month's PDF on the row. Closest by date to the bill's
+                # own date; fall back to the newest doc when nothing parses.
+                target = bill.bill_date or bill.period_end
+                chosen = docs[0]
+                if target is not None:
+                    def _gap(t):
+                        ds = str(t.get("date") or "")[:10]
+                        try:
+                            y, mo, dy = int(ds[0:4]), int(ds[5:7]), int(ds[8:10])
+                            return abs((datetime(y, mo, dy).date() - target.date()).days)
+                        except Exception:
+                            return 10 ** 6
+                    chosen = min(docs, key=_gap)
+                data, ctype = adapter.fetch_bill_pdf_binary(chosen["urlBinary"])
                 bill.pdf_bytes = data
                 bill.pdf_content_type = ctype or "application/pdf"
-                return {"saved": True, "bill_id": bill.id, "bytes": len(data), "via": "transactions"}
+                return {"saved": True, "bill_id": bill.id, "bytes": len(data),
+                        "via": "transactions", "doc_date": chosen.get("date")}
         except Exception:  # noqa: BLE001 — fall through to the legacy currentBillUrl path
             pass
 
