@@ -1596,11 +1596,26 @@ def get_draft_gmp_bill(draft_id: int, authorization: Optional[str] = Header(defa
             return StreamingResponse(io.BytesIO(d.gmp_invoice_pdf), media_type="application/pdf",
                 headers={"Content-Disposition": "inline; filename=" + fn})
         sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
-        array_id = getattr(sub, "array_id", None)
-        if sub is not None and getattr(sub, "auto_attach_gmp", False) and array_id:
+        if sub is not None and getattr(sub, "auto_attach_gmp", False):
+            # Resolve the SAME PDF the send path attaches: the BOUND utility account's
+            # bill for THIS draft's period — so the download matches the invoice exactly
+            # (incl. older versions in the version dropdown), not just the global newest
+            # across the array. Falls back to the array-keyed lookup only for legacy
+            # array-based subs with no bound account.
+            from ..reports import gmp_bill_pdf_read as gbp
+            from .delivery import _parse_iso_date
+            ps = pe = None
+            if d.period_label and "→" in d.period_label:
+                parts = [p.strip() for p in d.period_label.split("→")]
+                if len(parts) == 2:
+                    ps, pe = _parse_iso_date(parts[0]), _parse_iso_date(parts[1])
+            uaid = getattr(sub, "utility_account_id", None)
+            found = None
             try:
-                from ..reports import gmp_bill_pdf_read as gbp
-                found = gbp.get_bill_pdf_for_period(array_id, db=db)
+                if uaid is not None:
+                    found = gbp.get_bill_pdf_for_account(uaid, ps, pe, db=db)
+                elif getattr(sub, "array_id", None):
+                    found = gbp.get_bill_pdf_for_period(sub.array_id, ps, pe, db=db)
             except Exception:
                 found = None
             if found and found.get("bytes"):
