@@ -57,6 +57,14 @@ def invoice_for_period(match: BillingMatch, period: Period,
         # on project_totals/computed_invoice; surfaced here so the PDF can render it.
         "array_breakdown": match.project_totals.get("array_breakdown")
             or (match.computed_invoice or {}).get("array_breakdown"),
+        # Budget billing: build_match put the operator's fixed final amount on
+        # computed_invoice.amount_owed (flagged budget_override) while preserving the
+        # CALCULATED credit. invoice_for_period recomputes the credit fresh, so surface
+        # the budget SEPARATELY here → the renderer shows BOTH the solar credit value
+        # and the budgeted amount, with AMOUNT DUE = the budget (the actual bill).
+        "budget_override": bool((match.computed_invoice or {}).get("budget_override")),
+        "budgeted_amount": ((match.computed_invoice or {}).get("amount_owed")
+                            if (match.computed_invoice or {}).get("budget_override") else None),
     })
     return inv
 
@@ -114,6 +122,10 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     invoice_date = invoice_date or date.today()
     inv = invoice_for_period(match, period, invoice_date)
     tpl = match.template
+    # Budget billing: when the operator set a fixed amount, AMOUNT DUE is that budget
+    # (the actual bill); the calculated solar credit value still shows as its own line.
+    _budget_on = bool(inv.get("budget_override")) and inv.get("budgeted_amount") is not None
+    _final_due = inv["budgeted_amount"] if _budget_on else inv["amount_owed"]
 
     wb = Workbook()
     ws = wb.active
@@ -171,11 +183,13 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
         _notes.append(f"Data source: {_src_note}")
     if inv.get("net_rate_source") == "gmp_credit_reference":
         _notes.append("Note: credit banked this period — rate is a reference estimate (trued up annually).")
+    if _budget_on:
+        _notes.append("Amount owed is your fixed budgeted amount; the solar credit value above is the calculated reference.")
     if _notes:
         put("B21", "  ".join(_notes))
 
     put("B22", "Amount Owed:", big)
-    put("C22", _money(inv["amount_owed"]), big, right)
+    put("C22", _money(_final_due), big, right)
     put("B23", tpl.get("payable_to") or f"Please make payment to {tpl.get('operator') or 'your solar array owner'}.")
 
     put("B26", "Project Total kWh generation:")
@@ -222,6 +236,10 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     invoice_date = invoice_date or date.today()
     inv = invoice_for_period(match, period, invoice_date)
     tpl = match.template
+    # Budget billing: when the operator set a fixed amount, AMOUNT DUE is that budget
+    # (the actual bill); the calculated solar credit value still shows as its own line.
+    _budget_on = bool(inv.get("budget_override")) and inv.get("budgeted_amount") is not None
+    _final_due = inv["budgeted_amount"] if _budget_on else inv["amount_owed"]
 
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -241,7 +259,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     # wordmark, and the "service provided by ArrayOperator.com" footer attribution.
     decorate = brand.make_hero_decorator(
         title=title, subtitle=operator_name,
-        right_label="AMOUNT DUE", right_value=brand._money(inv["amount_owed"]),
+        right_label="AMOUNT DUE", right_value=brand._money(_final_due),
         footer_left=operator_name,
         footer_right=f"Invoice {inv['invoice_number']}", hero_h=HERO_H, light=True,
         show_brand=False)
@@ -344,6 +362,8 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         ["Your contractual payment share", _pct(inv["billing_rate"])],
         ["Solar credit value due", _money(inv["amount_owed"])],
     ]
+    if _budget_on:
+        rows.append(["Budgeted amount (your fixed bill)", _money(inv["budgeted_amount"])])
     rt = Table(rows, colWidths=[4.4 * inch, 2.2 * inch])
     rt.setStyle(TableStyle([
         ("FONTSIZE", (0, 0), (-1, -1), 10),
@@ -360,22 +380,17 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     ]))
     story.append(rt)
     story.append(Spacer(1, 6))
-    story.append(Paragraph(
-        f"{_shr_lbl} = {'solar generation' if _gmpc else 'array production'} × your share, "
-        "and the credit value due = your kWh × solar credit rate × your contractual payment share.", small))
     _src_note = _kwh_source_note(inv.get("kwh_source"))
     if _src_note:
-        story.append(Spacer(1, 4))
         story.append(Paragraph(f"Data source: {_xesc(_src_note)}", small))
     if inv.get("net_rate_source") == "gmp_credit_reference":
-        story.append(Spacer(1, 4))
+        story.append(Spacer(1, 3))
         story.append(Paragraph(
-            "Note: this period's credit was banked with the utility (not cashed), so the credit "
-            "rate shown is a reference rate for comparable months, trued up annually.", small))
+            "Credit banked with the utility this period — rate is a reference estimate, trued up annually.", small))
     story.append(Spacer(1, 16))
 
     # ---- amount due banner (light, day skin) ---------------------------------
-    owed = Table([[f"AMOUNT DUE  ·  payable to {_xesc(operator_name)}", _money(inv["amount_owed"])]],
+    owed = Table([[f"AMOUNT DUE  ·  payable to {_xesc(operator_name)}", _money(_final_due)]],
                  colWidths=[4.4 * inch, 2.2 * inch])
     owed.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
