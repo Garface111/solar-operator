@@ -707,6 +707,35 @@ def main():
             conn.execute(text(idx_sql))
         print("  ✓ inverter_connections table + index ensured")
 
+        # 2026-06-26 Encrypt vendor credentials at rest (SO_CONFIG_KEY).
+        # InverterConnection.config is now an EncryptedJSON column whose stored
+        # form is TEXT (plaintext JSON in pass-through mode, or a Fernet
+        # `SOENC1:`+token ciphertext when a key is set). On Postgres the live
+        # column is still native `json`, which would REJECT a non-JSON Fernet
+        # token — so widen it to TEXT here, BEFORE any key is provisioned. This
+        # is a SAFE no-op for plaintext (valid JSON is valid text) and a
+        # prerequisite for the key-gated row encryption.
+        #   * Postgres-only: SQLite's JSON is already TEXT-affinity and has no
+        #     ALTER COLUMN TYPE.
+        #   * Idempotent: only fires while the column still reports a json type.
+        #   * Type-only: this does NOT encrypt existing rows. Encrypting rows is
+        #     a deliberate, key-gated, dry-run-default step —
+        #     run scripts/encrypt_vendor_credentials.py once SO_CONFIG_KEY is set.
+        #     (The legacy Array.solaredge_api_key is already TEXT, so no ALTER.)
+        if conn.dialect.name == "postgresql":
+            cfg_type = next(
+                (str(c["type"]).lower()
+                 for c in inspect(conn).get_columns("inverter_connections")
+                 if c["name"] == "config"),
+                "",
+            )
+            if "json" in cfg_type:
+                conn.execute(text(
+                    "ALTER TABLE inverter_connections "
+                    "ALTER COLUMN config TYPE TEXT USING config::text"
+                ))
+                print("  ~ inverter_connections.config JSON -> TEXT (encryption-at-rest)")
+
         # 2026-06-13 Array Operator automatic billing reports
         # (feat/array-operator-reports). The billing_report_subscriptions table
         # is created by init_db() (create_all) above — it's brand new, nothing to
