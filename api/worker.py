@@ -309,6 +309,37 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
     }
 
 
+def pull_account_bills(tenant_id: str, account_id: int) -> dict:
+    """Pull bills for ONE account on demand — e.g. right before generating an offtaker
+    invoice, so it reflects the LATEST GMP statement without waiting for the 6h
+    scheduler. Same JSON-first / PDF-fallback path as the full tenant pull. Commits, so
+    the caller's next (READ COMMITTED) query sees the fresh bill."""
+    with SessionLocal() as db:
+        acc = db.get(UtilityAccount, account_id)
+        if not acc or acc.tenant_id != tenant_id or getattr(acc, "enabled", True) is False:
+            return {"status": "skipped", "reason": "account-not-eligible"}
+        adapter = get_adapter(acc.provider)
+        jwt = token_for_account(db, acc)
+        json_err = None
+        if jwt and hasattr(adapter, "fetch_bills_json"):
+            try:
+                r = _pull_via_json(db, tenant_id, acc, adapter, jwt)
+                db.commit()
+                return r
+            except Exception as e:  # noqa: BLE001
+                json_err = f"{type(e).__name__}: {e}"
+        try:
+            r = _pull_via_pdf(db, tenant_id, acc, adapter)
+            db.commit()
+            if json_err:
+                r["json_fallback_reason"] = json_err
+            return r
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            return {"status": "failed", "json_error": json_err,
+                    "pdf_error": f"{type(e).__name__}: {e}"}
+
+
 def run_job(job_id: int) -> dict:
     """Execute one queued Job row."""
     with SessionLocal() as db:

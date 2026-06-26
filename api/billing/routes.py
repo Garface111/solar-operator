@@ -1426,6 +1426,18 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
     require_not_demo(t)
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
+        # ALWAYS pull the freshest GMP bill for this offtaker's bound account first, so
+        # the invoice reflects the latest statement the moment it's generated — don't wait
+        # for the 6h scheduler. Best-effort: a lapsed session (or a vendor hiccup) just
+        # falls back to the last captured bill, so a refresh failure never blocks a draft.
+        # READ COMMITTED → build_match's fresh bill query below sees the committed pull.
+        uaid = getattr(sub, "utility_account_id", None)
+        if uaid:
+            try:
+                from ..worker import pull_account_bills
+                pull_account_bills(t.id, uaid)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             match = build_match(sub)
         except Exception as e:  # noqa: BLE001
