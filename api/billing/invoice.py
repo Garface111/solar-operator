@@ -47,6 +47,10 @@ def invoice_for_period(match: BillingMatch, period: Period,
         # vs production) honestly and flag a banked-month reference estimate.
         "net_rate_source": (match.computed_invoice or {}).get("net_rate_source"),
         "net_rate_note": (match.computed_invoice or {}).get("net_rate_note"),
+        # Provenance of the PRODUCTION figure (gmp_api | daily_csv | utility_bill |
+        # bill_prorate, possibly '+'-joined across arrays) so the renderer can tell
+        # the customer how their generation was measured vs estimated — honest data.
+        "kwh_source": (match.computed_invoice or {}).get("kwh_source"),
         "project_total_kwh": match.project_totals.get("total_customer_kwh"),
         "project_total_savings": match.project_totals.get("total_savings"),
         # Per-array breakdown for multi-array offtakers (one line per array). Lives
@@ -68,6 +72,31 @@ def _pct(x: Optional[float]) -> str:
 def _rate_str(x: Optional[float]) -> str:
     """Per-kWh rate with trailing zeros trimmed: 0.25760 -> '$0.2576/kWh'."""
     return f"${('%.5f' % (x or 0)).rstrip('0').rstrip('.')}/kWh"
+
+
+# Honest, customer-facing provenance line for the production figure. kwh_source is
+# one of gmp_api | daily_csv | utility_bill | bill_prorate (or '+'-joined across
+# arrays for a multi-array offtaker). We name the WEAKEST source present so an
+# estimate-dominated period is never presented as fully metered (Ford's #1 trust
+# rule). Returns None when provenance is unknown (renders nothing).
+def _kwh_source_note(kwh_source: Optional[str]) -> Optional[str]:
+    if not kwh_source:
+        return None
+    parts = {p for p in str(kwh_source).split("+") if p}
+    if not parts:
+        return None
+    # Weakest-first: a prorated estimate anywhere downgrades the whole label.
+    if "bill_prorate" in parts:
+        return ("Production for at least one array this period is estimated from your "
+                "utility bill (daily meter reads weren't available), so these figures "
+                "are an approximation.")
+    if "utility_bill" in parts:
+        return "Production this period is taken from your settled utility bill."
+    if "daily_csv" in parts:
+        return "Production this period is from daily meter reads."
+    if "gmp_api" in parts:
+        return "Production this period is verified by daily meter reads from your utility."
+    return None
 
 
 # ─── XLSX ───────────────────────────────────────────────────────────────────
@@ -134,8 +163,16 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("C18", _rate_str(rate), align=right)
     put("B19", "Your contractual payment share:"); put("C19", _pct(inv["billing_rate"]), align=right)
     put("B20", "Solar credit value due:"); put("C20", _money(inv["amount_owed"]), align=right)
+    # One note line at B21 (the layout reserves a single row before Amount Owed).
+    # Combine the data-source provenance with the banked-credit note if both apply.
+    _notes = []
+    _src_note = _kwh_source_note(inv.get("kwh_source"))
+    if _src_note:
+        _notes.append(f"Data source: {_src_note}")
     if inv.get("net_rate_source") == "gmp_credit_reference":
-        put("B21", "Note: credit banked this period — rate is a reference estimate (trued up annually).")
+        _notes.append("Note: credit banked this period — rate is a reference estimate (trued up annually).")
+    if _notes:
+        put("B21", "  ".join(_notes))
 
     put("B22", "Amount Owed:", big)
     put("C22", _money(inv["amount_owed"]), big, right)
@@ -326,6 +363,10 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story.append(Paragraph(
         f"{_shr_lbl} = {'solar generation' if _gmpc else 'array production'} × your share, "
         "and the credit value due = your kWh × solar credit rate × your contractual payment share.", small))
+    _src_note = _kwh_source_note(inv.get("kwh_source"))
+    if _src_note:
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(f"Data source: {_xesc(_src_note)}", small))
     if inv.get("net_rate_source") == "gmp_credit_reference":
         story.append(Spacer(1, 4))
         story.append(Paragraph(
