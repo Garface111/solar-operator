@@ -175,7 +175,11 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
     ).scalars().first()
     if bill is None:
         return {"saved": False, "reason": "no bill row to attach to"}
-    if bill.pdf_bytes:
+    # SETTLED bills (period closed >45d ago) with a PDF won't change — skip. But a RECENT
+    # bill is re-checked even if it already has a PDF, so a stale statement captured before
+    # GMP published the real one (the May-PDF-on-the-June-row bug) can SELF-HEAL.
+    recent = bool(bill.period_end) and (datetime.utcnow().date() - bill.period_end.date()).days <= 45
+    if bill.pdf_bytes and not recent:
         return {"saved": False, "reason": "already captured", "bill_id": bill.id}
 
     # ── PRIMARY: transactions → urlBinary (works for managed/offtaker accounts) ──
@@ -188,25 +192,35 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
                 [t for t in txns if isinstance(t, dict) and t.get("urlBinary")],
                 key=lambda t: t.get("date") or "", reverse=True)
             if docs:
-                # Pick the statement doc aligned to THIS bill's period, not blindly the
-                # newest transaction — a newer unrelated doc (payment, adjustment) must
-                # not put the wrong month's PDF on the row. Closest by date to the bill's
-                # own date; fall back to the newest doc when nothing parses.
-                target = bill.bill_date or bill.period_end
-                chosen = docs[0]
-                if target is not None:
-                    def _gap(t):
-                        ds = str(t.get("date") or "")[:10]
-                        try:
-                            y, mo, dy = int(ds[0:4]), int(ds[5:7]), int(ds[8:10])
-                            return abs((datetime(y, mo, dy).date() - target.date()).days)
-                        except Exception:
-                            return 10 ** 6
-                    chosen = min(docs, key=_gap)
+                def _dd(t):
+                    ds = str(t.get("date") or "")[:10]
+                    try:
+                        return datetime(int(ds[0:4]), int(ds[5:7]), int(ds[8:10])).date()
+                    except Exception:
+                        return None
+                # A statement is issued ON/AFTER its period closes, so any doc dated BEFORE
+                # this bill's period_end cannot be its statement — that's exactly how an
+                # older month's PDF got stamped onto a newer bill row (May's 05-27 doc onto
+                # the June row). Require date >= period_end (1-day tz slack); among those,
+                # take the one closest to the bill's own date. If none qualify, the real
+                # statement isn't published yet → capture NOTHING (don't attach a stale one).
+                floor = (bill.period_end.date() - timedelta(days=1)) if bill.period_end else None
+                cands = [t for t in docs if floor is None or (_dd(t) and _dd(t) >= floor)]
+                if not cands:
+                    return {"saved": False, "reason": "no statement issued for this period yet",
+                            "bill_id": bill.id}
+                tgt = bill.bill_date or bill.period_end
+                target = tgt.date() if tgt else datetime.utcnow().date()
+                chosen = min(cands, key=lambda t: abs((_dd(t) - target).days) if _dd(t) else 10 ** 6)
                 data, ctype = adapter.fetch_bill_pdf_binary(chosen["urlBinary"])
+                if not data or data[:4] != b"%PDF":
+                    return {"saved": False, "reason": "not a PDF (auth redirect?)", "bill_id": bill.id}
+                if bill.pdf_bytes and bytes(bill.pdf_bytes) == data:
+                    return {"saved": False, "reason": "unchanged", "bill_id": bill.id}
+                replaced = bool(bill.pdf_bytes)
                 bill.pdf_bytes = data
                 bill.pdf_content_type = ctype or "application/pdf"
-                return {"saved": True, "bill_id": bill.id, "bytes": len(data),
+                return {"saved": True, "bill_id": bill.id, "bytes": len(data), "replaced": replaced,
                         "via": "transactions", "doc_date": chosen.get("date")}
         except Exception:  # noqa: BLE001 — fall through to the legacy currentBillUrl path
             pass
