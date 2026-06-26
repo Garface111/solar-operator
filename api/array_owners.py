@@ -419,6 +419,31 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 if day == today:
                     est_today.add(aid)
 
+        # ── batched InverterConnection + provider lookups (was N+1) ───────────
+        # _resolve_connection and _array_provider each fired one SELECT per array
+        # inside the loop below. Pre-load both with a single IN query so a
+        # 20-array tenant doesn't pay 40 extra round-trips per dashboard load.
+        conn_by_array: dict[int, InverterConnection] = {}
+        provider_by_array: dict[int, str] = {}
+        if array_ids:
+            for c in db.execute(
+                select(InverterConnection)
+                .where(InverterConnection.array_id.in_(array_ids))
+            ).scalars().all():
+                # First connection wins (mirrors the single-row resolve below);
+                # an array realistically has one inverter connection.
+                conn_by_array.setdefault(c.array_id, c)
+            for aid, provider in db.execute(
+                select(UtilityAccount.array_id, UtilityAccount.provider)
+                .where(UtilityAccount.array_id.in_(array_ids),
+                       UtilityAccount.deleted_at.is_(None))
+                .order_by(UtilityAccount.id)
+            ).all():
+                provider_by_array.setdefault(aid, provider)
+
+        # Cache energy rates by provider so identical providers don't re-derive.
+        _rate_cache: dict[object, float] = {}
+
         for arr in arrays:
             today_kwh = today_by_array.get(arr.id, 0.0)
             # has_today: a row exists for today (distinct from "summed to 0").
@@ -430,7 +455,17 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             # cohort analysis runs on.
             daily_series = series_by_array.get(arr.id, [])
 
-            conn = _resolve_connection(db, arr)
+            # Resolve from the pre-loaded map; fall back to the legacy
+            # SolarEdge-columns virtual connection when no row exists (same
+            # rule as _resolve_connection, without the per-array query).
+            conn = conn_by_array.get(arr.id)
+            if conn is None and arr.solaredge_api_key and arr.solaredge_site_id:
+                conn = SimpleNamespace(
+                    vendor="solaredge",
+                    config={"api_key": arr.solaredge_api_key,
+                            "site_id": arr.solaredge_site_id},
+                    status="ok",
+                )
             module = VENDORS.get(conn.vendor) if conn is not None else None
             has_live_source = bool(
                 module is not None and getattr(module, "SUPPORTS_LIVE", False)
@@ -458,7 +493,10 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                         "as_of": None,
                     }
 
-            rate = get_energy_rate(_array_provider(db, arr.id))
+            provider = provider_by_array.get(arr.id)
+            if provider not in _rate_cache:
+                _rate_cache[provider] = get_energy_rate(provider)
+            rate = _rate_cache[provider]
             value = _value_model(today_kwh, month_kwh, lifetime_kwh, rate)
             health = _health(has_live_source, last_day, overview_ok, today)
 
