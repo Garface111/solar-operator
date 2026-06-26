@@ -114,21 +114,6 @@ to the tenant's master spreadsheet, draft the report.
 - The token deduper (`tokenHash`) prevents resending an unchanged token, so
   every page-load doesn't hammer the API.
 
-## Next utilities to add
-
-Each adapter is `manifest.json` host_permissions + a `content.js` block. The
-shape of `accounts[]` is provider-agnostic, so the backend stays the same.
-
-Targets (ranked by addressable market):
-1. National Grid (NY + MA) — same MyAccount pattern
-2. Eversource (CT + MA + NH)
-3. PSE&G (NJ)
-4. BGE (MD)
-
-For each, the discovery work mirrors what we did for GMP: log in, watch the
-network tab for the post-login API call that returns account list, find where
-the SPA stores the bearer.
-
 ## Known limitations
 
 - The extension only runs while the GMP tab is open. If the user never visits
