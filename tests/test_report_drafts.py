@@ -58,6 +58,36 @@ def test_generate_draft_then_appears_in_inbox(client):
     assert [x["id"] for x in inbox] == [d["id"]]
 
 
+def test_recomputed_draft_carries_budget_and_calculated_credit(client):
+    """Regression: the recompute response (POST .../draft, what the frontend hits after
+    a money edit) MUST carry budget_amount_usd + the CALCULATED solar_credit_value — not
+    nulls. When they were null the calc panel back-derived a fake rate (budget ÷ kWh, the
+    $2.42718/kWh bug) and the email preview collapsed to one row. solar_credit_value is the
+    real production×rate value (≠ the budget); the budget lives in amount_usd."""
+    _B = "/v1/array-operator/billing"
+    tid, auth = _make_tenant()
+    sub_id = _upload(client, auth, "norwich.xlsx").json()["subscription"]["id"]
+    # The genuine calculated total (no budget) — what solar_credit_value must equal.
+    base = client.post(f"{_B}/subscriptions/{sub_id}/draft",
+                       headers=_auth(auth)).json()["draft"]["amount_usd"]
+    assert isinstance(base, (int, float)) and base != 6000.0
+    # Operator sets a budget, then the frontend recomputes via the SAME draft endpoint.
+    client.patch(f"{_B}/subscriptions/{sub_id}",
+                 json={"budget_amount_usd": 6000.0}, headers=_auth(auth))
+    d = client.post(f"{_B}/subscriptions/{sub_id}/draft",
+                    headers=_auth(auth)).json()["draft"]
+    # The recompute response (NOT just the /drafts list) carries both fields now.
+    assert d["budget_amount_usd"] == 6000.0
+    assert d["amount_usd"] == 6000.0                       # budget overrides the total
+    assert d["solar_credit_value"] == base                 # the CALCULATED credit, not the budget
+    assert d["solar_credit_value"] != 6000.0
+    # And the effective rate the panel would show = credit ÷ kWh = the REAL rate, never
+    # budget ÷ kWh (the fake $2.42718 came from dividing the $6000 budget by the kWh).
+    fake = d["amount_usd"] / d["customer_kwh"]
+    real = d["solar_credit_value"] / d["customer_kwh"]
+    assert abs(real - fake) > 1e-6
+
+
 def test_draft_display_name_follows_live_subscription(client):
     """REGRESSION: renaming the offtaker must update the draft card + email preview.
     _draft_dict follows the LIVE subscription name, not the draft's frozen snapshot

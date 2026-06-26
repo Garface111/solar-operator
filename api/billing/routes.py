@@ -1721,7 +1721,15 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         if existing is None:
             db.add(d)
         db.commit()
-        return {"ok": True, "draft": _draft_dict(d)}
+        # Pass `sub` so the recompute response carries the SUBSCRIPTION-derived fields
+        # (budget_amount_usd + the CALCULATED solar_credit_value) — without it the
+        # frontend's post-edit refresh got nulls, so the "How we calculated" panel lost
+        # the budget split and back-derived a fake rate (budget ÷ kWh) from amount_usd,
+        # and the email preview collapsed to one row. Mirror the /drafts list overlay.
+        return {"ok": True, "draft": _draft_dict(
+            d, sub=sub,
+            gmp_auto_status=_resolve_gmp_auto_status(db, sub),
+            operator_name=getattr(t, "name", None))}
 
 
 @router.post("/drafts/{draft_id}/gmp-invoice")
