@@ -63,21 +63,36 @@ def _find_array_to_absorb_into(db, tenant_id, owner_id, provider, captured_name)
             Array.deleted_at.is_(None),
         ).order_by(Array.id)
     ).scalars().all()
+    if not candidates:
+        return None
 
-    def _no_provider_account(arr):
-        return (db.execute(
-            select(func.count(UtilityAccount.id)).where(
-                UtilityAccount.array_id == arr.id,
+    cand_ids = [arr.id for arr in candidates]
+
+    # Bulk-load both membership signals in TWO grouped queries (was 2 COUNT
+    # queries PER candidate inside the loops below — an N+1 on the hot /v1/sync
+    # path, multiplied again by the per-account caller loop).
+    _prov_acct_ids = {
+        aid for (aid,) in db.execute(
+            select(UtilityAccount.array_id).where(
+                UtilityAccount.array_id.in_(cand_ids),
                 UtilityAccount.provider == provider,
                 UtilityAccount.deleted_at.is_(None),
-            )
-        ).scalar() or 0) == 0
+            ).group_by(UtilityAccount.array_id)
+        ).all()
+    }
+    _vendor_ids = {
+        aid for (aid,) in db.execute(
+            select(InverterConnection.array_id).where(
+                InverterConnection.array_id.in_(cand_ids),
+            ).group_by(InverterConnection.array_id)
+        ).all()
+    }
+
+    def _no_provider_account(arr):
+        return arr.id not in _prov_acct_ids
 
     def _has_vendor(arr):
-        return (db.execute(
-            select(func.count(InverterConnection.id)).where(
-                InverterConnection.array_id == arr.id)
-        ).scalar() or 0) > 0
+        return arr.id in _vendor_ids
 
     # Tier 1: exact normalized-name match, no existing account of this provider.
     for arr in candidates:
