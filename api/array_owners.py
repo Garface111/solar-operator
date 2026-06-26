@@ -356,49 +356,58 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             .where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
             .order_by(Array.id)
         ).scalars().all()
+        array_ids = [a.id for a in arrays]
 
-        for arr in arrays:
-            today_kwh = db.execute(
-                select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0)).where(
-                    DailyGeneration.array_id == arr.id,
-                    DailyGeneration.day == today,
-                )
-            ).scalar_one()
-            has_today = db.execute(
-                select(func.count())
-                .select_from(DailyGeneration)
-                .where(
-                    DailyGeneration.array_id == arr.id,
-                    DailyGeneration.day == today,
-                )
-            ).scalar_one() > 0
-
-            month_kwh = db.execute(
-                select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0)).where(
-                    DailyGeneration.array_id == arr.id,
-                    DailyGeneration.day >= month_start,
-                )
-            ).scalar_one()
-            lifetime_kwh, last_day = db.execute(
+        # ── batched DailyGeneration aggregates (was N+1) ──────────────────────
+        # Previously this loop fired 5 DailyGeneration queries PER array (today,
+        # has_today, month, lifetime/last_day, window series), so a 20-array
+        # tenant cost 100+ round-trips on every dashboard load. Compute all of it
+        # up front with a handful of GROUP BY array_id queries, then look each
+        # array up in-memory below.
+        today_by_array: dict[int, float] = {}
+        month_by_array: dict[int, float] = {}
+        life_by_array: dict[int, tuple[float, object]] = {}
+        series_by_array: dict[int, list[dict]] = defaultdict(list)
+        if array_ids:
+            for aid, kwh in db.execute(
+                select(DailyGeneration.array_id, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+                .where(DailyGeneration.array_id.in_(array_ids), DailyGeneration.day == today)
+                .group_by(DailyGeneration.array_id)
+            ).all():
+                today_by_array[aid] = float(kwh or 0.0)
+            for aid, kwh in db.execute(
+                select(DailyGeneration.array_id, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+                .where(DailyGeneration.array_id.in_(array_ids), DailyGeneration.day >= month_start)
+                .group_by(DailyGeneration.array_id)
+            ).all():
+                month_by_array[aid] = float(kwh or 0.0)
+            for aid, kwh, last in db.execute(
                 select(
+                    DailyGeneration.array_id,
                     func.coalesce(func.sum(DailyGeneration.kwh), 0.0),
                     func.max(DailyGeneration.day),
-                ).where(DailyGeneration.array_id == arr.id)
-            ).one()
+                )
+                .where(DailyGeneration.array_id.in_(array_ids))
+                .group_by(DailyGeneration.array_id)
+            ).all():
+                life_by_array[aid] = (float(kwh or 0.0), last)
+            for aid, d, k in db.execute(
+                select(DailyGeneration.array_id, DailyGeneration.day, DailyGeneration.kwh)
+                .where(DailyGeneration.array_id.in_(array_ids), DailyGeneration.day >= window_start)
+                .order_by(DailyGeneration.array_id, DailyGeneration.day)
+            ).all():
+                series_by_array[aid].append({"date": d.isoformat(), "kwh": float(k or 0.0)})
+
+        for arr in arrays:
+            today_kwh = today_by_array.get(arr.id, 0.0)
+            # has_today: a row exists for today (distinct from "summed to 0").
+            has_today = arr.id in today_by_array
+            month_kwh = month_by_array.get(arr.id, 0.0)
+            lifetime_kwh, last_day = life_by_array.get(arr.id, (0.0, None))
 
             # Daily series over the peer window (ascending) — the raw signal the
             # cohort analysis runs on.
-            window_rows = db.execute(
-                select(DailyGeneration.day, DailyGeneration.kwh)
-                .where(
-                    DailyGeneration.array_id == arr.id,
-                    DailyGeneration.day >= window_start,
-                )
-                .order_by(DailyGeneration.day)
-            ).all()
-            daily_series = [
-                {"date": d.isoformat(), "kwh": float(k or 0.0)} for d, k in window_rows
-            ]
+            daily_series = series_by_array.get(arr.id, [])
 
             conn = _resolve_connection(db, arr)
             module = VENDORS.get(conn.vendor) if conn is not None else None
