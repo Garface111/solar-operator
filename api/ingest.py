@@ -40,7 +40,7 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .fuels import normalize_fuel
 from .models import Client, Array, UtilityAccount
-from .account import tenant_from_session, require_not_demo, require_not_demo
+from .account import tenant_from_session, require_not_demo
 from .import_examples import EXAMPLE_GMCS_STYLE, EXAMPLE_RESIDENTIAL_PORTFOLIO
 
 logger = logging.getLogger(__name__)

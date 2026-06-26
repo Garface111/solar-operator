@@ -20,7 +20,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .account import tenant_from_session, require_not_demo, require_not_demo
+from .account import tenant_from_session, require_not_demo
 from .db import SessionLocal
 from .models import Array, Client, UtilityAccount, now
 

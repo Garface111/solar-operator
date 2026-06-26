@@ -26,7 +26,7 @@ from sqlalchemy.orm import joinedload
 
 from .db import SessionLocal
 from .models import Array, Client
-from .account import tenant_from_session, require_not_demo, require_not_demo
+from .account import tenant_from_session, require_not_demo
 from .ingest import (
     _file_to_text,
     _detect_gmcs_shape,
