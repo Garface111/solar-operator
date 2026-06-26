@@ -95,6 +95,34 @@
       return;
     }
 
+    // Page asks to SYNC ALL vendors AT ONCE — the extension opens every vendor portal
+    // in a background tab simultaneously, captures, and auto-closes each. Returns fast
+    // once the tabs are open (captures + closes happen in the background).
+    if (data.type === "SO_SYNC_ALL") {
+      const reqId = data.reqId || null;
+      chrome.runtime.sendMessage({ type: "SYNC_ALL_VENDORS", vendors: data.vendors || null }, (resp) => {
+        window.postMessage({
+          type: "SO_SYNC_ALL_DONE", reqId,
+          ok: !!(resp && resp.ok), opened: (resp && resp.opened) || 0,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, TARGET);
+      });
+      return;
+    }
+
+    // Page asks to CLOSE every open vendor portal tab.
+    if (data.type === "SO_CLOSE_VENDOR_TABS") {
+      const reqId = data.reqId || null;
+      chrome.runtime.sendMessage({ type: "CLOSE_ALL_VENDOR_TABS" }, (resp) => {
+        window.postMessage({
+          type: "SO_CLOSE_VENDOR_TABS_DONE", reqId,
+          ok: !!(resp && resp.ok), closed: (resp && resp.closed) || 0,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, TARGET);
+      });
+      return;
+    }
+
     if (data.type === "SO_PAIR") {
       const reqId = data.reqId || null;
       const tenantKey = String(data.tenantKey || "").trim();

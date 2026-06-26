@@ -1805,6 +1805,95 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // don't collide with each other. onInstalled covers install + version-update;
   // onStartup covers a plain browser relaunch (persisted alarms usually survive it, but
   // this is the belt-and-suspenders re-assert).
+  // ── Sync ALL vendors at once (concurrent) + Close all vendor tabs ───────────
+  // Ford: one click opens every vendor portal in the BACKGROUND simultaneously; each
+  // captures on its existing session and closes itself the instant its data lands.
+  // Runs ALONGSIDE — not through — the single-surface recapture state machine (which is
+  // one-at-a-time): we open our own tabs, track them, and a capture-observer closes each
+  // on its *_CAPTURED message, with a watchdog backstop. Chint is excluded — it needs a
+  // per-site click, so it can't capture silently in a background tab.
+  const SYNC_PORTALS = {
+    fronius: "https://www.solarweb.com/",
+    sma: "https://ennexos.sunnyportal.com/",
+    solaredge: "https://monitoring.solaredge.com/",
+  };
+  // Vendor portal tab patterns for Close-all (within our granted host_permissions).
+  const VENDOR_TAB_PATS = [
+    "https://monitoring.solaredge.com/*",
+    "https://www.solarweb.com/*", "https://*.solarweb.com/*",
+    "https://ennexos.sunnyportal.com/*", "https://*.sunnyportal.com/*",
+    "https://monitor.chintpowersystems.com/*", "https://*.chintpowersystems.com/*",
+    "https://solar.chintpower.com/*", "https://*.chintpower.com/*",
+  ];
+  const _syncTabs = new Map();   // tabId -> { vendor, openedAt }
+  const SYNC_CAPTURED = new Set(["SOLAREDGE_CAPTURED", "FRONIUS_CAPTURED", "SMA_CAPTURED", "CHINT_CAPTURED"]);
+
+  // Observer: when a SYNC tab reports its capture, close it (after a beat so its POST
+  // finishes). Observe-only — never consumes the message, so the real *_CAPTURED
+  // handlers still run and persist the reading.
+  chrome.runtime.onMessage.addListener((msg, sender) => {
+    try {
+      if (!msg || !SYNC_CAPTURED.has(msg.type)) return;
+      const tabId = sender && sender.tab && sender.tab.id;
+      if (tabId != null && _syncTabs.has(tabId)) {
+        _syncTabs.delete(tabId);
+        setTimeout(() => { try { chrome.tabs.remove(tabId, () => void chrome.runtime.lastError); } catch (_) {} }, 1800);
+      }
+    } catch (_) {}
+  });
+
+  async function syncAllVendors(vendors) {
+    const want = (Array.isArray(vendors) && vendors.length ? vendors : Object.keys(SYNC_PORTALS))
+      .map((v) => String(v).toLowerCase()).filter((v) => SYNC_PORTALS[v]);
+    const opened = [];
+    await Promise.all(want.map((v) => new Promise((res) => {
+      try {
+        chrome.tabs.create({ url: SYNC_PORTALS[v], active: false }, (tab) => {
+          if (!chrome.runtime.lastError && tab && typeof tab.id === "number") {
+            _syncTabs.set(tab.id, { vendor: v, openedAt: Date.now() });
+            opened.push(tab.id);
+          }
+          res();
+        });
+      } catch (_) { res(); }
+    })));
+    // Watchdog: close any sync tab that never captured (lapsed session / slow load).
+    const ids = opened.slice();
+    setTimeout(() => {
+      for (const id of ids) {
+        if (_syncTabs.has(id)) { _syncTabs.delete(id); try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (_) {} }
+      }
+    }, 150 * 1000);
+    return { ok: true, opened: opened.length, vendors: want };
+  }
+
+  function closeAllVendorTabs() {
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.query({ url: VENDOR_TAB_PATS }, (tabs) => {
+          if (chrome.runtime.lastError || !Array.isArray(tabs)) return resolve({ ok: true, closed: 0 });
+          const ids = tabs.map((t) => t && t.id).filter((id) => typeof id === "number");
+          ids.forEach((id) => _syncTabs.delete(id));
+          if (ids.length) { try { chrome.tabs.remove(ids, () => void chrome.runtime.lastError); } catch (_) {} }
+          resolve({ ok: true, closed: ids.length });
+        });
+      } catch (e) { resolve({ ok: false, error: String(e && e.message || e) }); }
+    });
+  }
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== "SYNC_ALL_VENDORS") return;
+    syncAllVendors(msg.vendors).then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    return true;   // async sendResponse
+  });
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== "CLOSE_ALL_VENDOR_TABS") return;
+    closeAllVendorTabs().then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    return true;   // async sendResponse
+  });
+
   async function _onWake() {
     try { await reapTrackedRecapTabs(); } catch (_) {}   // close any recap tab orphaned before this wake
     try { await autoArmKnownLive(); } catch (_) {}
