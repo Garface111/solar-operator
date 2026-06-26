@@ -1178,6 +1178,23 @@ class BillingReportSubscription(Base):
     auto_attach_gmp: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False)
 
+    # BRING-YOUR-OWN generation spreadsheet (Jun 2026, Ford). The operator
+    # uploads their OWN ongoing generation-tracking sheet (whatever columns they
+    # already use); a heuristic detector (api/billing/sheet_tracker.py) maps its
+    # columns and we APPEND a new row each month as a fresh GMP bill lands —
+    # preserving their layout. A "Download latest spreadsheet" button on the
+    # invoice page streams the kept-current file. Distinct from source_workbook
+    # (which is the HCT billing-template the invoice is GENERATED from); this is
+    # the offtaker's personal running ledger that we keep current.
+    #   tracker_workbook — the live xlsx bytes (CSV uploads are normalized to xlsx)
+    #   tracker_filename — original upload name (for the download filename)
+    #   tracker_map      — the detected structure (sheet/header_row/columns/…) +
+    #                      the idempotency cursor (last_period). NULL = no sheet.
+    tracker_workbook: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    tracker_filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    tracker_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    tracker_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Schedule
     cadence: Mapped[str] = mapped_column(String(16), default="monthly")  # monthly | quarterly
     annual_trueup: Mapped[bool] = mapped_column(Boolean, default=False)

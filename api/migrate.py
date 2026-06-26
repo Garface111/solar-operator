@@ -789,6 +789,26 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_allocations")
 
+        # 2026-06-26 Bring-your-own generation spreadsheet auto-updater. The
+        # operator uploads their existing generation-tracking sheet; we detect its
+        # columns and append a new row each month as fresh GMP bills land. Additive
+        # nullable columns — create_all adds them on fresh DBs, but an EXISTING
+        # prod table needs these ALTERs. Idempotent via column_exists() on both
+        # sqlite dev + Postgres prod. (No IF NOT EXISTS — Postgres-only.)
+        for _col, _sql in [
+            ("tracker_workbook",
+             "ALTER TABLE billing_report_subscriptions ADD COLUMN tracker_workbook BYTEA"),
+            ("tracker_filename",
+             "ALTER TABLE billing_report_subscriptions ADD COLUMN tracker_filename VARCHAR(300)"),
+            ("tracker_map",
+             "ALTER TABLE billing_report_subscriptions ADD COLUMN tracker_map JSON"),
+            ("tracker_updated_at",
+             "ALTER TABLE billing_report_subscriptions ADD COLUMN tracker_updated_at TIMESTAMP"),
+        ]:
+            if not column_exists(conn, "billing_report_subscriptions", _col):
+                conn.execute(text(_sql))
+                print(f"  + billing_report_subscriptions.{_col}")
+
         # 2026-06 OFFTAKER ↔ UTILITY BILL binding. Offtaker invoices read ONLY the
         # utility's paper bills (Bill.kwh_generated) for the bound GMP account —
         # never vendor/inverter data. This column ties an offtaker subscription to

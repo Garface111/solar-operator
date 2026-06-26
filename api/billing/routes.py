@@ -1073,6 +1073,173 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+# ─── Bring-your-own generation spreadsheet tracker ───────────────────────────
+# The operator uploads their OWN running generation sheet (whatever columns they
+# use); we detect its structure and keep appending a monthly row as fresh GMP
+# bills land. A "Download latest spreadsheet" button streams the kept-current
+# file. Whole feature gated behind SPREADSHEET_TRACKER_ENABLED.
+
+_XLSX_MEDIA = ("application/vnd.openxmlformats-officedocument"
+               ".spreadsheetml.sheet")
+
+
+def _tracker_status_dict(sub) -> dict:
+    """The tracker card state for the offtaker editor. Honest about whether a
+    sheet is attached, what we detected, and when we last appended."""
+    m = getattr(sub, "tracker_map", None) or {}
+    has = bool(getattr(sub, "tracker_workbook", None)) and bool(m.get("ok"))
+    up = getattr(sub, "tracker_updated_at", None)
+    return {
+        "enabled": True,
+        "has_sheet": has,
+        "filename": getattr(sub, "tracker_filename", None),
+        "columns": m.get("columns") if has else None,
+        "headers": m.get("headers") if has else None,
+        "header_row": m.get("header_row") if has else None,
+        "sheet": m.get("sheet") if has else None,
+        "data_rows": m.get("data_rows") if has else None,
+        "last_period": m.get("last_period") if has else None,
+        "updated_at": up.isoformat() + "Z" if up else None,
+        "warnings": m.get("warnings") or [],
+    }
+
+
+@router.get("/subscriptions/{sub_id}/tracker")
+def tracker_status(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Tracker state for one offtaker (drives the card). 404 only on a missing
+    sub; returns {enabled:false} when the feature flag is off so the UI hides."""
+    from .sheet_tracker import tracker_enabled
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        if not tracker_enabled():
+            return {"ok": True, "tracker": {"enabled": False}}
+        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+
+
+@router.post("/subscriptions/{sub_id}/tracker")
+async def tracker_upload(sub_id: int,
+                         file: UploadFile = File(...),
+                         authorization: Optional[str] = Header(default=None)):
+    """Upload the offtaker's existing generation spreadsheet (XLSX or CSV). We
+    detect its structure ('our magic'), normalize to xlsx, and store it as the
+    running ledger we keep current. Returns the detected mapping for review."""
+    from .sheet_tracker import tracker_enabled, ingest_upload
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not tracker_enabled():
+        raise HTTPException(404, "Spreadsheet tracker is not enabled.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file.")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large (8 MB max).")
+    name = file.filename or "generation.xlsx"
+    is_x = raw[:4] in (_MAGIC_XLSX, _MAGIC_XLS)
+    is_csv = name.lower().endswith(".csv") or (not is_x)
+    if not is_x and not is_csv:
+        raise HTTPException(415, "Upload an .xlsx or .csv generation sheet.")
+    res = ingest_upload(raw, name)
+    if not res.get("ok"):
+        warn = "; ".join(res.get("warnings") or []) or "Couldn't read that sheet."
+        raise HTTPException(422, warn)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        sub.tracker_workbook = res["workbook"]
+        sub.tracker_filename = name
+        sub.tracker_map = res["mapping"]
+        sub.tracker_updated_at = datetime.utcnow()
+        db.add(sub)
+        db.commit()
+        db.refresh(sub)
+        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+
+
+@router.patch("/subscriptions/{sub_id}/tracker")
+def tracker_remap(sub_id: int, body: dict,
+                  authorization: Optional[str] = Header(default=None)):
+    """Operator correction of the detected column mapping (nice-to-have). Body:
+    {"columns": {"period": <idx>, "generation": <idx>, ...}}. Validates indices
+    against the stored headers and updates the mapping in place."""
+    from .sheet_tracker import tracker_enabled
+    t = tenant_from_session(authorization)
+    if not tracker_enabled():
+        raise HTTPException(404, "Spreadsheet tracker is not enabled.")
+    cols = (body or {}).get("columns")
+    if not isinstance(cols, dict):
+        raise HTTPException(400, "columns object required")
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        m = dict(getattr(sub, "tracker_map", None) or {})
+        if not m.get("ok"):
+            raise HTTPException(409, "No tracker sheet to remap.")
+        ncol = len(m.get("headers") or [])
+        clean = {}
+        for k in ("period", "generation", "consumption", "rate", "amount"):
+            if k in cols and cols[k] is not None:
+                ci = int(cols[k])
+                if ci < 0 or (ncol and ci >= ncol):
+                    raise HTTPException(400, f"{k} column out of range")
+                clean[k] = ci
+        if "generation" not in clean:
+            raise HTTPException(400, "A generation/kWh column is required.")
+        m["columns"] = clean
+        sub.tracker_map = m
+        sub.tracker_updated_at = datetime.utcnow()
+        db.add(sub)
+        db.commit()
+        db.refresh(sub)
+        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+
+
+@router.delete("/subscriptions/{sub_id}/tracker")
+def tracker_remove(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Detach the BYO sheet from this offtaker."""
+    from .sheet_tracker import tracker_enabled
+    t = tenant_from_session(authorization)
+    if not tracker_enabled():
+        raise HTTPException(404, "Spreadsheet tracker is not enabled.")
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        sub.tracker_workbook = None
+        sub.tracker_filename = None
+        sub.tracker_map = None
+        sub.tracker_updated_at = datetime.utcnow()
+        db.add(sub)
+        db.commit()
+        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+
+
+@router.get("/subscriptions/{sub_id}/tracker/download")
+def tracker_download(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Stream the current, kept-current generation spreadsheet. Before streaming
+    we opportunistically append the latest period (idempotent) so 'Download
+    latest' always reflects the freshest computed bill even between worker runs."""
+    from .sheet_tracker import tracker_enabled, update_subscription_sheet
+    t = tenant_from_session(authorization)
+    if not tracker_enabled():
+        raise HTTPException(404, "Spreadsheet tracker is not enabled.")
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        if not getattr(sub, "tracker_workbook", None):
+            raise HTTPException(404, "No spreadsheet uploaded yet.")
+        # Keep-current on demand: append the latest period if it isn't there.
+        res = update_subscription_sheet(db, sub)
+        if res.get("status") == "appended":
+            db.add(sub)
+            db.commit()
+            db.refresh(sub)
+        blob = bytes(sub.tracker_workbook)
+        base = (getattr(sub, "tracker_filename", None) or "generation.xlsx")
+        if base.lower().endswith(".csv"):
+            base = base[:-4] + ".xlsx"
+        elif not base.lower().endswith(".xlsx"):
+            base = base + ".xlsx"
+    return StreamingResponse(
+        io.BytesIO(blob), media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{base}"'})
+
+
 @router.get("/subscriptions/{sub_id}/preview-math")
 def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None)):
     """Compute (without persisting a draft) the auditable billing math for a

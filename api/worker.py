@@ -31,6 +31,25 @@ BILLS_DIR = DATA_DIR / "bills"
 BILLS_DIR.mkdir(exist_ok=True, parents=True)
 
 
+def _tracker_append_for_account(db, tenant_id: str, account, result: dict) -> None:
+    """When a pull CREATES a new bill for `account`, append the latest period to
+    every offtaker's BYO generation spreadsheet bound to that account. Gated on
+    SPREADSHEET_TRACKER_ENABLED inside the tracker module + IDEMPOTENT (never
+    double-appends the same period). Best-effort — a tracker hiccup must never
+    fail or block a bill pull, so all errors are swallowed (logged in-module)."""
+    try:
+        if not result or (result.get("created") or 0) <= 0:
+            return
+        from .billing.sheet_tracker import update_all_for_account, tracker_enabled
+        if not tracker_enabled():
+            return
+        statuses = update_all_for_account(db, tenant_id, account.id)
+        if statuses:
+            result["tracker"] = statuses
+    except Exception as e:  # noqa: BLE001
+        result["tracker_error"] = f"{type(e).__name__}: {e}"
+
+
 def _latest_session_token(db, tenant_id: str, provider: str) -> str | None:
     sess = db.execute(
         select(UtilitySession)
@@ -314,7 +333,9 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
             if jwt and hasattr(adapter, "fetch_bills_json"):
                 json_attempted = True
                 try:
-                    results.append(_pull_via_json(db, tenant_id, acc, adapter, jwt))
+                    rj = _pull_via_json(db, tenant_id, acc, adapter, jwt)
+                    _tracker_append_for_account(db, tenant_id, acc, rj)
+                    results.append(rj)
                     continue
                 except Exception as e:
                     json_err = f"{type(e).__name__}: {e}"
@@ -322,6 +343,7 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
             # Fallback: PDF
             try:
                 r = _pull_via_pdf(db, tenant_id, acc, adapter)
+                _tracker_append_for_account(db, tenant_id, acc, r)
                 if json_attempted:
                     r["json_fallback_reason"] = json_err
                 results.append(r)
@@ -361,12 +383,14 @@ def pull_account_bills(tenant_id: str, account_id: int) -> dict:
         if jwt and hasattr(adapter, "fetch_bills_json"):
             try:
                 r = _pull_via_json(db, tenant_id, acc, adapter, jwt)
+                _tracker_append_for_account(db, tenant_id, acc, r)
                 db.commit()
                 return r
             except Exception as e:  # noqa: BLE001
                 json_err = f"{type(e).__name__}: {e}"
         try:
             r = _pull_via_pdf(db, tenant_id, acc, adapter)
+            _tracker_append_for_account(db, tenant_id, acc, r)
             db.commit()
             if json_err:
                 r["json_fallback_reason"] = json_err
