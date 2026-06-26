@@ -1203,15 +1203,20 @@ def subscription_daily_series(
             label = start.strftime("%B %Y")
 
         rows = db.execute(
-            select(DailyGeneration.day, DailyGeneration.kwh)
+            select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
             .where(DailyGeneration.array_id == array_id,
                    DailyGeneration.day >= start, DailyGeneration.day <= end)
             .order_by(DailyGeneration.day.asc())
         ).all()
         arr = db.get(Array, array_id)
+        # Surface data provenance so the UI can mark estimated days (split out of a
+        # bill via bill_prorate) distinctly from measured rows — never render an
+        # estimate as if it were measured.
         points = [{"day": d.isoformat(),
                    "array_kwh": round(k or 0.0, 1),
-                   "kwh": round((k or 0.0) * alloc, 1)} for (d, k) in rows]
+                   "kwh": round((k or 0.0) * alloc, 1),
+                   "source": src or "csv",
+                   "is_estimated": (src == "bill_prorate")} for (d, k, src) in rows]
         total = round(sum(p["kwh"] for p in points), 1)
         return {
             "subscription_id": sub_id,
