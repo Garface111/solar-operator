@@ -791,6 +791,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Cookie wipe is best-effort; opening the tab still proceeds.
         console.warn("[so] cookie wipe failed", e);
       }
+      // Clear a BLOATED Fronius/SMA cookie blob before opening the portal so a manual
+      // Connect / dashboard-sync click can't land on ERR_HTTP2_PROTOCOL_ERROR. No-op on a
+      // healthy session (only fires >8KB) so we still ride the owner's existing login.
+      try {
+        const _pv = host.endsWith("solarweb.com") ? "fronius" : host.endsWith("sunnyportal.com") ? "sma" : null;
+        if (_pv && typeof self.__soPruneCookies === "function") await self.__soPruneCookies(_pv);
+      } catch (_) { /* non-fatal */ }
       chrome.tabs.create({ url, active }, (tab) => {
         if (chrome.runtime.lastError) {
           sendResponse({ ok: false, error: chrome.runtime.lastError.message });
@@ -1661,9 +1668,76 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Open ONE vendor's portal in a background tab, arm the capture intent, and let
   // the existing content script do its thing. A watchdog closes the tab if the
   // capture never lands (expired session) and fires the gentle nudge.
+  // ── COOKIE HYGIENE (v1.9.76) ────────────────────────────────────────────────
+  // Repeated auto-logins make WSO2 (Fronius) / Keycloak (SMA) pile up session/auth
+  // cookies; left unchecked the request-header cookie blob eventually outgrows the
+  // portal's HTTP/2 header limit and the SITE STOPS LOADING ENTIRELY
+  // (ERR_HTTP2_PROTOCOL_ERROR — Ford hit exactly this on solarweb.com after a marathon
+  // of test logins). Before each recapture we measure the vendor's cookie size and, ONLY
+  // if it's bloated past a safe ceiling (a normal session is ~1-2KB), clear it so the
+  // recapture's auto-login re-establishes a clean, minimal session. Targeted: a healthy
+  // session is NEVER touched (no forced re-login) — we only intervene when the blob is
+  // heading for the breaking point, which is strictly better than the portal going
+  // unloadable. Our customers log in far more often than a human (keep-warm re-auths), so
+  // this is what keeps the flagship's "never touch your portal again" from breaking later.
+  const VENDOR_COOKIE_DOMAINS = {
+    fronius: ["solarweb.com", "fronius.com"],
+    sma: ["sunnyportal.com", "sma.energy"],
+  };
+  const COOKIE_BLOAT_BYTES = 8192;   // well above a normal session (~1-2KB), well below the ~16KB+ that breaks HTTP/2
+  const COOKIE_PRUNE_COOLDOWN_MS = 20 * 60 * 1000;
+  const COOKIE_PRUNE_AT_KEY = "so_cookie_pruned_at";   // { fronius: ts, sma: ts } — anti-loop
+  async function cookiePruneEnabled() {
+    try { const s = await chrome.storage.local.get("so_cookieprune_off"); return s.so_cookieprune_off !== true; } catch (_) { return true; }
+  }
+  async function vendorCookieBytes(vendor) {
+    const domains = VENDOR_COOKIE_DOMAINS[vendor];
+    if (!domains) return { bytes: 0, cookies: [] };
+    let bytes = 0; const cookies = [];
+    for (const domain of domains) {
+      try {
+        for (const c of await chrome.cookies.getAll({ domain })) {
+          bytes += (c.name || "").length + (c.value || "").length + 4;   // ~"name=value; "
+          cookies.push(c);
+        }
+      } catch (_) {}
+    }
+    return { bytes, cookies };
+  }
+  self.__soVendorCookieBytes = async (v) => (await vendorCookieBytes(v)).bytes;
+  // Clear the vendor's cookies IFF they've bloated past the ceiling. Returns how many it
+  // removed (0 = healthy, left alone). Clearing a bloated, about-to-break session is
+  // strictly better than letting the portal become unloadable; auto-login (or a one-time
+  // manual sign-in) re-establishes a clean one.
+  async function pruneVendorCookiesIfBloated(vendor) {
+    try {
+      if (!VENDOR_COOKIE_DOMAINS[vendor] || !(await cookiePruneEnabled())) return 0;
+      const { bytes, cookies } = await vendorCookieBytes(vendor);
+      if (bytes < COOKIE_BLOAT_BYTES) return 0;   // healthy — never touch a working session
+      // Anti-loop: never prune the same vendor more than once per cooldown, so even if a
+      // single fresh login were itself large we can't force a re-login on every recapture.
+      const at = (await chrome.storage.local.get(COOKIE_PRUNE_AT_KEY))[COOKIE_PRUNE_AT_KEY] || {};
+      if (at[vendor] && (Date.now() - at[vendor]) < COOKIE_PRUNE_COOLDOWN_MS) {
+        rlog("cookie-hygiene:", vendor, "blob ~" + bytes + "B but pruned recently — cooldown, skipping");
+        return 0;
+      }
+      let n = 0;
+      for (const c of cookies) {
+        const u = (c.secure ? "https://" : "http://") + String(c.domain || "").replace(/^\./, "") + (c.path || "/");
+        try { await chrome.cookies.remove({ url: u, name: c.name, storeId: c.storeId }); n++; } catch (_) {}
+      }
+      at[vendor] = Date.now();
+      try { await chrome.storage.local.set({ [COOKIE_PRUNE_AT_KEY]: at }); } catch (_) {}
+      rlog("cookie-hygiene:", vendor, "cookie blob ~" + bytes + "B > " + COOKIE_BLOAT_BYTES + "B — cleared", n, "cookies to prevent ERR_HTTP2_PROTOCOL_ERROR (auto-login re-establishes a clean session)");
+      return n;
+    } catch (e) { rlog("cookie-hygiene error", vendor, e && e.message || e); return 0; }
+  }
+  self.__soPruneCookies = pruneVendorCookiesIfBloated;
+
   async function recaptureVendor(vendor, opts) {
     const url = RECAP_VENDORS[vendor];
     if (!url) return;
+    await pruneVendorCookiesIfBloated(vendor);   // clear a bloated cookie blob BEFORE it breaks the portal load
     await reapOrphanRecapture();   // never stack a new surface on a leftover one
     const newWindow = !!(opts && opts.newWindow);
     const budgetMs = (opts && typeof opts.budgetMs === "number") ? opts.budgetMs : TAB_BUDGET_MS;
@@ -2231,6 +2305,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function syncAllVendors(vendors) {
     const want = (Array.isArray(vendors) && vendors.length ? vendors : Object.keys(SYNC_PORTALS))
       .map((v) => String(v).toLowerCase()).filter((v) => SYNC_PORTALS[v]);
+    // Clear a bloated cookie blob before opening each portal so a user-initiated "Sync all"
+    // can't land on an ERR_HTTP2_PROTOCOL_ERROR page (no-op for vendors without a domain set).
+    for (const v of want) { try { await pruneVendorCookiesIfBloated(v); } catch (_) {} }
     const opened = [];
     await Promise.all(want.map((v) => new Promise((res) => {
       try {
