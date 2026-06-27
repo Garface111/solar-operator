@@ -934,6 +934,14 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             UtilityAccount.deleted_at.is_(None),
         )
     ).scalars().all())
+    # Array ids that have EVER had an inverter row (INCLUDING soft-deleted). A real
+    # inverter array — even a flaky Chint one whose inverter count momentarily blips to
+    # 0 — is always in here, so the meter-array filter below can NEVER hide it. Only an
+    # array that has a utility account AND has never had any inverter is a pure meter array.
+    _arr_ids = [a.id for a in arrays]
+    _arrays_with_inverters = set(db.execute(
+        select(Inverter.array_id).where(Inverter.array_id.in_(_arr_ids)).distinct()
+    ).scalars().all()) if _arr_ids else set()
 
     # ── batched InverterConnection map (was N+1) ──────────────────────────────
     # _resolve_connection fired one SELECT per inverter in the loop below, so an
@@ -984,10 +992,13 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     for arr in arrays:
         ivs = sorted(by_array.get(arr.id, []), key=lambda x: (x.position, x.id))
 
-        # Exclude pure UTILITY-METER arrays (a linked utility account but NO inverters)
-        # from the inverter/vendor fleet — they belong to the utility-bills system, not
-        # "vendor data". Kept in the DB for offtaker billing; just not shown in this view.
-        if not ivs and arr.id in _util_array_ids:
+        # Exclude pure UTILITY-METER arrays — a linked utility account AND never any
+        # inverter (created by the GMP/SmartHub generation capture so an offtaker bill
+        # can bind to them) — from the inverter/vendor fleet: they belong to the utility-
+        # bills system, not "vendor data". A real inverter array (incl. one momentarily
+        # at 0 inverters, like flaky Chint) is in _arrays_with_inverters and is NEVER
+        # hidden. Kept in the DB for offtaker billing; just not shown in this view.
+        if arr.id in _util_array_ids and arr.id not in _arrays_with_inverters:
             continue
 
         # Pull telemetry per source site (cached), then build peer-units for THIS
