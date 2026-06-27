@@ -32,7 +32,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .models import Array, DailyGeneration, Inverter, InverterConnection, InverterDaily, Tenant, now
+from .models import Array, DailyGeneration, Inverter, InverterConnection, InverterDaily, Tenant, UtilityAccount, now
 from .inverters import peer_analysis
 
 log = logging.getLogger(__name__)
@@ -921,6 +921,20 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     ).scalars().all()
     array_by_id = {a.id: a for a in arrays}
 
+    # Arrays that carry a UTILITY-METER account (created by the GMP/SmartHub generation
+    # capture so an offtaker bill can bind to them). The vendor-data / inverter fleet is
+    # a SEPARATE system from utility bills: a pure meter array (a UtilityAccount with NO
+    # inverters) must NOT masquerade as a "vendor data" array. We keep it for billing but
+    # exclude it from this inverter view below. An inverter array that ALSO has a linked
+    # bill keeps its inverters and still shows (it's a real vendor array).
+    _util_array_ids = set(db.execute(
+        select(UtilityAccount.array_id).where(
+            UtilityAccount.tenant_id == tenant.id,
+            UtilityAccount.array_id.isnot(None),
+            UtilityAccount.deleted_at.is_(None),
+        )
+    ).scalars().all())
+
     # ── batched InverterConnection map (was N+1) ──────────────────────────────
     # _resolve_connection fired one SELECT per inverter in the loop below, so an
     # array with 20 inverters cost 20 round-trips per fleet-tree build. Load
@@ -969,6 +983,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     borrow_live = _cross_tenant_live_by_serial(db, inverters)
     for arr in arrays:
         ivs = sorted(by_array.get(arr.id, []), key=lambda x: (x.position, x.id))
+
+        # Exclude pure UTILITY-METER arrays (a linked utility account but NO inverters)
+        # from the inverter/vendor fleet — they belong to the utility-bills system, not
+        # "vendor data". Kept in the DB for offtaker billing; just not shown in this view.
+        if not ivs and arr.id in _util_array_ids:
+            continue
 
         # Pull telemetry per source site (cached), then build peer-units for THIS
         # owner group (cohort = the inverters the owner placed under this array).
