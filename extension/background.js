@@ -976,6 +976,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // live-mode (Fronius/SMA) so production refreshes every few minutes and the
           // next silent recapture self-heals a lapsed session with these creds.
           try { if (typeof self.__soAutoLoginResetFails === "function") self.__soAutoLoginResetFails(msg.vendor); } catch (_) {}
+          try { if (typeof self.__soKeepwarmResetFails === "function") self.__soKeepwarmResetFails(msg.vendor); } catch (_) {}
           try { if ((msg.vendor === "fronius" || msg.vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(msg.vendor); } catch (_) {}
         }
         sendResponse({ ok });
@@ -1222,6 +1223,23 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
   const AUTOLOGIN_MAX_TAB_ATTEMPTS = 5;
   const AUTOLOGIN_MAX_VENDOR_FAILS = 3;
+  // vendor -> consecutive keep-warm refreshes that captured NOTHING (dead session we can't
+  // auto-login — e.g. used vendor whose creds were never saved). Persisted (same reason as
+  // the auto-login counter) so keep-warm GIVES UP after a few futile tries instead of opening
+  // a background tab every cycle forever. Reset to 0 on ANY successful capture or a creds save.
+  const KEEPWARM_FAILS_KEY = "so_keepwarm_fails";
+  const KEEPWARM_MAX_FAILS = 4;
+  async function keepwarmFailsGet(vendor) {
+    try { const s = await chrome.storage.local.get(KEEPWARM_FAILS_KEY); return Number((s[KEEPWARM_FAILS_KEY] || {})[vendor]) || 0; } catch (_) { return 0; }
+  }
+  async function keepwarmFailsSet(vendor, n) {
+    try {
+      const s = await chrome.storage.local.get(KEEPWARM_FAILS_KEY);
+      const m = s[KEEPWARM_FAILS_KEY] || {};
+      if (!n || n <= 0) delete m[vendor]; else m[vendor] = n;
+      await chrome.storage.local.set({ [KEEPWARM_FAILS_KEY]: m });
+    } catch (_) {}
+  }
   // Distinct per-vendor phase + jitter so the live alarms don't march in lockstep
   // (avoids same-wake collisions) and a fleet-wide Web Store update doesn't synchronize
   // every browser's first tick onto the single web replica.
@@ -1542,7 +1560,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   async function recapRecordLast(vendor, ok, sites) {
     try {
-      if (ok && vendor) await autoLoginFailsSet(vendor, 0);   // a capture landed → auto-login worked; clear the pause counter
+      if (ok && vendor) { await autoLoginFailsSet(vendor, 0); await keepwarmFailsSet(vendor, 0); }   // a capture landed → clear the auto-login pause + keep-warm give-up counters
       const s = await chrome.storage.local.get(LAST_KEY);
       const m = s[LAST_KEY] || {};
       m[vendor] = { at: new Date().toISOString(), ok, sites: Array.isArray(sites) ? sites.length : 0 };
@@ -1867,6 +1885,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
   self.__soTryAutoLoginOnTab = tryAutoLoginOnTab;
   self.__soAutoLoginResetFails = (v) => { try { if (v) autoLoginFailsSet(v, 0); } catch (_) {} };
+  self.__soKeepwarmResetFails = (v) => { try { if (v) keepwarmFailsSet(v, 0); } catch (_) {} };
   // Register a BACKGROUND SO_OPEN_PORTAL capture tab (the dashboard "sync" chip) so the
   // nav-driven auto-login recognizes it as ours. Called from the OPEN_UTILITY_PORTAL
   // handler. Only fronius/sma (vault vendors with an SSO login origin) — chint is
@@ -1959,45 +1978,68 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     }
     return out;
   }
-  // Tab-less keep-warm PING (Fronius): touch the session to keep its cookie alive; if it's
-  // already dead, proactively revive it via the governed recapture (which auto-logs-in).
-  // Escalates ONLY on a clear auth failure / login redirect — a network/CORS error is
-  // ambiguous (the ping itself may be blocked), so we no-op and let the normal cycle handle
-  // it. The warm path opens NO tab. Safe to ship unproven: worst case it's a silent no-op.
+  // Keep-warm session PROBE (Fronius, cookie-based): cheaply reports whether the portal
+  // session is alive WITHOUT opening a tab — "warm" (2xx), "lapsed" (login redirect / 401 /
+  // 403), or "blocked" (network/CORS — ambiguous). Used ONLY to skip a futile tab for a
+  // vendor we have no saved creds for; it does NOT keep the data fresh (a 200 cookie ≠ fresh
+  // readings, and an AJAX ping does NOT reset a portal's client-side JS idle timer).
   async function keepWarmPing(vendor) {
     const url = KEEPWARM_PING[vendor];
     if (!url) return "no-ping";
-    let status = 0;
     try {
       const r = await fetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now(),
         { credentials: "include", redirect: "manual", cache: "no-store" });
-      status = r.status;   // 0 = opaqueredirect (3xx → login) under redirect:"manual"
+      if (r.status >= 200 && r.status < 300) return "warm";
+      // 0 = opaqueredirect (3xx → login under redirect:"manual"); a visible 3xx, 401 or 403 also = logged out.
+      if (r.status === 0 || (r.status >= 300 && r.status < 400) || r.status === 401 || r.status === 403) return "lapsed";
+      return "warm";   // any other non-error status → treat the session as present
     } catch (e) {
-      rlog("keep-warm:", vendor, "ping blocked/network —", (e && e.message) || e, "(no-op)");
+      rlog("keep-warm:", vendor, "probe blocked/network —", (e && e.message) || e);
       return "blocked";
     }
-    if (status >= 200 && status < 300) { rlog("keep-warm:", vendor, "session WARM (" + status + ")"); return "warm"; }
-    if (status === 0 || status === 401 || status === 403) {
-      rlog("keep-warm:", vendor, "session LAPSED (" + status + ") → reviving via governed recapture/auto-login");
-      try { await recaptureNow(vendor); } catch (_) {}
-      return "revived";
-    }
-    rlog("keep-warm:", vendor, "ping status", status, "(no-op)");
-    return "other";
   }
-  // One keep-warm tick: ping Fronius (tab-less); touch SMA via a governed recapture only
-  // when its live-mode isn't ALREADY keeping it warm. Skips a vendor whose auto-login is
-  // paused (known-bad creds — don't hammer it).
+  // One keep-warm tick. For every USED vendor whose 6-min live-mode ISN'T already keeping it
+  // fresh, REFRESH THE DATA with a real recapture when our last successful capture has gone
+  // stale (> KEEPWARM_REFRESH_MIN). This is the v1.9.75 fix for "cookie warm but data frozen":
+  // the v1.9.74 tab-less ping confirmed the session yet never advanced last_seen_at/power, and
+  // an AJAX ping does NOT reset a portal's CLIENT-SIDE JS idle timer (Solar.web has one) — so
+  // Fronius drifted hours stale behind a "warm" cookie. A real recapture opens the portal in a
+  // background tab: that full page-load (a) refreshes the readings, (b) resets the JS idle
+  // timer, and (c) auto-logs-in if the session lapsed. Governed by the single-flight lock, so
+  // it can't pile up tabs. The cheap probe is kept only to skip a FUTILE tab when a vendor we
+  // have no creds for is logged out (a tab would just land on the login wall — nudge instead).
+  const KEEPWARM_REFRESH_MIN = 9;   // refresh a live-mode-off vendor at most ~once per keep-warm cycle
   async function runKeepWarmTick() {
     if (!(await keepWarmEnabled())) return;
     if (_liveBusy) { rlog("keep-warm: engine busy — skip"); return; }
     const { tenantKey } = await recapSettings();
     if (!tenantKey) return;
+    const last = (await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {};
     for (const v of await usedInverterVendors()) {
-      if ((await autoLoginFailsGet(v)) >= AUTOLOGIN_MAX_VENDOR_FAILS) continue;
-      if (KEEPWARM_PING[v]) { await keepWarmPing(v); continue; }
-      const liveOn = !!((await liveGet(v)) || {}).on;
-      if (!liveOn) { try { await recaptureNow(v); } catch (_) {} }   // SMA: only touch if live-mode isn't
+      if ((await autoLoginFailsGet(v)) >= AUTOLOGIN_MAX_VENDOR_FAILS) continue;   // auto-login paused: failing creds
+      if ((await keepwarmFailsGet(v)) >= KEEPWARM_MAX_FAILS) continue;            // gave up: dead session we can't refresh (a success or creds-save re-enables)
+      if (!!((await liveGet(v)) || {}).on) continue;                              // live-mode already refreshing
+      const rec = last[v];
+      const lastAt = (rec && rec.ok && rec.at) ? Date.parse(rec.at) : 0;
+      const staleMin = lastAt ? (Date.now() - lastAt) / 60000 : Infinity;
+      if (staleMin < KEEPWARM_REFRESH_MIN) continue;                              // data still fresh
+      // Skip a futile tab: if we have NO creds to auto-login this vendor and a cheap probe
+      // says the session is dead, nudge instead (a tab would only hit the login wall) and
+      // count it toward give-up so a perpetually-dead no-creds vendor stops churning tabs.
+      let hasCreds = false;
+      try { hasCreds = (typeof SoVault !== "undefined") && await SoVault.has(v); } catch (_) {}
+      if (KEEPWARM_PING[v] && !hasCreds && (await keepWarmPing(v)) === "lapsed") {
+        rlog("keep-warm:", v, "session lapsed + no saved creds → nudge (skip futile tab)");
+        await keepwarmFailsSet(v, (await keepwarmFailsGet(v)) + 1);
+        await recapMaybeNudge(v);
+        continue;
+      }
+      rlog("keep-warm:", v, "data", (staleMin === Infinity ? "never synced" : Math.round(staleMin) + "m stale"), "→ recapturing (refresh + reset idle timer)");
+      let res = null;
+      try { res = await recaptureNow(v); } catch (_) {}
+      // captured → recapRecordLast(ok) already reset keepwarmFails; ran-but-captured-nothing
+      // (a dead session we couldn't revive) climbs toward give-up; ok:false (busy) is transient.
+      if (res && res.ok && res.captured === false) await keepwarmFailsSet(v, (await keepwarmFailsGet(v)) + 1);
     }
   }
   self.__soKeepWarm = runKeepWarmTick;
