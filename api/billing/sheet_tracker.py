@@ -69,18 +69,48 @@ _FIELD_KEYWORDS: list[tuple[str, list[tuple[str, float]]]] = [
                     ("generation", 3.0), ("generated", 3.0), ("production", 3.0),
                     ("produced", 3.0), ("solar", 1.5), ("output", 2.0),
                     ("kwh", 1.5), ("kw h", 1.5), ("energy", 1.2)]),
-    # credit rate ($/kWh) — unit-bearing tokens are unambiguous and weighted high
-    ("rate", [("$/kwh", 4.0), ("per kwh", 4.0), ("/kwh", 4.0),
+    # credit rate ($/kWh) — unit-bearing tokens are unambiguous and weighted high.
+    # A COMBINED rate (tariff+adder) is the effective per-kWh credit, so it out-ranks
+    # the bare "tariff" column (which omits the adder) when a sheet splits them.
+    ("rate", [("tariff+adder", 5.0), ("rate+adder", 5.0), ("tariff + adder", 5.0),
+              ("$/kwh", 4.0), ("per kwh", 4.0), ("/kwh", 4.0),
               ("credit rate", 4.0), ("net rate", 3.5), ("tariff", 3.0),
               ("rate", 2.0), ("price", 1.5)]),
-    # amount / total $
+    # amount / total $ — "bill" is the offtaker's actual paid amount on many sheets
     ("amount", [("amount due", 3.5), ("total due", 3.5), ("invoice total", 3.5),
-                ("amount", 2.5), ("total credit", 2.5), ("total", 1.8),
-                ("balance", 2.0), ("owed", 2.5), ("due", 1.5), ("credit", 1.2)]),
+                ("bill amount", 3.0), ("amount", 2.5), ("total credit", 2.5),
+                ("bill", 2.2), ("total", 1.8), ("balance", 2.0), ("owed", 2.5),
+                ("due", 1.5), ("credit", 1.2)]),
 ]
+
+# A kWh column that is a CUMULATIVE / running-total (e.g. "Cumm KwH", "YTD kWh") is
+# NOT the monthly generation we append to — demote it so a real per-period column wins.
+_CUM_WORDS = ("cumm", "cumul", "ytd", "to date", "running", "lifetime", "year to date")
+
+# Common, non-distinctive words to drop from an offtaker's name before using the rest
+# as detection hints (so we match on "Fairlee", not "Town"/"of"/"Solar").
+_NAME_STOP = {"town", "city", "village", "the", "and", "llc", "inc", "co", "company",
+              "solar", "energy", "account", "customer", "school", "district",
+              "department", "association", "homeowners"}
 
 def _norm(v: Any) -> str:
     return re.sub(r"\s+", " ", str(v or "").strip().lower())
+
+
+def _is_cumulative(s: str) -> bool:
+    s = _norm(s)
+    return any(w in s for w in _CUM_WORDS)
+
+
+def name_hint_tokens(name: Optional[str]) -> list[str]:
+    """Distinctive lowercase tokens from an offtaker's name, used to recognize THEIR
+    own column in a multi-column sheet — e.g. 'Town of Fairlee' → ['fairlee'], which
+    lets the detector pick 'kWh Fairlee' (their share) over a cumulative or whole-array
+    kWh column. Drops short + non-distinctive words so we don't match on 'Town'/'Solar'."""
+    if not name:
+        return []
+    toks = re.split(r"[^a-z0-9]+", _norm(name))
+    return [t for t in toks if len(t) >= 4 and t not in _NAME_STOP]
 
 
 def _score_cell(cell: str) -> dict[str, tuple[float, str]]:
@@ -110,7 +140,8 @@ def _score_cell(cell: str) -> dict[str, tuple[float, str]]:
     return out
 
 
-def detect_structure(file_bytes: bytes, filename: str = "") -> dict:
+def detect_structure(file_bytes: bytes, filename: str = "",
+                     hint_tokens: Optional[list[str]] = None) -> dict:
     """The detector. Open the uploaded XLSX/CSV, find the header row, and map
     each logical field to a column index. Returns a JSON-serializable mapping:
 
@@ -134,7 +165,7 @@ def detect_structure(file_bytes: bytes, filename: str = "") -> dict:
             grid, sheet = _read_csv_grid(file_bytes), None
             kind = "csv"
         else:
-            grid, sheet = _read_xlsx_grid(file_bytes)
+            grid, sheet = _read_xlsx_grid(file_bytes, hint_tokens)
             kind = "xlsx"
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "warnings": [f"Could not open the file: {e}"]}
@@ -142,7 +173,7 @@ def detect_structure(file_bytes: bytes, filename: str = "") -> dict:
     if not grid:
         return {"ok": False, "warnings": ["The file appears to be empty."]}
 
-    header_row, columns, headers = _find_header(grid)
+    header_row, columns, headers = _find_header(grid, hint_tokens)
     if header_row is None or "generation" not in columns:
         return {
             "ok": False,
@@ -178,10 +209,17 @@ def detect_structure(file_bytes: bytes, filename: str = "") -> dict:
     }
 
 
-def _find_header(grid: list[list]) -> tuple[Optional[int], dict, list]:
+def _find_header(grid: list[list],
+                 hint_tokens: Optional[list[str]] = None) -> tuple[Optional[int], dict, list]:
     """Scan the first ~15 rows for the row that best looks like a header (the
     most fields matched, weighted by confidence). Returns
-    (header_row_idx, {field: col_idx}, raw_headers)."""
+    (header_row_idx, {field: col_idx}, raw_headers).
+
+    Two refinements on the generation column (the most ambiguous on real sheets):
+      * a CUMULATIVE/running-total kWh column (this cell or the sub-header above it
+        says 'cumm'/'ytd'/…) is demoted — it isn't the monthly figure we append.
+      * a column whose header bears the OFFTAKER'S name (hint_tokens, e.g. 'Fairlee')
+        is boosted — that's their generation share, the figure their invoice uses."""
     best_row = None
     best_cols: dict[str, int] = {}
     best_headers: list = []
@@ -191,7 +229,16 @@ def _find_header(grid: list[list]) -> tuple[Optional[int], dict, list]:
         # field -> (best_col_idx, score)
         claims: dict[str, tuple[int, float]] = {}
         for cidx, cell in enumerate(row):
-            scores = _score_cell(_norm(cell))
+            cell_n = _norm(cell)
+            scores = _score_cell(cell_n)
+            if "generation" in scores:
+                sc, kw = scores["generation"]
+                above = _norm(grid[ridx - 1][cidx]) if ridx > 0 and cidx < len(grid[ridx - 1]) else ""
+                if _is_cumulative(cell_n) or _is_cumulative(above):
+                    sc *= 0.05                       # cumulative/running-total → not the monthly column
+                elif hint_tokens and any(t and t in cell_n for t in hint_tokens):
+                    sc += 50.0                       # bears the offtaker's name → it IS their share
+                scores["generation"] = (sc, kw)
             for field, (sc, _kw) in scores.items():
                 if field not in claims or sc > claims[field][1]:
                     claims[field] = (cidx, sc)
@@ -443,7 +490,8 @@ def _read_csv_grid(b: bytes) -> list[list]:
     return rows
 
 
-def _read_xlsx_grid(b: bytes) -> tuple[list[list], Optional[str]]:
+def _read_xlsx_grid(b: bytes,
+                    hint_tokens: Optional[list[str]] = None) -> tuple[list[list], Optional[str]]:
     """Return (grid, sheet_name) for the sheet most likely to hold the ledger:
     the one whose first ~15 rows best match our header heuristic, else active."""
     from openpyxl import load_workbook
@@ -457,7 +505,7 @@ def _read_xlsx_grid(b: bytes) -> tuple[list[list], Optional[str]]:
             grid.append(list(row))
             if i > 300:
                 break
-        _hr, cols, _h = _find_header(grid)
+        _hr, cols, _h = _find_header(grid, hint_tokens)
         score = len(cols) + (5 if "generation" in cols else 0)
         if score > best_score:
             best_score = score
@@ -467,14 +515,18 @@ def _read_xlsx_grid(b: bytes) -> tuple[list[list], Optional[str]]:
     return best_grid, best_name
 
 
-def ingest_upload(file_bytes: bytes, filename: str) -> dict:
+def ingest_upload(file_bytes: bytes, filename: str,
+                  hint_tokens: Optional[list[str]] = None) -> dict:
     """Process an uploaded BYO sheet at upload time: detect structure, and
     normalize the stored bytes to XLSX (so append_period_row always has a real
     workbook to write into — even when the operator uploaded a CSV). Returns:
 
         {"ok": bool, "mapping": {..}, "workbook": <xlsx bytes>, "warnings": [..]}
+
+    hint_tokens (optional): distinctive tokens from the offtaker's name (see
+    name_hint_tokens) so a column bearing their name is recognized as their share.
     """
-    mapping = detect_structure(file_bytes, filename)
+    mapping = detect_structure(file_bytes, filename, hint_tokens)
     if not mapping.get("ok"):
         return {"ok": False, "mapping": mapping,
                 "warnings": mapping.get("warnings", [])}

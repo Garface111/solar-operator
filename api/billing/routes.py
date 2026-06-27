@@ -1124,7 +1124,7 @@ async def tracker_upload(sub_id: int,
     """Upload the offtaker's existing generation spreadsheet (XLSX or CSV). We
     detect its structure ('our magic'), normalize to xlsx, and store it as the
     running ledger we keep current. Returns the detected mapping for review."""
-    from .sheet_tracker import tracker_enabled, ingest_upload
+    from .sheet_tracker import tracker_enabled, ingest_upload, name_hint_tokens
     t = tenant_from_session(authorization)
     require_not_demo(t)
     if not tracker_enabled():
@@ -1139,12 +1139,15 @@ async def tracker_upload(sub_id: int,
     is_csv = name.lower().endswith(".csv") or (not is_x)
     if not is_x and not is_csv:
         raise HTTPException(415, "Upload an .xlsx or .csv generation sheet.")
-    res = ingest_upload(raw, name)
-    if not res.get("ok"):
-        warn = "; ".join(res.get("warnings") or []) or "Couldn't read that sheet."
-        raise HTTPException(422, warn)
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
+        # Hint the detector with the offtaker's own name so a column like "kWh Fairlee"
+        # is recognized as THEIR generation share (not a whole-array / cumulative kWh col).
+        hints = name_hint_tokens(getattr(sub, "customer_name", None))
+        res = ingest_upload(raw, name, hints)
+        if not res.get("ok"):
+            warn = "; ".join(res.get("warnings") or []) or "Couldn't read that sheet."
+            raise HTTPException(422, warn)
         sub.tracker_workbook = res["workbook"]
         sub.tracker_filename = name
         sub.tracker_map = res["mapping"]
