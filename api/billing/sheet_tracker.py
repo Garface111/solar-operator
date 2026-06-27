@@ -113,6 +113,29 @@ def name_hint_tokens(name: Optional[str]) -> list[str]:
     return [t for t in toks if len(t) >= 4 and t not in _NAME_STOP]
 
 
+def _open_grid(file_bytes: bytes, filename: str = "",
+               hint_tokens: Optional[list[str]] = None) -> tuple[list[list], Optional[str], str]:
+    """Open the upload into (grid, sheet_name, kind) the detector works on."""
+    is_csv = filename.lower().endswith(".csv") or _looks_like_csv(file_bytes)
+    if is_csv:
+        return _read_csv_grid(file_bytes), None, "csv"
+    grid, sheet = _read_xlsx_grid(file_bytes, hint_tokens)
+    return grid, sheet, "xlsx"
+
+
+def _period_tail(grid: list[list], header_row: int, columns: dict) -> tuple[int, Optional[str]]:
+    """(data_rows, last_period) below a header — shared by the heuristic + the AI path."""
+    data = [r for r in grid[header_row + 1:] if any(_norm(c) for c in r)]
+    last_period = None
+    pc = (columns or {}).get("period")
+    if data and isinstance(pc, int):
+        for r in reversed(data):
+            if pc < len(r) and _norm(r[pc]):
+                last_period = str(r[pc]).strip()
+                break
+    return len(data), last_period
+
+
 def _score_cell(cell: str) -> dict[str, tuple[float, str]]:
     """For one header cell, return {field: (score, matched_keyword)} for every
     field whose keyword appears in the cell. Higher score = more confident.
@@ -159,14 +182,8 @@ def detect_structure(file_bytes: bytes, filename: str = "",
 
     Pure + offline. Never raises — returns ok=False with a warning instead.
     """
-    is_csv = filename.lower().endswith(".csv") or _looks_like_csv(file_bytes)
     try:
-        if is_csv:
-            grid, sheet = _read_csv_grid(file_bytes), None
-            kind = "csv"
-        else:
-            grid, sheet = _read_xlsx_grid(file_bytes, hint_tokens)
-            kind = "xlsx"
+        grid, sheet, kind = _open_grid(file_bytes, filename, hint_tokens)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "warnings": [f"Could not open the file: {e}"]}
 
@@ -186,16 +203,7 @@ def detect_structure(file_bytes: bytes, filename: str = "",
             ],
         }
 
-    data = grid[header_row + 1:]
-    data = [r for r in data if any(_norm(c) for c in r)]
-    last_period = None
-    if data and "period" in columns:
-        pc = columns["period"]
-        for r in reversed(data):
-            if pc < len(r) and _norm(r[pc]):
-                last_period = str(r[pc]).strip()
-                break
-
+    data_rows, last_period = _period_tail(grid, header_row, columns)
     return {
         "ok": True,
         "kind": kind,
@@ -203,8 +211,9 @@ def detect_structure(file_bytes: bytes, filename: str = "",
         "header_row": header_row,
         "columns": columns,
         "headers": headers,
-        "data_rows": len(data),
+        "data_rows": data_rows,
         "last_period": last_period,
+        "via": "heuristic",
         "warnings": [],
     }
 
@@ -516,17 +525,44 @@ def _read_xlsx_grid(b: bytes,
 
 
 def ingest_upload(file_bytes: bytes, filename: str,
-                  hint_tokens: Optional[list[str]] = None) -> dict:
+                  offtaker_name: Optional[str] = None) -> dict:
     """Process an uploaded BYO sheet at upload time: detect structure, and
     normalize the stored bytes to XLSX (so append_period_row always has a real
     workbook to write into — even when the operator uploaded a CSV). Returns:
 
         {"ok": bool, "mapping": {..}, "workbook": <xlsx bytes>, "warnings": [..]}
 
-    hint_tokens (optional): distinctive tokens from the offtaker's name (see
-    name_hint_tokens) so a column bearing their name is recognized as their share.
+    offtaker_name (optional): the customer this sheet bills. Used two ways — the
+    deterministic heuristic boosts a column bearing their name (name_hint_tokens),
+    and, when an ANTHROPIC_API_KEY is configured, the AI mapper reads their name to
+    pick their share column on an arbitrary layout. Detection is deterministic +
+    offline by default; the AI is a best-effort upgrade that NEVER blocks upload.
     """
+    hint_tokens = name_hint_tokens(offtaker_name)
     mapping = detect_structure(file_bytes, filename, hint_tokens)
+
+    # ── AI upgrade ────────────────────────────────────────────────────────────
+    # When a key is present, let the model map columns on this sheet's real layout
+    # (handles any format, multiple kWh columns, buried headers). Best-effort: any
+    # failure leaves the heuristic mapping in place. Result is still surfaced to the
+    # operator (mapping chips + remap endpoint), so a wrong guess stays correctable.
+    try:
+        from .sheet_tracker_ai import ai_available, ai_map_columns
+        if ai_available():
+            grid, sheet, kind = _open_grid(file_bytes, filename, hint_tokens)
+            ai = ai_map_columns(grid, sheet, offtaker_name)
+            if ai and grid and 0 <= ai["header_row"] < len(grid):
+                hr, cols = ai["header_row"], ai["columns"]
+                headers = [str(c).strip() if c is not None else "" for c in grid[hr]]
+                data_rows, last_period = _period_tail(grid, hr, cols)
+                mapping = {"ok": True, "kind": kind, "sheet": sheet, "header_row": hr,
+                           "columns": cols, "headers": headers, "data_rows": data_rows,
+                           "last_period": last_period, "via": "ai",
+                           "ai_confidence": ai.get("confidence"),
+                           "ai_reasoning": ai.get("reasoning"), "warnings": []}
+    except Exception:  # noqa: BLE001 — the AI path can NEVER break an upload
+        pass
+
     if not mapping.get("ok"):
         return {"ok": False, "mapping": mapping,
                 "warnings": mapping.get("warnings", [])}
