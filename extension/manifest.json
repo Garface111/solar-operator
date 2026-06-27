@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.9.73",
+  "version": "1.9.74",
   "description": "Captures GMP, VEC & WEC bills + solar production for NEPOOL/Array Operator, and links SolarEdge, Fronius, SMA & Chint inverters.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",

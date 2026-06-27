@@ -1398,13 +1398,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // the vendor-name button to open the portal for a real refresh.
     if (vendor === "chint") return { ok: false, error: "chint-foreground-only" };
     if (_liveBusy) return { ok: false, error: "busy" };
-    const { tenantKey } = await recapSettings();
-    if (!tenantKey) return { ok: false, error: "not-paired" };
-    const st = await recapGetState();
-    if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) return { ok: false, error: "busy" };
+    // Claim the single-flight slot SYNCHRONOUSLY — before any await — so two sensors
+    // firing in the same SW wake (e.g. dashboard-open + network-restored) can't both pass
+    // the _liveBusy check and open two tabs (TOCTOU). The finally clears it on every path.
     _liveBusy = true;
-    const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
     try {
+      const { tenantKey } = await recapSettings();
+      if (!tenantKey) return { ok: false, error: "not-paired" };
+      const st = await recapGetState();
+      if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) return { ok: false, error: "busy" };
+      const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
       await recaptureVendor(vendor, { budgetMs: 150 * 1000 });   // headroom for a full SSO re-login + redirect + sequential recapture on a lapsed session
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
       return { ok: true, captured: !!(after.ok && after.at && after.at !== before.at) };
@@ -1910,6 +1913,146 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // Expose for the LOGIN_STATE_DETECTED handler (outside this IIFE).
   self.__soRecapTryAutoLogin = recapTryAutoLogin;
 
+  // ==========================================================================
+  // KEEP-WARM + EVENT SENSORS (v1.9.74) — "always trying to be connected"
+  // --------------------------------------------------------------------------
+  // Extra reconnect layers stacked ON TOP of live-mode/auto-login, ALL funneled
+  // through the SAME governed engine (recaptureNow's single-flight), so adding
+  // them can never produce a pile of tabs. Three sensors:
+  //   • keep-warm ping  — a tab-less authenticated touch (Fronius, cookie-based)
+  //     that exercises the session so it never lapses, and revives it the instant
+  //     it does. SMA's session check needs a page-held Bearer token, so it can't be
+  //     pinged tab-lessly — SMA stays warm via its 6-min live capture + the two
+  //     event sensors below.
+  //   • network-restored — when connectivity returns after a gap, refresh used vendors.
+  //   • dashboard-open  — when the owner opens/focuses the Array Operator dashboard,
+  //     refresh so they see live data the moment they look.
+  // ==========================================================================
+  const KEEPWARM_ALARM = "keep-warm";
+  const KEEPWARM_PERIOD_MIN = 11;                 // between the 6-min live ticks and the hourly sweep
+  const KEEPWARM_OFF_KEY = "so_keepwarm_off";     // global kill switch: set true to disable all of this
+  const WAS_OFFLINE_KEY = "so_was_offline";
+  const _DASH_DEBOUNCE_MS = 90 * 1000;
+  let _lastDashKickAt = 0;
+  // Cheap, COOKIE-authenticated session-check endpoint (the same one the content script
+  // uses for isSignedIn). A tab-less extension-SW fetch with credentials rides the owner's
+  // portal cookie via host_permissions. Fronius only (SMA's check is Bearer-token gated).
+  const KEEPWARM_PING = { fronius: "https://www.solarweb.com/Messages/GetUnreadMessageCountForUser" };
+
+  async function keepWarmEnabled() {
+    try { const s = await chrome.storage.local.get(KEEPWARM_OFF_KEY); return s[KEEPWARM_OFF_KEY] !== true; } catch (_) { return true; }
+  }
+  function _isAppUrl(url) {
+    try { return /(^|\.)(arrayoperator\.com|nepooloperator\.com|solaroperator\.org)$/i.test(new URL(url).hostname); } catch (_) { return false; }
+  }
+  // Vendors the owner actually USES (a prior successful capture OR saved auto-login creds),
+  // not opted out — the set every keep-warm/refresh sensor acts on.
+  async function usedInverterVendors() {
+    const known = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY]) || {};
+    const out = [];
+    for (const v of ["fronius", "sma"]) {
+      let used = !!(known[v] && known[v].ok);
+      if (!used && typeof SoVault !== "undefined") { try { used = await SoVault.has(v); } catch (_) {} }
+      if (!used) continue;
+      if (typeof SoVault !== "undefined") { try { if (!(await SoVault.isEnabled(v))) continue; } catch (_) {} }
+      out.push(v);
+    }
+    return out;
+  }
+  // Tab-less keep-warm PING (Fronius): touch the session to keep its cookie alive; if it's
+  // already dead, proactively revive it via the governed recapture (which auto-logs-in).
+  // Escalates ONLY on a clear auth failure / login redirect — a network/CORS error is
+  // ambiguous (the ping itself may be blocked), so we no-op and let the normal cycle handle
+  // it. The warm path opens NO tab. Safe to ship unproven: worst case it's a silent no-op.
+  async function keepWarmPing(vendor) {
+    const url = KEEPWARM_PING[vendor];
+    if (!url) return "no-ping";
+    let status = 0;
+    try {
+      const r = await fetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now(),
+        { credentials: "include", redirect: "manual", cache: "no-store" });
+      status = r.status;   // 0 = opaqueredirect (3xx → login) under redirect:"manual"
+    } catch (e) {
+      rlog("keep-warm:", vendor, "ping blocked/network —", (e && e.message) || e, "(no-op)");
+      return "blocked";
+    }
+    if (status >= 200 && status < 300) { rlog("keep-warm:", vendor, "session WARM (" + status + ")"); return "warm"; }
+    if (status === 0 || status === 401 || status === 403) {
+      rlog("keep-warm:", vendor, "session LAPSED (" + status + ") → reviving via governed recapture/auto-login");
+      try { await recaptureNow(vendor); } catch (_) {}
+      return "revived";
+    }
+    rlog("keep-warm:", vendor, "ping status", status, "(no-op)");
+    return "other";
+  }
+  // One keep-warm tick: ping Fronius (tab-less); touch SMA via a governed recapture only
+  // when its live-mode isn't ALREADY keeping it warm. Skips a vendor whose auto-login is
+  // paused (known-bad creds — don't hammer it).
+  async function runKeepWarmTick() {
+    if (!(await keepWarmEnabled())) return;
+    if (_liveBusy) { rlog("keep-warm: engine busy — skip"); return; }
+    const { tenantKey } = await recapSettings();
+    if (!tenantKey) return;
+    for (const v of await usedInverterVendors()) {
+      if ((await autoLoginFailsGet(v)) >= AUTOLOGIN_MAX_VENDOR_FAILS) continue;
+      if (KEEPWARM_PING[v]) { await keepWarmPing(v); continue; }
+      const liveOn = !!((await liveGet(v)) || {}).on;
+      if (!liveOn) { try { await recaptureNow(v); } catch (_) {} }   // SMA: only touch if live-mode isn't
+    }
+  }
+  self.__soKeepWarm = runKeepWarmTick;
+  // Refresh every used vendor NOW through the governed engine (declines per-vendor if busy).
+  async function kickRefreshUsedVendors(reason) {
+    if (!(await keepWarmEnabled())) return;
+    const { tenantKey } = await recapSettings();
+    if (!tenantKey) return;
+    const vendors = await usedInverterVendors();
+    if (!vendors.length) return;
+    rlog("refresh used vendors (" + reason + "):", vendors.join(", "));
+    for (const v of vendors) {
+      if ((await autoLoginFailsGet(v)) >= AUTOLOGIN_MAX_VENDOR_FAILS) continue;
+      try { await recaptureNow(v); } catch (_) {}
+    }
+  }
+  self.__soRefreshUsed = () => kickRefreshUsedVendors("manual");
+  // NETWORK-RESTORED: reconcile connectivity. Sets a persisted wasOffline flag while down,
+  // and on the false→true transition fires a governed refresh (data may have gone stale
+  // during the outage). Driven by the SW online/offline events while alive AND re-checked on
+  // the 1-min reaper / keep-warm alarms to catch transitions that happened while it slept.
+  async function checkConnectivityRestored() {
+    let online = true;
+    try { online = (typeof navigator !== "undefined") ? navigator.onLine !== false : true; } catch (_) { online = true; }
+    const wasOffline = (await chrome.storage.local.get(WAS_OFFLINE_KEY))[WAS_OFFLINE_KEY] === true;
+    if (!online) { if (!wasOffline) { try { await chrome.storage.local.set({ [WAS_OFFLINE_KEY]: true }); } catch (_) {} } return; }
+    if (wasOffline) {
+      try { await chrome.storage.local.set({ [WAS_OFFLINE_KEY]: false }); } catch (_) {}
+      rlog("connectivity RESTORED → refreshing used vendors");
+      await kickRefreshUsedVendors("network-restored");
+    }
+  }
+  try {
+    self.addEventListener("offline", () => { try { chrome.storage.local.set({ [WAS_OFFLINE_KEY]: true }); } catch (_) {} });
+    self.addEventListener("online", () => { checkConnectivityRestored().catch(() => {}); });
+  } catch (_) {}
+  // DASHBOARD-OPEN: when an Array Operator / NEPOOL tab becomes active or finishes loading,
+  // refresh used vendors (debounced) so the owner sees live data the instant they look.
+  async function onDashboardActive(url) {
+    if (!_isAppUrl(url)) return;
+    if (Date.now() - _lastDashKickAt < _DASH_DEBOUNCE_MS) return;
+    _lastDashKickAt = Date.now();
+    rlog("dashboard active → refreshing used vendors");
+    await kickRefreshUsedVendors("dashboard-open");
+  }
+  chrome.tabs.onActivated.addListener(({ tabId }) => {
+    try { chrome.tabs.get(tabId, (t) => { if (!chrome.runtime.lastError && t && t.url) onDashboardActive(t.url).catch(() => {}); }); } catch (_) {}
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!changeInfo || changeInfo.status !== "complete") return;
+    const url = (tab && tab.url) || changeInfo.url;
+    if (url && _isAppUrl(url)) onDashboardActive(url).catch(() => {});
+  });
+  chrome.alarms.create(KEEPWARM_ALARM, { periodInMinutes: KEEPWARM_PERIOD_MIN, delayInMinutes: 3 });
+
   // Run the vendors the owner actually has, one at a time (a single background tab
   // at a time keeps it invisible and cheap). After the first cycle we only refresh
   // vendors that have captured before — never open portals the owner doesn't use.
@@ -1976,10 +2119,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm && alarm.name === "recap-reaper") {
       reapStaleRecapTabs(TAB_BUDGET_MS).catch(() => {});
+      checkConnectivityRestored().catch(() => {});   // fast (~1 min) network-restored detection
       return;
     }
     if (alarm && alarm.name === RECAP_ALARM) {
       runRecaptureCycle().catch((e) => rlog("cycle error", e && e.message || e));
+    } else if (alarm && alarm.name === KEEPWARM_ALARM) {
+      checkConnectivityRestored().catch(() => {});
+      runKeepWarmTick().catch((e) => rlog("keep-warm error", e && e.message || e));
     } else if (alarm && alarm.name === CHINT_LIVE_ALARM) {
       runChintLiveTick().catch((e) => rlog("chint-live error", e && e.message || e));
     } else if (alarm && alarm.name === "live-fronius") {
