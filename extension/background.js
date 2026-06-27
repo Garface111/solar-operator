@@ -1264,28 +1264,38 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   const LIVE_STAGGER = { fronius: 1, sma: 2, chint: 3 };
   function _liveDelayMin(vendor) { return (LIVE_STAGGER[vendor] || 1) + Math.random() * 3; }
 
-  // ── CHINT live mode (v1.9.53) ────────────────────────────────────────────────
-  // A fast 4-min cadence layered on THIS background-tab machinery so Chint live
-  // power tracks the portal instead of freezing at the last manual capture. Opt-in:
-  // armed only by an explicit AO "Connect Chint" click. Reuses recaptureVendor /
-  // recapPost / recapFinish + the so_recap_state single-flight, so it can never race
-  // the hourly cycle. Degrades to an honest one/day reconnect nudge after repeated
-  // dead cycles (lapsed session) — never silent staleness.
+  // ── CHINT live mode (v1.9.53; background loop RE-ENABLED v1.9.81) ─────────────
+  // A periodic refresh so Chint power/per-inverter data tracks the portal instead of
+  // freezing at the last manual capture. Each tick runs the v1.9.77 programmatic site
+  // walk in a MINIMIZED, UNFOCUSED popup (recaptureVendor newWindow:true) — proven
+  // hands-off, no focus steal, no tab in the owner's strip. Armed by an AO "Connect
+  // Chint" click / the portal-open hook / the live toggle, AND auto-armed for owners
+  // who already use Chint (autoArmKnownLive + the v1.9.81 one-time migration), surviving
+  // restarts/updates. Reuses recaptureVendor / recapPost / recapFinish + the
+  // so_recap_state single-flight + _liveBusy, so it can never race the hourly cycle or
+  // pile up popups. Degrades to an honest reconnect nudge after CHINT_LIVE_MAX_FAILS dead
+  // cycles (lapsed session — Chint has no silent re-login) — never silent staleness.
+  // (Disabled v1.9.63→v1.9.80 because pre-walk Chint needed a manual site click; obsolete.)
   const CHINT_LIVE_ALARM = "chint-live";
-  const CHINT_LIVE_PERIOD_MIN = 4;          // ~3.75x margin inside the backend 15-min fresh window
+  const CHINT_LIVE_PERIOD_MIN = 10;         // background walk-refresh cadence; ~1.5x margin inside the backend's 15-min fresh window. Calmer than the old 4-min so the minimized popup blinks ~6x/hr, not 15x.
   const CHINT_LIVE_KEY = "so_chint_live";   // { on, armedAt, lastOkAt, fails }
-  const CHINT_LIVE_MAX_FAILS = 6;           // ~24 min of dead cycles → disable + nudge
+  const CHINT_LIVE_MAX_FAILS = 3;           // ~30 min of dead cycles (lapsed session — Chint has no silent re-login) → disable + nudge, so a dead session stops churning popups
   async function chintLiveGet() { const s = await chrome.storage.local.get(CHINT_LIVE_KEY); return s[CHINT_LIVE_KEY] || null; }
   async function chintLiveSet(v) { try { await chrome.storage.local.set({ [CHINT_LIVE_KEY]: v }); } catch (_) {} }
   async function armChintLive() {
-    // DISABLED (v1.9.63): Chint can't be captured silently — its per-inverter data only
-    // loads after the owner CLICKS into a site, so a background tab never gets it. The
-    // 4-min loop just spawned failing tabs that orphaned (MV3 kills the close-watchdog),
-    // piling up (Ford: "came back to a bunch of chint tabs"). Force OFF + clear any alarm
-    // a prior version armed. Chint refreshes when the owner opens the portal.
-    await chintLiveSet({ on: false, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
-    try { chrome.alarms.clear(CHINT_LIVE_ALARM, () => void chrome.runtime.lastError); } catch (_) {}
-    rlog("chint live-mode is DISABLED — cannot capture silently (needs a site click)");
+    // RE-ENABLED (v1.9.81): the v1.9.63 "Chint can't be captured silently — needs a site
+    // click" premise is OBSOLETE. v1.9.77's programmatic per-site route walk fires
+    // busTypeDevices with NO click, and v1.9.80 runs that walk in a MINIMIZED, UNFOCUSED
+    // popup window that can't steal focus or add a tab to the owner's window (Ford verified
+    // Sync-all Chint is fully hands-off). So Chint now gets the same background keep-fresh
+    // loop as Fronius/SMA — runChintLiveTick → recaptureVendor("chint",{newWindow:true}).
+    // Guards against the old tab-pileup the v1.9.63 note warned of: the _liveBusy
+    // single-flight serializes all background surfaces, the 1-min recap-reaper closes any
+    // orphan, recapFinish removes the popup the instant capture lands, and CHINT_LIVE_MAX_FAILS
+    // disarms+nudges a dead session instead of churning popups forever.
+    await chintLiveSet({ on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
+    try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: _liveDelayMin("chint") }); } catch (_) {}
+    rlog("chint live-mode ARMED — background refresh every", CHINT_LIVE_PERIOD_MIN, "min via a minimized-popup site walk");
   }
   async function disarmChintLive(reason) {
     const v = (await chintLiveGet()) || {};
@@ -1309,7 +1319,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const st = await recapGetState();
       if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("chint-live: recap busy — skip tick"); return; }
       const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
-      await recaptureVendor("chint", { budgetMs: 60 * 1000 });   // background tab (same path as the hourly Fronius/SMA refresh) -- no separate window, no taskbar blip; self-closes on capture (~18s) or the 60s watchdog
+      // MINIMIZED, UNFOCUSED popup window (newWindow) — NOT a background tab. Chint's SPA
+      // focuses its OWN tab on the walk's route changes, so a background tab gets pulled to
+      // the foreground ("took me to the Chint tab"); a minimized popup can't be. recapFinish
+      // removes the whole window the instant the walk's capture lands (or the watchdog fires).
+      // 120s budget for the multi-site walk headroom (same as Sync-all's Chint surface).
+      await recaptureVendor("chint", { newWindow: true, budgetMs: 120 * 1000 });
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
       const ok = !!(after.ok && after.at && after.at !== before.at);
       const cur = (await chintLiveGet()) || { on: true, fails: 0 };
@@ -1353,10 +1368,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // armChintLive) zeroes fails. Idempotent: chrome.alarms.create replaces same-named.
   async function reArmLive(vendor) {
     if (vendor === "chint") {
-      // chint silent live-mode is disabled (see armChintLive) — never re-arm it.
-      await chintLiveSet({ on: false });
-      try { chrome.alarms.clear(CHINT_LIVE_ALARM, () => void chrome.runtime.lastError); } catch (_) {}
-      return;
+      // Re-arm chint's background walk-loop after a browser restart / extension update,
+      // WITHOUT resetting fails (a Chint that self-disarmed after MAX_FAILS stays off until
+      // the owner reopens the portal; autoArmKnownLive only reaches here when on !== false).
+      // v1.9.81 — see armChintLive (re-enabled).
+      const cur = (await chintLiveGet()) || {};
+      await chintLiveSet({ on: true, armedAt: cur.armedAt || Date.now(), lastOkAt: cur.lastOkAt || 0, fails: cur.fails || 0 });
+      try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: _liveDelayMin("chint") }); } catch (_) {}
     } else {
       if (!LIVE_PERIOD_MIN[vendor]) return;
       const cur = (await liveGet(vendor)) || {};
@@ -1386,6 +1404,26 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     }
   }
   self.__soAutoArmKnownLive = autoArmKnownLive;
+  // One-time migration (v1.9.81): Chint background refresh was hard-disabled before this
+  // version, so EVERY existing install carries so_chint_live = {on:false} from the old stub —
+  // which autoArmKnownLive correctly treats as "owner left it off, leave it". But that off
+  // state was the CODE's choice, not the owner's, and Chint can now be captured silently. So
+  // arm it ONCE for owners who actually use Chint (a prior successful capture), so the new
+  // background loop turns on without making them reopen the portal. Guarded by a persisted
+  // flag → runs once; after that a real disarm (MAX_FAILS / the UI toggle) sticks normally.
+  async function migrateChintBackgroundOnce() {
+    const FLAG = "so_chint_bg_migrated_v1981";
+    try {
+      const s = await chrome.storage.local.get([FLAG, LAST_KEY]);
+      if (s[FLAG]) return;
+      await chrome.storage.local.set({ [FLAG]: true });
+      const known = s[LAST_KEY] || {};
+      if (known.chint && known.chint.ok) {
+        await armChintLive();
+        rlog("chint background refresh: enabled for this known-Chint install (v1.9.81 one-time migration)");
+      }
+    } catch (_) {}
+  }
   async function disarmLive(vendor, reason) {
     const v = (await liveGet(vendor)) || {};
     await liveSet(vendor, { ...v, on: false });
@@ -2417,6 +2455,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   async function _onWake() {
     try { await reapTrackedRecapTabs(); } catch (_) {}   // close any recap tab orphaned before this wake
+    try { await migrateChintBackgroundOnce(); } catch (_) {}   // v1.9.81: arm Chint bg once for existing Chint users
     try { await autoArmKnownLive(); } catch (_) {}
     setTimeout(() => runRecaptureCycle().catch(() => {}), 8000);
   }
