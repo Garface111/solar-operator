@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, time as dtime
@@ -34,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from . import inverters
+from . import ratelimit
 from .adapters import gmp as gmp_adapter
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
@@ -1968,7 +1970,8 @@ def solaredge_discover(
     operator commits. A site-level key (403) or bad key (401) comes back as a
     400 with a clear, actionable message; a SolarEdge 5xx comes back as a 502.
     """
-    _tenant_from_bearer(authorization)
+    _tenant = _tenant_from_bearer(authorization)
+    _guard_vendor_discover(_tenant.id, "solaredge")
 
     api_key = (body.api_key or "").strip()
     if not api_key:
@@ -1997,36 +2000,42 @@ def solaredge_discover(
 # Rate-limited per client IP to keep the open endpoint from being abused as a
 # free SolarEdge-key oracle / scraping proxy.
 
-# crude in-memory sliding-window limiter (per-process; Railway runs one web
-# replica today). {ip: [monotonic_ts, ...]} pruned on each call.
-_PREVIEW_HITS: dict[str, list[float]] = {}
-_PREVIEW_WINDOW_S = 300.0   # 5-minute window
-_PREVIEW_MAX = 8            # ≤8 preview attempts per IP per 5 min
-
 # Typical fixed-tilt PV capacity factor (annual kWh ≈ kW_dc × 8760 × CF). 0.14
 # is a conservative US/VT-ish blended figure for a quick pre-signup estimate;
 # the dashboard shows exact measured value once live.
 _EST_CAPACITY_FACTOR = 0.14
 
 
-def _client_ip(request: Request) -> str:
-    """Best-effort client IP behind Railway's proxy (X-Forwarded-For first hop)."""
-    xff = request.headers.get("x-forwarded-for") or ""
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+def _guard_preview_oracle(request: Request) -> None:
+    """Throttle the UNAUTHENTICATED vendor-credential preview oracle.
+
+    `/public/preview` validates arbitrary vendor credentials with no auth, so
+    it's a credential-validation + site-enumeration oracle that can also burn an
+    operator's SolarEdge/Locus API budget. A per-IP cap alone is bypassable by
+    rotating the client-supplied X-Forwarded-For header, so we layer an
+    UNSPOOFABLE global ceiling on top: even with IP rotation the endpoint can't
+    be hammered past the global cap. (Mirrors ratelimit.enforce's pytest
+    exemption so the shared-IP test suite doesn't trip it.)
+    """
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    ip = ratelimit.client_ip(request)
+    if not ratelimit.allow("vendor_preview_ip", ip, max_hits=6, window_s=300):
+        raise HTTPException(429, "Too many preview attempts — give it a few minutes and try again.")
+    if not ratelimit.allow("vendor_preview_global", "all", max_hits=40, window_s=300):
+        raise HTTPException(429, "The preview service is busy right now — please try again in a few minutes.")
 
 
-def _preview_rate_ok(ip: str) -> bool:
-    import time
-    now_ts = time.monotonic()
-    hits = [t for t in _PREVIEW_HITS.get(ip, []) if now_ts - t < _PREVIEW_WINDOW_S]
-    if len(hits) >= _PREVIEW_MAX:
-        _PREVIEW_HITS[ip] = hits
-        return False
-    hits.append(now_ts)
-    _PREVIEW_HITS[ip] = hits
-    return True
+def _guard_vendor_discover(tenant_id: str, vendor: str) -> None:
+    """Bound an AUTHENTICATED tenant's vendor-discovery calls so a compromised
+    session/key can't drain the operator's vendor API budget, plus a global
+    ceiling across all tenants. Keyed on the validated tenant id (unspoofable)."""
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    if not ratelimit.allow(f"{vendor}_discover_tenant", tenant_id, max_hits=30, window_s=300):
+        raise HTTPException(429, "Too many discovery attempts — give it a few minutes and try again.")
+    if not ratelimit.allow("vendor_discover_global", "all", max_hits=120, window_s=300):
+        raise HTTPException(429, "Discovery is busy right now — please try again in a few minutes.")
 
 
 def _estimate_annual_value(peak_power_kw: float) -> dict:
@@ -2132,9 +2141,7 @@ def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
     {ok, vendor, sites:[{site_id,name,peak_power_kw,annual_kwh,annual_value_usd}],
     totals, message}. Recoverable failures (bad creds, scope, empty) come back
     as ok:false + friendly message; rate limit → 429; vendor 5xx → 502."""
-    ip = _client_ip(request)
-    if not _preview_rate_ok(ip):
-        raise HTTPException(429, "Too many preview attempts — give it a few minutes and try again.")
+    _guard_preview_oracle(request)
 
     # Resolve vendor + config (back-compat: a bare api_key is SolarEdge).
     vendor = (body.vendor or "").strip().lower() or "solaredge"
@@ -2462,7 +2469,8 @@ def locus_discover(
     operator commits. Bad credentials (401) or a forbidden partner (403) come
     back as a 400 with a clear message; a Locus 5xx comes back as a 502.
     """
-    _tenant_from_bearer(authorization)
+    _tenant = _tenant_from_bearer(authorization)
+    _guard_vendor_discover(_tenant.id, "locus")
 
     creds = {
         "client_id": body.client_id,

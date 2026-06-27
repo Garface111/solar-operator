@@ -15,9 +15,9 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limit():
-    ao._PREVIEW_HITS.clear()
+    ao.ratelimit._HITS.clear()
     yield
-    ao._PREVIEW_HITS.clear()
+    ao.ratelimit._HITS.clear()
 
 
 def test_preview_returns_real_sites_and_value(monkeypatch):
@@ -152,8 +152,12 @@ def test_preview_site_level_key_hint(monkeypatch):
 
 def test_preview_rate_limited(monkeypatch):
     monkeypatch.setattr(ao.inverters.solaredge, "discover_sites", lambda key: [])
-    # _PREVIEW_MAX attempts allowed, then 429.
+    # The oracle guard no-ops under pytest (the suite shares one client IP); drop
+    # the marker so the real per-IP + global limiter actually runs for this test.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    ao.ratelimit._HITS.clear()
+    # Per-IP cap is 6 attempts per window → the 7th is throttled with 429.
     last = None
-    for _ in range(ao._PREVIEW_MAX + 3):
+    for _ in range(8):
         last = client.post("/v1/array-owners/public/preview", json={"api_key": "K"})
     assert last.status_code == 429
