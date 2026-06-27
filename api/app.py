@@ -1573,10 +1573,13 @@ def admin_run_jobs(_: None = Depends(_require_admin)):
 
 
 @app.post("/admin/vendor-cred-encryption")
-def admin_vendor_cred_encryption(mode: str = "dryrun", _: None = Depends(_require_admin)):
+def admin_vendor_cred_encryption(mode: str = "dryrun", x_maint_key: str | None = Header(default=None)):
     """One-off maintenance for the vendor-credential encryption-at-rest rollout
-    (PR #11). Runs IN the container (has the DB + SO_CONFIG_KEY in env), gated by
-    X-Admin-Key. Lets us drive the rollout without shell access.
+    (PR #11). Runs IN the container (has the DB + SO_CONFIG_KEY in env). Gated by
+    X-Maint-Key matching the SO_MAINT_KEY env var, which is UNSET by default so the
+    endpoint is DISABLED (403) except during a deliberate rollout — set SO_MAINT_KEY
+    to a throwaway value to enable it, then delete the var to disable it again.
+    Lets us drive the rollout over HTTPS since project tokens cannot railway ssh.
 
     mode:
       dryrun        — report the plaintext rows that WOULD be encrypted (no writes; default)
@@ -1587,6 +1590,9 @@ def admin_vendor_cred_encryption(mode: str = "dryrun", _: None = Depends(_requir
 
     Returns the report dict + the captured human-readable log.
     """
+    _maint = os.getenv("SO_MAINT_KEY", "")
+    if not _maint or not hmac.compare_digest(x_maint_key or "", _maint):
+        raise HTTPException(403, "vendor-cred-encryption maintenance is disabled")
     from api.db import engine
     from api import crypto
     from scripts import encrypt_vendor_credentials as ev
