@@ -204,6 +204,15 @@ class Tenant(Base):
     # operator's numeric estimate). NULL for tenants who pre-date this field.
     # Used only for the "You're all set!" dashboard milestone check.
 
+    # ── Consent / authorization-to-access record (Jun 2026) ──────────────
+    # The Terms/Privacy + account-access-authorization version the owner accepted
+    # at signup, the moment they accepted, and the source IP — durable proof of
+    # consent for the access the extension performs on their behalf. NULL for
+    # tenants who pre-date the consent gate.
+    consent_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    consent_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # ── Cross-product sibling link (Jun 2026) ────────────────────────────
     # A person can own a NEPOOL tenant AND an Array Operator tenant on the same
     # email — two SEPARATE rows with different `product`. When their two tenants

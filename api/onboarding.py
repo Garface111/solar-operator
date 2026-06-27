@@ -160,6 +160,9 @@ class StartRequest(BaseModel):
     # verifier; the Array Operator owner site posts "array_operator" so the
     # tenant bills on the owner price. Same 14-day trial either way.
     product: Optional[str] = Field("nepool", pattern="^(nepool|array_operator)$")
+    # Terms/Privacy + account-access authorization version the user accepted at
+    # signup (the consent checkbox). Persisted on the tenant as proof of consent.
+    consent_version: Optional[str] = Field(None, max_length=40)
 
 
 class StartResponse(BaseModel):
@@ -256,6 +259,7 @@ def _create_trial_tenant(
     *, email: str, full_name: str, company: Optional[str],
     password: Optional[str], array_count: Optional[int],
     product: str = "nepool",
+    consent_version: Optional[str] = None, consent_ip: Optional[str] = None,
 ) -> tuple[str, str]:
     """Create a live, trialing tenant — no card, no Stripe call.
 
@@ -320,6 +324,11 @@ def _create_trial_tenant(
             onboarding_token=onboarding_token,
             onboarding_stage="extension",
             onboarding_array_estimate=array_count,
+            # Proof of consent: the Terms/Privacy + account-access authorization
+            # the owner accepted at signup (NULL only for the deprecated paths).
+            consent_version=consent_version,
+            consent_at=(now() if consent_version else None),
+            consent_ip=consent_ip,
             # No card on file yet — these stay NULL until the operator adds a
             # payment method from the dashboard.
             stripe_customer_id=None,
@@ -356,6 +365,8 @@ def start(req: StartRequest, request: Request, background_tasks: BackgroundTasks
         email=req.email, full_name=req.full_name, company=req.company,
         password=req.password, array_count=req.array_count,
         product=req.product or "nepool",
+        consent_version=req.consent_version,
+        consent_ip=ratelimit.client_ip(request),
     )
     # Internal alert is non-critical — send it AFTER the response so the Resend
     # round-trip doesn't hold a request thread under a signup burst.

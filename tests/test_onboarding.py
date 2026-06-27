@@ -131,6 +131,26 @@ def test_start_creates_trialing_tenant_no_stripe(client, mocks, monkeypatch):
         assert t.product == "nepool"
 
 
+def test_start_persists_consent(client, mocks, monkeypatch):
+    """The Terms/Privacy + account-access authorization version accepted at
+    signup is persisted on the tenant (proof of consent), with a timestamp."""
+    resp = client.post("/v1/onboarding/start", json={
+        "email": "consent@example.com",
+        "full_name": "Cora Consent",
+        "array_count": 1,
+        "product": "array_operator",
+        "consent_version": "2026-06-27",
+    })
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["onboarding_token"]
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.onboarding_token == token)
+        ).scalar_one()
+        assert t.consent_version == "2026-06-27"
+        assert t.consent_at is not None
+
+
 def test_start_array_operator_product_same_trial(client, mocks, monkeypatch):
     """An Array Operator owner signup gets product='array_operator' and the
     IDENTICAL 14-day no-card trial (trial is product-agnostic)."""

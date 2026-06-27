@@ -60,6 +60,13 @@ def main():
             ("tracker_filename",       "ALTER TABLE tenants ADD COLUMN tracker_filename VARCHAR(300)"),
             ("tracker_map",            "ALTER TABLE tenants ADD COLUMN tracker_map JSON"),
             ("tracker_updated_at",     "ALTER TABLE tenants ADD COLUMN tracker_updated_at TIMESTAMP"),
+            # Consent / authorization-to-access record (Jun 2026): the Terms/
+            # Privacy + account-access authorization version accepted at signup,
+            # when, and from what IP — durable proof of consent. Nullable; NULL
+            # for pre-existing tenants.
+            ("consent_version",        "ALTER TABLE tenants ADD COLUMN consent_version VARCHAR(40)"),
+            ("consent_at",             "ALTER TABLE tenants ADD COLUMN consent_at TIMESTAMP"),
+            ("consent_ip",             "ALTER TABLE tenants ADD COLUMN consent_ip VARCHAR(64)"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):
