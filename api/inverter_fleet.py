@@ -588,6 +588,33 @@ def _source_status(inv_rows: list[dict], *, stale_hours: float = _SOURCE_STALE_H
     return {"state": state, "last_report": freshest.isoformat(), "age_hours": age_h}
 
 
+def _sync_recency(invs) -> dict:
+    """How recently WE last captured this array (max last_seen_at across its inverters).
+
+    Distinct from _source_status (the vendor SOURCE's own data age): last_seen_at advances
+    on EVERY successful capture — including overnight, when there's no production and the
+    source clock is frozen — so the UI can honestly show "Synced Xm ago" (our pipeline is
+    alive) as a separate truth from how old the vendor's own data is. This is what makes
+    the front-end freshness faithfully mirror the back end: a fresh auto-login/keep-warm
+    capture moves THIS even when the source's LastImport can't move (panels asleep).
+    Returns {synced_at: iso|None, age_min: float|None}.
+    """
+    from datetime import datetime, timezone
+    stamps: list[datetime] = []
+    for iv in invs:
+        dt = _sane_dt(getattr(iv, "last_seen_at", None))
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        stamps.append(dt)
+    if not stamps:
+        return {"synced_at": None, "age_min": None}
+    freshest = max(stamps)
+    age_min = round((datetime.now(timezone.utc) - freshest).total_seconds() / 60.0, 1)
+    return {"synced_at": freshest.isoformat(), "age_min": age_min}
+
+
 def _array_alert(inv_rows: list[dict]) -> dict:
     worst, worst_rank, bad = "ok", 0, 0
     for inv in inv_rows:
@@ -1186,6 +1213,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             # — surfaced on the card so a vendor-side reporting gap reads as a
             # SOURCE outage, not an app failure.
             "source_status": src_status,
+            # {"synced_at": iso|None, "age_min": float|None} — how recently WE captured
+            # (max last_seen_at). Advances on every successful capture incl. overnight, so
+            # the UI shows "Synced Xm ago" (our pipeline is alive) DISTINCT from the
+            # vendor source's own data age above. The two clocks together are the honest,
+            # legible freshness mirror.
+            "sync_status": _sync_recency(ivs),
         })
 
     attention = sum(c["alert"]["count"] for c in columns)
