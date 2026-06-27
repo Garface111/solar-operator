@@ -120,6 +120,10 @@
         if (i >= ids.length) {
           try { location.hash = "#/pv/sites"; } catch (_) {}   // return to the sites list when done
           window.__soChintWalking = false;
+          // Tell the content script every site has been visited, so a silent (recap/sync-all)
+          // capture knows the snapshot is COMPLETE and can close its surface — without this a
+          // multi-site owner would be truncated at the first site's emit.
+          try { window.postMessage({ type: "SO_CHINT_WALK_DONE" }, location.origin); } catch (_) {}
           L("walk: done");
           return;
         }

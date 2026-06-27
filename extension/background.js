@@ -80,7 +80,7 @@ const SO_TAB_URLS = [
   "https://*.solaroperator.org/*",
   "https://web-production-49c83.up.railway.app/*",
 ];
-function broadcastToSoTabs(message) {
+function broadcastToSoTabs(message, senderTab) {
   try {
     chrome.tabs.query({ url: SO_TAB_URLS }, (tabs) => {
       if (chrome.runtime.lastError) { void chrome.runtime.lastError; return; }
@@ -93,9 +93,20 @@ function broadcastToSoTabs(message) {
         });
       }
     });
-    // After a SUCCESSFUL capture from a user-initiated connect, bring the operator
-    // back to the Array Operator tab they started from (set in OPEN_UTILITY_PORTAL).
-    if (message && message.type === "SO_CAPTURE_LANDED" && message.ok) focusReturnTab();
+    // After a SUCCESSFUL capture from a user-initiated FOREGROUND connect, bring the
+    // operator back to the Array Operator tab they started from (set in OPEN_UTILITY_PORTAL).
+    // But NEVER refocus when the capture came from a background "Sync all" / recap surface
+    // (Ford: Sync-all must stay on his current tab) — gate on whether the sender tab is one
+    // of those. Legacy callers that pass no senderTab (GMP/SmartHub via _handleSync) keep
+    // the original refocus behavior unchanged.
+    if (message && message.type === "SO_CAPTURE_LANDED" && message.ok) {
+      const tid = senderTab && typeof senderTab.id === "number" ? senderTab.id : null;
+      if (tid != null && typeof self.__soIsHiddenSyncSurface === "function") {
+        Promise.resolve(self.__soIsHiddenSyncSurface(tid)).then((hidden) => { if (!hidden) focusReturnTab(); });
+      } else {
+        focusReturnTab();
+      }
+    }
   } catch (e) {
     console.warn("[EnergyAgent] broadcastToSoTabs failed:", e);
   }
@@ -286,7 +297,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       accountName: p.accountName || null,
       at: new Date().toISOString(),
     };
-    broadcastToSoTabs(landed);
+    broadcastToSoTabs(landed, sender && sender.tab);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
@@ -308,7 +319,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
       at: new Date().toISOString(),
     };
-    broadcastToSoTabs(landed);
+    broadcastToSoTabs(landed, sender && sender.tab);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
@@ -327,7 +338,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
       at: new Date().toISOString(),
     };
-    broadcastToSoTabs(landed);
+    broadcastToSoTabs(landed, sender && sender.tab);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
@@ -363,7 +374,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
       at: new Date().toISOString(),
     };
-    broadcastToSoTabs(landed);
+    broadcastToSoTabs(landed, sender && sender.tab);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
@@ -401,7 +412,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       auth: p.auth || null,
       at: new Date().toISOString(),
     };
-    broadcastToSoTabs(landed);
+    broadcastToSoTabs(landed, sender && sender.tab);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
@@ -424,7 +435,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       accounts,
       at: new Date().toISOString(),
     };
-    broadcastToSoTabs(landed);
+    broadcastToSoTabs(landed, sender && sender.tab);
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     // NEPOOL path: there is no Array Operator page open to POST the capture, but
     // the extension is paired to a tenant. POST the daily generation straight to
@@ -2219,7 +2230,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       if (okMap[msg.type] && okMap[msg.type] === st.vendor) {
         const sites = (msg.payload && Array.isArray(msg.payload.sites)) ? msg.payload.sites : [];
         const ok = await recapPost(st.vendor, sites);
-        await recapFinish(st.vendor, ok, sites);
+        // The Chint walk emits PROGRESSIVELY as it steps through each site — save every
+        // batch, but only CLOSE the surface once the walk has visited ALL sites
+        // (payload.walkComplete), else a multi-site owner is truncated at site 1. The
+        // recaptureVendor budget watchdog is the backstop if the walk never signals done.
+        const holdForWalk = st.vendor === "chint" && !(msg.payload && msg.payload.walkComplete);
+        if (!holdForWalk) await recapFinish(st.vendor, ok, sites);
       } else if (failMap[msg.type] && failMap[msg.type] === st.vendor) {
         await recapFinish(st.vendor, false, []);
       }
@@ -2264,8 +2280,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // captures on its existing session and closes itself the instant its data lands.
   // Runs ALONGSIDE — not through — the single-surface recapture state machine (which is
   // one-at-a-time): we open our own tabs, track them, and a capture-observer closes each
-  // on its *_CAPTURED message, with a watchdog backstop. Chint is excluded — it needs a
-  // per-site click, so it can't capture silently in a background tab.
+  // on its *_CAPTURED message, with a watchdog backstop. Fronius/SMA/SolarEdge ride this
+  // bare background-tab path (active:false). Chint is handled separately via
+  // recaptureVendor("chint") — a background tab that arms the capture intent and drives the
+  // v1.9.77 programmatic per-site route walk (no click), self-deleting via recapFinish + the
+  // recap-reaper — because the bare path neither arms that intent nor waits for the walk.
   const SYNC_PORTALS = {
     fronius: "https://www.solarweb.com/",
     sma: "https://ennexos.sunnyportal.com/",
@@ -2281,6 +2300,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   ];
   const _syncTabs = new Map();   // tabId -> { vendor, openedAt }
   const SYNC_CAPTURED = new Set(["SOLAREDGE_CAPTURED", "FRONIUS_CAPTURED", "SMA_CAPTURED", "CHINT_CAPTURED"]);
+  // A capture's tab is a HIDDEN sync surface — a background "Sync all" tab OR the in-flight
+  // recap tab/popup — so broadcastToSoTabs can suppress the post-capture refocus and a
+  // Sync-All never yanks the operator off their current tab. (recapGetState is in scope here.)
+  self.__soIsHiddenSyncSurface = async (tabId) => {
+    try {
+      if (_syncTabs.has(tabId)) return true;
+      const st = await recapGetState();
+      return !!(st && st.running && st.tabId === tabId);
+    } catch (_) { return false; }
+  };
 
   // Observer: when a SYNC tab reports its capture, close it (after a beat so its POST
   // finishes). Observe-only — never consumes the message, so the real *_CAPTURED
@@ -2303,8 +2332,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   });
 
   async function syncAllVendors(vendors) {
-    const want = (Array.isArray(vendors) && vendors.length ? vendors : Object.keys(SYNC_PORTALS))
-      .map((v) => String(v).toLowerCase()).filter((v) => SYNC_PORTALS[v]);
+    const reqList = (Array.isArray(vendors) && vendors.length ? vendors : Object.keys(SYNC_PORTALS).concat("chint"))
+      .map((v) => String(v).toLowerCase());
+    const want = reqList.filter((v) => SYNC_PORTALS[v]);
+    // Chint isn't a bare background-tab portal — it needs its capture intent armed AND the
+    // per-site route walk (v1.9.77). Route it through the battle-tested recaptureVendor:
+    // a background tab that arms the intent, drives the walk, and self-deletes via
+    // recapFinish + the recap-reaper. Detect it BEFORE the SYNC_PORTALS filter drops it.
+    const wantChint = reqList.includes("chint");
     // Clear a bloated cookie blob before opening each portal so a user-initiated "Sync all"
     // can't land on an ERR_HTTP2_PROTOCOL_ERROR page (no-op for vendors without a domain set).
     for (const v of want) { try { await pruneVendorCookiesIfBloated(v); } catch (_) {} }
@@ -2320,6 +2355,25 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         });
       } catch (_) { res(); }
     })));
+    // Fire-and-forget so the response stays instant; the Chint background tab captures
+    // alongside the others and self-deletes. budgetMs gives a multi-site walk headroom
+    // (N sites × ~2.2s + the polls-hold) while staying under the 150s sibling watchdog.
+    if (wantChint) {
+      (async () => {
+        try {
+          // Single-flight: every other recaptureVendor caller checks this FIRST. Without it,
+          // recaptureVendor's reapOrphanRecapture would KILL a Fronius/SMA (or a prior Sync-All)
+          // recapture that's genuinely in flight, losing that capture. If one is running within
+          // budget, skip the Chint surface this round — it self-heals next cycle / next click.
+          const st = await recapGetState();
+          if (_liveBusy || (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS)) {
+            rlog("sync-all: a recapture is already in flight — skipping the Chint surface this round");
+            return;
+          }
+          await recaptureVendor("chint", { budgetMs: 120 * 1000 });
+        } catch (_) {}
+      })();
+    }
     // Watchdog: close any sync tab that never captured (lapsed session / slow load).
     const ids = opened.slice();
     setTimeout(() => {
@@ -2327,7 +2381,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         if (_syncTabs.has(id)) { _syncTabs.delete(id); try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (_) {} }
       }
     }, 150 * 1000);
-    return { ok: true, opened: opened.length, vendors: want };
+    return { ok: true, opened: opened.length + (wantChint ? 1 : 0), vendors: want.concat(wantChint ? ["chint"] : []) };
   }
 
   function closeAllVendorTabs() {

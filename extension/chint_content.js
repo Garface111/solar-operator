@@ -47,6 +47,8 @@
   let _warnedNoList = false;
   let emittedAny = false;
   let _walkStarted = false;   // v1.9.77: have we kicked the auto site-walk yet?
+  let _walkDone = false;      // v1.9.79: chint_inject signalled the walk visited every site
+  let _walkExpected = 0;      // v1.9.79: how many sites the walk was asked to visit
 
   // Observed response bodies, relayed by chint_inject.js (MAIN world).
   let siteListJson = null;                     // parsed /api/asset/site/retrieve
@@ -130,6 +132,9 @@
   window.addEventListener("message", (e) => {
     if (e.source !== window || e.origin !== location.origin) return;
     const d = e.data;
+    // The walk (chint_inject.js) signals when it has stepped through every site, so a
+    // silent recap/sync-all capture knows its snapshot is complete and can close.
+    if (d && d.type === "SO_CHINT_WALK_DONE") { _walkDone = true; LOG("walk done — every site visited"); return; }
     if (!d || d.type !== "SO_CHINT_RESPONSE" || !d.path) return;
     const j = tryParse(d.body);
     if (!j || (j.code != null && String(j.code) !== "0")) {
@@ -321,6 +326,7 @@
       const ids = siteListJson.data.map((s) => s && s.id).filter(Boolean).map(String);
       if (ids.length) {
         _walkStarted = true;
+        _walkExpected = ids.length;
         try { window.postMessage({ type: "SO_CHINT_WALK_SITES", ids }, location.origin); } catch (_) {}
         LOG("auto-walk: driving the SPA through", ids.length, "site(s) to load inverters (no click needed)");
       }
@@ -380,6 +386,11 @@
     // more inverters (a newly-opened site). NEVER set done here — keep listening so
     // later site-opens are captured too. clearIntent stays armed until timeout.
     if (totalInv > 0) emittedAny = true;
+    // walkComplete tells a silent recap/sync-all capture that the snapshot is FINAL (every
+    // walked site visited) so it can close its surface — without it a multi-site owner is
+    // truncated at site 1. True when the walk signalled done OR all expected sites have
+    // inverters; for a non-walk (foreground) capture there's no recap surface to gate.
+    payload.walkComplete = !_walkStarted ? true : (_walkDone || (_walkExpected > 0 && withInv >= _walkExpected));
     chrome.runtime.sendMessage({ type: "CHINT_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
