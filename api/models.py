@@ -16,6 +16,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+# Encryption-at-rest for vendor credentials. EncryptedJSON/EncryptedStr are
+# transparent TypeDecorators: pure pass-through when SO_CONFIG_KEY is unset
+# (storage byte-identical to the old plaintext columns), Fernet-encrypted when
+# it is set. See api/crypto.py for the full design + rollout runbook.
+from .crypto import EncryptedJSON, EncryptedStr
+
 
 class Base(DeclarativeBase):
     pass
@@ -427,9 +433,12 @@ class Array(Base):
     reassigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # SolarEdge Monitoring API integration (feat/solaredge-adapter).
-    # Stored plain text — read-only scope, operator-controlled per-array key.
-    # Future hardening: encrypt at rest.
-    solaredge_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The api_key is a vendor secret → encrypted at rest via EncryptedStr
+    # (Fernet, keyed on SO_CONFIG_KEY; pass-through plaintext when unset, so the
+    # column is byte-identical until a key is provisioned). site_id is a
+    # non-secret identifier and stays plaintext so existing IS NOT NULL / value
+    # reads on it are unaffected. See api/crypto.py.
+    solaredge_api_key: Mapped[str | None] = mapped_column(EncryptedStr, nullable=True)
     solaredge_site_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # V2 (feat/v2-rec-fuels): the REC-minting fuel this array represents.
@@ -852,10 +861,14 @@ class InverterConnection(Base):
     SolarEdge creds on Array.solaredge_api_key/solaredge_site_id. Readers treat
     those as a virtual {vendor: "solaredge"} connection when no row exists here.
 
-    SECURITY TODO (encrypt at rest): `config` stores vendor secrets in PLAIN
-    TEXT — same posture as Array.solaredge_api_key today (read-only,
-    operator-controlled scope). Encrypt this column before onboarding vendors
-    whose keys grant broader access.
+    ENCRYPTION AT REST: `config` holds the vendor's credentials/tokens, so it is
+    an EncryptedJSON column (Fernet, keyed on SO_CONFIG_KEY). When the key is
+    unset it is a pure pass-through (plaintext JSON, byte-identical to the old
+    JSON column) so rollout is safe + reversible; when set, a DB dump yields
+    ciphertext. Encryption is transparent — every reader still does
+    `conn.config["api_key"]`. The stored type is TEXT (not native json) so the
+    ciphertext envelope fits; api/migrate.py widens the legacy Postgres `json`
+    column to TEXT before any key is provisioned. See api/crypto.py.
     """
     __tablename__ = "inverter_connections"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -863,7 +876,7 @@ class InverterConnection(Base):
         Integer, ForeignKey("arrays.id"), unique=True, index=True
     )
     vendor: Mapped[str] = mapped_column(String(20))
-    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    config: Mapped[dict] = mapped_column(EncryptedJSON, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="unverified")
     # unverified | ok | error
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

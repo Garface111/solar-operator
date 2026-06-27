@@ -29,3 +29,9 @@ bcrypt<4.1
 # never changes behavior without explicit configuration. FastAPI integration is
 # pulled in automatically by sentry-sdk when fastapi/starlette are installed.
 sentry-sdk[fastapi]>=2.0.0
+# Encryption-at-rest for vendor credentials (api/crypto.py): Fernet symmetric
+# encryption of InverterConnection.config + the legacy Array.solaredge_api_key,
+# keyed on SO_CONFIG_KEY. Ships a vendored OpenSSL wheel — no system deps.
+# Often already present transitively, but pinned explicitly because crypto.py
+# imports it at module load and a missing key must fail loud, not at import.
+cryptography>=42,<49
