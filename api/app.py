@@ -275,6 +275,43 @@ app.add_middleware(
     allow_credentials=False,
 )
 
+
+# ── Security headers (CSP + clickjacking / MIME / referrer hardening) ─────────
+# This backend serves the React dashboard SPA (/accounts) + onboarding for BOTH
+# products through the Netlify 200-proxy, so these headers protect the
+# authenticated surface of nepooloperator.com AND arrayoperator.com — Netlify
+# _headers can't, because it doesn't apply to proxied responses. The CSP allowlist
+# is exactly what the dashboard build loads: self (Vite bundle + same-origin /v1),
+# Google Fonts, data/blob images. No external scripts, no eval. 'unsafe-inline' is
+# kept for the inline title script + React inline styles (nonce refactor is a
+# separate pass). CSP on JSON/API responses is inert; the other headers harden them.
+_DASH_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' data: https://fonts.gstatic.com; "
+    "img-src 'self' data: blob:; "
+    "connect-src 'self' https://web-production-49c83.up.railway.app; "
+    "worker-src 'self' blob:; frame-src 'self' blob:; "
+    "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
+    h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    # CSP everywhere EXCEPT the MC-generated preview bundles (unknown external needs).
+    if not request.url.path.startswith("/accounts/preview/"):
+        h.setdefault("Content-Security-Policy", _DASH_CSP)
+    return resp
+
+
 # ── Global exception handler (launch readiness) ──────────────────────────────
 # Defense in depth so an unhandled 500 in prod is NEVER fully silent, even if
 # Sentry is unconfigured or down:
