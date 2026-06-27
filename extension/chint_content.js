@@ -46,6 +46,7 @@
   let done = false;
   let _warnedNoList = false;
   let emittedAny = false;
+  let _walkStarted = false;   // v1.9.77: have we kicked the auto site-walk yet?
 
   // Observed response bodies, relayed by chint_inject.js (MAIN world).
   let siteListJson = null;                     // parsed /api/asset/site/retrieve
@@ -310,6 +311,19 @@
     // produce FRESH readings instead of whatever the tab happened to load.
     if (polls === 1) {
       try { window.postMessage({ type: "SO_CHINT_FORCE_REFRESH" }, location.origin); } catch (_) {}
+    }
+    // AUTO-WALK (v1.9.77): once the site list is loaded, silently drive the SPA through
+    // each site's detail route so its busTypeDevices fires — the click-free equivalent of
+    // the owner opening every site. Confirmed live: a programmatic location.hash to
+    // #/pv/sites/siteDetail/<id> fires busTypeDevices and our hooks observe it. The walk
+    // itself runs in chint_inject.js (MAIN world); we just hand it the site ids we parsed.
+    if (!_walkStarted && siteListJson && Array.isArray(siteListJson.data) && siteListJson.data.length) {
+      const ids = siteListJson.data.map((s) => s && s.id).filter(Boolean).map(String);
+      if (ids.length) {
+        _walkStarted = true;
+        try { window.postMessage({ type: "SO_CHINT_WALK_SITES", ids }, location.origin); } catch (_) {}
+        LOG("auto-walk: driving the SPA through", ids.length, "site(s) to load inverters (no click needed)");
+      }
     }
 
     const payload = assemble();

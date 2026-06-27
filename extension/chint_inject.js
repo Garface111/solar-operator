@@ -95,4 +95,38 @@
     });
     L("force-refresh listener installed");
   } catch (e) { L("force-refresh listener FAILED", e && e.message); }
+
+  // ── Site-walk (v1.9.77) ──────────────────────────────────────────────────────
+  // Drive the app's OWN router through each site's DETAIL route so the SPA fetches that
+  // site's busTypeDevices with its own valid token — the click-free equivalent of the
+  // owner opening every site. Confirmed live (2026-06-27, Bruce's account): setting
+  // location.hash = "#/pv/sites/siteDetail/<id>" PROGRAMMATICALLY (no click) fires
+  // busTypeDevices and our hooks observe it. Still read-only: we only change the SPA's
+  // route, never craft/replay an API request. Single-flight; returns home when done.
+  try {
+    window.addEventListener("message", function (e) {
+      if (e.source !== window || e.origin !== location.origin) return;
+      var d = e.data;
+      if (!d || d.type !== "SO_CHINT_WALK_SITES" || !Array.isArray(d.ids)) return;
+      if (window.__soChintWalking) return;                 // don't stack walks
+      var ids = d.ids.slice(0, 50);                        // sane cap
+      if (!ids.length) return;
+      window.__soChintWalking = true;
+      var i = 0, STEP_MS = 2200;                           // dwell so each site's busTypeDevices fires + is observed
+      L("walk: stepping through", ids.length, "site(s) (no click)");
+      (function step() {
+        if (i >= ids.length) {
+          try { location.hash = "#/dashboard/overview"; } catch (_) {}   // return home when done
+          window.__soChintWalking = false;
+          L("walk: done");
+          return;
+        }
+        var id = ids[i++];
+        try { location.hash = "#/pv/sites/siteDetail/" + id; } catch (_) {}
+        L("walk: -> site", id);
+        setTimeout(step, STEP_MS);
+      })();
+    });
+    L("site-walk listener installed");
+  } catch (e) { L("site-walk listener FAILED", e && e.message); }
 })();
