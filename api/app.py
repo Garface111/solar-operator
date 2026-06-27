@@ -1572,6 +1572,50 @@ def admin_run_jobs(_: None = Depends(_require_admin)):
     return {"ran": run_pending_jobs()}
 
 
+@app.post("/admin/vendor-cred-encryption")
+def admin_vendor_cred_encryption(mode: str = "dryrun", _: None = Depends(_require_admin)):
+    """One-off maintenance for the vendor-credential encryption-at-rest rollout
+    (PR #11). Runs IN the container (has the DB + SO_CONFIG_KEY in env), gated by
+    X-Admin-Key. Lets us drive the rollout without shell access.
+
+    mode:
+      dryrun        — report the plaintext rows that WOULD be encrypted (no writes; default)
+      apply         — encrypt plaintext rows under SO_CONFIG_KEY
+      verify        — decrypt every connection + hit its vendor read-only (live check)
+      decrypt       — report the ciphertext that WOULD be unwrapped (no writes)
+      decrypt-apply — unwrap ciphertext back to plaintext (rollback; needs the key)
+
+    Returns the report dict + the captured human-readable log.
+    """
+    from api.db import engine
+    from api import crypto
+    from scripts import encrypt_vendor_credentials as ev
+    log: list[str] = []
+    out = lambda s="": log.append(str(s))   # noqa: E731 — tiny capture sink
+    m = (mode or "dryrun").lower()
+    try:
+        if m == "verify":
+            rep = ev.verify_live(engine, out=out)
+        elif m == "apply":
+            rep = ev.process(engine, mode="encrypt", apply=True, out=out)
+        elif m == "dryrun":
+            rep = ev.process(engine, mode="encrypt", apply=False, out=out)
+        elif m == "decrypt":
+            rep = ev.process(engine, mode="decrypt", apply=False, out=out)
+        elif m == "decrypt-apply":
+            rep = ev.process(engine, mode="decrypt", apply=True, out=out)
+        else:
+            raise HTTPException(400, "mode must be dryrun|apply|verify|decrypt|decrypt-apply")
+    except HTTPException:
+        raise
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — the script raises SystemExit
+        # when SO_CONFIG_KEY is unset; surface every failure in the body, don't 500-blind.
+        return {"ok": False, "mode": m, "encryption_enabled": crypto.encryption_enabled(),
+                "error": f"{type(exc).__name__}: {exc}", "log": log}
+    return {"ok": True, "mode": m, "encryption_enabled": crypto.encryption_enabled(),
+            "report": rep, "log": log}
+
+
 @app.post("/admin/rate-schedule/refresh")
 def admin_refresh_rate_schedule(_: None = Depends(_require_admin)):
     """(Re)compute the blended RateSchedule from captured bills. Idempotent;
