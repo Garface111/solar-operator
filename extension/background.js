@@ -100,12 +100,7 @@ function broadcastToSoTabs(message, senderTab) {
     // of those. Legacy callers that pass no senderTab (GMP/SmartHub via _handleSync) keep
     // the original refocus behavior unchanged.
     if (message && message.type === "SO_CAPTURE_LANDED" && message.ok) {
-      const tid = senderTab && typeof senderTab.id === "number" ? senderTab.id : null;
-      if (tid != null && typeof self.__soIsHiddenSyncSurface === "function") {
-        Promise.resolve(self.__soIsHiddenSyncSurface(tid)).then((hidden) => { if (!hidden) focusReturnTab(); });
-      } else {
-        focusReturnTab();
-      }
+      maybeReturnAfterCapture(message.provider, senderTab);
     }
   } catch (e) {
     console.warn("[EnergyAgent] broadcastToSoTabs failed:", e);
@@ -126,6 +121,43 @@ function focusReturnTab() {
         try { chrome.windows.update(rt.windowId, { focused: true }, () => void chrome.runtime.lastError); } catch (_) {}
       }
       chrome.storage.local.remove("so_return_tab");
+    });
+  } catch (_) { /* non-fatal */ }
+}
+
+// Decide whether a successful capture should bring the operator back to the AO tab.
+// A foreground "Open <vendor> to sync" records so_return_tab {tabId, vendor}. We return
+// them when THAT vendor's data lands — whether the foreground portal tab captured it OR a
+// concurrent BACKGROUND recapture did (clicking "Open SMA to sync" arms SMA live-mode, so a
+// background tick often lands the data ~1-4 min later, while the foreground tab's own
+// capture gets pre-empted). Without vendor-scoping, that background capture is treated as a
+// "hidden" surface and the return is suppressed → the operator is stranded on the vendor
+// page (the "it synced but never took me back" bug). A Sync-all records NO return tab (and
+// clears any stale one when it starts), so it still never pulls focus. Legacy captures with
+// a return tab but no recorded vendor keep the original hidden-surface gate.
+function maybeReturnAfterCapture(provider, senderTab) {
+  try {
+    chrome.storage.local.get("so_return_tab", (st) => {
+      const rt = st && st.so_return_tab;
+      if (!rt || typeof rt.tabId !== "number") return;                 // nothing pending
+      if (Date.now() - (rt.ts || 0) > 10 * 60 * 1000) {                // stale → drop
+        chrome.storage.local.remove("so_return_tab"); return;
+      }
+      const prov = String(provider || "").toLowerCase();
+      if (rt.vendor) {
+        // Vendor-scoped: ONLY this vendor's capture returns (and clears) it — even from a
+        // hidden background surface, because the operator explicitly asked for it and is
+        // waiting. A different vendor's capture leaves the pending return untouched.
+        if (prov && prov === rt.vendor) focusReturnTab();
+        return;
+      }
+      // Legacy (no vendor recorded): original hidden-surface gate.
+      const tid = senderTab && typeof senderTab.id === "number" ? senderTab.id : null;
+      if (tid != null && typeof self.__soIsHiddenSyncSurface === "function") {
+        Promise.resolve(self.__soIsHiddenSyncSurface(tid)).then((hidden) => { if (!hidden) focusReturnTab(); });
+      } else {
+        focusReturnTab();
+      }
     });
   } catch (_) { /* non-fatal */ }
 }
@@ -689,7 +721,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // bring them back to it automatically once the vendor data lands (they're about
     // to be sent to the vendor portal in a FOREGROUND tab to log in). One-shot.
     if (active && sender && sender.tab && typeof sender.tab.id === "number") {
-      try { chrome.storage.local.set({ so_return_tab: { tabId: sender.tab.id, windowId: sender.tab.windowId, ts: Date.now() } }); } catch (_) { /* non-fatal */ }
+      // Record the VENDOR too, so the post-capture return fires when this vendor's data
+      // lands even if a concurrent background recapture (the live-mode tick this click arms)
+      // is what captures it — not the foreground tab. See maybeReturnAfterCapture.
+      const rv = String(msg.provider || msg.vendor || "").toLowerCase();
+      try { chrome.storage.local.set({ so_return_tab: { tabId: sender.tab.id, windowId: sender.tab.windowId, ts: Date.now(), vendor: rv } }); } catch (_) { /* non-fatal */ }
     }
     if (!/^https:\/\//i.test(url)) {
       sendResponse({ ok: false, error: "invalid-url" });
@@ -2370,6 +2406,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   });
 
   async function syncAllVendors(vendors) {
+    // Sync-all is an explicit "do this in the background, don't move me" action — cancel any
+    // pending foreground-open return so a vendor landing mid-Sync-all can never pull focus.
+    try { await chrome.storage.local.remove("so_return_tab"); } catch (_) {}
     const reqList = (Array.isArray(vendors) && vendors.length ? vendors : Object.keys(SYNC_PORTALS).concat("chint"))
       .map((v) => String(v).toLowerCase());
     const want = reqList.filter((v) => SYNC_PORTALS[v]);
