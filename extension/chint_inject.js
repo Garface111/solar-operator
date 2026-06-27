@@ -81,16 +81,18 @@
       var d = e.data;
       if (!d || d.type !== "SO_CHINT_FORCE_REFRESH") return;
       try {
-        var ov = "#/dashboard/overview";
-        var h0 = location.hash;
-        if (h0 && h0 !== ov) {
-          location.hash = ov;                                  // leave then return → re-enter
-          setTimeout(function () { try { location.hash = h0; } catch (_) {} }, 400);
+        // Go to the SITES LIST route — THIS is what fetches /api/asset/site/retrieve (the
+        // owner's sites + ids); the dashboard/overview route does NOT (confirmed live
+        // 2026-06-27: location.hash="#/pv/sites" fired "observed SITE LIST"). Once the
+        // content script sees the list it kicks the per-site walk below.
+        var sites = "#/pv/sites";
+        if (location.hash.indexOf(sites) !== 0) {
+          location.hash = sites;                               // navigate to the sites list
         } else {
-          location.hash = ov + "?r=" + Date.now();             // already here → cache-bust re-enter
-          setTimeout(function () { try { location.hash = ov; } catch (_) {} }, 60);
+          location.hash = sites + "?r=" + Date.now();          // already there → cache-bust re-enter
+          setTimeout(function () { try { location.hash = sites; } catch (_) {} }, 60);
         }
-        L("force-refresh: hash-route bounce");
+        L("force-refresh: -> sites list (#/pv/sites)");
       } catch (_) {}
     });
     L("force-refresh listener installed");
@@ -116,7 +118,7 @@
       L("walk: stepping through", ids.length, "site(s) (no click)");
       (function step() {
         if (i >= ids.length) {
-          try { location.hash = "#/dashboard/overview"; } catch (_) {}   // return home when done
+          try { location.hash = "#/pv/sites"; } catch (_) {}   // return to the sites list when done
           window.__soChintWalking = false;
           L("walk: done");
           return;
