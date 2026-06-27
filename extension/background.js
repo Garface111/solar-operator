@@ -2355,9 +2355,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         });
       } catch (_) { res(); }
     })));
-    // Fire-and-forget so the response stays instant; the Chint background tab captures
-    // alongside the others and self-deletes. budgetMs gives a multi-site walk headroom
-    // (N sites × ~2.2s + the polls-hold) while staying under the 150s sibling watchdog.
+    // Fire-and-forget so the response stays instant. Chint runs in a MINIMIZED, UNFOCUSED
+    // popup window (newWindow) — NOT a background tab. A background tab kept getting pulled
+    // to the FOREGROUND ("took me to the Chint tab") because Chint's own SPA focuses its tab
+    // on the walk's route changes, which we can't stop from a third-party page. A
+    // focused:false + state:minimized popup can't be brought forward that way and isn't a
+    // tab in the operator's strip, so it can't steal focus. It arms the intent, drives the
+    // walk, and self-deletes via recapFinish (windows.remove) + the recap-reaper.
     if (wantChint) {
       (async () => {
         try {
@@ -2370,7 +2374,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
             rlog("sync-all: a recapture is already in flight — skipping the Chint surface this round");
             return;
           }
-          await recaptureVendor("chint", { budgetMs: 120 * 1000 });
+          await recaptureVendor("chint", { newWindow: true, budgetMs: 120 * 1000 });
         } catch (_) {}
       })();
     }
