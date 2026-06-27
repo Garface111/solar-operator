@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+# True when running on Railway (prod). Used to FAIL CLOSED if the signing secret
+# is unset — never accept unsigned billing events in production.
+_ON_RAILWAY = bool(
+    os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+    or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+)
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -421,6 +427,11 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
 
     # Verify signature
     if not STRIPE_WEBHOOK_SECRET:
+        if _ON_RAILWAY:
+            # Fail CLOSED in prod: never process unsigned events that mutate
+            # billing/subscription state. Locally (no secret) we still allow it.
+            logger.error("stripe webhook: STRIPE_WEBHOOK_SECRET unset in prod — rejecting")
+            raise HTTPException(503, "Stripe webhook not configured")
         try:
             event = stripe.Event.construct_from(
                 __import__("json").loads(payload), stripe.api_key

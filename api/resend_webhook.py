@@ -39,6 +39,12 @@ from .models import Client, now
 logger = logging.getLogger(__name__)
 
 RESEND_WEBHOOK_SECRET = os.getenv("RESEND_WEBHOOK_SECRET", "")
+# True when running on Railway (prod). Used to FAIL CLOSED if the signing secret
+# is unset — never accept unsigned events in production.
+_ON_RAILWAY = bool(
+    os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_SERVICE_ID")
+    or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+)
 
 router = APIRouter()
 
@@ -100,10 +106,15 @@ async def resend_webhook(
     health. Verifies the Svix signature when RESEND_WEBHOOK_SECRET is set."""
     body = await request.body()
 
-    if RESEND_WEBHOOK_SECRET and not _verify_signature(
-        RESEND_WEBHOOK_SECRET, svix_id, svix_timestamp, svix_signature, body
-    ):
-        raise HTTPException(400, "Invalid signature")
+    if RESEND_WEBHOOK_SECRET:
+        if not _verify_signature(
+            RESEND_WEBHOOK_SECRET, svix_id, svix_timestamp, svix_signature, body
+        ):
+            raise HTTPException(400, "Invalid signature")
+    elif _ON_RAILWAY:
+        # Fail CLOSED in prod: never process unsigned events that mutate client
+        # delivery state. Locally (no secret) we still accept for testing.
+        raise HTTPException(503, "Resend webhook not configured")
 
     try:
         payload = json.loads(body)

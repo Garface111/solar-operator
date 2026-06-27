@@ -19,6 +19,7 @@ env var is set (open in dev when unset). The live agent tier shells to a local
 `claude` binary if present; otherwise synthesis falls back to the heuristic only.
 """
 import datetime as dt
+import hmac
 import json
 import logging
 import os
@@ -385,7 +386,7 @@ router = APIRouter()
 
 def _require_admin(key):
     expected = os.environ.get("AUTO_ADAPTERS_ADMIN_KEY")
-    if not expected or key != expected:  # deny-by-default: closed unless a key is configured AND matches
+    if not expected or not hmac.compare_digest(str(key or ""), str(expected)):  # deny-by-default + constant-time
         raise HTTPException(status_code=403, detail="admin disabled (set AUTO_ADAPTERS_ADMIN_KEY)")
 
 
@@ -395,7 +396,7 @@ def _auth_tenant(authorization):
     standalone/test context where that import isn't available, require a bearer present."""
     try:
         from .app import tenant_from_bearer
-    except Exception:
+    except ImportError:
         if not authorization or not authorization.lower().startswith("bearer "):
             raise HTTPException(status_code=401, detail="authorization required")
         return None
