@@ -426,15 +426,101 @@ def _ym(s: str) -> Optional[tuple[int, int]]:
 
 # ─── public: append the latest period to a subscription's stored sheet ───────
 
-def update_subscription_sheet(db, sub) -> dict:
-    """Append the offtaker's latest computed billing period to their stored,
-    BYO generation spreadsheet. Idempotent + best-effort: a structural problem
-    NEVER raises into the bill-pull/worker path — it returns a status dict.
+def _row_from_computed(computed: dict, cols: dict, label: str, style) -> Optional[dict]:
+    """Build the {col: value} row for ONE period from its computed invoice, using the
+    SAME figures the invoice itself uses (no recomputation, no fabrication). None when
+    there's no generation to record (→ caller skips the period)."""
+    kwh = computed.get("array_kwh")
+    if kwh is None:
+        kwh = computed.get("project_total_kwh")
+    gen = computed.get("kwh")            # the offtaker's allocated kWh (their share)
+    if gen in (None, 0) and kwh:
+        gen = kwh
+    if not gen:
+        return None
+    row: dict[str, Any] = {}
+    if "period" in cols:
+        # The sheet's OWN style ("June 2026" vs ISO "2026-06") so rows look native.
+        row["period"] = _format_period(label, style)
+    if "generation" in cols:
+        row["generation"] = round(float(gen), 2)
+    if "consumption" in cols and computed.get("consumption_kwh") is not None:
+        row["consumption"] = round(float(computed["consumption_kwh"]), 2)
+    if "rate" in cols and computed.get("effective_rate_per_kwh") is not None:
+        row["rate"] = round(float(computed["effective_rate_per_kwh"]), 6)
+    if "amount" in cols and computed.get("amount_owed") is not None:
+        row["amount"] = round(float(computed["amount_owed"]), 2)
+    return row
 
-    Returns one of:
-      {"status": "appended", "period": "2026-06", "amount": ..}
-      {"status": "skipped", "reason": "..."}
-      {"status": "error", "error": "..."}
+
+def _offtaker_billed_labels(db, sub) -> Optional[list]:
+    """Every billed period ("YYYY-MM", oldest→newest) the offtaker SHOULD have a row for
+    — its GMP bills with excess sent to grid. None when the offtaker isn't bound to a
+    utility account (→ caller uses the single-latest fallback)."""
+    acct_id = getattr(sub, "utility_account_id", None)
+    if acct_id is None:
+        return None
+    from sqlalchemy import select
+    from ..models import Bill
+    bills = db.execute(
+        select(Bill).where(
+            Bill.account_id == acct_id,
+            Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0,
+            Bill.period_end.isnot(None))
+    ).scalars().all()
+    labels = set()
+    for b in bills:
+        pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
+        if pe:
+            labels.add(pe.strftime("%Y-%m"))
+    return sorted(labels)
+
+
+def _sheet_period_labels(file_bytes: bytes, mapping: dict) -> set:
+    """The periods ("YYYY-MM") already present in the stored sheet — read from the ACTUAL
+    rows (DB-agnostic), so reconciliation re-adds exactly what's MISSING regardless of the
+    idempotency cursor (e.g. after the operator deletes rows or re-uploads an edited file)."""
+    out: set = set()
+    try:
+        cols = mapping.get("columns") or {}
+        pc = cols.get("period")
+        hr = int(mapping.get("header_row") or 0)
+        if not isinstance(pc, int):
+            return out
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        sheet = mapping.get("sheet")
+        ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+        for row in ws.iter_rows(min_row=hr + 2, min_col=pc + 1, max_col=pc + 1, values_only=True):
+            v = row[0]
+            if v is None or not str(v).strip():
+                continue
+            ym = _ym(str(v))
+            if ym:
+                out.add(f"{ym[0]:04d}-{ym[1]:02d}")
+                continue
+            # Bare month name with NO year (e.g. Paul's "April") — record it as any-year
+            # "*-MM" so a single-year sheet still dedups and we never duplicate a row.
+            sv = _norm(str(v))
+            if not re.search(r"20\d{2}", sv):
+                for name, num in _MONTHS.items():
+                    if name in sv:
+                        out.add(f"*-{num:02d}")
+                        break
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def update_subscription_sheet(db, sub) -> dict:
+    """RECONCILE the offtaker's stored BYO generation spreadsheet with their billed
+    history: append a row for EVERY billed period missing from the sheet — so deleting a
+    row (or re-uploading an edited file) re-populates it — each valued with that period's
+    own real, canonically-computed figures. Best-effort: never raises into the bill-pull
+    path. Idempotent: a period already in the sheet is never duplicated.
+
+    Returns: {"status":"appended","periods":[...],"count":N} | {"status":"skipped",...}
+             | {"status":"error","error":...}
     """
     if not tracker_enabled():
         return {"status": "skipped", "reason": "feature-disabled"}
@@ -445,63 +531,62 @@ def update_subscription_sheet(db, sub) -> dict:
             return {"status": "skipped", "reason": "no-tracker-sheet"}
 
         from .delivery import build_match
+        cols = mapping.get("columns") or {}
+        # The sheet's period style (set at detection). Legacy mappings predate the field —
+        # back-fill it from the first original row so existing trackers append in-style.
+        style = mapping.get("period_style") or _period_style(_first_period_sample(bytes(bytes_), mapping))
+
+        billed = _offtaker_billed_labels(db, sub)
+
+        # ── Reconcile path (GMP-bound offtaker): backfill every missing billed period ──
+        if billed:
+            present = _sheet_period_labels(bytes(bytes_), mapping)
+            cur = bytes(bytes_)
+            appended: list = []
+            for lbl in billed:                      # oldest → newest, so rows land in order
+                if lbl in present or ("*-" + lbl[5:7]) in present:
+                    continue
+                m = build_match(sub, period_label=lbl)
+                row = _row_from_computed(getattr(m, "computed_invoice", None) or {}, cols, lbl, style)
+                if row is None:
+                    continue                        # no excess bill for that period → skip, never fabricate
+                cur = append_period_row(cur, mapping, row)
+                appended.append(lbl)
+                present.add(lbl)
+            if not appended:
+                return {"status": "skipped", "reason": "period-already-present",
+                        "period": billed[-1]}
+            sub.tracker_workbook = cur
+            new_map = dict(mapping)
+            new_map["period_style"] = style
+            new_map["last_period"] = billed[-1]
+            new_map["data_rows"] = int(mapping.get("data_rows") or 0) + len(appended)
+            sub.tracker_map = new_map
+            sub.tracker_updated_at = datetime.utcnow()
+            db.add(sub)
+            return {"status": "appended", "periods": appended, "count": len(appended)}
+
+        # ── Fallback (no utility account, e.g. workbook-driven offtaker): single latest ──
         match = build_match(sub)
         computed = getattr(match, "computed_invoice", None) or {}
-        kwh = computed.get("array_kwh")
-        if kwh is None:
-            kwh = computed.get("project_total_kwh")
-        # The offtaker's generation figure is what their invoice was computed
-        # from — the customer's allocated kWh (computed["kwh"]). The array-total
-        # is also available; we record the customer's share since the sheet is
-        # the offtaker's own tracker.
-        gen = computed.get("kwh")
-        if gen in (None, 0) and kwh:
-            gen = kwh
-        if not gen:
-            return {"status": "skipped", "reason": "no-generation-figure"}
-
         label = period_label_for(computed)
         if _period_matches(mapping.get("last_period"), label):
-            return {"status": "skipped", "reason": "period-already-present",
-                    "period": label}
-
-        # The sheet's period style (set at detection). Legacy mappings predate the field —
-        # back-fill it from the first original row so existing trackers also append in-style.
-        style = mapping.get("period_style")
-        if not style:
-            style = _period_style(_first_period_sample(bytes(bytes_), mapping))
-
-        cols = mapping.get("columns") or {}
-        row_values: dict[str, Any] = {}
-        if "period" in cols:
-            # Write the period in the sheet's OWN style (e.g. "June 2026" when its rows use
-            # month names, not our internal ISO "2026-06") so appended rows look native.
-            row_values["period"] = _format_period(label, style)
-        if "generation" in cols:
-            row_values["generation"] = round(float(gen), 2)
-        if "consumption" in cols and computed.get("consumption_kwh") is not None:
-            row_values["consumption"] = round(float(computed["consumption_kwh"]), 2)
-        if "rate" in cols and computed.get("effective_rate_per_kwh") is not None:
-            row_values["rate"] = round(float(computed["effective_rate_per_kwh"]), 6)
-        if "amount" in cols and computed.get("amount_owed") is not None:
-            row_values["amount"] = round(float(computed["amount_owed"]), 2)
-
-        new_bytes = append_period_row(bytes(bytes_), mapping, row_values)
-        sub.tracker_workbook = new_bytes
-        # Advance the idempotency cursor so the next pull won't re-append.
+            return {"status": "skipped", "reason": "period-already-present", "period": label}
+        row_values = _row_from_computed(computed, cols, label, style)
+        if row_values is None:
+            return {"status": "skipped", "reason": "no-generation-figure"}
+        sub.tracker_workbook = append_period_row(bytes(bytes_), mapping, row_values)
         new_map = dict(mapping)
-        new_map["period_style"] = style   # persist (back-fills legacy mappings going forward)
+        new_map["period_style"] = style
         new_map["last_period"] = label
         new_map["data_rows"] = int(mapping.get("data_rows") or 0) + 1
         sub.tracker_map = new_map
         sub.tracker_updated_at = datetime.utcnow()
         db.add(sub)
         return {"status": "appended", "period": label,
-                "amount": row_values.get("amount"),
-                "generation": row_values.get("generation")}
+                "amount": row_values.get("amount"), "generation": row_values.get("generation")}
     except Exception as e:  # noqa: BLE001 — never break a bill pull over the sheet
-        logger.exception("sheet_tracker append failed for sub %s",
-                         getattr(sub, "id", "?"))
+        logger.exception("sheet_tracker append failed for sub %s", getattr(sub, "id", "?"))
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
 

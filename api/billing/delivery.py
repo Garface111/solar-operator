@@ -55,8 +55,13 @@ def next_send_at(cadence: str, after: Optional[datetime] = None) -> datetime:
 
 # ─── attachment generation ──────────────────────────────────────────────────
 
-def build_match(sub) -> BillingMatch:
+def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     """Rebuild a BillingMatch from a subscription.
+
+    period_label ("YYYY-MM") targets a SPECIFIC historical period for the manual /
+    utility-bill path (default = the latest billed period). Used to backfill an
+    offtaker's generation spreadsheet with each missing month's real, canonically
+    computed figures.
 
     Two paths:
       * workbook-driven (the original) — re-parse the stored .xlsx bytes.
@@ -66,7 +71,7 @@ def build_match(sub) -> BillingMatch:
         consumer (invoice/summary renderers, delivery, drafts) is unchanged.
     """
     if not sub.source_workbook:
-        m = build_manual_match(sub)
+        m = build_manual_match(sub, period_label=period_label)
     else:
         m = match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)
     # Sequential invoice numbering: when the operator set a starting number, the
@@ -323,7 +328,7 @@ def _utility_bill_period_kwh(
 
 
 def _utility_bill_credit(
-    db, utility_account_id: int
+    db, utility_account_id: int, target_label: Optional[str] = None
 ) -> tuple[Optional[float], Optional[float], Optional[float],
            Optional[date], Optional[date], Optional[str], Optional[str]]:
     """OFFTAKER billing basis (Ford/Bruce's model, option B): the latest period's
@@ -341,7 +346,7 @@ def _utility_bill_credit(
     latest bill has no excess to bill (→ caller SKIPS).
     """
     from ..rate_schedule import resolve_offtaker_excess_credit
-    r = resolve_offtaker_excess_credit(db, utility_account_id)
+    r = resolve_offtaker_excess_credit(db, utility_account_id, target_label)
     if r is None:
         return None, None, None, None, None, None, None
     return r
@@ -403,7 +408,7 @@ def _platform_from_email(product) -> str:
     return m.group(1) if m else fa
 
 
-def build_manual_match(sub) -> BillingMatch:
+def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     """Synthesize a BillingMatch for a manually-entered customer (no workbook).
 
     The customer's share = allocation_pct × the array's most recent period
@@ -438,7 +443,7 @@ def build_manual_match(sub) -> BillingMatch:
             array_name = (acct.nickname if acct and acct.nickname
                           else (f"GMP {acct.account_number}" if acct else None))
             excess_kwh, credit_usd, credit_rate, start, end, label, rate_source = \
-                _utility_bill_credit(db, sub.utility_account_id)
+                _utility_bill_credit(db, sub.utility_account_id, target_label=period_label)
         kwh_source = "utility_bill"
         if credit_usd is None:
             # No GMP bill with excess generation yet → wait. NEVER substitute gross

@@ -386,7 +386,7 @@ def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
     return _median(rates) if len(rates) >= min_samples else None
 
 
-def resolve_offtaker_excess_credit(db, utility_account_id: int):
+def resolve_offtaker_excess_credit(db, utility_account_id: int, target_label: Optional[str] = None):
     """OPTION B offtaker billing basis: the latest period's EXCESS sent to grid,
     valued at the net-metering credit rate.
 
@@ -401,13 +401,24 @@ def resolve_offtaker_excess_credit(db, utility_account_id: int):
     bill has no excess to bill.
     """
     from .models import Bill, UtilityAccount, Array
-    bill = db.execute(
+    bills = db.execute(
         select(Bill).where(
             Bill.account_id == utility_account_id,
             Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0,
             Bill.period_end.isnot(None))
         .order_by(Bill.period_end.desc())
-    ).scalars().first()
+    ).scalars().all()
+    # Default: the latest billed period. With target_label ("YYYY-MM"), pick THAT
+    # period's bill instead — so the same canonical math can value any historical
+    # period (used to backfill an offtaker's generation spreadsheet). DB-agnostic
+    # match in Python (few bills per account).
+    def _lbl(b):
+        pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
+        return pe.strftime("%Y-%m") if pe else None
+    if target_label is not None:
+        bill = next((b for b in bills if _lbl(b) == target_label), None)
+    else:
+        bill = bills[0] if bills else None
     if bill is None:
         return None
     excess = round(float(bill.kwh_sent_to_grid), 1)
