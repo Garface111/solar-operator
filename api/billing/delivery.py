@@ -70,7 +70,18 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         generation. Both produce the same BillingMatch shape so every downstream
         consumer (invoice/summary renderers, delivery, drafts) is unchanged.
     """
-    if not sub.source_workbook:
+    # Bill from the GMP bill (percent-of-array: allocation_pct × the bill's generation)
+    # whenever the operator has EXPLICITLY configured it — both a linked utility account
+    # AND a share are set. That explicit config OVERRIDES a stored workbook (which would
+    # otherwise re-parse the uploaded sheet), so a spreadsheet offtaker can be switched to
+    # bill-driven billing just by setting bill + share. A budget bill still overrides the
+    # final total below, unchanged. Pure-workbook offtakers (no bill/share set) are
+    # unaffected; pure percent-of-array offtakers (no workbook) already take this path.
+    explicit_pct = (
+        getattr(sub, "utility_account_id", None) is not None
+        and getattr(sub, "allocation_pct", None) is not None
+    )
+    if (not sub.source_workbook) or explicit_pct:
         m = build_manual_match(sub, period_label=period_label)
     else:
         m = match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)

@@ -136,6 +136,51 @@ def test_unbound_offtaker_skips_rather_than_invoicing_telemetry():
     assert res.get("ok") is False
 
 
+def test_explicit_bill_and_share_override_stored_workbook():
+    """Ford 2026-06-28: a SPREADSHEET (workbook) offtaker that ALSO has a linked GMP
+    bill + a share set must bill PERCENT-OF-ARRAY from the GMP bill — the explicit
+    bill+share config overrides the stored source_workbook (which would otherwise
+    re-parse the uploaded sheet). The workbook bytes here are deliberately INVALID:
+    if path-selection wrongly took the workbook branch it would raise, so this proves
+    bill+share force the manual (bill-driven) path and the sheet is never parsed."""
+    tid, aid, acct_id = _seed(with_bill=True, bill_excess=1800.0,
+                              bill_credit_rate=0.2576, vendor_kwh=9999.0)
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Valley Cares, Inc.",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=0.5, billing_model="percent_of_array",
+        source_workbook=b"NOT-A-REAL-XLSX",        # would raise if wrongly parsed
+    )
+    m = delivery.build_match(sub)
+    assert m is not None and m.matched
+    ci = m.computed_invoice
+    assert ci["kwh_source"] == "utility_bill"       # billed from the GMP bill, not the sheet
+    assert ci["excess_kwh"] == 1800.0
+    assert m.latest_period.customer_kwh == 900.0     # 50% of the bill's 1800 kWh excess
+
+
+def test_budget_bill_overrides_on_workbook_offtaker_bill_path():
+    """The full Valley Cares case: a workbook offtaker with bill+share AND a custom
+    budget bill. It bills from the GMP bill (workbook ignored), but the fixed budget
+    total overrides the computed amount — exactly how budget billing already works.
+    The real computed solar-credit value is preserved for display."""
+    tid, aid, acct_id = _seed(with_bill=True, bill_excess=1800.0,
+                              bill_credit_rate=0.2576, vendor_kwh=9999.0)
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Valley Cares, Inc.",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=0.5, billing_model="percent_of_array",
+        source_workbook=b"NOT-A-REAL-XLSX",
+        budget_amount_usd=2150.0,
+    )
+    m = delivery.build_match(sub)
+    ci = m.computed_invoice
+    assert ci["kwh_source"] == "utility_bill"        # still bill-driven under the hood
+    assert ci["budget_override"] is True
+    assert ci["amount_owed"] == 2150.0               # the budget total wins
+    assert ci.get("solar_credit_value") is not None  # real computed credit preserved
+
+
 def test_offtaker_banked_month_bills_at_reference_rate():
     """Option B (Ford, 2026-06-22): a BANKED month — big EXCESS sent to grid but
     solar_credit_usd NULL (credited at ~$0, rolled forward, not cashed) — is NOT
