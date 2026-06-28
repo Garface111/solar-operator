@@ -563,18 +563,39 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     if getattr(sub, "utility_account_id", None) is not None:
         from ..models import UtilityAccount
         from ..adapters import is_smarthub_provider
-        # VEC/SmartHub accounts have no EXCESS+credit on their bills, so they take
-        # the "model A" path: allocation × MEASURED generation × an operator-entered
-        # rate (never the GMP/VT default). GMP accounts fall through UNCHANGED.
+        # A VEC/SmartHub account normally has no EXCESS+credit on its API bills, so it
+        # takes the "model A" path: allocation × MEASURED generation × an operator-
+        # entered rate (never the GMP/VT default). BUT once a VEC bill PDF has been
+        # parsed into a settled Bill (kwh_sent_to_grid + solar_credit_usd — see
+        # adapters.vec_bill), that bill carries the EXCESS and its OWN net-meter
+        # credit rate, exactly like a GMP bill. In that case PREFER the bill: fall
+        # through to the GMP utility-bill computation below so the VEC offtaker auto-
+        # prices from the bill's own rate (no operator rate needed). GMP accounts are
+        # unaffected — _is_sh is False for them.
         with SessionLocal() as _db0:
             _a0 = _db0.get(UtilityAccount, sub.utility_account_id)
             _is_sh = is_smarthub_provider((_a0.provider or "").lower()) if _a0 else False
-        if _is_sh:
+            _sh_has_bill = False
+            if _is_sh:
+                # Peek the SAME helper the GMP path uses: a non-None credit_usd means
+                # a parsed VEC bill with billable excess exists for this account.
+                _cu = _utility_bill_credit(
+                    _db0, sub.utility_account_id, target_label=period_label)[1]
+                _sh_has_bill = _cu is not None
+        # SmartHub with NO parsed bill yet → model-A fallback (operator rate).
+        # SmartHub WITH a parsed bill → fall through to the bill-priced GMP block.
+        if _is_sh and not _sh_has_bill:
             return _build_smarthub_offtaker_match(sub, operator, warnings)
         with SessionLocal() as db:
             acct = db.get(UtilityAccount, sub.utility_account_id)
-            array_name = (acct.nickname if acct and acct.nickname
-                          else (f"GMP {acct.account_number}" if acct else None))
+            # Provider-aware label: don't hardcode "GMP " for a VEC/SmartHub account.
+            if acct and acct.nickname:
+                array_name = acct.nickname
+            elif acct:
+                _prov = (acct.provider or "").upper() or "GMP"
+                array_name = f"{_prov} {acct.account_number}"
+            else:
+                array_name = None
             excess_kwh, credit_usd, credit_rate, start, end, label, rate_source = \
                 _utility_bill_credit(db, sub.utility_account_id, target_label=period_label)
         kwh_source = "utility_bill"

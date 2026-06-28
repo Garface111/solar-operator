@@ -219,6 +219,39 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
     return {"ok": True, "utility_accounts": out}
 
 
+@router.post("/utility-accounts/{utility_account_id}/vec-bill")
+async def upload_vec_bill(utility_account_id: int,
+                          file: UploadFile = File(...),
+                          authorization: Optional[str] = Header(default=None)):
+    """Upload a VEC/SmartHub bill PDF for a bound utility account → parse it into a
+    settled net-meter Bill (kwh_sent_to_grid + solar_credit_usd + the bill's own
+    credit rate). Once a parsed VEC bill exists, the offtaker invoice auto-prices
+    from the bill exactly like a GMP offtaker — excess kWh × the bill's own rate, no
+    operator-entered rate needed (see delivery.build_manual_match).
+
+    Tenant-scoped: the account must belong to the caller's tenant. Caps at 12 MB and
+    rejects anything that isn't a PDF (by %PDF magic). On a parse/guard failure
+    returns HTTP 422 with the reason.
+    """
+    from ..adapters.vec_bill import ingest_vec_bill_pdf
+
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "The uploaded file is empty")
+    if len(raw) > MAX_PDF_BYTES:
+        raise HTTPException(413, "File too large (max 12 MB).")
+    if raw[:4] != _MAGIC_PDF:
+        raise HTTPException(415, "Upload a PDF bill.")
+    with SessionLocal() as db:
+        res = ingest_vec_bill_pdf(db, t.id, utility_account_id, raw)
+        if not res.get("ok"):
+            raise HTTPException(422, res.get("reason") or "Couldn't read that bill.")
+        db.commit()
+        return res
+
+
 # ─── subscriptions CRUD ─────────────────────────────────────────────────────
 
 @router.get("/subscriptions")
