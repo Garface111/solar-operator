@@ -295,6 +295,119 @@ def _array_period_kwh_sourced(
     return kwh, start, end, label, (dom if kwh is not None else None)
 
 
+# Honest operator-set rate sources for a VEC/SmartHub offtaker. A VEC invoice may
+# ONLY use a rate the operator actually entered (per-offtaker or operator-global,
+# incl. the legacy flat overrides) — NEVER the auto schedule's VT/GMP default,
+# because VEC bills don't publish a net-metering credit rate and inventing one
+# would mis-bill a real customer (Ford's hard no, "model A").
+_SMARTHUB_HONEST_RATE_SOURCES = frozenset(
+    {"customer", "global", "legacy_flat_customer", "legacy_flat_global"}
+)
+
+
+def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
+    """VEC/SmartHub offtaker: price the offtaker's allocation_pct of the array's
+    MEASURED generation at an OPERATOR-ENTERED net rate. SmartHub bills carry no
+    excess+credit, so we REQUIRE an operator rate (per-offtaker or operator-global)
+    and NEVER use the GMP/VT default. Skips (waits) until both the generation and a
+    real operator rate are present."""
+    from ..db import SessionLocal
+    from ..models import UtilityAccount
+    from .matcher import Period, compute_invoice
+
+    # Re-fetch the bound account in a fresh session (we only have its id on `sub`).
+    with SessionLocal() as db:
+        acct = db.get(UtilityAccount, sub.utility_account_id)
+        prov = (acct.provider or "").lower() if acct else "vec"
+        PROV = prov.upper()
+        array_name = (acct.nickname if acct and acct.nickname
+                      else (f"{PROV} acct {acct.account_number}" if acct else None))
+        arr_id = acct.array_id if acct else None
+
+        # MEASURED generation for the array (DailyGeneration / GMP-read contract /
+        # Bill fallback — honest provenance in gen_src). VEC daily generation is
+        # populated from the SmartHub net-export pull (api/adapters/smarthub).
+        if arr_id is not None:
+            gen_kwh, start, end, label, gen_src = _array_period_kwh_sourced(db, arr_id)
+        else:
+            gen_kwh = None
+            start = end = None
+            label = None
+            gen_src = None
+            warnings.append(
+                f"This {PROV} account isn't linked to an array yet — link it to "
+                f"the array to bill its generation.")
+
+    # Rate: REQUIRE an operator-entered rate. Never the auto/VT default.
+    pricing = resolve_discount_pricing(sub, period_end=end)
+    rate_ok = pricing["net_source"] in _SMARTHUB_HONEST_RATE_SOURCES
+    if not rate_ok:
+        warnings.append(
+            f"Set a net-metering credit rate for this {PROV} offtaker — {PROV} "
+            f"bills don't publish one, so the invoice waits for the rate you enter "
+            f"(we never bill {PROV} at the GMP/VT default).")
+
+    pct = sub.allocation_pct or 0.0
+    if not pct:
+        warnings.append("No allocation % set for this offtaker.")
+
+    # Billable only when BOTH measured generation AND a real operator rate exist.
+    billable = (gen_kwh is not None) and rate_ok
+    array_kwh = gen_kwh if billable else None
+    net_rate = pricing["net_rate"] if rate_ok else 0.0
+    discount = pricing["discount_pct"]
+    billing_rate = 1.0 - discount
+
+    customer_kwh = round((array_kwh or 0.0) * pct, 2)
+    computed = compute_invoice(customer_kwh, net_rate, 0.0,
+                               billing_rate, "percent_of_array", None)
+    computed["invoice_number"] = end.strftime("%Y-%m") if end else label
+    computed["period_start"] = start.isoformat() if start else None
+    computed["period_end"] = end.isoformat() if end else None
+    computed["month"] = label
+    computed["project_total_kwh"] = (array_kwh or 0.0)
+    computed["array_kwh"] = (array_kwh or 0.0)
+    # For VEC this is MEASURED generation (no excess+credit on the bill); kept on
+    # the excess_kwh key purely for downstream-shape parity with the GMP path.
+    computed["excess_kwh"] = (array_kwh or 0.0)
+    computed["solar_credit_usd"] = None
+    computed["net_rate_per_kwh"] = round(net_rate, 6)
+    computed["discount_pct"] = round(discount, 6)
+    computed["effective_rate_per_kwh"] = round(net_rate * billing_rate, 6)
+    computed["net_rate_source"] = pricing["net_source"] if rate_ok else "needs_rate"
+    computed["net_rate_note"] = (
+        "the net-metering credit rate you entered (" + PROV
+        + " bills don't publish one)") if rate_ok else None
+    computed["discount_source"] = pricing["discount_source"]
+    computed["rate_per_kwh"] = round(net_rate * billing_rate, 6)
+    computed["rate_source"] = pricing["discount_source"]
+    # HONEST provenance — measured generation, NOT a utility bill.
+    computed["kwh_source"] = gen_src or "smarthub_generation"
+    # The send-guard flag: only True when this is a real, billable invoice.
+    computed["has_utility_bill"] = billable
+
+    period = Period(
+        month=label, start=start, end=end,
+        array_kwh=(array_kwh or 0.0), customer_kwh=customer_kwh,
+        tariff=net_rate, adder=0.0,
+    )
+    return BillingMatch(
+        matched=True, confidence=1.0, source="manual", data_sheet=None,
+        customer={"name": sub.customer_name, "email": sub.client_email},
+        allocation_pct=pct,
+        billing_rate=billing_rate, billing_model="percent_of_array",
+        periods=[period], latest_period=period,
+        template={"title": "Invoice - Solar Power Generation", "operator": operator},
+        computed_invoice=computed,
+        project_totals={
+            "total_array_kwh": (array_kwh or 0.0),
+            "total_customer_kwh": customer_kwh,
+            "array_name": array_name,
+        },
+        warnings=warnings,
+    )
+
+
 def _utility_bill_period_kwh(
     db, utility_account_id: int
 ) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str]]:
@@ -438,6 +551,15 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     # SKIPS (waits on the utility bill) — it is never fabricated or substituted.
     if getattr(sub, "utility_account_id", None) is not None:
         from ..models import UtilityAccount
+        from ..adapters import is_smarthub_provider
+        # VEC/SmartHub accounts have no EXCESS+credit on their bills, so they take
+        # the "model A" path: allocation × MEASURED generation × an operator-entered
+        # rate (never the GMP/VT default). GMP accounts fall through UNCHANGED.
+        with SessionLocal() as _db0:
+            _a0 = _db0.get(UtilityAccount, sub.utility_account_id)
+            _is_sh = is_smarthub_provider((_a0.provider or "").lower()) if _a0 else False
+        if _is_sh:
+            return _build_smarthub_offtaker_match(sub, operator, warnings)
         with SessionLocal() as db:
             acct = db.get(UtilityAccount, sub.utility_account_id)
             array_name = (acct.nickname if acct and acct.nickname
@@ -1062,8 +1184,33 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     if not getattr(sub, "source_workbook", None):
         _src = _ci_guard.get("kwh_source")
         _has_bill = _ci_guard.get("has_utility_bill") is True
-        if _src != "utility_bill" or not _has_bill:
-            if getattr(sub, "utility_account_id", None) is not None:
+        # Is the bound account a VEC/SmartHub one? (Its measured-generation source
+        # string is provenance-honest — e.g. 'daily_csv'/'smarthub' — so we can't
+        # detect "VEC" from kwh_source alone; look up the account's provider.)
+        _is_sh_bound = False
+        _uaid = getattr(sub, "utility_account_id", None)
+        if _uaid is not None:
+            from ..models import UtilityAccount
+            from ..adapters import is_smarthub_provider
+            _ga = db.get(UtilityAccount, _uaid)
+            _is_sh_bound = (
+                is_smarthub_provider((_ga.provider or "").lower())
+                if _ga else False)
+        # A SENDABLE invoice is one built from a settled GMP utility bill OR from a
+        # billable VEC/SmartHub measured-generation invoice (has_utility_bill flags
+        # both). The has_utility_bill gate (real bill / real operator rate + real
+        # generation) still does the heavy lifting — generation telemetry on an
+        # unbound or GMP offtaker is never sendable.
+        _sendable_src = (
+            _src == "utility_bill"
+            or (_src or "").startswith("smarthub")
+            or _is_sh_bound)
+        if not _sendable_src or not _has_bill:
+            if _is_sh_bound:
+                _reason = ("waiting on this VEC/SmartHub offtaker — set a net-"
+                           "metering rate and confirm the array's generation has "
+                           "landed (we never bill VEC at the GMP/VT default)")
+            elif _uaid is not None:
                 _reason = ("waiting on the utility bill for this offtaker — no GMP "
                            "bill has landed for this period yet (no vendor data is "
                            "substituted)")

@@ -40,7 +40,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 
 from ..db import SessionLocal
@@ -156,16 +156,23 @@ async def billing_match(file: UploadFile = File(...),
 
 @router.get("/utility-accounts")
 def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
-    """List this tenant's GMP utility accounts so the add-offtaker UI can let the
-    operator SELECT the utility bill that connects to an offtaker.
+    """List this tenant's GMP and VEC/SmartHub utility accounts so the add-offtaker
+    UI can let the operator SELECT the utility bill that connects to an offtaker.
 
-    Offtaker invoices are computed EXCLUSIVELY from the chosen account's utility
+    GMP offtaker invoices are computed EXCLUSIVELY from the chosen account's utility
     PAPER BILLS (Bill.kwh_generated per billing period) — never vendor/inverter
-    data. This endpoint surfaces each GMP account with the array it feeds and a
-    summary of the bills we hold (count + latest period + that period's kWh) so
-    the operator can pick confidently and see whether a bill is on file yet.
+    data. VEC/SmartHub accounts carry no EXCESS+credit breakdown, so a VEC offtaker
+    is priced as allocation_pct × the array's MEASURED generation × an operator-
+    entered net rate (delivery enforces that rate; see build_manual_match).
+
+    This endpoint surfaces each account with the array it feeds and a summary of the
+    bills we hold (count + latest period + that period's kWh). The bill summary is
+    GMP-shaped (Bill.kwh_generated, always null for SmartHub) so a VEC account shows
+    empty bill stats — that's acceptable; the account still appears so it can be
+    bound. The `provider` field lets the frontend label GMP vs VEC correctly.
     """
     from ..models import UtilityAccount, Bill, Array
+    from ..adapters.smarthub import ALL_SMARTHUB_PROVIDERS
 
     t = tenant_from_session(authorization)
     out = []
@@ -173,7 +180,8 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
         accts = db.execute(
             select(UtilityAccount).where(
                 UtilityAccount.tenant_id == t.id,
-                UtilityAccount.provider == "gmp",
+                or_(UtilityAccount.provider == "gmp",
+                    UtilityAccount.provider.in_(sorted(ALL_SMARTHUB_PROVIDERS))),
                 UtilityAccount.deleted_at.is_(None),
             ).order_by(UtilityAccount.nickname, UtilityAccount.account_number)
         ).scalars().all()
@@ -196,6 +204,7 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
                 "utility_account_id": a.id,
                 "account_number": a.account_number,
                 "nickname": a.nickname,
+                "provider": a.provider,
                 "array_id": a.array_id,
                 "array_name": arr.name if arr else None,
                 "bill_count": int(bill_count),
@@ -494,10 +503,12 @@ async def _create_manual_subscription(
             if (acct is None or acct.tenant_id != t.id
                     or acct.deleted_at is not None):
                 raise HTTPException(404, f"Utility account {utility_account_id} not found")
-            if (acct.provider or "").lower() != "gmp":
+            from ..adapters import is_smarthub_provider
+            _prov = (acct.provider or "").lower()
+            if _prov != "gmp" and not is_smarthub_provider(_prov):
                 raise HTTPException(
-                    400, "Offtaker reports bind to a GMP utility account "
-                         "(utility-bill data only).")
+                    400, "Offtaker reports bind to a GMP or VEC/SmartHub utility "
+                         "account (utility-bill data only).")
             client = db.execute(
                 select(Client).where(Client.tenant_id == t.id, Client.name == name,
                                      Client.deleted_at.is_(None))
@@ -733,14 +744,19 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                 raise HTTPException(404, "Array not found")
             sub.array_id = body.array_id
         if body.utility_account_id is not None:
-            # Re-bind the offtaker's billing source to a different GMP utility bill.
-            # Mirror creation: validate ownership + GMP, refresh array_id from it.
+            # Re-bind the offtaker's billing source to a different GMP or VEC/
+            # SmartHub utility bill. Mirror creation: validate ownership +
+            # provider, refresh array_id from it.
             from ..models import UtilityAccount
+            from ..adapters import is_smarthub_provider
             acct = db.get(UtilityAccount, body.utility_account_id)
             if acct is None or acct.tenant_id != t.id or acct.deleted_at is not None:
                 raise HTTPException(404, f"Utility account {body.utility_account_id} not found")
-            if (acct.provider or "").lower() != "gmp":
-                raise HTTPException(400, "Offtaker invoices bind to a GMP utility account.")
+            _prov = (acct.provider or "").lower()
+            if _prov != "gmp" and not is_smarthub_provider(_prov):
+                raise HTTPException(
+                    400, "Offtaker invoices bind to a GMP or VEC/SmartHub utility "
+                         "account.")
             sub.utility_account_id = body.utility_account_id
             sub.array_id = acct.array_id
         if "rate_per_kwh" in body.model_fields_set:
