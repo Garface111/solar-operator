@@ -276,6 +276,19 @@ def detect_structure(file_bytes: bytes, filename: str = "",
     }
 
 
+def _looks_numeric(v) -> bool:
+    """True if a cell holds a number (an actual data value), tolerating $ , and spaces."""
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    try:
+        float(str(v).replace(",", "").replace("$", "").strip())
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _find_header(grid: list[list],
                  hint_tokens: Optional[list[str]] = None) -> tuple[Optional[int], dict, list]:
     """Scan the first ~15 rows for the row that best looks like a header (the
@@ -305,6 +318,11 @@ def _find_header(grid: list[list],
                     sc *= 0.05                       # cumulative/running-total → not the monthly column
                 elif hint_tokens and any(t and t in cell_n for t in hint_tokens):
                     sc += 50.0                       # bears the offtaker's name → it IS their share
+                # …but a generation column with NO numeric data below it can't be the real one
+                # (e.g. an empty 'kWh <offtaker>' column next to a populated 'kWh whole array'):
+                # demote it hard so a column that actually holds data wins, name boost or not.
+                if not any(cidx < len(rr) and _looks_numeric(rr[cidx]) for rr in grid[ridx + 1:ridx + 40]):
+                    sc *= 0.02
                 scores["generation"] = (sc, kw)
             for field, (sc, _kw) in scores.items():
                 if field not in claims or sc > claims[field][1]:
