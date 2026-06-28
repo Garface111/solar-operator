@@ -809,9 +809,29 @@ def _sheet_context(file_bytes: bytes, mapping: dict, n_rows: int = 6):
     data_rows = [r for r in range(hr + 2, ws.max_row + 1)
                  if isinstance(pc, int) and ws.cell(row=r, column=pc + 1).value not in (None, "")]
     last = data_rows[-1] if data_rows else None
-    date_cols = [c for c in range(1, maxc + 1)
-                 if last and _parse_date_any(ws.cell(row=last, column=c).value)]   # incl. TEXT dates
-    end_col = date_cols[-1] if date_cols else ((pc + 1) if isinstance(pc, int) else 1)
+    # The PERIOD of a row must come from its bill-END date so it matches build_match's labels.
+    # 1) Trust the recipe's period_end column when present (authoritative).
+    # 2) Else use the FIRST contiguous block of date columns — the Date start/End pair sits next to
+    #    the period column; a stray date-like value far right (an invoice id, a 'paid' date) must
+    #    NOT hijack the period. (Real bug: a 21-col sheet derived periods from col ~18, so present
+    #    was missing real months and inventing phantom ones.)
+    end_col = None
+    for _k, _rule in ((mapping.get("recipe") or {}).get("columns") or {}).items():
+        if (_rule or {}).get("src") == "period_end":
+            try:
+                end_col = int(_k) + 1
+            except (TypeError, ValueError):
+                end_col = None
+    if end_col is None:
+        _raw = [c for c in range(1, maxc + 1)
+                if last and _parse_date_any(ws.cell(row=last, column=c).value)]   # incl. TEXT dates
+        _block = []
+        for _c in _raw:
+            if not _block or _c == _block[-1] + 1:
+                _block.append(_c)
+            else:
+                break
+        end_col = _block[-1] if _block else ((pc + 1) if isinstance(pc, int) else 1)
 
     def rper(r):
         v = ws.cell(row=r, column=end_col).value
@@ -988,6 +1008,19 @@ def append_recipe_rows(file_bytes: bytes, mapping: dict, facts_list: list,
             rr += 1
         return wr
 
+    # Deterministic CONSTANT detection: a column whose every existing data row holds the SAME value
+    # is a constant to carry (a flat tariff, a 0 adder). Override the recipe with it — guards against
+    # the model labeling a flat tariff as 'rate' (which would recompute 0.183582 instead of 0.18116).
+    const_cols = {}
+    _drows = [rr for rr in range(hr + 2, ws.max_row + 1)
+              if any(ws.cell(row=rr, column=c + 1).value not in (None, "") for c in probe)]
+    for _ci in range(ws.max_column):
+        _vv = [ws.cell(row=rr, column=_ci + 1).value for rr in _drows
+               if ws.cell(row=rr, column=_ci + 1).value not in (None, "")]
+        if len(_vv) >= 3 and not (isinstance(_vv[0], str) and str(_vv[0]).startswith("=")) \
+                and len({str(x) for x in _vv}) == 1:
+            const_cols[_ci] = _vv[-1]
+
     seen = set(present or ())
     appended = []
     for fact in sorted(facts_list, key=lambda f: f.get("period") or "9999-99"):
@@ -1002,7 +1035,9 @@ def append_recipe_rows(file_bytes: bytes, mapping: dict, facts_list: list,
                 continue
             src = (rule or {}).get("src")
             tcell = ws.cell(row=template, column=ci + 1) if template else None
-            if src in _RECIPE_FACT:
+            if ci in const_cols:                           # deterministic constant wins
+                val = const_cols[ci]
+            elif src in _RECIPE_FACT:
                 val = fact.get(_RECIPE_FACT[src])
             elif src == "constant":
                 val = tcell.value if tcell else None
