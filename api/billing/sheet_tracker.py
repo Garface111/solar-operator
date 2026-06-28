@@ -859,13 +859,21 @@ def update_subscription_sheet(db, sub) -> dict:
         from . import sheet_tracker_ai as _ai
         if billed and _ai.ai_available():
             plan = None
+            present = []
             try:
                 headers, recent, present = _sheet_context(bytes(bytes_), mapping)
-                facts = _candidate_facts(sub, billed)
-                if facts:
-                    plan = _ai.ai_plan_rows(headers, recent, facts, sheet=mapping.get("sheet"),
-                                            offtaker=getattr(sub, "customer_name", None),
-                                            present_labels=present)
+                # Deterministically pick the MISSING months (billed but not already on the sheet) —
+                # the model over-proposes if left to decide. Hand it ONLY those to lay out.
+                missing = [b for b in billed if b not in set(present)][-14:]
+                if not missing:
+                    plan = {"rows": [], "sane": True,
+                            "explanation": "Already up to date through the latest bill."}
+                else:
+                    facts = _candidate_facts(sub, missing, n=len(missing))
+                    if facts:
+                        plan = _ai.ai_plan_rows(headers, recent, facts, sheet=mapping.get("sheet"),
+                                                offtaker=getattr(sub, "customer_name", None),
+                                                present_labels=present)
             except Exception:  # noqa: BLE001 — never break the reconcile over the AI path
                 plan = None
             if plan is not None:
