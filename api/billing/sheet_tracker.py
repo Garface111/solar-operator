@@ -680,6 +680,19 @@ def _read_xlsx_grid(b: bytes,
                 break
         _hr, cols, _h = _find_header(grid, hint_tokens)
         score = len(cols) + (5 if "generation" in cols else 0)
+        # Prefer the tab that holds the real LEDGER, not a 'SAMPLE'/'Template' example: weight
+        # by how many data rows sit under the header, and penalize obvious non-data tab names.
+        # (Real case: a workbook with a 17-row 'SAMPLE' tab AND the true 55-row 'Data' tab — both
+        # map the same columns, so without this tie-break the sample tab silently won.)
+        pc = cols.get("period")
+        if isinstance(pc, int):
+            ndata = sum(1 for r in grid[_hr + 1:]
+                        if pc < len(r) and r[pc] not in (None, "") and str(r[pc]).strip())
+            score += min(ndata, 60) * 0.1
+        nm = (ws.title or "").lower()
+        if any(w in nm for w in ("sample", "template", "example", "true up", "trueup",
+                                 "trend", "instruction", "readme", "notes", "summary")):
+            score -= 4.0
         if score > best_score:
             best_score = score
             best_grid = grid
