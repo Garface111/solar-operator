@@ -1120,6 +1120,16 @@ def _tracker_status_dict(sub) -> dict:
     }
 
 
+def _friendly_period(lbl: str) -> str:
+    """'2026-05' -> 'May 2026' for human-readable upload feedback; passthrough on anything odd."""
+    try:
+        import calendar
+        y, m = str(lbl).split("-")[:2]
+        return f"{calendar.month_name[int(m)]} {y}"
+    except Exception:  # noqa: BLE001
+        return str(lbl)
+
+
 @router.get("/subscriptions/{sub_id}/tracker")
 def tracker_status(sub_id: int, authorization: Optional[str] = Header(default=None)):
     """Tracker state for one offtaker (drives the card). 404 only on a missing
@@ -1168,9 +1178,25 @@ async def tracker_upload(sub_id: int,
         sub.tracker_map = res["mapping"]
         sub.tracker_updated_at = datetime.utcnow()
         db.add(sub)
+        # Transparency: immediately reconcile the freshly-uploaded sheet against the offtaker's
+        # GMP bills, so the operator SEES that we processed it and produced an updated
+        # spreadsheet — not a silent store. Best-effort: a reconcile hiccup never fails upload.
+        from .sheet_tracker import update_subscription_sheet
+        try:
+            recon = update_subscription_sheet(db, sub) or {}
+        except Exception:  # noqa: BLE001
+            recon = {"status": "error"}
         db.commit()
         db.refresh(sub)
-        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+        added = recon.get("periods") if isinstance(recon.get("periods"), list) else (
+            [recon["period"]] if recon.get("status") == "appended" and recon.get("period") else [])
+        return {"ok": True, "tracker": _tracker_status_dict(sub),
+                "processed": {
+                    "sheet": (res.get("mapping") or {}).get("sheet"),
+                    "status": recon.get("status"),
+                    "added": [_friendly_period(p) for p in added],
+                    "added_count": len(added),
+                }}
 
 
 @router.patch("/subscriptions/{sub_id}/tracker")
