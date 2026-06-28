@@ -489,29 +489,31 @@ def _bare_month(s: str) -> Optional[int]:
     return None
 
 
-def _sheet_last_period(file_bytes: bytes, mapping: dict) -> Optional[str]:
-    """The raw period value of the LAST non-empty data row — the most recent month the sheet
-    holds. Used to anchor the sheet to the billed timeline (append billed periods AFTER it),
-    which is robust to BARE month names and to sheets that start at a different point than the
-    bill history — we only need the last row's period, never every row's year."""
-    last = None
+def _sheet_data_row_count(file_bytes: bytes, mapping: dict) -> int:
+    """How many data rows hold a PARSEABLE period (a real month/date). Junk or typo cells like
+    'Aguust', and blanks, don't count. The sheet's rows align 1:1 with the offtaker's EARLIEST
+    billed periods, so billed[count:] is exactly the recent periods missing from the tail — no
+    fragile year parsing, immune to a single garbled cell that otherwise broke the anchor."""
+    n = 0
     try:
         cols = mapping.get("columns") or {}
         pc = cols.get("period")
         hr = int(mapping.get("header_row") or 0)
         if not isinstance(pc, int):
-            return None
+            return 0
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         sheet = mapping.get("sheet")
         ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
         for row in ws.iter_rows(min_row=hr + 2, min_col=pc + 1, max_col=pc + 1, values_only=True):
             v = row[0]
-            if v is not None and str(v).strip():
-                last = str(v).strip()
+            if v is None or not str(v).strip():
+                continue
+            if _ym(str(v)) or _bare_month(str(v)):
+                n += 1
     except Exception:  # noqa: BLE001
-        return None
-    return last
+        return 0
+    return n
 
 
 def update_subscription_sheet(db, sub) -> dict:
@@ -541,24 +543,15 @@ def update_subscription_sheet(db, sub) -> dict:
 
         billed = _offtaker_billed_labels(db, sub)
 
-        # ── Reconcile path (GMP-bound offtaker): append billed periods AFTER the sheet's
-        # last row ── Anchor the sheet's LAST data row to the billed timeline, then add every
-        # billed period that comes after it. Robust to bare month names + sheets that start at
-        # a different point than the bill history; handles the common "deleted the recent rows"
-        # and "a new month landed" cases without parsing every row's year.
+        # ── Reconcile path (GMP-bound offtaker) ── The sheet's data rows are chronological and
+        # align 1:1 with the offtaker's earliest billed periods, so the periods MISSING from the
+        # tail = billed[<# parseable rows already in the sheet>:]. This re-adds the recently
+        # deleted/just-landed months without parsing any row's year — immune to bare month names
+        # and to a single garbled cell. (Assumes the sheet starts at the account's first bill;
+        # the cap bounds any misalignment.)
         if billed:
-            last_cell = _sheet_last_period(bytes(bytes_), mapping)
-            anchor = None
-            if last_cell:
-                ym = _ym(last_cell)
-                if ym:
-                    anchor = f"{ym[0]:04d}-{ym[1]:02d}"
-                else:
-                    mo = _bare_month(last_cell)
-                    if mo:
-                        cands = [b for b in billed if b.endswith(f"-{mo:02d}")]
-                        anchor = cands[-1] if cands else None
-            missing = [b for b in billed if b > anchor] if anchor else billed[-1:]
+            n_rows = _sheet_data_row_count(bytes(bytes_), mapping)
+            missing = billed[n_rows:] if 0 <= n_rows < len(billed) else []
             # Safety cap: never dump a long history — append at most the most-recent MAX_BACKFILL.
             MAX_BACKFILL = 14
             if len(missing) > MAX_BACKFILL:
