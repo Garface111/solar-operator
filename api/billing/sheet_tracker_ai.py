@@ -234,7 +234,7 @@ def _parse_plan(text: str, ncol: int) -> Optional[dict]:
 
 def ai_plan_rows(headers: list, recent_rows: list, facts: list,
                  sheet: Optional[str] = None, offtaker: Optional[str] = None,
-                 timeout: int = 45) -> Optional[dict]:
+                 present_labels: Optional[list] = None, timeout: int = 45) -> Optional[dict]:
     """The intelligence Ford asked for: hand the model the sheet's headers + last rows and the
     customer's available billing periods (each with REAL figures we computed), and let it (1)
     decide which periods are MISSING from the sheet, (2) produce a COMPLETE row for each, matching
@@ -249,7 +249,10 @@ def ai_plan_rows(headers: list, recent_rows: list, facts: list,
             "You maintain a solar-generation tracking spreadsheet a utility operator hand-built. It "
             "records ONE row per billing month for a single customer"
             + (f' ("{offtaker}")' if offtaker else "") + (f' on sheet "{sheet}"' if sheet else "") + ".\n\n"
-            + _render_rows(headers, recent_rows) + "\n\n"
+            + _render_rows(headers, recent_rows) + "\n"
+            + (("ALL MONTHS ALREADY IN THE SHEET (the complete set already present — do NOT re-add "
+                "any of these): " + ", ".join(str(p) for p in present_labels) + "\n") if present_labels else "")
+            + "\n"
             "Here are the customer's billing periods available from the utility, each with the REAL "
             "figures already computed (whole-array generation, the customer's share kWh, the credit "
             "rate $/kWh, the billed amount, and the period start/end dates):\n"
