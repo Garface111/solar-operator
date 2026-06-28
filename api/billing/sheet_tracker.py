@@ -1082,7 +1082,11 @@ def ingest_upload(file_bytes: bytes, filename: str,
     # operator (mapping chips + remap endpoint), so a wrong guess stays correctable.
     try:
         from .sheet_tracker_ai import ai_available, ai_map_columns
-        if ai_available():
+        # Heuristic FIRST (deterministic). Only let the model map columns when the heuristic
+        # couldn't confidently find the layout — otherwise its run-to-run variation would
+        # destabilize a sheet the heuristic already reads correctly (Glover).
+        _heur_ok = mapping.get("ok") and "generation" in (mapping.get("columns") or {})
+        if ai_available() and not _heur_ok:
             grid, sheet, kind = _open_grid(file_bytes, filename, hint_tokens)
             ai = ai_map_columns(grid, sheet, offtaker_name)
             if ai and grid and 0 <= ai["header_row"] < len(grid):
