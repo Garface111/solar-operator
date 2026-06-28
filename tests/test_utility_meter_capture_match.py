@@ -301,3 +301,46 @@ def test_gmp_capture_bill_is_idempotent_no_dupe_bill(client):
         assert len(accts) == 1
 
 
+def test_vec_capture_creates_linkable_account_even_with_no_generation(client):
+    """REGRESSION (Ford: 'I linked VEC but don't see Glover in the picker').
+
+    VEC net-metering 'credit' accounts routinely read 0 kWh in SmartHub's usage
+    explorer, so the meter capture lands with no generation. The path used to skip
+    ANY account with no detected generation → a freshly-linked VEC account never
+    became a pickable UtilityAccount. For SmartHub providers we now create the
+    bindable UtilityAccount + Array anyway (generation attaches later; the offtaker
+    invoice waits for it). No pre-existing array."""
+    tid, key = _make_tenant()
+    resp = _capture(client, key, account_number="6578300",
+                    nickname="52 County RD, Glover, VT", daily=[])  # NO generation
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        ua = db.execute(select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid, UtilityAccount.provider == "vec",
+            UtilityAccount.account_number == "6578300")).scalar_one_or_none()
+        assert ua is not None, "VEC account must be created so it's pickable"
+        assert ua.array_id is not None              # linked to an array to bill from
+        arrs = db.execute(select(Array).where(
+            Array.tenant_id == tid, Array.deleted_at.is_(None))).scalars().all()
+        assert len(arrs) == 1                        # the bindable array exists
+
+
+def test_gmp_capture_still_skips_no_generation_account(client):
+    """GMP keeps the bury-prevention gate: a GMP account with no generation (a
+    home/pump/meter among the operator's many accounts) creates NO array and NO
+    UtilityAccount — only the SmartHub gate was relaxed."""
+    tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/utility-meter-capture",
+        json={"provider": "gmp", "accounts": [{
+            "account_number": "4040404", "nickname": "No Solar Home",
+            "summary": {}, "daily": []}]},
+        headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        ua = db.execute(select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid,
+            UtilityAccount.account_number == "4040404")).scalar_one_or_none()
+        assert ua is None, "GMP no-generation account must still be skipped"
+
+

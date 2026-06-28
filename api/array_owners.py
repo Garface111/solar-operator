@@ -37,6 +37,7 @@ from sqlalchemy.orm import selectinload
 from . import inverters
 from . import ratelimit
 from .adapters import gmp as gmp_adapter
+from .adapters import is_smarthub_provider
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
@@ -3651,7 +3652,18 @@ def _persist_meter_accounts(
                 or (period_gen is not None and period_gen > 0 and period_end is not None)
             )
 
-            if not has_any_generation:
+            # The "no array for non-solar accounts" gate is GMP-SPECIFIC: a GMP login
+            # carries dozens of homes/pumps/meters with no solar, and we must not bury
+            # the real arrays under empty ones. A SmartHub (VEC/WEC) connect is the
+            # operator's OWN solar account — and VEC net-metering "credit" accounts
+            # routinely read 0 kWh in SmartHub's usage explorer yet are a real array
+            # the operator needs to bill an offtaker from. So for SmartHub we STILL
+            # create the bindable UtilityAccount + Array even with no generation yet
+            # (it appears in the offtaker picker immediately; generation attaches later
+            # via the SmartHub pull and the offtaker invoice WAITS for it). Only GMP
+            # skips a no-generation account. (Was: every provider skipped → a linked
+            # VEC account never reached the picker — Ford: "I don't see Glover.")
+            if not has_any_generation and not is_smarthub_provider(provider):
                 # Record the account honestly as no-solar — but create NO array and
                 # write NO rows. The UI uses has_generation=false to tell the owner
                 # "this GMP account has no solar production."
