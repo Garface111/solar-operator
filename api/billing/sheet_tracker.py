@@ -719,11 +719,22 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
     present = set(present or ())
 
     template = None   # last existing data row → its per-column number_format is the template
+    _drows = []
     r = hr + 2
     while r <= ws.max_row:
         if any(ws.cell(row=r, column=c + 1).value not in (None, "") for c in probe):
             template = r
+            _drows.append(r)
         r += 1
+    # Columns holding the SAME value in every existing data row → carry that EXACT constant onto
+    # every new row (the operator's flat tariff, a zero adder), overriding whatever the model placed.
+    # Varying columns (generation, share, dates) and formulas are left to the model.
+    constants = {}
+    for col in range(1, ws.max_column + 1):
+        nb = [ws.cell(row=rr, column=col).value for rr in _drows]
+        nb = [v for v in nb if v not in (None, "")]
+        if len(nb) >= 2 and len(set(nb)) == 1 and not (isinstance(nb[0], str) and str(nb[0]).startswith("=")):
+            constants[col] = nb[0]
 
     def next_row():
         wr = hr + 2
@@ -768,6 +779,10 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
             cell = ws.cell(row=wr, column=ci + 1, value=conv(v))
             if template is not None:                  # mimic the column's date/number format exactly
                 cell.number_format = ws.cell(row=template, column=ci + 1).number_format
+        for col, cval in constants.items():           # carry the flat tariff / zero adder exactly
+            cc = ws.cell(row=wr, column=col, value=cval)
+            if template is not None:
+                cc.number_format = ws.cell(row=template, column=col).number_format
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
