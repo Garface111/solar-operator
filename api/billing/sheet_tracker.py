@@ -641,6 +641,31 @@ def _sheet_data_row_count(file_bytes: bytes, mapping: dict) -> int:
     return n
 
 
+def _parse_date_any(v):
+    """A date from a cell value — handles real date objects AND text dates ('4/18/2025',
+    '2025-04-18'). None if it isn't a date. (Many hand-built sheets store dates as TEXT.)"""
+    import datetime as _dt
+    if isinstance(v, _dt.datetime):
+        return v.date()
+    if isinstance(v, _dt.date):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+        if m:
+            try:
+                return _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except Exception:  # noqa: BLE001
+                return None
+        m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", s)
+        if m:
+            try:
+                return _dt.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
 def _sheet_context(file_bytes: bytes, mapping: dict, n_rows: int = 6):
     """(headers, recent_rows, present_labels) for the AI planner. recent_rows keep formulas as
     strings and dates as ISO; present_labels = each data row's period as 'YYYY-MM' (from a date
@@ -661,7 +686,7 @@ def _sheet_context(file_bytes: bytes, mapping: dict, n_rows: int = 6):
                  if isinstance(pc, int) and ws.cell(row=r, column=pc + 1).value not in (None, "")]
     last = data_rows[-1] if data_rows else None
     date_cols = [c for c in range(1, maxc + 1)
-                 if last and isinstance(ws.cell(row=last, column=c).value, (_dt.date, _dt.datetime))]
+                 if last and _parse_date_any(ws.cell(row=last, column=c).value)]   # incl. TEXT dates
     end_col = date_cols[-1] if date_cols else ((pc + 1) if isinstance(pc, int) else 1)
 
     def rper(r):
@@ -745,23 +770,32 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
             rr += 1
         return wr
 
-    def conv(v):
-        if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.strip()):
+    from copy import copy as _copy
+
+    def write_cell(wr, col, v):
+        cell = ws.cell(row=wr, column=col)
+        tcell = ws.cell(row=template, column=col) if template else None
+        d = _parse_date_any(v) if isinstance(v, str) else None
+        if d is not None:
+            # Mimic how this column stores dates: a TEXT-date column gets a matching M/D/YYYY
+            # string (so it aligns + reads exactly like the existing rows); a real-date column
+            # gets a date object that the copied number_format renders.
+            if tcell is not None and isinstance(tcell.value, str):
+                cell.value = "%d/%d/%d" % (d.month, d.day, d.year)
+            else:
+                cell.value = d
+        else:
+            cell.value = v                                # numbers, formulas ('=...'), text as-is
+        if tcell is not None:
+            cell.number_format = tcell.number_format
             try:
-                return _dt.date.fromisoformat(v.strip())
+                cell.alignment = _copy(tcell.alignment)   # match the column's left/right alignment
             except Exception:  # noqa: BLE001
-                return v
-        return v
+                pass
 
     def row_period(ai_row):
-        ds = []
-        for v in ai_row.values():
-            if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.strip()):
-                try:
-                    ds.append(_dt.date.fromisoformat(v.strip()))
-                except Exception:  # noqa: BLE001
-                    pass
-        return max(ds).strftime("%Y-%m") if ds else None
+        keys = [d.strftime("%Y-%m") for d in (_parse_date_any(v) for v in ai_row.values()) if d]
+        return max(keys) if keys else None
 
     # Write in CHRONOLOGICAL order (by each row's period) so they land April, May, June — not the
     # order the model happened to emit them. Dedup against the sheet AND within this batch.
@@ -781,13 +815,9 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
                 continue
             if v is None:
                 continue
-            cell = ws.cell(row=wr, column=ci + 1, value=conv(v))
-            if template is not None:                  # mimic the column's date/number format exactly
-                cell.number_format = ws.cell(row=template, column=ci + 1).number_format
+            write_cell(wr, ci + 1, v)
         for col, cval in constants.items():           # carry the flat tariff / zero adder exactly
-            cc = ws.cell(row=wr, column=col, value=cval)
-            if template is not None:
-                cc.number_format = ws.cell(row=template, column=col).number_format
+            write_cell(wr, col, cval)
         if per:
             seen.add(per)
         appended.append(ai_row)
