@@ -136,6 +136,28 @@ def test_unbound_offtaker_skips_rather_than_invoicing_telemetry():
     assert res.get("ok") is False
 
 
+def test_operator_entered_rate_overrides_the_bill_credit_rate():
+    """Ford 2026-06-28: the solar credit rate DEFAULTS to the bill's net-metering
+    credit rate, but if the operator TYPES a rate it OVERRIDES the bill. Same bill
+    (rate 0.2576) → with sub.net_rate_per_kwh=0.25 the invoice prices the excess at
+    0.25, not 0.2576, and flags the source as the operator's rate. (Blank → bill
+    rate is proven by test_offtaker_uses_utility_bill_not_vendor above.)"""
+    tid, aid, acct_id = _seed(with_bill=True, bill_excess=1800.0,
+                              bill_credit_rate=0.2576, vendor_kwh=9999.0)
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Valley Cares, Inc.",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=0.5, billing_model="percent_of_array",
+        net_rate_per_kwh=0.25,          # operator-entered override
+        discount_pct=0.0,               # isolate the rate (no discount)
+    )
+    m = delivery.build_manual_match(sub)
+    ci = m.computed_invoice
+    assert ci["kwh_source"] == "utility_bill"
+    assert ci["net_rate_source"] == "customer"           # entered rate wins
+    assert abs(ci["net_rate_per_kwh"] - 0.25) < 1e-6     # 0.25, NOT the bill's 0.2576
+
+
 def test_explicit_bill_and_share_override_stored_workbook():
     """Ford 2026-06-28: a SPREADSHEET (workbook) offtaker that ALSO has a linked GMP
     bill + a share set must bill PERCENT-OF-ARRAY from the GMP bill — the explicit
