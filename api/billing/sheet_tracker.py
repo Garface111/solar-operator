@@ -668,7 +668,12 @@ def _sheet_context(file_bytes: bytes, mapping: dict, n_rows: int = 6):
         v = ws.cell(row=r, column=end_col).value
         if isinstance(v, (_dt.date, _dt.datetime)):
             return v.strftime("%Y-%m")
-        return str(ws.cell(row=r, column=(pc + 1) if isinstance(pc, int) else 1).value)
+        ym = _ym(str(v)) if v is not None else None   # text dates ("7/18/2025") + "YYYY-MM-DD"
+        if ym:
+            return f"{ym[0]:04d}-{ym[1]:02d}"
+        pv = ws.cell(row=r, column=(pc + 1) if isinstance(pc, int) else 1).value
+        ym2 = _ym(str(pv)) if pv is not None else None
+        return f"{ym2[0]:04d}-{ym2[1]:02d}" if ym2 else str(pv)
     present = [rper(r) for r in data_rows]
     recent = [[cv(ws.cell(row=r, column=c).value) for c in range(1, maxc + 1)] for r in data_rows[-n_rows:]]
     return headers, recent, present
@@ -696,9 +701,13 @@ def _candidate_facts(sub, billed, n: int = 14) -> list:
     return facts
 
 
-def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list) -> bytes:
+def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
+                   present: Optional[set] = None) -> bytes:
     """Append fully-specified rows (each {col_index: value}) from the AI planner. ISO date strings
-    become dates; strings starting with '=' are written as live Excel formulas; null is skipped."""
+    become dates; '=' strings become live formulas; null is skipped. Each new cell inherits the
+    number FORMAT of the last existing data row, so dates/numbers display EXACTLY like the sheet.
+    A row whose period (YYYY-MM, from its own dates) is already in `present` is skipped — a
+    deterministic guard so the model can never duplicate a month already on the sheet."""
     import datetime as _dt
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(file_bytes))
@@ -707,28 +716,47 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list) -> bytes:
     hr = int(mapping.get("header_row") or 0)
     cols = mapping.get("columns") or {}
     probe = [c for c in cols.values() if isinstance(c, int)]
+    present = set(present or ())
+
+    template = None   # last existing data row → its per-column number_format is the template
+    r = hr + 2
+    while r <= ws.max_row:
+        if any(ws.cell(row=r, column=c + 1).value not in (None, "") for c in probe):
+            template = r
+        r += 1
 
     def next_row():
         wr = hr + 2
-        r = hr + 2
-        while r <= ws.max_row:
-            if any(ws.cell(row=r, column=c + 1).value not in (None, "") for c in probe):
-                wr = r + 1
-            r += 1
+        rr = hr + 2
+        while rr <= ws.max_row:
+            if any(ws.cell(row=rr, column=c + 1).value not in (None, "") for c in probe):
+                wr = rr + 1
+            rr += 1
         return wr
 
     def conv(v):
-        if isinstance(v, str):
-            s = v.strip()
-            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
-                try:
-                    return _dt.date.fromisoformat(s)
-                except Exception:  # noqa: BLE001
-                    return v
+        if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.strip()):
+            try:
+                return _dt.date.fromisoformat(v.strip())
+            except Exception:  # noqa: BLE001
+                return v
         return v
+
+    def row_period(ai_row):
+        ds = []
+        for v in ai_row.values():
+            if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.strip()):
+                try:
+                    ds.append(_dt.date.fromisoformat(v.strip()))
+                except Exception:  # noqa: BLE001
+                    pass
+        return max(ds).strftime("%Y-%m") if ds else None
+
     for ai_row in ai_rows:
         if not isinstance(ai_row, dict):
             continue
+        if present and row_period(ai_row) in present:
+            continue                                  # already on the sheet → never duplicate
         wr = next_row()
         for k, v in ai_row.items():
             try:
@@ -737,7 +765,9 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list) -> bytes:
                 continue
             if v is None:
                 continue
-            ws.cell(row=wr, column=ci + 1, value=conv(v))
+            cell = ws.cell(row=wr, column=ci + 1, value=conv(v))
+            if template is not None:                  # mimic the column's date/number format exactly
+                cell.number_format = ws.cell(row=template, column=ci + 1).number_format
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -790,7 +820,7 @@ def update_subscription_sheet(db, sub) -> dict:
                 ai_meta = {"sane": plan.get("sane"), "explanation": plan.get("explanation"), "via": "ai"}
                 if not rows:
                     return {"status": "skipped", "reason": "ai-nothing-missing", "ai": ai_meta}
-                sub.tracker_workbook = append_ai_rows(bytes(bytes_), mapping, rows)
+                sub.tracker_workbook = append_ai_rows(bytes(bytes_), mapping, rows, present=set(present))
                 pcol = cols.get("period")
                 added = [r.get(pcol) for r in rows if isinstance(pcol, int) and r.get(pcol) is not None]
                 new_map = dict(mapping)
