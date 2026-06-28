@@ -476,17 +476,31 @@ def _offtaker_billed_labels(db, sub) -> Optional[list]:
     return sorted(labels)
 
 
-def _sheet_period_labels(file_bytes: bytes, mapping: dict) -> set:
-    """The periods ("YYYY-MM") already present in the stored sheet — read from the ACTUAL
-    rows (DB-agnostic), so reconciliation re-adds exactly what's MISSING regardless of the
-    idempotency cursor (e.g. after the operator deletes rows or re-uploads an edited file)."""
-    out: set = set()
+def _bare_month(s: str) -> Optional[int]:
+    """Month number from a bare month name with NO year ('April' -> 4); None otherwise."""
+    sv = _norm(s)
+    if re.search(r"20\d{2}", sv):
+        return None
+    for name, num in _MONTHS.items():
+        if name in sv:
+            return num
+    return None
+
+
+def _present_labels(file_bytes: bytes, mapping: dict, billed: list) -> set:
+    """The periods ("YYYY-MM") already in the stored sheet. Yeared cells parse directly;
+    BARE month names (e.g. 'April' — common in these sheets and AMBIGUOUS across years) get
+    real years INFERRED by walking the chronological rows backward from the last one, anchored
+    to the most-recent billed period of that month. Without this, a multi-year month-name sheet
+    made every 'June' look like the latest June, so the reconcile skipped every period and
+    nothing populated. DB-agnostic; returns a set of real YYYY-MM labels."""
+    rows: list = []   # (year_or_None, month) in sheet order
     try:
         cols = mapping.get("columns") or {}
         pc = cols.get("period")
         hr = int(mapping.get("header_row") or 0)
         if not isinstance(pc, int):
-            return out
+            return set()
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         sheet = mapping.get("sheet")
@@ -497,19 +511,33 @@ def _sheet_period_labels(file_bytes: bytes, mapping: dict) -> set:
                 continue
             ym = _ym(str(v))
             if ym:
-                out.add(f"{ym[0]:04d}-{ym[1]:02d}")
-                continue
-            # Bare month name with NO year (e.g. Paul's "April") — record it as any-year
-            # "*-MM" so a single-year sheet still dedups and we never duplicate a row.
-            sv = _norm(str(v))
-            if not re.search(r"20\d{2}", sv):
-                for name, num in _MONTHS.items():
-                    if name in sv:
-                        out.add(f"*-{num:02d}")
-                        break
+                rows.append((ym[0], ym[1]))
+            else:
+                mo = _bare_month(str(v))
+                if mo:
+                    rows.append((None, mo))
     except Exception:  # noqa: BLE001
-        pass
-    return out
+        return set()
+    if not rows:
+        return set()
+    if all(y is not None for y, _ in rows):
+        return {f"{y:04d}-{m:02d}" for y, m in rows}
+    # Infer years for bare rows: anchor the LAST row to the billed timeline, then walk back,
+    # decrementing the year each time the month increases going backward (a Jan<-Dec boundary).
+    last_y, last_m = rows[-1]
+    if last_y is None:
+        cands = [b for b in (billed or []) if b.endswith(f"-{last_m:02d}")]
+        last_y = int(cands[-1][:4]) if cands else (int(billed[-1][:4]) if billed else 2000)
+    years = [0] * len(rows)
+    years[-1] = last_y
+    for i in range(len(rows) - 2, -1, -1):
+        if rows[i][0] is not None:
+            years[i] = rows[i][0]
+        elif rows[i][1] > rows[i + 1][1]:
+            years[i] = years[i + 1] - 1
+        else:
+            years[i] = years[i + 1]
+    return {f"{years[i]:04d}-{rows[i][1]:02d}" for i in range(len(rows))}
 
 
 def update_subscription_sheet(db, sub) -> dict:
@@ -532,27 +560,32 @@ def update_subscription_sheet(db, sub) -> dict:
 
         from .delivery import build_match
         cols = mapping.get("columns") or {}
-        # The sheet's period style (set at detection). Legacy mappings predate the field —
-        # back-fill it from the first original row so existing trackers append in-style.
-        style = mapping.get("period_style") or _period_style(_first_period_sample(bytes(bytes_), mapping))
+        # Derive the write-style from the sheet's ACTUAL first row — the STORED style can be
+        # wrong (seen live: 'iso' on a month-name sheet, which would write "2026-05" among
+        # "May"/"June" rows). Fall back to the stored style, then iso.
+        style = _period_style(_first_period_sample(bytes(bytes_), mapping)) or mapping.get("period_style") or "iso"
 
         billed = _offtaker_billed_labels(db, sub)
 
         # ── Reconcile path (GMP-bound offtaker): backfill every missing billed period ──
         if billed:
-            present = _sheet_period_labels(bytes(bytes_), mapping)
+            present = _present_labels(bytes(bytes_), mapping, billed)
+            missing = [lbl for lbl in billed if lbl not in present]   # oldest → newest
+            # Safety cap: these sheets already carry their full history, so a reconcile should
+            # only ever add a few recent rows. Never dump the whole multi-year history — append
+            # at most the most-recent MAX_BACKFILL missing periods.
+            MAX_BACKFILL = 14
+            if len(missing) > MAX_BACKFILL:
+                missing = missing[-MAX_BACKFILL:]
             cur = bytes(bytes_)
             appended: list = []
-            for lbl in billed:                      # oldest → newest, so rows land in order
-                if lbl in present or ("*-" + lbl[5:7]) in present:
-                    continue
+            for lbl in missing:                     # oldest → newest, so rows land in order
                 m = build_match(sub, period_label=lbl)
                 row = _row_from_computed(getattr(m, "computed_invoice", None) or {}, cols, lbl, style)
                 if row is None:
                     continue                        # no excess bill for that period → skip, never fabricate
                 cur = append_period_row(cur, mapping, row)
                 appended.append(lbl)
-                present.add(lbl)
             if not appended:
                 return {"status": "skipped", "reason": "period-already-present",
                         "period": billed[-1]}
