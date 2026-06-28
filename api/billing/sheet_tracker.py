@@ -353,6 +353,88 @@ def _find_header(grid: list[list],
     return best_row, best_cols, best_headers
 
 
+def _add_month(d):
+    """A date advanced ~one month (clamped to the month's length)."""
+    import calendar
+    import datetime as _dt
+    y, m = d.year, d.month + 1
+    if m > 12:
+        m = 1; y += 1
+    return _dt.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def _shift_formula(f: str, drow: int) -> str:
+    """Shift the RELATIVE (non-$) row refs in a formula by drow so a copied formula points at
+    the new row; $-anchored rows are left alone. Best-effort — returns the original on trouble."""
+    try:
+        def repl(m):
+            col, rowdollar, rownum = m.group(1), m.group(2), m.group(3)
+            return m.group(0) if rowdollar == "$" else f"{col}{int(rownum) + drow}"
+        return re.sub(r"(\$?[A-Z]{1,3})(\$?)(\d+)", repl, f)
+    except Exception:  # noqa: BLE001
+        return f
+
+
+def _complete_row(ws, write_row: int, header_row: int, written: dict, gen_value,
+                  period_start=None, period_end=None) -> None:
+    """Fill the columns NOT explicitly mapped by CONTINUING the sheet's own pattern from the
+    last data rows — the deterministic "just take the previous row into the next" completion:
+      * date columns advance (exact billing dates when known, else by the period delta),
+      * a column that's a fixed ratio of generation = the per-offtaker kWh share (new gen × ratio),
+      * a constant column (e.g. Adder 0) carries forward,
+      * a sequential +1 column (invoice #) increments,
+      * formula columns (Value, Savings) copy with their row refs shifted to the new row.
+    Never fabricates — leaves a column blank when there's no confident pattern. `written` is a
+    {field: 0-based col} dict of the columns already filled."""
+    import datetime as _dt
+    prev = write_row - 1
+    if prev < header_row + 2:
+        return
+    def _d(v):
+        return v.date() if isinstance(v, _dt.datetime) else v
+    rws = list(range(max(header_row + 2, prev - 2), prev + 1))   # up to 3 prior rows, oldest→newest
+    max_col = ws.max_column
+    gen_col = written.get("generation")
+    done = {c for c in written.values() if isinstance(c, int)}   # 0-based cols already filled
+    # Date columns: leftmost = period start, next = period end → use the EXACT billing dates.
+    date_cols = [col for col in range(1, max_col + 1)
+                 if (col - 1) not in done and isinstance(ws.cell(row=prev, column=col).value, (_dt.date, _dt.datetime))]
+    if period_start and len(date_cols) >= 1:
+        ws.cell(row=write_row, column=date_cols[0]).value = period_start; done.add(date_cols[0] - 1)
+    if period_end and len(date_cols) >= 2:
+        ws.cell(row=write_row, column=date_cols[1]).value = period_end; done.add(date_cols[1] - 1)
+    for col in range(1, max_col + 1):
+        if (col - 1) in done:
+            continue
+        vals = [ws.cell(row=r, column=col).value for r in rws]
+        last = vals[-1]
+        if last is None or (isinstance(last, str) and not last.strip()):
+            continue
+        cell = ws.cell(row=write_row, column=col)
+        if isinstance(last, str) and last.startswith("="):
+            cell.value = _shift_formula(last, write_row - prev)            # formula → shift to new row
+        elif isinstance(last, (_dt.date, _dt.datetime)):
+            if len(vals) >= 2 and isinstance(vals[-2], (_dt.date, _dt.datetime)):
+                cell.value = _d(last) + (_d(last) - _d(vals[-2]))          # advance by the period delta
+            else:
+                cell.value = _add_month(_d(last))
+        elif isinstance(last, (int, float)):
+            nums = [v for v in vals if isinstance(v, (int, float))]
+            if len(nums) == len(vals):
+                if len(set(nums)) == 1:
+                    cell.value = nums[-1]                                  # constant (e.g. Adder 0)
+                elif len(nums) >= 2 and all(nums[i + 1] - nums[i] == 1 for i in range(len(nums) - 1)):
+                    cell.value = nums[-1] + 1                              # sequential (invoice #)
+                elif gen_col is not None and gen_value:
+                    gprev = ws.cell(row=prev, column=gen_col + 1).value
+                    if isinstance(gprev, (int, float)) and gprev:
+                        ratio = last / gprev
+                        if 0 < ratio <= 1.0001:                            # per-offtaker share = gen × ratio
+                            cell.value = round(float(gen_value) * ratio, 2)
+        elif isinstance(last, str) and len({str(v) for v in vals}) == 1:
+            cell.value = last                                             # text constant → copy
+
+
 # ─── append a new period row ─────────────────────────────────────────────────
 
 def append_period_row(file_bytes: bytes, mapping: dict, row_values: dict) -> bytes:
@@ -383,12 +465,28 @@ def append_period_row(file_bytes: bytes, mapping: dict, row_values: dict) -> byt
             write_row = r + 1
         r += 1
 
+    written: dict = {}
     for field, col_idx in cols.items():
         if field in row_values and isinstance(col_idx, int):
             val = row_values[field]
             if val is None:
                 continue
             ws.cell(row=write_row, column=col_idx + 1, value=val)
+            written[field] = col_idx
+    # Complete the rest of the row by continuing the sheet's own pattern (dates, the per-offtaker
+    # share, constants like Adder, invoice #, formula columns) — best-effort, never raises.
+    try:
+        import datetime as _dt
+        def _pd(s):
+            try:
+                return _dt.date.fromisoformat(str(s)[:10])
+            except Exception:  # noqa: BLE001
+                return None
+        _complete_row(ws, write_row, header_row, written, row_values.get("generation"),
+                      period_start=_pd(row_values.get("_period_start")),
+                      period_end=_pd(row_values.get("_period_end")))
+    except Exception:  # noqa: BLE001
+        pass
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -473,6 +571,12 @@ def _row_from_computed(computed: dict, cols: dict, label: str, style) -> Optiona
         row["rate"] = round(float(computed["effective_rate_per_kwh"]), 6)
     if "amount" in cols and computed.get("amount_owed") is not None:
         row["amount"] = round(float(computed["amount_owed"]), 2)
+    # Exact billing dates for row completion to fill date columns (underscore keys are NOT mapped
+    # write fields — they're consumed by _complete_row in append_period_row).
+    if computed.get("period_start"):
+        row["_period_start"] = computed["period_start"]
+    if computed.get("period_end"):
+        row["_period_end"] = computed["period_end"]
     return row
 
 
