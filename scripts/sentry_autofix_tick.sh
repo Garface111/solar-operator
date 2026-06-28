@@ -3,15 +3,17 @@
 # Prints a human summary to stdout (the cron delivers it to Ford). The orchestrator
 # prints a short "no new issues" line when there's nothing to do.
 #
-# DEFAULT = SAFE mode: the orchestrator fixes, tests, and opens a PR — it never
-# merges or deploys. The auto-MERGE capability exists but is OFF here by design.
+# AUTONOMOUS mode is ARMED: the orchestrator fixes, tests, opens a PR, and — when
+# every hard rail passes AND the diff carries a regression test — squash-merges it,
+# which auto-deploys to prod. Each merge is still gated by ALL rails (FIXED verdict,
+# no sensitive path [auth/billing/Stripe/migrations excluded], <=60 lines / <=3 files,
+# FULL test suite GREEN, regression test present). Brakes: `touch .autofix_nomerge`
+# reverts to PR-only; `touch .autofix_disabled` stops everything.
 #
-# To ARM autonomous auto-merge (squash-merge a fully-railed, test-carrying fix
-# straight to prod), uncomment the export below. Even armed, every rail still gates
-# each merge; brakes: `touch .autofix_nomerge` reverts to PR-only, `.autofix_disabled`
-# stops everything. Arm this ONLY with explicit owner sign-off — it auto-deploys
-# AI-written fixes to production without human review.
-#   export SENTRY_AUTOFIX_AUTOMERGE=1
+# Armed 2026-06-28 with Ford's explicit sign-off (he chose "Arm it" when asked whether
+# to enable the unattended auto-merge loop). To revert without touching cron, drop the
+# brake file above or comment the export below.
+export SENTRY_AUTOFIX_AUTOMERGE=1
 #
 # No-ops cleanly (exit 0) when the Sentry token isn't configured yet.
 set -uo pipefail
