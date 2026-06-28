@@ -763,11 +763,16 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
                     pass
         return max(ds).strftime("%Y-%m") if ds else None
 
-    for ai_row in ai_rows:
-        if not isinstance(ai_row, dict):
-            continue
-        if present and row_period(ai_row) in present:
-            continue                                  # already on the sheet → never duplicate
+    # Write in CHRONOLOGICAL order (by each row's period) so they land April, May, June — not the
+    # order the model happened to emit them. Dedup against the sheet AND within this batch.
+    valid = sorted((rr for rr in ai_rows if isinstance(rr, dict)),
+                   key=lambda rr: row_period(rr) or "9999-99")
+    seen = set(present)
+    appended = []
+    for ai_row in valid:
+        per = row_period(ai_row)
+        if per and per in seen:
+            continue                                  # already on the sheet, or already added this batch
         wr = next_row()
         for k, v in ai_row.items():
             try:
@@ -783,9 +788,12 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
             cc = ws.cell(row=wr, column=col, value=cval)
             if template is not None:
                 cc.number_format = ws.cell(row=template, column=col).number_format
+        if per:
+            seen.add(per)
+        appended.append(ai_row)
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    return buf.getvalue(), appended   # (bytes, rows actually written after sort + dedup)
 
 
 def update_subscription_sheet(db, sub) -> dict:
@@ -835,16 +843,19 @@ def update_subscription_sheet(db, sub) -> dict:
                 ai_meta = {"sane": plan.get("sane"), "explanation": plan.get("explanation"), "via": "ai"}
                 if not rows:
                     return {"status": "skipped", "reason": "ai-nothing-missing", "ai": ai_meta}
-                sub.tracker_workbook = append_ai_rows(bytes(bytes_), mapping, rows, present=set(present))
+                new_bytes, appended_rows = append_ai_rows(bytes(bytes_), mapping, rows, present=set(present))
+                if not appended_rows:                 # everything the model proposed was already present
+                    return {"status": "skipped", "reason": "ai-nothing-new", "ai": ai_meta}
+                sub.tracker_workbook = new_bytes
                 pcol = cols.get("period")
-                added = [r.get(pcol) for r in rows if isinstance(pcol, int) and r.get(pcol) is not None]
+                added = [r.get(pcol) for r in appended_rows if isinstance(pcol, int) and r.get(pcol) is not None]
                 new_map = dict(mapping)
                 new_map["last_period"] = billed[-1]
-                new_map["data_rows"] = int(mapping.get("data_rows") or 0) + len(rows)
+                new_map["data_rows"] = int(mapping.get("data_rows") or 0) + len(appended_rows)
                 sub.tracker_map = new_map
                 sub.tracker_updated_at = datetime.utcnow()
                 db.add(sub)
-                return {"status": "appended", "via": "ai", "count": len(rows),
+                return {"status": "appended", "via": "ai", "count": len(appended_rows),
                         "periods": [str(a) for a in added], "ai": ai_meta}
             # plan is None (AI off/failed) → fall through to the deterministic reconcile.
 
