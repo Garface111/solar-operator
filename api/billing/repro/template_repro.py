@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as _dt
 import io
 import logging
+import re
 from typing import Optional
 
 from .pipeline import ReproResult, reproduce_invoice
@@ -276,6 +277,123 @@ def _autofit_columns(ws, factor: float = 0.08, cap: float = 72.0) -> None:
         ws.column_dimensions[get_column_letter(ci)].width = min(w, cap)
 
 
+# --- Volatile cross-tab pre-resolution -------------------------------------------------
+# The HCT invoice sheets pull their array-level figures (Total Array KwH, the From/To
+# period dates, Solar Value/Savings) from a Data tab via a VOLATILE array formula:
+#     {=INDIRECT(ADDRESS(<rowcell>, <col>, , , "<Data sheet>"))}
+# These cells carry NO Excel-cached value (`<v/>`) — their result exists ONLY after the
+# render engine recalculates them. Local LibreOffice always recalcs volatile cells on
+# load, so they resolve here; prod Gotenberg's LibreOffice does NOT reliably recalc a
+# volatile array formula that points into a HIDDEN sheet, so it renders them as 0 (the
+# kWh) and date-serial 0 → "00:00:00" (the period dates) — exactly the broken invoice
+# Ford saw for Town of Glover, while the literal Amount Due (a value we write) stayed
+# correct. The robust, engine-agnostic fix: resolve these cross-tab values to LITERALS
+# in Python (deterministically, from the data tab) so the rendered invoice never depends
+# on a volatile recalc. Fail-safe: if a cell can't be resolved cleanly, its formula is
+# left untouched (so we can never substitute a wrong number).
+
+# INDIRECT(ADDRESS(<rowcell>, <colnum>, [abs], [a1], "<sheet>"))  — the HCT volatile shape.
+_INDIRECT_ADDRESS_RE = re.compile(
+    r'^\s*\+?\s*INDIRECT\(\s*ADDRESS\(\s*([A-Za-z]{1,3}\$?\d+)\s*,\s*(\d+)\s*'
+    r'(?:,[^,]*){0,3},\s*"([^"]+)"\s*\)\s*\)\s*$',
+    re.IGNORECASE,
+)
+_CELL_REF_RE = re.compile(r"\$?([A-Za-z]{1,3})\$?(\d+)")
+_ARITH_ONLY_RE = re.compile(r"^[0-9eE+\-*/().,\s]*$")
+
+
+def _resolve_referenced_cell_value(sheet_f, sheet_d, coord: str, depth: int = 0,
+                                   seen: Optional[set] = None):
+    """Resolve a single cell's VALUE on `sheet_f`/`sheet_d` (formula / data_only views
+    of the same sheet). A cached value wins; otherwise evaluate a SIMPLE arithmetic
+    formula (`+ - * / ( )`, cell refs with optional `$`, numeric literals) by
+    substituting each referenced cell's resolved value. Bounded recursion; returns None
+    the moment anything falls outside the safe whitelist — so the caller leaves the
+    original formula in place rather than risk a wrong literal. Handles exactly the
+    shallow `=+D60*$E$3` / `=E60*(F60+G60)` chains the HCT data tabs use."""
+    if depth > 12:
+        return None
+    seen = seen or set()
+    if coord in seen:
+        return None                                  # circular — bail
+    seen = seen | {coord}
+    try:
+        cached = sheet_d[coord].value
+    except Exception:  # noqa: BLE001
+        cached = None
+    if cached is not None and not (isinstance(cached, str) and cached.startswith("=")):
+        return cached                                # Excel-cached scalar/date — trust it
+    try:
+        f = sheet_f[coord].value
+    except Exception:  # noqa: BLE001
+        return None
+    f = getattr(f, "text", f)                         # ArrayFormula → its text
+    if not (isinstance(f, str) and f.startswith("=")):
+        return f if not isinstance(f, str) else None
+    expr = f[1:].lstrip("+")
+    out, refs = expr, list(_CELL_REF_RE.finditer(expr))
+    for m in reversed(refs):                          # right-to-left keeps slice indices valid
+        ref = f"{m.group(1).upper()}{m.group(2)}"
+        val = _resolve_referenced_cell_value(sheet_f, sheet_d, ref, depth + 1, seen)
+        if isinstance(val, (_dt.datetime, _dt.date)):
+            return None                               # date arithmetic — out of scope, bail
+        if val is None:
+            val = 0                                   # a blank cell is 0 in Excel arithmetic
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            return None
+        out = out[:m.start()] + repr(float(val)) + out[m.end():]
+    if not _ARITH_ONLY_RE.match(out):
+        return None                                   # leftover function/text — unsafe to eval
+    try:
+        return eval(out, {"__builtins__": {}}, {})    # noqa: S307 — whitelisted chars only
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _prefill_volatile_crosstab(wb, ws, original_bytes: bytes) -> int:
+    """Replace each invoice-sheet `INDIRECT(ADDRESS(rowcell,col,,,"sheet"))` cell with the
+    LITERAL value it resolves to, so the render needs no volatile recalc. Returns the count
+    resolved. Other tabs must still be present (they are, when this runs before isolation).
+    Leaves any cell it can't resolve cleanly as-is (fail-safe)."""
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+    # data_only twin from the ORIGINAL bytes — preserves whatever values Excel cached on the
+    # data tabs (an openpyxl-resave strips caches, so re-saving `wb` would lose them).
+    wbd = None
+    try:
+        wbd = load_workbook(io.BytesIO(original_bytes), data_only=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("_prefill_volatile_crosstab: data_only twin failed (%s)", e)
+    resolved = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            v = cell.value
+            text = getattr(v, "text", v)              # ArrayFormula → text
+            if not (isinstance(text, str) and text.startswith("=")):
+                continue
+            m = _INDIRECT_ADDRESS_RE.match(text[1:])
+            if not m:
+                continue
+            rowcell, colnum, sheetname = m.group(1).replace("$", ""), int(m.group(2)), m.group(3)
+            if sheetname not in wb.sheetnames:
+                continue
+            try:
+                rnum = int(ws[rowcell].value)         # N7 → the data row to read
+            except (TypeError, ValueError):
+                continue
+            coord = f"{get_column_letter(colnum)}{rnum}"
+            sf = wb[sheetname]
+            sd = wbd[sheetname] if (wbd is not None and sheetname in wbd.sheetnames) else sf
+            val = _resolve_referenced_cell_value(sf, sd, coord)
+            if val is None:
+                continue                              # unresolved → leave the formula (fail-safe)
+            cell.value = val                          # literal; the cell's own number format renders it
+            resolved += 1
+    if resolved:
+        log.info("_prefill_volatile_crosstab: pre-resolved %d cross-tab INDIRECT cell(s)", resolved)
+    return resolved
+
+
 def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
     """Render exactly ONE invoice (the `ws` sheet) — not the operator's whole
     workbook — WITHOUT breaking the cross-tab references some templates use.
@@ -287,13 +405,26 @@ def _isolate_to_invoice_sheet(wb, ws, original_bytes: bytes) -> None:
     LibreOffice excludes hidden sheets from the PDF, yet still resolves formulas that
     reference them — verified on the prod Gotenberg renderer. We still flatten cells
     that carry an Excel-cached result (frozen, consistent); any cell without a cache
-    keeps its formula and resolves live against the hidden sheets."""
+    keeps its formula and resolves live against the hidden sheets.
+
+    FIRST, though, we pre-resolve the VOLATILE cross-tab cells (the HCT
+    `INDIRECT(ADDRESS(N7,…,"Data"))` array formulas for Total Array KwH + the period
+    dates) to literals — those carry no cache and a hidden-sheet volatile recalc is
+    exactly what prod Gotenberg drops, rendering them 0 / "00:00:00". Done while the
+    data tabs are still present, so the resolver can read them."""
     from openpyxl import load_workbook
     inv_title = ws.title
     others = [s.title for s in wb.worksheets if s.title != inv_title]
     if not others:
         ws.sheet_state = "visible"
         return
+    # Bake volatile cross-tab INDIRECT cells to literals BEFORE the data tabs are hidden,
+    # so the rendered invoice doesn't depend on the engine recalculating them (Gotenberg
+    # doesn't, reliably → the Glover "Total Array KwH: 0" / dates "00:00:00" regression).
+    try:
+        _prefill_volatile_crosstab(wb, ws, original_bytes)
+    except Exception as e:  # noqa: BLE001 — never break a render over this
+        log.warning("_isolate: volatile cross-tab pre-resolution skipped (%s)", e)
     invd = None
     try:
         wbd = load_workbook(io.BytesIO(original_bytes), data_only=True)

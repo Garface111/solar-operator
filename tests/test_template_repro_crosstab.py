@@ -5,10 +5,22 @@ isolation step KEEPS the other sheets (hidden) so cross-tab formulas resolve on
 the headless render — instead of deleting them (which turned `=+NFD!G6` into
 #REF!) or nulling uncached cross-sheet refs (which silently dropped real data).
 """
+import datetime
 import io
-import openpyxl
+import os
 
-from api.billing.repro.template_repro import _isolate_to_invoice_sheet, _autofit_columns
+import openpyxl
+import pytest
+
+from api.billing.repro.template_repro import (
+    _isolate_to_invoice_sheet,
+    _autofit_columns,
+    _prefill_volatile_crosstab,
+    _resolve_referenced_cell_value,
+    build_template_cell_map,
+    offtaker_values_from_match,
+    _fill_template_cells,
+)
 
 
 def _wb_with_crosstab():
@@ -108,3 +120,116 @@ def test_isolate_keeps_sheets_hidden_clears_print_area_and_strips_charts():
     assert wb["Trend"].sheet_state == "hidden"
     assert len(wb["Trend"]._charts) == 0              # chart stripped → won't break the render
     assert inv.sheet_state == "visible"
+
+
+# --- Volatile cross-tab pre-resolution (the Glover "KWH: 0 / 00:00:00" regression) ------
+#
+# The HCT invoice sheets pull Total Array KwH + the period dates from a Data tab with a
+# VOLATILE array formula `{=INDIRECT(ADDRESS(N7,col,,,"Data"))}` that carries no Excel
+# cache. Local LibreOffice recalcs volatile cells on load so they resolved here, but prod
+# Gotenberg does NOT recalc a volatile formula into a HIDDEN sheet → it rendered 0 (kWh)
+# and date-serial-0 "00:00:00" (the dates). The fix bakes those cells to literals BEFORE
+# the data tab is hidden, so the render never needs a volatile recalc.
+
+def _hct_shaped_wb():
+    """A minimal workbook with the HCT shape: an Invoice sheet whose kWh + period-date
+    cells are `INDIRECT(ADDRESS(N7,col,,,"Data"))` ARRAY formulas (no cache), and a Data
+    tab whose kWh cell is itself an uncached arithmetic chain (=raw*$factor)."""
+    from openpyxl.worksheet.formula import ArrayFormula
+    wb = openpyxl.Workbook()
+    inv = wb.active
+    inv.title = "Template"
+    inv["B7"] = 3                                       # N7-style row pointer → Data row 3
+    inv["N7"] = 3
+    # KWH cell: pulls Data col 5 (E3); From/To: Data cols 2/3 (B3/C3)
+    inv["G19"] = ArrayFormula("G19", '=INDIRECT(ADDRESS(N7,5,,,"Data"))')
+    inv["G19"].number_format = "0.0"
+    inv["E16"] = ArrayFormula("E16", '=INDIRECT(ADDRESS(N7,2,,,"Data"))')
+    inv["E16"].number_format = "mm-dd-yy"
+    inv["G16"] = ArrayFormula("G16", '=INDIRECT(ADDRESS(N7,3,,,"Data"))')
+    inv["G16"].number_format = "mm-dd-yy"
+    data = wb.create_sheet("Data")
+    data["B3"] = datetime.datetime(2026, 4, 24)        # From (literal datetime, cached)
+    data["C3"] = datetime.datetime(2026, 5, 26)        # To
+    data["D3"] = 18160                                  # raw kWh (literal)
+    data["E3"] = "=+D3*0.95"                            # KWH = raw * factor (uncached formula)
+    return wb
+
+
+def test_prefill_resolves_indirect_address_chain():
+    """The bounded resolver evaluates a shallow `=raw*factor` data-tab chain to the exact
+    value (18160 * 0.95 = 17252), and reads literal cached dates straight through."""
+    wb = _hct_shaped_wb()
+    data = wb["Data"]
+    assert _resolve_referenced_cell_value(data, data, "E3") == 17252.0
+    assert _resolve_referenced_cell_value(data, data, "B3") == datetime.datetime(2026, 4, 24)
+
+
+def test_prefill_volatile_crosstab_bakes_kwh_and_dates_to_literals():
+    """After pre-resolution the invoice sheet's kWh + date cells are LITERAL values
+    (non-zero kWh, real datetimes) — NOT formulas — so a render that does no volatile
+    recalc still shows them. This is the exact Glover "Total Array KwH: 0 / 00:00:00" fix."""
+    wb = _hct_shaped_wb()
+    inv = wb["Template"]
+    buf = io.BytesIO(); wb.save(buf)
+    n = _prefill_volatile_crosstab(wb, inv, buf.getvalue())
+    assert n == 3                                       # kWh + From + To all resolved
+    assert inv["G19"].value == 17252.0                 # was INDIRECT(...) → would render 0
+    assert inv["E16"].value == datetime.datetime(2026, 4, 24)   # was → "00:00:00"
+    assert inv["G16"].value == datetime.datetime(2026, 5, 26)
+    # none are formulas any more
+    for coord in ("G19", "E16", "G16"):
+        v = inv[coord].value
+        assert not (isinstance(v, str) and v.startswith("=")), coord
+
+
+def test_prefill_leaves_unresolvable_and_non_indirect_formulas_untouched():
+    """Fail-safe: a cell that ISN'T the INDIRECT(ADDRESS(...)) shape, or whose chain can't
+    be evaluated safely, is left exactly as-is — we never substitute a guessed number."""
+    from openpyxl.worksheet.formula import ArrayFormula
+    wb = openpyxl.Workbook()
+    inv = wb.active; inv.title = "Template"; inv["N7"] = 3
+    inv["A1"] = "=TODAY()"                              # plain live formula — not our shape
+    inv["A2"] = "=SUM(Data!A1:A9)"                      # cross-tab but not INDIRECT(ADDRESS)
+    inv["A3"] = ArrayFormula("A3", '=INDIRECT(ADDRESS(N7,5,,,"Data"))')
+    data = wb.create_sheet("Data")
+    data["E3"] = "=VLOOKUP(1,X:Y,2)"                    # unsafe chain → resolver bails
+    buf = io.BytesIO(); wb.save(buf)
+    n = _prefill_volatile_crosstab(wb, inv, buf.getvalue())
+    assert n == 0
+    assert inv["A1"].value == "=TODAY()"
+    assert inv["A2"].value == "=SUM(Data!A1:A9)"
+    assert getattr(inv["A3"].value, "text", inv["A3"].value) == '=INDIRECT(ADDRESS(N7,5,,,"Data"))'
+
+
+# The real HCT template, when present locally (not in CI). Renders nothing — asserts on
+# the FILLED xlsx cells so it needs no PDF parsing / renderer.
+_REAL_TPL = "/mnt/c/Users/fordg/Downloads/Danville Big Buck Invoice - HCT - NEW (1) (2).xlsx"
+
+
+@pytest.mark.skipif(not os.path.exists(_REAL_TPL), reason="real HCT template not present")
+def test_real_hct_template_kwh_and_dates_nonzero_in_filled_xlsx():
+    """End-to-end on Paul's real 'Valley Cares Template': after the fill+isolate pipeline,
+    Total Array KwH (G19) is a non-zero number and the From/To dates (E16/G16) are real
+    datetimes in the FILLED workbook — i.e. they would NOT render 0 / 00:00:00."""
+    b = open(_REAL_TPL, "rb").read()
+
+    class _Period:
+        start = datetime.date(2026, 5, 21)
+        end = datetime.date(2026, 6, 21)
+        customer_kwh = 46.0
+
+    class _Match:
+        latest_period = _Period()
+        computed_invoice = {"amount_owed": 8.36, "kwh": 46.0, "invoice_number": "GLOVER-001"}
+
+    cm = build_template_cell_map(b)
+    vals = offtaker_values_from_match(_Match())
+    filled = _fill_template_cells(b, cm, vals, "Town of Glover")
+    assert filled
+    wb = openpyxl.load_workbook(io.BytesIO(filled))
+    ws = wb[cm["sheet"]]
+    kwh = ws["G19"].value
+    assert isinstance(kwh, (int, float)) and kwh > 0, kwh                  # not 0
+    assert isinstance(ws["E16"].value, datetime.datetime), ws["E16"].value  # not 00:00:00
+    assert isinstance(ws["G16"].value, datetime.datetime), ws["G16"].value
