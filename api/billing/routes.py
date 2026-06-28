@@ -1231,6 +1231,7 @@ async def tracker_upload(sub_id: int,
                     "status": recon.get("status"),
                     "added": [_friendly_period(p) for p in added],
                     "added_count": len(added),
+                    "ai": recon.get("ai"),   # {sane, explanation, via} when the AI planner ran
                 }}
 
 

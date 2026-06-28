@@ -641,6 +641,108 @@ def _sheet_data_row_count(file_bytes: bytes, mapping: dict) -> int:
     return n
 
 
+def _sheet_context(file_bytes: bytes, mapping: dict, n_rows: int = 6):
+    """(headers, recent_rows, present_labels) for the AI planner. recent_rows keep formulas as
+    strings and dates as ISO; present_labels = each data row's period as 'YYYY-MM' (from a date
+    column when available, else the raw period cell) so the model knows the full set already there."""
+    import datetime as _dt
+    from openpyxl import load_workbook
+    cols = mapping.get("columns") or {}
+    pc = cols.get("period"); hr = int(mapping.get("header_row") or 0)
+    sheet = mapping.get("sheet")
+    wb = load_workbook(io.BytesIO(file_bytes))   # NOT data_only → formula cells come back as strings
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+    maxc = ws.max_column
+
+    def cv(v):
+        return v.strftime("%Y-%m-%d") if isinstance(v, (_dt.date, _dt.datetime)) else v
+    headers = [cv(ws.cell(row=hr + 1, column=c).value) for c in range(1, maxc + 1)]
+    data_rows = [r for r in range(hr + 2, ws.max_row + 1)
+                 if isinstance(pc, int) and ws.cell(row=r, column=pc + 1).value not in (None, "")]
+    last = data_rows[-1] if data_rows else None
+    date_cols = [c for c in range(1, maxc + 1)
+                 if last and isinstance(ws.cell(row=last, column=c).value, (_dt.date, _dt.datetime))]
+    end_col = date_cols[-1] if date_cols else ((pc + 1) if isinstance(pc, int) else 1)
+
+    def rper(r):
+        v = ws.cell(row=r, column=end_col).value
+        if isinstance(v, (_dt.date, _dt.datetime)):
+            return v.strftime("%Y-%m")
+        return str(ws.cell(row=r, column=(pc + 1) if isinstance(pc, int) else 1).value)
+    present = [rper(r) for r in data_rows]
+    recent = [[cv(ws.cell(row=r, column=c).value) for c in range(1, maxc + 1)] for r in data_rows[-n_rows:]]
+    return headers, recent, present
+
+
+def _candidate_facts(sub, billed, n: int = 14) -> list:
+    """Real per-period figures (computed canonically, NOT by the model) for the recent billed
+    periods — the model arranges these into rows, it never invents the billing math."""
+    import calendar
+    from .delivery import build_match
+    facts = []
+    for lbl in (billed or [])[-n:]:
+        try:
+            ci = getattr(build_match(sub, period_label=lbl), "computed_invoice", None) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            mo = int(lbl[5:7])
+        except Exception:  # noqa: BLE001
+            mo = 0
+        facts.append({"period": lbl, "month": calendar.month_name[mo] if 1 <= mo <= 12 else lbl,
+                      "start": ci.get("period_start"), "end": ci.get("period_end"),
+                      "whole_kwh": ci.get("array_kwh"), "share_kwh": ci.get("kwh"),
+                      "rate": ci.get("effective_rate_per_kwh"), "amount": ci.get("amount_owed")})
+    return facts
+
+
+def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list) -> bytes:
+    """Append fully-specified rows (each {col_index: value}) from the AI planner. ISO date strings
+    become dates; strings starting with '=' are written as live Excel formulas; null is skipped."""
+    import datetime as _dt
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(file_bytes))
+    sheet = mapping.get("sheet")
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+    hr = int(mapping.get("header_row") or 0)
+    cols = mapping.get("columns") or {}
+    probe = [c for c in cols.values() if isinstance(c, int)]
+
+    def next_row():
+        wr = hr + 2
+        r = hr + 2
+        while r <= ws.max_row:
+            if any(ws.cell(row=r, column=c + 1).value not in (None, "") for c in probe):
+                wr = r + 1
+            r += 1
+        return wr
+
+    def conv(v):
+        if isinstance(v, str):
+            s = v.strip()
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+                try:
+                    return _dt.date.fromisoformat(s)
+                except Exception:  # noqa: BLE001
+                    return v
+        return v
+    for ai_row in ai_rows:
+        if not isinstance(ai_row, dict):
+            continue
+        wr = next_row()
+        for k, v in ai_row.items():
+            try:
+                ci = int(k)
+            except (TypeError, ValueError):
+                continue
+            if v is None:
+                continue
+            ws.cell(row=wr, column=ci + 1, value=conv(v))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def update_subscription_sheet(db, sub) -> dict:
     """RECONCILE the offtaker's stored BYO generation spreadsheet with their billed
     history: append a row for EVERY billed period missing from the sheet — so deleting a
@@ -667,6 +769,39 @@ def update_subscription_sheet(db, sub) -> dict:
         style = _period_style(_first_period_sample(bytes(bytes_), mapping)) or mapping.get("period_style") or "iso"
 
         billed = _offtaker_billed_labels(db, sub)
+
+        # ── AI path (when the model is funded): hand it the sheet + the real billed figures and let
+        # it decide which months are missing, produce a COMPLETE row for each, and validate. The
+        # heuristic path below is the fallback when the AI is off, errors, or low-confidence.
+        from . import sheet_tracker_ai as _ai
+        if billed and _ai.ai_available():
+            plan = None
+            try:
+                headers, recent, present = _sheet_context(bytes(bytes_), mapping)
+                facts = _candidate_facts(sub, billed)
+                if facts:
+                    plan = _ai.ai_plan_rows(headers, recent, facts, sheet=mapping.get("sheet"),
+                                            offtaker=getattr(sub, "customer_name", None),
+                                            present_labels=present)
+            except Exception:  # noqa: BLE001 — never break the reconcile over the AI path
+                plan = None
+            if plan is not None:
+                rows = plan.get("rows") or []
+                ai_meta = {"sane": plan.get("sane"), "explanation": plan.get("explanation"), "via": "ai"}
+                if not rows:
+                    return {"status": "skipped", "reason": "ai-nothing-missing", "ai": ai_meta}
+                sub.tracker_workbook = append_ai_rows(bytes(bytes_), mapping, rows)
+                pcol = cols.get("period")
+                added = [r.get(pcol) for r in rows if isinstance(pcol, int) and r.get(pcol) is not None]
+                new_map = dict(mapping)
+                new_map["last_period"] = billed[-1]
+                new_map["data_rows"] = int(mapping.get("data_rows") or 0) + len(rows)
+                sub.tracker_map = new_map
+                sub.tracker_updated_at = datetime.utcnow()
+                db.add(sub)
+                return {"status": "appended", "via": "ai", "count": len(rows),
+                        "periods": [str(a) for a in added], "ai": ai_meta}
+            # plan is None (AI off/failed) → fall through to the deterministic reconcile.
 
         # ── Reconcile path (GMP-bound offtaker) ── The sheet's data rows are chronological and
         # align 1:1 with the offtaker's earliest billed periods, so the periods MISSING from the
