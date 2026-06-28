@@ -1027,11 +1027,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (ok) {
           // Saving a portal password is an explicit "I use this vendor" signal: clear
           // any auto-login pause so the new creds get a fresh try, and arm tight
-          // live-mode (Fronius/SMA) so production refreshes every few minutes and the
-          // next silent recapture self-heals a lapsed session with these creds.
+          // live-mode so production refreshes every few minutes and the next silent
+          // recapture self-heals a lapsed session with these creds. Fronius/SMA use the
+          // tab-based armLive; Chint uses its minimized-popup walk (armChintLive). With
+          // creds saved, Chint's walk now auto-logs in on a dead session too (v1.9.87) —
+          // the login_required → recapTryAutoLogin → soFillLoginForm path fires on the
+          // same-origin Chint login page, so Chint is hands-off like SMA/Fronius.
           try { if (typeof self.__soAutoLoginResetFails === "function") self.__soAutoLoginResetFails(msg.vendor); } catch (_) {}
           try { if (typeof self.__soKeepwarmResetFails === "function") self.__soKeepwarmResetFails(msg.vendor); } catch (_) {}
           try { if ((msg.vendor === "fronius" || msg.vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(msg.vendor); } catch (_) {}
+          try { if (msg.vendor === "chint" && typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}
         }
         sendResponse({ ok });
       } else if (msg.type === "SO_VAULT_CLEAR") {
@@ -2056,8 +2061,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   self.__soKeepwarmResetFails = (v) => { try { if (v) keepwarmFailsSet(v, 0); } catch (_) {} };
   // Register a BACKGROUND SO_OPEN_PORTAL capture tab (the dashboard "sync" chip) so the
   // nav-driven auto-login recognizes it as ours. Called from the OPEN_UTILITY_PORTAL
-  // handler. Only fronius/sma (vault vendors with an SSO login origin) — chint is
-  // foreground-only and SolarEdge logs in same-origin.
+  // handler. Only fronius/sma here because their login is on a SEPARATE SSO origin that
+  // needs the chrome.tabs.onUpdated (nav) trigger. Chint logs in SAME-ORIGIN
+  // (monitor.chintpowersystems.com), so its auto-login fires via the SECONDARY trigger
+  // instead — chint_content.js broadcasts LOGIN_STATE_DETECTED{login_required} → the
+  // handler → recapTryAutoLogin (recognizes the chint recap tab via so_recap_state). So
+  // Chint IS auto-login-capable now (v1.9.87); it just doesn't need this nav registration.
+  // SolarEdge also logs in same-origin.
   self.__soRegisterAutoLoginTab = (tabId, vendor) => {
     try { if (typeof tabId === "number" && (vendor === "fronius" || vendor === "sma")) _openPortalTabs.set(tabId, vendor); } catch (_) {}
   };
