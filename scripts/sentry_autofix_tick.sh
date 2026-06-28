@@ -3,7 +3,16 @@
 # Prints a human summary to stdout (the cron delivers it to Ford). The orchestrator
 # prints a short "no new issues" line when there's nothing to do.
 #
-# SAFE mode: the orchestrator only ever opens PRs — it never merges or deploys.
+# DEFAULT = SAFE mode: the orchestrator fixes, tests, and opens a PR — it never
+# merges or deploys. The auto-MERGE capability exists but is OFF here by design.
+#
+# To ARM autonomous auto-merge (squash-merge a fully-railed, test-carrying fix
+# straight to prod), uncomment the export below. Even armed, every rail still gates
+# each merge; brakes: `touch .autofix_nomerge` reverts to PR-only, `.autofix_disabled`
+# stops everything. Arm this ONLY with explicit owner sign-off — it auto-deploys
+# AI-written fixes to production without human review.
+#   export SENTRY_AUTOFIX_AUTOMERGE=1
+#
 # No-ops cleanly (exit 0) when the Sentry token isn't configured yet.
 set -uo pipefail
 

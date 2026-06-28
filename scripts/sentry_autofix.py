@@ -60,6 +60,46 @@ def git(*args, check=True, timeout=120):
     return sh(["git", *args], check=check, timeout=timeout)
 
 
+def automerge_on() -> bool:
+    """Autonomous mode: squash-merge a fully-vetted fix straight to prod (merge
+    auto-deploys on Railway). OFF unless SENTRY_AUTOFIX_AUTOMERGE is truthy AND the
+    `.autofix_nomerge` brake file is absent — so Ford can drop back to PR-only without
+    disabling detection or touching cron (`touch .autofix_nomerge`)."""
+    flag = os.getenv("SENTRY_AUTOFIX_AUTOMERGE", "").strip().lower()
+    if flag in ("", "0", "false", "no", "off"):
+        return False
+    return not os.path.exists(os.path.join(REPO, ".autofix_nomerge"))
+
+
+def merge_pr(pr_url: str) -> tuple[bool, str]:
+    """Squash-merge + delete the branch. --admin bypasses any branch protection.
+    Returns (ok, tail-of-output). The merge triggers a prod deploy."""
+    m = sh(["gh", "pr", "merge", pr_url, "--squash", "--delete-branch", "--admin"],
+           check=False, timeout=120)
+    return (m.returncode == 0, (m.stdout + m.stderr).strip()[-300:])
+
+
+def post_merge_health() -> str:
+    """Crash-canary after an auto-merge: poll prod /health for a couple minutes so a
+    fix that crash-loops on boot is caught and SHOUTED in the run summary. A 200 here
+    means prod is serving (possibly still the old build mid-deploy) — a safety net, not
+    proof the new version is bug-free."""
+    import urllib.request
+    url = os.getenv("AO_HEALTH_URL", "https://web-production-49c83.up.railway.app/health")
+    deadline = time.time() + 180
+    last = "(no response)"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                if r.status == 200:
+                    return "HTTP 200 ✅ (prod responding post-merge)"
+                last = f"HTTP {r.status}"
+        except Exception as e:
+            last = f"error: {str(e)[:80]}"
+        time.sleep(15)
+    return f"⚠️ {last} — prod did NOT return 200 within 3 min after an auto-merge; CHECK PROD"
+
+
 def ensure_clean_main():
     git("fetch", "origin", "main", check=False)
     git("checkout", "main")
@@ -209,6 +249,23 @@ def process_issue(issue: dict) -> dict:
         res["pr"] = next((l for l in url if l.startswith("http")), "(pr create output unclear)")
         res["outcome"] = "PR-opened"
         res["detail"] = cc["summary"][:200]
+
+        # AUTONOMOUS MODE: every hard rail already passed (FIXED verdict, no sensitive
+        # path, within size caps, FULL test suite GREEN) → squash-merge now, which
+        # auto-deploys to prod. ONE extra rail for unattended prod merges: a regression
+        # test MUST be in the diff — an untested fix is left as a PR for a human instead.
+        if automerge_on() and res["pr"].startswith("http"):
+            if not any("test" in f.lower() for f in files):
+                res["detail"] = ("auto-merge HELD (no regression test in diff) — PR left "
+                                 "for human: " + cc["summary"][:140])
+            else:
+                ok, mout = merge_pr(res["pr"])
+                if ok:
+                    res["outcome"] = "MERGED"
+                    res["detail"] = "squash-merged to prod (auto-deploys): " + cc["summary"][:160]
+                else:
+                    res["outcome"] = "merge-failed"
+                    res["detail"] = "PR opened but auto-merge FAILED (left for human): " + mout
         return res
     finally:
         # Return to a pristine main: drop any uncommitted edits + Claude's new
@@ -252,14 +309,17 @@ def main() -> int:
         return 0
 
     results = [process_issue(it) for it in issues]
-    lines = ["Sentry auto-fix run (SAFE mode — PRs only, you merge):\n"]
+    mode = "AUTONOMOUS (auto-merge ON)" if automerge_on() else "SAFE (PRs only — you merge)"
+    lines = [f"Sentry auto-fix run — {mode}:\n"]
     for r in results:
-        icon = {"PR-opened": "✅", "tests-failed": "🧪", "blocked-sensitive": "🔒",
-                "blocked-toolarge": "📏", "skipped": "⏭️"}.get(r["outcome"], "•")
+        icon = {"MERGED": "🚀", "PR-opened": "✅", "merge-failed": "⚠️", "tests-failed": "🧪",
+                "blocked-sensitive": "🔒", "blocked-toolarge": "📏", "skipped": "⏭️"}.get(r["outcome"], "•")
         lines.append(f"{icon} {r['issue']}: {r['title'][:60]}")
         lines.append(f"    → {r['outcome']}: {r['detail'][:200]}")
         if r["pr"]:
             lines.append(f"    PR: {r['pr']}")
+    if any(r["outcome"] == "MERGED" for r in results):
+        lines.append(f"\nPost-merge prod health: {post_merge_health()}")
     print("\n".join(lines))
     return 0
 
