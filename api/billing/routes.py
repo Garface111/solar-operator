@@ -1200,9 +1200,11 @@ async def tracker_upload(sub_id: int,
         raise HTTPException(415, "Upload an .xlsx or .csv generation sheet.")
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
-        # Pass the offtaker's name: the heuristic boosts a column bearing it ("kWh Fairlee"
-        # = their share), and the AI mapper (when keyed) uses it to read any layout.
-        res = ingest_upload(raw, name, getattr(sub, "customer_name", None))
+        # Do NOT pass the offtaker's name as a column hint here: on sheets that carry BOTH a
+        # 'kWh whole array' column (populated) and an empty 'kWh <offtaker>' column, the name
+        # boost dragged generation onto the empty named column, so appended rows landed blank.
+        # The generation column is detected by keyword + data-presence, which is correct here.
+        res = ingest_upload(raw, name, None)
         if not res.get("ok"):
             warn = "; ".join(res.get("warnings") or []) or "Couldn't read that sheet."
             raise HTTPException(422, warn)
