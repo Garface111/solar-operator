@@ -656,35 +656,63 @@
       }
       if (bills.length === 0) return false;
 
-      // The net-meter generation + the bill's own credit rate live ONLY on the bill PDF
-      // (VEC's APIs return totalUsage:0). Fetch the most-recent few bill PDFs — exact URL
-      // reverse-engineered from SmartHub's BillPdfService; credentials ride the session.
+      // The net-meter generation + the bill's own credit rate live ONLY on the bill
+      // PDF (VEC's APIs return totalUsage:0). Pull EVERY bill's PDF (Ford: "we want
+      // ALL the data") — exact URL reverse-engineered from SmartHub's BillPdfService;
+      // credentials ride the session. A persisted per-uuid cache means we only
+      // download bills we haven't pulled before (no re-downloading the whole history
+      // on every page load), and we POST in batches so a long history never makes one
+      // giant request.
       const _pad2 = (n) => String(n).padStart(2, "0");
-      const _pdfDate = (ts) => { const d = new Date(Number(ts)); return d.getFullYear() + "_" + _pad2(d.getMonth()+1) + "_" + _pad2(d.getDate()); };
-      const _recent = bills.slice().sort((a,b) => (Number(b.bill_timestamp)||0) - (Number(a.bill_timestamp)||0)).slice(0, 3);
-      for (const bill of _recent) {
+      const _pdfDate = (ts) => { const d = new Date(Number(ts)); return d.getFullYear() + "_" + _pad2(d.getMonth() + 1) + "_" + _pad2(d.getDate()); };
+      let _pulled = {};
+      try { _pulled = (await chrome.storage.local.get("so_vec_pdf_pulled")).so_vec_pdf_pulled || {}; } catch (_) {}
+      const _need = bills
+        .filter((b) => b.bill_timestamp && b.account_id && b.bill_uuid && !_pulled[b.bill_uuid])
+        .sort((a, b) => (Number(b.bill_timestamp) || 0) - (Number(a.bill_timestamp) || 0));   // newest first
+      async function _fetchBillPdf(bill) {
         try {
-          if (!bill.bill_timestamp || !bill.account_id) continue;
           const fn = _pdfDate(bill.bill_timestamp) + "_" + bill.account_id + ".pdf";
           let url = "/services/secured/billPdfService/" + fn + "?account=" + encodeURIComponent(bill.account_id) + "&timestamp=" + encodeURIComponent(bill.bill_timestamp);
           if (bill.bill_uuid) url += "&uuid=" + encodeURIComponent(bill.bill_uuid);
           if (bill.system_of_record) url += "&systemOfRecord=" + encodeURIComponent(bill.system_of_record);
           const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 20000);
           let res; try { res = await fetch(url, { credentials: "include", cache: "no-store", signal: ctrl.signal }); } finally { clearTimeout(to); }
-          if (!res || !res.ok) continue;
+          if (!res || !res.ok) return;
           const buf = await res.arrayBuffer();
-          if (buf.byteLength < 1000 || buf.byteLength > 12 * 1024 * 1024) continue;
+          if (buf.byteLength < 1000 || buf.byteLength > 12 * 1024 * 1024) return;
           const a = new Uint8Array(buf); let binv = "";
           for (let i = 0; i < a.length; i += 0x8000) binv += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
           bill.pdf_b64 = btoa(binv);
           LOG("billPdf fetched", bill.account_id, fn, buf.byteLength, "bytes");
         } catch (e) { LOG("billPdf fetch failed", bill && bill.account_id, (e && e.message) || e); }
       }
+      // Download with light concurrency (gentle on the portal), entire history.
+      const _CONC = 4;
+      for (let i = 0; i < _need.length; i += _CONC) {
+        await Promise.all(_need.slice(i, i + _CONC).map(_fetchBillPdf));
+      }
+      LOG("billPdf: pulled", bills.filter((b) => b.pdf_b64).length, "of", _need.length, "needed PDFs");
 
       if (creds && creds.userId && !capturedPrimaryUsername) {
         capturedPrimaryUsername = creds.userId;
       }
-      await sendCapture(bills, [], "api");
+      // POST in batches of 5 so a long bill history is never one giant request. Each
+      // chunk carries the same accounts (idempotent upsert); the backend dedups bills.
+      // Persist the uuids whose PDF we successfully sent so the next session skips them.
+      const _BATCH = 5;
+      const _sentUuids = [];
+      for (let i = 0; i < bills.length; i += _BATCH) {
+        const chunk = bills.slice(i, i + _BATCH);
+        const ok = await sendCapture(chunk, [], "api");
+        if (ok) chunk.forEach((b) => { if (b.bill_uuid && b.pdf_b64) _sentUuids.push(b.bill_uuid); });
+      }
+      if (_sentUuids.length) {
+        try {
+          for (const id of _sentUuids) _pulled[id] = 1;
+          await chrome.storage.local.set({ so_vec_pdf_pulled: _pulled });
+        } catch (_) {}
+      }
       apiCaptureDone = true;
       return true;
     } finally {
@@ -786,39 +814,49 @@
       usage,
     };
 
-    // Dedupe: skip if this exact capture was already sent
+    // Dedupe: skip if this EXACT capture was already sent. Key on the bill
+    // IDENTITIES (not just the count) so batched sends of equal-size chunks don't
+    // collide — and so a re-capture of identical bills still dedups. Returns whether
+    // we actually sent, so the batch loop can record which PDFs landed.
     const fingerprint = JSON.stringify({
-      bills: bills.length,
+      bills: bills.map((b) => (b.bill_uuid || b.bill_timestamp || b.billing_date || "") + (b.pdf_b64 ? "p" : "")).sort(),
       usage: usage.length,
       acct: accounts[0]?.accountNumber,
       page: location.pathname + location.hash,
       provider: PROVIDER,
     });
     const hash = await hashString(fingerprint);
-    if (hash === lastSentHash) return;
+    if (hash === lastSentHash) return false;
     lastSentHash = hash;
 
-    chrome.runtime.sendMessage(
-      { type: "SMARTHUB_DATA_CAPTURED", payload, tokenHash: hash },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          console.warn(
-            `[EnergyAgent ${UTILITY_NAME}] sendMessage failed:`,
-            chrome.runtime.lastError
-          );
-          return;
+    return await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        { type: "SMARTHUB_DATA_CAPTURED", payload, tokenHash: hash },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              `[EnergyAgent ${UTILITY_NAME}] sendMessage failed:`,
+              chrome.runtime.lastError
+            );
+            resolve(false);
+            return;
+          }
+          if (response && response.ok) {
+            console.log(
+              `[EnergyAgent ${UTILITY_NAME}] Synced: ` +
+                `${accounts.length} account(s), ${bills.length} bill row(s), ` +
+                `${usage.length} usage row(s) → ${response.endpoint}`
+            );
+            resolve(true);
+          } else {
+            if (response && response.error) {
+              console.warn(`[EnergyAgent ${UTILITY_NAME}] Sync error:`, response.error);
+            }
+            resolve(false);
+          }
         }
-        if (response && response.ok) {
-          console.log(
-            `[EnergyAgent ${UTILITY_NAME}] Synced: ` +
-              `${accounts.length} account(s), ${bills.length} bill row(s), ` +
-              `${usage.length} usage row(s) → ${response.endpoint}`
-          );
-        } else if (response && response.error) {
-          console.warn(`[EnergyAgent ${UTILITY_NAME}] Sync error:`, response.error);
-        }
-      }
-    );
+      );
+    });
   }
 
   // Re-scrape when the Angular SPA navigates (hash or path changes)
