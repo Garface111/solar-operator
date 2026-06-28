@@ -136,6 +136,63 @@ def _period_tail(grid: list[list], header_row: int, columns: dict) -> tuple[int,
     return len(data), last_period
 
 
+_MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"]
+
+
+def _period_style(sample: Any) -> str:
+    """Classify how this sheet writes its billing period, so an appended row matches it
+    instead of always reading ISO. -> 'monthname' | 'monthname_year' | 'slash' | 'iso'."""
+    s = _norm(sample)
+    if not s:
+        return "iso"
+    if any(mn in s for mn in _MONTHS):                              # "April", "June 2026"
+        return "monthname_year" if re.search(r"20\d{2}", s) else "monthname"
+    if re.search(r"\d{1,2}[/.\-]\d{1,2}[/.\-]20\d{2}", s):          # 5/31/2026
+        return "slash"
+    return "iso"                                                    # 2026-05 (our default)
+
+
+def _format_period(iso_label: Optional[str], style: Optional[str]) -> Optional[str]:
+    """Render an ISO 'YYYY-MM' label in the sheet's own period style (see _period_style)."""
+    ym = _ym(iso_label or "")
+    if not ym or style in (None, "iso"):
+        return iso_label
+    year, month = ym
+    name = _MONTH_NAMES[month - 1] if 1 <= month <= 12 else None
+    if style == "monthname" and name:
+        return name
+    if style == "monthname_year" and name:
+        return f"{name} {year}"
+    if style == "slash":
+        return f"{month:02d}/{year}"
+    return iso_label
+
+
+def _first_period_sample(file_bytes: bytes, mapping: dict) -> Optional[str]:
+    """Period cell of the FIRST original data row (appends go to the bottom, so row 1 keeps
+    the sheet's native style) — back-fills period_style for trackers detected before that
+    field existed, so legacy sheets also append in-style. Best-effort; None on any problem."""
+    try:
+        cols = mapping.get("columns") or {}
+        pc = cols.get("period")
+        hr = int(mapping.get("header_row") or 0)
+        if not isinstance(pc, int):
+            return None
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        sheet = mapping.get("sheet")
+        ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+        for row in ws.iter_rows(min_row=hr + 2, max_row=hr + 40,
+                                min_col=pc + 1, max_col=pc + 1, values_only=True):
+            v = row[0]
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _score_cell(cell: str) -> dict[str, tuple[float, str]]:
     """For one header cell, return {field: (score, matched_keyword)} for every
     field whose keyword appears in the cell. Higher score = more confident.
@@ -213,6 +270,7 @@ def detect_structure(file_bytes: bytes, filename: str = "",
         "headers": headers,
         "data_rows": data_rows,
         "last_period": last_period,
+        "period_style": _period_style(last_period),
         "via": "heuristic",
         "warnings": [],
     }
@@ -407,10 +465,18 @@ def update_subscription_sheet(db, sub) -> dict:
             return {"status": "skipped", "reason": "period-already-present",
                     "period": label}
 
+        # The sheet's period style (set at detection). Legacy mappings predate the field —
+        # back-fill it from the first original row so existing trackers also append in-style.
+        style = mapping.get("period_style")
+        if not style:
+            style = _period_style(_first_period_sample(bytes(bytes_), mapping))
+
         cols = mapping.get("columns") or {}
         row_values: dict[str, Any] = {}
         if "period" in cols:
-            row_values["period"] = label
+            # Write the period in the sheet's OWN style (e.g. "June 2026" when its rows use
+            # month names, not our internal ISO "2026-06") so appended rows look native.
+            row_values["period"] = _format_period(label, style)
         if "generation" in cols:
             row_values["generation"] = round(float(gen), 2)
         if "consumption" in cols and computed.get("consumption_kwh") is not None:
@@ -424,6 +490,7 @@ def update_subscription_sheet(db, sub) -> dict:
         sub.tracker_workbook = new_bytes
         # Advance the idempotency cursor so the next pull won't re-append.
         new_map = dict(mapping)
+        new_map["period_style"] = style   # persist (back-fills legacy mappings going forward)
         new_map["last_period"] = label
         new_map["data_rows"] = int(mapping.get("data_rows") or 0) + 1
         sub.tracker_map = new_map
@@ -557,7 +624,7 @@ def ingest_upload(file_bytes: bytes, filename: str,
                 data_rows, last_period = _period_tail(grid, hr, cols)
                 mapping = {"ok": True, "kind": kind, "sheet": sheet, "header_row": hr,
                            "columns": cols, "headers": headers, "data_rows": data_rows,
-                           "last_period": last_period, "via": "ai",
+                           "last_period": last_period, "period_style": _period_style(last_period), "via": "ai",
                            "ai_confidence": ai.get("confidence"),
                            "ai_reasoning": ai.get("reasoning"), "warnings": []}
     except Exception:  # noqa: BLE001 — the AI path can NEVER break an upload
