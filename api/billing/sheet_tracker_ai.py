@@ -93,13 +93,13 @@ def _prompt(grid_text: str, sheet: Optional[str], offtaker: Optional[str]) -> st
     )
 
 
-def _call_anthropic(prompt: str, timeout: int = 22) -> Optional[str]:
+def _call_anthropic(prompt: str, timeout: int = 22, max_tokens: int = 600) -> Optional[str]:
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
         return None
     body = json.dumps({
         "model": _model(),
-        "max_tokens": 600,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
     req = urllib.request.Request(_API_URL, data=body, headers={
@@ -180,4 +180,108 @@ def ai_map_columns(grid: list[list], sheet: Optional[str],
     except Exception as e:  # noqa: BLE001 — NEVER break upload over the AI path
         logger.warning("sheet_tracker_ai: mapping failed (%s) — falling back to heuristic",
                        type(e).__name__)
+        return None
+
+
+# ─── AI row planner: understand the sheet → append the missing months → validate ─────
+
+def _render_rows(headers: list, rows: list) -> str:
+    lines = ["HEADERS: " + " | ".join(f"[{i}] {_trunc(h, 30)}" for i, h in enumerate(headers))]
+    for ri, r in enumerate(rows):
+        cells = " | ".join(f"[{i}] {_trunc(c, 22)}" for i, c in enumerate(r))
+        lines.append(f"sheet row (recent-{len(rows) - ri}): {cells}")
+    return "\n".join(lines)
+
+
+def _render_facts(facts: list) -> str:
+    out = []
+    for f in facts:
+        out.append("- {period}: month={month} start={start} end={end} whole_kwh={whole_kwh} "
+                   "share_kwh={share_kwh} rate={rate} amount={amount}".format(**f))
+    return "\n".join(out)
+
+
+def _parse_plan(text: str, ncol: int) -> Optional[dict]:
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:  # noqa: BLE001
+        return None
+    raw = obj.get("rows")
+    if not isinstance(raw, list):
+        return None
+    rows = []
+    for rr in raw:
+        if not isinstance(rr, dict):
+            continue
+        clean = {}
+        for k, v in rr.items():
+            try:
+                ci = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= ci < max(ncol, 1):
+                clean[ci] = v
+        if clean:
+            rows.append(clean)
+    if not rows:
+        return None
+    return {"rows": rows, "explanation": str(obj.get("explanation") or "")[:400],
+            "sane": bool(obj.get("sane", True))}
+
+
+def ai_plan_rows(headers: list, recent_rows: list, facts: list,
+                 sheet: Optional[str] = None, offtaker: Optional[str] = None,
+                 timeout: int = 45) -> Optional[dict]:
+    """The intelligence Ford asked for: hand the model the sheet's headers + last rows and the
+    customer's available billing periods (each with REAL figures we computed), and let it (1)
+    decide which periods are MISSING from the sheet, (2) produce a COMPLETE row for each, matching
+    the sheet's columns by continuing its patterns, and (3) say whether the result is consistent.
+    Returns {rows:[{col_index:value}], explanation, sane} or None (caller falls back to heuristic).
+    The model arranges/validates; the dollar figures it places come from facts we computed — it is
+    not asked to invent billing math."""
+    if not ai_available() or not facts:
+        return None
+    try:
+        prompt = (
+            "You maintain a solar-generation tracking spreadsheet a utility operator hand-built. It "
+            "records ONE row per billing month for a single customer"
+            + (f' ("{offtaker}")' if offtaker else "") + (f' on sheet "{sheet}"' if sheet else "") + ".\n\n"
+            + _render_rows(headers, recent_rows) + "\n\n"
+            "Here are the customer's billing periods available from the utility, each with the REAL "
+            "figures already computed (whole-array generation, the customer's share kWh, the credit "
+            "rate $/kWh, the billed amount, and the period start/end dates):\n"
+            + _render_facts(facts) + "\n\n"
+            "TASK:\n"
+            "1. Decide which of these billing periods are MISSING from the sheet (in the bills above "
+            "but not among the recent rows). The sheet may have had recent rows deleted.\n"
+            "2. For each missing period, oldest first, produce a COMPLETE new row matching this sheet's "
+            "columns exactly, continuing its own patterns:\n"
+            "   - the month/period column in the SAME format the existing rows use,\n"
+            "   - date columns from the period start/end,\n"
+            "   - the whole-array kWh column AND the customer-share kWh column,\n"
+            "   - the tariff/rate column and the billed-amount column (use the figures above; do not "
+            "invent them),\n"
+            "   - any constant column (e.g. an adder always 0) carried forward,\n"
+            "   - an invoice-number column incremented by 1,\n"
+            "   - a formula column copied as an Excel formula whose row references point at the NEW row,\n"
+            "   - leave a column null when you genuinely cannot determine it (e.g. a 'date paid').\n"
+            "3. Say whether the rows are internally consistent.\n\n"
+            "Respond with ONLY JSON, no prose:\n"
+            '{"rows": [{"<col_index>": <value or null>, ...}, ...], '
+            '"explanation": "<two sentences: what you added and why it is consistent>", '
+            '"sane": <true|false>}\n'
+            'Dates as "YYYY-MM-DD". Numbers as numbers. Match the existing month-format exactly. '
+            "If nothing is missing, return an empty rows list."
+        )
+        text = _call_anthropic(prompt, timeout=timeout, max_tokens=2200)
+        result = _parse_plan(text or "", len(headers))
+        if result is not None:
+            logger.info("sheet_tracker_ai: planned %d row(s) via %s sane=%s",
+                        len(result["rows"]), _model(), result["sane"])
+        return result
+    except Exception as e:  # noqa: BLE001 — NEVER break the reconcile over the AI path
+        logger.warning("sheet_tracker_ai: plan failed (%s)", type(e).__name__)
         return None
