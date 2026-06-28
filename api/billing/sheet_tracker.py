@@ -318,10 +318,13 @@ def _find_header(grid: list[list],
                     sc *= 0.05                       # cumulative/running-total → not the monthly column
                 elif hint_tokens and any(t and t in cell_n for t in hint_tokens):
                     sc += 50.0                       # bears the offtaker's name → it IS their share
-                # …but a generation column with NO numeric data below it can't be the real one
-                # (e.g. an empty 'kWh <offtaker>' column next to a populated 'kWh whole array'):
-                # demote it hard so a column that actually holds data wins, name boost or not.
-                if not any(cidx < len(rr) and _looks_numeric(rr[cidx]) for rr in grid[ridx + 1:ridx + 40]):
+                # …but the active generation column must hold data in the RECENT rows (that's
+                # where we append). An empty 'kWh <offtaker>' column next to a populated 'kWh
+                # whole array' must not win on the name alone — demote it hard if the last rows
+                # are blank, so the column that actually carries the data wins.
+                _data = grid[ridx + 1:]
+                _recent = _data[-15:] if len(_data) > 15 else _data
+                if not any(cidx < len(rr) and _looks_numeric(rr[cidx]) for rr in _recent):
                     sc *= 0.02
                 scores["generation"] = (sc, kw)
             for field, (sc, _kw) in scores.items():
