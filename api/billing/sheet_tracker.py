@@ -863,8 +863,11 @@ def update_subscription_sheet(db, sub) -> dict:
             try:
                 headers, recent, present = _sheet_context(bytes(bytes_), mapping)
                 # Deterministically pick the MISSING months (billed but not already on the sheet) —
-                # the model over-proposes if left to decide. Hand it ONLY those to lay out.
-                missing = [b for b in billed if b not in set(present)][-14:]
+                # the model over-proposes if left to decide. Restrict to at/after the sheet's earliest
+                # period so we don't drag in old pre-sheet history; hand it ONLY those to lay out.
+                present_set = set(present)
+                _floor = min(present) if present else ""
+                missing = [b for b in billed if b not in present_set and b >= _floor][-14:]
                 if not missing:
                     plan = {"rows": [], "sane": True,
                             "explanation": "Already up to date through the latest bill."}
