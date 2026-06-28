@@ -666,6 +666,130 @@ def _parse_date_any(v):
     return None
 
 
+def _to_num(v):
+    """A number from a cell that may carry $, commas, or a kWh/kW unit suffix. None if not numeric."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = re.sub(r"\s*k?wh?\s*$", "", v.strip(), flags=re.I)
+        s = s.replace(",", "").replace("$", "").strip()
+        try:
+            return float(s)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _dominant(items):
+    """The most common item in a list (ties broken by first-seen), or None."""
+    items = [i for i in items if i]
+    if not items:
+        return None
+    best, n = None, -1
+    for it in items:
+        c = items.count(it)
+        if c > n:
+            best, n = it, c
+    return best
+
+
+def normalize_columns(file_bytes: bytes, mapping: dict):
+    """STEP 1 — make every data column internally CONSISTENT in format without changing the
+    underlying values: one date format across a date column (text dates -> real dates, one
+    number_format), one numeric/currency format across a number column ('$1,920' / '1920 kWh' ->
+    1920 with a single format). Returns (normalized_bytes, changes:list[str]). Never touches the
+    header or non-data rows; the caller verifies values are unchanged before keeping the result."""
+    import datetime as _dt
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(file_bytes))
+    sheet = mapping.get("sheet")
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+    hr = int(mapping.get("header_row") or 0)
+    cols = mapping.get("columns") or {}
+    probe = [c for c in cols.values() if isinstance(c, int)]
+    data_rows = [r for r in range(hr + 2, ws.max_row + 1)
+                 if any(ws.cell(row=r, column=c + 1).value not in (None, "") for c in probe)]
+    changes = []
+    for col in range(1, ws.max_column + 1):
+        cells = [ws.cell(row=r, column=col) for r in data_rows]
+        vals = [c.value for c in cells if c.value not in (None, "")]
+        if not vals:
+            continue
+        # Don't reformat formula columns — leave their formulas intact.
+        if any(isinstance(c.value, str) and c.value.startswith("=") for c in cells):
+            continue
+        n_date = sum(1 for v in vals if _parse_date_any(v))
+        n_num = sum(1 for v in vals if _to_num(v) is not None)
+        if n_date >= len(vals) * 0.6:
+            fmts = [c.number_format for c in cells if isinstance(c.value, (_dt.date, _dt.datetime))
+                    and c.number_format and c.number_format != "General"]
+            target = _dominant(fmts) or "m/d/yyyy"
+            for c in cells:
+                d = _parse_date_any(c.value)
+                if d is None:
+                    continue
+                if not isinstance(c.value, (_dt.date, _dt.datetime)) or c.number_format != target:
+                    c.value = d
+                    c.number_format = target
+                    changes.append(f"col{col}: date -> {target}")
+        elif n_num >= len(vals) * 0.6:
+            fmts = [c.number_format for c in cells if isinstance(c.value, (int, float))
+                    and c.number_format and c.number_format != "General"]
+            target = _dominant(fmts)
+            for c in cells:
+                num = _to_num(c.value)
+                if num is None:
+                    continue
+                changed = False
+                if c.value != num:
+                    c.value = num
+                    changed = True
+                if target and c.number_format != target:
+                    c.number_format = target
+                    changed = True
+                if changed:
+                    changes.append(f"col{col}: number -> {target or 'numeric'}")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), changes
+
+
+def verify_normalization(before_bytes: bytes, after_bytes: bytes, mapping: dict) -> bool:
+    """STEP 2 — sanity check: every data cell's underlying VALUE (date or number) must be the SAME
+    before and after normalization; only the representation/format may differ. Returns True if safe
+    to keep the normalized sheet, False if any value actually changed (then keep the original)."""
+    import datetime as _dt
+    from openpyxl import load_workbook
+    try:
+        sheet = mapping.get("sheet")
+        a = load_workbook(io.BytesIO(before_bytes), data_only=True)
+        b = load_workbook(io.BytesIO(after_bytes), data_only=True)
+        wa = a[sheet] if sheet and sheet in a.sheetnames else a.active
+        wb_ = b[sheet] if sheet and sheet in b.sheetnames else b.active
+        if wa.max_row != wb_.max_row or wa.max_column != wb_.max_column:
+            return False
+        for r in range(1, wa.max_row + 1):
+            for cidx in range(1, wa.max_column + 1):
+                va, vb = wa.cell(row=r, column=cidx).value, wb_.cell(row=r, column=cidx).value
+                da, db = _parse_date_any(va), _parse_date_any(vb)
+                if da is not None or db is not None:
+                    if da != db:
+                        return False
+                    continue
+                na, nb = _to_num(va), _to_num(vb)
+                if na is not None or nb is not None:
+                    if na is None or nb is None or abs(na - nb) > 1e-6:
+                        return False
+                    continue
+                if (va or "") != (vb or ""):
+                    return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _sheet_context(file_bytes: bytes, mapping: dict, n_rows: int = 6):
     """(headers, recent_rows, present_labels) for the AI planner. recent_rows keep formulas as
     strings and dates as ISO; present_labels = each data row's period as 'YYYY-MM' (from a date
@@ -1239,6 +1363,18 @@ def ingest_upload(file_bytes: bytes, filename: str,
         mapping["sheet"] = "Generation"
     else:
         xlsx_bytes = file_bytes
+
+    # STEP 1+2 — normalize every column to a CONSISTENT format, then verify ONLY formatting changed
+    # (no value touched). Keep the normalized sheet only if the check passes.
+    try:
+        if mapping.get("ok"):
+            _normalized, _changes = normalize_columns(xlsx_bytes, mapping)
+            if _changes and verify_normalization(xlsx_bytes, _normalized, mapping):
+                xlsx_bytes = _normalized
+                mapping = dict(mapping)
+                mapping["normalized"] = len(_changes)
+    except Exception:  # noqa: BLE001 — normalization can NEVER break upload
+        pass
 
     # Derive the per-column RECIPE once (AI), stored on the mapping — the deterministic engine then
     # applies it every month with no per-run model variation. Best-effort: no recipe just means the
