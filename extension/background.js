@@ -2006,7 +2006,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     try {
       if (typeof tabId !== "number") return;
       if (typeof SoVault === "undefined" || !SoVault.VENDORS.includes(vendor)) return;
-      if (_autoLoginSubmittedTab.has(tabId)) return;                       // already submitted on this exact tab
+      if (_autoLoginSubmittedTab.has(tabId)) {
+        // We already submitted on this tab and it's BACK on a login page — the saved
+        // password didn't take. Count the fail NOW (only on this confirmed re-presentation),
+        // not optimistically at submit time, so a slow-but-successful sign-in (whose capture
+        // lands a beat later) never pauses good creds. A real success redirects AWAY from the
+        // login host, so this handler never fires for it; the capture then resets fails to 0.
+        await autoLoginFailsSet(vendor, (await autoLoginFailsGet(vendor)) + 1);
+        rlog("auto-login: login re-presented after submit for", vendor, "— counted a real fail");
+        return;
+      }
       const fails = await autoLoginFailsGet(vendor);
       if (fails >= AUTOLOGIN_MAX_VENDOR_FAILS) {
         rlog("auto-login: PAUSED for", vendor, "after", fails, "failed attempts — re-save the password (or sign in once) to retry");
@@ -2030,11 +2039,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       rlog("auto-login OUTCOME for", vendor, "=>", outcome);
       if (outcome === "submitted") {
         _autoLoginSubmittedTab.add(tabId);
-        // Optimistic-pessimist: count it as a fail until a capture clears it. A real login
-        // lands a capture within seconds → recapRecordLast / the sync observer reset it to
-        // 0; a wrong password never does, so it climbs to the cap and PAUSES (persisted, so
-        // the pause survives the worker death between live ticks — the whole point).
-        await autoLoginFailsSet(vendor, (await autoLoginFailsGet(vendor)) + 1);
+        // Do NOT count a fail here. A fail is only real once the login page RE-PRESENTS on
+        // this tab (handled at the top of this function); a success redirects to the dashboard
+        // and lands a capture (which resets the counter). This stops a slow-but-good sign-in
+        // from racking up "fails" across ticks and pausing valid credentials (the SMA bug).
       }
       // "filled-username" / "no-form" / "already-in": leave the tab un-submitted so a
       // later navigation (e.g. the password step) can retry, up to the attempt cap.
