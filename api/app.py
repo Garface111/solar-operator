@@ -1192,6 +1192,21 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 acct_id = acct_map.get(acct_no)
                 if not acct_id or not b.get("billing_date"):
                     continue
+                # AUTOMATIC VEC bill-PDF pull: the extension attaches the bill PDF
+                # (base64) per bill. The generation sent-to-grid + the bill's OWN
+                # net-meter credit rate live ONLY on the PDF (the SmartHub APIs
+                # return totalUsage:0 for a net-meter credit account). Parse it →
+                # an AUTHORITATIVE settled net-meter Bill (the GMP offtaker-credit
+                # path then auto-prices the invoice from the bill's own rate).
+                _nm = None
+                _pdf_b64 = b_raw.get("pdf_b64") if isinstance(b_raw, dict) else None
+                if _pdf_b64:
+                    try:
+                        import base64 as _b64
+                        from .adapters.vec_bill import parse_vec_bill_pdf as _parse_vec_pdf
+                        _nm = _parse_vec_pdf(_b64.b64decode(_pdf_b64))
+                    except Exception:
+                        _nm = None
                 doc_no = b.get("bill_uuid") or b.get("pdf_url") or b["billing_date"].strftime("VEC-%Y-%m-%d")
                 # Attach usage from the same billing month, if available.
                 # API-captured bills (v1.6.0) carry kWh + meter-read period
@@ -1200,6 +1215,13 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 u = usage_by_acct.get(acct_no, {}).get(b["billing_date"].strftime("%Y-%m"))
                 _ps = b.get("period_start") or (u["period_start"] if u else None)
                 _pe = b.get("period_end") or (u["period_end"] if u else None)
+                # A parsed bill PDF is authoritative for the meter period — prefer it.
+                if _nm is not None:
+                    from datetime import time as _dtime
+                    if _nm.get("period_start") is not None:
+                        _ps = datetime.combine(_nm["period_start"], _dtime.min)
+                    if _nm.get("period_end") is not None:
+                        _pe = datetime.combine(_nm["period_end"], _dtime.min)
                 # CRITICAL — SmartHub bill kWh is CONSUMPTION, not generation.
                 # The extension sources this from billing/overview `totalUsage`
                 # (and the usage-explorer aria-label kWh), which is the meter's
@@ -1234,6 +1256,30 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             exists.period_start = _ps
                         if _pe and not exists.period_end:
                             exists.period_end = _pe
+                    # AUTOMATIC VEC bill-PDF: the parsed net-meter bill is
+                    # authoritative for generation + the bill's own credit. Apply it
+                    # independently of consumption (a net-meter credit account reads
+                    # ~0 consumption). Climb-only — only raise / set when None.
+                    if _nm is not None:
+                        _sent = _nm.get("kwh_sent_to_grid")
+                        if _sent is not None and (exists.kwh_sent_to_grid is None
+                                                  or float(_sent) > exists.kwh_sent_to_grid):
+                            exists.kwh_sent_to_grid = float(_sent)
+                        _gen = _nm.get("kwh_generated")
+                        if _gen is not None:
+                            _geni = int(round(float(_gen)))
+                            if exists.kwh_generated is None or _geni > exists.kwh_generated:
+                                exists.kwh_generated = _geni
+                        _cred = _nm.get("solar_credit_usd")
+                        if _cred is not None and (exists.solar_credit_usd is None
+                                                  or float(_cred) > exists.solar_credit_usd):
+                            exists.solar_credit_usd = float(_cred)
+                        exists.is_net_metered = True
+                        exists.parse_status = "parsed"
+                        if _ps and not exists.period_start:
+                            exists.period_start = _ps
+                        if _pe and not exists.period_end:
+                            exists.period_end = _pe
                     continue
                 db.add(Bill(
                     tenant_id=tenant.id,
@@ -1241,14 +1287,28 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     bill_date=b["billing_date"],
                     period_start=_ps,
                     period_end=_pe,
-                    # generation is unknown from a SmartHub bill — leave it None so
-                    # the report's bill-prorate path never treats consumption as
-                    # production; DailyGeneration (daily pull) is the truth source.
-                    kwh_generated=None,
+                    # generation is unknown from a SmartHub bill's consumption number —
+                    # leave kwh_generated None so the report's bill-prorate path never
+                    # treats consumption as production; DailyGeneration (daily pull) is
+                    # the truth source. BUT when a parsed bill PDF is attached (_nm),
+                    # IT is authoritative for the net-meter generation + the bill's own
+                    # credit — set those so the GMP offtaker-credit path auto-prices.
+                    kwh_generated=(int(round(float(_nm["kwh_generated"])))
+                                   if (_nm is not None and _nm.get("kwh_generated") is not None)
+                                   else None),
+                    kwh_sent_to_grid=(float(_nm["kwh_sent_to_grid"])
+                                      if (_nm is not None and _nm.get("kwh_sent_to_grid") is not None)
+                                      else None),
+                    solar_credit_usd=(float(_nm["solar_credit_usd"])
+                                      if (_nm is not None and _nm.get("solar_credit_usd") is not None)
+                                      else None),
+                    is_net_metered=(True if _nm is not None else None),
                     kwh_consumed=int(_consumed) if _consumed is not None else None,
                     document_number=doc_no,
                     pdf_path=b.get("pdf_url"),
-                    parse_status="parsed" if _consumed is not None else "partial",
+                    parse_status=("parsed"
+                                  if (_nm is not None or _consumed is not None)
+                                  else "partial"),
                 ))
 
         # CaptureEvent rows are a best-effort audit trail. Flush them inside a

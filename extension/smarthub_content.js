@@ -642,6 +642,9 @@
             pdf_url: null,
             bill_uuid: r.billProcessUuid || null,
             bill_timestamp: r.billingDateTimestamp ? String(r.billingDateTimestamp) : null,
+            // The bill-PDF URL needs the row's system-of-record (e.g. "UTILITY");
+            // carried here so the PDF fetch below can build the exact URL.
+            system_of_record: r.systemOfRecord || null,
             // API-only riches: kWh + meter-read period (DOM scrape never had these)
             kwh: typeof r.totalUsage === "number" ? r.totalUsage : null,
             period_start: loc.lastBillPrevReadDtTm ? isoDay(loc.lastBillPrevReadDtTm) : null,
@@ -652,6 +655,32 @@
         }
       }
       if (bills.length === 0) return false;
+
+      // The net-meter generation + the bill's own credit rate live ONLY on the bill PDF
+      // (VEC's APIs return totalUsage:0). Fetch the most-recent few bill PDFs — exact URL
+      // reverse-engineered from SmartHub's BillPdfService; credentials ride the session.
+      const _pad2 = (n) => String(n).padStart(2, "0");
+      const _pdfDate = (ts) => { const d = new Date(Number(ts)); return d.getFullYear() + "_" + _pad2(d.getMonth()+1) + "_" + _pad2(d.getDate()); };
+      const _recent = bills.slice().sort((a,b) => (Number(b.bill_timestamp)||0) - (Number(a.bill_timestamp)||0)).slice(0, 3);
+      for (const bill of _recent) {
+        try {
+          if (!bill.bill_timestamp || !bill.account_id) continue;
+          const fn = _pdfDate(bill.bill_timestamp) + "_" + bill.account_id + ".pdf";
+          let url = "/services/secured/billPdfService/" + fn + "?account=" + encodeURIComponent(bill.account_id) + "&timestamp=" + encodeURIComponent(bill.bill_timestamp);
+          if (bill.bill_uuid) url += "&uuid=" + encodeURIComponent(bill.bill_uuid);
+          if (bill.system_of_record) url += "&systemOfRecord=" + encodeURIComponent(bill.system_of_record);
+          const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 20000);
+          let res; try { res = await fetch(url, { credentials: "include", cache: "no-store", signal: ctrl.signal }); } finally { clearTimeout(to); }
+          if (!res || !res.ok) continue;
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength < 1000 || buf.byteLength > 12 * 1024 * 1024) continue;
+          const a = new Uint8Array(buf); let binv = "";
+          for (let i = 0; i < a.length; i += 0x8000) binv += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
+          bill.pdf_b64 = btoa(binv);
+          LOG("billPdf fetched", bill.account_id, fn, buf.byteLength, "bytes");
+        } catch (e) { LOG("billPdf fetch failed", bill && bill.account_id, (e && e.message) || e); }
+      }
+
       if (creds && creds.userId && !capturedPrimaryUsername) {
         capturedPrimaryUsername = creds.userId;
       }
