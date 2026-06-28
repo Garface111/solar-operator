@@ -2274,6 +2274,124 @@ def delete_invoice_template(authorization: Optional[str] = Header(default=None))
         return {"ok": True}
 
 
+# ── Per-offtaker invoice template ────────────────────────────────────────────
+# Each offtaker can have its OWN uploaded template; it OVERRIDES the tenant-wide
+# default at render time (see delivery._effective_template_row). These mirror the
+# tenant endpoints above, scoped to one subscription the caller owns.
+
+def _owned_sub(db, t, sub_id: int):
+    """Fetch a subscription the caller's tenant owns, or 404."""
+    from ..models import BillingReportSubscription
+    sub = db.get(BillingReportSubscription, sub_id)
+    if not sub or sub.tenant_id != t.id:
+        raise HTTPException(404, "Offtaker not found")
+    return sub
+
+
+def _seed_template_from_bytes(tpl, data: bytes, name: str, content_type):
+    """Store an uploaded template's file + seed editable token-HTML (HTML verbatim;
+    Excel → its invoice sheet's HTML). Mirrors the tenant upload path; never fatal."""
+    tpl.filename = name[:300]
+    tpl.content_type = content_type or "application/octet-stream"
+    tpl.file_bytes = data
+    lname = name.lower()
+    is_excel = (lname.endswith((".xlsx", ".xls", ".xlsm"))
+                or data[:4] == _MAGIC_XLSX[:4] or data[:4] == _MAGIC_XLS)
+    if lname.endswith((".html", ".htm")):
+        try:
+            tpl.html = data.decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            pass
+    elif is_excel:
+        try:
+            from .matcher import excel_to_template_html
+            _sheet, html = excel_to_template_html(data)
+            if html:
+                tpl.html = html
+        except Exception:  # noqa: BLE001
+            logger.warning("per-offtaker template: Excel HTML seed failed", exc_info=True)
+
+
+@router.get("/subscriptions/{sub_id}/invoice-template")
+def get_sub_invoice_template(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """This offtaker's own invoice-template status + editable token-HTML (seeds the
+    default template HTML when none saved, so the editor works out of the box)."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerSubscriptionTemplate
+    from .template_render import DEFAULT_TEMPLATE_HTML, AVAILABLE_TOKENS
+    with SessionLocal() as db:
+        _owned_sub(db, t, sub_id)
+        tpl = db.execute(select(OfftakerSubscriptionTemplate).where(
+            OfftakerSubscriptionTemplate.subscription_id == sub_id)).scalars().first()
+        d = _template_dict(tpl)
+        d["html"] = (tpl.html if tpl and tpl.html else DEFAULT_TEMPLATE_HTML)
+        d["is_default_html"] = not (tpl and tpl.html)
+        d["tokens"] = AVAILABLE_TOKENS
+        return {"ok": True, "template": d}
+
+
+@router.post("/subscriptions/{sub_id}/invoice-template")
+async def upload_sub_invoice_template(sub_id: int, file: UploadFile = File(...),
+                                      authorization: Optional[str] = Header(default=None)):
+    """Upload (or replace) THIS offtaker's own invoice template. Render-from-template
+    is gated behind `enabled` (the format toggle), same as the tenant default."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    data, name = await _read_template_upload(file)
+    from ..models import OfftakerSubscriptionTemplate
+    with SessionLocal() as db:
+        _owned_sub(db, t, sub_id)
+        tpl = db.execute(select(OfftakerSubscriptionTemplate).where(
+            OfftakerSubscriptionTemplate.subscription_id == sub_id)).scalars().first()
+        if tpl is None:
+            tpl = OfftakerSubscriptionTemplate(subscription_id=sub_id, tenant_id=t.id)
+            db.add(tpl)
+        _seed_template_from_bytes(tpl, data, name, file.content_type)
+        db.commit()
+        db.refresh(tpl)
+        return {"ok": True, "template": _template_dict(tpl)}
+
+
+@router.put("/subscriptions/{sub_id}/invoice-template")
+def put_sub_invoice_template(sub_id: int, body: InvoiceTemplatePut,
+                             authorization: Optional[str] = Header(default=None)):
+    """Save THIS offtaker's editable token-HTML + the enable toggle ("Use this
+    template" vs "Default format"). A render failure at send falls back to standard."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import OfftakerSubscriptionTemplate
+    with SessionLocal() as db:
+        _owned_sub(db, t, sub_id)
+        tpl = db.execute(select(OfftakerSubscriptionTemplate).where(
+            OfftakerSubscriptionTemplate.subscription_id == sub_id)).scalars().first()
+        if tpl is None:
+            tpl = OfftakerSubscriptionTemplate(subscription_id=sub_id, tenant_id=t.id)
+            db.add(tpl)
+        if body.html is not None:
+            tpl.html = body.html
+        if body.enabled is not None:
+            tpl.enabled = bool(body.enabled)
+        db.commit()
+        db.refresh(tpl)
+        return {"ok": True, "template": _template_dict(tpl)}
+
+
+@router.delete("/subscriptions/{sub_id}/invoice-template")
+def delete_sub_invoice_template(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Remove THIS offtaker's own template (falls back to the tenant default/standard)."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import OfftakerSubscriptionTemplate
+    with SessionLocal() as db:
+        _owned_sub(db, t, sub_id)
+        tpl = db.execute(select(OfftakerSubscriptionTemplate).where(
+            OfftakerSubscriptionTemplate.subscription_id == sub_id)).scalars().first()
+        if tpl:
+            db.delete(tpl)
+            db.commit()
+        return {"ok": True}
+
+
 # ─── file library — every stored file we hold for the operator ───────────────
 # A small repository for the Offtaker Invoice Generator: the operator's uploaded
 # invoice template, any uploaded billing workbooks, and captured GMP utility-bill

@@ -823,21 +823,43 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     )
 
 
+def _effective_template_row(db, sub, force: bool = False):
+    """The invoice template to render this offtaker's invoice from. A PER-OFFTAKER
+    template (OfftakerSubscriptionTemplate, keyed by subscription) OVERRIDES the
+    tenant-wide default (OfftakerInvoiceTemplate); each respects its own `enabled`
+    gate unless `force` (preview). Precedence: per-offtaker → tenant default → None
+    (fall back to the standard branded invoice). Both rows share the same shape
+    (html / file_bytes / enabled), so the two render paths use this interchangeably."""
+    from ..models import OfftakerInvoiceTemplate, OfftakerSubscriptionTemplate
+    sid = getattr(sub, "id", None)
+    if sid is not None:
+        st = db.execute(select(OfftakerSubscriptionTemplate).where(
+            OfftakerSubscriptionTemplate.subscription_id == sid)).scalars().first()
+        if st and (force or st.enabled) and (st.html or st.file_bytes):
+            return st
+    tid = getattr(sub, "tenant_id", None)
+    if tid is not None:
+        tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+            OfftakerInvoiceTemplate.tenant_id == tid)).scalars().first()
+        if tpl and (force or tpl.enabled) and (tpl.html or tpl.file_bytes):
+            return tpl
+    return None
+
+
 def _render_from_operator_template(match, sub, out_path, force: bool = False) -> bool:
-    """If the offtaker's tenant has an ENABLED invoice template, render the invoice in
-    THEIR own format and write it to out_path. Returns True on success, False to fall
-    back to the standard PDF. NEVER raises — a bad template can't break a real send.
-    force=True ignores the enabled flag (preview-only compare of the template)."""
+    """If this offtaker (or, as a fallback, their tenant) has an ENABLED invoice
+    template, render the invoice in THAT format and write it to out_path. Returns True
+    on success, False to fall back to the standard PDF. NEVER raises — a bad template
+    can't break a real send. force=True ignores the enabled flag (preview compare)."""
     if sub is None or not getattr(sub, "tenant_id", None):
         return False
     try:
         from ..db import SessionLocal
-        from ..models import OfftakerInvoiceTemplate, Tenant
+        from ..models import Tenant
         from .template_render import render_template_pdf, build_token_context
         with SessionLocal() as db:
-            tpl = db.execute(select(OfftakerInvoiceTemplate).where(
-                OfftakerInvoiceTemplate.tenant_id == sub.tenant_id)).scalars().first()
-            if not tpl or (not force and not tpl.enabled) or not tpl.html:
+            tpl = _effective_template_row(db, sub, force)   # per-offtaker → tenant → None
+            if not tpl or not tpl.html:
                 return False
             tenant = db.get(Tenant, sub.tenant_id)
             ctx = build_token_context(match, sub, tenant)
@@ -866,12 +888,10 @@ def _render_from_operator_template_repro(match, sub, out_path, force: bool = Fal
         from .repro import render as _repro_render
         if not _repro_render.renderer_available():
             return False
-        from ..models import OfftakerInvoiceTemplate
         from .repro.template_repro import reproduce_in_template
         with SessionLocal() as db:
-            tpl = db.execute(select(OfftakerInvoiceTemplate).where(
-                OfftakerInvoiceTemplate.tenant_id == sub.tenant_id)).scalars().first()
-            if not tpl or (not force and not tpl.enabled) or not tpl.file_bytes:
+            tpl = _effective_template_row(db, sub, force)   # per-offtaker → tenant → None
+            if not tpl or not tpl.file_bytes:
                 return False
             fb = bytes(tpl.file_bytes)
         if fb[:4] != b"PK\x03\x04":                   # xlsx only (PDF/Word/HTML → token-HTML path)

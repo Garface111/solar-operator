@@ -1384,6 +1384,31 @@ class OfftakerInvoiceTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
+class OfftakerSubscriptionTemplate(Base):
+    """A PER-OFFTAKER invoice template — one offtaker's own uploaded format, keyed by
+    subscription. Same shape as OfftakerInvoiceTemplate (the tenant-wide default) but
+    scoped to a single offtaker; it OVERRIDES the tenant default at render time (see
+    delivery._effective_template_row). `enabled` gates rendering from it just like the
+    tenant row, so a half-built per-offtaker template can never reach a real send.
+
+    New table → auto-created by init_db()/create_all on deploy (no manual migration).
+    """
+    __tablename__ = "offtaker_subscription_templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subscription_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("billing_report_subscriptions.id"), index=True, unique=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    file_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Editable token-HTML rendition (Jinja2 placeholders) — the render source.
+    html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Gate: only when True does invoice generation render from this template.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class CaptureEvent(Base):
     """One stage in a capture pipeline run (/v1/sync).
 
