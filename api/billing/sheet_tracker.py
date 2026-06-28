@@ -430,12 +430,14 @@ def _row_from_computed(computed: dict, cols: dict, label: str, style) -> Optiona
     """Build the {col: value} row for ONE period from its computed invoice, using the
     SAME figures the invoice itself uses (no recomputation, no fabrication). None when
     there's no generation to record (→ caller skips the period)."""
-    kwh = computed.get("array_kwh")
-    if kwh is None:
-        kwh = computed.get("project_total_kwh")
-    gen = computed.get("kwh")            # the offtaker's allocated kWh (their share)
-    if gen in (None, 0) and kwh:
-        gen = kwh
+    # Generation column = the WHOLE-ARRAY figure (what the existing rows hold + what the GMP
+    # bill states), not the offtaker's allocated share. Prefer array_kwh, then project total,
+    # then the allocated kWh only as a last resort.
+    gen = computed.get("array_kwh")
+    if gen in (None, 0):
+        gen = computed.get("project_total_kwh")
+    if gen in (None, 0):
+        gen = computed.get("kwh")
     if not gen:
         return None
     row: dict[str, Any] = {}
@@ -487,57 +489,29 @@ def _bare_month(s: str) -> Optional[int]:
     return None
 
 
-def _present_labels(file_bytes: bytes, mapping: dict, billed: list) -> set:
-    """The periods ("YYYY-MM") already in the stored sheet. Yeared cells parse directly;
-    BARE month names (e.g. 'April' — common in these sheets and AMBIGUOUS across years) get
-    real years INFERRED by walking the chronological rows backward from the last one, anchored
-    to the most-recent billed period of that month. Without this, a multi-year month-name sheet
-    made every 'June' look like the latest June, so the reconcile skipped every period and
-    nothing populated. DB-agnostic; returns a set of real YYYY-MM labels."""
-    rows: list = []   # (year_or_None, month) in sheet order
+def _sheet_last_period(file_bytes: bytes, mapping: dict) -> Optional[str]:
+    """The raw period value of the LAST non-empty data row — the most recent month the sheet
+    holds. Used to anchor the sheet to the billed timeline (append billed periods AFTER it),
+    which is robust to BARE month names and to sheets that start at a different point than the
+    bill history — we only need the last row's period, never every row's year."""
+    last = None
     try:
         cols = mapping.get("columns") or {}
         pc = cols.get("period")
         hr = int(mapping.get("header_row") or 0)
         if not isinstance(pc, int):
-            return set()
+            return None
         from openpyxl import load_workbook
         wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         sheet = mapping.get("sheet")
         ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
         for row in ws.iter_rows(min_row=hr + 2, min_col=pc + 1, max_col=pc + 1, values_only=True):
             v = row[0]
-            if v is None or not str(v).strip():
-                continue
-            ym = _ym(str(v))
-            if ym:
-                rows.append((ym[0], ym[1]))
-            else:
-                mo = _bare_month(str(v))
-                if mo:
-                    rows.append((None, mo))
+            if v is not None and str(v).strip():
+                last = str(v).strip()
     except Exception:  # noqa: BLE001
-        return set()
-    if not rows:
-        return set()
-    if all(y is not None for y, _ in rows):
-        return {f"{y:04d}-{m:02d}" for y, m in rows}
-    # Infer years for bare rows: anchor the LAST row to the billed timeline, then walk back,
-    # decrementing the year each time the month increases going backward (a Jan<-Dec boundary).
-    last_y, last_m = rows[-1]
-    if last_y is None:
-        cands = [b for b in (billed or []) if b.endswith(f"-{last_m:02d}")]
-        last_y = int(cands[-1][:4]) if cands else (int(billed[-1][:4]) if billed else 2000)
-    years = [0] * len(rows)
-    years[-1] = last_y
-    for i in range(len(rows) - 2, -1, -1):
-        if rows[i][0] is not None:
-            years[i] = rows[i][0]
-        elif rows[i][1] > rows[i + 1][1]:
-            years[i] = years[i + 1] - 1
-        else:
-            years[i] = years[i + 1]
-    return {f"{years[i]:04d}-{rows[i][1]:02d}" for i in range(len(rows))}
+        return None
+    return last
 
 
 def update_subscription_sheet(db, sub) -> dict:
@@ -567,13 +541,25 @@ def update_subscription_sheet(db, sub) -> dict:
 
         billed = _offtaker_billed_labels(db, sub)
 
-        # ── Reconcile path (GMP-bound offtaker): backfill every missing billed period ──
+        # ── Reconcile path (GMP-bound offtaker): append billed periods AFTER the sheet's
+        # last row ── Anchor the sheet's LAST data row to the billed timeline, then add every
+        # billed period that comes after it. Robust to bare month names + sheets that start at
+        # a different point than the bill history; handles the common "deleted the recent rows"
+        # and "a new month landed" cases without parsing every row's year.
         if billed:
-            present = _present_labels(bytes(bytes_), mapping, billed)
-            missing = [lbl for lbl in billed if lbl not in present]   # oldest → newest
-            # Safety cap: these sheets already carry their full history, so a reconcile should
-            # only ever add a few recent rows. Never dump the whole multi-year history — append
-            # at most the most-recent MAX_BACKFILL missing periods.
+            last_cell = _sheet_last_period(bytes(bytes_), mapping)
+            anchor = None
+            if last_cell:
+                ym = _ym(last_cell)
+                if ym:
+                    anchor = f"{ym[0]:04d}-{ym[1]:02d}"
+                else:
+                    mo = _bare_month(last_cell)
+                    if mo:
+                        cands = [b for b in billed if b.endswith(f"-{mo:02d}")]
+                        anchor = cands[-1] if cands else None
+            missing = [b for b in billed if b > anchor] if anchor else billed[-1:]
+            # Safety cap: never dump a long history — append at most the most-recent MAX_BACKFILL.
             MAX_BACKFILL = 14
             if len(missing) > MAX_BACKFILL:
                 missing = missing[-MAX_BACKFILL:]
