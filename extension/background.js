@@ -1180,12 +1180,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     }
   }
 
-  // v1.9.63: chint silent live-mode is removed (can't capture without a site click).
-  // Clear the 4-min alarm a prior version armed + mark it off, and reap a recapture tab
-  // orphaned by an MV3 worker termination so they don't pile up (Ford: "came back to a
-  // bunch of chint tabs").
-  try { chrome.alarms.clear("chint-live", () => void chrome.runtime.lastError); } catch (_) {}
-  try { await chrome.storage.local.set({ so_chint_live: { on: false } }); } catch (_) {}
+  // v1.9.86: the old v1.9.63 "chint live-mode removed" stub used to run HERE on every
+  // install/update and force `so_chint_live = {on:false}` + clear the alarm — which
+  // silently RE-DISABLED Chint background refresh on EVERY version bump after v1.9.81
+  // re-enabled it (autoArmKnownLive then saw on:false and skipped Chint). Removed. Chint
+  // background refresh now survives updates via reArmLive/autoArmKnownLive + the one-time
+  // migrateChintBackgroundOnce. We still reap any recapture tab orphaned by an MV3 worker
+  // termination so they don't pile up (Ford: "came back to a bunch of chint tabs").
   try { if (typeof self.__soReapOrphanRecapture === "function") await self.__soReapOrphanRecapture(); } catch (_) {}
 
   // v1.5.2: retro-inject so_bridge.js into any SO tabs the user already had
@@ -1440,15 +1441,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     }
   }
   self.__soAutoArmKnownLive = autoArmKnownLive;
-  // One-time migration (v1.9.81): Chint background refresh was hard-disabled before this
-  // version, so EVERY existing install carries so_chint_live = {on:false} from the old stub —
-  // which autoArmKnownLive correctly treats as "owner left it off, leave it". But that off
-  // state was the CODE's choice, not the owner's, and Chint can now be captured silently. So
-  // arm it ONCE for owners who actually use Chint (a prior successful capture), so the new
-  // background loop turns on without making them reopen the portal. Guarded by a persisted
-  // flag → runs once; after that a real disarm (MAX_FAILS / the UI toggle) sticks normally.
+  // One-time migration: Chint background refresh was hard-disabled before v1.9.81, so every
+  // install carried so_chint_live = {on:false} from the old stub — which autoArmKnownLive
+  // correctly treats as "owner left it off, leave it". v1.9.81 armed it once, BUT the leftover
+  // onInstalled disarm stub (removed in v1.9.86) re-forced on:false on every later update, so
+  // by v1.9.85 Chint was off again on every install. Bumping the flag re-arms it ONCE more for
+  // owners who actually use Chint (a prior successful capture); with the disarm stub gone it now
+  // STICKS. After this, a real disarm (MAX_FAILS / the UI toggle) sticks normally.
   async function migrateChintBackgroundOnce() {
-    const FLAG = "so_chint_bg_migrated_v1981";
+    const FLAG = "so_chint_bg_migrated_v1986";
     try {
       const s = await chrome.storage.local.get([FLAG, LAST_KEY]);
       if (s[FLAG]) return;
