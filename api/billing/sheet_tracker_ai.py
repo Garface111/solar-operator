@@ -291,3 +291,80 @@ def ai_plan_rows(headers: list, recent_rows: list, facts: list,
     except Exception as e:  # noqa: BLE001 — NEVER break the reconcile over the AI path
         logger.warning("sheet_tracker_ai: plan failed (%s)", type(e).__name__)
         return None
+
+
+# ─── AI RECIPE: derive per-column rules ONCE; a deterministic engine applies them forever ─────
+
+_RECIPE_SRCS = ("month_name", "period_label", "period_start", "period_end",
+                "whole_kwh", "share_kwh", "rate", "amount", "constant", "formula", "blank")
+
+
+def _parse_recipe(text: str, ncol: int) -> Optional[dict]:
+    m = re.search(r"\{.*\}", text or "", re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:  # noqa: BLE001
+        return None
+    raw = obj.get("columns")
+    if not isinstance(raw, dict):
+        return None
+    cols = {}
+    for k, rule in raw.items():
+        try:
+            ci = int(k)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= ci < max(ncol, 1)) or not isinstance(rule, dict):
+            continue
+        src = rule.get("src")
+        if src in _RECIPE_SRCS:
+            cols[str(ci)] = {"src": src}
+    if not cols:
+        return None
+    return {"columns": cols, "reasoning": str(obj.get("reasoning") or "")[:300]}
+
+
+def ai_derive_recipe(headers: list, sample_rows: list, sheet: Optional[str] = None,
+                     offtaker: Optional[str] = None, timeout: int = 45) -> Optional[dict]:
+    """The intelligence layer, run ONCE per sheet (on upload): read the columns + a few sample
+    rows and decide, FOR EACH COLUMN, the RULE that fills it in a new monthly row. A deterministic
+    engine then applies these rules every month — so there is no per-run model variation. Returns
+    {"columns": {"<idx>": {"src": ...}}, "reasoning": str} or None (caller falls back)."""
+    if not ai_available():
+        return None
+    try:
+        prompt = (
+            "You are configuring an automated system that appends ONE new row per billing month to a "
+            "solar operator's hand-built spreadsheet" + (f' for "{offtaker}"' if offtaker else "")
+            + (f' (sheet "{sheet}")' if sheet else "") + ". You decide the rule for EACH column ONCE; "
+            "a deterministic engine then applies your rules every month, so be exact.\n\n"
+            + _render_rows(headers, sample_rows) + "\n\n"
+            "For each new row, the engine has these FACTS about the billing month (from the utility bill):\n"
+            "  month_name  (e.g. \"April\")            period_label  (\"2026-04\")\n"
+            "  period_start (\"2026-03-18\")           period_end    (\"2026-04-18\")\n"
+            "  whole_kwh   (whole-array generation)   share_kwh     (this customer's share)\n"
+            "  rate        ($/kWh)                    amount        (dollars billed)\n\n"
+            "Assign EVERY column index (0..N-1) a rule with one 'src':\n"
+            "  - one of the FACT names above (the column holds that figure),\n"
+            "  - \"constant\"  — every existing row has the SAME value here (a flat tariff, a 0 adder); "
+            "the engine carries that exact value forward,\n"
+            "  - \"formula\"   — the column is an Excel formula; the engine copies the existing formula "
+            "with its row references shifted to the new row,\n"
+            "  - \"blank\"     — leave empty (e.g. a 'date paid' column).\n"
+            "Match the existing rows' meaning EXACTLY. If a sheet has both a whole-array column and a "
+            "per-customer column, map whole_kwh and share_kwh to the right ones.\n\n"
+            'Respond with ONLY JSON, no prose:\n'
+            '{"columns": {"0": {"src": "month_name"}, "1": {"src": "period_start"}, ...}, '
+            '"reasoning": "<one sentence>"}'
+        )
+        text = _call_anthropic(prompt, timeout=timeout, max_tokens=1500)
+        result = _parse_recipe(text or "", len(headers))
+        if result is not None:
+            logger.info("sheet_tracker_ai: derived recipe via %s (%d cols)",
+                        _model(), len(result["columns"]))
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sheet_tracker_ai: recipe derivation failed (%s)", type(e).__name__)
+        return None

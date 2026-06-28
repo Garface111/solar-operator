@@ -826,6 +826,91 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
     return buf.getvalue(), appended   # (bytes, rows actually written after sort + dedup)
 
 
+_RECIPE_FACT = {"month_name": "month", "period_label": "period", "period_start": "start",
+                "period_end": "end", "whole_kwh": "whole_kwh", "share_kwh": "share_kwh",
+                "rate": "rate", "amount": "amount"}
+
+
+def append_recipe_rows(file_bytes: bytes, mapping: dict, facts_list: list,
+                       present: Optional[set] = None) -> tuple:
+    """DETERMINISTIC engine: append one row per fact by applying the stored per-column recipe
+    (mapping['recipe']) — no model call. Each column's value comes from its rule: a bill FACT, the
+    carried CONSTANT (from the last existing row), the existing FORMULA (row-shifted), or BLANK.
+    Mimics the column's date/number format + alignment. Sorts by period + dedups vs `present`.
+    Returns (bytes, appended_facts)."""
+    import datetime as _dt
+    from copy import copy as _copy
+    from openpyxl import load_workbook
+    recipe = ((mapping.get("recipe") or {}).get("columns")) or {}
+    wb = load_workbook(io.BytesIO(file_bytes))
+    sheet = mapping.get("sheet")
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+    hr = int(mapping.get("header_row") or 0)
+    cols = mapping.get("columns") or {}
+    probe = [c for c in cols.values() if isinstance(c, int)]
+    template = None
+    r = hr + 2
+    while r <= ws.max_row:
+        if any(ws.cell(row=r, column=c + 1).value not in (None, "") for c in probe):
+            template = r
+        r += 1
+
+    def next_row():
+        wr = hr + 2
+        rr = hr + 2
+        while rr <= ws.max_row:
+            if any(ws.cell(row=rr, column=c + 1).value not in (None, "") for c in probe):
+                wr = rr + 1
+            rr += 1
+        return wr
+
+    seen = set(present or ())
+    appended = []
+    for fact in sorted(facts_list, key=lambda f: f.get("period") or "9999-99"):
+        per = fact.get("period")
+        if per and per in seen:
+            continue
+        wr = next_row()
+        for k, rule in recipe.items():
+            try:
+                ci = int(k)
+            except (TypeError, ValueError):
+                continue
+            src = (rule or {}).get("src")
+            tcell = ws.cell(row=template, column=ci + 1) if template else None
+            if src in _RECIPE_FACT:
+                val = fact.get(_RECIPE_FACT[src])
+            elif src == "constant":
+                val = tcell.value if tcell else None
+            elif src == "formula":
+                fv = tcell.value if tcell else None
+                val = _shift_formula(fv, wr - template) if isinstance(fv, str) and fv.startswith("=") else fv
+            else:                                          # blank / unknown
+                continue
+            if val is None:
+                continue
+            cell = ws.cell(row=wr, column=ci + 1)
+            d = _parse_date_any(val) if isinstance(val, str) else None
+            if d is not None and tcell is not None and isinstance(tcell.value, str):
+                cell.value = "%d/%d/%d" % (d.month, d.day, d.year)   # text-date column → match text
+            elif d is not None:
+                cell.value = d
+            else:
+                cell.value = val
+            if tcell is not None:
+                cell.number_format = tcell.number_format
+                try:
+                    cell.alignment = _copy(tcell.alignment)
+                except Exception:  # noqa: BLE001
+                    pass
+        if per:
+            seen.add(per)
+        appended.append(fact)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), appended
+
+
 def update_subscription_sheet(db, sub) -> dict:
     """RECONCILE the offtaker's stored BYO generation spreadsheet with their billed
     history: append a row for EVERY billed period missing from the sheet — so deleting a
@@ -853,7 +938,38 @@ def update_subscription_sheet(db, sub) -> dict:
 
         billed = _offtaker_billed_labels(db, sub)
 
-        # ── AI path (when the model is funded): hand it the sheet + the real billed figures and let
+        # ── RECIPE path (deterministic, primary): apply the per-column rules the AI derived ONCE for
+        # this sheet (mapping['recipe']). No model call per run → no drift in order/format/count.
+        if billed and (mapping.get("recipe") or {}).get("columns"):
+            try:
+                _h, _recent, present = _sheet_context(bytes(bytes_), mapping)
+            except Exception:  # noqa: BLE001
+                present = []
+            present_set = set(present)
+            _floor = min(present) if present else ""
+            missing = [b for b in billed if b not in present_set and b >= _floor][-14:]
+            if not missing:
+                return {"status": "skipped", "reason": "up-to-date",
+                        "ai": {"sane": True, "explanation": "Already up to date through the latest bill.", "via": "recipe"}}
+            facts = _candidate_facts(sub, missing, n=len(missing))
+            if facts:
+                new_bytes, appended = append_recipe_rows(bytes(bytes_), mapping, facts, present=present_set)
+                if appended:
+                    sub.tracker_workbook = new_bytes
+                    added = [f.get("month") or f.get("period") for f in appended]
+                    new_map = dict(mapping)
+                    new_map["last_period"] = billed[-1]
+                    new_map["data_rows"] = int(mapping.get("data_rows") or 0) + len(appended)
+                    sub.tracker_map = new_map
+                    sub.tracker_updated_at = datetime.utcnow()
+                    db.add(sub)
+                    return {"status": "appended", "via": "recipe", "count": len(appended),
+                            "periods": [str(a) for a in added],
+                            "ai": {"sane": True, "via": "recipe",
+                                   "explanation": "Added %d month(s) by your saved column rules (%s)." % (
+                                       len(appended), ", ".join(str(a) for a in added))}}
+
+        # ── AI planner path (fallback when no recipe is stored) ──
         # it decide which months are missing, produce a COMPLETE row for each, and validate. The
         # heuristic path below is the fallback when the AI is off, errors, or low-confidence.
         from . import sheet_tracker_ai as _ai
@@ -1123,6 +1239,20 @@ def ingest_upload(file_bytes: bytes, filename: str,
         mapping["sheet"] = "Generation"
     else:
         xlsx_bytes = file_bytes
+
+    # Derive the per-column RECIPE once (AI), stored on the mapping — the deterministic engine then
+    # applies it every month with no per-run model variation. Best-effort: no recipe just means the
+    # reconcile falls back to the planner/heuristic.
+    try:
+        from .sheet_tracker_ai import ai_available as _aiok, ai_derive_recipe as _derive
+        if _aiok():
+            _hdrs, _sample, _pres = _sheet_context(xlsx_bytes, mapping)
+            _rec = _derive(_hdrs, _sample, sheet=mapping.get("sheet"), offtaker=offtaker_name)
+            if _rec:
+                mapping = dict(mapping)
+                mapping["recipe"] = _rec
+    except Exception:  # noqa: BLE001 — recipe derivation can NEVER break upload
+        pass
 
     return {"ok": True, "mapping": mapping, "workbook": xlsx_bytes,
             "warnings": mapping.get("warnings", [])}
