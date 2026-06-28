@@ -1008,14 +1008,20 @@ def append_recipe_rows(file_bytes: bytes, mapping: dict, facts_list: list,
             rr += 1
         return wr
 
-    # Deterministic CONSTANT detection: a column whose every existing data row holds the SAME value
-    # is a constant to carry (a flat tariff, a 0 adder). Override the recipe with it — guards against
-    # the model labeling a flat tariff as 'rate' (which would recompute 0.183582 instead of 0.18116).
+    # Deterministic CARRY-FORWARD: a column that's stable across the RECENT rows (a flat tariff, a 0
+    # adder) is carried forward as that last value — overriding the recipe. Uses recent rows (not all
+    # history, since a flat tariff may have changed years ago) and SKIPS the varying data columns the
+    # recipe maps to bill facts, so it only ever pins genuinely-flat columns (fixes the model
+    # labeling a flat tariff as 'rate' → was writing 0.183582 instead of the sheet's flat 0.18116).
+    _VARY = {"month_name", "period_label", "period_start", "period_end", "whole_kwh", "share_kwh", "amount"}
     const_cols = {}
     _drows = [rr for rr in range(hr + 2, ws.max_row + 1)
               if any(ws.cell(row=rr, column=c + 1).value not in (None, "") for c in probe)]
+    _recent = _drows[-6:] if len(_drows) >= 4 else _drows
     for _ci in range(ws.max_column):
-        _vv = [ws.cell(row=rr, column=_ci + 1).value for rr in _drows
+        if ((recipe.get(str(_ci)) or {}).get("src")) in _VARY:
+            continue
+        _vv = [ws.cell(row=rr, column=_ci + 1).value for rr in _recent
                if ws.cell(row=rr, column=_ci + 1).value not in (None, "")]
         if len(_vv) >= 3 and not (isinstance(_vv[0], str) and str(_vv[0]).startswith("=")) \
                 and len({str(x) for x in _vv}) == 1:
