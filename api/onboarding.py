@@ -316,7 +316,13 @@ def _create_trial_tenant(
         t = Tenant(
             id=tenant_id, name=display_name, contact_email=email,
             operator_name=full_name.strip()[:120],
-            company_name=(company or full_name).strip()[:200],
+            # Only store a REAL company the owner gave us — don't seed company_name
+            # with the email-derived full_name, otherwise Master Account → Company
+            # renders pre-filled with a junk "<vendor> owner"/name and the owner has
+            # to clear it. Leave it blank so the field shows its "Add your company
+            # name" placeholder. `name` (display_name) still falls back to full_name,
+            # and every company_name consumer already falls back to name/operator_name.
+            company_name=((company or "").strip()[:200] or None),
             tenant_key=tenant_key, plan="standard", active=True, created_at=now(),
             product=product,
             subscription_status="trialing",

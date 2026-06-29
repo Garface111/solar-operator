@@ -151,6 +151,46 @@ def test_start_persists_consent(client, mocks, monkeypatch):
         assert t.consent_at is not None
 
 
+def test_start_without_company_leaves_company_name_blank(client, mocks, monkeypatch):
+    """When the owner gives NO company at signup, company_name is NOT seeded with
+    the email-derived full_name — it's left blank so Master Account → Company shows
+    its "Add your company name" prompt instead of junk to clear. A real company is
+    still stored verbatim. (display `name` still falls back to full_name.)"""
+    # No company supplied → company_name blank, but name (display) falls back.
+    resp = client.post("/v1/onboarding/start", json={
+        "email": "nocompany@example.com",
+        "full_name": "Nora NoCompany",
+        "array_count": 2,
+        "product": "array_operator",
+    })
+    assert resp.status_code == 200, resp.text
+    token = resp.json()["onboarding_token"]
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.onboarding_token == token)
+        ).scalar_one()
+        assert not t.company_name              # blank/None — never the derived full_name
+        assert t.company_name != "Nora NoCompany"
+        assert t.operator_name == "Nora NoCompany"
+        assert t.name == "Nora NoCompany"      # display name still falls back to full_name
+
+    # A real company is preserved unchanged.
+    resp2 = client.post("/v1/onboarding/start", json={
+        "email": "withcompany@example.com",
+        "full_name": "Walt WithCompany",
+        "company": "Bright Fields Solar",
+        "array_count": 1,
+        "product": "array_operator",
+    })
+    assert resp2.status_code == 200, resp2.text
+    token2 = resp2.json()["onboarding_token"]
+    with SessionLocal() as db:
+        t2 = db.execute(
+            select(Tenant).where(Tenant.onboarding_token == token2)
+        ).scalar_one()
+        assert t2.company_name == "Bright Fields Solar"
+
+
 def test_start_array_operator_product_same_trial(client, mocks, monkeypatch):
     """An Array Operator owner signup gets product='array_operator' and the
     IDENTICAL 14-day no-card trial (trial is product-agnostic)."""
