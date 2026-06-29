@@ -142,6 +142,52 @@ def solar_credit_from_bill(raw_json: dict) -> Optional[dict]:
             "credit_rate": round(rate, 5)}
 
 
+def excess_credit_rate_from_bill(raw_json: dict) -> Optional[float]:
+    """The per-kWh net-metering EXCESS credit RATE the bill STATES ($/kWh), read
+    from the CREDITED line(s) alone — i.e. credit dollars ÷ the kWh those dollars
+    credited, NOT ÷ all excess on the bill.
+
+    Why this is separate from solar_credit_from_bill: under GMP GROUP net metering
+    most of an array's excess is SHARED OUT to group members and shows on the host's
+    own bill as an EXCESS line at $0 (the value left with the members, not cashed
+    here). Only the small residual the host kept is a credited line (e.g. the
+    screenshot's "9 Total KWH Excess Credit @ $-0.18398"). solar_credit_from_bill
+    divides the residual credit across ALL excess kWh, diluting the rate to ~$0 and
+    tripping the banked floor — so the offtaker falls back to a fleet reference
+    estimate instead of the rate printed on the bill. This reads the RATE off the
+    credited line only ($0.18398/kWh), which IS the canonical net-metering credit
+    rate for the period, so the offtaker's shared excess bills at the bill's own
+    rate. Returns None for a truly banked month (no line credited at a real rate)."""
+    if not isinstance(raw_json, dict):
+        return None
+    excess_usd = solcred_usd = credited_kwh = 0.0
+    for seg in raw_json.get("billSegments", []):
+        for li in seg.get("segmentLineItems", []):
+            if li.get("unitOfMeasure") != "KWH":
+                continue
+            uc = li.get("unitCode")
+            da = _f(li.get("dollarAmount"))
+            cnt = _f(li.get("unitCount"))
+            if uc in _EXCESS_CODES:
+                # Only lines that ACTUALLY credited dollars define the rate; the
+                # $0 group-shared excess line is excluded from both sides.
+                if da is not None and da < 0 and cnt and cnt > 0:
+                    excess_usd += -da
+                    credited_kwh += cnt
+            elif uc in _SOLCRED_CODES:
+                if da is not None and da < 0:
+                    solcred_usd += -da
+    if credited_kwh <= 0:
+        return None
+    credit_usd = excess_usd + solcred_usd            # SOLCRED optional
+    if credit_usd <= 0:
+        return None
+    rate = credit_usd / credited_kwh
+    if rate < BANKED_CREDIT_RATE_FLOOR:
+        return None                                   # banked — no real credit rate
+    return round(rate, 5)
+
+
 def array_age_bucket(first_connect_date, as_of: Optional[date] = None) -> str:
     """'le11' if the array is ≤ AGE_THRESHOLD_YEARS old at as_of, else 'gt11'.
     Unknown install date → 'le11' (the common/newer case; conservative)."""
@@ -422,8 +468,19 @@ def resolve_offtaker_excess_credit(db, utility_account_id: int, target_label: Op
     if bill is None:
         return None
     excess = round(float(bill.kwh_sent_to_grid), 1)
+    # 1) Fully-cashed bill (solar_credit_usd captured) → its own cash rate.
+    # 2) Else the rate the bill STATES on its credited excess line — the default the
+    #    operator expects ("the credit rate in the bill"). This is what rescues GROUP
+    #    net-metering offtakers, whose excess is shared out at $0 so solar_credit_usd
+    #    never gets captured (kwh_sent_to_grid is the shared amount; the rate lives on
+    #    the small residual credited line). Only when the bill states NO real credited
+    #    rate (a truly banked month) do we fall back to a reference estimate.
+    bill_stated_rate = (excess_credit_rate_from_bill(bill.raw_json)
+                        if bill.raw_json else None)
     if bill.solar_credit_usd is not None and bill.solar_credit_usd > 0:
         rate, source = round(float(bill.solar_credit_usd) / excess, 6), "bill_cash"
+    elif bill_stated_rate is not None:
+        rate, source = round(bill_stated_rate, 6), "bill_cash"
     else:
         acct = db.get(UtilityAccount, utility_account_id)
         arr = db.get(Array, acct.array_id) if acct and acct.array_id else None
