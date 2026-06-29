@@ -32,7 +32,7 @@
   const INTENT_KEY = "so_capture_intent";
   const SYNC_INTENT_KEY = "so_sync_intent";  // {vendor: ts} per-vendor map armed by a PARALLEL Sync-all
   const INTENT_TTL_MS = 10 * 60 * 1000;
-  const POLL_INTERVAL_MS = 4000;
+  const POLL_INTERVAL_MS = 1500;
   const MAX_POLLS = 30;
   // Diagnostic trace — flip SMA_DEBUG to true to re-enable the [EnergyAgent SMA]
   // console play-by-play (kept from the v1.9.x debugging saga; silent in prod).
@@ -463,6 +463,15 @@
   }
 
   tick();
+  // Fast token-watcher: SMA's Bearer token only lands in localStorage AFTER the heavy
+  // ennexOS SPA boots + Keycloak auth completes — often several poll intervals on a fresh
+  // background tab. Re-run tick() the instant it appears instead of waiting for the next
+  // scheduled poll, so a logged-in SMA capture lands almost as fast as the cookie vendors.
+  let _tokenSeen = false;
+  const _tokWatch = setInterval(() => {
+    if (done || _tokenSeen) { clearInterval(_tokWatch); return; }
+    try { if (getAccessToken()) { _tokenSeen = true; clearInterval(_tokWatch); tick(); } } catch (_) {}
+  }, 250);
   const iv = setInterval(() => {
     if (done) { clearInterval(iv); return; }
     if (polls >= MAX_POLLS) {

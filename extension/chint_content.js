@@ -37,7 +37,7 @@
 
   const INTENT_KEY = "so_capture_intent";
   const INTENT_TTL_MS = 10 * 60 * 1000;
-  const POLL_INTERVAL_MS = 3000;
+  const POLL_INTERVAL_MS = 1500;
   const MAX_POLLS = 100;                       // ~5 min — owner needs time to click into sites
   let polls = 0;
   let lastHash = null;

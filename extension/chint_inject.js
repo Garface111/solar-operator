@@ -114,7 +114,7 @@
       var ids = d.ids.slice(0, 50);                        // sane cap
       if (!ids.length) return;
       window.__soChintWalking = true;
-      var i = 0, STEP_MS = 2200;                           // dwell so each site's busTypeDevices fires + is observed
+      var i = 0, STEP_MS = 1000;                           // dwell so each site's busTypeDevices fires + is observed (the hook catches it async, so this just paces route changes)
       L("walk: stepping through", ids.length, "site(s) (no click)");
       (function step() {
         if (i >= ids.length) {
