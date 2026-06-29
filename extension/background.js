@@ -2490,7 +2490,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         if (_syncTabs.has(id)) { _syncTabs.delete(id); try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (_) {} }
       }
       try { await chrome.storage.local.remove("so_sync_intent"); } catch (_) {}
-    }, 60 * 1000);
+    }, 110 * 1000);   // room for a lapsed-session SSO re-login (esp. SMA) before reaping a sync tab
 
     return { ok: true, opened: opened.length + (wantChint ? 1 : 0), vendors: want.concat(wantChint ? ["chint"] : []) };
   }
