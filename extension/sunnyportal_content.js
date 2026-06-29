@@ -30,6 +30,7 @@
 
   const UIAPI = "https://uiapi.sunnyportal.com";
   const INTENT_KEY = "so_capture_intent";
+  const SYNC_INTENT_KEY = "so_sync_intent";  // {vendor: ts} per-vendor map armed by a PARALLEL Sync-all
   const INTENT_TTL_MS = 10 * 60 * 1000;
   const POLL_INTERVAL_MS = 4000;
   const MAX_POLLS = 30;
@@ -394,14 +395,28 @@
   function hasIntent() {
     return new Promise((res) => {
       try {
-        chrome.storage.local.get(INTENT_KEY, (s) => {
+        chrome.storage.local.get([INTENT_KEY, SYNC_INTENT_KEY], (s) => {
           const it = s && s[INTENT_KEY];
-          res(!!(it && it.vendor === "sma" && (Date.now() - (it.ts || 0)) < INTENT_TTL_MS));
+          const single = !!(it && it.vendor === "sma" && (Date.now() - (it.ts || 0)) < INTENT_TTL_MS);
+          const sy = s && s[SYNC_INTENT_KEY];
+          const syTs = sy && sy.sma;
+          const sync = !!(syTs && (Date.now() - syTs) < INTENT_TTL_MS);
+          res(single || sync);
         });
       } catch (_) { res(false); }
     });
   }
-  function clearIntent() { try { chrome.storage.local.remove(INTENT_KEY); } catch (_) {} }
+  function clearIntent() {
+    try { chrome.storage.local.remove(INTENT_KEY); } catch (_) {}
+    try {
+      chrome.storage.local.get(SYNC_INTENT_KEY, (s) => {
+        const sy = s && s[SYNC_INTENT_KEY];
+        if (!sy || sy.sma == null) return;   // clear ONLY our vendor so parallel siblings survive
+        delete sy.sma;
+        try { chrome.storage.local.set({ [SYNC_INTENT_KEY]: sy }); } catch (_) {}
+      });
+    } catch (_) {}
+  }
 
   let lastErr = null;   // most recent failure reason, surfaced to the AO page on give-up
   function reportFailure(reason) {

@@ -2435,32 +2435,38 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // Clear a bloated cookie blob before opening each portal so a user-initiated "Sync all"
     // can't land on an ERR_HTTP2_PROTOCOL_ERROR page (no-op for vendors without a domain set).
     for (const v of want) { try { await pruneVendorCookiesIfBloated(v); } catch (_) {} }
-    const done = [];
-    // CRITICAL — run the portal vendors SERIALLY, each with its capture intent ARMED.
-    // `so_capture_intent` is a SINGLE shared slot ({vendor,ts}) that every content script
-    // reads to decide whether to scrape, and CLEARS on success; recaptureVendor's
-    // reapOrphanRecapture also kills any in-flight sibling surface. So two vendors armed at
-    // once cannibalize each other. The OLD bare parallel `chrome.tabs.create` NEVER armed
-    // intent, which is exactly why fronius/sma/solaredge opened but never captured — their
-    // content scripts hard-gate the scrape on the intent flag (only Chint captured, because
-    // it goes through recaptureVendor). Each vendor's capture broadcasts SO_CAPTURE_LANDED
-    // the instant it lands (independent of the budget), so arrays still stream into the
-    // onboarding page progressively as the sweep walks the list.
-    for (const v of want) {
+    // PARALLEL — arm a PER-VENDOR so_sync_intent for all three portal vendors at once and open
+    // their tabs concurrently, so the whole sweep finishes in ~the slowest single vendor (not
+    // the sum). so_sync_intent is ADDITIVE: every portal content script checks it IN ADDITION
+    // to the single so_capture_intent slot (which the single-vendor flows still own), and each
+    // clears ONLY its own vendor key on success — so the three can't cannibalize each other the
+    // way one shared slot did. Auto-login still fires per tab: the chrome.tabs.onUpdated SSO
+    // trigger resolves the vendor via _captureTabVendor's _syncTabs branch, and the auto-login
+    // path has no global single-flight, so three different-origin logins run concurrently. This
+    // also fixes Fronius — its slow identifier-first WSO2 login no longer has to fit a tight
+    // serial budget; it gets the full ~60s watchdog like everyone else.
+    const now = Date.now();
+    const syncIntent = {};
+    for (const v of want) syncIntent[v] = now;
+    try { await chrome.storage.local.set({ so_sync_intent: syncIntent }); } catch (_) {}
+
+    const opened = [];
+    await Promise.all(want.map((v) => new Promise((res) => {
       try {
-        if (v === "fronius" || v === "sma") {
-          // recaptureVendor arms so_capture_intent, opens a background tab, auto-logins on a
-          // lapsed session, and self-cleans. Short budget keeps the serial sweep brisk.
-          await recaptureVendor(v, { budgetMs: 20 * 1000 });
-        } else if (v === "solaredge") {
-          await syncSolarEdgeTab();
-        }
-        done.push(v);
-      } catch (_) {}
-    }
-    // Chint LAST — its own MINIMIZED, UNFOCUSED popup window (its SPA self-focuses a
-    // background tab, which a minimized popup can't be) + per-site route walk. The shared
-    // intent slot is free now. Fire-and-forget; it self-deletes via recapFinish + the reaper.
+        chrome.tabs.create({ url: SYNC_PORTALS[v], active: false }, (tab) => {
+          if (!chrome.runtime.lastError && tab && typeof tab.id === "number") {
+            _syncTabs.set(tab.id, { vendor: v, openedAt: Date.now() });
+            opened.push(tab.id);
+          }
+          res();
+        });
+      } catch (_) { res(); }
+    })));
+
+    // Chint runs CONCURRENTLY in its own MINIMIZED, UNFOCUSED popup window via recaptureVendor
+    // (it uses so_capture_intent + its per-site route walk, which never collides with
+    // so_sync_intent). Its SPA self-focuses a background tab — a minimized popup can't be — so
+    // it stays on newWindow. Fire-and-forget; it self-deletes via recapFinish + the reaper.
     if (wantChint) {
       (async () => {
         try {
@@ -2472,31 +2478,21 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           await recaptureVendor("chint", { newWindow: true, budgetMs: 120 * 1000 });
         } catch (_) {}
       })();
-      done.push("chint");
     }
-    return { ok: true, opened: done.length, vendors: done };
-  }
 
-  // SolarEdge has NO RECAP_VENDORS entry (it scrapes a durable account API key via a
-  // cookie-authed fetch, not a readings walk), so recaptureVendor no-ops for it. Arm the
-  // capture intent ourselves, open a background tab so solaredge_content.js's fetch runs,
-  // and close it on capture (the SYNC_CAPTURED observer handles SOLAREDGE_CAPTURED) or after
-  // a short window. A background tab is fine — the read is fetch-driven, no render needed.
-  async function syncSolarEdgeTab() {
-    try { await chrome.storage.local.set({ so_capture_intent: { vendor: "solaredge", ts: Date.now() } }); } catch (_) {}
-    await new Promise((res) => {
-      try {
-        chrome.tabs.create({ url: SYNC_PORTALS.solaredge, active: false }, (tab) => {
-          const id = (!chrome.runtime.lastError && tab && typeof tab.id === "number") ? tab.id : null;
-          if (id == null) { res(); return; }
-          _syncTabs.set(id, { vendor: "solaredge", openedAt: Date.now() });
-          setTimeout(() => {
-            if (_syncTabs.has(id)) { _syncTabs.delete(id); try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (_) {} }
-            res();
-          }, 20 * 1000);
-        });
-      } catch (_) { res(); }
-    });
+    // Generous ~60s watchdog: close any sync tab that never captured (lapsed session / slow SSO
+    // re-login), then drop so_sync_intent so a stale ts can't make a later single-vendor visit
+    // auto-scrape unexpectedly (the per-vendor TTL bounds it anyway). Captured tabs self-close
+    // earlier via the SYNC_CAPTURED observer.
+    const ids = opened.slice();
+    setTimeout(async () => {
+      for (const id of ids) {
+        if (_syncTabs.has(id)) { _syncTabs.delete(id); try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (_) {} }
+      }
+      try { await chrome.storage.local.remove("so_sync_intent"); } catch (_) {}
+    }, 60 * 1000);
+
+    return { ok: true, opened: opened.length + (wantChint ? 1 : 0), vendors: want.concat(wantChint ? ["chint"] : []) };
   }
 
   function closeAllVendorTabs() {
