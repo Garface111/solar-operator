@@ -1719,6 +1719,77 @@ def admin_vendor_cred_encryption(mode: str = "dryrun", x_maint_key: str | None =
             "report": rep, "log": log}
 
 
+@app.post("/admin/tenant-purge")
+def admin_tenant_purge(email: str, mode: str = "preview",
+                       x_maint_key: str | None = Header(default=None)):
+    """One-off maintenance: PREVIEW or hard-DELETE a tenant + ALL its data, matched by
+    contact_email. Runs IN the container (project tokens can't railway ssh). Gated by
+    X-Maint-Key == SO_MAINT_KEY (UNSET by default → 403, so this is DISABLED unless a
+    throwaway key is set for the operation, then deleted again).
+
+    Built for Ford's deliberate "wipe bruce.genereaux@gmail.com so he can re-onboard
+    fresh" (2026-06-28). There is NO ON DELETE CASCADE in the schema, so we delete in
+    reverse-FK (child-first) order, scoped to the matched tenant(s):
+      • every table with a tenant_id column → WHERE tenant_id IN (matched)
+      • inverter_connections (no tenant_id) → WHERE array_id IN (the tenant's arrays)
+      • the tenant rows last
+    GLOBAL tables (rate_schedule, discovered_utilities) are NEVER touched. The whole
+    delete runs in ONE transaction, so a missed child FK-errors and rolls back clean
+    (no partial state). mode=preview is read-only.
+    """
+    _maint = os.getenv("SO_MAINT_KEY", "")
+    if not _maint or not hmac.compare_digest(x_maint_key or "", _maint):
+        raise HTTPException(403, "tenant-purge maintenance is disabled")
+    from sqlalchemy import select, func
+    from api.models import Base, Tenant
+    GLOBAL_TABLES = {"rate_schedule", "discovered_utilities"}
+    arrays_t = Base.metadata.tables["arrays"]
+
+    def _scoped_count_or_delete(db, tbl, tids, do_delete):
+        if "tenant_id" in tbl.c:
+            cond = tbl.c.tenant_id.in_(tids)
+        elif tbl.name == "inverter_connections":
+            cond = tbl.c.array_id.in_(select(arrays_t.c.id).where(arrays_t.c.tenant_id.in_(tids)))
+        else:
+            return None
+        if do_delete:
+            return db.execute(tbl.delete().where(cond)).rowcount
+        return db.execute(select(func.count()).select_from(tbl).where(cond)).scalar()
+
+    with SessionLocal() as db:
+        tenants = db.query(Tenant).filter(Tenant.contact_email == email).all()
+        tids = [t.id for t in tenants]
+        info = [{"id": t.id, "name": t.name, "operator_name": getattr(t, "operator_name", None),
+                 "active": getattr(t, "active", None), "product": getattr(t, "product", None),
+                 "created_at": str(getattr(t, "created_at", None))} for t in tenants]
+        tables = list(reversed(Base.metadata.sorted_tables))   # children first
+        scoped = [t for t in tables if t.name not in GLOBAL_TABLES and t.name != "tenants"]
+
+        if (mode or "preview").lower() == "preview":
+            counts = {}
+            if tids:
+                for tbl in scoped:
+                    n = _scoped_count_or_delete(db, tbl, tids, do_delete=False)
+                    if n:
+                        counts[tbl.name] = n
+            return {"mode": "preview", "email": email, "tenants": info, "row_counts": counts}
+
+        if (mode or "").lower() == "delete":
+            if not tids:
+                return {"deleted": False, "email": email, "reason": "no tenant matches that email"}
+            removed = {}
+            for tbl in scoped:
+                n = _scoped_count_or_delete(db, tbl, tids, do_delete=True)
+                if n:
+                    removed[tbl.name] = n
+            removed["tenants"] = db.execute(
+                Tenant.__table__.delete().where(Tenant.__table__.c.id.in_(tids))).rowcount
+            db.commit()
+            return {"deleted": True, "email": email, "tenants_removed": info, "rows_deleted": removed}
+
+        raise HTTPException(400, "mode must be 'preview' or 'delete'")
+
+
 @app.post("/admin/rate-schedule/refresh")
 def admin_refresh_rate_schedule(_: None = Depends(_require_admin)):
     """(Re)compute the blended RateSchedule from captured bills. Idempotent;
