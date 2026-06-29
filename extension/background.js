@@ -2475,25 +2475,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       } catch (_) { res(); }
     })));
 
-    // Chint runs CONCURRENTLY in its own MINIMIZED, UNFOCUSED popup window via recaptureVendor
-    // (it uses so_capture_intent + its per-site route walk, which never collides with
-    // so_sync_intent). Its SPA self-focuses a background tab — a minimized popup can't be — so
-    // it stays on newWindow. Fire-and-forget; it self-deletes via recapFinish + the reaper.
-    if (wantChint) {
-      (async () => {
-        try {
-          const st = await recapGetState();
-          if (_liveBusy || (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS)) {
-            rlog("sync-all: a recapture is already in flight — skipping the Chint surface this round");
-            return;
-          }
-          // Generous budget: a lapsed-session login (the owner signs into the popup) + the
-          // per-site route walk can run well past 2min. The window self-closes the instant
-          // walkComplete lands, so a healthy account finishes far sooner.
-          await recaptureVendor("chint", { newWindow: true, budgetMs: 180 * 1000 });
-        } catch (_) {}
-      })();
-    }
+    // Chint is NOT auto-opened here. Its monitoring SPA only renders + fetches data in a VISIBLE
+    // tab — a MINIMIZED/background surface (what the old popup used) runs nothing, so the capture
+    // saw an empty page and wrongly reported "no session" even when the owner was signed in
+    // (confirmed live: a normal tab captures every inverter; the minimized window captures zero).
+    // A plain background tab DOES render but its SPA yanks itself to the foreground during the
+    // route walk (focus-steal). So Chint is CLICK-TO-CONNECT: the page shows "Sign in to add
+    // Chint", and the click opens monitor.chintpowersystems.com in a FOREGROUND tab
+    // (OPEN_UTILITY_PORTAL — Chint is not in the cookie-wipe list, so an existing login rides),
+    // where the walk reliably captures, then so_return_tab brings the owner back here.
 
     // Generous ~60s watchdog: close any sync tab that never captured (lapsed session / slow SSO
     // re-login), then drop so_sync_intent so a stale ts can't make a later single-vendor visit
@@ -2507,7 +2497,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       try { await chrome.storage.local.remove("so_sync_intent"); } catch (_) {}
     }, 110 * 1000);   // room for a lapsed-session SSO re-login (esp. SMA) before reaping a sync tab
 
-    return { ok: true, opened: opened.length + (wantChint ? 1 : 0), vendors: want.concat(wantChint ? ["chint"] : []) };
+    return { ok: true, opened: opened.length, vendors: want.slice() };   // Chint is click-to-connect, not opened here
   }
 
   function closeAllVendorTabs() {
