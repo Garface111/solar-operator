@@ -99,7 +99,7 @@ function broadcastToSoTabs(message, senderTab) {
     // (Ford: Sync-all must stay on his current tab) — gate on whether the sender tab is one
     // of those. Legacy callers that pass no senderTab (GMP/SmartHub via _handleSync) keep
     // the original refocus behavior unchanged.
-    if (message && message.type === "SO_CAPTURE_LANDED" && message.ok) {
+    if (message && message.type === "SO_CAPTURE_LANDED" && message.ok && !message._noReturn) {
       maybeReturnAfterCapture(message.provider, senderTab);
     }
   } catch (e) {
@@ -398,6 +398,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // script fails gracefully (CHINT_CAPTURE_FAILED) until they're verified.
   if (msg.type === "CHINT_CAPTURED") {
     const p = msg.payload || {};
+    const tid = (sender && sender.tab && typeof sender.tab.id === "number") ? sender.tab.id : null;
     const landed = {
       type: "SO_CAPTURE_LANDED",
       ok: true,
@@ -405,8 +406,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sites: Array.isArray(p.sites) ? p.sites : [],
       accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
       at: new Date().toISOString(),
+      // Only the FINAL (walk-complete) emit triggers the return-to-AO. Per-site partial emits
+      // during a multi-site walk just stream the arrays — returning on the first one would
+      // strand the owner (the SPA keeps yanking its tab forward as the walk continues).
+      _noReturn: !p.walkComplete,
     };
-    broadcastToSoTabs(landed, sender && sender.tab);
+    if (p.walkComplete && tid != null) {
+      // Read the pending return BEFORE the broadcast clears it: if a return to the AO tab is
+      // pending for chint, this Chint tab is an onboarding foreground connect (not the owner's
+      // own Chint tab). Return them, then CLOSE this tab so Chint's SPA can't pull itself back
+      // to the foreground after the route walk finishes (the "never brought me back" bug).
+      chrome.storage.local.get("so_return_tab", (st) => {
+        const rt = st && st.so_return_tab;
+        const isOnbConnect = !!(rt && rt.vendor === "chint" && rt.tabId !== tid);
+        const returnTabId = isOnbConnect && typeof rt.tabId === "number" ? rt.tabId : null;
+        const returnWindowId = isOnbConnect && typeof rt.windowId === "number" ? rt.windowId : null;
+        broadcastToSoTabs(landed, sender && sender.tab);   // fires the return (focusReturnTab)
+        if (isOnbConnect) {
+          setTimeout(() => {
+            try { chrome.tabs.remove(tid, () => void chrome.runtime.lastError); } catch (_) {}
+            // Re-assert focus on the AO tab AFTER closing Chint — closing the (possibly-foreground)
+            // Chint tab must never leave the owner stranded on some other tab.
+            if (returnTabId != null) {
+              try { chrome.tabs.update(returnTabId, { active: true }, () => void chrome.runtime.lastError); } catch (_) {}
+              if (returnWindowId != null) { try { chrome.windows.update(returnWindowId, { focused: true }, () => void chrome.runtime.lastError); } catch (_) {} }
+            }
+          }, 700);
+        }
+      });
+    } else {
+      broadcastToSoTabs(landed, sender && sender.tab);
+    }
     chrome.runtime.sendMessage(landed, () => { void chrome.runtime.lastError; });
     sendResponse({ ok: true });
     return; // synchronous response
