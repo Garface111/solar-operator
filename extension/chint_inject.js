@@ -106,6 +106,17 @@
   // busTypeDevices and our hooks observe it. Still read-only: we only change the SPA's
   // route, never craft/replay an API request. Single-flight; returns home when done.
   try {
+    // OBSERVE-DRIVEN walk: chint_content posts SO_CHINT_SITE_OBSERVED the moment it sees a
+    // site's busTypeDevices RESPONSE. We track that here and advance the walk as soon as the
+    // current site's devices have landed — instead of a blind fixed timer that sometimes
+    // moved on BEFORE the response arrived (→ empty capture → stuck). A min dwell lets the SPA
+    // fire the request; a max cap stops a dead/slow site from hanging the whole walk.
+    var _chintObserved = {};
+    window.addEventListener("message", function (e) {
+      if (e.source !== window || e.origin !== location.origin) return;
+      var d = e.data;
+      if (d && d.type === "SO_CHINT_SITE_OBSERVED" && d.siteId) { _chintObserved[String(d.siteId)] = true; }
+    });
     window.addEventListener("message", function (e) {
       if (e.source !== window || e.origin !== location.origin) return;
       var d = e.data;
@@ -114,9 +125,9 @@
       var ids = d.ids.slice(0, 50);                        // sane cap
       if (!ids.length) return;
       window.__soChintWalking = true;
-      var i = 0, STEP_MS = 2200;                           // dwell so each site's busTypeDevices RESPONSE lands before the next route change cancels it (empirically grounded; 1000 skipped sites)
-      L("walk: stepping through", ids.length, "site(s) (no click)");
-      (function step() {
+      var MIN_MS = 500, MAX_MS = 7000, POLL_MS = 250;
+      L("walk: stepping through", ids.length, "site(s) (no click, observe-driven)");
+      function walkOne(i) {
         if (i >= ids.length) {
           try { location.hash = "#/pv/sites"; } catch (_) {}   // return to the sites list when done
           window.__soChintWalking = false;
@@ -127,11 +138,18 @@
           L("walk: done");
           return;
         }
-        var id = ids[i++];
+        var id = String(ids[i]);
         try { location.hash = "#/pv/sites/siteDetail/" + id; } catch (_) {}
         L("walk: -> site", id);
-        setTimeout(step, STEP_MS);
-      })();
+        var waited = 0;
+        (function waitObserved() {
+          if (_chintObserved[id] && waited >= MIN_MS) { setTimeout(function () { walkOne(i + 1); }, 200); return; }
+          if (waited >= MAX_MS) { L("walk: site", id, "timed out waiting for devices — advancing"); walkOne(i + 1); return; }
+          waited += POLL_MS;
+          setTimeout(waitObserved, POLL_MS);
+        })();
+      }
+      walkOne(0);
     });
     L("site-walk listener installed");
   } catch (e) { L("site-walk listener FAILED", e && e.message); }

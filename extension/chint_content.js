@@ -149,6 +149,10 @@
         deviceJsonBySite.set(String(sid), j);
         const n = countInverters(j);
         LOG("observed DEVICES for site", sid, "->", n, "inverter(s)");
+        // Tell the MAIN-world walk this site's devices actually LANDED, so it advances the
+        // moment the data arrives instead of on a blind fixed timer (which sometimes moved on
+        // before the response came back → empty capture → stuck).
+        try { window.postMessage({ type: "SO_CHINT_SITE_OBSERVED", siteId: String(sid) }, location.origin); } catch (_) {}
       }
     } else if (d.path === "/openApi/v1/siteMertics/getSiteTimeSharingChart2") {
       // Production chart — integrate its 30-min PV power curve into daily kWh
