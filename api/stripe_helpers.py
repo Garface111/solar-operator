@@ -167,9 +167,19 @@ def ao_plan_features(product: str | None, billing_plan: str | None) -> dict:
         return {"plan": None, "plan_chosen": True, "vendor_data": True, "invoicing": True}
     p = (billing_plan or "").strip().lower()
     chosen = p in _AO_PLANS
+    if not chosen:
+        # No plan picked yet (fresh trial): default to FULL functionality — both
+        # vendor monitoring AND offtaker invoicing — and treat it as "chosen" so we
+        # never block a trialing operator behind a forced plan-picker. The trial is
+        # meant to show everything. They can narrow their plan anytime in Master
+        # Account. NOTE: this is ENTITLEMENT only — Stripe billing reads billing_plan
+        # directly (is_ao_invoicing/is_ao_monitoring), where unset still bills the
+        # conservative monitoring default until they explicitly choose, so this can
+        # never over-charge anyone.
+        return {"plan": "both", "plan_chosen": True, "vendor_data": True, "invoicing": True}
     return {
-        "plan": p if chosen else None,
-        "plan_chosen": chosen,
+        "plan": p,
+        "plan_chosen": True,
         "vendor_data": p in ("monitoring", "both"),
         "invoicing": p in ("invoicing", "both"),
     }
