@@ -325,10 +325,12 @@ def test_vec_capture_creates_linkable_account_even_with_no_generation(client):
         assert len(arrs) == 1                        # the bindable array exists
 
 
-def test_gmp_capture_still_skips_no_generation_account(client):
-    """GMP keeps the bury-prevention gate: a GMP account with no generation (a
-    home/pump/meter among the operator's many accounts) creates NO array and NO
-    UtilityAccount — only the SmartHub gate was relaxed."""
+def test_gmp_no_generation_account_is_pickable_but_has_no_array(client):
+    """Ford, for Bruce: 'pull ALL the utility bills so I can see them in the choose-
+    utility-account dropdown.' A GMP account with no detected solar generation (a
+    home/pump/meter, OR a solar account whose generation hasn't loaded yet) now
+    creates a bindable UtilityAccount — so it appears in the offtaker picker — but
+    still NO Array, so the bury-prevention gate on the inverter dashboard holds."""
     tid, key = _make_tenant()
     resp = client.post(
         "/v1/array-owners/utility-meter-capture",
@@ -341,6 +343,10 @@ def test_gmp_capture_still_skips_no_generation_account(client):
         ua = db.execute(select(UtilityAccount).where(
             UtilityAccount.tenant_id == tid,
             UtilityAccount.account_number == "4040404")).scalar_one_or_none()
-        assert ua is None, "GMP no-generation account must still be skipped"
+        assert ua is not None, "GMP no-generation account must be pickable in the dropdown"
+        assert ua.array_id is None, "but NO array (don't bury real solar arrays)"
+        arrs = db.execute(select(Array).where(
+            Array.tenant_id == tid, Array.deleted_at.is_(None))).scalars().all()
+        assert len(arrs) == 0, "a non-solar GMP account must not spawn an array"
 
 

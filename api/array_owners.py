@@ -3702,12 +3702,47 @@ def _persist_meter_accounts(
             # skips a no-generation account. (Was: every provider skipped → a linked
             # VEC account never reached the picker — Ford: "I don't see Glover.")
             if not has_any_generation and not is_smarthub_provider(provider):
-                # Record the account honestly as no-solar — but create NO array and
-                # write NO rows. The UI uses has_generation=false to tell the owner
-                # "this GMP account has no solar production."
+                # No solar production → create NO Array, NO Bill, NO generation rows,
+                # so the inverter dashboard isn't buried under empty non-solar arrays
+                # (a GMP login carries dozens of homes/pumps/meters). BUT still create
+                # a bindable UtilityAccount so EVERY GMP account the owner has appears
+                # in the offtaker "choose utility account" dropdown — Ford, for Bruce:
+                # "pull ALL the utility bills so I can see them in the dropdown." A
+                # non-solar account just has no bill to invoice from yet (the picker
+                # shows "no bill on file yet"; the offtaker invoice WAITS until
+                # generation/bills land — it never mis-bills). This decouples dropdown
+                # visibility (UtilityAccount) from dashboard arrays (Array): the gate
+                # used to skip the UtilityAccount too, so non-solar accounts vanished.
+                ua_id = None
+                if acct_num:
+                    ua = db.execute(
+                        select(UtilityAccount).where(
+                            UtilityAccount.tenant_id == tenant.id,
+                            UtilityAccount.provider == provider,
+                            UtilityAccount.account_number == acct_num,
+                        )
+                    ).scalar_one_or_none()
+                    if ua is None:
+                        ua = UtilityAccount(
+                            tenant_id=tenant.id, provider=provider,
+                            account_number=acct_num, array_id=None,
+                            nickname=(acct.nickname or "").strip() or None,
+                        )
+                        db.add(ua)
+                        db.flush()
+                    else:
+                        # Never steal an existing array link (a once-solar account
+                        # that momentarily reads 0) — only revive + refresh metadata.
+                        if ua.deleted_at is not None:
+                            ua.deleted_at = None
+                        if not ua.nickname and (acct.nickname or "").strip():
+                            ua.nickname = (acct.nickname or "").strip()
+                        ua.last_seen = now()
+                    ua_id = ua.id
                 results.append({
                     "account_number": acct_num,
                     "array_id": None,
+                    "utility_account_id": ua_id,
                     "name": name,
                     "created": False,
                     "kwh_recorded": 0.0,
