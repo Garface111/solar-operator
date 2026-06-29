@@ -2025,13 +2025,21 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const fails = await autoLoginFailsGet(vendor);
       if (fails >= AUTOLOGIN_MAX_VENDOR_FAILS) {
         rlog("auto-login: PAUSED for", vendor, "after", fails, "failed attempts — re-save the password (or sign in once) to retry");
+        broadcastToSoTabs({ type: "SO_LOGIN_STATE", provider: vendor, state: "login_required", reason: "auto-login-paused" });
         return;
       }
       const attempts = _autoLoginAttemptsTab.get(tabId) || 0;
       if (attempts >= AUTOLOGIN_MAX_TAB_ATTEMPTS) { rlog("auto-login: max attempts on tab", tabId, "for", vendor); return; }
       if (!(await SoVault.isEnabled(vendor))) { rlog("auto-login: opted out for", vendor); return; }
       const creds = await SoVault.get(vendor);
-      if (!creds) { rlog("auto-login: no stored creds for", vendor, "(one-click recovery will nudge)"); return; }
+      if (!creds) {
+        rlog("auto-login: no stored creds for", vendor, "(one-click recovery will nudge)");
+        // No saved password → we can't sign in silently. Tell the AO page so it surfaces a
+        // one-click "Sign in to add <vendor>" instead of a tab that sits invisibly on the SSO
+        // login page (the SSO origin has no content script to emit this itself).
+        broadcastToSoTabs({ type: "SO_LOGIN_STATE", provider: vendor, state: "login_required", reason: "no-creds" });
+        return;
+      }
       _autoLoginAttemptsTab.set(tabId, attempts + 1);
       rlog("auto-login: ATTEMPT", attempts + 1, "— filling", vendor, "login form on tab", tabId);
       const res = await chrome.scripting.executeScript({
@@ -2475,7 +2483,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
             rlog("sync-all: a recapture is already in flight — skipping the Chint surface this round");
             return;
           }
-          await recaptureVendor("chint", { newWindow: true, budgetMs: 120 * 1000 });
+          // Generous budget: a lapsed-session login (the owner signs into the popup) + the
+          // per-site route walk can run well past 2min. The window self-closes the instant
+          // walkComplete lands, so a healthy account finishes far sooner.
+          await recaptureVendor("chint", { newWindow: true, budgetMs: 180 * 1000 });
         } catch (_) {}
       })();
     }
