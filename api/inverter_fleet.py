@@ -497,8 +497,15 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
                 iv.source_array_id = iv.source_array_id or arr.id
                 if iv.deleted_at is not None:
                     iv.deleted_at = None
-            # metadata refresh (cheap, safe)
-            iv.name = m.get("name") or iv.name or str(serial)
+            # metadata refresh (cheap, safe). An OWNER-renamed inverter
+            # (name_is_custom) is part of "their arrangement is sacred" — the
+            # telemetry name must NOT clobber it, exactly like array_id/position
+            # are never touched on a sync.
+            if not getattr(iv, "name_is_custom", False):
+                iv.name = m.get("name") or iv.name or str(serial)
+            elif not iv.name:
+                # custom flag set but somehow empty — fall back so it's never blank
+                iv.name = m.get("name") or str(serial)
             iv.model = m.get("model") or iv.model
             if m.get("nameplate_kw") is not None:
                 iv.nameplate_kw = m.get("nameplate_kw")
@@ -1304,6 +1311,58 @@ def reassign_inverter(db, tenant: Tenant, inverter_id: int, target_array_id: int
         iv.position = (maxpos or 0) + 1
     else:
         iv.position = int(position)
+    db.commit()
+    db.refresh(iv)
+    return iv
+
+
+def rename_array(db, tenant: Tenant, array_id: int, name: str) -> Array:
+    """Rename an owner array (the inline edit in the Sandbox / Spreadsheet view).
+
+    Tenant-scoped (array must belong to `tenant`, else FleetError → 404). The name
+    is trimmed; empty is rejected. Array names are unique per tenant
+    (uq_array_per_tenant), so a clash with ANOTHER of this tenant's arrays raises
+    FleetError (route → 409) — mirroring api.account.update_array's rule. Renaming
+    to the SAME name is a no-op (returns the row unchanged)."""
+    arr = db.get(Array, array_id)
+    if arr is None or arr.tenant_id != tenant.id or arr.deleted_at is not None:
+        raise FleetError("Array not found")
+    new_name = (name or "").strip()
+    if not new_name:
+        raise FleetError("Name cannot be empty")
+    if new_name == arr.name:
+        return arr                                  # no-op
+    clash = db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant.id,
+            Array.name == new_name,
+            Array.id != arr.id,
+        )
+    ).scalar_one_or_none()
+    if clash is not None:
+        raise FleetError("Another array already has that name")
+    arr.name = new_name
+    db.commit()
+    db.refresh(arr)
+    return arr
+
+
+def rename_inverter(db, tenant: Tenant, inverter_id: int, name: str) -> Inverter:
+    """Rename an owner inverter (the inline edit in either dashboard view).
+
+    Tenant-scoped (inverter must belong to `tenant`, else FleetError → 404). The
+    name is trimmed; empty is rejected. NO uniqueness check — inverters may share
+    a name across arrays (e.g. "Inverter 1" under several sites). Sets
+    name_is_custom so a later telemetry sync (discover_and_persist) never
+    overwrites the owner's chosen name."""
+    iv = db.get(Inverter, inverter_id)
+    if iv is None or iv.tenant_id != tenant.id or iv.deleted_at is not None:
+        raise FleetError("Inverter not found")
+    new_name = (name or "").strip()
+    if not new_name:
+        raise FleetError("Name cannot be empty")
+    iv.name = new_name
+    iv.name_is_custom = True
     db.commit()
     db.refresh(iv)
     return iv

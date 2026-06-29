@@ -1437,6 +1437,44 @@ def create_array_ep(body: CreateArrayBody,
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
+class RenameBody(BaseModel):
+    name: str
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/name")
+def rename_array_ep(array_id: int, body: RenameBody,
+                    authorization: str | None = Header(default=None)) -> dict:
+    """Rename an owner array (the inline edit in the Sandbox / Spreadsheet view).
+    Persists to the backend so BOTH dashboard views and a reload see the new name.
+    Name clash with another of this tenant's arrays → 409; empty → 400."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            a = inverter_fleet.rename_array(db, tenant, array_id, body.name)
+        except inverter_fleet.FleetError as exc:
+            msg = str(exc)
+            status = 409 if "already has that name" in msg else 400
+            raise HTTPException(status, msg)
+        return {"ok": True, "array_id": a.id, "name": a.name}
+
+
+@router.post("/v1/array-owners/inverters/{inverter_id}/name")
+def rename_inverter_ep(inverter_id: int, body: RenameBody,
+                       authorization: str | None = Header(default=None)) -> dict:
+    """Rename an owner inverter (the inline edit in either dashboard view).
+    Persists + marks the name owner-set so a telemetry sync never overwrites it.
+    Empty → 400. No uniqueness check (inverters may share names across arrays)."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            iv = inverter_fleet.rename_inverter(db, tenant, inverter_id, body.name)
+        except inverter_fleet.FleetError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True, "inverter_id": iv.id, "name": iv.name}
+
+
 @router.get("/v1/array-owners/utility-accounts")
 def list_utility_accounts_ep(authorization: str | None = Header(default=None)) -> dict:
     """The tenant's captured GMP/utility accounts and which array each is linked

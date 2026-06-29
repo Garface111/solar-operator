@@ -943,6 +943,13 @@ class Inverter(Base):
     )
     # Display / analysis metadata (refreshed on discovery).
     name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    # True once the OWNER has renamed this inverter from the dashboard. Discovery
+    # refreshes name/model/nameplate on every sync, but an owner-set name is part
+    # of "their arrangement is sacred" — so when this is True the telemetry name
+    # must NOT clobber it (same principle as never moving their array_id/position).
+    name_is_custom: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     nameplate_kw: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

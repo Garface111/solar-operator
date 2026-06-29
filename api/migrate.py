@@ -902,6 +902,24 @@ def main():
                 added.append(col)
                 print(f"  + inverters.{col}")
 
+        # 2026-06-29 Owner inverter rename persistence. name_is_custom marks an
+        # inverter whose name the OWNER set from the dashboard, so the telemetry
+        # sync (discover_and_persist) never clobbers it — same principle as never
+        # touching their array_id/position. Additive + NOT NULL DEFAULT false:
+        # create_all adds it on fresh DBs; an EXISTING prod inverters table needs
+        # this explicit ALTER. Idempotent via column_exists() (no IF NOT EXISTS —
+        # Postgres-only). Every existing inverter keeps the vendor name (false).
+        if not column_exists(conn, "inverters", "name_is_custom"):
+            conn.execute(text(
+                "ALTER TABLE inverters ADD COLUMN name_is_custom BOOLEAN "
+                "NOT NULL DEFAULT false"
+            ))
+            conn.execute(text(
+                "UPDATE inverters SET name_is_custom = false WHERE name_is_custom IS NULL"
+            ))
+            added.append("name_is_custom")
+            print("  + inverters.name_is_custom")
+
         # 2026-06-18 DATA SPONGE: full energy-record columns on bills. The bills
         # table predates these; create_all won't add columns to an existing prod
         # table, so add the sponge fields explicitly. JSONB for raw_json so the
