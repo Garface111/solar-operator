@@ -987,6 +987,14 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
     safe = (match.customer.get("name") or "customer").replace(" ", "_").replace("/", "-")
     inv_no = (match.computed_invoice or {}).get("invoice_number") or invoice_date.strftime("%Y-%m")
     stem = f"{safe}_{inv_no}"
+    # GMP bill rides the email named like the invoice: a self-describing
+    # gmp_utility_bill_<offtaker>_<period>.pdf (mirrors reports.js gmpBillFilename),
+    # not the operator's raw upload name.
+    import re as _re
+    _gmp_slug = (_re.sub(r"[^a-z0-9]+", "_",
+                         (match.customer.get("name") or "offtaker").lower()).strip("_")
+                 or "offtaker")
+    gmp_name = f"gmp_utility_bill_{_gmp_slug}_{inv_no}.pdf"
     paths: list[pathlib.Path] = []
     fmts = [f.lower() for f in (formats or ["pdf"])]
     if "pdf" in fmts:
@@ -1019,7 +1027,7 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
     #      up the captured bill PDF for this array+period via the read seam.
     #      Returns nothing until ingestion persists durable bytes (never fabricated).
     if sub is not None and getattr(sub, "gmp_invoice_pdf", None):
-        gmp_path = out_dir / f"{safe}_GMP_invoice.pdf"
+        gmp_path = out_dir / gmp_name
         gmp_path.write_bytes(bytes(sub.gmp_invoice_pdf))
         paths.append(gmp_path)
     elif sub is not None and getattr(sub, "auto_attach_gmp", False):
@@ -1039,7 +1047,7 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
             else:
                 found = None
             if found and found.get("bytes"):
-                gmp_path = out_dir / f"{safe}_GMP_bill.pdf"
+                gmp_path = out_dir / gmp_name
                 gmp_path.write_bytes(found["bytes"])
                 paths.append(gmp_path)
         except Exception:  # noqa: BLE001 — provisional seam must never break send

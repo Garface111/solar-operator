@@ -772,7 +772,7 @@ def test_auto_attach_gmp_bill_when_captured_else_nothing(client, monkeypatch):
         with tempfile.TemporaryDirectory() as tmp:
             paths = delivery.generate_files(match, [], False,
                                             pathlib.Path(tmp), sub=sub)
-            assert not any("GMP_bill" in p.name for p in paths)
+            assert not any("gmp_utility_bill" in p.name for p in paths)
 
         # 2) Simulate ingestion having landed a durable PDF → auto-attached.
         monkeypatch.setattr(
@@ -784,4 +784,5 @@ def test_auto_attach_gmp_bill_when_captured_else_nothing(client, monkeypatch):
         with tempfile.TemporaryDirectory() as tmp:
             paths = delivery.generate_files(match, [], False,
                                             pathlib.Path(tmp), sub=sub)
-            assert any("GMP_bill" in p.name for p in paths), [p.name for p in paths]
+            assert any(p.name.startswith("gmp_utility_bill_") and p.name.endswith(".pdf")
+                       for p in paths), [p.name for p in paths]

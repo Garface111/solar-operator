@@ -211,7 +211,8 @@ def test_approve_sends_and_attaches_gmp_pdf(client, monkeypatch):
     assert r.json()["draft"]["status"] == "sent"
     # Went to the customer, and the GMP invoice PDF rode along.
     names = [a.get("filename", "") for a in captured.get("attachments", [])]
-    assert any("GMP_invoice.pdf" in n for n in names), names
+    assert any(n.startswith("gmp_utility_bill_") and n.endswith(".pdf")
+               for n in names), names
     # Draft is now in the sent list, not pending.
     pending = client.get(f"{BASE}/drafts", headers=_auth(auth)).json()["drafts"]
     assert pending == []
