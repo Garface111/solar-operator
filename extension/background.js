@@ -2038,6 +2038,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         // one-click "Sign in to add <vendor>" instead of a tab that sits invisibly on the SSO
         // login page (the SSO origin has no content script to emit this itself).
         broadcastToSoTabs({ type: "SO_LOGIN_STATE", provider: vendor, state: "login_required", reason: "no-creds" });
+        // Don't leave a Sync-all background tab grinding on the login page — close it so the
+        // page's "Sign in to add" is the clean next step. Only reap bare _syncTabs tabs; a
+        // recap surface (Chint's popup) self-manages via its own watchdog.
+        if (_syncTabs.has(tabId)) { try { _syncTabs.delete(tabId); chrome.tabs.remove(tabId, () => void chrome.runtime.lastError); } catch (_) {} }
         return;
       }
       _autoLoginAttemptsTab.set(tabId, attempts + 1);
