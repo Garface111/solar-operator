@@ -53,6 +53,10 @@ def test_gmp_credit_invoice_labels_generation_and_flags_banked():
     m = delivery.build_manual_match(sub)
     assert m.computed_invoice["net_rate_source"] == "gmp_credit_reference"
     text = _pdf_text(m)
-    assert "Solar generation sent to grid" in text
-    assert "Array production this period" not in text       # not mislabeled as gross
+    # The array-total + share-% breakdown lines were removed per Ford.
+    assert "Solar generation sent to grid" not in text
+    assert "Your share of the array" not in text
+    # The offtaker's own kWh is still shown, GMP-labeled (excess, not gross production).
+    assert "Your share of the generation" in text
+    assert "Your share of production" not in text           # GMP path uses the generation label
     assert "banked" in text.lower()                          # honest reference note

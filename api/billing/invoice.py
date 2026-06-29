@@ -163,19 +163,16 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("B14", "How this period's solar credit is calculated", bold)
     rate = (inv["tariff"] or 0) + (inv["adder"] or 0)
     _gmpc = inv.get("net_rate_source") in ("gmp_bill_credit", "gmp_credit_reference")
-    akwh = inv.get("array_kwh")
-    if not akwh and inv.get("allocation_pct"):
-        akwh = (inv["kwh"] or 0) / inv["allocation_pct"]
-    put("B15", "Solar generation sent to grid:" if _gmpc else "Array production this period:")
-    put("C15", (round(akwh) if akwh else "—"), align=right)
-    put("B16", "Your share of the array:"); put("C16", _pct(inv["allocation_pct"]), align=right)
-    put("B17", "Your share of the generation (kWh):" if _gmpc else "Your share of production (kWh):")
-    put("C17", round(inv["kwh"], 0), align=right)
-    put("B18", "Solar credit rate:")
-    put("C18", _rate_str(rate), align=right)
-    put("B19", "Your contractual payment share:"); put("C19", _pct(inv["billing_rate"]), align=right)
-    put("B20", "Solar credit value due:"); put("C20", _money(inv["amount_owed"]), align=right)
-    # One note line at B21 (the layout reserves a single row before Amount Owed).
+    # The "Solar generation sent to grid" (array total) + "Your share of the array"
+    # (allocation %) breakdown lines were removed per Ford — the offtaker's own kWh
+    # ("Your share of the generation") is the only input shown. Rows shifted up.
+    put("B15", "Your share of the generation (kWh):" if _gmpc else "Your share of production (kWh):")
+    put("C15", round(inv["kwh"], 0), align=right)
+    put("B16", "Solar credit rate:")
+    put("C16", _rate_str(rate), align=right)
+    put("B17", "Your contractual payment share:"); put("C17", _pct(inv["billing_rate"]), align=right)
+    put("B18", "Solar credit value due:"); put("C18", _money(inv["amount_owed"]), align=right)
+    # One note line at B19 (the layout reserves a single row before Amount Owed).
     # Combine the data-source provenance with the banked-credit note if both apply.
     _notes = []
     _src_note = _kwh_source_note(inv.get("kwh_source"))
@@ -186,16 +183,16 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     if _budget_on:
         _notes.append("Amount owed is your fixed budgeted amount; the solar credit value above is the calculated reference.")
     if _notes:
-        put("B21", "  ".join(_notes))
+        put("B19", "  ".join(_notes))
 
-    put("B22", "Amount Owed:", big)
-    put("C22", _money(_final_due), big, right)
-    put("B23", tpl.get("payable_to") or f"Please make payment to {tpl.get('operator') or 'your solar array owner'}.")
+    put("B20", "Amount Owed:", big)
+    put("C20", _money(_final_due), big, right)
+    put("B21", tpl.get("payable_to") or f"Please make payment to {tpl.get('operator') or 'your solar array owner'}.")
 
-    put("B26", "Project Total kWh generation:")
-    put("C26", round(inv.get("project_total_kwh") or 0, 0), align=right)
-    put("B27", "Project total financial savings:")
-    put("C27", _money(inv.get("project_total_savings")), align=right)
+    put("B24", "Project Total kWh generation:")
+    put("C24", round(inv.get("project_total_kwh") or 0, 0), align=right)
+    put("B25", "Project total financial savings:")
+    put("C25", _money(inv.get("project_total_savings")), align=right)
 
     put("B29", "Solar credit invoice service provided by ArrayOperator.com  ·  admin@solaroperator.org")
 
@@ -347,16 +344,12 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     story.append(Spacer(1, 8))
     rate = (inv["tariff"] or 0) + (inv["adder"] or 0)     # excess credit + solar incentive
     _gmpc = inv.get("net_rate_source") in ("gmp_bill_credit", "gmp_credit_reference")
-    # Customer-facing label: GMP members are billed on the EXCESS sent to grid;
-    # we display it as "Solar generation" per Ford (the figure is still the excess).
-    _arr_lbl = "Solar generation sent to grid" if _gmpc else "Array production this period"
+    # Customer-facing label: GMP members are billed on the EXCESS sent to grid; we
+    # show their SHARE of it as "Solar generation" per Ford (still the excess figure).
+    # The array-total + share-% breakdown lines were removed per Ford — the offtaker's
+    # own kWh ("Your share of the generation") is the only input they need to see.
     _shr_lbl = "Your share of the generation" if _gmpc else "Your share of production"
-    array_kwh = inv.get("array_kwh")
-    if not array_kwh and inv.get("allocation_pct"):
-        array_kwh = (inv["kwh"] or 0) / inv["allocation_pct"]   # derive the array total
     rows = [
-        [_arr_lbl, (f"{array_kwh:,.0f} kWh" if array_kwh else "—")],
-        ["Your share of the array", _pct(inv["allocation_pct"])],
         [_shr_lbl, f"{inv['kwh']:,.0f} kWh"],
         ["Solar credit rate", _rate_str(rate)],
         ["Your contractual payment share", _pct(inv["billing_rate"])],
@@ -368,7 +361,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     rt.setStyle(TableStyle([
         ("FONTSIZE", (0, 0), (-1, -1), 10),
         ("TEXTCOLOR", (0, 0), (-1, -1), INKDK),
-        ("TEXTCOLOR", (0, 0), (0, 2), MUTEDDK),             # production-chain rows quieter
+        ("TEXTCOLOR", (0, 0), (0, 0), MUTEDDK),             # the share-of-generation input row quieter
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("LINEBELOW", (0, 0), (-1, -2), 0.4, LINE_C),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),  # emphasize the value-due row
