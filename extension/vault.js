@@ -20,9 +20,47 @@
 // ============================================================================
 const SoVault = (() => {
   const KEY_STORE = "so_vault_key";          // { k: base64 raw AES-256 key }
-  const CRED_STORE = "so_vault_creds";       // { fronius:{iv,ct}, sma:{...}, chint:{...} }
+  const CRED_STORE = "so_vault_creds";       // { fronius:{iv,ct}, sma:{...}, chint:{...}, gmp:{...}, vec:{...} }
   const OPT_OUT_STORE = "so_autologin_optout"; // { fronius:true, ... } true = disabled
   const VENDORS = ["fronius", "sma", "chint"];
+
+  // v1.9.97: the vault also stores UTILITY portal creds so a utility session
+  // (GMP, or any SmartHub co-op) can be silently re-authed for hands-off bill
+  // pulls — exactly like the inverter vendors. Utility codes are NOT in VENDORS
+  // (that list still drives the inverter-only paths). A code is a valid utility
+  // when it's "gmp", a known SmartHub co-op code (vec/wec/…), or a discovered
+  // "sh_*" co-op (smarthub_registry.js mints "sh_<subdomain>" for any new co-op).
+  // The known-utility list is intentionally small + curated; the sh_ prefix +
+  // the SMARTHUB_CODES allowlist (populated from the registry when available)
+  // cover the long tail so a brand-new co-op works without a vault change.
+  const UTILITIES = ["gmp"];
+  // Provider codes seen in smarthub_registry.js (vec, wec, …). Populated lazily
+  // from the registry if it's loaded in this context (popup loads it; the SW
+  // imports the SW-safe build). Falls back to the sh_ prefix + a couple of
+  // grounded codes (vec/wec) so utility creds work even without the registry.
+  const SMARTHUB_FALLBACK_CODES = new Set(["vec", "wec"]);
+  function _smarthubCodes() {
+    try {
+      const reg = (typeof self !== "undefined" && self.SMARTHUB_REGISTRY)
+        || (typeof window !== "undefined" && window.SMARTHUB_REGISTRY) || null;
+      if (reg) {
+        const s = new Set(SMARTHUB_FALLBACK_CODES);
+        for (const k of Object.keys(reg)) { const c = reg[k] && reg[k].provider; if (c) s.add(String(c).toLowerCase()); }
+        return s;
+      }
+    } catch (_) {}
+    return SMARTHUB_FALLBACK_CODES;
+  }
+  // True if `code` is a utility portal credential code (GMP or any SmartHub co-op).
+  function isUtilityCode(code) {
+    const c = String(code || "").toLowerCase();
+    if (!c) return false;
+    if (UTILITIES.includes(c)) return true;
+    if (c.startsWith("sh_")) return true;       // any discovered co-op
+    return _smarthubCodes().has(c);             // known co-op (vec/wec/… from the registry)
+  }
+  // The gate every vault op uses: an inverter vendor OR a utility code.
+  function accepts(code) { return VENDORS.includes(code) || isUtilityCode(code); }
 
   function b64(buf) {
     const bytes = new Uint8Array(buf);
@@ -49,8 +87,12 @@ const SoVault = (() => {
   }
 
   // Store a vendor's {username, password}, encrypted. Returns true on success.
+  // `vendor` may be an inverter vendor (fronius/sma/chint) OR a utility code
+  // (gmp / a SmartHub co-op code). get/clear/isEnabled/setOptOut are keyed the
+  // same way and never gate (read/toggle/delete an arbitrary key is harmless);
+  // only set() validates the key so we never persist creds under a junk code.
   async function set(vendor, username, password) {
-    if (!VENDORS.includes(vendor)) return false;
+    if (!accepts(vendor)) return false;
     try {
       const key = await getKey();
       const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -109,13 +151,26 @@ const SoVault = (() => {
   }
 
   // Lightweight status for the popup UI (never returns the actual secrets).
+  // Reports the inverter vendors AND every utility code that currently has creds
+  // saved (so the popup can render the "Utility logins" group with live state —
+  // including a discovered sh_* co-op the popup wouldn't otherwise list). The
+  // popup keys utility rows it offers by code; here we surface whatever is stored.
   async function status() {
     const out = {};
     for (const v of VENDORS) {
       out[v] = { hasCreds: await has(v), enabled: await isEnabled(v) };
     }
+    try {
+      const s = await chrome.storage.local.get(CRED_STORE);
+      const m = s[CRED_STORE] || {};
+      for (const code of Object.keys(m)) {
+        if (out[code]) continue;                 // already reported (inverter vendor)
+        if (!isUtilityCode(code)) continue;      // ignore anything that isn't a utility code
+        out[code] = { hasCreds: await has(code), enabled: await isEnabled(code), utility: true };
+      }
+    } catch (_) {}
     return out;
   }
 
-  return { set, get, has, clear, isEnabled, setOptOut, status, VENDORS };
+  return { set, get, has, clear, isEnabled, setOptOut, status, VENDORS, UTILITIES, isUtilityCode, accepts };
 })();
