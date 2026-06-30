@@ -852,6 +852,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               so_capture_intent: { vendor: "gmp", ts: Date.now() },
             });
           } catch (_) { /* non-fatal */ }
+          // v1.9.97 — arm GMP's DAILY background bill refresh on this explicit
+          // "Connect GMP" click (mirrors the fronius/sma arm-on-connect), so once
+          // the owner saves their GMP login the bills stay current hands-off.
+          try { if (typeof self.__soArmUtilityLive === "function") await self.__soArmUtilityLive("gmp"); } catch (_) { /* non-fatal */ }
         }
         // v1.9.25: SmartHub co-op (VEC / WEC) utility-meter PRODUCTION capture —
         // arm the matching intent so smarthub_content.js forwards the owner's
@@ -860,16 +864,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // IS in the cookie-wipe list above, so each connect is a fresh sign-in —
         // the intent flag survives the wipe (extension storage, not site cookies).
         if (host.endsWith("smarthub.coop")) {
-          const shVendor =
-            host === "vermontelectric.smarthub.coop" ? "vec"
-            : host === "washingtonelectric.smarthub.coop" ? "wec"
-            : (msg.provider || msg.vendor || "").toLowerCase();
-          if (shVendor === "vec" || shVendor === "wec") {
+          // v1.9.97 — resolve the co-op CODE from the registry (was hardcoded
+          // vec/wec) so ANY co-op connect arms its intent + daily refresh, not
+          // just the two seeded ones. Falls back to the seeded codes / an explicit
+          // msg.provider when the registry didn't load.
+          let shVendor = "";
+          try { if (typeof self.smartHubCodeForHost === "function") shVendor = self.smartHubCodeForHost(host) || ""; } catch (_) {}
+          if (!shVendor) {
+            shVendor =
+              host === "vermontelectric.smarthub.coop" ? "vec"
+              : host === "washingtonelectric.smarthub.coop" ? "wec"
+              : (msg.provider || msg.vendor || "").toLowerCase();
+          }
+          if (shVendor) {
             try {
               await chrome.storage.local.set({
                 so_capture_intent: { vendor: shVendor, ts: Date.now() },
               });
             } catch (_) { /* non-fatal */ }
+            // Arm this co-op's DAILY background bill refresh on the explicit connect.
+            try { if (typeof self.__soArmUtilityLive === "function") await self.__soArmUtilityLive(shVendor); } catch (_) { /* non-fatal */ }
           }
         }
       } catch (e) {
@@ -1075,10 +1089,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try { if (typeof self.__soKeepwarmResetFails === "function") self.__soKeepwarmResetFails(msg.vendor); } catch (_) {}
           try { if ((msg.vendor === "fronius" || msg.vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(msg.vendor); } catch (_) {}
           try { if (msg.vendor === "chint" && typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}
+          // v1.9.97 — saving a UTILITY login (GMP / a SmartHub co-op) arms its
+          // DAILY background refresh (NOT the 6-min live loop — bills are monthly)
+          // so we keep the owner's bills current + the session warm hands-off.
+          try {
+            const isUtil = (typeof SoVault.isUtilityCode === "function") ? SoVault.isUtilityCode(msg.vendor) : false;
+            if (isUtil && typeof self.__soArmUtilityLive === "function") await self.__soArmUtilityLive(msg.vendor);
+          } catch (_) {}
         }
         sendResponse({ ok });
       } else if (msg.type === "SO_VAULT_CLEAR") {
         await SoVault.clear(msg.vendor);
+        // v1.9.97 — clearing a utility credential disarms its daily background
+        // refresh (no creds → we can't silently re-auth, so stop re-opening it).
+        try {
+          const isUtil = (typeof SoVault.isUtilityCode === "function") ? SoVault.isUtilityCode(msg.vendor) : false;
+          if (isUtil && typeof self.__soDisarmUtilityLive === "function") await self.__soDisarmUtilityLive(msg.vendor, "creds-cleared");
+        } catch (_) {}
         sendResponse({ ok: true });
       } else if (msg.type === "SO_VAULT_OPTOUT") {
         await SoVault.setOptOut(msg.vendor, !!msg.optedOut);
