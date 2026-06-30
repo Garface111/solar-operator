@@ -233,19 +233,29 @@
     const byDevice = {};                               // displayName -> [{date,kwh}]
     if (!deviceIds || !deviceIds.length) return { site, byDevice };
     const devQs = deviceIds.map((id) => "devices=" + encodeURIComponent(id)).join("&");
-    for (let back = 1; back <= days; back++) {        // back=0 (today) already recorded via energy_today_kwh
+    // Build one request per past day and fire them ALL IN PARALLEL. GetAnalysisChart runs ~1.7s
+    // each, so the old sequential 1..7 loop was ~12.5s PER SYSTEM — essentially the whole Fronius
+    // capture lag. Confirmed live 2026-06-30: 7 parallel = ~3.1s, all 7 succeed (Solar.web doesn't
+    // throttle). Promise.all preserves order, so the day series stays chronological. Per-day
+    // failures still degrade gracefully to a skipped day (never throws).
+    const reqs = [];
+    for (let back = 1; back <= days; back++) {          // back=0 (today) already recorded via energy_today_kwh
       const d = new Date();
       d.setDate(d.getDate() - back);
       const dateQs = "year=" + d.getFullYear() + "&month=" + (d.getMonth() + 1) +
         "&day=" + d.getDate() + "&interval=day";
-      let resp;
-      try {
-        resp = await getJson("/Chart/GetAnalysisChart?pvSystemId=" + encodeURIComponent(pvSystemId) +
-          "&" + dateQs + "&channels=devwork&" + devQs + "&compareView=false&kwhkwpView=false&_=" + Date.now());
-      } catch (e) { LOG("history day fetch failed (skipped):", back, e && e.message); continue; }
-      const series = (((resp || {}).settings || {}).series) || [];
       const iso = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
         "-" + String(d.getDate()).padStart(2, "0");
+      reqs.push({ iso, p: getJson("/Chart/GetAnalysisChart?pvSystemId=" + encodeURIComponent(pvSystemId) +
+        "&" + dateQs + "&channels=devwork&" + devQs + "&compareView=false&kwhkwpView=false&_=" + Date.now())
+        .catch((e) => { LOG("history day fetch failed (skipped):", iso, e && e.message); return null; }) });
+    }
+    const resps = await Promise.all(reqs.map((r) => r.p));
+    for (let i = 0; i < reqs.length; i++) {
+      const resp = resps[i];
+      if (!resp) continue;
+      const iso = reqs[i].iso;
+      const series = (((resp || {}).settings || {}).series) || [];
       let dayKwh = 0, any = false;
       for (const s of series) {
         const nm = String(s.name || "");
@@ -339,6 +349,11 @@
 
     // 3. Per-system + per-INVERTER drill-down (the sandbox comb). Each system's
     // analysis chart yields every inverter's daily kWh. Best-effort per system.
+    // Per-system drill-down. The 7-day history inside each system is now fetched in PARALLEL
+    // (see captureHistory) — that was the dominant cost and cut Fronius from ~26s to ~10s.
+    // Systems stay SEQUENTIAL on purpose: firing BOTH systems' history at once pushed concurrency
+    // to ~16 requests and Solar.web started dropping ~10% (verified live 2026-06-30: 16-parallel =
+    // 2 errors vs 7-parallel = 0). History is best-effort, but not worth the loss to shave ~3s.
     const sites = [];
     for (const s of systems) {
       const live = liveMap[s.PvSystemId] || {};
