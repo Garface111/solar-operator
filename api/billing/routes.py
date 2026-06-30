@@ -880,6 +880,19 @@ def _bulk_classify_columns(header_row: list[str]) -> dict[str, int]:
     return mapping
 
 
+async def _read_csv_upload(file: UploadFile) -> bytes:
+    """Same size/empty guards as _read_upload, but NO xlsx-magic-bytes gate — that
+    gate is specific to the billing-workbook flow and would reject every CSV
+    outright (caught live: it raised "Upload an .xlsx billing workbook" against a
+    real CSV during testing). A roster import is plain text, not a workbook."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "The uploaded file is empty")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "File too large (max 8 MB)")
+    return data
+
+
 @router.post("/subscriptions/bulk-import")
 async def bulk_import_offtakers(
     file: UploadFile = File(...),
@@ -904,7 +917,7 @@ async def bulk_import_offtakers(
     if delivery_mode not in VALID_DELIVERY:
         raise HTTPException(400, "delivery_mode must be approval or auto")
 
-    raw = await _read_upload(file)
+    raw = await _read_csv_upload(file)
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
