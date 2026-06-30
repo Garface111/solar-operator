@@ -327,12 +327,14 @@ def build_forecast(
     geocoded_address: Optional[str],
     actual_by_day: dict[str, float], window_days: int = DEFAULT_WINDOW_DAYS,
     pr: float = DEFAULT_PR, today: Optional[date] = None,
+    _poa_by_day: Optional[dict[str, float]] = None,
 ) -> Forecast:
     """Assemble the full predicted-vs-actual forecast for ONE array over the window.
 
     `actual_by_day` is {iso_day: measured_kwh} ALREADY filtered to clean measured
     sources by the caller. Everything needed to display the math transparently is
-    packed into Forecast.inputs."""
+    packed into Forecast.inputs. `_poa_by_day` lets the fleet endpoint pass a
+    memoized POA (shared by same-location arrays) so we don't refetch per array."""
     today = today or datetime.utcnow().date()
     # Window excludes today (partial) — compare full days only.
     end = today - timedelta(days=1)
@@ -343,7 +345,8 @@ def build_forecast(
     if lat is None or lng is None:
         return Forecast(False, reason="no_location")
 
-    poa_by_day = fetch_poa_daily(lat, lng, tilt_deg, azimuth_deg, start, end)
+    poa_by_day = _poa_by_day if _poa_by_day is not None else fetch_poa_daily(
+        lat, lng, tilt_deg, azimuth_deg, start, end)
     if not poa_by_day:
         return Forecast(False, reason="irradiance_unavailable",
                         inputs={"lat": lat, "lng": lng})

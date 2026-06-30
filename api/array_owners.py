@@ -4157,3 +4157,138 @@ def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
         return {"ok": True, "array_id": arr.id,
                 "tilt_deg": arr.tilt_deg, "azimuth_deg": arr.azimuth_deg,
                 "geometry_source": arr.geometry_source}
+
+
+@router.get("/v1/array-owners/forecast-fleet")
+def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
+                      authorization: str | None = Header(default=None)) -> dict:
+    """Predicted-vs-actual for the WHOLE fleet in ONE call — the data behind the
+    dashboard "Production vs expected" card.
+
+    Loops the tenant's arrays, geocodes each lazily (cached), and rolls the
+    per-array expected/actual kWh into a fleet total + a weather-aware ratio. Per
+    request it MEMOIZES the Open-Meteo POA per (rounded lat,lng,tilt) so the many
+    arrays that share an address/geometry (e.g. several 150 kW units at the same
+    site) cost one irradiance fetch, not N. Returns the same transparent `inputs`
+    as the per-array endpoint (from a representative array) so the card can show
+    the full math, plus a compact per-array breakdown for drill-down.
+
+    Honest by construction: arrays we can't model (no nameplate / ungeocodable /
+    no measured days) are reported in `skipped` with a reason and excluded from
+    the ratio — never silently counted as 0 or guessed.
+    """
+    from . import forecasting
+    tenant = _tenant_from_bearer(authorization)
+    today = now().date()
+    end = today - timedelta(days=1)
+    start = end - timedelta(days=window_days - 1)
+
+    poa_memo: dict[tuple, dict] = {}
+
+    def poa_for(lat, lng, tilt, az):
+        key = (round(lat, 3), round(lng, 3), round(tilt, 1), round(az, 1))
+        if key not in poa_memo:
+            poa_memo[key] = forecasting.fetch_poa_daily(lat, lng, tilt, az, start, end)
+        return poa_memo[key]
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+            )
+        ).scalars().all()
+
+        rows: list[dict] = []
+        skipped: list[dict] = []
+        fleet_exp = 0.0          # expected over days WITH a measured actual (for the ratio)
+        fleet_act = 0.0
+        fleet_exp_all = 0.0      # expected over the full window (informational)
+        total_measured_days = 0
+        rep_inputs = None        # a representative array's inputs for the card's "how"
+        rep_nameplate = 0.0
+        sunny_rows: list[dict] = []
+
+        for arr in arrays:
+            nameplate = _array_nameplate_kw(db, arr)
+            if nameplate <= 0:
+                skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "no_nameplate"})
+                continue
+            if not _ensure_array_geocoded(db, arr):
+                skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "no_location"})
+                continue
+
+            tilt_assumed = arr.tilt_deg is None
+            az_assumed = arr.azimuth_deg is None
+            tilt = arr.tilt_deg if arr.tilt_deg is not None else forecasting.default_tilt_deg(arr.latitude)
+            az = arr.azimuth_deg if arr.azimuth_deg is not None else forecasting.DEFAULT_AZIMUTH_DEG
+
+            poa_by_day = poa_for(arr.latitude, arr.longitude, tilt, az)
+            if not poa_by_day:
+                skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "irradiance_unavailable"})
+                continue
+
+            actual_by_day = _clean_actual_by_day(db, arr, start, end)
+            fc = forecasting.build_forecast(
+                nameplate_kw=nameplate, lat=arr.latitude, lng=arr.longitude,
+                tilt_deg=tilt, azimuth_deg=az,
+                tilt_assumed=tilt_assumed, azimuth_assumed=az_assumed,
+                geocode_source=arr.geocode_source, geocoded_address=arr.geocoded_address,
+                actual_by_day=actual_by_day, window_days=window_days, today=today,
+                _poa_by_day=poa_by_day,
+            )
+            d = fc.to_dict()
+            measured_days = d["inputs"].get("measured_days", 0) if d.get("available") else 0
+            # expected restricted to matched days, for an apples-to-apples ratio
+            exp_matched = sum(x["expected_kwh"] for x in d["days"] if x["actual_kwh"] is not None)
+            rows.append({
+                "array_id": arr.id, "array_name": arr.name,
+                "nameplate_kw": round(nameplate, 1),
+                "expected_kwh": d["expected_kwh"], "actual_kwh": d["actual_kwh"],
+                "ratio_pct": d["ratio_pct"], "measured_days": measured_days,
+                "confidence": d["confidence"],
+                "tilt_assumed": tilt_assumed, "geocode_source": arr.geocode_source,
+            })
+            fleet_exp += exp_matched
+            fleet_act += d["actual_kwh"]
+            fleet_exp_all += d["expected_kwh"]
+            total_measured_days = max(total_measured_days, measured_days)
+            if rep_inputs is None or nameplate > rep_nameplate:
+                rep_inputs, rep_nameplate = d["inputs"], nameplate
+            for x in d["days"]:
+                if x["sunny"] and x["actual_kwh"] is not None:
+                    sunny_rows.append({"array_id": arr.id, "array_name": arr.name, **x})
+
+        ratio_pct = round(fleet_act / fleet_exp * 100) if fleet_exp > 0 else None
+        pr_measured = round(fleet_act / fleet_exp, 3) if fleet_exp > 0 else None
+        if total_measured_days >= 10 and rows:
+            confidence = "high"
+        elif total_measured_days >= 4 and rows:
+            confidence = "medium"
+        elif rows:
+            confidence = "low"
+        else:
+            confidence = "none"
+
+        # Spotlight the clearest sunny day (best POA across the fleet) — Ford's
+        # most-legible proof point. Pick the sunny row with the highest POA.
+        sunny_rows.sort(key=lambda r: r.get("poa_kwh_m2", 0), reverse=True)
+        spotlight = sunny_rows[0] if sunny_rows else None
+
+        return {
+            "available": bool(rows),
+            "ratio_pct": ratio_pct,
+            "expected_kwh": round(fleet_exp, 1),          # over matched days
+            "actual_kwh": round(fleet_act, 1),
+            "expected_kwh_window": round(fleet_exp_all, 1),
+            "performance_ratio_measured": pr_measured,
+            "confidence": confidence,
+            "arrays_modeled": len(rows),
+            "arrays_skipped": len(skipped),
+            "inputs": rep_inputs or {},
+            "rows": sorted(rows, key=lambda r: (r["ratio_pct"] is None, r["ratio_pct"] or 0)),
+            "skipped": skipped,
+            "sunny_spotlight": spotlight,
+            "window": {"start": start.isoformat(), "end": end.isoformat(), "days": window_days},
+        }
