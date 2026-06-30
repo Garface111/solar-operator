@@ -1936,8 +1936,27 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const HINTS = {
       sma: { user: "#username", pass: "#password", btn: "#kc-login, button[type=\"submit\"]" },
       fronius: { user: "#usernameUserInput", pass: "#password", btn: "#login-button, [data-testid=\"login-page-continue-login-button\"], button[type=\"submit\"]" },
+      // v1.9.97 — UTILITY login selectors. ⚠️ BEST-EFFORT, pending real-browser
+      // verification (the operator's first sign-out test; the SW console logs
+      // `auto-login OUTCOME for <code> => …`). GMP is a standard email+password
+      // form; SmartHub/NISC portals share one platform — classic ASP.NET ids
+      // (#LoginUsernameTextBox / #LoginPasswordTextBox) on older skins, and
+      // name=username / name=password on newer ones. ALL of these are plain
+      // username+password+submit forms, so the GENERIC matcher below almost
+      // certainly already handles them; these hints just give the happy path a
+      // head start. If MFA/CAPTCHA is present the fill can't bypass it and the
+      // existing fail-pause guard applies (we never hammer).
+      gmp: { user: "input[type=\"email\"], #username, input[name=\"username\" i], input[name=\"email\" i]", pass: "#password, input[name=\"password\" i]", btn: "button[type=\"submit\"], button[id*=\"login\" i], button[id*=\"signin\" i]" },
+      smarthub: { user: "#LoginUsernameTextBox, input[name=\"username\" i], input[name=\"userId\" i], input[type=\"email\"]", pass: "#LoginPasswordTextBox, input[name=\"password\" i], input[type=\"password\"]", btn: "#LoginSubmitButton, button[type=\"submit\"], input[type=\"submit\"], button[id*=\"login\" i]" },
     };
-    const hint = HINTS[vendor] || null;
+    // This function is INJECTED into the page (MAIN world) — it can't call the
+    // service-worker helpers, so derive the hint key from the code shape alone:
+    // a known inverter/gmp key uses its own hint; any OTHER code passed here is a
+    // SmartHub co-op (vec/wec/sh_*) and shares the one SmartHub login form.
+    const hintKey = HINTS[vendor] ? vendor
+      : (vendor === "fronius" || vendor === "sma" || vendor === "chint") ? vendor
+      : "smarthub";
+    const hint = HINTS[hintKey] || null;
     const vis = (el) => el && el.offsetParent !== null && !el.disabled;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const findUser = () => {
