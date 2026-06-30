@@ -38,7 +38,9 @@
   const INTENT_KEY = "so_capture_intent";
   const INTENT_TTL_MS = 10 * 60 * 1000;
   const POLL_INTERVAL_MS = 1500;
-  const MAX_POLLS = 100;                       // ~5 min — owner needs time to click into sites
+  const MAX_POLLS = 400;                       // ~10 min @1.5s (matches INTENT_TTL) — a first-time owner
+                                               // needs time to SIGN IN before the capture can run; was
+                                               // 100 (~2.5min), which expired while Bruce was logging in
   let polls = 0;
   let lastHash = null;
   let lastLoginState = null;
@@ -318,7 +320,13 @@
     // (MAIN world) does a hash-route bounce; a harmless same-route no-op if the SPA
     // already auto-refreshes. This is what makes the silent 4-min background cycle
     // produce FRESH readings instead of whatever the tab happened to load.
-    if (polls === 1) {
+    // Keep nudging the SPA toward the sites list until we've actually OBSERVED it — NOT just once.
+    // A first-time owner lands on the LOGIN page first; a one-shot poll-1 nudge fires while they're
+    // still signing in (wasted), and after they log in nobody re-nudges → stuck on #/dashboard
+    // forever (the exact bug Bruce hit). So re-fire every tick while we have NO site list yet AND
+    // we're past the login form (no password field on screen — never navigate the page out from
+    // under someone typing their password). Stops the instant the list lands (siteListJson → walk).
+    if (!siteListJson && !document.querySelector('input[type="password"]')) {
       try { window.postMessage({ type: "SO_CHINT_FORCE_REFRESH" }, location.origin); } catch (_) {}
     }
     // AUTO-WALK (v1.9.77): once the site list is loaded, silently drive the SPA through
