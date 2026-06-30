@@ -2609,6 +2609,19 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         if (!holdForWalk) await recapFinish(st.vendor, ok, sites);
       } else if (failMap[msg.type] && failMap[msg.type] === st.vendor) {
         await recapFinish(st.vendor, false, []);
+      } else if (_isUtilityCode(st.vendor)) {
+        // UTILITY daily refresh (GMP / SmartHub). The bill + meter captures already POST
+        // themselves (content script → /v1/sync etc.), so — unlike the inverter path — we
+        // do NOT recapPost. We DO need to RECORD the success so runUtilityLiveTick sees a
+        // fresh LAST_KEY[code].ok and stays armed; without this it scored every capture as
+        // a "dead cycle" and self-disarmed after ~3 ticks (~1.5 days). Match the in-flight
+        // utility code to the capture's provider (GMP_* → gmp; SmartHub/VEC → msg.provider).
+        let _cp = null;
+        if (msg.type === "GMP_TOKEN_CAPTURED" || msg.type === "GMP_METER_CAPTURED") _cp = "gmp";
+        else if (msg.type === "VEC_DATA_CAPTURED") _cp = String(msg.provider || "vec").toLowerCase();
+        else if (msg.type === "SMARTHUB_DATA_CAPTURED" || msg.type === "SMARTHUB_METER_GEN_CAPTURED")
+          _cp = String(msg.provider || (msg.payload && msg.payload.provider) || "").toLowerCase() || null;
+        if (_cp && _cp === st.vendor) await recapFinish(st.vendor, true, []);
       }
     })();
   });
