@@ -156,7 +156,18 @@ function maybeReturnAfterCapture(provider, senderTab) {
         // Vendor-scoped: ONLY this vendor's capture returns (and clears) it — even from a
         // hidden background surface, because the operator explicitly asked for it and is
         // waiting. A different vendor's capture leaves the pending return untouched.
-        if (prov && prov === rt.vendor) focusReturnTab();
+        if (prov && prov === rt.vendor) {
+          // The owner explicitly signed in via "Sign in to add ‹vendor›". Close the foreground
+          // portal tab they just used so the pull-back lands them CLEANLY on the onboarding with
+          // no stray vendor tab behind it — every vendor now behaves like Chint (which closes its
+          // own tab). Guard: never close the AO tab itself. (Sync-all background tabs never reach
+          // here — sync-all clears so_return_tab; they self-close via the SYNC_CAPTURED observer.)
+          const vt = senderTab && typeof senderTab.id === "number" ? senderTab.id : null;
+          if (vt != null && vt !== rt.tabId) {
+            setTimeout(() => { try { chrome.tabs.remove(vt, () => void chrome.runtime.lastError); } catch (_) {} }, 600);
+          }
+          focusReturnTab();
+        }
         return;
       }
       // Legacy (no vendor recorded): original hidden-surface gate.
