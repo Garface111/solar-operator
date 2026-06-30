@@ -102,6 +102,14 @@ def main():
             ))
             print("  + arrays.nepool_gis_id")
 
+        # arrays.portfolio_name (added 2026-06-30 for the Analysis-tab portfolio
+        # hierarchy — operator-assigned group label; nullable, no backfill needed)
+        if not column_exists(conn, "arrays", "portfolio_name"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN portfolio_name VARCHAR(80)"
+            ))
+            print("  + arrays.portfolio_name")
+
         # 2026-06-03 Phase-1 expansion: Client layer
         # Idempotency: create_all() above already created `clients` table
         # via Base.metadata, so we only need to (a) add arrays.client_id and

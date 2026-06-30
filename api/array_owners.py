@@ -1459,6 +1459,34 @@ def rename_array_ep(array_id: int, body: RenameBody,
         return {"ok": True, "array_id": a.id, "name": a.name}
 
 
+class PortfolioBody(BaseModel):
+    portfolio_name: str | None = None
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/portfolio")
+def set_array_portfolio_ep(array_id: int, body: PortfolioBody,
+                           authorization: str | None = Header(default=None)) -> dict:
+    """Assign (or clear) an array's portfolio/group label — the Analysis-tab
+    fleet hierarchy. Tenant-scoped. Empty/whitespace clears it (NULL = Unassigned).
+    Trimmed and capped to the column width (80)."""
+    from .models import Array
+    tenant = _tenant_from_bearer(authorization)
+    name = (body.portfolio_name or "").strip()[:80] or None
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.id == array_id,
+                Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+        arr.portfolio_name = name
+        db.commit()
+        return {"ok": True, "array_id": arr.id, "portfolio_name": arr.portfolio_name}
+
+
 @router.post("/v1/array-owners/inverters/{inverter_id}/name")
 def rename_inverter_ep(inverter_id: int, body: RenameBody,
                        authorization: str | None = Header(default=None)) -> dict:

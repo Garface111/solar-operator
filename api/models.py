@@ -417,6 +417,11 @@ class Array(Base):
     # Self client" by the migration so existing tenants keep working.
     name: Mapped[str] = mapped_column(String(120))
     region: Mapped[str | None] = mapped_column(String(40), nullable=True)  # north/south/central
+    # Operator-assigned portfolio/group label for the Analysis-tab fleet hierarchy
+    # (PowerTrack-style "group my sites into portfolios"). Free-text, owner-set;
+    # NULL = ungrouped ("Unassigned" in the UI). Optional so every existing array
+    # is byte-identical until the operator assigns one.
+    portfolio_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     nepool_gis_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # NEPOOL-GIS asset ID (e.g. "53984" → shown as "Chester (53984)" in reports)
     first_connect_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
