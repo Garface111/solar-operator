@@ -39,7 +39,7 @@ from api.db import SessionLocal, init_db
 from api.models import (
     Tenant, Client, Array, UtilityAccount, Bill, DailyGeneration,
     CaptureEvent, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal,
-    UtilitySession, LoginToken, BillingReportSubscription,
+    UtilitySession, LoginToken, BillingReportSubscription, ReportDraft,
     Inverter, InverterDaily,
 )
 
@@ -134,6 +134,10 @@ def _last_day(year: int, month: int) -> int:
 
 def _wipe(db) -> None:
     tid = TENANT_ID
+    # ReportDraft FKs to billing_report_subscriptions — must go first (caught live:
+    # a prior bulk-import run let the scheduler/approval-inbox draft against these
+    # subscriptions, so re-seeding without this hit a real FK violation on re-run).
+    db.execute(delete(ReportDraft).where(ReportDraft.tenant_id == tid))
     db.execute(delete(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tid))
     db.execute(delete(InverterDaily).where(InverterDaily.tenant_id == tid))
     db.execute(delete(Inverter).where(Inverter.tenant_id == tid))
