@@ -350,3 +350,35 @@ def test_gmp_no_generation_account_is_pickable_but_has_no_array(client):
         assert len(arrs) == 0, "a non-solar GMP account must not spawn an array"
 
 
+def test_meter_capture_appends_offtaker_generation_sheet(client, monkeypatch):
+    """REGRESSION (Ford: 'refresh on UTILITY bill pull, not just GMP'): the
+    generation-spreadsheet append was wired ONLY into the GMP server pull
+    (worker.py), so a bill that lands via the EXTENSION meter capture — GMP (whose
+    server pull is flaky) or any SmartHub utility (VEC/WEC, which have no server
+    pull at all) — never updated each offtaker's BYO spreadsheet. The capture path
+    must now call the provider-agnostic tracker append for the touched account."""
+    from api.models import UtilityAccount
+    import api.billing.sheet_tracker as st
+    calls: list[tuple] = []
+    monkeypatch.setattr(st, "maybe_append_for_account",
+                        lambda _db, _tid, _aid: calls.append((_tid, _aid)))
+    tid, key = _make_tenant()
+    resp = client.post(
+        "/v1/array-owners/utility-meter-capture",
+        json={"provider": "gmp", "accounts": [{
+            "account_number": "8675309", "nickname": "Solar Barn",
+            "summary": {
+                "accountNumber": "8675309", "isNetMetered": True,
+                "billingPeriodStartDate": "2026-05-01",
+                "billingPeriodEndDate": "2026-05-31",
+                "totalGrossGenerated": 1800, "totalGenerationSentToGrid": 1500,
+            }, "daily": []}]},
+        headers={"Authorization": f"Bearer {key}"})
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        ua = db.execute(select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid,
+            UtilityAccount.account_number == "8675309")).scalar_one()
+    assert (tid, ua.id) in calls, "meter-capture bill-land must append the offtaker sheet"
+
+

@@ -1186,12 +1186,17 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     continue
                 usage_by_acct.setdefault(acct_no, {})[u["period_end"].strftime("%Y-%m")] = u
 
+            # Accounts touched by a bill this sync → after the loop we append each
+            # offtaker's generation-spreadsheet row (SmartHub utilities never hit the
+            # GMP server pull that normally does this).
+            _tracker_accts: set[int] = set()
             for b_raw in (normalized.get("bills_raw") or []):
                 b = _vec_parse_bill(b_raw)
                 acct_no = b.get("account_id")
                 acct_id = acct_map.get(acct_no)
                 if not acct_id or not b.get("billing_date"):
                     continue
+                _tracker_accts.add(acct_id)
                 # AUTOMATIC VEC bill-PDF pull: the extension attaches the bill PDF
                 # (base64) per bill. The generation sent-to-grid + the bill's OWN
                 # net-meter credit rate live ONLY on the PDF (the SmartHub APIs
@@ -1310,6 +1315,15 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                   if (_nm is not None or _consumed is not None)
                                   else "partial"),
                 ))
+
+            # SmartHub utilities (VEC/WEC/…) land bills via the extension, not the
+            # GMP server pull — so append each touched offtaker's generation-spreadsheet
+            # row here too (the GMP pull does this in worker._tracker_append_for_account).
+            # Gated + idempotent + best-effort; the db.commit() below persists it.
+            if _tracker_accts:
+                from .billing import sheet_tracker as _sheet_tracker
+                for _aid in _tracker_accts:
+                    _sheet_tracker.maybe_append_for_account(db, tenant.id, _aid)
 
         # CaptureEvent rows are a best-effort audit trail. Flush them inside a
         # SAVEPOINT so a bad event can't poison — or partially commit into — the

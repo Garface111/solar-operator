@@ -1271,6 +1271,26 @@ def update_all_for_account(db, tenant_id: str, utility_account_id: int) -> list[
     return out
 
 
+def maybe_append_for_account(db, tenant_id: str, utility_account_id: int) -> None:
+    """Best-effort, gated, idempotent append for the NON-GMP bill-land paths.
+
+    GMP bills are pulled server-side (api.worker) which calls
+    `_tracker_append_for_account`. Every OTHER utility (VEC, WEC, and all SmartHub
+    co-ops) lands its bills through the EXTENSION instead — `/v1/sync`,
+    `/utility-meter-capture`, or the manual bill upload — so those paths must call
+    this to keep each offtaker's generation spreadsheet current too. Same provider-
+    agnostic `update_all_for_account` (which sources MEASURED generation, not the
+    bill's own kWh, so it's correct for VEC/WEC whose bills carry no generation).
+    A tracker hiccup must NEVER break a bill sync, so all errors are swallowed."""
+    if not tracker_enabled():
+        return
+    try:
+        update_all_for_account(db, tenant_id, utility_account_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("sheet_tracker: maybe_append_for_account failed for account %s",
+                         utility_account_id)
+
+
 # ─── file readers ────────────────────────────────────────────────────────────
 
 def _looks_like_csv(b: bytes) -> bool:

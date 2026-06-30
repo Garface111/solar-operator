@@ -3846,6 +3846,12 @@ def _persist_meter_accounts(
                             bill.kwh_generated = newg
                         if bill.period_start is None and period_start is not None:
                             bill.period_start = datetime.combine(period_start, dtime.min)
+                    # The meter capture is an EXTENSION path (the GMP server pull is
+                    # flaky and SmartHub has none), so keep this account's offtaker
+                    # generation-spreadsheet rows current here too — gated + idempotent
+                    # + best-effort, mirroring worker._tracker_append_for_account.
+                    from .billing import sheet_tracker as _sheet_tracker_mc
+                    _sheet_tracker_mc.maybe_append_for_account(db, tenant.id, ua.id)
 
             kwh_recorded = 0.0
             days_written = 0

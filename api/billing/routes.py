@@ -248,6 +248,10 @@ async def upload_vec_bill(utility_account_id: int,
         res = ingest_vec_bill_pdf(db, t.id, utility_account_id, raw)
         if not res.get("ok"):
             raise HTTPException(422, res.get("reason") or "Couldn't read that bill.")
+        # A manual upload is its own bill-land path (no extension, no server pull) —
+        # keep this account's offtaker generation-spreadsheet rows current too.
+        from .sheet_tracker import maybe_append_for_account
+        maybe_append_for_account(db, t.id, utility_account_id)
         db.commit()
         return res
 
