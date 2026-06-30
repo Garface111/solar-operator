@@ -40,6 +40,7 @@ from api.models import (
     Tenant, Client, Array, UtilityAccount, Bill, DailyGeneration,
     CaptureEvent, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal,
     UtilitySession, LoginToken, BillingReportSubscription,
+    Inverter, InverterDaily,
 )
 
 TENANT_ID = "ten_ford_demo_100"
@@ -76,6 +77,18 @@ ARRAY_SITE_WORDS = [
     "Solar Field", "Community Array", "Carport", "Roof Array", "Town Garage Array",
     "School Roof", "Meadow Array", "Hillside Array", "Industrial Park Array", "Library Roof",
 ]
+
+# Synthetic vendor-side inverter telemetry (so arrays show in Fleet Health / Inverter
+# Dashboard, and the forecast feature has a real nameplate_kw — see the note above the
+# Inverter-creation block).
+VENDORS = ["solaredge", "fronius", "sma", "chint"]
+MODELS = {
+    "solaredge": ["SE7600H-US", "SE10000H-US", "SE11400H-US"],
+    "fronius":   ["Primo 7.6-1", "Primo 11.4-1", "Symo 10.0-3"],
+    "sma":       ["Sunny Tripower 8.0", "Sunny Boy 7.7", "Sunny Tripower 12.0"],
+    "chint":     ["CPS SCA10KTL", "CPS SCA20KTL", "CPS SCA30KTL"],
+}
+TELEMETRY_DAYS = 21   # comfortably covers the 14-day peer/health window
 
 # Synthetic-but-real-shaped VT street addresses (for the geocoding feature this
 # session is also building — gives it real addresses to chew on, not blanks).
@@ -122,6 +135,8 @@ def _last_day(year: int, month: int) -> int:
 def _wipe(db) -> None:
     tid = TENANT_ID
     db.execute(delete(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tid))
+    db.execute(delete(InverterDaily).where(InverterDaily.tenant_id == tid))
+    db.execute(delete(Inverter).where(Inverter.tenant_id == tid))
     db.execute(delete(Bill).where(Bill.tenant_id == tid))
     db.execute(delete(DailyGeneration).where(DailyGeneration.tenant_id == tid))
     db.execute(delete(UtilityAccount).where(UtilityAccount.tenant_id == tid))
@@ -174,7 +189,8 @@ def _gen_array_plan() -> list[dict]:
 
 def seed() -> dict:
     init_db()
-    today = datetime.utcnow().date()
+    now_ts = datetime.utcnow()
+    today = now_ts.date()
     months = _history_months(today)
     plan = _gen_array_plan()
     assert len(plan) == TARGET_ARRAYS, f"plan has {len(plan)} arrays, expected {TARGET_ARRAYS}"
@@ -210,7 +226,7 @@ def seed() -> dict:
         for row in plan:
             by_community.setdefault(row["community"], []).append(row)
 
-        counts = {"clients": 0, "arrays": 0, "accounts": 0, "bills": 0}
+        counts = {"clients": 0, "arrays": 0, "accounts": 0, "bills": 0, "inverters": 0}
         account_rows = []   # for the companion offtaker-CSV generator
 
         for ci, (cname, arrays) in enumerate(by_community.items()):
@@ -266,6 +282,51 @@ def seed() -> dict:
                         parse_status="parsed", pulled_at=DELIVERED_AT,
                     ))
                     counts["bills"] += 1
+
+                # Synthetic VENDOR-SIDE inverters too — without these, Fleet Health /
+                # Inverter Dashboard never show this array at all (api/inverter_fleet.py
+                # build_fleet_tree deliberately excludes utility-meter-only arrays from
+                # the vendor-data view; confirmed live: 100 billing-only arrays were
+                # genuinely invisible there, not a bug). Also gives the new weather-aware
+                # forecast feature a real nameplate_kw to compute against instead of
+                # skipping every array as no_nameplate. Mixed vendor labels for visual
+                # variety (matches a real multi-vendor fleet), 2-4 inverters per array
+                # (peer_analysis needs >=2 with history to form a cohort), 21 days of
+                # daily telemetry (covers the 14-day peer/health window with margin).
+                vendor = VENDORS[seed_n % len(VENDORS)]
+                n_inv = 2 + (seed_n % 3)             # 2-4 inverters
+                per_inv_kw = round(row["kw"] / n_inv, 2)
+                model = MODELS[vendor][seed_n % len(MODELS[vendor])]
+                day_inverters = []
+                for ii in range(n_inv):
+                    inv = Inverter(
+                        tenant_id=TENANT_ID, array_id=arr.id, position=ii,
+                        vendor=vendor, serial=f"FORD100-{acct_num}-{ii+1}",
+                        source_site_id=acct_num, source_array_id=arr.id,
+                        name=f"{row['array_name']} ({ii + 1})",
+                        model=model, nameplate_kw=per_inv_kw,
+                        last_seen_at=now_ts,
+                        last_power_w=round(per_inv_kw * 1000 * (0.55 + ((seed_n + ii) % 30) / 100.0), 0),
+                        last_power_at=now_ts,
+                        source_last_data_at=now_ts,
+                        created_at=FIRST_CONNECT,
+                    )
+                    db.add(inv)
+                    db.flush()
+                    day_inverters.append(inv)
+
+                daily_base_kwh = (base_mwh * 1000) / 30.0   # mid-season MWh -> a typical day's kWh
+                for d in range(TELEMETRY_DAYS):
+                    day = today - timedelta(days=d)
+                    factor = SEASONAL[day.month - 1]
+                    for ii, inv in enumerate(day_inverters):
+                        jit = (((seed_n * 13 + ii * 7 + d * 5) % 21) - 10) / 100.0   # +/-10%
+                        kwh = max(0.0, round((daily_base_kwh / n_inv) * factor * (1.0 + jit), 2))
+                        db.add(InverterDaily(
+                            tenant_id=TENANT_ID, inverter_id=inv.id, day=day,
+                            kwh=kwh, source="ford_demo_seed",
+                        ))
+                counts["inverters"] += n_inv
             db.flush()
 
         db.commit()
@@ -285,6 +346,7 @@ def seed() -> dict:
     print(f"  arrays       : {counts['arrays']}")
     print(f"  accounts     : {counts['accounts']}")
     print(f"  bills        : {counts['bills']}  ({MONTHS_OF_HISTORY} months each)")
+    print(f"  inverters    : {counts['inverters']}  ({TELEMETRY_DAYS} days of daily telemetry each)")
     print(f"  roster CSV   : {out_path}")
     return counts
 
