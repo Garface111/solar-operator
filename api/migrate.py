@@ -293,6 +293,29 @@ def main():
             ))
             print("  + arrays.excluded")
 
+        # 2026-06-30 Predicted-vs-actual production: per-array geolocation +
+        # geometry, cached after a one-time geocode of the linked
+        # UtilityAccount.service_address. All NULLable → existing arrays untouched
+        # until their first forecast request lazily fills lat/lng. See
+        # api/forecasting.py.
+        forecast_cols = [
+            ("latitude",         "ALTER TABLE arrays ADD COLUMN latitude DOUBLE PRECISION"),
+            ("longitude",        "ALTER TABLE arrays ADD COLUMN longitude DOUBLE PRECISION"),
+            ("geocode_source",   "ALTER TABLE arrays ADD COLUMN geocode_source VARCHAR(24)"),
+            ("geocoded_address", "ALTER TABLE arrays ADD COLUMN geocoded_address TEXT"),
+            ("geocoded_at",      "ALTER TABLE arrays ADD COLUMN geocoded_at TIMESTAMP"),
+            ("tilt_deg",         "ALTER TABLE arrays ADD COLUMN tilt_deg DOUBLE PRECISION"),
+            ("azimuth_deg",      "ALTER TABLE arrays ADD COLUMN azimuth_deg DOUBLE PRECISION"),
+            ("geometry_source",  "ALTER TABLE arrays ADD COLUMN geometry_source VARCHAR(16)"),
+        ]
+        _fc_added = []
+        for col, sql in forecast_cols:
+            if not column_exists(conn, "arrays", col):
+                conn.execute(text(sql))
+                _fc_added.append(col)
+        if _fc_added:
+            print(f"  + arrays forecast geo/geometry cols: {_fc_added}")
+
         # 2026-06-04 VEC auto-populate: mirror of GMP triple for VEC provider.
         vec_cols = [
             ("clients", "vec_email",

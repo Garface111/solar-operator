@@ -3965,3 +3965,195 @@ def _persist_meter_accounts(
             })
 
     return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Predicted-vs-actual production forecast (feat 2026-06-30)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Read endpoint behind the dashboard's "Production vs target" card. It answers
+# "given the ACTUAL sunlight on THIS array's roof, how much should it have made,
+# vs what it really made?" — the weather-aware, absolute basis peer-analysis and
+# the static-CF card can't provide. All the model's inputs come back with the
+# number so the UI can show the full math (Ford: "extreme clarity about how the
+# model is working"). See api/forecasting.py for the model + validation.
+
+def _array_nameplate_kw(db, arr) -> float:
+    """Effective installed AC capacity for an array = Σ its inverters' nameplate,
+    falling back to the rating parsed from the model code for nameplate-less
+    vendors (Chint/SolarEdge), mirroring inverter_fleet._eff_nameplate_kw so the
+    forecast nameplate matches what the dashboard shows."""
+    from .inverter_fleet import _nameplate_from_model
+    ivs = db.execute(
+        select(Inverter).where(
+            Inverter.array_id == arr.id, Inverter.deleted_at.is_(None)
+        )
+    ).scalars().all()
+    total = 0.0
+    for iv in ivs:
+        npk = iv.nameplate_kw
+        if npk is None:
+            npk = _nameplate_from_model(iv.vendor, iv.model)
+        total += float(npk or 0.0)
+    return total
+
+
+def _ensure_array_geocoded(db, arr) -> bool:
+    """Lazily geocode an array from its linked UtilityAccount.service_address and
+    CACHE lat/lng on the Array row. Idempotent: returns True (and does nothing) if
+    already geocoded. Returns False when there's no address to geocode or the
+    geocoders couldn't resolve it (caller then shows an honest unavailable state).
+    Commits on a successful first geocode so the lookup is paid exactly once."""
+    from . import forecasting
+    if arr.latitude is not None and arr.longitude is not None:
+        return True
+    # Find the best linked address among this array's utility accounts. Prefer a
+    # GMP structured address (has zip → best geocode precision).
+    accts = db.execute(
+        select(UtilityAccount).where(
+            UtilityAccount.array_id == arr.id,
+            UtilityAccount.deleted_at.is_(None),
+            UtilityAccount.service_address.isnot(None),
+        )
+    ).scalars().all()
+    oneline = None
+    for ac in sorted(accts, key=lambda a: 0 if a.provider == "gmp" else 1):
+        oneline = forecasting.address_to_oneline(ac.service_address)
+        if oneline:
+            break
+    if not oneline:
+        return False
+    geo = forecasting.geocode_oneline(oneline)
+    if not geo:
+        return False
+    arr.latitude = geo["lat"]
+    arr.longitude = geo["lng"]
+    arr.geocode_source = geo["source"]
+    arr.geocoded_address = geo.get("matched") or oneline
+    arr.geocoded_at = now()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("forecast: geocode cache commit failed for array %s", arr.id, exc_info=True)
+    return arr.latitude is not None
+
+
+def _clean_actual_by_day(db, arr, start: date, end: date) -> dict:
+    """{iso_day: kwh} of REAL measured single-day generation in [start,end].
+    Excludes bill_prorate + utility_meter (monthly-bill smears) so a daily
+    predicted-vs-actual isn't distorted by a 2000-kWh monthly meter total landing
+    on one day. See forecasting.MEASURED_DAILY_SOURCES."""
+    from . import forecasting
+    rows = db.execute(
+        select(DailyGeneration).where(
+            DailyGeneration.array_id == arr.id,
+            DailyGeneration.day >= start,
+            DailyGeneration.day <= end,
+        )
+    ).scalars().all()
+    out: dict[str, float] = {}
+    for r in rows:
+        if (r.source or "").lower() not in forecasting.MEASURED_DAILY_SOURCES:
+            continue
+        if r.kwh is None or r.kwh < 0:
+            continue
+        # last-writer-wins per day (upsert means at most one row anyway)
+        out[r.day.isoformat()] = float(r.kwh)
+    return out
+
+
+@router.get("/v1/array-owners/forecast")
+def array_forecast_ep(array_id: int = Query(...),
+                      window_days: int = Query(14, ge=3, le=30),
+                      authorization: str | None = Header(default=None)) -> dict:
+    """Predicted-vs-actual production for ONE array over a rolling window.
+
+    Resolves the array's location once (lazy geocode of its utility-account
+    address, cached on the Array row), pulls Open-Meteo plane-of-array irradiance
+    for the array's real tilt/azimuth, and compares the modeled expected AC kWh to
+    the array's clean measured daily generation. Returns the number AND every
+    input that produced it (location, irradiance source + value, tilt/azimuth and
+    whether they're assumed, nameplate, performance ratio, the days counted,
+    confidence) so the dashboard can show the full math.
+
+    available=False with a `reason` when we genuinely can't model it
+    (ungeocodable, no nameplate, irradiance feed down) — never a fabricated guess.
+    """
+    from . import forecasting
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.id == array_id,
+                Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+
+        nameplate = _array_nameplate_kw(db, arr)
+        if nameplate <= 0:
+            return {"array_id": arr.id, "array_name": arr.name,
+                    **forecasting.Forecast(False, reason="no_nameplate").to_dict()}
+
+        if not _ensure_array_geocoded(db, arr):
+            return {"array_id": arr.id, "array_name": arr.name,
+                    **forecasting.Forecast(False, reason="no_location").to_dict()}
+
+        # Geometry: operator override (geometry_source='manual') or our labeled
+        # default (tilt ≈ latitude, due south).
+        tilt_assumed = arr.tilt_deg is None
+        az_assumed = arr.azimuth_deg is None
+        tilt = arr.tilt_deg if arr.tilt_deg is not None else forecasting.default_tilt_deg(arr.latitude)
+        az = arr.azimuth_deg if arr.azimuth_deg is not None else forecasting.DEFAULT_AZIMUTH_DEG
+
+        today = now().date()
+        end = today - timedelta(days=1)
+        start = end - timedelta(days=window_days - 1)
+        actual_by_day = _clean_actual_by_day(db, arr, start, end)
+
+        fc = forecasting.build_forecast(
+            nameplate_kw=nameplate, lat=arr.latitude, lng=arr.longitude,
+            tilt_deg=tilt, azimuth_deg=az,
+            tilt_assumed=tilt_assumed, azimuth_assumed=az_assumed,
+            geocode_source=arr.geocode_source, geocoded_address=arr.geocoded_address,
+            actual_by_day=actual_by_day, window_days=window_days, today=today,
+        )
+        return {"array_id": arr.id, "array_name": arr.name, **fc.to_dict()}
+
+
+class ArrayGeometryBody(BaseModel):
+    tilt_deg: Optional[float] = None
+    azimuth_deg: Optional[float] = None
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/geometry")
+def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
+                          authorization: str | None = Header(default=None)) -> dict:
+    """Operator override of an array's tilt/azimuth assumption (the forecast's
+    one user-tunable input). Sending null/null clears the override → back to the
+    labeled default (tilt ≈ latitude, due south). Validated to physical ranges."""
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    if body.tilt_deg is not None and not (0 <= body.tilt_deg <= 90):
+        raise HTTPException(400, "tilt_deg must be 0–90")
+    if body.azimuth_deg is not None and not (-180 <= body.azimuth_deg <= 180):
+        raise HTTPException(400, "azimuth_deg must be -180..180 (0=south, -90=east, 90=west)")
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.id == array_id, Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+        arr.tilt_deg = body.tilt_deg
+        arr.azimuth_deg = body.azimuth_deg
+        arr.geometry_source = "manual" if (body.tilt_deg is not None or body.azimuth_deg is not None) else None
+        db.commit()
+        return {"ok": True, "array_id": arr.id,
+                "tilt_deg": arr.tilt_deg, "azimuth_deg": arr.azimuth_deg,
+                "geometry_source": arr.geometry_source}

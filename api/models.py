@@ -441,6 +441,29 @@ class Array(Base):
     solaredge_api_key: Mapped[str | None] = mapped_column(EncryptedStr, nullable=True)
     solaredge_site_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Geolocation + array geometry (feat: predicted-vs-actual production) ──
+    # Resolved ONCE (lazily, on first forecast request) by geocoding the array's
+    # linked UtilityAccount.service_address, then cached here so we never re-hit a
+    # geocoder per-request. NULL = not yet geocoded (or no address to geocode).
+    # All optional so every existing array is byte-identical until first forecast.
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Provenance of the lat/lng so the UI can be honest about precision:
+    # 'census' (rooftop-ish, US street match) | 'nominatim' | 'open-meteo' (city
+    # centroid, coarse) | 'manual' (operator-entered). NULL while ungeocoded.
+    geocode_source: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # The address string we actually geocoded (audit trail; lets us re-geocode if
+    # the source address later changes).
+    geocoded_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    geocoded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Array geometry for the plane-of-array irradiance model. When the operator
+    # hasn't told us, we DEFAULT (tilt ≈ latitude, azimuth = 180° true-south) and
+    # surface that assumption loudly in the UI. An operator override sets these +
+    # flips geometry_source to 'manual'.
+    tilt_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    azimuth_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geometry_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 'default' | 'manual'
+
     # V2 (feat/v2-rec-fuels): the REC-minting fuel this array represents.
     # Allowed values: solar | wind | hydro | digester | storage. Defaults to
     # 'solar' so every existing array and all solar logic is byte-identical.
