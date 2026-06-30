@@ -351,6 +351,38 @@ def _create_trial_tenant(
         ensure_placeholder_client(db, tenant_id)
         db.commit()
 
+    # Ford asked to be pinged at his gmail when SOMEONE ELSE signs up — i.e.
+    # not his own / Bruce's / family test accounts (all @…genereaux…), nor the
+    # placeholder fixtures. Best-effort: a Resend hiccup must never fail signup.
+    try:
+        _e = (email or "").lower()
+        _is_internal = (
+            not _e
+            or "genereaux" in _e
+            or _e.endswith("@example.com")
+            or _e.endswith("@test.com")
+        )
+        if not _is_internal:
+            _label = {
+                "array_operator": "Array Operator",
+                "nepool": "NEPOOL Operator",
+            }.get(product, product or "NEPOOL Operator")
+            send_internal_alert(
+                f"🎉 New {_label} signup: {email}",
+                (
+                    "A new account was just created.\n\n"
+                    f"Email:    {email}\n"
+                    f"Name:     {full_name or '—'}\n"
+                    f"Company:  {company or '—'}\n"
+                    f"Product:  {_label}\n"
+                    f"Arrays:   {array_count if array_count is not None else '—'} (estimate)\n"
+                    f"Tenant:   {tenant_id}\n"
+                ),
+                to=os.getenv("SIGNUP_ALERT_TO", "ford.genereaux@gmail.com"),
+            )
+    except Exception:
+        logger.warning("new-signup gmail alert failed for %s", email, exc_info=True)
+
     return onboarding_token, tenant_id
 
 

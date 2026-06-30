@@ -971,9 +971,12 @@ def send_warranty_claim_email(
 
 # ─── internal ───────────────────────────────────────────────────────────
 
-def send_internal_alert(subject: str, body: str) -> bool:
+def send_internal_alert(subject: str, body: str, to: str | None = None) -> bool:
     """Plain-text notification to ourselves. Used for new signups + errors.
-    Kept intentionally simple — Ford reads these on his phone at 2am."""
+    Kept intentionally simple — Ford reads these on his phone at 2am.
+
+    `to` overrides the default INTERNAL_ALERT_TO recipient — e.g. the new-signup
+    alert Ford wants delivered to his gmail rather than the dysonswarm address."""
     html = (
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='color-scheme' content='light only'>"
@@ -986,7 +989,7 @@ def send_internal_alert(subject: str, body: str) -> bool:
         "</div></body></html>"
     )
     return _send_via_resend(
-        to=INTERNAL_ALERT_TO,
+        to=to or INTERNAL_ALERT_TO,
         subject=f"[NEPOOL Operator] {subject}",
         html=html,
         text=body,
