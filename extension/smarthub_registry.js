@@ -4,10 +4,14 @@
 // Regenerate:  python scripts/gen_smarthub_registry_js.py
 // CI verifies this file is in sync via --check.
 //
-// Exported as window.SMARTHUB_REGISTRY so smarthub_content.js can read it
-// without module imports (content scripts run in the page context).
+// Exposed on the global so it works in EVERY context that loads this file:
+//   * content scripts + the popup (page world)  -> window.SMARTHUB_REGISTRY
+//   * the background service worker (importScripts, no `window`) -> self.SMARTHUB_REGISTRY
+// background.js importScripts() this for utility auto-login: it resolves a
+// *.smarthub.coop login host to the right co-op CODE so the saved credential
+// for that co-op is used.
 
-(function () {
+(function (glob) {
   "use strict";
 
   // Maps *.smarthub.coop hostname → lowercase provider code (matches DB)
@@ -1925,8 +1929,20 @@
     return null;
   }
 
-  // Expose on window so smarthub_content.js (loaded in the same content-script
-  // world) can call window.SMARTHUB_REGISTRY and window.detectSmartHubProvider.
-  window.SMARTHUB_REGISTRY = SMARTHUB_REGISTRY;
-  window.detectSmartHubProvider = detectProvider;
-})();
+  // Resolve a *.smarthub.coop hostname to its co-op CODE (or null). Thin wrapper
+  // over detectProvider used by the background service worker's utility
+  // auto-login: given a SmartHub login URL's host, return the co-op code so the
+  // matching saved credential (keyed by co-op code) is used. Covers known hosts
+  // AND any new co-op via the deterministic sh_<subdomain> fallback.
+  function codeForHost(hostname) {
+    const e = detectProvider(String(hostname || "").toLowerCase());
+    return e ? e.provider : null;
+  }
+
+  // Expose on the global of WHATEVER context loaded this file: `window` in the
+  // page/content-script/popup world, `self`/`globalThis` in the service worker
+  // (which importScripts() this — there is no `window` there).
+  glob.SMARTHUB_REGISTRY = SMARTHUB_REGISTRY;
+  glob.detectSmartHubProvider = detectProvider;
+  glob.smartHubCodeForHost = codeForHost;
+})(typeof self !== "undefined" ? self : (typeof window !== "undefined" ? window : globalThis));

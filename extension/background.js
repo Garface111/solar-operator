@@ -7,6 +7,14 @@
 // stored ONLY in chrome.storage.local — never sent to our backend.
 try { importScripts("vault.js"); } catch (e) { console.warn("[EnergyAgent] vault load failed", e); }
 
+// v1.9.97: the SmartHub host→co-op-code registry, loaded into the SW so utility
+// auto-login can resolve a *.smarthub.coop login page to the right co-op code
+// (vec/wec/sh_*) and use that co-op's saved credential. The generated file is
+// SW-safe (exposes self.SMARTHUB_REGISTRY + self.smartHubCodeForHost when there
+// is no `window`). Best-effort: if it fails to load, utility auto-login simply
+// falls back to GMP-only + the vault's grounded co-op fallback set.
+try { importScripts("smarthub_registry.js"); } catch (e) { console.warn("[EnergyAgent] smarthub registry load failed", e); }
+
 // v1.3.0: SO_PAIR / SO_STATUS_REQUEST handlers + SO_CAPTURE_LANDED +
 //         SO_LOGIN_STATE broadcasts to every solaroperator.org tab so the
 //         onboarding wizard can mirror live state without polling.
@@ -1706,7 +1714,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       // get this working — remove them"). Stay silent for every vault vendor EXCEPT the
       // one genuinely-actionable case: auto-login tried with a saved password and GAVE UP
       // (paused after repeated failures = a wrong/stale password the owner must fix).
-      if (typeof SoVault !== "undefined" && SoVault.VENDORS.includes(vendor)) {
+      if (typeof SoVault !== "undefined" && _vaultAccepts(vendor)) {
         const fails = await autoLoginFailsGet(vendor);
         if (fails < AUTOLOGIN_MAX_VENDOR_FAILS) {
           rlog("reconnect nudge suppressed for", vendor, "(auto-login era; in-app freshness chip signals staleness; fails=" + fails + ")");
@@ -1720,7 +1728,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       m[vendor] = today;
       await chrome.storage.local.set({ [NUDGE_KEY]: m });
       const label = vendor === "fronius" ? "Fronius Solar.web"
-        : vendor === "sma" ? "SMA Sunny Portal" : "Chint";
+        : vendor === "sma" ? "SMA Sunny Portal"
+        : vendor === "chint" ? "Chint"
+        : vendor === "gmp" ? "Green Mountain Power"
+        : _isUtilityCode(vendor) ? _utilityLabel(vendor) : vendor;
       // Reaches here ONLY when auto-login gave up (saved password failing) — so the copy
       // is the honest "your saved password isn't working", not a generic refresh prompt.
       chrome.notifications.create(`recap-${vendor}-${today}`, {
@@ -2019,16 +2030,67 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // [WSO2], login.sma.energy [Keycloak] — verified login.online.fronius.com does NOT resolve,
   // so don't key on it). Anchored with (^|\.) so a lookalike like "notfronius.com" or
   // "fronius.com.attacker.net" can't match; _captureTabVendor is the second gate.
+  // v1.9.97: utilities added. GMP logs in SAME-ORIGIN (greenmountainpower.com),
+  // so its dead-session form is reached BOTH by this nav trigger AND by the
+  // content script's LOGIN_STATE_DETECTED{provider:"gmp"} (the Chint-style
+  // secondary trigger). SmartHub co-ops ALSO log in same-origin
+  // (*.smarthub.coop) — a single host pattern can serve any of ~470 co-ops, so
+  // a static vendor string won't do: we resolve the host to its co-op CODE
+  // (vec/wec/sh_*) via the registry (smartHubCodeForHost), then drive auto-login
+  // with that co-op's saved credential. Anchored with (^|\.) so a lookalike
+  // can't match; _captureTabVendor is the second gate (we only ever fill OUR
+  // own capture tabs, never the owner's tabs).
   const _LOGIN_HOSTS = [
     { re: /(^|\.)fronius\.com$/i, vendor: "fronius" },
     { re: /(^|\.)sma\.energy$/i, vendor: "sma" },
+    { re: /(^|\.)greenmountainpower\.com$/i, vendor: "gmp" },
+    // SmartHub: vendor is resolved per-host from the registry (see resolve()).
+    { re: /(^|\.)smarthub\.coop$/i, vendor: "smarthub", resolve: (h) => {
+        try { if (typeof self.smartHubCodeForHost === "function") return self.smartHubCodeForHost(h); } catch (_) {}
+        // Fallback if the registry didn't load: the two grounded co-ops, else a
+        // deterministic discovered code so a brand-new co-op still resolves.
+        if (h === "vermontelectric.smarthub.coop") return "vec";
+        if (h === "washingtonelectric.smarthub.coop") return "wec";
+        const m = /^([^.]+)\.smarthub\.coop$/i.exec(h);
+        return m ? "sh_" + m[1].replace(/[^a-z0-9]+/gi, "_").toLowerCase().slice(0, 37) : null;
+      } },
   ];
   function _loginVendorForUrl(url) {
     let h; try { h = new URL(url).hostname; } catch (_) { return null; }
-    for (const e of _LOGIN_HOSTS) if (e.re.test(h)) return e.vendor;
+    for (const e of _LOGIN_HOSTS) {
+      if (!e.re.test(h)) continue;
+      return typeof e.resolve === "function" ? e.resolve(h) : e.vendor;
+    }
     return null;
   }
   function _safeHost(url) { try { return new URL(url).hostname; } catch (_) { return String(url || "").slice(0, 60); } }
+  // v1.9.97: does the vault accept this code (inverter vendor OR utility)? Uses the
+  // vault's own accepts() when present (newer builds), else falls back to the
+  // VENDORS list + a local utility check, so an older vault never breaks this path.
+  function _isUtilityCode(code) {
+    try { if (typeof SoVault !== "undefined" && typeof SoVault.isUtilityCode === "function") return SoVault.isUtilityCode(code); } catch (_) {}
+    const c = String(code || "").toLowerCase();
+    if (c === "gmp" || c.startsWith("sh_") || c === "vec" || c === "wec") return true;
+    try { if (typeof self.SMARTHUB_REGISTRY === "object") return Object.values(self.SMARTHUB_REGISTRY).some((e) => e && e.provider === c); } catch (_) {}
+    return false;
+  }
+  function _vaultAccepts(code) {
+    if (typeof SoVault === "undefined") return false;
+    try { if (typeof SoVault.accepts === "function") return SoVault.accepts(code); } catch (_) {}
+    try { if (SoVault.VENDORS && SoVault.VENDORS.includes(code)) return true; } catch (_) {}
+    return _isUtilityCode(code);
+  }
+  // Friendly display name for a utility code (for nudges). Reads the co-op's name
+  // from the registry when available; falls back to the upper-cased code.
+  function _utilityLabel(code) {
+    const c = String(code || "").toLowerCase();
+    if (c === "gmp") return "Green Mountain Power";
+    try {
+      const reg = self.SMARTHUB_REGISTRY;
+      if (reg) { for (const k of Object.keys(reg)) { if (reg[k] && reg[k].provider === c) return reg[k].name || c.toUpperCase(); } }
+    } catch (_) {}
+    return c.toUpperCase();
+  }
 
   // Fill + submit a vendor's login form on one of OUR capture tabs using the vault
   // creds. Guards: vault holds creds + auto-login enabled (opt-out); never resubmit
@@ -2041,7 +2103,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function tryAutoLoginOnTab(vendor, tabId) {
     try {
       if (typeof tabId !== "number") return;
-      if (typeof SoVault === "undefined" || !SoVault.VENDORS.includes(vendor)) return;
+      // v1.9.97: accept inverter vendors AND utility codes (gmp / SmartHub co-op).
+      if (typeof SoVault === "undefined" || !_vaultAccepts(vendor)) return;
       if (_autoLoginSubmittedTab.has(tabId)) {
         // We already submitted on this tab and it's BACK on a login page — the saved
         // password didn't take. Count the fail NOW (only on this confirmed re-presentation),
