@@ -197,31 +197,38 @@
   // Returns an array of {id, name}. Handles: (a) the owner sitting ON a plant
   // (URL has the id), and (b) the owner on the portfolio root (enumerate all).
   async function resolvePlants() {
-    // (a) URL is scoped to one plant: ennexos.sunnyportal.com/<plantId>/...
-    const m = location.pathname.match(/\/(\d{4,})\b/);
-    if (m) return [{ id: m[1], name: null }];
-
     const out = [];
-    // (b) Portfolio root — enumerate top-level components (the Plants).
+    const seen = new Set();
+    const add = (id, name) => { id = String(id || ""); if (id && !seen.has(id)) { seen.add(id); out.push({ id, name: name || null }); } };
+
+    // Enumerate the WHOLE portfolio FIRST — a multi-plant owner must get EVERY plant, even when
+    // the SPA is deep-linked to just one of them. The old code short-circuited on a plant id in
+    // the URL path and returned ONLY that plant, silently dropping the rest (e.g. "SMA: 1 array"
+    // for a 2-plant portfolio when the tab happened to open on one system). Confirmed live
+    // 2026-06-30: GET /api/v1/navigation returns ALL Plant roots regardless of the current route.
     try {
       const roots = await getJson(UIAPI + "/api/v1/navigation");
       if (Array.isArray(roots)) {
         for (const c of roots) {
-          if (c && c.componentType === "Plant" && c.componentId) {
-            out.push({ id: String(c.componentId), name: c.name || null });
-          }
+          if (c && c.componentType === "Plant" && c.componentId) add(c.componentId, c.name);
         }
       }
-    } catch (_) { /* fall through to menuitems */ }
+    } catch (_) { /* fall through */ }
     if (out.length) return out;
 
     // Single-plant accounts may resolve straight to their plant via menuitems.
     try {
       const nav = await getJson(UIAPI + "/api/v1/navigation/menuitems");
-      if (nav && nav.componentType === "Plant" && nav.componentId) {
-        return [{ id: String(nav.componentId), name: nav.name || null }];
-      }
+      if (nav && nav.componentType === "Plant" && nav.componentId) add(nav.componentId, nav.name);
     } catch (_) { /* none */ }
+    if (out.length) return out;
+
+    // LAST RESORT only — the plant id in the URL path, when enumeration is unavailable (owner
+    // sitting on one plant and both API calls failed). Never the primary path: it can't see the
+    // owner's other plants.
+    const m = location.pathname.match(/\/(\d{4,})\b/);
+    if (m) add(m[1], null);
+
     return out;   // possibly empty — caller retries next poll (SPA may still load)
   }
 
