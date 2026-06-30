@@ -31,9 +31,11 @@ standard generated one (api/billing/invoice.py).
 """
 from __future__ import annotations
 
+import csv
 import io
 import json
 import logging
+import re as _re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -836,6 +838,204 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                 sub.budget_amount_usd = amt
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
+
+
+# ── BULK OFFTAKER IMPORT (Ford, 2026-06-30) ──────────────────────────────────
+# A roster CSV (name, email, percent share, account number) → many offtakers at
+# once instead of one-at-a-time through the manual form. Built for operators
+# scaling past a handful of offtakers — the "100 offtakers" case. Deterministic
+# header detection (no LLM), matching the codebase's existing heuristic
+# spreadsheet-column-detector pattern. CSV only (not .xlsx) — a roster has no
+# visual layout to preserve, so plain CSV keeps parsing trivial and dependency-free.
+_BULK_HEADER_ALIASES = {
+    "name": {"name", "offtakername", "customername", "customer", "offtaker",
+              "tenantname", "clientname", "fullname"},
+    "email": {"email", "clientemail", "offtakeremail", "customeremail", "contactemail",
+              "emailaddress"},
+    "percent": {"percent", "pct", "share", "allocation", "allocationpct",
+                "percentage", "offtakerpct", "sharepct", "%"},
+    "account_number": {"accountnumber", "accountno", "account", "acctnumber", "acctno",
+                        "gmpaccount", "utilityaccount", "meternumber", "meterno",
+                        "accountnum", "acct"},
+    "discount": {"discount", "discountpct", "discountpercent"},
+}
+
+
+def _bulk_norm_header(s: str) -> str:
+    return _re.sub(r"[^a-z0-9%]", "", (s or "").lower())
+
+
+def _bulk_classify_columns(header_row: list[str]) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for idx, h in enumerate(header_row):
+        nh = _bulk_norm_header(h)
+        if not nh:
+            continue
+        for field, aliases in _BULK_HEADER_ALIASES.items():
+            if field in mapping:
+                continue
+            if nh in aliases:
+                mapping[field] = idx
+                break
+    return mapping
+
+
+@router.post("/subscriptions/bulk-import")
+async def bulk_import_offtakers(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(default=True),
+    cadence: str = Form(default="monthly"),
+    delivery_mode: str = Form(default="approval"),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Create many offtakers at once from a roster CSV.
+
+    Always parses + matches first (dry_run defaults True — a PREVIEW, no writes).
+    The frontend shows the matched/unmatched table, the operator fixes or accepts,
+    then re-posts with dry_run=false to actually create. Only rows with ZERO
+    errors are ever created — a row this can't confidently match is reported
+    back, never guessed at (the same "never fabricate" rule as everywhere else
+    in this codebase: a wrong offtaker binding means a wrong invoice).
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if cadence not in VALID_CADENCE:
+        raise HTTPException(400, "cadence must be monthly or quarterly")
+    if delivery_mode not in VALID_DELIVERY:
+        raise HTTPException(400, "delivery_mode must be approval or auto")
+
+    raw = await _read_upload(file)
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception:
+            raise HTTPException(422, "Couldn't read that file as text — please upload a CSV "
+                                      "(export from Excel/Google Sheets: File → Download → CSV).")
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        raise HTTPException(422, "That file is empty.")
+    header, *data_rows = rows
+    colmap = _bulk_classify_columns(header)
+    missing = [f for f in ("name", "percent") if f not in colmap]
+    if missing:
+        raise HTTPException(
+            422, "Couldn't find a column for: " + ", ".join(missing) + ". "
+                 "Include a header row with Name and Percent (and ideally Account Number "
+                 "so each offtaker links to the right utility bill).")
+
+    from ..models import UtilityAccount
+    with SessionLocal() as db:
+        accts = db.execute(select(UtilityAccount).where(
+            UtilityAccount.tenant_id == t.id, UtilityAccount.deleted_at.is_(None)
+        )).scalars().all()
+    by_number = {(a.account_number or "").strip().lower(): a for a in accts if a.account_number}
+    single_acct = accts[0] if len(accts) == 1 else None
+
+    def _cell(row: list[str], field: str) -> str:
+        idx = colmap.get(field)
+        if idx is None or idx >= len(row):
+            return ""
+        return (row[idx] or "").strip()
+
+    def _pct(raw: str) -> tuple[Optional[float], Optional[str]]:
+        if not raw:
+            return None, "missing percent"
+        try:
+            v = float(raw.replace("%", "").strip())
+        except ValueError:
+            return None, f'"{raw}" isn\'t a number'
+        if v > 1.0:
+            v = v / 100.0  # accept "25" or "25%" or "0.25" — never "2500%"
+        if not (0.0 < v <= 1.0):
+            return None, "percent must be between 0 and 100"
+        return v, None
+
+    results = []
+    for i, row in enumerate(data_rows, start=2):  # row 1 is the header
+        name = _cell(row, "name")
+        if not name and not any(c.strip() for c in row):
+            continue  # silently skip a wholly-blank trailing line
+        errors = []
+        if not name:
+            errors.append("missing name")
+
+        pct, pct_err = _pct(_cell(row, "percent"))
+        if pct_err:
+            errors.append(pct_err)
+
+        email = _cell(row, "email") or None
+        acct_num = _cell(row, "account_number")
+        acct = None
+        if acct_num:
+            acct = by_number.get(acct_num.strip().lower())
+            if acct is None:
+                errors.append(f'no connected utility account matches "{acct_num}"')
+        elif single_acct:
+            acct = single_acct  # only one utility account on file — safe unambiguous default
+        else:
+            errors.append("no account number given, and more than one utility account is "
+                           "connected — add an Account Number column to disambiguate")
+
+        discount_raw = _cell(row, "discount")
+        discount = None
+        if discount_raw:
+            try:
+                discount = float(discount_raw.replace("%", "").strip())
+                if discount > 1.0:
+                    discount = discount / 100.0
+            except ValueError:
+                errors.append(f'"{discount_raw}" isn\'t a valid discount')
+
+        results.append({
+            "row": i, "name": name, "email": email, "allocation_pct": pct,
+            "account_number": acct_num or None,
+            "matched_account_id": acct.id if acct else None,
+            "matched_account_label": (
+                f"{(acct.provider or '').upper()} · {acct.account_number}"
+                + (f" · {acct.nickname}" if acct.nickname else "")
+            ) if acct else None,
+            "discount_pct": discount,
+            "errors": errors,
+        })
+
+    if not results:
+        raise HTTPException(422, "No offtaker rows found below the header.")
+
+    if dry_run:
+        return {"ok": True, "dry_run": True, "rows": results, "summary": {
+            "total": len(results),
+            "ready": sum(1 for r in results if not r["errors"]),
+            "needs_attention": sum(1 for r in results if r["errors"]),
+        }}
+
+    # COMMIT — only rows with zero errors are created; everything else reports back
+    # untouched so the operator can fix the source CSV and re-run (idempotent: a
+    # second import just creates new rows for whatever's still missing — it doesn't
+    # know about "already imported", so re-uploading the FULL roster after a partial
+    # fix will duplicate the rows that already landed. Surfaced in the frontend copy.)
+    created, failed = [], []
+    for r in results:
+        if r["errors"]:
+            failed.append(r)
+            continue
+        try:
+            out = await _create_manual_subscription(
+                t, customer_name=r["name"], array_id=None, allocation_pct=r["allocation_pct"],
+                utility_account_id=r["matched_account_id"], rate_per_kwh=None,
+                discount_pct=r["discount_pct"], net_rate_per_kwh=None,
+                cadence=cadence, send_mode=("to_client" if r["email"] else "to_me"),
+                delivery_mode=delivery_mode, client_email=r["email"], cc_emails=None,
+                operator_email=None, formats=None, include_summary=False,
+                annual_trueup=False, enabled=True,
+            )
+            created.append({"row": r["row"], "name": r["name"],
+                             "subscription_id": out["subscription"]["id"]})
+        except HTTPException as e:
+            failed.append({**r, "errors": [str(e.detail)]})
+    return {"ok": True, "dry_run": False, "created": len(created), "failed": failed,
+            "rows": created}
 
 
 class GlobalRatePatch(BaseModel):
