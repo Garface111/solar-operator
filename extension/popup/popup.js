@@ -317,43 +317,97 @@
     });
   }
 
+  // Build one credential row (vendor OR utility) into `container`, re-rendering
+  // `rerender` on any change. Shared by the inverter auto-login group and the
+  // utility-logins group so they stay pixel-identical.
+  function buildCredRow(container, item, status, rerender) {
+    const st = status[item.id] || { hasCreds: false, enabled: true };
+    const node = alTpl.content.cloneNode(true);
+    const row = node.querySelector(".al-row");
+    row.querySelector(".al-vendor").textContent = item.label;
+    const stateEl = row.querySelector(".al-state");
+    stateEl.textContent = st.hasCreds ? (st.enabled ? "● saved · on" : "● saved · off") : "not set";
+    stateEl.className = "al-state " + (st.hasCreds && st.enabled ? "on" : st.hasCreds ? "off" : "");
+    const userEl = row.querySelector(".al-user");
+    const passEl = row.querySelector(".al-pass");
+    const saveBtn = row.querySelector(".al-save");
+    const clearBtn = row.querySelector(".al-clear");
+    const optCb = row.querySelector(".al-optout-cb");
+    if (item.userPlaceholder) userEl.placeholder = item.userPlaceholder;
+    if (st.hasCreds) { passEl.placeholder = "•••••••• (saved — type to replace)"; clearBtn.classList.remove("hidden"); }
+    optCb.checked = !st.enabled;   // checkbox = "off" (opted out)
+    saveBtn.addEventListener("click", async () => {
+      const u = userEl.value.trim(); const p = passEl.value;
+      if (!u || !p) { saveBtn.textContent = "enter both"; setTimeout(() => saveBtn.textContent = "Save", 1500); return; }
+      saveBtn.textContent = "Saving…";
+      const r = await vaultMsg({ type: "SO_VAULT_SET", vendor: item.id, username: u, password: p });
+      saveBtn.textContent = r.ok ? "✓ Saved" : "failed";
+      passEl.value = "";
+      setTimeout(rerender, 900);
+    });
+    clearBtn.addEventListener("click", async () => {
+      await vaultMsg({ type: "SO_VAULT_CLEAR", vendor: item.id });
+      rerender();
+    });
+    optCb.addEventListener("change", async () => {
+      await vaultMsg({ type: "SO_VAULT_OPTOUT", vendor: item.id, optedOut: optCb.checked });
+      rerender();
+    });
+    container.appendChild(node);
+  }
+
   async function renderAutoLogin() {
     const resp = await vaultMsg({ type: "SO_VAULT_STATUS" });
     const status = (resp && resp.status) || {};
     alRows.innerHTML = "";
-    for (const v of AL_VENDORS) {
-      const st = status[v.id] || { hasCreds: false, enabled: true };
-      const node = alTpl.content.cloneNode(true);
-      const row = node.querySelector(".al-row");
-      row.querySelector(".al-vendor").textContent = v.label;
-      const stateEl = row.querySelector(".al-state");
-      stateEl.textContent = st.hasCreds ? (st.enabled ? "● saved · on" : "● saved · off") : "not set";
-      stateEl.className = "al-state " + (st.hasCreds && st.enabled ? "on" : st.hasCreds ? "off" : "");
-      const userEl = row.querySelector(".al-user");
-      const passEl = row.querySelector(".al-pass");
-      const saveBtn = row.querySelector(".al-save");
-      const clearBtn = row.querySelector(".al-clear");
-      const optCb = row.querySelector(".al-optout-cb");
-      if (st.hasCreds) { passEl.placeholder = "•••••••• (saved — type to replace)"; clearBtn.classList.remove("hidden"); }
-      optCb.checked = !st.enabled;   // checkbox = "off" (opted out)
-      saveBtn.addEventListener("click", async () => {
-        const u = userEl.value.trim(); const p = passEl.value;
-        if (!u || !p) { saveBtn.textContent = "enter both"; setTimeout(() => saveBtn.textContent = "Save", 1500); return; }
-        saveBtn.textContent = "Saving…";
-        const r = await vaultMsg({ type: "SO_VAULT_SET", vendor: v.id, username: u, password: p });
-        saveBtn.textContent = r.ok ? "✓ Saved" : "failed";
-        passEl.value = "";
-        setTimeout(renderAutoLogin, 900);
-      });
-      clearBtn.addEventListener("click", async () => {
-        await vaultMsg({ type: "SO_VAULT_CLEAR", vendor: v.id });
-        renderAutoLogin();
-      });
-      optCb.addEventListener("change", async () => {
-        await vaultMsg({ type: "SO_VAULT_OPTOUT", vendor: v.id, optedOut: optCb.checked });
-        renderAutoLogin();
-      });
-      alRows.appendChild(node);
+    for (const v of AL_VENDORS) buildCredRow(alRows, v, status, renderAutoLogin);
+  }
+
+  // ── Utility logins (GMP + SmartHub co-ops) ────────────────────────────────
+  // Same encrypted vault + same row UX as the inverter auto-login above. Offers
+  // GMP + the grounded VT co-ops, and surfaces ANY other co-op the owner already
+  // saved (a discovered sh_* one the backend resolved) from the vault status —
+  // keyed by co-op code, the same key the background uses to pick the credential.
+  const UT_VENDORS = [
+    { id: "gmp", label: "Green Mountain Power", userPlaceholder: "GMP username / email" },
+    { id: "vec", label: "Vermont Electric Co-op (SmartHub)", userPlaceholder: "SmartHub username / email" },
+    { id: "wec", label: "Washington Electric Co-op (SmartHub)", userPlaceholder: "SmartHub username / email" },
+  ];
+  const utToggle = document.getElementById("ut-toggle");
+  const utBody = document.getElementById("ut-body");
+  const utChev = document.getElementById("ut-chev");
+  const utRows = document.getElementById("ut-rows");
+
+  if (utToggle) {
+    utToggle.addEventListener("click", () => {
+      const open = utBody.classList.toggle("hidden") === false;
+      utChev.textContent = open ? "▾" : "▸";
+      utToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) renderUtilityLogins();
+    });
+  }
+
+  // Pretty label for a SmartHub co-op code we didn't pre-list, from the registry.
+  function coopLabel(code) {
+    try {
+      const reg = window.SMARTHUB_REGISTRY;
+      if (reg) { for (const host of Object.keys(reg)) { if (reg[host] && reg[host].provider === code) return (reg[host].name || code) + " (SmartHub)"; } }
+    } catch (_) {}
+    return code.toUpperCase() + " (SmartHub)";
+  }
+
+  async function renderUtilityLogins() {
+    const resp = await vaultMsg({ type: "SO_VAULT_STATUS" });
+    const status = (resp && resp.status) || {};
+    utRows.innerHTML = "";
+    const shown = new Set();
+    for (const v of UT_VENDORS) { buildCredRow(utRows, v, status, renderUtilityLogins); shown.add(v.id); }
+    // Surface any already-saved utility code we didn't pre-list (e.g. a sh_* co-op).
+    for (const code of Object.keys(status)) {
+      if (shown.has(code)) continue;
+      if (!(status[code] && status[code].utility && status[code].hasCreds)) continue;
+      buildCredRow(utRows, { id: code, label: coopLabel(code), userPlaceholder: "SmartHub username / email" }, status, renderUtilityLogins);
+      shown.add(code);
     }
   }
 })();

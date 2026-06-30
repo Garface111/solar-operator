@@ -67,6 +67,22 @@
         <div id="al-rows"></div>
       </div>
     </div>
+
+    <!-- v1.9.97: same client-side auto-login, for the UTILITY portals (GMP +
+         SmartHub co-ops). Save your utility login once and your bills stay
+         current hands-off. Reuses the al-row template + the encrypted vault. -->
+    <div class="autol0gin">
+      <button id="ut-toggle" class="al-head" type="button"
+              aria-label="Toggle utility logins section"
+              aria-expanded="false" aria-controls="ut-body">
+        <span>Utility logins (keeps your bills current)</span>
+        <span id="ut-chev" class="al-chev" aria-hidden="true">▸</span>
+      </button>
+      <div id="ut-body" class="al-body hidden">
+        <p class="al-note">Save your <b>GMP</b> or co-op login once — we keep your bills current without you signing in. Stored <b>only on this device</b>, encrypted, never sent to our servers.</p>
+        <div id="ut-rows"></div>
+      </div>
+    </div>
   </div>
 
   <div class="footer">
