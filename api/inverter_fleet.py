@@ -1212,6 +1212,9 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         columns.append({
             "array_id": arr.id,
             "array_name": arr.name,
+            # Operator-assigned portfolio/group label (Analysis-tab fleet
+            # hierarchy). None until the owner groups this site.
+            "portfolio_name": arr.portfolio_name,
             "vendor": vendors[0] if len(vendors) == 1 else None,
             "vendors": vendors,
             "inverter_source": "live" if ivs else None,
