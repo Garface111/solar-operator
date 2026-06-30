@@ -1276,6 +1276,38 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     sma: "https://ennexos.sunnyportal.com/",
     chint: "https://monitor.chintpowersystems.com/",
   };
+  // v1.9.97 — UTILITY portals (monthly BILLS, not live power). Kept in a SEPARATE
+  // map so the inverter hourly cycle / live loop / tab-reaper never iterate or
+  // hammer a utility (those use RECAP_VENDORS only). The background open + capture
+  // reuse the SAME machinery (recaptureVendor → so_capture_intent → the content
+  // script POSTs the bill), but on a DAILY cadence (see UTIL_LIVE_PERIOD_MIN), so
+  // we re-open a utility portal at most a couple times a day, never every 6 min.
+  // GMP is one host; SmartHub co-ops each have their own *.smarthub.coop host,
+  // resolved from the registry by code so the URL matches the saved credential.
+  const RECAP_UTILITIES = {
+    gmp: "https://greenmountainpower.com/",
+    // Two grounded co-ops are seeded for clarity; ANY connected co-op is added at
+    // arm time via _utilityPortalUrl(code) from the registry (so vec/wec/sh_* all
+    // work without listing them here). These literals are just a fast path.
+    vec: "https://vermontelectric.smarthub.coop/",
+    wec: "https://washingtonelectric.smarthub.coop/",
+  };
+  // Resolve a utility code to its portal URL: GMP, a seeded co-op, or — for any
+  // other connected co-op — its *.smarthub.coop host from the registry.
+  function _utilityPortalUrl(code) {
+    const c = String(code || "").toLowerCase();
+    if (RECAP_UTILITIES[c]) return RECAP_UTILITIES[c];
+    try {
+      const reg = self.SMARTHUB_REGISTRY;
+      if (reg) { for (const host of Object.keys(reg)) { if (reg[host] && reg[host].provider === c) return "https://" + host + "/"; } }
+    } catch (_) {}
+    if (c.startsWith("sh_")) return null;   // discovered co-op with no known host yet — can't background-open
+    return null;
+  }
+  // Portal URL for ANY code we background-open: inverter vendor OR utility.
+  function _recapUrlFor(code) {
+    return RECAP_VENDORS[code] || _utilityPortalUrl(code) || null;
+  }
   const RECAP_ALARM = "inverter-recapture";
   const RECAP_PERIOD_MIN = 60;           // hourly while the browser is running
   const TAB_BUDGET_MS = 150 * 1000;      // up to 2.5min — room for an auto-login + re-poll + capture
@@ -1441,6 +1473,79 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     try { chrome.alarms.create("live-" + vendor, { periodInMinutes: per, delayInMinutes: _liveDelayMin(vendor) }); } catch (_) {}
     rlog(vendor, "live-mode ARMED -- refresh every", per, "min via a background tab");
   }
+
+  // ── UTILITY background refresh (v1.9.97) ────────────────────────────────────
+  // Utilities pull monthly BILLS, not live power, so they get a DAILY-ish cadence
+  // — NEVER the 6-min live loop (that would hammer a utility portal for data that
+  // changes once a month). Each tick opens the utility portal in a MINIMIZED,
+  // UNFOCUSED popup (the same hands-off surface Chint uses) so the existing
+  // content script (gmp_meter_content / smarthub_content) re-captures the latest
+  // bill and, on a lapsed session, the nav/secondary auto-login trigger signs the
+  // owner back in with their saved utility credential. Per-code state + alarm so
+  // an owner with GMP + a co-op refreshes each independently. Same single-flight
+  // (_liveBusy) + recap-state lock + recapFinish teardown as every other surface,
+  // so it can never pile up tabs or race the inverter loops. Degrades to one
+  // honest reconnect nudge/day after UTIL_LIVE_MAX_FAILS dead cycles.
+  const UTIL_LIVE_PERIOD_MIN = 720;          // twice a day (~every 12h). Bills land monthly; this just keeps a fresh one current + the session warm. NEVER the 6-min live cadence.
+  const UTIL_LIVE_MAX_FAILS = 3;             // ~1.5 days of dead cycles → disarm + one nudge (lapsed session we couldn't auto-login)
+  const UTIL_LIVE_ALARM_PREFIX = "util-live-";
+  const _utilLiveKey = (c) => "so_util_live_" + c;
+  const _utilLiveAlarm = (c) => UTIL_LIVE_ALARM_PREFIX + c;
+  async function utilLiveGet(c) { const k = _utilLiveKey(c); const s = await chrome.storage.local.get(k); return s[k] || null; }
+  async function utilLiveSet(c, val) { try { await chrome.storage.local.set({ [_utilLiveKey(c)]: val }); } catch (_) {} }
+  function _utilDelayMin() { return 5 + Math.random() * 30; }   // first tick soon-ish but jittered, never a thundering herd on a utility
+  async function armUtilityLive(code) {
+    code = String(code || "").toLowerCase();
+    if (!_isUtilityCode(code)) return;
+    if (!_utilityPortalUrl(code)) { rlog("util-live: no portal URL for", code, "— can't background-open (discovered co-op w/o known host)"); return; }
+    await utilLiveSet(code, { on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
+    try { chrome.alarms.create(_utilLiveAlarm(code), { periodInMinutes: UTIL_LIVE_PERIOD_MIN, delayInMinutes: _utilDelayMin() }); } catch (_) {}
+    rlog(code, "utility background refresh ARMED — every", UTIL_LIVE_PERIOD_MIN, "min (daily-ish; bills are monthly)");
+  }
+  async function disarmUtilityLive(code, reason) {
+    const v = (await utilLiveGet(code)) || {};
+    await utilLiveSet(code, { ...v, on: false });
+    try { chrome.alarms.clear(_utilLiveAlarm(code), () => void chrome.runtime.lastError); } catch (_) {}
+    rlog(code, "utility background refresh DISARMED:", reason || "");
+  }
+  async function reArmUtilityLive(code) {
+    const cur = (await utilLiveGet(code)) || {};
+    if (!_utilityPortalUrl(code)) return;
+    await utilLiveSet(code, { on: true, armedAt: cur.armedAt || Date.now(), lastOkAt: cur.lastOkAt || 0, fails: cur.fails || 0 });
+    try { chrome.alarms.create(_utilLiveAlarm(code), { periodInMinutes: UTIL_LIVE_PERIOD_MIN, delayInMinutes: _utilDelayMin() }); } catch (_) {}
+    rlog(code, "utility background refresh RE-ARMED (fails preserved)");
+  }
+  self.__soArmUtilityLive = armUtilityLive;
+  self.__soDisarmUtilityLive = disarmUtilityLive;
+  // One utility refresh tick: open the portal in a minimized popup via the shared
+  // recapture path, then update the fail counter from the recorded outcome.
+  async function runUtilityLiveTick(code) {
+    if (_liveBusy) { rlog("util-live:", code, "engine busy (sync lock) — skip"); return; }
+    _liveBusy = true;
+    try {
+      const live = await utilLiveGet(code);
+      if (!live || !live.on) { try { chrome.alarms.clear(_utilLiveAlarm(code), () => void chrome.runtime.lastError); } catch (_) {} return; }  // self-heal zombie alarm
+      if ((await autoLoginFailsGet(code)) >= AUTOLOGIN_MAX_VENDOR_FAILS) { rlog("util-live:", code, "auto-login paused (bad creds) — skip"); return; }
+      const { tenantKey } = await recapSettings();
+      if (!tenantKey) { rlog("util-live: no tenant key — skip"); return; }
+      const st = await recapGetState();
+      if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("util-live: recap busy — skip tick"); return; }
+      const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
+      await recaptureVendor(code, { newWindow: true, budgetMs: 150 * 1000 });   // headroom for a full re-login + bill capture
+      const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
+      const ok = !!(after.ok && after.at && after.at !== before.at);
+      const cur = (await utilLiveGet(code)) || { on: true, fails: 0 };
+      if (!cur.on) return;
+      if (ok) { await utilLiveSet(code, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
+      const fails = (cur.fails || 0) + 1;
+      await utilLiveSet(code, { ...cur, fails });
+      if (fails >= UTIL_LIVE_MAX_FAILS) {
+        rlog("util-live:", code, fails, "dead cycles — disabling + nudging");
+        await disarmUtilityLive(code, "max-fails");
+        await recapMaybeNudge(code);
+      }
+    } finally { _liveBusy = false; }
+  }
   // Re-arm an ALREADY-ON vendor's alarm (after a browser restart / extension update)
   // WITHOUT resetting the fail counter — so a vendor that legitimately self-disarmed
   // after MAX_FAILS dead cycles is NOT resurrected, and a still-healthy vendor's
@@ -1482,6 +1587,28 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       if (live && live.on === false) continue;                  // self-disarmed / toggled off — leave off
       await reArmLive(v);
     }
+    // v1.9.97 — re-arm known UTILITY connections (daily cadence). "Known" = the
+    // owner saved a utility credential (the explicit "I use this utility" signal,
+    // since a utility bill capture may not have written so_recap_last yet). Respect
+    // a sticky off (self-disarmed after MAX_FAILS or toggled off) and skip a
+    // discovered co-op we have no portal URL for. Belt-and-suspenders: also re-arm
+    // any utility that already produced a successful capture.
+    try {
+      const codes = new Set();
+      if (typeof SoVault !== "undefined") {
+        try {
+          const st = await SoVault.status();
+          for (const c of Object.keys(st || {})) { if (st[c] && st[c].hasCreds && _isUtilityCode(c)) codes.add(c); }
+        } catch (_) {}
+      }
+      for (const c of Object.keys(known)) { if (known[c] && known[c].ok && _isUtilityCode(c)) codes.add(c); }
+      for (const c of codes) {
+        if (!_utilityPortalUrl(c)) continue;
+        const live = await utilLiveGet(c);
+        if (live && live.on === false) continue;                // sticky off — leave it
+        await reArmUtilityLive(c);
+      }
+    } catch (e) { rlog("auto-arm utilities failed", e && e.message || e); }
   }
   self.__soAutoArmKnownLive = autoArmKnownLive;
   // One-time migration: Chint background refresh was hard-disabled before v1.9.81, so every
@@ -1867,9 +1994,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   self.__soPruneCookies = pruneVendorCookiesIfBloated;
 
   async function recaptureVendor(vendor, opts) {
-    const url = RECAP_VENDORS[vendor];
+    const url = _recapUrlFor(vendor);            // inverter vendor OR utility portal URL
     if (!url) return;
-    await pruneVendorCookiesIfBloated(vendor);   // clear a bloated cookie blob BEFORE it breaks the portal load
+    await pruneVendorCookiesIfBloated(vendor);   // clear a bloated cookie blob BEFORE it breaks the portal load (no-op for utilities)
     await reapOrphanRecapture();   // never stack a new surface on a leftover one
     const newWindow = !!(opts && opts.newWindow);
     const budgetMs = (opts && typeof opts.budgetMs === "number") ? opts.budgetMs : TAB_BUDGET_MS;
@@ -2482,6 +2609,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       runLiveTick("fronius").catch((e) => rlog("fronius-live error", e && e.message || e));
     } else if (alarm && alarm.name === "live-sma") {
       runLiveTick("sma").catch((e) => rlog("sma-live error", e && e.message || e));
+    } else if (alarm && typeof alarm.name === "string" && alarm.name.startsWith(UTIL_LIVE_ALARM_PREFIX)) {
+      // v1.9.97 — utility daily refresh: util-live-<code> → open that utility's portal.
+      const code = alarm.name.slice(UTIL_LIVE_ALARM_PREFIX.length);
+      runUtilityLiveTick(code).catch((e) => rlog("util-live error", code, e && e.message || e));
     }
   });
   // On install/update AND browser startup: turn live-mode on for the vendors the owner
