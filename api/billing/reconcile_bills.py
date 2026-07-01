@@ -341,10 +341,16 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
     end = _as_date(inv_period[1])
 
     # Share% per array (fraction, e.g. 0.2553) for the allocation cross-check.
+    # Prefer the dedicated array_share_pct (the GMP allocation share, entered at
+    # setup) over allocation_pct — an offtaker billed off their OWN already-
+    # allocated bill has allocation_pct≈1.0 but a real array share <1.0. Multi-
+    # array offtakers keep their per-array allocation_pct (array_share_pct is a
+    # single whole-offtaker value that doesn't split per array).
+    _single_share = getattr(sub, "array_share_pct", None) or sub.allocation_pct
     share_by_array: dict[int, float] = (
         {a["array_id"]: a["allocation_pct"] for a in allocs} if allocs
-        else ({sub.array_id: sub.allocation_pct}
-              if (getattr(sub, "array_id", None) is not None and sub.allocation_pct)
+        else ({sub.array_id: _single_share}
+              if (getattr(sub, "array_id", None) is not None and _single_share)
               else {}))
     array_bill_by_aid: dict[int, Optional[Bill]] = {}
 

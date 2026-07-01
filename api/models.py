@@ -1225,6 +1225,13 @@ class BillingReportSubscription(Base):
     # allocation_pct × the array's period generation. Both NULL for the
     # workbook-driven path, which keeps its allocation inside parsed_map.
     allocation_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
+    # GMP allocation SHARE of the array's group-excess (e.g. 0.2553 = 25.53%), for
+    # the bill-accuracy cross-check (Anna/Bruce): does GMP's credit on THIS
+    # offtaker's own bill match share × the array's stated group excess? DISTINCT
+    # from allocation_pct (the billing multiplier on their bound account) — an
+    # offtaker billed off their OWN already-allocated bill has allocation_pct≈1.0
+    # yet a real array share <1.0. NULL → the check falls back to allocation_pct.
+    array_share_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
     array_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("arrays.id"), nullable=True, index=True)
 

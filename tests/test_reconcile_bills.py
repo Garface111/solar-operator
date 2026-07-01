@@ -117,3 +117,61 @@ def test_allocation_cross_check_catches_gmp_error(monkeypatch):
     assert abs(alloc["expected_kwh"] - 7345.5) < 0.3, alloc
     assert abs(alloc["implied_group_total_kwh"] - 28762.2) < 0.5, alloc
     assert rep["allocation_flagged"] == 1, rep["allocation_counts"]
+
+
+def test_end_to_end_real_resolver_own_bill_plus_share():
+    """The realistic model, NO monkeypatch — the actual resolve_offtaker_excess_
+    credit runs off seeded bills. Each offtaker is bound to their OWN GMP account
+    (bill = their allocated excess), allocation_pct=1.0 (billed on their full
+    allocation), array_share_pct = the GMP share (the cross-check input). Proves
+    the whole pipeline on real-shaped data: the accuracy check flags a rigged
+    allocation error and passes a clean one, using array_share_pct as the share."""
+    tid = "ten_e2e_" + secrets.token_hex(3)
+    RATE = 0.16
+    GROUP = 28772.0            # the array's stated group excess (host bill)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="E2E",
+                      contact_email=f"{tid}@e.com", active=True, product="array_operator"))
+        db.flush()
+        arr = Array(tenant_id=tid, name="Timberworks", region="VT"); db.add(arr); db.flush()
+        host = UtilityAccount(tenant_id=tid, provider="gmp", account_number="HOST",
+                              array_id=arr.id)
+        db.add(host); db.flush()
+        # Host bill carries the group excess (kwh_sent_to_grid).
+        db.add(Bill(tenant_id=tid, account_id=host.id, period_start=datetime(2026, 6, 1),
+                    period_end=datetime(2026, 6, 30), kwh_generated=28788,
+                    kwh_sent_to_grid=GROUP, is_net_metered=True))
+
+        def _offtaker(name, share, credited):
+            acct = UtilityAccount(tenant_id=tid, provider="gmp",
+                                  account_number=name[:8], nickname=name)
+            db.add(acct); db.flush()
+            # The offtaker's OWN bill: GMP's credited excess + a cashed credit so the
+            # real resolver returns (credited, credited*RATE, RATE, 'bill_cash').
+            db.add(Bill(tenant_id=tid, account_id=acct.id, period_start=datetime(2026, 6, 1),
+                        period_end=datetime(2026, 6, 30), kwh_sent_to_grid=credited,
+                        solar_credit_usd=round(credited * RATE, 2), is_net_metered=True))
+            c = Client(tenant_id=tid, name=name, active=True); db.add(c); db.flush()
+            db.add(BillingReportSubscription(
+                tenant_id=tid, client_id=c.id, customer_name=name, array_id=arr.id,
+                allocation_pct=1.0, array_share_pct=share, utility_account_id=acct.id,
+                billing_model="percent_of_array", cadence="monthly"))
+
+        # Rigged error: 25.53% of 28,772 = 7,345.5, but GMP credited 7,343 (implies 28,762).
+        _offtaker("St. J Muni", 0.2553, 7343.0)
+        # Clean: 30% of 28,772 = 8,631.6, GMP credited 8,632 → within tolerance.
+        _offtaker("Fair Haven School", 0.30, 8632.0)
+        db.commit()
+
+    with SessionLocal() as db:
+        rep = reconcile_bills.reconcile_tenant(db, tid)
+    by_name = {s["customer_name"]: s for s in rep["subscriptions"]}
+    bad = by_name["St. J Muni"]["allocation"]
+    good = by_name["Fair Haven School"]["allocation"]
+    # Real resolver produced the credited excess; share came from array_share_pct.
+    assert bad["status"] == "mismatch", bad
+    assert bad["offtaker_credited_kwh"] == 7343.0
+    assert abs(bad["implied_group_total_kwh"] - 28762.2) < 0.5, bad
+    assert bad["array_group_excess_kwh"] == 28772.0
+    assert good["status"] == "match", good
+    assert rep["allocation_flagged"] == 1, rep["allocation_counts"]

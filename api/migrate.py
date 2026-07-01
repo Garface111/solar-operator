@@ -852,6 +852,16 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_id")
 
+        # 2026-07-01 Anna/Bruce bill-accuracy check: the offtaker's GMP allocation
+        # SHARE of the array's group-excess (0..1), distinct from allocation_pct
+        # (the billing multiplier). Used by reconcile's allocation cross-check.
+        if not column_exists(conn, "billing_report_subscriptions", "array_share_pct"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN array_share_pct DOUBLE PRECISION"
+            ))
+            print("  + billing_report_subscriptions.array_share_pct")
+
         # 2026-06-22 Sequential invoice numbering: operator sets a starting number,
         # Array Operator adds 1 per real send. start = seed entered; next = running
         # counter. NULL on both = legacy period-date invoice number.
