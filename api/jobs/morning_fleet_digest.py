@@ -10,7 +10,8 @@ dashboard shows (build_fleet_tree).
 What's in the email:
   * a header (fleet/operator name + the date)
   * top-line KPIs (arrays, inverters, # needing attention, producing-now / asleep)
-  * a HIGHLIGHTS block (best & worst performing arrays by recent daily kWh, any
+  * a HIGHLIGHTS block (best & worst arrays by their LAST FULL DAY's kWh — never
+    today's still-accumulating partial, which would read like a live snapshot; any
     arrays carrying an alert called out in amber/red, any inverter flagged)
   * a clean per-array summary row (name, status dot, recent output)
   * a green "All systems healthy" banner when summary.attention == 0, or an
@@ -76,29 +77,63 @@ def _vendor_daily(col: dict) -> list:
     return col.get("daily") or []
 
 
-def _recent_kwh(col: dict) -> float | None:
-    """The array's most recent VENDOR daily kWh reading, or None if no history.
+def _local_today_iso() -> str:
+    """Today's date (ET) as 'YYYY-MM-DD', matching the daily-series date strings."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return datetime.now(timezone.utc).date().isoformat()
 
-    Ascending [{date, kwh}, ...]; the last point is the freshest day. Returns
-    None (not 0.0) when there is genuinely no data, so callers can SAY "no recent
-    data" instead of printing a fabricated zero.
+
+def _last_full_day_point(col: dict) -> dict | None:
+    """The array's most recent COMPLETE-day vendor daily point ({date, kwh}).
+
+    CRITICAL: the digest sends in the MORNING, when TODAY's kWh is still
+    accumulating — a partial, near-live figure that reads like an instantaneous
+    snapshot, not a day's production. So we skip today and report the last FULL
+    day (normally yesterday) — the honest "production of the last day". Returns
+    None (not 0.0) when there is genuinely no complete-day history yet.
     """
-    for pt in reversed(_vendor_daily(col)):
-        kwh = pt.get("kwh")
-        if kwh is not None:
+    today = _local_today_iso()
+    pts = _vendor_daily(col)
+    for pt in reversed(pts):                       # newest → oldest, skip today
+        if pt.get("kwh") is None or str(pt.get("date")) == today:
+            continue
+        try:
+            float(pt["kwh"])
+            return pt
+        except (TypeError, ValueError):
+            continue
+    # Edge case: the ONLY data is today (a brand-new connect). Rather than say
+    # "no data", fall back to it — rare in the morning, and still honest via its date.
+    for pt in reversed(pts):
+        if pt.get("kwh") is not None:
             try:
-                return float(kwh)
+                float(pt["kwh"])
+                return pt
             except (TypeError, ValueError):
-                return None
+                continue
     return None
+
+
+def _recent_kwh(col: dict) -> float | None:
+    """The array's total production on its LAST COMPLETE DAY (not today's partial),
+    or None when there's no full-day history. None (not 0.0) so callers can SAY
+    "no recent data" rather than printing a fabricated zero."""
+    p = _last_full_day_point(col)
+    if p is None:
+        return None
+    try:
+        return float(p["kwh"])
+    except (TypeError, ValueError):
+        return None
 
 
 def _recent_day(col: dict) -> str | None:
-    """The date string of the array's most recent VENDOR daily reading, or None."""
-    for pt in reversed(_vendor_daily(col)):
-        if pt.get("kwh") is not None:
-            return pt.get("date")
-    return None
+    """The date of the array's last COMPLETE-day reading (the day _recent_kwh is for)."""
+    p = _last_full_day_point(col)
+    return p.get("date") if p else None
 
 
 def _fmt_kwh(kwh: float | None) -> str:
@@ -293,14 +328,14 @@ def build_digest_html(tenant, tree: dict) -> str:
             highlight_rows.append(
                 f'<li style="margin:6px 0;color:{BLUE_DEEP};">'
                 f'<b>Top producer:</b> {_html.escape(best["col"].get("array_name", "Array"))}'
-                f' — {_fmt_kwh(best["kwh"])} on its latest day.</li>'
+                f' — {_fmt_kwh(best["kwh"])} on its last full day.</li>'
             )
             if len(ranked) > 1:
                 worst_a = ranked[-1]
                 highlight_rows.append(
                     f'<li style="margin:6px 0;color:{BODY};">'
                     f'<b>Lowest producer:</b> {_html.escape(worst_a["col"].get("array_name", "Array"))}'
-                    f' — {_fmt_kwh(worst_a["kwh"])} on its latest day.</li>'
+                    f' — {_fmt_kwh(worst_a["kwh"])} on its last full day.</li>'
                 )
         else:
             why = "the fleet is asleep right now" if not is_daylight else "no recent daily data has landed yet"
@@ -355,8 +390,10 @@ def build_digest_html(tenant, tree: dict) -> str:
 
     if arr_rows:
         per_array = (
-            f'<div style="font-size:12px;color:{FAINT};margin:0 0 9px;text-transform:uppercase;'
+            f'<div style="font-size:12px;color:{FAINT};margin:0 0 3px;text-transform:uppercase;'
             f'letter-spacing:.6px;font-weight:700;">{table_label}</div>'
+            f'<div style="font-size:11.5px;color:{FAINT};margin:0 0 9px;">'
+            f'Output shown is each array&rsquo;s total production on its last full day.</div>'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{CARD}" '
             f'style="border-collapse:collapse;border:1px solid {LINE2};border-radius:12px;'
             f'overflow:hidden;margin:0 0 22px;">'
@@ -457,7 +494,7 @@ def build_digest_text(tenant, tree: dict) -> str:
         for fi in _flagged_inverters(cols)[:12]:
             lines.append(f"  ! {fi['name']} ({fi['array_name']}): {fi['phrase']}")
     else:
-        lines.append("Arrays:")
+        lines.append("Arrays (total production on their last full day):")
         for col in cols:
             alert = col.get("alert", {}) or {}
             state = _LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
