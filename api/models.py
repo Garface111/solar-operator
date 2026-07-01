@@ -422,6 +422,9 @@ class Array(Base):
     # NULL = ungrouped ("Unassigned" in the UI). Optional so every existing array
     # is byte-identical until the operator assigns one.
     portfolio_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Operator O&M note / reminder shown in the Analysis Sites grid (PowerTrack's
+    # "Reminder" column). Free-text, owner-set; NULL = none.
+    reminder: Mapped[str | None] = mapped_column(Text, nullable=True)
     nepool_gis_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # NEPOOL-GIS asset ID (e.g. "53984" → shown as "Chester (53984)" in reports)
     first_connect_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -1467,4 +1470,52 @@ class CaptureEvent(Base):
 
     __table_args__ = (
         Index("ix_capture_events_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class SiteFile(Base):
+    """A document attached to an array/site — the Analysis-tab "Files" feature
+    (PowerTrack's per-site document storage). Stored as a DB blob (bounded by an
+    upload-size cap in the endpoint); fine for interconnection agreements, site
+    layouts, O&M contracts, warranties. Tenant-scoped; soft-deletable."""
+    __tablename__ = "site_files"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    mime: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+    __table_args__ = (
+        Index("ix_site_files_tenant_array", "tenant_id", "array_id"),
+    )
+
+
+class AlertEvent(Base):
+    """A ticketed alert in the Analysis-tab "Event log" — the historical, actionable
+    ledger with a lightweight O&M lifecycle (open → ack → resolved). One row per
+    (tenant, array, inverter_ref, title); the list endpoint upserts an OPEN event
+    when an alert is currently firing, and status/note edits persist here. Distinct
+    from InverterAlertState (email-dedup bookkeeping) — this is the operator-facing
+    ticket the UI reads and mutates."""
+    __tablename__ = "alert_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    array_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    inverter_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)  # inverter name/serial
+    title: Mapped[str] = mapped_column(String(160))
+    severity: Mapped[str] = mapped_column(String(16), default="warning")  # critical | warning | info
+    status: Mapped[str] = mapped_column(String(16), default="open")       # open | ack | resolved
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_alert_events_tenant_status", "tenant_id", "status"),
+        UniqueConstraint("tenant_id", "array_id", "inverter_ref", "title",
+                         name="uq_alert_event_dedup"),
     )
