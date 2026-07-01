@@ -505,6 +505,54 @@ def _normalized_allocations(sub) -> list[dict]:
     return out
 
 
+def _array_group_excess_for_sub(db, sub, period_label=None):
+    """The array's GROUP excess (its host bill's kwh_sent_to_grid) — the pool GMP
+    allocates among the array's offtakers by share — for the "real math" invoice.
+    Returns None (→ fall back to GMP's own-bill figure) when it can't be trusted:
+    a multi-array offtaker, no linked array/host bill, or the host account IS the
+    offtaker's own account (single-meter — then share × host would double-count).
+    Never raises — any error falls back to GMP's own-bill figure (the safe default
+    for a billing path)."""
+    try:
+        return _array_group_excess_for_sub_inner(db, sub, period_label)
+    except Exception:
+        return None
+
+
+def _array_group_excess_for_sub_inner(db, sub, period_label=None):
+    from ..models import UtilityAccount, Bill
+    aid = getattr(sub, "array_id", None)
+    if aid is None or getattr(sub, "array_allocations", None):
+        return None
+    acct_id = db.execute(
+        select(UtilityAccount.id).where(UtilityAccount.array_id == aid)
+        .order_by(UtilityAccount.id)
+    ).scalars().first()
+    if acct_id is None or acct_id == getattr(sub, "utility_account_id", None):
+        return None   # no host account, or it's the offtaker's own meter
+    bills = list(db.execute(
+        select(Bill).where(Bill.account_id == acct_id, Bill.period_end.isnot(None))
+        .order_by(Bill.period_end.desc())
+    ).scalars().all())
+    if not bills:
+        return None
+    bill = None
+    if period_label:
+        for b in bills:
+            pe = b.period_end.date() if hasattr(b.period_end, "date") else b.period_end
+            if pe and pe.strftime("%Y-%m") == period_label:
+                bill = b
+                break
+    bill = bill or bills[0]
+    v = getattr(bill, "kwh_sent_to_grid", None)
+    if v is not None:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
+    return float(bill.kwh_generated) if bill.kwh_generated is not None else None
+
+
 def _operator_company_name(tenant_id):
     """The operator's own company name (what they filled out at signup) to print on
     offtaker invoices instead of the generic 'Your solar array owner'. Falls back
@@ -614,7 +662,26 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         if not pct:
             warnings.append("No allocation % set for this offtaker.")
             pct = 0.0
-        customer_kwh = round((array_kwh or 0.0) * pct, 2)
+        # ── "Real math" billing basis (Anna/Bruce, Ford 2026-07-01) ─────────────
+        # Bill the offtaker's SHARE of the array's group excess — the correct
+        # allocation — not whatever GMP happened to credit on THEIR own bill (which
+        # GMP sometimes gets wrong). Guarded: only when array_share_pct AND the
+        # array's group excess are both present and the offtaker has a SEPARATE
+        # account from the array host (so there's a real cross-check); otherwise
+        # fall back to today's GMP-credited × pct so no invoice silently changes
+        # without the data to back it. GMP's credited figure is kept for the
+        # side-by-side + the ⚑, and the operator can still override the final
+        # amount per-customer (budget_amount_usd).
+        gmp_credited_kwh = round((array_kwh or 0.0) * pct, 2)
+        _share = getattr(sub, "array_share_pct", None)
+        _group = (_array_group_excess_for_sub(db, sub, label)
+                  if (_share and array_kwh is not None) else None)
+        if _share and _group:
+            customer_kwh = round(_share * _group, 2)
+            _billing_basis = "real_math"
+        else:
+            customer_kwh = gmp_credited_kwh
+            _billing_basis = "gmp_credited"
         pricing = resolve_discount_pricing(sub, period_end=end)
         discount = pricing["discount_pct"]
         billing_rate = 1.0 - discount
@@ -658,6 +725,14 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["kwh_source"] = kwh_source           # always 'utility_bill' here
         # has_data flag the empty-skip path checks (None = nothing billable).
         computed["has_utility_bill"] = credit_usd is not None
+        # Real-math vs GMP-credited provenance so the invoice/UI can show BOTH the
+        # amount we bill and what GMP credited, and flag the gap.
+        computed["billing_basis"] = _billing_basis
+        computed["gmp_credited_kwh"] = gmp_credited_kwh
+        computed["array_share_pct"] = _share
+        computed["array_group_excess_kwh"] = _group
+        computed["realmath_kwh"] = (round(_share * _group, 2)
+                                    if (_share and _group) else None)
         return BillingMatch(
             matched=True, confidence=1.0, source="manual", data_sheet=None,
             customer={"name": sub.customer_name, "email": sub.client_email},
