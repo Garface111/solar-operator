@@ -1487,6 +1487,219 @@ def set_array_portfolio_ep(array_id: int, body: PortfolioBody,
         return {"ok": True, "array_id": arr.id, "portfolio_name": arr.portfolio_name}
 
 
+class ReminderBody(BaseModel):
+    reminder: str | None = None
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/reminder")
+def set_array_reminder_ep(array_id: int, body: ReminderBody,
+                          authorization: str | None = Header(default=None)) -> dict:
+    """Assign/clear an array's O&M reminder note (Analysis Sites "Reminder" column).
+    Tenant-scoped; empty clears (NULL)."""
+    tenant = _tenant_from_bearer(authorization)
+    note = (body.reminder or "").strip()[:2000] or None
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(Array.id == array_id, Array.tenant_id == tenant.id,
+                                Array.deleted_at.is_(None))
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+        arr.reminder = note
+        db.commit()
+        return {"ok": True, "array_id": arr.id, "reminder": arr.reminder}
+
+
+# ── Files: per-site document storage (Analysis-tab "Files") ──────────────────
+MAX_SITE_FILE_BYTES = 10 * 1024 * 1024   # 10 MB per document
+
+
+class FileUploadBody(BaseModel):
+    array_id: int
+    filename: str
+    mime: str | None = None
+    data_b64: str
+
+
+@router.get("/v1/array-owners/files")
+def list_site_files_ep(authorization: str | None = Header(default=None)) -> dict:
+    from .models import SiteFile
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(SiteFile, Array.name).join(Array, SiteFile.array_id == Array.id)
+            .where(SiteFile.tenant_id == tenant.id, SiteFile.deleted_at.is_(None))
+            .order_by(SiteFile.uploaded_at.desc())
+        ).all()
+        files = [{
+            "id": f.id, "array_id": f.array_id, "array_name": aname,
+            "filename": f.filename, "mime": f.mime, "size": f.size,
+            "uploaded_at": f.uploaded_at.isoformat() if f.uploaded_at else None,
+        } for (f, aname) in rows]
+        return {"files": files}
+
+
+@router.post("/v1/array-owners/files")
+def upload_site_file_ep(body: FileUploadBody,
+                        authorization: str | None = Header(default=None)) -> dict:
+    import base64
+    from .models import SiteFile
+    tenant = _tenant_from_bearer(authorization)
+    try:
+        raw = base64.b64decode((body.data_b64 or "").split(",")[-1])
+    except Exception:
+        raise HTTPException(400, "Invalid file data")
+    if not raw:
+        raise HTTPException(400, "Empty file")
+    if len(raw) > MAX_SITE_FILE_BYTES:
+        raise HTTPException(413, "File too large (max 10 MB)")
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(Array.id == body.array_id, Array.tenant_id == tenant.id,
+                                Array.deleted_at.is_(None))
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+        f = SiteFile(tenant_id=tenant.id, array_id=arr.id,
+                     filename=(body.filename or "file")[:255], mime=(body.mime or None),
+                     size=len(raw), data=raw)
+        db.add(f)
+        db.commit()
+        db.refresh(f)
+        return {"ok": True, "file": {"id": f.id, "array_id": f.array_id,
+                "filename": f.filename, "mime": f.mime, "size": f.size,
+                "uploaded_at": f.uploaded_at.isoformat()}}
+
+
+@router.get("/v1/array-owners/files/{file_id}/download")
+def download_site_file_ep(file_id: int,
+                          authorization: str | None = Header(default=None)):
+    from fastapi import Response
+    from .models import SiteFile
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        f = db.execute(
+            select(SiteFile).where(SiteFile.id == file_id, SiteFile.tenant_id == tenant.id,
+                                   SiteFile.deleted_at.is_(None))
+        ).scalar_one_or_none()
+        if f is None or f.data is None:
+            raise HTTPException(404, "File not found")
+        safe = (f.filename or "file").replace('"', "")
+        return Response(content=f.data, media_type=(f.mime or "application/octet-stream"),
+                        headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+
+
+@router.delete("/v1/array-owners/files/{file_id}")
+def delete_site_file_ep(file_id: int,
+                        authorization: str | None = Header(default=None)) -> dict:
+    from .models import SiteFile
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        f = db.execute(
+            select(SiteFile).where(SiteFile.id == file_id, SiteFile.tenant_id == tenant.id,
+                                   SiteFile.deleted_at.is_(None))
+        ).scalar_one_or_none()
+        if f is None:
+            raise HTTPException(404, "File not found")
+        f.deleted_at = now()
+        db.commit()
+        return {"ok": True}
+
+
+# ── Event log: ticketed alerts with an O&M lifecycle (Analysis-tab "Event log") ──
+_EVENT_FROM_STATUS = {
+    "dead": ("Inverter stopped", "critical"),
+    "fault": ("Fault reported", "critical"),
+    "underperforming": ("Underperforming", "warning"),
+    "comm_gap": ("Gone quiet", "warning"),
+}
+
+
+class AlertEventPatchBody(BaseModel):
+    status: str | None = None
+    note: str | None = None
+
+
+def _sync_alert_events(db, tenant) -> None:
+    """Upsert an OPEN AlertEvent for each currently-firing inverter alert so the
+    Event log reflects live faults. Idempotent (dedup on tenant+array+inverter+title);
+    an already-tracked event is left as-is (operator owns its lifecycle)."""
+    from . import inverter_fleet
+    from .models import AlertEvent
+    try:
+        tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
+    except Exception:
+        return
+    created = False
+    for col in tree.get("columns", []):
+        aid = col.get("array_id")
+        aname = col.get("array_name")
+        for inv in col.get("inverters", []):
+            spec = _EVENT_FROM_STATUS.get(inv.get("status"))
+            if not spec:
+                continue
+            title, sev = spec
+            ref = inv.get("name") or (str(inv.get("inverter_id")) if inv.get("inverter_id") is not None else None)
+            existing = db.execute(
+                select(AlertEvent).where(
+                    AlertEvent.tenant_id == tenant.id,
+                    AlertEvent.array_id == aid,
+                    AlertEvent.inverter_ref == ref,
+                    AlertEvent.title == title,
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(AlertEvent(tenant_id=tenant.id, array_id=aid, array_name=aname,
+                                  inverter_ref=ref, title=title, severity=sev,
+                                  status="open", note=inv.get("diagnosis")))
+                created = True
+    if created:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
+@router.get("/v1/array-owners/alert-events")
+def list_alert_events_ep(authorization: str | None = Header(default=None)) -> dict:
+    from .models import AlertEvent
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        _sync_alert_events(db, tenant)
+        rows = db.execute(
+            select(AlertEvent).where(AlertEvent.tenant_id == tenant.id)
+            .order_by(AlertEvent.created_at.desc())
+        ).scalars().all()
+        events = [{
+            "id": e.id, "array_id": e.array_id, "array_name": e.array_name,
+            "inverter_name": e.inverter_ref, "title": e.title,
+            "severity": e.severity, "status": e.status, "note": e.note,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "updated_at": e.updated_at.isoformat() if e.updated_at else None,
+        } for e in rows]
+        return {"events": events}
+
+
+@router.patch("/v1/array-owners/alert-events/{event_id}")
+def patch_alert_event_ep(event_id: int, body: AlertEventPatchBody,
+                         authorization: str | None = Header(default=None)) -> dict:
+    from .models import AlertEvent
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        e = db.execute(
+            select(AlertEvent).where(AlertEvent.id == event_id,
+                                     AlertEvent.tenant_id == tenant.id)
+        ).scalar_one_or_none()
+        if e is None:
+            raise HTTPException(404, "Event not found")
+        if body.status in ("open", "ack", "resolved"):
+            e.status = body.status
+        if body.note is not None:
+            e.note = body.note.strip()[:2000] or None
+        db.commit()
+        return {"ok": True, "event": {"id": e.id, "status": e.status, "note": e.note}}
+
+
 @router.post("/v1/array-owners/inverters/{inverter_id}/name")
 def rename_inverter_ep(inverter_id: int, body: RenameBody,
                        authorization: str | None = Header(default=None)) -> dict:
@@ -4212,12 +4425,21 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
     start = end - timedelta(days=window_days - 1)
 
     poa_memo: dict[tuple, dict] = {}
+    wx_memo: dict[tuple, int | None] = {}
 
     def poa_for(lat, lng, tilt, az):
         key = (round(lat, 3), round(lng, 3), round(tilt, 1), round(az, 1))
         if key not in poa_memo:
             poa_memo[key] = forecasting.fetch_poa_daily(lat, lng, tilt, az, start, end)
         return poa_memo[key]
+
+    def wx_for(lat, lng):
+        # Current sky at the site (Analysis "Sky" column); memoized per location so
+        # co-located arrays cost one call. Fail-soft: None → the UI shows no icon.
+        key = (round(lat, 3), round(lng, 3))
+        if key not in wx_memo:
+            wx_memo[key] = forecasting.fetch_current_weather_code(lat, lng)
+        return wx_memo[key]
 
     with SessionLocal() as db:
         arrays = db.execute(
@@ -4277,6 +4499,7 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
                 "ratio_pct": d["ratio_pct"], "measured_days": measured_days,
                 "confidence": d["confidence"],
                 "tilt_assumed": tilt_assumed, "geocode_source": arr.geocode_source,
+                "weather_code": wx_for(arr.latitude, arr.longitude),
             })
             fleet_exp += exp_matched
             fleet_act += d["actual_kwh"]

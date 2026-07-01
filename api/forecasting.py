@@ -259,6 +259,25 @@ def fetch_poa_daily(
         return {}
 
 
+def fetch_current_weather_code(lat: float, lng: float) -> Optional[int]:
+    """Current Open-Meteo WMO weathercode at a location (for the Analysis Sites
+    'Sky' column). Returns None on any failure — the UI simply shows no icon, never
+    a guess. Cheap single call; callers should memoize per rounded lat/lng."""
+    try:
+        r = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": round(lat, 3), "longitude": round(lng, 3),
+                    "current_weather": True, "timezone": _OPEN_METEO_TZ},
+            timeout=_OPEN_METEO_TIMEOUT,
+        )
+        if r.status_code != 200:
+            return None
+        code = ((r.json() or {}).get("current_weather") or {}).get("weathercode")
+        return int(code) if code is not None else None
+    except Exception:
+        return None
+
+
 # ── the model core (pure) ─────────────────────────────────────────────────────
 def expected_kwh_from_poa(nameplate_kw: float, poa_kwh_m2: float, pr: float = DEFAULT_PR) -> float:
     """expected AC kWh = nameplate_kW × (POA / STC) × PR. Pure; the whole model."""

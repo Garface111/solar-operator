@@ -110,6 +110,12 @@ def main():
             ))
             print("  + arrays.portfolio_name")
 
+        # arrays.reminder (added 2026-06-30 for the Analysis-tab O&M "Reminder"
+        # column — operator note; nullable, no backfill)
+        if not column_exists(conn, "arrays", "reminder"):
+            conn.execute(text("ALTER TABLE arrays ADD COLUMN reminder TEXT"))
+            print("  + arrays.reminder")
+
         # 2026-06-03 Phase-1 expansion: Client layer
         # Idempotency: create_all() above already created `clients` table
         # via Base.metadata, so we only need to (a) add arrays.client_id and

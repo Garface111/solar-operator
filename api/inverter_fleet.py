@@ -1215,6 +1215,8 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             # Operator-assigned portfolio/group label (Analysis-tab fleet
             # hierarchy). None until the owner groups this site.
             "portfolio_name": arr.portfolio_name,
+            # Operator O&M note shown in the Analysis Sites "Reminder" column.
+            "reminder": arr.reminder,
             "vendor": vendors[0] if len(vendors) == 1 else None,
             "vendors": vendors,
             "inverter_source": "live" if ivs else None,
