@@ -64,6 +64,95 @@
 
   function tryParse(body) { try { return JSON.parse(body); } catch (_) { return null; } }
 
+  // ── SITE-LOCATION deep-scan (shared, ADDITIVE + FAIL-SAFE) ───────────────────
+  // Coordinate field paths in the Chint payloads are NOT confirmed, so rather than
+  // guess one path we recursively walk any JSON and return the first plausible
+  // {latitude, longitude} pair (and best-effort address string). Everything here is
+  // wrapped so a bad shape yields null, never a throw.
+  function _soCoerceNum(v) {
+    if (typeof v === "number") return isFinite(v) ? v : null;
+    if (typeof v === "string" && v.trim() !== "") { const n = Number(v.trim()); return isFinite(n) ? n : null; }
+    return null;
+  }
+  function _soValidLatLng(lat, lng) {
+    lat = _soCoerceNum(lat); lng = _soCoerceNum(lng);
+    if (lat == null || lng == null) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    if (lat === 0 && lng === 0) return null;                 // null-island = missing data
+    return { latitude: lat, longitude: lng };
+  }
+  const _SO_LAT_RE = /^(lat|latitude|gpslat|sitelat|centerlat)$/i;
+  const _SO_LNG_RE = /^(lng|lon|long|longitude|gpslng|gpslon|sitelng|centerlng)$/i;
+  const _SO_PREFER_RE = /^(location|address|site|coordinates|coord|coords|center|geo|position|gps)$/i;
+  const _SO_ADDR_KEY_RE = /^(street|street1|address1|addressline1|line1|road|city|town|locality|state|province|region|zip|zipcode|postal|postalcode|postcode|country|countrycode)$/i;
+  const _SO_ADDR_FULL_RE = /^(address|addr|fulladdress|formattedaddress|streetaddress|displayaddress)$/i;
+  function _soExtractAddress(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    const parts = [];
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (typeof v === "string" && v.trim()) {
+        if (_SO_ADDR_FULL_RE.test(k) && v.trim().length > 4) return v.trim();
+        if (_SO_ADDR_KEY_RE.test(k)) parts.push(v.trim());
+      }
+    }
+    const joined = parts.join(", ").trim();
+    return joined.length > 3 ? joined : null;
+  }
+  function findLocation(root) {
+    try {
+      if (!root || typeof root !== "object") return null;
+      const queue = [root];
+      let seen = 0;
+      let addrFallback = null;
+      while (queue.length && seen < 4000) {
+        const node = queue.shift(); seen++;
+        if (!node || typeof node !== "object") continue;
+        // A bare [x,y] pair is GeoJSON coordinates → [lng, lat] by spec. Prefer that.
+        if (Array.isArray(node) && node.length === 2 &&
+            _soCoerceNum(node[0]) != null && _soCoerceNum(node[1]) != null) {
+          const asLngLat = _soValidLatLng(node[1], node[0]);   // [lng,lat] (GeoJSON, preferred)
+          const asLatLng = _soValidLatLng(node[0], node[1]);   // [lat,lng]
+          if (asLngLat) return asLngLat;
+          if (asLatLng) return asLatLng;
+        }
+        if (!Array.isArray(node)) {
+          let latKey = null, lngKey = null;
+          for (const k of Object.keys(node)) {
+            if (latKey == null && _SO_LAT_RE.test(k) && _soCoerceNum(node[k]) != null) latKey = k;
+            else if (lngKey == null && _SO_LNG_RE.test(k) && _soCoerceNum(node[k]) != null) lngKey = k;
+          }
+          if (latKey != null && lngKey != null) {
+            const hit = _soValidLatLng(node[latKey], node[lngKey]);
+            if (hit) {
+              const addr = _soExtractAddress(node);
+              return addr ? Object.assign(hit, { address: addr }) : hit;
+            }
+          }
+          if (!addrFallback) { const a = _soExtractAddress(node); if (a) addrFallback = a; }
+        }
+        const kids = Array.isArray(node) ? node.map((_, i) => i) : Object.keys(node);
+        const preferred = [], rest = [];
+        for (const k of kids) {
+          const child = node[k];
+          if (child && typeof child === "object") {
+            (!Array.isArray(node) && _SO_PREFER_RE.test(String(k)) ? preferred : rest).push(child);
+          }
+        }
+        for (const c of preferred) queue.push(c);
+        for (const c of rest) queue.push(c);
+      }
+      return addrFallback ? { address: addrFallback } : null;
+    } catch (_) { return null; }
+  }
+  function applyLocation(site, loc) {
+    if (!site || !loc) return;
+    if (typeof loc.latitude === "number" && typeof loc.longitude === "number") {
+      site.latitude = loc.latitude; site.longitude = loc.longitude;
+    }
+    if (typeof loc.address === "string" && loc.address && site.address == null) site.address = loc.address;
+  }
+
   // Integrate the site's 30-min PV POWER curve into daily kWh. The production
   // chart endpoint (/openApi/v1/siteMertics/getSiteTimeSharingChart2) returns
   // data.times[] ("YYYY-MM-DD HH:MM") + data.pv[] (instantaneous kW per slot).
@@ -275,7 +364,15 @@
       if (inverters.length) {
         energyToday = Math.round(inverters.reduce((t, iv) => t + (iv.energy_today_kwh || 0), 0) * 1000) / 1000;
       }
-      sites.push({
+      // Best-effort site LOCATION for the weather model: deep-scan the responses we
+      // ALREADY observed for this site — the site-list row first (richest), then the
+      // busTypeDevices response. Purely additive; findLocation never throws → capture
+      // is untouched if no coords are present. (Chint's own API can't be re-fetched
+      // here — token replay 4010s — so we only scan what the app already loaded; the
+      // exact coordinate field in these payloads is INFERRED, NEEDS a live verify.)
+      let loc = null;
+      try { loc = findLocation(st) || (devJson ? findLocation(devJson.data || devJson) : null); } catch (_) { loc = null; }
+      const site = {
         site_id: String(sid != null ? sid : name),
         name,
         peak_power_kw: kwFromStr(st.installedCapacity),
@@ -286,7 +383,9 @@
         status: (liveW || 0) > 0 ? "producing" : "idle",
         daily: mergeDaily(weekTrendDaily(st), (sid != null && dailyBySite.has(String(sid))) ? dailyBySite.get(String(sid)) : []),   // 7-day weekETrend (site list) + chart-integrated history
         inverters,
-      });
+      };
+      applyLocation(site, loc);                     // additive latitude/longitude/address (best-effort)
+      sites.push(site);
     }
     return { provider: "chint", capturedAt: new Date().toISOString(), sites };
   }
