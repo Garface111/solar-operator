@@ -906,7 +906,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // healthy session (only fires >8KB) so we still ride the owner's existing login.
       try {
         const _pv = host.endsWith("solarweb.com") ? "fronius" : host.endsWith("sunnyportal.com") ? "sma" : null;
-        if (_pv && typeof self.__soPruneCookies === "function") await self.__soPruneCookies(_pv);
+        if (_pv && typeof self.__soPruneCookies === "function") await self.__soPruneCookies(_pv, { force: true });
       } catch (_) { /* non-fatal */ }
       chrome.tabs.create({ url, active }, (tab) => {
         if (chrome.runtime.lastError) {
@@ -1984,7 +1984,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     fronius: ["solarweb.com", "fronius.com"],
     sma: ["sunnyportal.com", "sma.energy"],
   };
-  const COOKIE_BLOAT_BYTES = 8192;   // well above a normal session (~1-2KB), well below the ~16KB+ that breaks HTTP/2
+  const COOKIE_BLOAT_BYTES = 6144;   // above a normal session (~1-2KB), below the ~8KB TOTAL-header limit that 400s solarweb/IIS ("Request Too Long")
   const COOKIE_PRUNE_COOLDOWN_MS = 20 * 60 * 1000;
   const COOKIE_PRUNE_AT_KEY = "so_cookie_pruned_at";   // { fronius: ts, sma: ts } — anti-loop
   async function cookiePruneEnabled() {
@@ -2009,15 +2009,18 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // removed (0 = healthy, left alone). Clearing a bloated, about-to-break session is
   // strictly better than letting the portal become unloadable; auto-login (or a one-time
   // manual sign-in) re-establishes a clean one.
-  async function pruneVendorCookiesIfBloated(vendor) {
+  async function pruneVendorCookiesIfBloated(vendor, opts) {
+    const force = !!(opts && opts.force);   // user-initiated open/sync → bypass the anti-loop cooldown
     try {
       if (!VENDOR_COOKIE_DOMAINS[vendor] || !(await cookiePruneEnabled())) return 0;
       const { bytes, cookies } = await vendorCookieBytes(vendor);
       if (bytes < COOKIE_BLOAT_BYTES) return 0;   // healthy — never touch a working session
       // Anti-loop: never prune the same vendor more than once per cooldown, so even if a
       // single fresh login were itself large we can't force a re-login on every recapture.
+      // A FORCE (explicit "Open to sync" / Sync-all click) skips the cooldown — the owner is
+      // actively trying and a dead 400 page is worse than one clean re-login.
       const at = (await chrome.storage.local.get(COOKIE_PRUNE_AT_KEY))[COOKIE_PRUNE_AT_KEY] || {};
-      if (at[vendor] && (Date.now() - at[vendor]) < COOKIE_PRUNE_COOLDOWN_MS) {
+      if (!force && at[vendor] && (Date.now() - at[vendor]) < COOKIE_PRUNE_COOLDOWN_MS) {
         rlog("cookie-hygiene:", vendor, "blob ~" + bytes + "B but pruned recently — cooldown, skipping");
         return 0;
       }
@@ -2028,11 +2031,39 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       }
       at[vendor] = Date.now();
       try { await chrome.storage.local.set({ [COOKIE_PRUNE_AT_KEY]: at }); } catch (_) {}
-      rlog("cookie-hygiene:", vendor, "cookie blob ~" + bytes + "B > " + COOKIE_BLOAT_BYTES + "B — cleared", n, "cookies to prevent ERR_HTTP2_PROTOCOL_ERROR (auto-login re-establishes a clean session)");
+      rlog("cookie-hygiene:", vendor, "cookie blob ~" + bytes + "B > " + COOKIE_BLOAT_BYTES + "B — cleared", n, "cookies to prevent 400 Request-Too-Long / ERR_HTTP2 (auto-login or a one-time sign-in re-establishes a clean session)");
       return n;
     } catch (e) { rlog("cookie-hygiene error", vendor, e && e.message || e); return 0; }
   }
   self.__soPruneCookies = pruneVendorCookiesIfBloated;
+
+  // UNCONDITIONAL force-clear of a vendor's cookies — the 400 "Request Too Long" recovery path.
+  // The content script calls this (via SO_RECOVER_VENDOR) when solarweb/sunnyportal has already
+  // rejected the request because the Cookie header outgrew the server limit: the portal is a dead
+  // 400 page, so a clean re-login strictly beats leaving it broken. Allowlisted to the known
+  // vendor domains only.
+  async function clearVendorCookies(vendor) {
+    try {
+      if (!VENDOR_COOKIE_DOMAINS[vendor]) return 0;
+      const { cookies } = await vendorCookieBytes(vendor);
+      let n = 0;
+      for (const c of cookies) {
+        const u = (c.secure ? "https://" : "http://") + String(c.domain || "").replace(/^\./, "") + (c.path || "/");
+        try { await chrome.cookies.remove({ url: u, name: c.name, storeId: c.storeId }); n++; } catch (_) {}
+      }
+      rlog("cookie-recover:", vendor, "force-cleared", n, "cookies after a 400 Request-Too-Long");
+      return n;
+    } catch (e) { rlog("cookie-recover error", vendor, e && e.message || e); return 0; }
+  }
+  self.__soClearVendorCookies = clearVendorCookies;
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== "SO_RECOVER_VENDOR") return;
+    const vendor = String(msg.vendor || "").toLowerCase();
+    clearVendorCookies(vendor).then((n) => sendResponse({ ok: true, cleared: n }))
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
+    return true;   // async sendResponse
+  });
 
   async function recaptureVendor(vendor, opts) {
     const url = _recapUrlFor(vendor);            // inverter vendor OR utility portal URL
@@ -2768,7 +2799,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function _armVendorForSync(v) {
     try { await chrome.storage.local.set({ so_capture_intent: { vendor: v, ts: Date.now() } }); } catch (_) {}
     if (v === "fronius" || v === "sma") {
-      try { await pruneVendorCookiesIfBloated(v); } catch (_) {}   // avoid ERR_HTTP2 on a bloated cookie blob
+      try { await pruneVendorCookiesIfBloated(v, { force: true }); } catch (_) {}   // avoid 400 Request-Too-Long / ERR_HTTP2 on a bloated blob
       try { if (typeof self.__soArmLive === "function") await self.__soArmLive(v); } catch (_) {}
     } else if (v === "chint") {
       try { if (typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}

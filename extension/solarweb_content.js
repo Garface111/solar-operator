@@ -611,6 +611,27 @@
     chrome.runtime.sendMessage({ type: "FRONIUS_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
+  // 400 "Request Too Long" recovery: solarweb rejects once the accumulated Cookie header
+  // outgrows the server's ~8KB limit (repeated keep-warm re-auths bloat it) — the app never
+  // loads, just a "Bad Request / the size of the request headers is too long" page. Clear this
+  // vendor's cookies once and reload so the owner lands on a clean login instead of a dead end.
+  // One-shot per tab (sessionStorage guard) so a persistent error can't loop.
+  function maybeRecoverFrom400() {
+    try {
+      const t = (document.title || "") + " " + (document.body ? String(document.body.innerText || "").slice(0, 600) : "");
+      if (!/Request Too Long|request headers .{0,14}too long|Error 400/i.test(t)) return false;
+      if (sessionStorage.getItem("so_fronius_400_recovered") === "1") return false;
+      sessionStorage.setItem("so_fronius_400_recovered", "1");
+      LOG("400 Request-Too-Long detected — clearing bloated Fronius cookies + reloading to a clean login");
+      chrome.runtime.sendMessage({ type: "SO_RECOVER_VENDOR", vendor: "fronius" }, () => {
+        try { void chrome.runtime.lastError; } catch (_) {}
+        setTimeout(() => { try { location.reload(); } catch (_) {} }, 500);
+      });
+      return true;
+    } catch (_) { return false; }
+  }
+
+  if (maybeRecoverFrom400()) return;   // recovering from a 400 — skip the normal capture loop this load
   tick();
   const iv = setInterval(() => {
     if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }

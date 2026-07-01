@@ -577,6 +577,26 @@
     chrome.runtime.sendMessage({ type: "SMA_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
+  // 400 "Request Too Long" recovery (mirrors the Fronius path): if sunnyportal rejects because
+  // the accumulated Cookie header outgrew the server limit, the app never loads — clear this
+  // vendor's cookies once and reload so the owner lands on a clean login instead of a dead 400.
+  // One-shot per tab (sessionStorage guard) so a persistent error can't loop.
+  function maybeRecoverFrom400() {
+    try {
+      const t = (document.title || "") + " " + (document.body ? String(document.body.innerText || "").slice(0, 600) : "");
+      if (!/Request Too Long|request headers .{0,14}too long|Error 400/i.test(t)) return false;
+      if (sessionStorage.getItem("so_sma_400_recovered") === "1") return false;
+      sessionStorage.setItem("so_sma_400_recovered", "1");
+      LOG("400 Request-Too-Long detected — clearing bloated SMA cookies + reloading to a clean login");
+      chrome.runtime.sendMessage({ type: "SO_RECOVER_VENDOR", vendor: "sma" }, () => {
+        try { void chrome.runtime.lastError; } catch (_) {}
+        setTimeout(() => { try { location.reload(); } catch (_) {} }, 500);
+      });
+      return true;
+    } catch (_) { return false; }
+  }
+
+  if (maybeRecoverFrom400()) return;   // recovering from a 400 — skip the normal capture loop this load
   tick();
   // Fast token-watcher: SMA's Bearer token only lands in localStorage AFTER the heavy
   // ennexOS SPA boots + Keycloak auth completes — often several poll intervals on a fresh
