@@ -1872,9 +1872,7 @@ def _billing_summary_kwh(t: Tenant) -> dict:
                 period_start = ps
         except Exception:  # noqa: BLE001 — never fail the summary on a Stripe hiccup
             pass
-    from .stripe_helpers import (
-        _ao_nameplate_price_id, tenant_nameplate_kw, ao_nameplate_rate_cents,
-    )
+    from .stripe_helpers import _ao_nameplate_price_id, tenant_nameplate_kw
     nameplate_active = bool(_ao_nameplate_price_id())
     with SessionLocal() as db:
         billable_arrays = db.execute(
@@ -1890,13 +1888,20 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         nameplate_kw = tenant_nameplate_kw(db, t.id) if nameplate_active else 0
     mtd_kwh = float(mtd_kwh)
     if nameplate_active:
-        # MONITORING is now billed on REGISTERED NAMEPLATE (kW) — match the live
-        # Stripe charge exactly: quantity (kW) × the price's unit_amount (cents/kW).
-        rate_cents_per_kw = ao_nameplate_rate_cents() or 30
+        # MONITORING is billed on REGISTERED NAMEPLATE (kW) under a GRADUATED
+        # volume discount (pricing_ao_nameplate — mirrors the live Stripe tiered
+        # price so this estimate matches the actual invoice to the penny; the
+        # local module, not a live Stripe unit_amount read, is the source of
+        # truth here since a tiered price has no single flat unit_amount).
+        from . import pricing_ao_nameplate as np_pricing
+        billed_kw = max(nameplate_kw, 1)
         monitoring_basis = "nameplate"
-        monitoring_total_cents = float(max(nameplate_kw, 1) * rate_cents_per_kw)
+        monitoring_total_cents = np_pricing.compute_monthly_cents(billed_kw)
+        rate_cents_per_kw = np_pricing.blended_unit_cents(billed_kw)
+        full_rate_cents_per_kw = np_pricing.FULL_UNIT_CENTS
     else:
         rate_cents_per_kw = None
+        full_rate_cents_per_kw = None
         monitoring_basis = "kwh"
         monitoring_total_cents = ao_pricing.compute_monthly_cents(mtd_kwh)
 
@@ -1930,7 +1935,8 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         # monitoring_basis: "nameplate" (per-kW, the live model) or "kwh" (legacy).
         "monitoring_basis": monitoring_basis,
         "nameplate_kw": int(nameplate_kw),
-        "rate_cents_per_kw": rate_cents_per_kw,                  # cents / kW-month (nameplate)
+        "rate_cents_per_kw": rate_cents_per_kw,                  # BLENDED cents / kW-month (nameplate; reproduces the total × kW)
+        "full_rate_cents_per_kw": full_rate_cents_per_kw,        # headline (pre-discount) cents / kW-month
         "billable_arrays": int(billable_arrays),
         "mtd_kwh": round(mtd_kwh, 1),
         "period_start": period_start.isoformat(),
@@ -1941,7 +1947,8 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         "offtaker_count": int(offtaker_count),
         "invoicing_base_cents": inv_pricing.BASE_CENTS,
         "invoicing_base_includes": inv_pricing.BASE_INCLUDES_OFFTAKERS,
-        "invoicing_per_offtaker_cents": inv_pricing.PER_OFFTAKER_CENTS,
+        "invoicing_per_offtaker_cents": inv_pricing.PER_OFFTAKER_CENTS,   # headline (pre-discount) rate
+        "invoicing_blended_cents_per_offtaker": inv_pricing.blended_unit_cents(offtaker_count),
         "invoicing_setup_cents": inv_pricing.SETUP_CENTS,
         "invoicing_total_cents": invoicing_total_cents,
         # The active plan's total — 'both' sums the per-kWh meter + invoicing line.

@@ -240,7 +240,7 @@ def test_generate_files_no_gmp_pdf_unchanged(tmp_path):
     sub = types.SimpleNamespace(gmp_invoice_pdf=None)
     with_sub = generate_files(match, ["pdf"], False, tmp_path, sub=sub)
     assert [p.name for p in with_sub] == [p.name for p in baseline]
-    assert not any(p.name.endswith("_GMP_invoice.pdf") for p in with_sub)
+    assert not any(p.name.startswith("gmp_utility_bill_") for p in with_sub)
 
 
 def test_generate_files_attaches_gmp_pdf_when_present(tmp_path):
@@ -249,7 +249,7 @@ def test_generate_files_attaches_gmp_pdf_when_present(tmp_path):
     blob = b"%PDF-1.4\n%fake GMP invoice\n"
     sub = types.SimpleNamespace(gmp_invoice_pdf=blob)
     paths = generate_files(match, ["pdf"], False, tmp_path, sub=sub)
-    gmp = [p for p in paths if p.name.endswith("_GMP_invoice.pdf")]
+    gmp = [p for p in paths if p.name.startswith("gmp_utility_bill_")]
     assert len(gmp) == 1
     assert gmp[0].read_bytes() == blob
-    assert gmp[0].name.startswith("Norwich")
+    assert "norwich" in gmp[0].name.lower()
