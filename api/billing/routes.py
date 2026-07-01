@@ -1123,6 +1123,28 @@ def invoice_archive_zip(authorization: Optional[str] = Header(default=None),
                  "X-File-Count": str(count)})
 
 
+@router.get("/gmp-expected-rate")
+def gmp_expected_rate(authorization: Optional[str] = Header(default=None),
+                      year: int = Query(...), month: int = Query(...),
+                      commission_year: Optional[int] = Query(default=None),
+                      age_years: Optional[int] = Query(default=None),
+                      regime: Optional[str] = Query(default=None)):
+    """Expected GMP $/kWh from the published rate schedule (Anna/Bruce's ask #4).
+
+    An array uses GMP Rate #1 before its 10-year anniversary, the Blended
+    Statewide Rate after — age picks the regime, year+month picks the cell.
+    Feeds the setup page's 'expected billing rate' and a bill-rate cross-check.
+    Reference only; never overrides a bill's own billed rate.
+    """
+    from ..rate_schedule_gmp import expected_gmp_rate as _er
+    tenant_from_session(authorization)  # gate to signed-in operators
+    out = _er(year, month, commission_year=commission_year,
+              age_years=age_years, regime=regime)
+    if out is None:
+        raise HTTPException(503, "GMP rate schedule unavailable")
+    return out
+
+
 @router.get("/global-rate")
 def get_global_rate(authorization: Optional[str] = Header(default=None)):
     """The operator's global billing defaults. The discount model:
