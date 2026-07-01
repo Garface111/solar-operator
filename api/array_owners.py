@@ -4400,6 +4400,72 @@ def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
                 "geometry_source": arr.geometry_source}
 
 
+class ArrayLocationBody(BaseModel):
+    place: Optional[str] = None          # a town/address to geocode ("Londonderry, VT")
+    latitude: Optional[float] = None     # OR set coordinates directly
+    longitude: Optional[float] = None
+    use_name: Optional[bool] = None      # OR geocode the array's own name
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/location")
+def set_array_location_ep(array_id: int, body: ArrayLocationBody,
+                          authorization: str | None = Header(default=None)) -> dict:
+    """Give an array a location so the weather model can run.
+
+    Inverter-onboarded arrays (Chint/Fronius/SMA/SolarEdge) have no utility
+    service address to geocode, so they can never be modeled (skipped as
+    `no_location`). This lets the operator set one — by coordinates, by geocoding
+    a place string, or by geocoding the array's own name — which unblocks the
+    predicted-vs-actual view. Unlike the geometry override, this is allowed for
+    demo tenants (a demo fleet still wants a working forecast).
+    """
+    from . import forecasting
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.id == array_id, Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+
+        lat = lng = None
+        source = "manual"
+        matched = None
+        if body.latitude is not None and body.longitude is not None:
+            if not (-90 <= body.latitude <= 90) or not (-180 <= body.longitude <= 180):
+                raise HTTPException(400, "latitude/longitude out of range")
+            lat, lng = body.latitude, body.longitude
+            matched = (body.place or f"{round(lat, 4)}, {round(lng, 4)}")
+        else:
+            query = (body.place or "").strip()
+            if not query and body.use_name:
+                # geocode the site's own name (strip a trailing size/number suffix
+                # like "Londonderry 186" → "Londonderry") — a coarse but useful default
+                import re
+                query = re.sub(r"\s+\d[\d.]*\s*(kw|kW|mw|MW)?\s*$", "", arr.name or "").strip()
+            if not query:
+                raise HTTPException(400, "Provide coordinates, a place, or use_name")
+            geo = forecasting.geocode_oneline(query)
+            if not geo:
+                raise HTTPException(422, f"Couldn't find a location for “{query}”")
+            lat, lng = geo["lat"], geo["lng"]
+            source = (geo.get("source") or "geocoded")[:24]
+            matched = geo.get("matched") or query
+
+        arr.latitude = lat
+        arr.longitude = lng
+        arr.geocode_source = source
+        arr.geocoded_address = (matched or "")[:500] if matched else None
+        arr.geocoded_at = now()
+        db.commit()
+        return {"ok": True, "array_id": arr.id, "latitude": arr.latitude,
+                "longitude": arr.longitude, "geocode_source": arr.geocode_source,
+                "geocoded_address": arr.geocoded_address, "modeled": True}
+
+
 @router.get("/v1/array-owners/forecast-fleet")
 def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
                       authorization: str | None = Header(default=None)) -> dict:
