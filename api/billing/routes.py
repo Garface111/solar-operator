@@ -336,6 +336,71 @@ def list_bundle(authorization: Optional[str] = Header(default=None)):
     }
 
 
+def _arrays_and_accounts_for_tenant(t) -> tuple[list[dict], list[dict]]:
+    """Shared pick-list for the offtaker-matcher flows (bulk-import v2 + commit).
+
+    Returns (arrays, utility_accounts) in the shapes offtaker_match.match_array
+    expects AND the frontend needs to build correction dropdowns:
+      arrays           = [{id, name}, ...]
+      utility_accounts = [{utility_account_id, array_id, array_name, nickname,
+                           provider, account_number, has_bill, utility_label}, ...]
+
+    The utility_accounts payload is the SAME source as GET /utility-accounts (so
+    the shapes never drift) — we call that handler and enrich each row with a
+    precomputed `utility_label` for the review UI. Arrays are the light id/name
+    query used by list-bundle. Tenant-scoped throughout.
+    """
+    from ..models import Array
+    from .offtaker_match import _utility_label
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Array)
+            .where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
+            .order_by(Array.name)
+        ).scalars().all()
+        arrays = [{"id": a.id, "name": a.name} for a in rows]
+
+    # Reuse the utility-accounts handler verbatim (it re-derives auth from the
+    # tenant is not possible — it needs the header — so we rebuild the same query
+    # here tenant-scoped rather than re-authing). Keep it byte-shaped like the
+    # /utility-accounts payload plus account_number (already returned there).
+    from ..models import UtilityAccount, Bill, Array as _Array
+    from ..adapters.smarthub import ALL_SMARTHUB_PROVIDERS
+
+    uaccts: list[dict] = []
+    with SessionLocal() as db:
+        accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                or_(UtilityAccount.provider == "gmp",
+                    UtilityAccount.provider.in_(sorted(ALL_SMARTHUB_PROVIDERS))),
+                UtilityAccount.deleted_at.is_(None),
+            ).order_by(UtilityAccount.nickname, UtilityAccount.account_number)
+        ).scalars().all()
+        for a in accts:
+            latest = db.execute(
+                select(Bill)
+                .where(Bill.account_id == a.id,
+                       Bill.kwh_generated.isnot(None),
+                       Bill.period_end.isnot(None))
+                .order_by(Bill.period_end.desc())
+            ).scalars().first()
+            arr = db.get(_Array, a.array_id) if a.array_id else None
+            row = {
+                "utility_account_id": a.id,
+                "account_number": a.account_number,
+                "nickname": a.nickname,
+                "provider": a.provider,
+                "array_id": a.array_id,
+                "array_name": arr.name if arr else None,
+                "has_bill": latest is not None,
+            }
+            row["utility_label"] = _utility_label(row)
+            uaccts.append(row)
+    return arrays, uaccts
+
+
 def _parse_formats(raw: Optional[str]) -> list[str]:
     if not raw:
         return ["pdf"]
@@ -566,6 +631,64 @@ async def _create_manual_subscription(
     name = (customer_name or "").strip()
     if not name:
         raise HTTPException(400, "customer_name is required for a manual customer")
+
+    # ── ARRAY-FIRST resolution (Ford, 2026-07-01) ────────────────────────────
+    # The offtaker binding model is ARRAY-FIRST with a utility-bill override: the
+    # operator names the ARRAY, and we resolve WHICH utility bill invoices it FROM.
+    # When array_id is given WITHOUT an explicit utility_account_id, look up the
+    # array's linked GMP/VEC utility account(s) and pick the one to bill from:
+    #   * prefer an account that actually HAS a settled bill;
+    #   * if exactly one billable account, use it;
+    #   * if MULTIPLE billable accounts and none is unambiguous, require an
+    #     explicit utility_account_id override (400) — never guess which bill.
+    # If resolved, we set utility_account_id and fall through to the OFFTAKER↔
+    # UTILITY BILL path (a single, audited billing binding). If the array has NO
+    # connected utility bill at all, we DON'T error — we fall through to the
+    # legacy array-generation path below (allocation_pct × the array's measured
+    # generation), which is a supported billing mode for generation-only arrays.
+    # (An explicit utility_account_id always wins and skips this resolution.)
+    if utility_account_id is None and array_id is not None and not array_allocations:
+        from ..models import UtilityAccount as _UA, Array as _Arr, Bill
+        from ..adapters import is_smarthub_provider as _is_sh
+        with SessionLocal() as _db:
+            _arr = _db.get(_Arr, array_id)
+            if _arr is None or _arr.tenant_id != t.id or _arr.deleted_at is not None:
+                raise HTTPException(404, f"Array {array_id} not found")
+            _accts = _db.execute(
+                select(_UA).where(
+                    _UA.array_id == array_id,
+                    _UA.tenant_id == t.id,
+                    _UA.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            # Only GMP / VEC-SmartHub accounts can bill an offtaker invoice.
+            _billable = [a for a in _accts
+                         if (a.provider or "").lower() == "gmp"
+                         or _is_sh((a.provider or "").lower())]
+            if _billable:
+                # Prefer accounts with a settled bill; if that narrows to exactly
+                # one, use it. Else if a single billable account overall, use it.
+                # Anything still ambiguous demands an explicit override.
+                _with_bill = []
+                for a in _billable:
+                    _has = _db.execute(
+                        select(func.count(Bill.id)).where(
+                            Bill.account_id == a.id, Bill.kwh_generated.isnot(None))
+                    ).scalar() or 0
+                    if _has:
+                        _with_bill.append(a)
+                if len(_with_bill) == 1:
+                    utility_account_id = _with_bill[0].id
+                elif len(_with_bill) == 0 and len(_billable) == 1:
+                    utility_account_id = _billable[0].id
+                elif len(_billable) == 1:
+                    utility_account_id = _billable[0].id
+                else:
+                    raise HTTPException(
+                        400, "This array has multiple connected utility bills — "
+                             "pass utility_account_id to choose which one invoices "
+                             "this offtaker.")
+            # else: no billable account → fall through to legacy generation path.
 
     # ── OFFTAKER ↔ UTILITY BILL path (highest priority) ──────────────────────
     if utility_account_id is not None:
@@ -902,29 +1025,41 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
         return {"ok": True, "subscription": _sub_dict(sub)}
 
 
-# ── BULK OFFTAKER IMPORT (Ford, 2026-06-30) ──────────────────────────────────
-# A roster CSV (name, email, percent share, account number) → many offtakers at
-# once instead of one-at-a-time through the manual form. Built for operators
-# scaling past a handful of offtakers — the "100 offtakers" case. Deterministic
-# header detection (no LLM), matching the codebase's existing heuristic
-# spreadsheet-column-detector pattern. CSV only (not .xlsx) — a roster has no
-# visual layout to preserve, so plain CSV keeps parsing trivial and dependency-free.
+# ── BULK OFFTAKER IMPORT v2 (Ford, 2026-07-01 — the "flawless" upload) ────────
+# A roster (.csv OR .xlsx) → many offtakers at once. v2 is ARRAY-FIRST: the
+# operator names each offtaker's ARRAY (human name) and we FUZZY-MATCH it to the
+# tenant's arrays (offtaker_match.match_array), returning a confidence class +
+# correctable alternatives so a wrong array→offtaker match can never slip through
+# to a wrong invoice. Deterministic header detection (no LLM). "Scrape as much as
+# possible": unrecognized columns are kept per-row in `extra` so nothing is lost.
+# The dry-run PREVIEW never writes; the separate bulk-commit endpoint writes only
+# the reviewed/corrected rows the frontend sends back.
 _BULK_HEADER_ALIASES = {
     "name": {"name", "offtakername", "customername", "customer", "offtaker",
               "tenantname", "clientname", "fullname"},
+    # ARRAY NAME (bulk-import v2, Ford 2026-07-01) — the array this offtaker draws
+    # from. Fuzzy-matched to the tenant's arrays; now a REQUIRED column.
+    "array": {"array", "arrayname", "arrayid", "site", "sitename", "arraysite",
+              "project", "projectname", "solararray", "generator"},
     "email": {"email", "clientemail", "offtakeremail", "customeremail", "contactemail",
               "emailaddress"},
     "percent": {"percent", "pct", "share", "allocation", "allocationpct",
-                "percentage", "offtakerpct", "sharepct", "%"},
+                "percentage", "offtakerpct", "sharepct"},
     "account_number": {"accountnumber", "accountno", "account", "acctnumber", "acctno",
                         "gmpaccount", "utilityaccount", "meternumber", "meterno",
                         "accountnum", "acct"},
     "discount": {"discount", "discountpct", "discountpercent"},
+    # Optional per-offtaker net rate ($/kWh) scraped when present.
+    "rate": {"rate", "rateperkwh", "creditrate", "netrate", "netrateperkwh",
+             "price", "priceperkwh", "usdperkwh"},
 }
 
 
 def _bulk_norm_header(s: str) -> str:
-    return _re.sub(r"[^a-z0-9%]", "", (s or "").lower())
+    # Drop everything but a-z0-9. The '%' sign is treated as noise so headers
+    # like "Share %" / "Discount %" normalize to "share" / "discount" and match
+    # their aliases (a trailing % glued on would otherwise break exact matching).
+    return _re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
 def _bulk_classify_columns(header_row: list[str]) -> dict[str, int]:
@@ -942,17 +1077,96 @@ def _bulk_classify_columns(header_row: list[str]) -> dict[str, int]:
     return mapping
 
 
-async def _read_csv_upload(file: UploadFile) -> bytes:
-    """Same size/empty guards as _read_upload, but NO xlsx-magic-bytes gate — that
-    gate is specific to the billing-workbook flow and would reject every CSV
-    outright (caught live: it raised "Upload an .xlsx billing workbook" against a
-    real CSV during testing). A roster import is plain text, not a workbook."""
+async def _read_roster_upload(file: UploadFile) -> bytes:
+    """Read a roster upload with the same size/empty guards as the billing-
+    workbook path but WITHOUT the xlsx-magic-bytes gate (that gate rejects CSVs).
+    Accepts both .csv (plain text) and .xlsx (OpenXML). Returns raw bytes; the
+    caller sniffs the type."""
     data = await file.read()
     if not data:
         raise HTTPException(400, "The uploaded file is empty")
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "File too large (max 8 MB)")
     return data
+
+
+def _roster_rows(raw: bytes, filename: str) -> list[list[str]]:
+    """Parse a roster's bytes into a list of string rows (header + data), from
+    EITHER .xlsx or .csv. xlsx is detected by the ZIP/OpenXML magic (PK\\x03\\x04);
+    everything else is treated as delimited text. Every cell is stringified +
+    stripped so downstream parsing is uniform regardless of source format."""
+    name = (filename or "").lower()
+    is_xlsx = raw[:4] == _MAGIC_XLSX or name.endswith(".xlsx")
+    if is_xlsx:
+        # Reuse openpyxl (already a dependency; the matcher/invoice_writer use it).
+        from openpyxl import load_workbook
+        try:
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(
+                422, "Couldn't read that .xlsx — re-save it from Excel/Google "
+                     "Sheets, or export as CSV.")
+        ws = wb.active
+        rows: list[list[str]] = []
+        for r in ws.iter_rows(values_only=True):
+            rows.append(["" if c is None else str(c).strip() for c in r])
+        wb.close()
+        return rows
+    # CSV / delimited text.
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception:
+            raise HTTPException(
+                422, "Couldn't read that file — upload a .csv or .xlsx "
+                     "(Excel/Google Sheets: File → Download).")
+    return [[(c or "").strip() for c in row] for row in csv.reader(io.StringIO(text))]
+
+
+def _bulk_pct(raw: str) -> tuple[Optional[float], Optional[str]]:
+    """Parse a percent cell to a fraction in (0,1]. Accepts "25", "25%", "0.25".
+    Returns (value, None) or (None, error_message)."""
+    if not raw:
+        return None, "missing percent"
+    try:
+        v = float(raw.replace("%", "").strip())
+    except ValueError:
+        return None, f'"{raw}" isn\'t a number'
+    if v > 1.0:
+        v = v / 100.0  # accept "25" or "25%" or "0.25" — never "2500%"
+    if not (0.0 < v <= 1.0):
+        return None, "percent must be between 0 and 100"
+    return v, None
+
+
+def _bulk_discount(raw: str) -> tuple[Optional[float], Optional[str]]:
+    """Parse a discount cell to a fraction in [0,1). None when blank."""
+    if not raw:
+        return None, None
+    try:
+        v = float(raw.replace("%", "").strip())
+    except ValueError:
+        return None, f'"{raw}" isn\'t a valid discount'
+    if v > 1.0:
+        v = v / 100.0
+    if not (0.0 <= v < 1.0):
+        return None, "discount must be between 0 and 100 (and under 100)"
+    return v, None
+
+
+def _bulk_rate(raw: str) -> tuple[Optional[float], Optional[str]]:
+    """Parse an optional $/kWh net-rate cell. None when blank."""
+    if not raw:
+        return None, None
+    try:
+        v = float(raw.replace("$", "").strip())
+    except ValueError:
+        return None, f'"{raw}" isn\'t a valid rate ($/kWh)'
+    if v < 0 or v > MAX_RATE_PER_KWH:
+        return None, f"rate must be between 0 and {MAX_RATE_PER_KWH} $/kWh"
+    return v, None
 
 
 @router.post("/subscriptions/bulk-import")
@@ -963,14 +1177,21 @@ async def bulk_import_offtakers(
     delivery_mode: str = Form(default="approval"),
     authorization: Optional[str] = Header(default=None),
 ):
-    """Create many offtakers at once from a roster CSV.
+    """Bulk-import v2 — parse a roster (.csv/.xlsx) and return a per-row, fuzzy-
+    matched, CORRECTABLE preview (dry_run defaults True — a PREVIEW, never writes).
 
-    Always parses + matches first (dry_run defaults True — a PREVIEW, no writes).
-    The frontend shows the matched/unmatched table, the operator fixes or accepts,
-    then re-posts with dry_run=false to actually create. Only rows with ZERO
-    errors are ever created — a row this can't confidently match is reported
-    back, never guessed at (the same "never fabricate" rule as everywhere else
-    in this codebase: a wrong offtaker binding means a wrong invoice).
+    The frontend renders the preview table with a per-row array dropdown (built
+    from the returned `arrays` pick-list + each row's `alternatives`), the operator
+    reviews/corrects, then posts the reviewed rows to POST .../bulk-commit. This
+    endpoint NEVER auto-writes — even with dry_run=false it returns the same
+    preview and points the caller at bulk-commit (the two paths are decoupled so a
+    correction round-trip can't force a re-parse). A wrong array→offtaker match
+    makes a wrong invoice, so medium/none-confidence matches surface for review and
+    are never silently committed.
+
+    Required columns: offtaker `name`, `array` (name), `percent`.
+    Optional/scraped: `email`, `discount`, `rate`/`credit_rate`, `account_number`,
+    plus any UNRECOGNIZED columns preserved per-row in `extra`.
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
@@ -979,34 +1200,29 @@ async def bulk_import_offtakers(
     if delivery_mode not in VALID_DELIVERY:
         raise HTTPException(400, "delivery_mode must be approval or auto")
 
-    raw = await _read_csv_upload(file)
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        try:
-            text = raw.decode("latin-1")
-        except Exception:
-            raise HTTPException(422, "Couldn't read that file as text — please upload a CSV "
-                                      "(export from Excel/Google Sheets: File → Download → CSV).")
-    rows = list(csv.reader(io.StringIO(text)))
+    from .offtaker_match import match_array
+
+    raw = await _read_roster_upload(file)
+    rows = _roster_rows(raw, file.filename or "")
     if not rows:
         raise HTTPException(422, "That file is empty.")
     header, *data_rows = rows
     colmap = _bulk_classify_columns(header)
-    missing = [f for f in ("name", "percent") if f not in colmap]
-    if missing:
+    missing_cols = [f for f in ("name", "array", "percent") if f not in colmap]
+    if missing_cols:
         raise HTTPException(
-            422, "Couldn't find a column for: " + ", ".join(missing) + ". "
-                 "Include a header row with Name and Percent (and ideally Account Number "
-                 "so each offtaker links to the right utility bill).")
+            422, "Couldn't find a column for: " + ", ".join(missing_cols) + ". "
+                 "Include a header row with Offtaker (name), Array, and Share % "
+                 "(download the template for the exact layout).")
 
-    from ..models import UtilityAccount
-    with SessionLocal() as db:
-        accts = db.execute(select(UtilityAccount).where(
-            UtilityAccount.tenant_id == t.id, UtilityAccount.deleted_at.is_(None)
-        )).scalars().all()
-    by_number = {(a.account_number or "").strip().lower(): a for a in accts if a.account_number}
-    single_acct = accts[0] if len(accts) == 1 else None
+    # Pick-list for matching + the frontend correction dropdowns.
+    arrays, uaccts = _arrays_and_accounts_for_tenant(t)
+    ua_by_number = {(u.get("account_number") or "").strip().lower(): u
+                    for u in uaccts if u.get("account_number")}
+    ua_by_id = {u["utility_account_id"]: u for u in uaccts}
+
+    # Which header indices are "recognized" — everything else feeds `extra`.
+    recognized_idx = set(colmap.values())
 
     def _cell(row: list[str], field: str) -> str:
         idx = colmap.get(field)
@@ -1014,103 +1230,292 @@ async def bulk_import_offtakers(
             return ""
         return (row[idx] or "").strip()
 
-    def _pct(raw: str) -> tuple[Optional[float], Optional[str]]:
-        if not raw:
-            return None, "missing percent"
-        try:
-            v = float(raw.replace("%", "").strip())
-        except ValueError:
-            return None, f'"{raw}" isn\'t a number'
-        if v > 1.0:
-            v = v / 100.0  # accept "25" or "25%" or "0.25" — never "2500%"
-        if not (0.0 < v <= 1.0):
-            return None, "percent must be between 0 and 100"
-        return v, None
-
-    results = []
+    results: list[dict] = []
     for i, row in enumerate(data_rows, start=2):  # row 1 is the header
-        name = _cell(row, "name")
-        if not name and not any(c.strip() for c in row):
+        if not any((c or "").strip() for c in row):
             continue  # silently skip a wholly-blank trailing line
-        errors = []
-        if not name:
-            errors.append("missing name")
+        errors: list[str] = []
+        missing: list[str] = []
 
-        pct, pct_err = _pct(_cell(row, "percent"))
-        if pct_err:
+        name = _cell(row, "name")
+        if not name:
+            missing.append("name")
+        array_raw = _cell(row, "array")
+        if not array_raw:
+            missing.append("array")
+
+        pct, pct_err = _bulk_pct(_cell(row, "percent"))
+        if pct_err == "missing percent":
+            missing.append("percent")
+        elif pct_err:
             errors.append(pct_err)
 
         email = _cell(row, "email") or None
-        acct_num = _cell(row, "account_number")
-        acct = None
-        if acct_num:
-            acct = by_number.get(acct_num.strip().lower())
-            if acct is None:
-                errors.append(f'no connected utility account matches "{acct_num}"')
-        elif single_acct:
-            acct = single_acct  # only one utility account on file — safe unambiguous default
-        else:
-            errors.append("no account number given, and more than one utility account is "
-                           "connected — add an Account Number column to disambiguate")
+        discount, disc_err = _bulk_discount(_cell(row, "discount"))
+        if disc_err:
+            errors.append(disc_err)
+        rate, rate_err = _bulk_rate(_cell(row, "rate"))
+        if rate_err:
+            errors.append(rate_err)
 
-        discount_raw = _cell(row, "discount")
-        discount = None
-        if discount_raw:
-            try:
-                discount = float(discount_raw.replace("%", "").strip())
-                if discount > 1.0:
-                    discount = discount / 100.0
-            except ValueError:
-                errors.append(f'"{discount_raw}" isn\'t a valid discount')
+        # Preserve unrecognized columns verbatim ("scrape as much as possible").
+        extra: dict[str, str] = {}
+        for idx, cell in enumerate(row):
+            if idx in recognized_idx:
+                continue
+            key = header[idx].strip() if idx < len(header) else f"col{idx}"
+            val = (cell or "").strip()
+            if key and val:
+                extra[key] = val
+
+        # ── Fuzzy array match (the heart of v2). ─────────────────────────────
+        m = match_array(array_raw, arrays, uaccts) if array_raw else {
+            "array_id": None, "array_name": None, "utility_account_id": None,
+            "utility_label": None, "provider": None, "confidence": "none",
+            "alternatives": [], "flags": ["no_match"],
+        }
+
+        # An explicit account_number column, when present, OVERRIDES the fuzzy
+        # utility-account choice (the operator was precise; honor it) — but only
+        # to a utility account belonging to this tenant.
+        acct_num = _cell(row, "account_number")
+        matched_ua_id = m.get("utility_account_id")
+        matched_ua_label = m.get("utility_label")
+        provider = m.get("provider")
+        if acct_num:
+            ua = ua_by_number.get(acct_num.strip().lower())
+            if ua is None:
+                errors.append(f'no connected utility account matches "{acct_num}"')
+            else:
+                matched_ua_id = ua["utility_account_id"]
+                matched_ua_label = ua.get("utility_label")
+                provider = ua.get("provider")
+
+        # Bill availability of the finally-chosen account decides ready-ness.
+        chosen_ua = ua_by_id.get(matched_ua_id) if matched_ua_id else None
+        has_bill = bool(chosen_ua and chosen_ua.get("has_bill"))
+        confidence = m.get("confidence", "none")
 
         results.append({
-            "row": i, "name": name, "email": email, "allocation_pct": pct,
-            "account_number": acct_num or None,
-            "matched_account_id": acct.id if acct else None,
-            "matched_account_label": (
-                f"{(acct.provider or '').upper()} · {acct.account_number}"
-                + (f" · {acct.nickname}" if acct.nickname else "")
-            ) if acct else None,
+            "row": i,
+            "offtaker_name": name or None,
+            "array_name_raw": array_raw or None,
+            "matched_array_id": m.get("array_id"),
+            "matched_array_name": m.get("array_name"),
+            "matched_utility_account_id": matched_ua_id,
+            "matched_utility_label": matched_ua_label,
+            "provider": provider,
+            "confidence": confidence,
+            "alternatives": m.get("alternatives", []),
+            "allocation_pct": pct,
+            "email": email,
             "discount_pct": discount,
+            "extra": extra,
+            "missing": missing,
             "errors": errors,
         })
 
     if not results:
         raise HTTPException(422, "No offtaker rows found below the header.")
 
-    if dry_run:
-        return {"ok": True, "dry_run": True, "rows": results, "summary": {
-            "total": len(results),
-            "ready": sum(1 for r in results if not r["errors"]),
-            "needs_attention": sum(1 for r in results if r["errors"]),
-        }}
-
-    # COMMIT — only rows with zero errors are created; everything else reports back
-    # untouched so the operator can fix the source CSV and re-run (idempotent: a
-    # second import just creates new rows for whatever's still missing — it doesn't
-    # know about "already imported", so re-uploading the FULL roster after a partial
-    # fix will duplicate the rows that already landed. Surfaced in the frontend copy.)
-    created, failed = [], []
-    for r in results:
+    def _status(r: dict) -> str:
+        if r["missing"]:
+            return "blocked"
         if r["errors"]:
-            failed.append(r)
+            return "blocked"
+        # ready needs: no errors, high/exact confidence, AND a settled bill to
+        # price from. Everything matched-but-uncertain (or no bill) is review.
+        chosen = ua_by_id.get(r["matched_utility_account_id"]) if r["matched_utility_account_id"] else None
+        has_bill = bool(chosen and chosen.get("has_bill"))
+        if r["confidence"] in ("exact", "high") and has_bill:
+            return "ready"
+        return "needs_review"
+
+    summary = {"total": len(results), "ready": 0, "needs_review": 0, "blocked": 0}
+    for r in results:
+        summary[_status(r)] += 1
+
+    return {
+        "ok": True,
+        "dry_run": True,  # this endpoint is always a preview; commit is separate
+        "rows": results,
+        "summary": summary,
+        # The FULL pick-list so the frontend can build correction dropdowns.
+        "arrays": [
+            {
+                "array_id": u["array_id"],
+                "array_name": u.get("array_name"),
+                "utility_account_id": u["utility_account_id"],
+                "utility_label": u.get("utility_label"),
+                "provider": u.get("provider"),
+                "has_bill": u.get("has_bill"),
+            }
+            for u in uaccts
+        ],
+    }
+
+
+class _BulkCommitRow(BaseModel):
+    offtaker_name: str
+    array_id: Optional[int] = None
+    utility_account_id: int
+    allocation_pct: float
+    email: Optional[str] = None
+    discount_pct: Optional[float] = None
+
+
+class BulkCommitBody(BaseModel):
+    rows: list[_BulkCommitRow]
+    cadence: str = "monthly"
+    delivery_mode: str = "approval"
+
+
+@router.post("/subscriptions/bulk-commit")
+async def bulk_commit_offtakers(body: BulkCommitBody,
+                                authorization: Optional[str] = Header(default=None)):
+    """Commit reviewed/corrected offtaker rows (decoupled from re-parsing).
+
+    The frontend sends this AFTER the operator reviews the bulk-import preview and
+    fixes any matches. Each row is created via _create_manual_subscription bound to
+    the row's array_id + utility_account_id (both validated as belonging to the
+    tenant). Idempotent: a row whose (tenant, customer_name, utility_account_id)
+    already matches a LIVE subscription is SKIPPED (never duplicated), so re-running
+    a partially-committed batch is safe.
+
+    Returns {ok, created, skipped, failed:[{offtaker_name, error}]}.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if body.cadence not in VALID_CADENCE:
+        raise HTTPException(400, "cadence must be monthly or quarterly")
+    if body.delivery_mode not in VALID_DELIVERY:
+        raise HTTPException(400, "delivery_mode must be approval or auto")
+    if not body.rows:
+        raise HTTPException(400, "No rows to commit.")
+
+    from ..models import UtilityAccount
+
+    # Pre-validate every utility account belongs to the tenant + is a billing
+    # provider, and snapshot existing (name, ua) subs for idempotency — one query.
+    with SessionLocal() as db:
+        owned_ua = {
+            a.id: a for a in db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.tenant_id == t.id,
+                    UtilityAccount.deleted_at.is_(None))
+            ).scalars().all()
+        }
+        existing = db.execute(
+            select(BillingReportSubscription.customer_name,
+                   BillingReportSubscription.utility_account_id).where(
+                BillingReportSubscription.tenant_id == t.id,
+                BillingReportSubscription.deleted_at.is_(None))
+        ).all()
+    existing_keys = {((n or "").strip().lower(), ua) for (n, ua) in existing}
+
+    created: list[dict] = []
+    skipped: list[dict] = []
+    failed: list[dict] = []
+    for r in body.rows:
+        name = (r.offtaker_name or "").strip()
+        if not name:
+            failed.append({"offtaker_name": r.offtaker_name, "error": "missing offtaker_name"})
             continue
+        ua = owned_ua.get(r.utility_account_id)
+        if ua is None:
+            failed.append({"offtaker_name": name,
+                           "error": f"utility account {r.utility_account_id} not found"})
+            continue
+        # Idempotency: skip a row that already exists live.
+        if (name.lower(), r.utility_account_id) in existing_keys:
+            skipped.append({"offtaker_name": name,
+                            "utility_account_id": r.utility_account_id,
+                            "reason": "already exists"})
+            continue
+        # _create_manual_subscription is async but performs only sync DB work; the
+        # OFFTAKER↔UTILITY-BILL path validates array_id + utility_account_id
+        # ownership + provider itself and persists the binding.
         try:
             out = await _create_manual_subscription(
-                t, customer_name=r["name"], array_id=None, allocation_pct=r["allocation_pct"],
-                utility_account_id=r["matched_account_id"], rate_per_kwh=None,
-                discount_pct=r["discount_pct"], net_rate_per_kwh=None,
-                cadence=cadence, send_mode=("to_client" if r["email"] else "to_me"),
-                delivery_mode=delivery_mode, client_email=r["email"], cc_emails=None,
-                operator_email=None, formats=None, include_summary=False,
-                annual_trueup=False, enabled=True,
+                t, customer_name=name, array_id=r.array_id,
+                allocation_pct=r.allocation_pct,
+                utility_account_id=r.utility_account_id, rate_per_kwh=None,
+                discount_pct=r.discount_pct, net_rate_per_kwh=None,
+                cadence=body.cadence,
+                send_mode=("to_client" if r.email else "to_me"),
+                delivery_mode=body.delivery_mode, client_email=r.email,
+                cc_emails=None, operator_email=None, formats=None,
+                include_summary=False, annual_trueup=False, enabled=True,
             )
-            created.append({"row": r["row"], "name": r["name"],
-                             "subscription_id": out["subscription"]["id"]})
         except HTTPException as e:
-            failed.append({**r, "errors": [str(e.detail)]})
-    return {"ok": True, "dry_run": False, "created": len(created), "failed": failed,
-            "rows": created}
+            failed.append({"offtaker_name": name, "error": str(e.detail)})
+            continue
+        created.append({"offtaker_name": name,
+                        "subscription_id": out["subscription"]["id"]})
+        existing_keys.add((name.lower(), r.utility_account_id))
+
+    return {"ok": True, "created": len(created), "created_rows": created,
+            "skipped": skipped, "failed": failed}
+
+
+@router.get("/offtaker-template.xlsx")
+def offtaker_template_xlsx():
+    """A blank, ready-to-fill offtaker-roster .xlsx for the bulk import.
+
+    Header row: Array | Offtaker | Share % | Email | Discount % — matching the
+    bulk-import v2 column aliases — plus a few realistic example rows and a second
+    "Instructions" sheet. No auth: it's a static blank template (no tenant data).
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Offtakers"
+    headers = ["Array", "Offtaker", "Share %", "Email", "Discount %"]
+    ws.append(headers)
+    # Realistic examples (share as whole-number percents — the importer accepts
+    # "25", "25%" and "0.25" alike).
+    examples = [
+        ["Maple Street Solar", "Jane Offtaker", 25, "jane@example.com", 10],
+        ["Maple Street Solar", "Green Grocer LLC", 40, "ap@greengrocer.com", 0],
+        ["Route 7 Community Array", "Town of Elsewhere", 15, "clerk@elsewhere.gov", 5],
+    ]
+    for row in examples:
+        ws.append(row)
+    # Widen the columns so the template is legible on open.
+    for col, width in zip("ABCDE", (26, 24, 10, 28, 12)):
+        ws.column_dimensions[col].width = width
+
+    info = wb.create_sheet("Instructions")
+    notes = [
+        ["How to fill this in"],
+        [""],
+        ["Array", "The name of the solar array. We'll fuzzy-match it to your "
+                  "arrays, so it doesn't have to be exact — you can correct any "
+                  "match before importing."],
+        ["Offtaker", "The customer's name (who receives the invoice)."],
+        ["Share %", "This offtaker's share of that array (e.g. 25 for 25%). "
+                    "Accepts 25, 25%, or 0.25."],
+        ["Email", "Optional. The customer's email (leave blank to keep sends to "
+                  "yourself for now)."],
+        ["Discount %", "Optional. A discount off the credit rate (e.g. 10 for 10%)."],
+        [""],
+        ["Tip", "You can add extra columns (account number, notes, etc.) — we "
+                "keep them with each row and show them during review."],
+    ]
+    for row in notes:
+        info.append(row)
+    info.column_dimensions["A"].width = 16
+    info.column_dimensions["B"].width = 72
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    data = buf.getvalue()
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="offtaker-template.xlsx"'})
 
 
 class GlobalRatePatch(BaseModel):
