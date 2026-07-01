@@ -1,17 +1,22 @@
-"""QuickBooks / Xero batch invoice-export (Array Operator).
+"""Batch invoice-export for QuickBooks AND Xero (Array Operator).
 
-Anna/Bruce's ask #3: "a spreadsheet of the invoice data built that can be imported
-into Quickbooks or Xero." Produces a CSV of the current period's offtaker invoices
-in the exact column layout of the sample Bruce sent (Norwich Racquet Club's
-export, "NRC Invoices April 2026.CSV") so it drops straight into her bookkeeping
-import mapping:
+Anna/Bruce's ask #3: "a spreadsheet of the invoice data that can be imported into
+QuickBooks or Xero." QuickBooks and Xero use DIFFERENT import layouts, so this
+emits a DIFFERENT CSV per platform (Ford, 2026-07-01):
 
-    Customer , … , Num , , Date , Due Date , , Description , Qty , Open Balance , <acct>
+  • xero        → Xero's Sales-Invoice import columns (ContactName, EmailAddress,
+                  InvoiceNumber, InvoiceDate, DueDate, Description, Quantity,
+                  UnitAmount, AccountCode, TaxType).
+  • quickbooks  → QuickBooks Online's invoice-import columns (InvoiceNo, Customer,
+                  InvoiceDate, DueDate, Item(Product/Service), ItemDescription,
+                  ItemQuantity, ItemRate, ItemAmount).
 
-Only offtakers with a REAL billable invoice this period are emitted — no
-fabricated $0 rows. Dollar figures and dates come from the same build_match /
+Only offtakers with a REAL billable invoice this period are emitted — never a
+fabricated $0 row. Dollar figures + dates come from the same build_match /
 invoice_for_period path the PDF/XLSX invoices use, so the export never drifts
-from what the customer is actually billed.
+from what the customer is actually billed. Dates are M/D/YYYY (US); tax type,
+account code, and the product/service name are operator-settable because the
+exact values depend on the operator's own QuickBooks/Xero chart of accounts.
 """
 from __future__ import annotations
 
@@ -27,21 +32,18 @@ from ..models import BillingReportSubscription
 from .delivery import build_match
 from .invoice import invoice_for_period
 
-# Column offsets in the NRC sample (0-indexed). Kept as one map so the layout is
-# trivially adjustable if Anna's import expects a different arrangement.
-COL_CUSTOMER = 0
-COL_NUM = 10
-COL_DATE = 12
-COL_DUE = 13
-COL_DESC = 15
-COL_QTY = 16
-COL_AMOUNT = 17     # "Open Balance" in the sample header
-COL_ACCT = 18       # unlabeled account-code column (e.g. 400/401/402)
-_WIDTH = 19
+XERO_HEADER = ["ContactName", "EmailAddress", "InvoiceNumber", "InvoiceDate",
+               "DueDate", "Description", "Quantity", "UnitAmount", "AccountCode",
+               "TaxType"]
+QB_HEADER = ["InvoiceNo", "Customer", "InvoiceDate", "DueDate",
+             "Item(Product/Service)", "ItemDescription", "ItemQuantity",
+             "ItemRate", "ItemAmount"]
+
+_QB_ALIASES = {"quickbooks", "qb", "qbo"}
 
 
 def _mdY(v) -> str:
-    """M/D/YYYY with no leading zeros, matching the sample (e.g. 4/2/2026)."""
+    """M/D/YYYY, no leading zeros (e.g. 6/30/2026)."""
     if v is None:
         return ""
     d = v
@@ -56,50 +58,48 @@ def _mdY(v) -> str:
         return str(v)
 
 
-def _blank_row() -> list:
-    return [""] * _WIDTH
-
-
-def _header_row() -> list:
-    row = _blank_row()
-    row[COL_CUSTOMER] = "Customer"
-    row[COL_NUM] = "Num"
-    row[COL_DATE] = "Date"
-    row[COL_DUE] = "Due Date"
-    row[COL_DESC] = "Description"
-    row[COL_QTY] = "Qty"
-    row[COL_AMOUNT] = "Open Balance"
-    return row
-
-
-def _invoice_row(inv: dict, account_code: str) -> Optional[list]:
-    """One export line for a built invoice, or None when there's nothing billable
-    (no amount) — we never emit a fabricated $0 invoice."""
+def _invoice_fields(inv: dict, sub) -> Optional[dict]:
+    """Normalized fields for one billable invoice, or None when there's nothing
+    to bill (no amount) — we never emit a fabricated $0 invoice."""
     budget_on = bool(inv.get("budget_override")) and inv.get("budgeted_amount") is not None
     amount = inv.get("budgeted_amount") if budget_on else inv.get("amount_owed")
     if amount is None or float(amount) == 0.0:
         return None
     month = inv.get("month") or (inv.get("period_end") or "")[:7]
-    desc = f"Solar credit — {month}" if month else "Solar credit"
-    row = _blank_row()
-    row[COL_CUSTOMER] = inv.get("customer_name") or "Customer"
-    row[COL_NUM] = str(inv.get("invoice_number") or "")
-    row[COL_DATE] = _mdY(inv.get("invoice_date"))
-    row[COL_DUE] = _mdY(inv.get("due_date"))
-    row[COL_DESC] = desc
-    row[COL_QTY] = 1
-    row[COL_AMOUNT] = round(float(amount), 2)
-    row[COL_ACCT] = account_code or ""
-    return row
+    return {
+        "customer": inv.get("customer_name") or "Customer",
+        "email": (getattr(sub, "client_email", None) or ""),
+        "number": str(inv.get("invoice_number") or ""),
+        "date": _mdY(inv.get("invoice_date")),
+        "due": _mdY(inv.get("due_date")),
+        "desc": f"Solar credit — {month}" if month else "Solar credit",
+        "amount": round(float(amount), 2),
+    }
+
+
+def _xero_row(f: dict, account_code: str, tax_type: str) -> list:
+    return [f["customer"], f["email"], f["number"], f["date"], f["due"],
+            f["desc"], 1, f["amount"], account_code or "", tax_type or ""]
+
+
+def _qb_row(f: dict, item_name: str) -> list:
+    return [f["number"], f["customer"], f["date"], f["due"], item_name or "Solar Credit",
+            f["desc"], 1, f["amount"], f["amount"]]
+
+
+def normalize_format(fmt: Optional[str]) -> str:
+    return "quickbooks" if (fmt or "").strip().lower() in _QB_ALIASES else "xero"
 
 
 def build_invoice_register(
-    db: Session, tenant_id: str, account_code: str = "",
+    db: Session, tenant_id: str, account_code: str = "", fmt: str = "xero",
+    tax_type: str = "", item_name: str = "Solar Credit",
     invoice_date: Optional[date] = None,
 ) -> tuple[str, int]:
-    """Build the QB/Xero invoice-register CSV for a tenant's current-period
-    offtaker invoices. Returns (csv_text, row_count). Best-effort per offtaker —
-    one bad subscription never sinks the whole export."""
+    """Build the invoice-export CSV for a tenant's current-period offtaker invoices
+    in the QuickBooks or Xero layout. Returns (csv_text, row_count). Best-effort
+    per offtaker — one bad subscription never sinks the whole export."""
+    fmt = normalize_format(fmt)
     invoice_date = invoice_date or date.today()
     subs = db.execute(
         select(BillingReportSubscription).where(
@@ -110,7 +110,13 @@ def build_invoice_register(
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(_header_row())
+    if fmt == "quickbooks":
+        w.writerow(QB_HEADER)
+        row_fn = lambda f: _qb_row(f, item_name)          # noqa: E731
+    else:
+        w.writerow(XERO_HEADER)
+        row_fn = lambda f: _xero_row(f, account_code, tax_type)  # noqa: E731
+
     count = 0
     for sub in subs:
         try:
@@ -118,10 +124,10 @@ def build_invoice_register(
             if not match.matched or not match.latest_period:
                 continue
             inv = invoice_for_period(match, match.latest_period, invoice_date)
-            row = _invoice_row(inv, account_code)
+            f = _invoice_fields(inv, sub)
         except Exception:
-            row = None      # never let one offtaker break the batch
-        if row is not None:
-            w.writerow(row)
+            f = None      # never let one offtaker break the batch
+        if f is not None:
+            w.writerow(row_fn(f))
             count += 1
     return buf.getvalue(), count

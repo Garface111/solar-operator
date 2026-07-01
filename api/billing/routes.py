@@ -1138,24 +1138,32 @@ def reconcile_bills_route(authorization: Optional[str] = Header(default=None)):
 
 @router.get("/invoice-export.csv")
 def invoice_export_csv(authorization: Optional[str] = Header(default=None),
-                       account_code: str = Query(default="")):
-    """QuickBooks / Xero batch invoice-export (Anna/Bruce's ask #3).
+                       account_code: str = Query(default=""),
+                       format: str = Query(default="xero"),
+                       tax_type: str = Query(default=""),
+                       item_name: str = Query(default="Solar Credit")):
+    """Batch invoice-export for QuickBooks OR Xero (Anna/Bruce's ask #3).
 
-    Emits the current period's offtaker invoices as a CSV in the exact column
-    layout of Anna's bookkeeping export, ready to import into QB or Xero. Only
-    offtakers with a real billable invoice are included — never a fabricated $0
-    row. `account_code` fills the trailing account-code column if the operator
-    maps solar income to a specific account.
+    `format=xero` emits Xero's Sales-Invoice import columns; `format=quickbooks`
+    emits QuickBooks Online's invoice-import columns — the two platforms need
+    different layouts. Only offtakers with a real billable invoice are included —
+    never a fabricated $0 row. `account_code` (Xero AccountCode), `tax_type`
+    (Xero TaxType), and `item_name` (QuickBooks Product/Service) are operator-set
+    since they depend on the operator's own chart of accounts.
     """
-    from .qb_export import build_invoice_register
+    from .qb_export import build_invoice_register, normalize_format
     t = tenant_from_session(authorization)
+    fmt = normalize_format(format)
     with SessionLocal() as db:
-        csv_text, count = build_invoice_register(db, t.id, account_code=account_code)
-    fname = f"offtaker-invoices-{date.today().isoformat()}.csv"
+        csv_text, count = build_invoice_register(
+            db, t.id, account_code=account_code, fmt=fmt,
+            tax_type=tax_type, item_name=item_name)
+    label = "quickbooks" if fmt == "quickbooks" else "xero"
+    fname = f"offtaker-invoices-{label}-{date.today().isoformat()}.csv"
     return Response(
         content=csv_text, media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{fname}"',
-                 "X-Invoice-Count": str(count)})
+                 "X-Invoice-Count": str(count), "X-Export-Format": label})
 
 
 @router.get("/invoice-archive")

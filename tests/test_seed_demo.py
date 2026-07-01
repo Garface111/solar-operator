@@ -39,9 +39,12 @@ def test_seed_lights_up_the_whole_pipeline():
         assert arch["months"][0]["invoice_count"] > 0
 
         # QB/Xero export has real invoice rows (header + data lines).
-        csv_text, count = build_invoice_register(db, DEMO_TENANT_ID)
+        csv_text, count = build_invoice_register(db, DEMO_TENANT_ID)  # Xero default
         assert count > 0, "expected real billable invoices in the export"
-        assert csv_text.splitlines()[0].startswith("Customer")
+        assert csv_text.splitlines()[0].startswith("ContactName")
+        qb_text, qb_count = build_invoice_register(db, DEMO_TENANT_ID, fmt="quickbooks")
+        assert qb_count == count
+        assert qb_text.splitlines()[0].startswith("InvoiceNo")
 
 
 def test_review_emails_batched_one_digest_per_operator():
