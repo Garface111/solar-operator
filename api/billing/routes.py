@@ -1096,6 +1096,33 @@ def invoice_export_csv(authorization: Optional[str] = Header(default=None),
                  "X-Invoice-Count": str(count)})
 
 
+@router.get("/invoice-archive")
+def invoice_archive_manifest(authorization: Optional[str] = Header(default=None)):
+    """Browsable invoice-archive manifest (Anna/Bruce's ask #2): months → arrays →
+    offtakers, with what's available for each (invoice / offtaker bill / array
+    bill). Read-only; built on demand from the same source the live invoices use."""
+    from .invoice_archive import list_archive
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        return list_archive(db, t.id)
+
+
+@router.get("/invoice-archive.zip")
+def invoice_archive_zip(authorization: Optional[str] = Header(default=None),
+                        month: Optional[str] = Query(default=None)):
+    """Download a month's invoice archive as a .zip laid out per Bruce:
+    <month>/<array>/{invoice, each offtaker bill, the array's own bill}. Defaults
+    to the latest month present. Missing files are omitted, never fabricated."""
+    from .invoice_archive import build_archive_zip
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        data, fname, count = build_archive_zip(db, t.id, month=month)
+    return Response(
+        content=data, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                 "X-File-Count": str(count)})
+
+
 @router.get("/global-rate")
 def get_global_rate(authorization: Optional[str] = Header(default=None)):
     """The operator's global billing defaults. The discount model:
