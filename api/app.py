@@ -1637,6 +1637,27 @@ def admin_create_tenant(body: dict, _: None = Depends(_require_admin)):
     return {"tenant_id": tid, "tenant_key": key, "name": name}
 
 
+@app.post("/admin/seed-realistic-demo")
+def admin_seed_realistic_demo(arrays: int = 12, offtakers_per_array: int = 5,
+                              x_seed_token: str | None = Header(default=None)):
+    """Provision the realistic demo tenant — Ford's testable 'real data' account
+    (large Array Operator tenant with real-shaped GMP bills so invoices, the
+    bill-accuracy check, the archive, and the QB/Xero export all light up).
+
+    Gated by the SEED_DEMO_TOKEN env var, set out-of-band. Unset => disabled
+    (404), so this can never run unless deliberately armed. Idempotent: re-seeding
+    wipes and rebuilds the fixed demo tenant only — no other tenant is touched.
+    """
+    import os as _os
+    token = _os.getenv("SEED_DEMO_TOKEN")
+    if not token:
+        raise HTTPException(404, "Not found")
+    if not hmac.compare_digest(x_seed_token or "", token):
+        raise HTTPException(403, "Invalid seed token")
+    from .seed_demo import seed_realistic_demo
+    return seed_realistic_demo(arrays=arrays, offtakers_per_array=offtakers_per_array)
+
+
 @app.get("/admin/tenants")
 def admin_list_tenants(_: None = Depends(_require_admin)):
     with SessionLocal() as db:
