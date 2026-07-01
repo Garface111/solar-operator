@@ -2703,21 +2703,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // don't collide with each other. onInstalled covers install + version-update;
   // onStartup covers a plain browser relaunch (persisted alarms usually survive it, but
   // this is the belt-and-suspenders re-assert).
-  // ── Sync ALL vendors at once (concurrent) + Close all vendor tabs ───────────
-  // Ford: one click opens every vendor portal in the BACKGROUND simultaneously; each
-  // captures on its existing session and closes itself the instant its data lands.
-  // Runs ALONGSIDE — not through — the single-surface recapture state machine (which is
-  // one-at-a-time): we open our own tabs, track them, and a capture-observer closes each
-  // on its *_CAPTURED message, with a watchdog backstop. Fronius/SMA/SolarEdge ride this
-  // bare background-tab path (active:false). Chint is handled separately via
-  // recaptureVendor("chint") — a background tab that arms the capture intent and drives the
-  // v1.9.77 programmatic per-site route walk (no click), self-deleting via recapFinish + the
-  // recap-reaper — because the bare path neither arms that intent nor waits for the walk.
-  const SYNC_PORTALS = {
-    fronius: "https://www.solarweb.com/",
-    sma: "https://ennexos.sunnyportal.com/",
-    solaredge: "https://monitoring.solaredge.com/",
-  };
+  // ── Sync ALL vendors (v1.9.104: SEQUENTIAL foreground) + Close all vendor tabs ──
+  // Ford (v1.9.104): "none of Chint/Fronius/SMA refresh" on Sync-all. Root cause: the old
+  // sweep opened every portal in a HIDDEN background tab (active:false), but these vendor SPAs
+  // capture ZERO when not visible — Chint is explicitly foreground-only, and Fronius/SMA only
+  // fetch their dashboards when focused. A tidy invisible sweep that captures nothing is worse
+  // than a visible one that works. So Sync-all now cycles each vendor through the SAME proven
+  // foreground path the single "Open <vendor> to sync" button uses (see syncAllVendors below),
+  // one visible tab at a time. solaredge is omitted — it's pulled server-side via API.
   // Vendor portal tab patterns for Close-all (within our granted host_permissions).
   const VENDOR_TAB_PATS = [
     "https://monitoring.solaredge.com/*",
@@ -2759,68 +2752,85 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } catch (_) {}
   });
 
-  async function syncAllVendors(vendors) {
-    // Sync-all is an explicit "do this in the background, don't move me" action — cancel any
-    // pending foreground-open return so a vendor landing mid-Sync-all can never pull focus.
-    try { await chrome.storage.local.remove("so_return_tab"); } catch (_) {}
-    const reqList = (Array.isArray(vendors) && vendors.length ? vendors : Object.keys(SYNC_PORTALS).concat("chint"))
-      .map((v) => String(v).toLowerCase());
-    const want = reqList.filter((v) => SYNC_PORTALS[v]);   // solaredge / fronius / sma
-    const wantChint = reqList.includes("chint");
-    // Clear a bloated cookie blob before opening each portal so a user-initiated "Sync all"
-    // can't land on an ERR_HTTP2_PROTOCOL_ERROR page (no-op for vendors without a domain set).
-    for (const v of want) { try { await pruneVendorCookiesIfBloated(v); } catch (_) {} }
-    // PARALLEL — arm a PER-VENDOR so_sync_intent for all three portal vendors at once and open
-    // their tabs concurrently, so the whole sweep finishes in ~the slowest single vendor (not
-    // the sum). so_sync_intent is ADDITIVE: every portal content script checks it IN ADDITION
-    // to the single so_capture_intent slot (which the single-vendor flows still own), and each
-    // clears ONLY its own vendor key on success — so the three can't cannibalize each other the
-    // way one shared slot did. Auto-login still fires per tab: the chrome.tabs.onUpdated SSO
-    // trigger resolves the vendor via _captureTabVendor's _syncTabs branch, and the auto-login
-    // path has no global single-flight, so three different-origin logins run concurrently. This
-    // also fixes Fronius — its slow identifier-first WSO2 login no longer has to fit a tight
-    // serial budget; it gets the full ~60s watchdog like everyone else.
-    const now = Date.now();
-    const syncIntent = {};
-    for (const v of want) syncIntent[v] = now;
-    try { await chrome.storage.local.set({ so_sync_intent: syncIntent }); } catch (_) {}
+  // Portal roots for the SEQUENTIAL foreground sweep. Chint IS included now (v1.9.104) —
+  // it just has to ride a visible tab, same as the others.
+  const SYNC_PORTAL_URL = {
+    fronius: "https://www.solarweb.com/",
+    sma: "https://ennexos.sunnyportal.com/",
+    chint: "https://monitor.chintpowersystems.com/",
+  };
+  const SYNC_ORDER = ["fronius", "sma", "chint"];   // solaredge is pulled server-side (API) — never portal-scraped here
+  const SYNC_CAPTURED_TYPE = { fronius: "FRONIUS_CAPTURED", sma: "SMA_CAPTURED", chint: "CHINT_CAPTURED" };
+  const SYNC_PER_VENDOR_MS = 75 * 1000;   // room for a lapsed-session SSO re-login (esp. SMA) + Chint's multi-site walk
 
-    const opened = [];
-    await Promise.all(want.map((v) => new Promise((res) => {
+  // Arm ONE vendor exactly the way the working single "Open <vendor> to sync" button does
+  // (OPEN_UTILITY_PORTAL): the single so_capture_intent slot + that vendor's live-refresh.
+  async function _armVendorForSync(v) {
+    try { await chrome.storage.local.set({ so_capture_intent: { vendor: v, ts: Date.now() } }); } catch (_) {}
+    if (v === "fronius" || v === "sma") {
+      try { await pruneVendorCookiesIfBloated(v); } catch (_) {}   // avoid ERR_HTTP2 on a bloated cookie blob
+      try { if (typeof self.__soArmLive === "function") await self.__soArmLive(v); } catch (_) {}
+    } else if (v === "chint") {
+      try { if (typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}
+    }
+  }
+
+  // Open one vendor's portal in a VISIBLE (foreground) tab and resolve when it captures
+  // (its *_CAPTURED message) or a per-vendor watchdog fires. Always closes the tab before
+  // resolving so the next vendor gets a clean, focused surface.
+  function _openAndAwaitCapture(v) {
+    return new Promise((resolve) => {
+      let tabId = null, settled = false, timer = null;
+      const finish = (captured) => {
+        if (settled) return; settled = true;
+        try { chrome.runtime.onMessage.removeListener(onMsg); } catch (_) {}
+        if (timer) clearTimeout(timer);
+        // A captured tab just POSTed its payload in the *_CAPTURED message itself (the real
+        // handler already has the data), but give it a short beat before closing to be safe.
+        setTimeout(() => {
+          if (tabId != null) { try { chrome.tabs.remove(tabId, () => void chrome.runtime.lastError); } catch (_) {} }
+          resolve({ vendor: v, captured });
+        }, captured ? 1500 : 0);
+      };
+      const onMsg = (m) => { try { if (m && m.type === SYNC_CAPTURED_TYPE[v]) finish(true); } catch (_) {} };
+      chrome.runtime.onMessage.addListener(onMsg);
+      timer = setTimeout(() => finish(false), SYNC_PER_VENDOR_MS);
       try {
-        chrome.tabs.create({ url: SYNC_PORTALS[v], active: false }, (tab) => {
-          if (!chrome.runtime.lastError && tab && typeof tab.id === "number") {
-            _syncTabs.set(tab.id, { vendor: v, openedAt: Date.now() });
-            opened.push(tab.id);
-          }
-          res();
+        chrome.tabs.create({ url: SYNC_PORTAL_URL[v], active: true }, (tab) => {
+          if (chrome.runtime.lastError || !tab || typeof tab.id !== "number") { finish(false); return; }
+          tabId = tab.id;
         });
-      } catch (_) { res(); }
-    })));
+      } catch (_) { finish(false); }
+    });
+  }
 
-    // Chint is NOT auto-opened here. Its monitoring SPA only renders + fetches data in a VISIBLE
-    // tab — a MINIMIZED/background surface (what the old popup used) runs nothing, so the capture
-    // saw an empty page and wrongly reported "no session" even when the owner was signed in
-    // (confirmed live: a normal tab captures every inverter; the minimized window captures zero).
-    // A plain background tab DOES render but its SPA yanks itself to the foreground during the
-    // route walk (focus-steal). So Chint is CLICK-TO-CONNECT: the page shows "Sign in to add
-    // Chint", and the click opens monitor.chintpowersystems.com in a FOREGROUND tab
-    // (OPEN_UTILITY_PORTAL — Chint is not in the cookie-wipe list, so an existing login rides),
-    // where the walk reliably captures, then so_return_tab brings the owner back here.
+  // SEQUENTIAL FOREGROUND sweep. Hidden/background tabs capture ZERO for these vendor SPAs —
+  // Chint is explicitly foreground-only (recaptureVendor refuses it), and Fronius/SMA only
+  // fetch their dashboards when visible. The old "open every portal in a silent background tab"
+  // sweep looked tidy but captured nothing (Ford: "none of Chint/Fronius/SMA refresh"). So
+  // Sync-all now cycles each vendor through the SAME proven foreground capture the single
+  // "Open <vendor> to sync" button uses — arm intent → open a visible tab → wait for *_CAPTURED
+  // (or a watchdog) → close → next — then returns the operator to the AO tab. Only one portal is
+  // ever visible at a time (that's a hard SPA constraint), so this is inherently serial.
+  async function syncAllVendors(vendors, originTab) {
+    // clear any stale background-sweep / foreground-return state before a fresh sweep
+    try { await chrome.storage.local.remove(["so_sync_intent", "so_return_tab"]); } catch (_) {}
+    const reqList = (Array.isArray(vendors) && vendors.length ? vendors : SYNC_ORDER)
+      .map((v) => String(v).toLowerCase());
+    const want = SYNC_ORDER.filter((v) => reqList.includes(v) && SYNC_PORTAL_URL[v]);   // stable order, supported+requested
 
-    // Generous ~60s watchdog: close any sync tab that never captured (lapsed session / slow SSO
-    // re-login), then drop so_sync_intent so a stale ts can't make a later single-vendor visit
-    // auto-scrape unexpectedly (the per-vendor TTL bounds it anyway). Captured tabs self-close
-    // earlier via the SYNC_CAPTURED observer.
-    const ids = opened.slice();
-    setTimeout(async () => {
-      for (const id of ids) {
-        if (_syncTabs.has(id)) { _syncTabs.delete(id); try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (_) {} }
-      }
-      try { await chrome.storage.local.remove("so_sync_intent"); } catch (_) {}
-    }, 110 * 1000);   // room for a lapsed-session SSO re-login (esp. SMA) before reaping a sync tab
-
-    return { ok: true, opened: opened.length, vendors: want.slice() };   // Chint is click-to-connect, not opened here
+    const results = [];
+    for (const v of want) {
+      await _armVendorForSync(v);
+      results.push(await _openAndAwaitCapture(v));
+    }
+    try { await chrome.storage.local.remove("so_capture_intent"); } catch (_) {}
+    // bring the operator back to the Array Operator tab they launched the sweep from
+    if (originTab && typeof originTab.id === "number") {
+      try { chrome.tabs.update(originTab.id, { active: true }, () => void chrome.runtime.lastError); } catch (_) {}
+    }
+    const captured = results.filter((r) => r.captured).map((r) => r.vendor);
+    return { ok: true, requested: want, captured, results };
   }
 
   function closeAllVendorTabs() {
@@ -2839,9 +2849,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || msg.type !== "SYNC_ALL_VENDORS") return;
-    syncAllVendors(msg.vendors).then(sendResponse)
-      .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
-    return true;   // async sendResponse
+    // ACK IMMEDIATELY, then run the visible sweep fire-and-forget. The sweep is now sequential
+    // and can take a couple of minutes; the AO page only waits ~3s for this ack before falling
+    // back to its own path, so we must NOT hold the response until the sweep finishes (that
+    // would trigger a conflicting second sweep). The content scripts capture independently and
+    // the sweep re-focuses the AO tab when done.
+    try { syncAllVendors(msg.vendors, sender && sender.tab).catch((e) => console.warn("[so] syncAll failed", e)); } catch (_) {}
+    sendResponse({ ok: true, started: true });
+    // sync response — do not return true
   });
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || msg.type !== "CLOSE_ALL_VENDOR_TABS") return;
