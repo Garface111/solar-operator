@@ -67,21 +67,56 @@ _PERIOD_END = datetime(2026, 6, 30)
 
 
 def _wipe(db, tid: str) -> None:
-    """FK-safe bulk delete of every tenant-scoped row for a re-seed. Children
-    before parents. report_drafts.subscription_id references
-    billing_report_subscriptions — and a draft's OWN tenant_id can't be trusted to
-    match, so delete drafts by the actual FK (subscription_id of THIS tenant's
-    subs) first; that's bulletproof. Then bills.account_id + subs.* reference
-    utility_accounts; utility_accounts.array_id references arrays; arrays.client_id
-    references clients — so accounts/arrays/clients come after subs."""
-    sub_ids = [r[0] for r in db.query(BillingReportSubscription.id)
-               .filter(BillingReportSubscription.tenant_id == tid).all()]
-    if sub_ids:
-        db.query(ReportDraft).filter(
-            ReportDraft.subscription_id.in_(sub_ids)).delete(synchronize_session=False)
-    for model in (Bill, ReportDraft, ReportDelivery, DailyGeneration,
-                  BillingReportSubscription, UtilityAccount, Array, Client):
+    """Remove EVERY trace of the demo tenant for a clean re-seed. The tenant
+    accumulates child rows from background jobs (drafts, inverters, captures, …),
+    so this: (a) disables FK triggers for the wipe when the DB role allows it (so
+    cross-table order can't bite), and (b) deletes every tenant-scoped table by
+    tenant_id in a children-first order (which also works if the trigger disable
+    isn't permitted) PLUS the one array-child that lacks tenant_id
+    (inverter_connections) by array_id — leaving no orphans."""
+    from sqlalchemy import text
+    from . import models as _m
+
+    arr_ids = [r[0] for r in db.query(Array.id).filter(Array.tenant_id == tid).all()]
+
+    fk_off = False
+    try:
+        db.execute(text("SET session_replication_role = 'replica'"))
+        fk_off = True
+    except Exception:
+        db.rollback()
+
+    # The one array-child without a tenant_id column → delete by array_id.
+    if arr_ids and getattr(_m, "InverterConnection", None) is not None:
+        db.query(_m.InverterConnection).filter(
+            _m.InverterConnection.array_id.in_(arr_ids)).delete(synchronize_session=False)
+
+    # Every tenant-scoped table, children before parents (getattr-guarded so a
+    # renamed/absent model is simply skipped).
+    order = [
+        "ReportDraft", "OfftakerSubscriptionTemplate",       # → subscriptions
+        "InverterReading", "InverterDaily", "Inverter",      # → inverters/arrays
+        "Bill", "GmpUsageRaw", "GmpDailyGeneration", "DailyGeneration",  # → accounts/arrays
+        "ReportDelivery", "WarrantyClaim", "VerificationCheck", "CaptureEvent",
+        "SiteFile", "AlertEvent", "InverterAlertState", "ArrayMergeDismissal",
+        "ClientMergeDismissal", "OfftakerInvoiceTemplate", "Job", "LoginToken",
+        "DeleteHistory", "SpongeProgress", "StripeEvent", "GmpDailyGeneration",
+        "BillingReportSubscription",                          # after sub-children
+        "UtilitySession", "UtilityAccount",                   # after bills
+        "Array", "Client",                                    # last
+    ]
+    for nm in order:
+        model = getattr(_m, nm, None)
+        if model is None or not hasattr(model, "tenant_id"):
+            continue
         db.query(model).filter(model.tenant_id == tid).delete(synchronize_session=False)
+
+    if fk_off:
+        try:
+            db.execute(text("SET session_replication_role = 'origin'"))
+        except Exception:
+            pass
+
     t = db.get(Tenant, tid)
     if t is not None:
         db.delete(t)
