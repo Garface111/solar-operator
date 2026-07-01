@@ -67,11 +67,18 @@ _PERIOD_END = datetime(2026, 6, 30)
 
 
 def _wipe(db, tid: str) -> None:
-    """FK-safe bulk delete of every tenant-scoped row for a re-seed. Order matters:
-    delete CHILDREN before parents — report_drafts.subscription_id references
-    billing_report_subscriptions; bills.account_id + subs.* reference
+    """FK-safe bulk delete of every tenant-scoped row for a re-seed. Children
+    before parents. report_drafts.subscription_id references
+    billing_report_subscriptions — and a draft's OWN tenant_id can't be trusted to
+    match, so delete drafts by the actual FK (subscription_id of THIS tenant's
+    subs) first; that's bulletproof. Then bills.account_id + subs.* reference
     utility_accounts; utility_accounts.array_id references arrays; arrays.client_id
-    references clients. So: leaf rows first, then subs, then accounts/arrays/clients."""
+    references clients — so accounts/arrays/clients come after subs."""
+    sub_ids = [r[0] for r in db.query(BillingReportSubscription.id)
+               .filter(BillingReportSubscription.tenant_id == tid).all()]
+    if sub_ids:
+        db.query(ReportDraft).filter(
+            ReportDraft.subscription_id.in_(sub_ids)).delete(synchronize_session=False)
     for model in (Bill, ReportDraft, ReportDelivery, DailyGeneration,
                   BillingReportSubscription, UtilityAccount, Array, Client):
         db.query(model).filter(model.tenant_id == tid).delete(synchronize_session=False)
