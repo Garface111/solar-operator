@@ -10,6 +10,7 @@ os.environ.setdefault("SOLAR_DATA_DIR", "/tmp/ao_recon_test")
 from datetime import date, datetime
 import secrets
 
+from sqlalchemy import select
 from api.db import SessionLocal
 from api.models import (Tenant, Array, UtilityAccount, Bill, DailyGeneration,
                         BillingReportSubscription, Client)
@@ -175,3 +176,69 @@ def test_end_to_end_real_resolver_own_bill_plus_share():
     assert bad["array_group_excess_kwh"] == 28772.0
     assert good["status"] == "match", good
     assert rep["allocation_flagged"] == 1, rep["allocation_counts"]
+
+
+def test_audit_by_array_groups_master_and_offtakers(monkeypatch):
+    """The bill-audit sandbox: array master (group excess) on top, offtakers
+    underneath with should-be vs GMP-credited + a flag, grouped per utility."""
+    tid = "ten_audit_" + secrets.token_hex(3)
+    RATE = 0.16
+    GROUP = 28772.0
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="Audit",
+                      contact_email=f"{tid}@e.com", active=True, product="array_operator"))
+        db.flush()
+        arr = Array(tenant_id=tid, name="Londonderry", region="VT"); db.add(arr); db.flush()
+        host = UtilityAccount(tenant_id=tid, provider="gmp", account_number="HOST",
+                              array_id=arr.id)
+        db.add(host); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=host.id, period_start=datetime(2026, 6, 1),
+                    period_end=datetime(2026, 6, 30), kwh_generated=28788,
+                    kwh_sent_to_grid=GROUP, is_net_metered=True))
+
+        def _off(name, share, credited):
+            acct = UtilityAccount(tenant_id=tid, provider="gmp",
+                                  account_number=name[:8], nickname=name)
+            db.add(acct); db.flush()
+            db.add(Bill(tenant_id=tid, account_id=acct.id, period_start=datetime(2026, 6, 1),
+                        period_end=datetime(2026, 6, 30), kwh_sent_to_grid=credited,
+                        solar_credit_usd=round(credited * RATE, 2), is_net_metered=True))
+            c = Client(tenant_id=tid, name=name, active=True); db.add(c); db.flush()
+            db.add(BillingReportSubscription(
+                tenant_id=tid, client_id=c.id, customer_name=name, array_id=arr.id,
+                allocation_pct=1.0, array_share_pct=share, utility_account_id=acct.id,
+                billing_model="percent_of_array", cadence="monthly"))
+        _off("Brooks House", 0.2553, 7343.0)     # rigged (implies 28,762)
+        _off("Norwich Inn", 0.30, 8632.0)        # clean (30% of 28,772 ≈ 8,631.6)
+        db.commit()
+
+    import api.rate_schedule as _rs
+    monkeypatch.setattr(_rs, "resolve_offtaker_excess_credit",
+                        lambda db, acct_id, label=None: _CREDIT.get(acct_id))
+    # resolve each offtaker account to its credited excess by looking up its bill
+    with SessionLocal() as db:
+        from api.models import Bill as _B, UtilityAccount as _UA
+        global _CREDIT
+        _CREDIT = {}
+        for acc in db.execute(select(_UA).where(_UA.tenant_id == tid,
+                                                _UA.array_id.is_(None))).scalars():
+            b = db.execute(select(_B).where(_B.account_id == acc.id)).scalars().first()
+            _CREDIT[acc.id] = (float(b.kwh_sent_to_grid), round(float(b.kwh_sent_to_grid) * RATE, 2),
+                               RATE, None, None, "2026-06", "bill_cash")
+        audit = reconcile_bills.audit_by_array(db, tid)
+
+    assert audit["ok"]
+    assert audit["totals"]["arrays"] == 1
+    assert audit["totals"]["offtakers"] == 2
+    assert audit["totals"]["flagged"] == 1
+    util = audit["utilities"][0]
+    assert util["provider"] == "gmp"
+    arr_a = util["arrays"][0]
+    assert arr_a["array_name"] == "Londonderry"
+    assert arr_a["group_excess_kwh"] == 28772.0
+    assert arr_a["flagged"] == 1
+    by_name = {o["customer_name"]: o for o in arr_a["offtakers"]}
+    assert by_name["Brooks House"]["status"] == "mismatch"
+    assert by_name["Brooks House"]["gmp_credited_kwh"] == 7343.0
+    assert abs(by_name["Brooks House"]["should_be_kwh"] - 7345.5) < 0.3
+    assert by_name["Norwich Inn"]["status"] == "match"

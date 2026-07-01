@@ -1541,6 +1541,18 @@ def reconcile_bills_route(authorization: Optional[str] = Header(default=None)):
         return reconcile_tenant(db, t.id)
 
 
+@router.get("/audit-by-array")
+def audit_by_array_route(authorization: Optional[str] = Header(default=None)):
+    """The bill-audit sandbox (Anna/Bruce): the fleet organized as GMP allocates
+    it — per utility, each array's master bill on top with its offtakers'
+    should-be vs GMP-credited math underneath, flagged where GMP got it wrong.
+    Read-only; reuses the same allocation cross-check as /reconcile-bills."""
+    from .reconcile_bills import audit_by_array
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        return audit_by_array(db, t.id)
+
+
 @router.get("/invoice-export.csv")
 def invoice_export_csv(authorization: Optional[str] = Header(default=None),
                        account_code: str = Query(default=""),

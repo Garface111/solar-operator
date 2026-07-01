@@ -446,3 +446,105 @@ def reconcile_tenant(db: Session, tenant_id: str) -> dict:
         "allocation_dollars_flagged": round(alloc_dollars, 2),
         "subscriptions": results,
     }
+
+
+def _array_provider(db: Session, array_id: int) -> Optional[str]:
+    """The utility provider of the array's OWN (host) account — for the audit
+    sandbox's per-utility sub-tabs (gmp / vec / smarthub / …)."""
+    return db.execute(
+        select(UtilityAccount.provider).where(UtilityAccount.array_id == array_id)
+        .order_by(UtilityAccount.id)
+    ).scalars().first()
+
+
+def audit_by_array(db: Session, tenant_id: str) -> dict:
+    """The "bill audit sandbox" (Anna/Bruce): organize the fleet as GMP itself
+    allocates it — the ARRAY's master bill on top (its group excess), each
+    offtaker's OWN bill underneath (their share, what GMP credited them, what they
+    SHOULD be by the math, the delta, and a flag when GMP got it wrong), grouped
+    into per-utility sub-tabs. Reuses the exact per-offtaker allocation math from
+    reconcile_subscription so the sandbox and the invoice cross-check never drift.
+
+    Returns {utilities:[{provider, arrays:[{array_id, array_name, group_excess_kwh,
+    credit_rate, period, flagged, offtakers:[{sub_id, customer_name, share_pct,
+    gmp_credited_kwh, should_be_kwh, delta_kwh, delta_dollars, status, note}]}]}],
+    totals:{arrays, offtakers, flagged, dollars_flagged}}.
+    """
+    from .delivery import _normalized_allocations  # lazy — delivery imports this pkg
+
+    subs = db.execute(
+        select(BillingReportSubscription).where(
+            BillingReportSubscription.tenant_id == tenant_id,
+            BillingReportSubscription.deleted_at.is_(None))
+        .order_by(BillingReportSubscription.customer_name)
+    ).scalars().all()
+
+    arrays: dict[int, dict] = {}
+    total_flagged = 0
+    total_dollars = 0.0
+    for sub in subs:
+        aid = getattr(sub, "array_id", None)
+        allocs = _normalized_allocations(sub)
+        if aid is None and allocs:
+            aid = allocs[0]["array_id"]
+        if aid is None:
+            continue
+        rep = reconcile_subscription(db, sub)
+        a = rep.get("allocation") or {}
+        entry = arrays.get(aid)
+        if entry is None:
+            arr = db.get(Array, aid)
+            entry = {
+                "array_id": aid,
+                "array_name": arr.name if arr else f"Array {aid}",
+                "provider": (_array_provider(db, aid) or "other"),
+                "group_excess_kwh": a.get("array_group_excess_kwh"),
+                "credit_rate": a.get("credit_rate"),
+                "flagged": 0,
+                "offtakers": [],
+            }
+            arrays[aid] = entry
+        # The group excess comes from the array's own bill — fill it from the first
+        # offtaker that resolved it (they all read the same host bill).
+        if entry["group_excess_kwh"] is None and a.get("array_group_excess_kwh") is not None:
+            entry["group_excess_kwh"] = a["array_group_excess_kwh"]
+        if entry["credit_rate"] is None and a.get("credit_rate") is not None:
+            entry["credit_rate"] = a["credit_rate"]
+        share = getattr(sub, "array_share_pct", None) or sub.allocation_pct
+        flagged = a.get("status") == "mismatch"
+        if flagged:
+            entry["flagged"] += 1
+            total_flagged += 1
+            if a.get("delta_dollars"):
+                total_dollars += float(a["delta_dollars"])
+        entry["offtakers"].append({
+            "sub_id": sub.id,
+            "customer_name": sub.customer_name,
+            "share_pct": round(share, 6) if share else None,
+            "gmp_credited_kwh": a.get("offtaker_credited_kwh"),
+            "should_be_kwh": a.get("expected_kwh"),
+            "delta_kwh": a.get("delta_kwh"),
+            "delta_dollars": a.get("delta_dollars"),
+            "status": a.get("status"),
+            "note": a.get("note"),
+        })
+
+    # Group arrays into per-utility sub-tabs.
+    by_provider: dict[str, list] = {}
+    for entry in arrays.values():
+        by_provider.setdefault(entry["provider"], []).append(entry)
+    utilities = [
+        {"provider": prov, "arrays": sorted(arrs, key=lambda x: x["array_name"])}
+        for prov, arrs in sorted(by_provider.items())
+    ]
+    total_offtakers = sum(len(e["offtakers"]) for e in arrays.values())
+    return {
+        "ok": True,
+        "utilities": utilities,
+        "totals": {
+            "arrays": len(arrays),
+            "offtakers": total_offtakers,
+            "flagged": total_flagged,
+            "dollars_flagged": round(total_dollars, 2),
+        },
+    }
