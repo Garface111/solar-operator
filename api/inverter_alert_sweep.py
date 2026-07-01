@@ -143,6 +143,66 @@ def _live_dark_inverters(tree: dict) -> list[dict]:
     return out
 
 
+# ── Live "low vs peers" underperformance (mirrors the dashboard's liveVerdict
+# "low", Ford 2026-07-01). An inverter PRODUCING but sitting well below its
+# siblings right now — a partial string loss, heavy soiling, or a derating
+# inverter — that the 14-day window hasn't caught yet. Flagged when >15% below
+# the peer MEDIAN output-per-nameplate, with the same freshness + genuinely-up
+# guards as live_dark so weather never pages.
+LIVE_LOW_DEFICIT = 0.15         # >15% below the peer median pct-of-max
+LIVE_LOW_MIN_PEER_MED = 0.30    # only judge when the cohort is genuinely producing
+LIVE_LOW_GRACE_HOURS = 2        # must persist across sweeps (not a passing cloud)
+
+
+def _pct_of_max(inv: dict):
+    """Current output as a fraction of rated nameplate, or None."""
+    np = inv.get("nameplate_kw")
+    p = inv.get("current_power_w")
+    if p is None or not np:
+        return None
+    try:
+        return float(p) / (float(np) * 1000.0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _live_low_inverters(tree: dict) -> list[dict]:
+    """Inverters that 14-day health calls 'ok' and ARE producing, but sit >15%
+    below their siblings' output-per-nameplate right now. Mirrors the dashboard's
+    liveVerdict 'low'; same freshness + genuinely-producing guards as live_dark so
+    a dawn/fog reading never pages."""
+    out = []
+    for col in tree.get("columns", []):
+        if col.get("is_daylight") is False:
+            continue
+        src = col.get("source_status") or {}
+        age = src.get("age_hours")
+        if src.get("state") in (None, "none") or age is None or age > LIVE_DARK_MAX_AGE_HOURS:
+            continue
+        invs = col.get("inverters", [])
+        producers = [i for i in invs if _meaningfully_producing(i)]
+        if len(producers) < 2:
+            continue  # array not genuinely up (dawn/fog) — nothing to compare against
+        for inv in invs:
+            if inv.get("status") != "ok" or not _is_producing(inv):
+                continue
+            my = _pct_of_max(inv)
+            if my is None:
+                continue
+            peer_pcts = sorted(
+                v for v in (_pct_of_max(p) for p in producers if p is not inv)
+                if v is not None)
+            if len(peer_pcts) < 2:
+                continue
+            med = peer_pcts[len(peer_pcts) // 2]     # peer median pct-of-max
+            if med < LIVE_LOW_MIN_PEER_MED:
+                continue
+            if my < med * (1 - LIVE_LOW_DEFICIT):
+                out.append({"col": col, "inv": inv, "reason": "live_low",
+                            "pct_of_max": round(my, 3), "peer_median": round(med, 3)})
+    return out
+
+
 def _incident_key(col: dict, inv: dict) -> str:
     return f"{col.get('array_id')}|{inv.get('inverter_id') or inv.get('name')}"
 
@@ -160,6 +220,7 @@ def _render_email(tenant: Tenant, items: list[dict]) -> tuple[str, str, str]:
         "comm_gap": "gone quiet (no data)",
         "underperforming": "underperforming vs its neighbors",
         "live_dark": "dark right now while its neighbors are producing",
+        "live_low": "producing well below its neighbors right now",
     }
     rows = []
     text_rows = []
@@ -168,6 +229,10 @@ def _render_email(tenant: Tenant, items: list[dict]) -> tuple[str, str, str]:
         name = inv.get("name", "Inverter")
         arr = col.get("array_name", "")
         what = labels.get(it["reason"], "needs a look")
+        # For a live peer gap, name the numbers so the email is actionable.
+        if it["reason"] == "live_low" and it.get("pct_of_max") is not None:
+            what = (f"producing ~{round(it['pct_of_max'] * 100)}% of max vs its "
+                    f"neighbors' ~{round(it['peer_median'] * 100)}% right now")
         rows.append(
             f'<tr><td style="padding:8px 12px;border-bottom:1px solid #eee">'
             f'<b>{name}</b><br><span style="color:#666;font-size:13px">{arr}</span></td>'
@@ -232,7 +297,9 @@ def sweep_tenant(db, tenant: Tenant) -> int:
     # can't appear in both (live_dark requires status=="ok"); if a live_dark
     # later hardens into dead/comm_gap the incident_key is the same, so we never
     # re-page the same physical outage.
-    flagged = _flagged_inverters(tree, threshold) + _live_dark_inverters(tree)
+    flagged = (_flagged_inverters(tree, threshold)
+               + _live_dark_inverters(tree)
+               + _live_low_inverters(tree))
     flagged_keys = {_incident_key(it["col"], it["inv"]): it for it in flagged}
 
     # Load existing incident state for this tenant.
@@ -259,7 +326,12 @@ def sweep_tenant(db, tenant: Tenant) -> int:
         # Live "dark now" anomalies use a short fixed grace (confirm across two
         # hourly sweeps, ~1h) so a real midday outage pages fast; the slower
         # 14-day/down incidents use the tenant's configured grace (default 12h).
-        this_grace = LIVE_DARK_GRACE_HOURS if it["reason"] == "live_dark" else grace_h
+        if it["reason"] == "live_dark":
+            this_grace = LIVE_DARK_GRACE_HOURS
+        elif it["reason"] == "live_low":
+            this_grace = LIVE_LOW_GRACE_HOURS
+        else:
+            this_grace = grace_h
         grace_passed = st.first_flagged_at <= now - timedelta(hours=this_grace)
         if grace_passed and st.last_alerted_at is None:
             to_email.append(it)
