@@ -45,6 +45,109 @@
     const d = await crypto.subtle.digest("SHA-1", buf);
     return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
+
+  // ── SITE-LOCATION deep-scan (shared, ADDITIVE + FAIL-SAFE) ───────────────────
+  // Coordinate field paths in these portals' payloads are NOT confirmed, so rather
+  // than guess one path we recursively walk any JSON and return the first plausible
+  // {latitude, longitude} pair (and best-effort address string). Everything here is
+  // wrapped so a bad shape yields null, never a throw. See each vendor's attach site.
+  function _soCoerceNum(v) {
+    if (typeof v === "number") return isFinite(v) ? v : null;
+    if (typeof v === "string" && v.trim() !== "") { const n = Number(v.trim()); return isFinite(n) ? n : null; }
+    return null;
+  }
+  function _soValidLatLng(lat, lng) {
+    lat = _soCoerceNum(lat); lng = _soCoerceNum(lng);
+    if (lat == null || lng == null) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    if (lat === 0 && lng === 0) return null;                 // null-island = missing data
+    return { latitude: lat, longitude: lng };
+  }
+  const _SO_LAT_RE = /^(lat|latitude|gpslat|sitelat|centerlat)$/i;
+  const _SO_LNG_RE = /^(lng|lon|long|longitude|gpslng|gpslon|sitelng|centerlng)$/i;
+  const _SO_PREFER_RE = /^(location|address|site|coordinates|coord|coords|center|geo|position|gps)$/i;
+  // Join street/city/state/zip/country-ish fields under an address/location object
+  // into one string the backend can geocode as a fallback when no coords are found.
+  const _SO_ADDR_KEY_RE = /^(street|street1|address1|addressline1|line1|road|city|town|locality|state|province|region|zip|zipcode|postal|postalcode|postcode|country|countrycode)$/i;
+  const _SO_ADDR_FULL_RE = /^(address|addr|fulladdress|formattedaddress|streetaddress|displayaddress)$/i;
+  function _soExtractAddress(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    const parts = [];
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (typeof v === "string" && v.trim()) {
+        if (_SO_ADDR_FULL_RE.test(k) && v.trim().length > 4) return v.trim();
+        if (_SO_ADDR_KEY_RE.test(k)) parts.push(v.trim());
+      }
+    }
+    const joined = parts.join(", ").trim();
+    return joined.length > 3 ? joined : null;
+  }
+  // Breadth-first walk. Preferred keys (location/address/site/coordinates/center…)
+  // are enqueued first so a top-level or clearly-geographic pair wins over a stray
+  // pair buried elsewhere. Returns {latitude, longitude, address?} or null.
+  function findLocation(root) {
+    try {
+      if (!root || typeof root !== "object") return null;
+      const queue = [root];
+      let seen = 0;
+      let addrFallback = null;
+      while (queue.length && seen < 4000) {
+        const node = queue.shift(); seen++;
+        if (!node || typeof node !== "object") continue;
+
+        // A bare [x,y] pair is GeoJSON coordinates → [lng, lat] by spec. Prefer that
+        // reading; only fall back to [lat, lng] if the GeoJSON order is out of range
+        // (e.g. |first| > 90 means it can't be a latitude, so it must already be lng).
+        if (Array.isArray(node) && node.length === 2 &&
+            _soCoerceNum(node[0]) != null && _soCoerceNum(node[1]) != null) {
+          const asLngLat = _soValidLatLng(node[1], node[0]);   // [lng,lat] (GeoJSON, preferred)
+          const asLatLng = _soValidLatLng(node[0], node[1]);   // [lat,lng]
+          if (asLngLat) return asLngLat;
+          if (asLatLng) return asLatLng;
+        }
+
+        if (!Array.isArray(node)) {
+          // Direct sibling lat/lng on this object.
+          let latKey = null, lngKey = null;
+          for (const k of Object.keys(node)) {
+            if (latKey == null && _SO_LAT_RE.test(k) && _soCoerceNum(node[k]) != null) latKey = k;
+            else if (lngKey == null && _SO_LNG_RE.test(k) && _soCoerceNum(node[k]) != null) lngKey = k;
+          }
+          if (latKey != null && lngKey != null) {
+            const hit = _soValidLatLng(node[latKey], node[lngKey]);
+            if (hit) {
+              const addr = _soExtractAddress(node);
+              return addr ? Object.assign(hit, { address: addr }) : hit;
+            }
+          }
+          if (!addrFallback) { const a = _soExtractAddress(node); if (a) addrFallback = a; }
+        }
+
+        // Enqueue children, preferred geographic keys first (breadth-first bias).
+        const kids = Array.isArray(node) ? node.map((_, i) => i) : Object.keys(node);
+        const preferred = [], rest = [];
+        for (const k of kids) {
+          const child = node[k];
+          if (child && typeof child === "object") {
+            (!Array.isArray(node) && _SO_PREFER_RE.test(String(k)) ? preferred : rest).push(child);
+          }
+        }
+        for (const c of preferred) queue.push(c);
+        for (const c of rest) queue.push(c);
+      }
+      return addrFallback ? { address: addrFallback } : null;
+    } catch (_) { return null; }
+  }
+  // Merge a found location onto a site object IN PLACE (only sets fields present).
+  function applyLocation(site, loc) {
+    if (!site || !loc) return;
+    if (typeof loc.latitude === "number" && typeof loc.longitude === "number") {
+      site.latitude = loc.latitude; site.longitude = loc.longitude;
+    }
+    if (typeof loc.address === "string" && loc.address && site.address == null) site.address = loc.address;
+  }
+
   function LOG() {
     // Surface capture diagnostics in the page console (prefixed for grep-ability).
     try { console.warn.apply(console, ["[solar-operator/fronius]"].concat([].slice.call(arguments))); } catch (_) {}
@@ -315,6 +418,29 @@
     }
   }
 
+  // Best-effort per-system LOCATION. (a) The list-view row itself is deep-scanned
+  // first (free — no extra fetch). (b) If that yields no coordinates, fetch the
+  // per-system detail JSON and scan it. Solar.web's JSON API exposes the system at
+  // /PvSystems/{id} (same first-party origin the other captures use, session-cookie
+  // authed). URL/field paths are INFERRED — NEEDS a live-portal verify. try/catch →
+  // any failure returns null and the existing capture is untouched.
+  async function captureLocation(system) {
+    try {
+      const fromRow = findLocation(system);
+      if (fromRow && typeof fromRow.latitude === "number") return fromRow;
+      let rowAddr = fromRow && fromRow.address ? fromRow : null;
+      const id = system && system.PvSystemId;
+      if (id) {
+        try {
+          const detail = await getJson("/PvSystems/" + encodeURIComponent(id) + "?_=" + Date.now());
+          const loc = findLocation(detail);
+          if (loc && (typeof loc.latitude === "number" || (!rowAddr && loc.address))) return loc;
+        } catch (_) { /* detail endpoint may differ — fall back to any row address */ }
+      }
+      return rowAddr;
+    } catch (_) { return null; }
+  }
+
   async function captureFlow() {
     // 1. System list — names, inverter counts, today's energy, specific yield.
     const listResp = await getJson("/PvSystems/GetPvSystemsForListView?_=" + Date.now());
@@ -393,7 +519,11 @@
       // a best-effort estimate, NOT a measured spec rating. Flag it so the
       // backend/dashboard/billing never treat it as an authoritative nameplate.
       const derivedPeakKw = deriveNameplateKw(energyToday, s.KwhPerKwp);
-      sites.push({
+      // Best-effort site LOCATION (coords or geocodable address) so the backend can
+      // run the weather model. Purely additive — never blocks the capture.
+      let loc = null;
+      try { loc = await captureLocation(s); } catch (_) { loc = null; }
+      const site = {
         site_id: s.PvSystemId,
         name: s.PvSystemName || null,
         peak_power_kw: derivedPeakKw,
@@ -411,7 +541,9 @@
         last_report_disp: s.LastImportDisp || null,
         daily,                                      // ~7 days site history for instant graph
         inverters,                                  // [] if drill-down unavailable
-      });
+      };
+      applyLocation(site, loc);                     // additive latitude/longitude/address (best-effort)
+      sites.push(site);
     }
 
     return {

@@ -48,6 +48,96 @@
     const d = await crypto.subtle.digest("SHA-1", buf);
     return Array.from(new Uint8Array(d)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
+
+  // ── SITE-LOCATION deep-scan (shared, ADDITIVE + FAIL-SAFE) ───────────────────
+  // Coordinate field paths in these portals' payloads are NOT confirmed, so rather
+  // than guess one path we recursively walk any JSON and return the first plausible
+  // {latitude, longitude} pair (and best-effort address string). Everything here is
+  // wrapped so a bad shape yields null, never a throw.
+  function _soCoerceNum(v) {
+    if (typeof v === "number") return isFinite(v) ? v : null;
+    if (typeof v === "string" && v.trim() !== "") { const n = Number(v.trim()); return isFinite(n) ? n : null; }
+    return null;
+  }
+  function _soValidLatLng(lat, lng) {
+    lat = _soCoerceNum(lat); lng = _soCoerceNum(lng);
+    if (lat == null || lng == null) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    if (lat === 0 && lng === 0) return null;                 // null-island = missing data
+    return { latitude: lat, longitude: lng };
+  }
+  const _SO_LAT_RE = /^(lat|latitude|gpslat|sitelat|centerlat)$/i;
+  const _SO_LNG_RE = /^(lng|lon|long|longitude|gpslng|gpslon|sitelng|centerlng)$/i;
+  const _SO_PREFER_RE = /^(location|address|site|coordinates|coord|coords|center|geo|position|gps)$/i;
+  const _SO_ADDR_KEY_RE = /^(street|street1|address1|addressline1|line1|road|city|town|locality|state|province|region|zip|zipcode|postal|postalcode|postcode|country|countrycode)$/i;
+  const _SO_ADDR_FULL_RE = /^(address|addr|fulladdress|formattedaddress|streetaddress|displayaddress)$/i;
+  function _soExtractAddress(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    const parts = [];
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (typeof v === "string" && v.trim()) {
+        if (_SO_ADDR_FULL_RE.test(k) && v.trim().length > 4) return v.trim();
+        if (_SO_ADDR_KEY_RE.test(k)) parts.push(v.trim());
+      }
+    }
+    const joined = parts.join(", ").trim();
+    return joined.length > 3 ? joined : null;
+  }
+  function findLocation(root) {
+    try {
+      if (!root || typeof root !== "object") return null;
+      const queue = [root];
+      let seen = 0;
+      let addrFallback = null;
+      while (queue.length && seen < 4000) {
+        const node = queue.shift(); seen++;
+        if (!node || typeof node !== "object") continue;
+        // A bare [x,y] pair is GeoJSON coordinates → [lng, lat] by spec. Prefer that.
+        if (Array.isArray(node) && node.length === 2 &&
+            _soCoerceNum(node[0]) != null && _soCoerceNum(node[1]) != null) {
+          const asLngLat = _soValidLatLng(node[1], node[0]);   // [lng,lat] (GeoJSON, preferred)
+          const asLatLng = _soValidLatLng(node[0], node[1]);   // [lat,lng]
+          if (asLngLat) return asLngLat;
+          if (asLatLng) return asLatLng;
+        }
+        if (!Array.isArray(node)) {
+          let latKey = null, lngKey = null;
+          for (const k of Object.keys(node)) {
+            if (latKey == null && _SO_LAT_RE.test(k) && _soCoerceNum(node[k]) != null) latKey = k;
+            else if (lngKey == null && _SO_LNG_RE.test(k) && _soCoerceNum(node[k]) != null) lngKey = k;
+          }
+          if (latKey != null && lngKey != null) {
+            const hit = _soValidLatLng(node[latKey], node[lngKey]);
+            if (hit) {
+              const addr = _soExtractAddress(node);
+              return addr ? Object.assign(hit, { address: addr }) : hit;
+            }
+          }
+          if (!addrFallback) { const a = _soExtractAddress(node); if (a) addrFallback = a; }
+        }
+        const kids = Array.isArray(node) ? node.map((_, i) => i) : Object.keys(node);
+        const preferred = [], rest = [];
+        for (const k of kids) {
+          const child = node[k];
+          if (child && typeof child === "object") {
+            (!Array.isArray(node) && _SO_PREFER_RE.test(String(k)) ? preferred : rest).push(child);
+          }
+        }
+        for (const c of preferred) queue.push(c);
+        for (const c of rest) queue.push(c);
+      }
+      return addrFallback ? { address: addrFallback } : null;
+    } catch (_) { return null; }
+  }
+  function applyLocation(site, loc) {
+    if (!site || !loc) return;
+    if (typeof loc.latitude === "number" && typeof loc.longitude === "number") {
+      site.latitude = loc.latitude; site.longitude = loc.longitude;
+    }
+    if (typeof loc.address === "string" && loc.address && site.address == null) site.address = loc.address;
+  }
+
   // ennexOS authenticates to uiapi.sunnyportal.com with a Keycloak OAuth Bearer
   // token (NOT a cookie). The token lives in the page's localStorage under
   // "access_token" — content scripts share localStorage with the host page, so
@@ -278,6 +368,18 @@
     return out;
   }
 
+  // Best-effort plant LOCATION (coords or geocodable address) for the weather model.
+  // GET /api/v1/plants/{plantId} (same uiapi origin + Bearer auth as everything else)
+  // is where ennexOS carries plant metadata; deep-scan whatever it returns. The
+  // location fields aren't confirmed in a live payload — INFERRED, NEEDS a live-portal
+  // verify. try/catch → any failure returns null, capture proceeds unchanged.
+  async function fetchPlantLocation(plantId) {
+    try {
+      const plant = await getJson(UIAPI + "/api/v1/plants/" + encodeURIComponent(plantId));
+      return findLocation(plant);
+    } catch (_) { return null; }
+  }
+
   // Capture one plant's per-inverter comb. Returns a site object or null.
   async function captureOnePlant(plantId, hintName) {
     let plantName = hintName || null;
@@ -369,7 +471,11 @@
     LOG("SMA history:", plantId, daily.length, "site-day(s);",
         inverters.filter((iv) => (iv.daily || []).length).length, "inv w/ history");
 
-    return {
+    // Best-effort location (never blocks capture).
+    let loc = null;
+    try { loc = await fetchPlantLocation(plantId); } catch (_) { loc = null; }
+
+    const site = {
       site_id: String(plantId),
       name: plantName || ("SMA plant " + plantId),
       peak_power_kw: peakKw || null,
@@ -382,6 +488,8 @@
       daily,                                      // ~7 days site history for instant graph
       inverters,
     };
+    applyLocation(site, loc);                     // additive latitude/longitude/address (best-effort)
+    return site;
   }
 
   async function captureFlow() {
