@@ -105,8 +105,13 @@ def _mismatch_reason(
 ) -> Optional[str]:
     """Plain-English explanation of WHY a row doesn't cleanly match, grounded in
     real signals — so an operator can tell a data-quality artifact from a genuine
-    billing-model problem before trusting the number. Never fabricates: returns
-    None when the row is a clean match (no explanation needed).
+    billing-model problem before trusting the number.
+
+    Returns (reason, is_genuine): `reason` is None for a clean match; `is_genuine`
+    is True ONLY when both sides have real data and the delta is a real
+    production/billing difference — False for every data-quality artifact (no
+    metered reads, prorated estimate, timing gap). The caller uses is_genuine to
+    keep artifacts out of the operator's "needs review" count.
 
       • no_bill        → no captured GMP bill linked to this array yet.
       • no_invoice_data→ our invoice produced no array kWh for the period.
@@ -116,11 +121,11 @@ def _mismatch_reason(
                          overlap, from (c) a real per-array delta.
     """
     if status == "match":
-        return None
+        return None, False
     if status == "no_bill":
-        return "No captured GMP bill linked to this array yet — awaiting utility data."
+        return "No captured GMP bill linked to this array yet — awaiting utility data.", False
     if status == "no_invoice_data":
-        return "Our invoice produced no kWh for this array over the period."
+        return "Our invoice produced no kWh for this array over the period.", False
 
     # status == "mismatch": probe the real data source for the invoice window.
     metered = 0
@@ -150,20 +155,20 @@ def _mismatch_reason(
         if bs is not None and be is not None and (be < inv_start or bs > inv_end):
             return ("Bill period and invoice period don't overlap — comparing "
                     "different months, so the delta is a timing gap, not a real "
-                    "discrepancy.")
+                    "discrepancy."), False
 
     if metered == 0 and prorated > 0:
         return ("Our figure is a prorated bill estimate (no metered daily reads "
                 "in this window yet) — expect drift vs. the bill total until real "
-                "reads land.")
+                "reads land."), False
     if metered == 0 and prorated == 0:
         return ("No daily generation rows for this array in the period — our kWh "
-                "comes from the invoice fallback, not measured reads.")
+                "comes from the invoice fallback, not measured reads."), False
     if prorated > 0:
         return ("Period mixes measured reads with prorated bill estimates — "
-                "partial data, so some drift is expected.")
+                "partial data, so some drift is expected."), False
     return ("Both sides have real data — this delta reflects a genuine "
-            "production/billing difference worth a closer look.")
+            "production/billing difference worth a closer look."), True
 
 
 def _array_group_excess(bill: Optional[Bill]) -> Optional[float]:
@@ -362,6 +367,16 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
         array_bill_by_aid[aid] = bill
         gmp_kwh = float(bill.kwh_generated) if (bill and bill.kwh_generated is not None) else None
         status, delta, pct = _verdict(our_kwh, gmp_kwh)
+        reason, genuine = _mismatch_reason(db, aid, status, start, end, bill)
+        # A "mismatch" whose only cause is missing/estimated measured data (no
+        # metered reads, a prorated bill smear, or a period-timing gap) is NOT a
+        # real billing discrepancy — it's "we can't verify this against the bill
+        # yet". Reclassify it to `unverified` so it never inflates the operator's
+        # "needs review" count. Only a real delta with data on BOTH sides stays
+        # `mismatch`. (Fixes the 104-false-alarm: every offtaker flagged only
+        # because the fleet has no measured generation yet.)
+        if status == "mismatch" and not genuine:
+            status = "unverified"
         bp = None
         if bill is not None:
             bs = bill.period_start.date().isoformat() if bill.period_start else None
@@ -375,23 +390,27 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
             "delta_kwh": delta,
             "delta_pct": pct,
             "status": status,
-            "mismatch_reason": _mismatch_reason(db, aid, status, start, end, bill),
+            "mismatch_reason": reason,
             "gmp_bill_period": bp,
             "gmp_total_cost": (float(bill.total_cost) if (bill and bill.total_cost is not None) else None),
         })
 
-    # Roll up: mismatch dominates, then no_bill, then no_invoice_data, else match.
+    # Roll up: a GENUINE mismatch dominates; then any clean match; then
+    # `unverified` (data-quality artifact, awaiting measured data — NOT a review
+    # item); then no_bill; else no_invoice_data.
     statuses = {r["status"] for r in rows}
     if not rows:
         overall = "no_arrays"
     elif "mismatch" in statuses:
         overall = "mismatch"
-    elif statuses == {"match"}:
-        overall = "match"
-    elif "no_bill" in statuses and "match" not in statuses:
+    elif "match" in statuses:
+        overall = "match" if statuses == {"match"} else "partial"
+    elif "unverified" in statuses:
+        overall = "unverified"
+    elif "no_bill" in statuses:
         overall = "no_bill"
     else:
-        overall = "partial"
+        overall = "no_invoice_data"
 
     # Anna/Bruce's allocation cross-check (share × array-total vs GMP's own credit).
     inv_label = (match.computed_invoice or {}).get("month") if match is not None else None
