@@ -1417,8 +1417,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // ── CHINT live mode (v1.9.53; background loop RE-ENABLED v1.9.81) ─────────────
   // A periodic refresh so Chint power/per-inverter data tracks the portal instead of
   // freezing at the last manual capture. Each tick runs the v1.9.77 programmatic site
-  // walk in a MINIMIZED, UNFOCUSED popup (recaptureVendor newWindow:true) — proven
-  // hands-off, no focus steal, no tab in the owner's strip. Armed by an AO "Connect
+  // walk in a BACKGROUND TAB (v1.9.102 — was a minimized popup window through v1.9.101;
+  // Ford found the window sketchy/flashy, a tab is cleaner). recaptureVendor's focus-
+  // guard snaps the owner back to their tab if Chint's SPA tries to steal focus. Armed by an AO "Connect
   // Chint" click / the portal-open hook / the live toggle, AND auto-armed for owners
   // who already use Chint (autoArmKnownLive + the v1.9.81 one-time migration), surviving
   // restarts/updates. Reuses recaptureVendor / recapPost / recapFinish + the
@@ -1427,7 +1428,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // cycles (lapsed session — Chint has no silent re-login) — never silent staleness.
   // (Disabled v1.9.63→v1.9.80 because pre-walk Chint needed a manual site click; obsolete.)
   const CHINT_LIVE_ALARM = "chint-live";
-  const CHINT_LIVE_PERIOD_MIN = 10;         // background walk-refresh cadence; ~1.5x margin inside the backend's 15-min fresh window. Calmer than the old 4-min so the minimized popup blinks ~6x/hr, not 15x.
+  const CHINT_LIVE_PERIOD_MIN = 10;         // background walk-refresh cadence; ~1.5x margin inside the backend's 15-min fresh window. Calmer than the old 4-min so the background tab opens ~6x/hr, not 15x.
   const CHINT_LIVE_KEY = "so_chint_live";   // { on, armedAt, lastOkAt, fails }
   const CHINT_LIVE_MAX_FAILS = 3;           // ~30 min of dead cycles (lapsed session — Chint has no silent re-login) → disable + nudge, so a dead session stops churning popups
   async function chintLiveGet() { const s = await chrome.storage.local.get(CHINT_LIVE_KEY); return s[CHINT_LIVE_KEY] || null; }
@@ -1435,17 +1436,17 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   async function armChintLive() {
     // RE-ENABLED (v1.9.81): the v1.9.63 "Chint can't be captured silently — needs a site
     // click" premise is OBSOLETE. v1.9.77's programmatic per-site route walk fires
-    // busTypeDevices with NO click, and v1.9.80 runs that walk in a MINIMIZED, UNFOCUSED
-    // popup window that can't steal focus or add a tab to the owner's window (Ford verified
-    // Sync-all Chint is fully hands-off). So Chint now gets the same background keep-fresh
-    // loop as Fronius/SMA — runChintLiveTick → recaptureVendor("chint",{newWindow:true}).
+    // busTypeDevices with NO click. v1.9.102 runs that walk in a BACKGROUND TAB (was a
+    // minimized popup window v1.9.80→101; Ford found the window flashy) with a focus-guard
+    // that snaps the owner back if Chint's SPA pulls its own tab foreground. So Chint gets
+    // the same background keep-fresh loop as Fronius/SMA — runChintLiveTick → recaptureVendor("chint").
     // Guards against the old tab-pileup the v1.9.63 note warned of: the _liveBusy
     // single-flight serializes all background surfaces, the 1-min recap-reaper closes any
-    // orphan, recapFinish removes the popup the instant capture lands, and CHINT_LIVE_MAX_FAILS
-    // disarms+nudges a dead session instead of churning popups forever.
+    // orphan, recapFinish removes the tab the instant capture lands, and CHINT_LIVE_MAX_FAILS
+    // disarms+nudges a dead session instead of churning tabs forever.
     await chintLiveSet({ on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
     try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: _liveDelayMin("chint") }); } catch (_) {}
-    rlog("chint live-mode ARMED — background refresh every", CHINT_LIVE_PERIOD_MIN, "min via a minimized-popup site walk");
+    rlog("chint live-mode ARMED — background refresh every", CHINT_LIVE_PERIOD_MIN, "min via a background-tab site walk");
   }
   async function disarmChintLive(reason) {
     const v = (await chintLiveGet()) || {};
@@ -1469,12 +1470,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const st = await recapGetState();
       if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("chint-live: recap busy — skip tick"); return; }
       const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
-      // MINIMIZED, UNFOCUSED popup window (newWindow) — NOT a background tab. Chint's SPA
-      // focuses its OWN tab on the walk's route changes, so a background tab gets pulled to
-      // the foreground ("took me to the Chint tab"); a minimized popup can't be. recapFinish
-      // removes the whole window the instant the walk's capture lands (or the watchdog fires).
+      // Background TAB (not a separate popup window). Ford found the minimized popup
+      // "sketchy / flashy" as it blinked open behind his window; a background tab is
+      // cleaner. Chint's SPA walk can try to pull its own tab foreground ("took me to
+      // the Chint tab") — recaptureVendor's focus-guard snaps the owner back to their
+      // tab if that happens, so the refresh stays invisible without the popup window.
+      // recapFinish closes the tab the instant capture lands (or the watchdog fires).
       // 120s budget for the multi-site walk headroom (same as Sync-all's Chint surface).
-      await recaptureVendor("chint", { newWindow: true, budgetMs: 120 * 1000 });
+      await recaptureVendor("chint", { budgetMs: 120 * 1000 });
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
       const ok = !!(after.ok && after.at && after.at !== before.at);
       const cur = (await chintLiveGet()) || { on: true, fails: 0 };
@@ -2067,9 +2070,35 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           armed(tab.id, win.id);
         });
       } else {
-        chrome.tabs.create({ url, active: false }, (tab) => {   // background tab in the current window
-          if (chrome.runtime.lastError || !tab) { armed(null); return; }
-          armed(tab.id);
+        // Background tab in the CURRENT window. Some vendor SPAs (Chint's multi-site
+        // walk especially) try to pull their OWN tab to the foreground on a route
+        // change, which used to yank the owner off whatever they were doing ("took me
+        // to the Chint tab"). A FOCUS-GUARD neutralizes that: remember the tab the
+        // owner was on, and if the recapture tab ever becomes active, snap right back.
+        // This lets the refresh ride in a clean background tab (Ford prefers a tab over
+        // a flashy separate popup window) while staying invisible. The guard fires only
+        // if the tab actually steals focus, so it's a harmless no-op for Fronius/SMA.
+        chrome.tabs.query({ active: true, currentWindow: true }, (actTabs) => {
+          const orig = actTabs && actTabs[0];
+          const origTabId = orig ? orig.id : null;
+          chrome.tabs.create({ url, active: false }, (tab) => {
+            if (chrome.runtime.lastError || !tab) { armed(null); return; }
+            const guardTabId = tab.id;
+            const onAct = (info) => {
+              if (info.tabId === guardTabId && origTabId != null) {
+                try { chrome.tabs.update(origTabId, { active: true }, () => void chrome.runtime.lastError); } catch (_) {}
+              }
+            };
+            const onRem = (closedId) => {
+              if (closedId === guardTabId) {
+                try { chrome.tabs.onActivated.removeListener(onAct); } catch (_) {}
+                try { chrome.tabs.onRemoved.removeListener(onRem); } catch (_) {}
+              }
+            };
+            try { chrome.tabs.onActivated.addListener(onAct); } catch (_) {}
+            try { chrome.tabs.onRemoved.addListener(onRem); } catch (_) {}
+            armed(tab.id);
+          });
         });
       }
     });
