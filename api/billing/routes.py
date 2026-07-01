@@ -93,6 +93,10 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "utility_account_id": getattr(s, "utility_account_id", None),
         "allocation_pct": getattr(s, "allocation_pct", None),
         "array_allocations": getattr(s, "array_allocations", None),
+        # GMP allocation share for the bill-accuracy cross-check — DISTINCT from
+        # allocation_pct (the billing multiplier). Surfaced so the setup/edit form
+        # can pre-fill it. NULL → the check falls back to allocation_pct.
+        "array_share_pct": getattr(s, "array_share_pct", None),
         "billing_model": s.billing_model,
         "rate_per_kwh": getattr(s, "rate_per_kwh", None),
         "discount_pct": getattr(s, "discount_pct", None),
@@ -377,6 +381,36 @@ def _validate_discount(pct):
     return d
 
 
+def _validate_array_share(pct):
+    """Validate the optional array_share_pct — the offtaker's GMP allocation share
+    of the array's group excess, used by the bill-accuracy cross-check (DISTINCT
+    from allocation_pct, the billing multiplier). A fraction in (0, 1]; None passes
+    through (the check falls back to allocation_pct). Mirrors the PATCH-path rule."""
+    if pct is None:
+        return None
+    try:
+        p = float(pct)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "array_share_pct must be a number between 0 and 1")
+    if not (0.0 < p <= 1.0):
+        raise HTTPException(400, "array_share_pct must be a fraction in (0, 1] — e.g. 0.25 for 25%")
+    return p
+
+
+def _validate_invoice_start(v):
+    """Validate the optional invoice_number_start (a whole number seed for
+    sequential invoice numbering). None passes through. Mirrors the PATCH rule."""
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "invoice_number_start must be a whole number")
+    if not (0 <= n <= 9_999_999):
+        raise HTTPException(400, "invoice_number_start must be between 0 and 9999999")
+    return n
+
+
 def _sync_invoicing_quantity(tenant_id: str) -> None:
     """After an offtaker (BillingReportSubscription) is added or removed, keep the
     AO invoicing Stripe quantity in sync with the offtaker count. No-op unless the
@@ -397,6 +431,8 @@ async def create_subscription(
     utility_account_id: Optional[int] = Form(default=None),
     allocation_pct: Optional[float] = Form(default=None),
     array_allocations: Optional[str] = Form(default=None),
+    array_share_pct: Optional[float] = Form(default=None),
+    invoice_number_start: Optional[int] = Form(default=None),
     rate_per_kwh: Optional[float] = Form(default=None),
     discount_pct: Optional[float] = Form(default=None),
     net_rate_per_kwh: Optional[float] = Form(default=None),
@@ -430,11 +466,17 @@ async def create_subscription(
     if delivery_mode not in VALID_DELIVERY:
         raise HTTPException(400, "delivery_mode must be approval or auto")
 
+    # array_share_pct + invoice_number_start are optional on create (they were
+    # PATCH-only until now); validate here so a bad value fails before any write.
+    array_share_val = _validate_array_share(array_share_pct)
+    invoice_start_val = _validate_invoice_start(invoice_number_start)
+
     if file is None:
         return await _create_manual_subscription(
             t, customer_name=customer_name, array_id=array_id,
             utility_account_id=utility_account_id,
             allocation_pct=allocation_pct, array_allocations=array_allocations,
+            array_share_pct=array_share_val, invoice_number_start=invoice_start_val,
             rate_per_kwh=rate_per_kwh,
             discount_pct=discount_pct, net_rate_per_kwh=net_rate_per_kwh,
             cadence=cadence, send_mode=send_mode,
@@ -476,6 +518,9 @@ async def create_subscription(
             rate_per_kwh=rate_per_kwh,
             discount_pct=_validate_discount(discount_pct),
             net_rate_per_kwh=_validate_rate(net_rate_per_kwh),
+            array_share_pct=array_share_val,
+            invoice_number_start=invoice_start_val,
+            invoice_number_next=invoice_start_val,
             cadence=cadence,
             annual_trueup=annual_trueup,
             delivery_mode=delivery_mode,
@@ -496,7 +541,7 @@ async def create_subscription(
 
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
-    utility_account_id=None,
+    utility_account_id=None, array_share_pct=None, invoice_number_start=None,
     rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
@@ -537,6 +582,8 @@ async def _create_manual_subscription(
         rate_val = _validate_rate(rate_per_kwh)
         disc_val = _validate_discount(discount_pct)
         net_val = _validate_rate(net_rate_per_kwh)
+        share_val = _validate_array_share(array_share_pct)
+        inv_start_val = _validate_invoice_start(invoice_number_start)
         with SessionLocal() as db:
             acct = db.get(UtilityAccount, utility_account_id)
             if (acct is None or acct.tenant_id != t.id
@@ -568,6 +615,9 @@ async def _create_manual_subscription(
                 array_id=acct.array_id,
                 allocation_pct=pct,
                 array_allocations=None,
+                array_share_pct=share_val,
+                invoice_number_start=inv_start_val,
+                invoice_number_next=inv_start_val,
                 rate_per_kwh=rate_val,
                 discount_pct=disc_val,
                 net_rate_per_kwh=net_val,
@@ -637,6 +687,8 @@ async def _create_manual_subscription(
     rate_val = _validate_rate(rate_per_kwh)
     disc_val = _validate_discount(discount_pct)
     net_val = _validate_rate(net_rate_per_kwh)
+    share_val = _validate_array_share(array_share_pct)
+    inv_start_val = _validate_invoice_start(invoice_number_start)
 
     with SessionLocal() as db:
         # Validate every referenced array belongs to this tenant.
@@ -666,6 +718,9 @@ async def _create_manual_subscription(
             array_id=(allocs[0]["array_id"] if allocs else array_id),
             allocation_pct=(allocs[0]["allocation_pct"] if allocs else pct),
             array_allocations=(allocs or None),
+            array_share_pct=share_val,
+            invoice_number_start=inv_start_val,
+            invoice_number_next=inv_start_val,
             rate_per_kwh=rate_val,
             discount_pct=disc_val,
             net_rate_per_kwh=net_val,
@@ -708,6 +763,10 @@ class SubscriptionPatch(BaseModel):
     # the manual customer to the array whose generation is split.
     allocation_pct: Optional[float] = None
     array_id: Optional[int] = None
+    # GMP allocation share for the bill-accuracy cross-check (fraction in (0, 1]).
+    # Distinct from allocation_pct. Explicit null clears it (check falls back to
+    # allocation_pct). Uses model_fields_set to tell "clear" from "omitted".
+    array_share_pct: Optional[float] = None
     # Re-bind the offtaker to a different GMP utility bill (the billing source).
     # Validated to a GMP account the operator owns; array_id is refreshed from it.
     utility_account_id: Optional[int] = None
@@ -776,6 +835,9 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                 raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
                                          "(e.g. 0.95 for 95%)")
             sub.allocation_pct = pct
+        if "array_share_pct" in body.model_fields_set:
+            # null clears it (check falls back to allocation_pct); a number validates.
+            sub.array_share_pct = _validate_array_share(body.array_share_pct)
         if body.array_id is not None:
             from ..models import Array
             arr = db.get(Array, body.array_id)

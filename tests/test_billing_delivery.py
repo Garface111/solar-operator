@@ -350,6 +350,85 @@ def test_manual_subscription_array_must_be_owned(client):
     assert r.status_code == 404
 
 
+def test_create_subscription_persists_array_share_and_invoice_start(client):
+    """Piece 4 (2026-07-01): POST /subscriptions now accepts array_share_pct (the
+    GMP allocation share used by the bill-accuracy cross-check, DISTINCT from
+    allocation_pct) and invoice_number_start (the sequential-numbering seed) at
+    CREATE time — previously they were PATCH-only. Assert both persist, round-trip
+    through GET /subscriptions, and seed the running invoice counter.
+
+    (Proof this would FAIL pre-change: create_subscription had no Form param for
+    either field, so they were silently dropped on create — the operator had to
+    create then edit to set the share the accuracy check needs.)"""
+    from api.db import SessionLocal
+    from api.models import UtilityAccount
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        arr = Array(tenant_id=tid, name="Cross-check Array", region="VT")
+        db.add(arr); db.flush()
+        acct = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp",
+                              account_number="GMP-" + secrets.token_hex(2),
+                              nickname="XCheck GMP")
+        db.add(acct); db.flush()
+        acct_id = acct.id
+        db.commit()
+
+    r = _create_manual(client, auth, customer_name="Group Net Metered Co",
+                       utility_account_id=str(acct_id), allocation_pct="1.0",
+                       array_share_pct="0.25", invoice_number_start="5000",
+                       client_email="gnm@example.test")
+    assert r.status_code == 200, r.text
+    sub = r.json()["subscription"]
+    sub_id = sub["id"]
+    assert abs(sub["array_share_pct"] - 0.25) < 1e-9
+    assert sub["invoice_number_start"] == 5000
+    # The running counter is seeded from the start so the first invoice uses it.
+    assert sub["invoice_number_next"] == 5000
+
+    with SessionLocal() as db:
+        s = db.get(BillingReportSubscription, sub_id)
+        assert s.array_share_pct == 0.25
+        assert s.invoice_number_start == 5000
+        assert s.invoice_number_next == 5000
+
+    # Round-trips through the list the frontend reads.
+    lst = client.get("/v1/array-operator/billing/subscriptions",
+                     headers={"Authorization": auth}).json()
+    row = next(x for x in lst["subscriptions"] if x["id"] == sub_id)
+    assert abs(row["array_share_pct"] - 0.25) < 1e-9
+    assert row["invoice_number_start"] == 5000
+
+
+def test_create_subscription_validates_array_share(client):
+    """array_share_pct must be a fraction in (0, 1] — a percent typo (25 instead of
+    0.25) or a negative is rejected before any write, same rule as the PATCH path."""
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid)
+    r = _create_manual(client, auth, customer_name="Bad Share", array_id=aid,
+                       allocation_pct="0.5", array_share_pct="25")
+    assert r.status_code == 400
+    assert "array_share_pct" in r.json()["detail"]
+
+
+def test_patch_subscription_sets_and_clears_array_share(client):
+    """array_share_pct is settable AND clearable via PATCH: a number sets it, an
+    explicit null clears it (so the accuracy check falls back to allocation_pct)."""
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid)
+    sub_id = _create_manual(client, auth, customer_name="Share Edit",
+                            array_id=aid, allocation_pct="1.0").json()["subscription"]["id"]
+    # Set it.
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"array_share_pct": 0.4}, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert abs(r.json()["subscription"]["array_share_pct"] - 0.4) < 1e-9
+    # Clear it (explicit null).
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"array_share_pct": None}, headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    assert r.json()["subscription"]["array_share_pct"] is None
+
+
 def test_patch_subscription_with_utility_account_id_succeeds(client):
     """REGRESSION: the edit-offtaker form re-sends utility_account_id on every save
     (the GMP bill picker is pre-selected to the current bill). patch_subscription
