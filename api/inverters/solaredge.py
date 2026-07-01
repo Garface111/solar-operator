@@ -84,6 +84,7 @@ def discover_sites(api_key: str) -> list[dict]:
             "name": s.get("name") or "",
             "peak_power_kw": s.get("peak_kw"),
             "status": s.get("status") or "",
+            "address": s.get("address") or "",   # for weather-model geocoding
         }
         for s in raw
     ]

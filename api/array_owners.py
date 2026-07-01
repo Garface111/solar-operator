@@ -2677,6 +2677,14 @@ def solaredge_connect_account(
 
             connected.append(entry)
 
+            # Geocode the SolarEdge site address onto the array so the weather
+            # model can run (SolarEdge's /sites/list gives a real address). Fills
+            # only when the array has no location yet.
+            _tgt = arr_by_id.get(entry["array_id"])
+            if _tgt is not None and site.get("address"):
+                _set_array_location(db, _tgt, address=site.get("address"),
+                                    source_label="vendor:solaredge")
+
         db.commit()
 
         # Self-healing: kick off the deep multi-year history backfill for every
@@ -3109,6 +3117,12 @@ class CaptureSite(BaseModel):
     status: Optional[str] = None
     last_report: Optional[str] = None
     last_report_disp: Optional[str] = None
+    # Site location captured from the vendor portal so the weather model can run
+    # without a utility service address. Either coordinates OR a geocodable address;
+    # the ingest fills Array.latitude/longitude (geocoding the address if needed).
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    address: Optional[str] = None
     # Optional site-level daily-kWh history for instant graph backfill on connect
     # (Chint weekETrend → ~7 days). Site-level only; never split per inverter.
     daily: list[CaptureDaily] = []
@@ -3331,6 +3345,14 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                     if site_key:
                         by_site_id[site_key] = _varr
                     arr = _varr
+
+            # Vendor-captured site location → the weather model can run without a
+            # utility service address (the whole reason inverter-onboarded Chint/
+            # Fronius/SMA/SolarEdge arrays read "not modeled yet"). Fills only when
+            # the array has no location yet, so a manual override always wins.
+            if site.latitude is not None or site.longitude is not None or site.address:
+                _set_array_location(db, arr, lat=site.latitude, lng=site.longitude,
+                                    address=site.address, source_label="vendor:" + provider)
 
             # NOTE: nameplate hinting via Inverter rows is a follow-up — the
             # Array is the owner-facing grouping, and the value/peer model
@@ -4277,6 +4299,37 @@ def _ensure_array_geocoded(db, arr) -> bool:
         db.rollback()
         log.warning("forecast: geocode cache commit failed for array %s", arr.id, exc_info=True)
     return arr.latitude is not None
+
+
+def _set_array_location(db, arr, *, lat=None, lng=None, address=None,
+                        source_label: str = "vendor") -> bool:
+    """Give an array a location from vendor-captured data — coordinates directly,
+    or by geocoding a vendor-supplied address. Fills ONLY when the array has no
+    location yet (never overwrites a manual override or a utility-address geocode).
+    Does NOT commit — callers batch it. Returns True if a location was set."""
+    from . import forecasting
+    if arr is None or (arr.latitude is not None and arr.longitude is not None):
+        return False
+    try:
+        if lat is not None and lng is not None:
+            latf, lngf = float(lat), float(lng)
+            if -90 <= latf <= 90 and -180 <= lngf <= 180 and not (latf == 0 and lngf == 0):
+                arr.latitude, arr.longitude = latf, lngf
+                arr.geocode_source = source_label[:24]
+                arr.geocoded_address = (str(address) if address else source_label + " coordinates")[:500]
+                arr.geocoded_at = now()
+                return True
+    except (TypeError, ValueError):
+        pass
+    if address:
+        geo = forecasting.geocode_oneline(str(address))
+        if geo:
+            arr.latitude, arr.longitude = geo["lat"], geo["lng"]
+            arr.geocode_source = (source_label + "-geo")[:24]
+            arr.geocoded_address = (geo.get("matched") or str(address))[:500]
+            arr.geocoded_at = now()
+            return True
+    return False
 
 
 def _clean_actual_by_day(db, arr, start: date, end: date) -> dict:
