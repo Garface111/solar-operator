@@ -10,10 +10,9 @@ the **Blended Statewide Rate** from the 10-year anniversary on. So the array's
 AGE picks the regime; the billing YEAR + MONTH picks the cell. Rates are $/kWh;
 a $0.043 solar adder is tracked separately.
 
-NOTE (confirm w/ Ford/Bruce): the regime switch is set at the 10-year anniversary
-(age >= 10 -> Blended), per the sheet's "Pre 10 year anniversary arrays" label.
-Bruce's prose said both "<11 is Rate #1" and "10+ is Blended" — a one-year
-ambiguity. The threshold is the single constant BLENDED_AGE_THRESHOLD below.
+Regime switch: an array uses GMP Rate #1 for its first 11 years and the Blended
+Statewide Rate from age 11 on (Ford confirmed 2026-07-01: "<11 is Rate #1", so
+ages 0–10 → Rate #1, age 11+ → Blended). The threshold is BLENDED_AGE_THRESHOLD.
 This lookup is a REFERENCE (the invoice still bills on the bill's own rate); it
 never silently overrides real billed figures.
 """
@@ -24,9 +23,9 @@ import pathlib
 from functools import lru_cache
 from typing import Optional
 
-# The 10-year anniversary switch (age in whole years from commissioning). See the
-# module docstring — flagged for Ford/Bruce confirmation.
-BLENDED_AGE_THRESHOLD = 10
+# Age (whole years from commissioning) at which an array moves from GMP Rate #1
+# to the Blended Statewide Rate. Ford confirmed 11: <11 stays on Rate #1.
+BLENDED_AGE_THRESHOLD = 11
 
 _DATA_PATH = pathlib.Path(__file__).parent / "data" / "gmp_rates_2026.json"
 
@@ -53,9 +52,9 @@ def _nearest_year(grid: dict, year: int) -> Optional[str]:
 
 
 def regime_for_age(age_years: Optional[int]) -> str:
-    """'rate1' before the 10-year anniversary, else 'blended'. Unknown age
-    (None) defaults to 'rate1' (the pre-anniversary case is the common one and
-    the caller is told the age was assumed)."""
+    """'rate1' for an array's first 11 years (age 0–10), 'blended' from age 11 on.
+    Unknown age (None) defaults to 'rate1' (the common pre-switch case; the caller
+    is told the age was assumed)."""
     if age_years is None:
         return "rate1"
     return "blended" if age_years >= BLENDED_AGE_THRESHOLD else "rate1"

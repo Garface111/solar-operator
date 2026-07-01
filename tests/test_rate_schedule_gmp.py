@@ -15,12 +15,13 @@ def test_data_file_loads_and_is_sane():
     assert "2026" in d["blended"]["monthly"]
 
 
-def test_regime_switches_at_ten_year_anniversary():
+def test_regime_switches_at_age_11():
+    # Ford confirmed: <11 is Rate #1, 11+ is Blended Statewide.
     assert regime_for_age(0) == "rate1"
-    assert regime_for_age(9) == "rate1"
-    assert regime_for_age(10) == "blended"
+    assert regime_for_age(10) == "rate1"
+    assert regime_for_age(11) == "blended"
     assert regime_for_age(15) == "blended"
-    assert regime_for_age(None) == "rate1"   # unknown age → pre-anniversary default
+    assert regime_for_age(None) == "rate1"   # unknown age → Rate #1 default
 
 
 def test_rate1_2026_matches_workbook():
