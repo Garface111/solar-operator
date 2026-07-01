@@ -36,11 +36,11 @@ import io
 import json
 import logging
 import re as _re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
@@ -1072,6 +1072,28 @@ def reconcile_bills_route(authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         return reconcile_tenant(db, t.id)
+
+
+@router.get("/invoice-export.csv")
+def invoice_export_csv(authorization: Optional[str] = Header(default=None),
+                       account_code: str = Query(default="")):
+    """QuickBooks / Xero batch invoice-export (Anna/Bruce's ask #3).
+
+    Emits the current period's offtaker invoices as a CSV in the exact column
+    layout of Anna's bookkeeping export, ready to import into QB or Xero. Only
+    offtakers with a real billable invoice are included — never a fabricated $0
+    row. `account_code` fills the trailing account-code column if the operator
+    maps solar income to a specific account.
+    """
+    from .qb_export import build_invoice_register
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        csv_text, count = build_invoice_register(db, t.id, account_code=account_code)
+    fname = f"offtaker-invoices-{date.today().isoformat()}.csv"
+    return Response(
+        content=csv_text, media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                 "X-Invoice-Count": str(count)})
 
 
 @router.get("/global-rate")
