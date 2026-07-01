@@ -6,6 +6,11 @@ builder = "RAILPACK"
 [deploy]
 startCommand = "python -m api.migrate && uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+# The startCommand runs the full migration (create_all + backfills) BEFORE uvicorn
+# binds the port, so /health can't answer until migrate finishes. 30s raced that
+# on a heavier run and rolled a good deploy back; widen the window to cover
+# migrate + boot comfortably. (Migrations are idempotent/guarded, so this only
+# affects how long Railway waits for the first healthy response.)
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
