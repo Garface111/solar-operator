@@ -44,6 +44,22 @@ def test_seed_lights_up_the_whole_pipeline():
         assert csv_text.splitlines()[0].startswith("Customer")
 
 
+def test_review_emails_batched_one_digest_per_operator():
+    """An operator with many offtakers gets ONE 'come review' digest, not one
+    email per offtaker (Ford's 100-emails complaint). Also proves the seeded
+    offtaker bills are now SETTLED (kwh_generated set) — the review sweep only
+    sees them if they are, so a non-zero count confirms the visibility fix."""
+    from api.jobs.new_bill_review import run_new_bill_reviews
+    seed_realistic_demo(arrays=2, offtakers_per_array=3)   # 6 offtakers, one operator
+    res = run_new_bill_reviews(dry_run=True)
+    demo = [p for p in res.get("previews", []) if p["tenant_id"] == DEMO_TENANT_ID]
+    assert len(demo) == 1, f"expected ONE digest for the demo operator, got {len(demo)}"
+    p = demo[0]
+    assert p["count"] == 6, p["count"]            # all 6 offtakers in one email
+    assert "6 solar invoices are ready" in p["subject"], p["subject"]
+    assert p["items"][0]["amount_usd"] is not None  # bills settled → real amount
+
+
 def test_seed_is_idempotent():
     a = seed_realistic_demo(arrays=2, offtakers_per_array=2)
     b = seed_realistic_demo(arrays=2, offtakers_per_array=2)

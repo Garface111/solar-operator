@@ -143,6 +143,12 @@ def seed_realistic_demo(arrays: int = 12, offtakers_per_array: int = 5) -> dict:
                 db.flush()
                 db.add(Bill(tenant_id=DEMO_TENANT_ID, account_id=acct.id,
                             period_start=_PERIOD_START, period_end=_PERIOD_END,
+                            # kwh_generated makes the bill count as a SETTLED bill so
+                            # it shows in the accounts list (has_bill) AND the review
+                            # sweep (_utility_bill_period_kwh) sees it. The offtaker's
+                            # allocated generation ~= what they were credited.
+                            kwh_generated=int(round(credited)),
+                            kwh_consumed=int(round(credited * 0.15)),
                             kwh_sent_to_grid=credited,
                             solar_credit_usd=round(credited * rate, 2),
                             is_net_metered=True, pdf_bytes=_MINI_PDF,

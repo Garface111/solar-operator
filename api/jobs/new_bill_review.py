@@ -171,6 +171,82 @@ def _build_review_email(sub, tenant, draft, bill_label: str | None) -> tuple[str
     return subject, html, text
 
 
+def _build_review_digest_email(tenant, items) -> tuple[str, str, str]:
+    """ONE "come review" email covering ALL of an operator's offtakers whose new
+    bills are ready this run — so an operator with 100 offtakers gets a single
+    morning digest, not 100 separate emails (Ford, 2026-07-01). Reads personal for
+    a single offtaker; a scannable table + total for many. AO day skin."""
+    from ..email_skin import render_email_skin, render_email_skin_text
+
+    n = len(items)
+    url = _reports_url(tenant)
+
+    def _amt(v):
+        return f"${v:,.2f}" if isinstance(v, (int, float)) else "—"
+    total = sum(i["amount_usd"] for i in items if isinstance(i.get("amount_usd"), (int, float)))
+
+    if n == 1:
+        i = items[0]
+        cust = i.get("customer") or "your customer"
+        cust_e = _html.escape(cust)
+        period_e = _html.escape(str(i.get("period") or "the latest period"))
+        kwh = i.get("customer_kwh")
+        kwh_str = f"{kwh:,.0f} kWh" if isinstance(kwh, (int, float)) else "—"
+        subject = f"Your next solar invoice is ready to review — {cust}"
+        preheader = (f"A new utility bill landed for {cust}. We've prepared their "
+                     f"invoice — come review, then approve & send.")
+        body_html = (
+            f"<p>A new utility bill just landed for <strong>{cust_e}</strong>, so we've "
+            f"prepared their next invoice. Come review the numbers and the cover note, "
+            f"tweak anything, then approve &amp; send — nothing goes to {cust_e} until you do.</p>"
+            f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:10px;">'
+            f'<tr><td style="padding:7px 0;opacity:.65;">Billing period</td>'
+            f'<td style="padding:7px 0;text-align:right;">{period_e}</td></tr>'
+            f'<tr><td style="padding:7px 0;opacity:.65;">Their production</td>'
+            f'<td style="padding:7px 0;text-align:right;">{kwh_str}</td></tr>'
+            f'<tr><td style="padding:10px 0;opacity:.65;">Amount due</td>'
+            f'<td style="padding:10px 0;text-align:right;font-weight:700;color:#2563eb;">{_amt(i.get("amount_usd"))}</td></tr>'
+            f"</table>")
+        intro = f"Ready to review — {cust}"
+        body_text = (f"A new utility bill just landed for {cust}. We've prepared their next invoice.\n\n"
+                     f"Billing period: {i.get('period') or '—'}\n"
+                     f"Their production: {kwh_str}\nAmount due: {_amt(i.get('amount_usd'))}\n\n"
+                     f"Come review, edit anything, then approve & send. Nothing goes to {cust} until you do.\n")
+    else:
+        subject = f"{n} solar invoices are ready to review"
+        preheader = (f"New utility bills landed for {n} offtakers. We've prepared their "
+                     f"invoices — come review them all, then approve & send.")
+        rows = ""
+        for i in items:
+            rows += (f'<tr><td style="padding:6px 0;">{_html.escape(str(i.get("customer") or "—"))}</td>'
+                     f'<td style="padding:6px 0;opacity:.6;text-align:right;">{_html.escape(str(i.get("period") or "—"))}</td>'
+                     f'<td style="padding:6px 0;text-align:right;font-weight:600;">{_amt(i.get("amount_usd"))}</td></tr>')
+        body_html = (
+            f"<p>New utility bills just landed for <strong>{n} offtakers</strong>, so we've "
+            f"prepared their next invoices. Review them all in one place — tweak anything, then "
+            f"approve &amp; send. Nothing goes to any customer until you do.</p>"
+            f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:10px;">'
+            f'<tr><td style="padding:4px 0;opacity:.5;font-size:12px;">Offtaker</td>'
+            f'<td style="padding:4px 0;opacity:.5;font-size:12px;text-align:right;">Period</td>'
+            f'<td style="padding:4px 0;opacity:.5;font-size:12px;text-align:right;">Amount</td></tr>'
+            f"{rows}"
+            f'<tr><td colspan="2" style="padding:9px 0;border-top:1px solid #e5e7eb;font-weight:700;">Total</td>'
+            f'<td style="padding:9px 0;border-top:1px solid #e5e7eb;text-align:right;font-weight:700;color:#2563eb;">{_amt(total)}</td></tr>'
+            f"</table>")
+        intro = f"{n} invoices ready to review"
+        body_text = (f"New utility bills landed for {n} offtakers. We've prepared their invoices:\n\n"
+                     + "\n".join(f"  - {i.get('customer') or '—'}: {i.get('period') or '—'} — {_amt(i.get('amount_usd'))}"
+                                 for i in items)
+                     + f"\n\nTotal: {_amt(total)}\n\nReview them all, edit anything, then approve & send:\n{url}\n")
+
+    cta = {"label": (f"Review & send ({n})" if n > 1 else "Review & send"), "url": url}
+    html = render_email_skin(preheader=preheader, intro_line=intro, body_html=body_html,
+                             cta=cta, product="array_operator")
+    text = render_email_skin_text(intro_line=intro, body_text=body_text, cta=cta,
+                                  product="array_operator")
+    return subject, html, text
+
+
 def _operator_recipient(sub, tenant) -> str:
     """The OPERATOR (account holder) who reviews + approves — never the offtaker."""
     return (getattr(sub, "operator_email", None)
@@ -185,24 +261,26 @@ def _from_addr(tenant) -> str | None:
 
 
 def run_new_bill_reviews(*, dry_run: bool = False, to_override: str | None = None) -> dict:
-    """Daily. For every offtaker subscription bound to a GMP account, if a NEWER
-    utility-bill period has landed than the one we last review-emailed, ensure a
-    draft exists and email the OPERATOR a "come review your next bill" prompt.
+    """Daily. For every offtaker bound to a GMP account whose latest bill period is
+    NEWER than the one we last review-emailed, ensure a draft exists — then email
+    the OPERATOR **one digest** covering ALL their ready offtakers. So an operator
+    with 100 offtakers gets a SINGLE morning email listing them, not 100 (Ford,
+    2026-07-01). Drafts are still per-offtaker; only the notification is batched.
 
-    dry_run=True    → build everything and RETURN the rendered emails + recipients
-                      WITHOUT sending or stamping the dedup marker (safe preview).
-    to_override     → send the real email to this address instead of the operator
+    dry_run=True    → build everything and RETURN the rendered digest email(s) +
+                      recipients WITHOUT sending or stamping dedup (safe preview).
+    to_override     → route the real digest to this address instead of the operator
                       (a Ford-test send); still stamps dedup so it isn't re-sent.
 
-    Returns a structured result (operators emailed, per-subscription detail, and
-    for dry_run the rendered subject/recipient/period/amount for each candidate).
+    Returns {emailed (operators/digests sent), invoices_ready, candidates:[...],
+    and for dry_run previews:[{recipient, count, subject, html, text, items}]}.
     """
     from ..billing.delivery import _utility_bill_period_kwh
     from ..notify import _send_via_resend
 
-    emailed = 0
     candidates: list[dict] = []
-    previews: list[dict] = []
+    # (tenant_id, recipient) → {"tenant_id", "recipient", "items":[...], "subs":[(sid,label)]}
+    groups: dict = {}
 
     with SessionLocal() as db:
         rows = db.execute(
@@ -218,53 +296,67 @@ def run_new_bill_reviews(*, dry_run: bool = False, to_override: str | None = Non
             if (t.active or t.subscription_status in ("comped", "trialing"))
         ]
 
+        # ── PASS 1: per offtaker — dedup, ensure the draft, collect into a
+        #    per-(operator) group. No email here.
         for sid in sub_ids:
             sub = db.get(BillingReportSubscription, sid)
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
             if sub is None or tenant is None:
                 continue
-
-            # Source of truth: the latest paper-bill period for this GMP account.
             _kwh, _ps, _pe, label = _utility_bill_period_kwh(db, sub.utility_account_id)
             if not label:
                 continue  # no settled bill covers a period yet → nothing to review
-
             already = (sub.review_emailed_period or "").strip()
             if already == label and not to_override:
-                # We've already prompted the operator for this exact bill period.
-                continue
-
+                continue  # already prompted for this exact bill period
             draft = _ensure_draft(db, sub, tenant)
             if draft is None:
                 continue
-
             op = _operator_recipient(sub, tenant)
-            subject, email_html, email_text = _build_review_email(sub, tenant, draft, label)
             recipient = to_override or op
-
-            cand = {
+            item = {
                 "subscription_id": sid, "tenant_id": tenant.id,
                 "customer": sub.customer_name, "period": label,
                 "draft_period_label": draft.period_label,
                 "amount_usd": draft.amount_usd, "customer_kwh": draft.customer_kwh,
                 "operator_recipient": op, "recipient": recipient,
-                "subject": subject, "already_emailed_period": already or None,
+                "already_emailed_period": already or None,
             }
-            candidates.append(cand)
+            candidates.append(item)
+            key = (tenant.id, recipient or "")
+            g = groups.setdefault(key, {"tenant_id": tenant.id, "recipient": recipient,
+                                        "items": [], "subs": []})
+            g["items"].append(item)
+            g["subs"].append((sid, label))
+            if dry_run:
+                db.rollback()   # a preview never persists a flushed draft
+            else:
+                db.commit()     # the draft is ready in the inbox regardless of the email
+
+        # ── PASS 2: ONE email per (operator) group — the digest of all their
+        #    ready offtakers. Stamp dedup on ALL of the group's subs on success.
+        emailed = 0
+        previews: list[dict] = []
+        for g in groups.values():
+            items = g["items"]
+            recipient = g["recipient"]
+            tenant = db.get(Tenant, g["tenant_id"])
+            subject, email_html, email_text = _build_review_digest_email(tenant, items)
 
             if dry_run:
-                # Roll back the flushed draft so a preview never persists anything.
-                db.rollback()
-                previews.append({**cand, "html": email_html, "text": email_text})
+                previews.append({"tenant_id": g["tenant_id"], "recipient": recipient,
+                                 "count": len(items), "subject": subject,
+                                 "html": email_html, "text": email_text, "items": items})
                 continue
 
             if not recipient:
-                # No operator on file → can't route. Stamp so we don't churn it
-                # every day, but flag it (the draft is still in their inbox).
-                sub.review_emailed_period = label
+                # No operator on file → stamp so we don't churn daily (drafts still
+                # sit in their inbox for whenever an email is set).
+                for (sid, label) in g["subs"]:
+                    s = db.get(BillingReportSubscription, sid)
+                    if s:
+                        s.review_emailed_period = label
                 db.commit()
-                cand["sent"] = False
-                cand["note"] = "no operator email on file"
                 continue
 
             sent = False
@@ -273,25 +365,25 @@ def run_new_bill_reviews(*, dry_run: bool = False, to_override: str | None = Non
                     to=recipient, subject=subject, html=email_html, text=email_text,
                     from_addr=_from_addr(tenant), product="array_operator"))
             except Exception as exc:  # one operator must not stall the rest
-                logger.warning("new_bill_review send failed for sub %s: %s", sid, exc)
+                logger.warning("new_bill_review digest send failed for tenant %s: %s",
+                               g["tenant_id"], exc)
                 sent = False
 
-            cand["sent"] = sent
             if sent:
-                # Stamp dedup only on a confirmed send (a transient failure retries
-                # next tick). The draft itself is already committed below.
-                sub.review_emailed_period = label
-                db.commit()
                 emailed += 1
-            else:
-                # Persist the draft regardless (it's ready in the inbox) but leave
-                # the dedup marker so we retry the email on the next daily run.
+                for (sid, label) in g["subs"]:
+                    s = db.get(BillingReportSubscription, sid)
+                    if s:
+                        s.review_emailed_period = label
                 db.commit()
+            # not sent → leave dedup unset so the next daily tick retries (the
+            # drafts are already persisted from pass 1).
 
-    result = {"emailed": emailed, "candidates": candidates}
+    result = {"emailed": emailed, "operators_emailed": emailed,
+              "invoices_ready": len(candidates), "candidates": candidates}
     if dry_run:
         result["dry_run"] = True
         result["previews"] = previews
-    logger.info("new_bill_reviews: emailed=%d candidates=%d dry_run=%s",
+    logger.info("new_bill_reviews: operators_emailed=%d invoices_ready=%d dry_run=%s",
                 emailed, len(candidates), dry_run)
     return result
