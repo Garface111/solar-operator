@@ -1169,12 +1169,26 @@ def _bulk_rate(raw: str) -> tuple[Optional[float], Optional[str]]:
     return v, None
 
 
+# Maps the format-agnostic detector's field names → this endpoint's internal
+# colmap keys, so a detected mapping (or an operator override) plugs straight in.
+_DETECTOR_FIELD_TO_BULK = {
+    "offtaker_name": "name",
+    "array_name": "array",
+    "allocation_pct": "percent",
+    "email": "email",
+    "discount_pct": "discount",
+    "net_rate": "rate",
+    "account_number": "account_number",
+}
+
+
 @router.post("/subscriptions/bulk-import")
 async def bulk_import_offtakers(
     file: UploadFile = File(...),
     dry_run: bool = Form(default=True),
     cadence: str = Form(default="monthly"),
     delivery_mode: str = Form(default="approval"),
+    column_map: Optional[str] = Form(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
     """Bulk-import v2 — parse a roster (.csv/.xlsx) and return a per-row, fuzzy-
@@ -1192,6 +1206,20 @@ async def bulk_import_offtakers(
     Required columns: offtaker `name`, `array` (name), `percent`.
     Optional/scraped: `email`, `discount`, `rate`/`credit_rate`, `account_number`,
     plus any UNRECOGNIZED columns preserved per-row in `extra`.
+
+    Column detection is layered so simple sheets stay fast and messy ones still work:
+      1. `column_map` override — a JSON `{field: column_index}` the operator confirmed
+         in the review UI. When present we parse by it and SKIP detection entirely.
+      2. Clean alias match — the deterministic `_BULK_HEADER_ALIASES` fast path; used
+         as-is when the header row exactly names all three required columns.
+      3. Format-agnostic detector — `roster_detector.detect_roster_columns`, which
+         reads any layout (unknown headers, junk title rows, reordered columns) by
+         combining header keywords with CONTENT sniffing (the array column is found by
+         fuzzy-matching cell values to the tenant's real arrays). Preferred whenever the
+         alias path misses a required field.
+    The response carries a `detection` block (sheet, header_row, headers, column_map,
+    unmapped_columns, preview, via, warnings) so the frontend can show a column-mapping
+    review before the operator confirms.
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
@@ -1200,23 +1228,72 @@ async def bulk_import_offtakers(
     if delivery_mode not in VALID_DELIVERY:
         raise HTTPException(400, "delivery_mode must be approval or auto")
 
+    import json as _json
+
     from .offtaker_match import match_array
+    from .roster_detector import detect_roster_columns
 
     raw = await _read_roster_upload(file)
     rows = _roster_rows(raw, file.filename or "")
     if not rows:
         raise HTTPException(422, "That file is empty.")
-    header, *data_rows = rows
-    colmap = _bulk_classify_columns(header)
+
+    # Pick-list for matching + the frontend correction dropdowns. Needed by the
+    # detector too (content array-matching resolves against these real arrays).
+    arrays, uaccts = _arrays_and_accounts_for_tenant(t)
+
+    # ── Resolve the column mapping (override → alias fast-path → detector). ───────
+    detection: Optional[dict] = None
+    header_row_idx = 0
+
+    # (1) Operator-confirmed override: parse by it, skip detection.
+    override_map: Optional[dict] = None
+    if column_map:
+        try:
+            parsed = _json.loads(column_map)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "column_map must be valid JSON")
+        if not isinstance(parsed, dict):
+            raise HTTPException(400, "column_map must be a JSON object {field: index}")
+        override_map = {}
+        for field, idx in parsed.items():
+            bulk_key = _DETECTOR_FIELD_TO_BULK.get(field, field)
+            if idx is None:
+                continue
+            try:
+                override_map[bulk_key] = int(idx)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f'column_map["{field}"] must be an integer index')
+
+    if override_map is not None:
+        colmap = override_map
+    else:
+        # (2) Clean alias match on the first row.
+        header = rows[0]
+        colmap = _bulk_classify_columns(header)
+        alias_ok = all(f in colmap for f in ("name", "array", "percent"))
+        if not alias_ok:
+            # (3) Format-agnostic detector — reads junk rows / weird headers / any order.
+            detection = detect_roster_columns(raw, file.filename or "", arrays, uaccts)
+            header_row_idx = detection.get("header_row") or 0
+            det_map = detection.get("column_map") or {}
+            colmap = {}
+            for field, info in det_map.items():
+                if info and isinstance(info.get("index"), int):
+                    colmap[_DETECTOR_FIELD_TO_BULK.get(field, field)] = info["index"]
+
     missing_cols = [f for f in ("name", "array", "percent") if f not in colmap]
     if missing_cols:
         raise HTTPException(
             422, "Couldn't find a column for: " + ", ".join(missing_cols) + ". "
                  "Include a header row with Offtaker (name), Array, and Share % "
-                 "(download the template for the exact layout).")
+                 "(download the template for the exact layout), or map the columns "
+                 "manually and re-upload.")
 
-    # Pick-list for matching + the frontend correction dropdowns.
-    arrays, uaccts = _arrays_and_accounts_for_tenant(t)
+    # The header is at row header_row_idx (0 for the alias/override fast paths); the
+    # data rows are everything below it.
+    header = rows[header_row_idx] if header_row_idx < len(rows) else rows[0]
+    data_rows = rows[header_row_idx + 1:]
     ua_by_number = {(u.get("account_number") or "").strip().lower(): u
                     for u in uaccts if u.get("account_number")}
     ua_by_id = {u["utility_account_id"]: u for u in uaccts}
@@ -1231,7 +1308,8 @@ async def bulk_import_offtakers(
         return (row[idx] or "").strip()
 
     results: list[dict] = []
-    for i, row in enumerate(data_rows, start=2):  # row 1 is the header
+    # 1-based sheet row of the first data row (header is at header_row_idx, 0-based).
+    for i, row in enumerate(data_rows, start=header_row_idx + 2):
         if not any((c or "").strip() for c in row):
             continue  # silently skip a wholly-blank trailing line
         errors: list[str] = []
@@ -1335,7 +1413,7 @@ async def bulk_import_offtakers(
     for r in results:
         summary[_status(r)] += 1
 
-    return {
+    resp = {
         "ok": True,
         "dry_run": True,  # this endpoint is always a preview; commit is separate
         "rows": results,
@@ -1353,6 +1431,47 @@ async def bulk_import_offtakers(
             for u in uaccts
         ],
     }
+    # Surface the column-mapping detection so the frontend can show a review UI. On the
+    # clean-alias / override fast paths there's no detector run, so synthesize a minimal
+    # block from the resolved colmap (mapping the internal keys back to detector fields).
+    if detection is not None:
+        resp["detection"] = {
+            "sheet": detection.get("sheet"),
+            "header_row": detection.get("header_row"),
+            "headers": detection.get("headers", []),
+            "column_map": detection.get("column_map", {}),
+            "unmapped_columns": detection.get("unmapped_columns", []),
+            "preview": detection.get("preview", []),
+            "data_rows": detection.get("data_rows"),
+            "via": detection.get("via"),
+            "warnings": detection.get("warnings", []),
+        }
+    else:
+        _bulk_to_field = {v: k for k, v in _DETECTOR_FIELD_TO_BULK.items()}
+        det_cm: dict = {f: None for f in _DETECTOR_FIELD_TO_BULK}
+        for bulk_key, idx in colmap.items():
+            field = _bulk_to_field.get(bulk_key, bulk_key)
+            det_cm[field] = {
+                "index": idx,
+                "header": header[idx].strip() if idx < len(header) else "",
+                "confidence": "high",  # exact alias match or operator-confirmed
+            }
+        resp["detection"] = {
+            "sheet": None,
+            "header_row": header_row_idx,
+            "headers": [h.strip() for h in header],
+            "column_map": det_cm,
+            "unmapped_columns": [
+                {"index": idx, "header": header[idx].strip() if header[idx] else "",
+                 "sample": []}
+                for idx in range(len(header)) if idx not in set(colmap.values())
+            ],
+            "preview": [row for row in data_rows[:5] if any((c or "").strip() for c in row)],
+            "data_rows": len(results),
+            "via": "override" if override_map is not None else "alias",
+            "warnings": [],
+        }
+    return resp
 
 
 class _BulkCommitRow(BaseModel):

@@ -280,6 +280,73 @@ def test_manual_create_array_multiple_bills_requires_override(client):
     assert "multiple" in r.json()["detail"].lower()
 
 
+# ─── format-agnostic detection (junk rows / weird headers / reordered) ───────
+
+def test_bulk_import_messy_sheet_detected_by_content(client):
+    """A roster with junk TITLE rows above the header, unhelpful headers ('Solar
+    Site', 'Customer', '% of System'), and a NON-canonical column order still parses:
+    the array column is found by CONTENT (its values are the tenant's real arrays)."""
+    tid, auth = _make_tenant()
+    aid1, ua1 = _make_array_with_bill(tid, "Maple Street Solar", "GMP-111", with_bill=True)
+    aid2, ua2 = _make_array_with_bill(tid, "Route 7 Community Array", "GMP-222", with_bill=True)
+
+    csv = (
+        "Community Solar Roster — Q3 2026,,,\n"            # junk title row
+        "Confidential — do not distribute,,,\n"           # junk subtitle
+        ",,,\n"                                            # blank spacer
+        "Solar Site,Customer,% of System,Contact\n"       # the REAL header (weird labels)
+        "Maple Street Solar,Alice Cooper,25,alice@example.com\n"
+        "Route 7 Community,Bob Dylan,15,bob@example.com\n"
+    )
+    r = _bulk_import(client, auth, "messy.csv", csv.encode(), "text/csv")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    # Detection block is surfaced for the frontend review UI.
+    det = body["detection"]
+    assert det["header_row"] == 3
+    assert det["via"] in ("content", "mixed")
+    cm = det["column_map"]
+    assert cm["array_name"]["index"] == 0     # found by content, not header
+    assert cm["offtaker_name"]["index"] == 1
+    assert cm["allocation_pct"]["index"] == 2
+    assert cm["email"]["index"] == 3
+
+    # And the rows parsed correctly off that detected mapping.
+    rows = body["rows"]
+    assert len(rows) == 2
+    assert rows[0]["offtaker_name"] == "Alice Cooper"
+    assert rows[0]["matched_array_id"] == aid1
+    assert rows[0]["confidence"] in ("exact", "high")
+    assert abs(rows[0]["allocation_pct"] - 0.25) < 1e-9
+    assert rows[0]["email"] == "alice@example.com"
+    assert rows[1]["matched_array_id"] == aid2
+
+
+def test_bulk_import_column_map_override(client):
+    """An operator-confirmed column_map override parses by the given indices and
+    SKIPS detection — this is how column corrections re-parse the sheet."""
+    tid, auth = _make_tenant()
+    aid, ua = _make_array_with_bill(tid, "Maple Street Solar", "GMP-111", with_bill=True)
+
+    # Deliberately AMBIGUOUS headers so only an explicit override can parse it right.
+    csv = (
+        "colA,colB,colC\n"
+        "Maple Street Solar,Jane Offtaker,25\n"
+    )
+    import json as _json
+    override = _json.dumps({"array_name": 0, "offtaker_name": 1, "allocation_pct": 2})
+    r = _bulk_import(client, auth, "blind.csv", csv.encode(), "text/csv",
+                     column_map=override)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["detection"]["via"] == "override"
+    row = body["rows"][0]
+    assert row["offtaker_name"] == "Jane Offtaker"
+    assert row["matched_array_id"] == aid
+    assert abs(row["allocation_pct"] - 0.25) < 1e-9
+
+
 # ─── template download ───────────────────────────────────────────────────────
 
 def test_offtaker_template_download(client):
