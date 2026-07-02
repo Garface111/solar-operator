@@ -17,7 +17,7 @@ lumbee_river_emc,Lumbee River EMC,NC,live,lumbeeriver.smarthub.coop,https://lumb
 pee_dee_emc,Pee Dee EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
 piedmont_emc,Piedmont Electric Membership Corporation,NC,live,pemc.smarthub.coop,https://pemc.smarthub.coop,NISC SmartHub portal (pemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
 randolph_emc,Randolph EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
-roanoke_emc,Roanoke Electric Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
+roanoke_emc,Roanoke Electric Cooperative,NC,live,roanokecooperative.smarthub.coop,https://roanokecooperative.smarthub.coop,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload. SmartHub host auto-discovered + siteName-verified ('Roanoke Cooperative') Jul 2026.
 rutherford_emc,Rutherford EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
 south_river_emc,South River EMC,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
 surry_yadkin_emc,Surry-Yadkin EMC,NC,live,syemc.smarthub.coop,https://syemc.smarthub.coop,NISC SmartHub portal (syemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.

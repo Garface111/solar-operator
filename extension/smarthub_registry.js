@@ -44,6 +44,10 @@
       provider: "algerdelta",
       name: "Alger Delta Cooperative Electric Association",
     },
+    "anecop.smarthub.coop": {
+      provider: "anec",
+      name: "A&N Electric Cooperative",
+    },
     "arkvalley.smarthub.coop": {
       provider: "arkvalley",
       name: "Arkansas Valley Electric Cooperative",
@@ -75,6 +79,10 @@
     "bartlettec.smarthub.coop": {
       provider: "bartlett",
       name: "Bartlett Electric Cooperative",
+    },
+    "bartonelectric.smarthub.coop": {
+      provider: "mo_barton_co",
+      name: "Barton County Electric Cooperative",
     },
     "bayfieldelectric.smarthub.coop": {
       provider: "bayfield",
@@ -540,6 +548,10 @@
       provider: "eiec",
       name: "Eastern Illini Electric Cooperative",
     },
+    "elkriverutilities.smarthub.coop": {
+      provider: "mn_elk_river",
+      name: "Elk River Municipal Utilities",
+    },
     "elmhurstmutual.smarthub.coop": {
       provider: "elmhurst_mutual",
       name: "Elmhurst Mutual Power & Light",
@@ -715,6 +727,10 @@
     "gridley.smarthub.coop": {
       provider: "gridley",
       name: "Gridley Electric Utility",
+    },
+    "guthrierec.smarthub.coop": {
+      provider: "guthrie",
+      name: "Guthrie County Rural Electric Cooperative",
     },
     "gvea.smarthub.coop": {
       provider: "gvea",
@@ -1032,6 +1048,10 @@
       provider: "lrec",
       name: "Lake Region Electric Association",
     },
+    "lrecok.smarthub.coop": {
+      provider: "lakeregion_ok",
+      name: "Lake Region Electric Cooperative",
+    },
     "ludlow.smarthub.coop": {
       provider: "ludlow",
       name: "Village of Ludlow Electric Light Department",
@@ -1100,6 +1120,10 @@
       provider: "mcleod",
       name: "McLeod Cooperative Power Association",
     },
+    "mcphersonpower.smarthub.coop": {
+      provider: "mcpherson",
+      name: "City of McPherson Electric Department",
+    },
     "mcrea.smarthub.coop": {
       provider: "mcrea",
       name: "Morgan County Rural Electric Association",
@@ -1107,6 +1131,10 @@
     "mea.smarthub.coop": {
       provider: "mea",
       name: "Matanuska Electric Association",
+    },
+    "meccoop.smarthub.coop": {
+      provider: "missoula",
+      name: "Missoula Electric Cooperative",
     },
     "meckelec.smarthub.coop": {
       provider: "meckelec",
@@ -1196,6 +1224,10 @@
       provider: "nceci",
       name: "North Central Electric Cooperative",
     },
+    "neelectric.smarthub.coop": {
+      provider: "neoc",
+      name: "Northeast Oklahoma Electric Cooperative",
+    },
     "nemahamarshall.smarthub.coop": {
       provider: "nemaha_marshall",
       name: "Nemaha-Marshall Electric Cooperative",
@@ -1211,6 +1243,10 @@
     "newportutilities.smarthub.coop": {
       provider: "newport",
       name: "Newport Utilities",
+    },
+    "nfecoop.smarthub.coop": {
+      provider: "northfork",
+      name: "Northfork Electric Cooperative",
     },
     "nhec.smarthub.coop": {
       provider: "nhec",
@@ -1356,6 +1392,10 @@
       provider: "otero",
       name: "Otero County Electric Cooperative",
     },
+    "owatonnautilities.smarthub.coop": {
+      provider: "mn_owatonna",
+      name: "Owatonna Public Utilities",
+    },
     "ozarkborder.smarthub.coop": {
       provider: "mo_ozark_border",
       name: "Ozark Border Electric Cooperative",
@@ -1367,6 +1407,10 @@
     "ozarksecc.smarthub.coop": {
       provider: "ozarks",
       name: "Ozarks Electric Cooperative",
+    },
+    "pbutilities.smarthub.coop": {
+      provider: "poplar_bluff",
+      name: "Poplar Bluff Municipal Utilities",
     },
     "pcemc.smarthub.coop": {
       provider: "pcemc",
@@ -1427,6 +1471,10 @@
     "polkburnett.smarthub.coop": {
       provider: "polkburnett",
       name: "Polk-Burnett Electric Cooperative",
+    },
+    "popud.smarthub.coop": {
+      provider: "pend_oreille_pud",
+      name: "Pend Oreille PUD",
     },
     "ppec.smarthub.coop": {
       provider: "ppec",
@@ -1503,6 +1551,10 @@
     "rmec.smarthub.coop": {
       provider: "rmec",
       name: "Rich Mountain Electric Cooperative",
+    },
+    "roanokecooperative.smarthub.coop": {
+      provider: "roanoke_emc",
+      name: "Roanoke Electric Cooperative",
     },
     "rock.smarthub.coop": {
       provider: "rock",
@@ -1716,6 +1768,10 @@
       provider: "stearns",
       name: "Stearns Electric Association",
     },
+    "steubenrec.smarthub.coop": {
+      provider: "srec",
+      name: "Steuben Rural Electric Cooperative",
+    },
     "stoweelectric.smarthub.coop": {
       provider: "stowe",
       name: "Village of Stowe Electric Department",
@@ -1723,6 +1779,14 @@
     "sucocoop.smarthub.coop": {
       provider: "sumner_cowley",
       name: "Sumner-Cowley Electric Cooperative",
+    },
+    "sud.smarthub.coop": {
+      provider: "starkville_es",
+      name: "Starkville Electric System",
+    },
+    "sullivancorec.smarthub.coop": {
+      provider: "sullivan_rec",
+      name: "Sullivan County Rural Electric Cooperative",
     },
     "sunriverec.smarthub.coop": {
       provider: "sunriver",
@@ -1972,9 +2036,17 @@
       provider: "wild_rice",
       name: "Wild Rice Electric Cooperative",
     },
+    "withlacoochee.smarthub.coop": {
+      provider: "wrec",
+      name: "Withlacoochee River Electric Cooperative (WREC)",
+    },
     "wmu.smarthub.coop": {
       provider: "mn_willmar",
       name: "Willmar Municipal Utilities",
+    },
+    "woodburyrec.smarthub.coop": {
+      provider: "woodbury",
+      name: "Woodbury County Rural Electric Cooperative",
     },
     "wrea.smarthub.coop": {
       provider: "wrea_co",

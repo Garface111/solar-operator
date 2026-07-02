@@ -34,7 +34,7 @@ wellington_muni,City of Wellington Electric Department,KS,in-progress,,,Kansas P
 winfield,City of Winfield Electric Department,KS,in-progress,,,Kansas Power Pool member. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
 augusta,City of Augusta Electric Department,KS,in-progress,,,Kansas Power Pool member. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
 independence,City of Independence Light & Power,KS,in-progress,,,Major municipal utility in southeast Kansas. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
-mcpherson,City of McPherson Electric Department,KS,in-progress,,https://www.mcphersonks.org,"Municipal utility, Kansas Municipal Utilities member. No SmartHub (checked Jun 2026). Manual upload until portal confirmed."
+mcpherson,City of McPherson Electric Department,KS,live,mcphersonpower.smarthub.coop,https://mcphersonpower.smarthub.coop,"Municipal utility, Kansas Municipal Utilities member. No SmartHub (checked Jun 2026). Manual upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('McPherson Board of Public Utilities') Jul 2026."
 iola,City of Iola Electric Department,KS,in-progress,,,Kansas municipal utility. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
 ottawa,City of Ottawa Electric Department,KS,in-progress,,,Kansas municipal utility. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
 gardner,City of Gardner Energy,KS,in-progress,,https://www.gardnerkansas.gov,"Municipal utility serving Gardner, KS. No SmartHub (checked Jun 2026). Manual upload until portal confirmed."
