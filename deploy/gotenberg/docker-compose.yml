@@ -1,0 +1,32 @@
+# Gotenberg render service for the pixel-perfect invoice repro path.
+#
+# Gotenberg wraps a headless LibreOffice behind a small HTTP API. The Solar
+# Operator app POSTs a filled .xlsx to /forms/libreoffice/convert and gets back
+# a PDF that matches the operator's own workbook down to the pixel
+# (see api/billing/repro/render.py :: _render_gotenberg).
+#
+# This compose file is for LOCAL dev / self-hosting and as a reference for the
+# Railway service config. On Railway you deploy the SAME image
+# (gotenberg/gotenberg:8) as a separate service - no compose needed there; see
+# docs/REPRO-PIXEL-RUNBOOK.md.
+#
+#   docker compose -f deploy/gotenberg/docker-compose.yml up -d
+#   # then, for the app:  export GOTENBERG_URL=http://localhost:3000
+#
+services:
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    command:
+      # Only the LibreOffice route is used; keep the surface small.
+      - "gotenberg"
+      - "--api-timeout=120s"
+      # Chromium isn't needed for xlsx->pdf; disabling trims memory/attack surface.
+      - "--chromium-disable-javascript=true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
