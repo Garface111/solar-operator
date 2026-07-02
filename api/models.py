@@ -31,6 +31,33 @@ def now() -> datetime:
     return datetime.utcnow()
 
 
+# The fleet's local timezone. Arrays are US/Eastern (Vermont solar); vendor
+# portals, utility bills, and peer-analysis all reckon days in LOCAL time.
+FLEET_TZ = "America/New_York"
+
+
+def local_today(when: datetime | None = None) -> date:
+    """The fleet-LOCAL calendar day (US/Eastern), optionally for a given UTC
+    instant (testability).
+
+    DailyGeneration.day / InverterDaily.day are LOCAL production days: vendor
+    daily series carry portal-local dates, bill periods are local dates, and
+    peer-analysis buckets by FLEET_TZ. Bucketing "today" with utcnow().date()
+    instead rolls to tomorrow at ~8pm ET, so an evening capture wrote the
+    CURRENT day's accrued kWh into the NEXT day's slot — and the climb-only
+    upsert then kept yesterday's larger total over a cloudier real today,
+    double-counting kWh that feeds the Stripe per-kWh meter (verified on prod:
+    42/618 extension_pull rows mis-slotted, 4 stuck duplicate-day pairs).
+    Always bucket day-keyed generation writes AND their "today" reads with
+    this helper, never utcnow().date().
+    """
+    from zoneinfo import ZoneInfo
+    w = when if when is not None else datetime.now(ZoneInfo("UTC"))
+    if w.tzinfo is None:
+        w = w.replace(tzinfo=ZoneInfo("UTC"))
+    return w.astimezone(ZoneInfo(FLEET_TZ)).date()
+
+
 class Tenant(Base):
     """A paying customer (a solar operator like Bruce)."""
     __tablename__ = "tenants"

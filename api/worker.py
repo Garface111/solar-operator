@@ -18,6 +18,7 @@ Strategy (per account):
      downtime, schema change).
 """
 from __future__ import annotations
+import logging
 import pathlib, traceback
 from datetime import datetime
 from sqlalchemy import select
@@ -25,6 +26,8 @@ from .db import SessionLocal, DATA_DIR
 from .models import Tenant, UtilityAccount, UtilitySession, Bill, Job, now
 from .adapters import get_adapter
 from .sessions import token_for_account
+
+log = logging.getLogger(__name__)
 
 
 BILLS_DIR = DATA_DIR / "bills"
@@ -356,6 +359,19 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
                     "trace": traceback.format_exc(limit=2),
                 })
 
+        # Freshly-pulled bills → daily stream IMMEDIATELY (idempotent; only fills
+        # bill_prorate gaps, real metered days always win). Without this a
+        # bills-only tenant read ALL ZEROS on overview/trends until the nightly
+        # 05:30 bill_to_daily cron — up to 24h of "broken" dashboards right after
+        # a successful connect. Best-effort: a transform hiccup never fails the pull.
+        try:
+            from .jobs.bill_to_daily import transform_tenant_bills
+            with db.begin_nested():   # savepoint: a hiccup can't poison the pull tx
+                transform_tenant_bills(tenant_id, db=db)
+        except Exception:
+            log.warning("bill→daily transform after pull failed for %s",
+                        tenant_id, exc_info=True)
+
         # Stamp last_pull_at so the dashboard can show the next-pull countdown.
         tenant.last_pull_at = now()
         db.commit()
@@ -380,10 +396,24 @@ def pull_account_bills(tenant_id: str, account_id: int) -> dict:
         adapter = get_adapter(acc.provider)
         jwt = token_for_account(db, acc)
         json_err = None
+        # Surface fresh bill generation in the daily stream right away (only for
+        # this account's array; idempotent bill_prorate fill, real days win).
+        def _transform_after_pull():
+            if not acc.array_id:
+                return
+            try:
+                from .jobs.bill_to_daily import transform_array_bills
+                with db.begin_nested():   # savepoint: never poison the pull tx
+                    transform_array_bills(db, acc.array_id)
+            except Exception:
+                log.warning("bill→daily transform after account pull failed "
+                            "(array %s)", acc.array_id, exc_info=True)
+
         if jwt and hasattr(adapter, "fetch_bills_json"):
             try:
                 r = _pull_via_json(db, tenant_id, acc, adapter, jwt)
                 _tracker_append_for_account(db, tenant_id, acc, r)
+                _transform_after_pull()
                 db.commit()
                 return r
             except Exception as e:  # noqa: BLE001
@@ -391,6 +421,7 @@ def pull_account_bills(tenant_id: str, account_id: int) -> dict:
         try:
             r = _pull_via_pdf(db, tenant_id, acc, adapter)
             _tracker_append_for_account(db, tenant_id, acc, r)
+            _transform_after_pull()
             db.commit()
             if json_err:
                 r["json_fallback_reason"] = json_err

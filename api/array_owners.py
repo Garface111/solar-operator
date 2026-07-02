@@ -42,7 +42,7 @@ from .adapters import is_smarthub_provider
 from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
-from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, UtilitySession, now
+from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, UtilitySession, now, local_today
 from .models import Inverter, InverterDaily
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
@@ -177,9 +177,13 @@ def _capture_tenant_by_key(authorization: str | None) -> Tenant:
 def extension_status(authorization: str | None = Header(default=None)) -> dict:
     """Lightweight product + live-stat summary for the EnergyAgent extension popup.
 
-    Authed with the raw tenant_key bearer (reuses _capture_tenant_by_key, so a
-    paused-but-recoverable tenant still resolves — the popup should keep showing
-    its numbers). One tenant_key resolves exactly ONE Tenant.
+    Auth matches every other array-owner endpoint (_tenant_from_bearer): a SPA
+    SESSION bearer resolves first, falling back to the raw tenant_key the
+    extension popup sends. It previously accepted ONLY the tenant key, so a
+    valid session bearer got a misleading 403 "Invalid tenant key" — the one
+    array-owner endpoint that rejected the dashboard's own credential. The
+    key path still uses the capture-tolerant resolver, so a
+    paused-but-recoverable tenant keeps showing its numbers in the popup.
 
     LINKED dual-product install: when that tenant is cross-product LINKED
     (Tenant.linked_tenant_id → api.tenant_link), this reports BOTH products with
@@ -210,7 +214,7 @@ def extension_status(authorization: str | None = Header(default=None)) -> dict:
         "last_capture": {"provider": str, "at": iso} | None
       }
     """
-    tenant = _capture_tenant_by_key(authorization)
+    tenant = _tenant_from_bearer(authorization)
     product = (tenant.product or "nepool").strip() or "nepool"
 
     out: dict = {
@@ -288,7 +292,7 @@ def _ao_status_stats(db, tenant: Tenant) -> dict:
     """Array Operator popup stats for ONE tenant: arrays / inverters / flagged
     (from the cached fleet tree, fleet-tree-failure-tolerant), today's measured
     kWh (excl. bill_prorate), and active offtakers."""
-    today = date.today()
+    today = local_today()   # rows are keyed by the fleet-LOCAL day, so read likewise
     arrays = inverters_total = flagged = 0
     try:
         from . import inverter_fleet
@@ -531,7 +535,9 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
     """Per-array live power, generation totals, value, and health for a tenant."""
     tenant = _tenant_from_bearer(authorization)
 
-    today = date.today()
+    # DailyGeneration.day is a fleet-LOCAL (US/Eastern) day — read with the same
+    # key or the today/month buckets go stale/empty every evening after ~8pm ET.
+    today = local_today()
     month_start = today.replace(day=1)
     # Peer analysis compares each array against its cohort over a rolling window.
     window_start = today - timedelta(days=peer_analysis.WINDOW_DAYS)
@@ -869,7 +875,7 @@ def array_owners_fleet_trends(
       }
     """
     tenant = _tenant_from_bearer(authorization)
-    today = date.today()
+    today = local_today()   # TTM window anchored on the fleet-local day
 
     # (year, month) → kWh across the whole fleet, and per-array lifetime/years.
     fleet_ym: dict[tuple[int, int], float] = defaultdict(float)
@@ -3234,7 +3240,13 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
          for s in body.sites],
     )
 
-    today = now().date()
+    # FLEET-LOCAL day bucket (billing-critical). energy_today_kwh is the
+    # portal's LOCAL (US/Eastern) day total; keying it by utcnow().date()
+    # wrote every 8pm–midnight ET capture into TOMORROW's slot, and the
+    # climb-only upsert below then kept yesterday's larger total over a
+    # cloudier real today — double-counted kWh straight into the Stripe
+    # per-kWh meter. See models.local_today.
+    today = local_today()
     results: list[dict] = []
 
     with SessionLocal() as db:

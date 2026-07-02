@@ -133,6 +133,18 @@ def absorb_history(tenant_id: str, provider: str = "gmp") -> dict:
         prog.updated_at = now()
         db.commit()
 
+    # Absorbed bills → daily stream IMMEDIATELY (idempotent bill_prorate fill;
+    # real metered days always win) so a freshly-connected bills-only tenant's
+    # overview/trends light up with honestly-labeled bill-derived generation
+    # the moment the sponge finishes — not at the next 05:30 cron. Best-effort.
+    if total_absorbed:
+        try:
+            from .jobs.bill_to_daily import transform_tenant_bills
+            transform_tenant_bills(tenant_id)
+        except Exception:
+            log.warning("sponge: bill→daily transform failed for %s",
+                        tenant_id, exc_info=True)
+
     return {
         "status": "done" if not errors or total_absorbed else "error",
         "accounts": len(account_ids), "bills_absorbed": total_absorbed,

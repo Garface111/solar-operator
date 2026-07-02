@@ -1324,6 +1324,18 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 from .billing import sheet_tracker as _sheet_tracker
                 for _aid in _tracker_accts:
                     _sheet_tracker.maybe_append_for_account(db, tenant.id, _aid)
+                # Bills landed this sync → surface their generation in the daily
+                # stream NOW (idempotent bill_prorate fill; real metered days
+                # win) instead of at the 05:30 cron — a bills-only tenant must
+                # not read all-zeros for a day after connecting. Best-effort,
+                # savepoint-guarded so it can never poison the sync tx.
+                try:
+                    from .jobs.bill_to_daily import transform_tenant_bills
+                    with db.begin_nested():
+                        transform_tenant_bills(tenant.id, db=db)
+                except Exception:
+                    log.warning("bill→daily transform after sync failed for %s",
+                                tenant.id, exc_info=True)
 
         # CaptureEvent rows are a best-effort audit trail. Flush them inside a
         # SAVEPOINT so a bad event can't poison — or partially commit into — the

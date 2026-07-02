@@ -33,7 +33,7 @@ from sqlalchemy import select
 
 from . import generation_sources
 from .db import SessionLocal
-from .models import Array, DailyGeneration, Inverter, InverterConnection, InverterDaily, Tenant, UtilityAccount, now
+from .models import Array, DailyGeneration, Inverter, InverterConnection, InverterDaily, Tenant, UtilityAccount, now, local_today
 from .inverters import peer_analysis
 
 log = logging.getLogger(__name__)
@@ -195,6 +195,31 @@ def _is_daylight(lat: float | None = None, lon: float | None = None,
     except Exception:
         return True   # never let a sun-calc error hide a real card — default to "day"
     return elev > _DAYLIGHT_MIN_ELEVATION_DEG
+
+
+def _daylight_for(arr, default: bool, _cache: dict | None = None) -> bool:
+    """Per-ARRAY sun-up: use the array's own stored lat/long (captured by the
+    weather-model geocoding / vendor location capture / the owner's "set
+    location") when present, else the regional central-VT default. A
+    geographically distant array must not be daylight-gated on Vermont's sun
+    schedule — that blanked/showed its live power at the wrong hours. `_cache`
+    (rounded-coord → verdict) lets one fleet build reuse the sun calc across
+    co-located arrays."""
+    lat = getattr(arr, "latitude", None)
+    lon = getattr(arr, "longitude", None)
+    if lat is None or lon is None:
+        return default
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return default
+    key = (round(lat_f, 1), round(lon_f, 1))
+    if _cache is not None and key in _cache:
+        return _cache[key]
+    verdict = _is_daylight(lat_f, lon_f)
+    if _cache is not None:
+        _cache[key] = verdict
+    return verdict
 
 
 # Per-site telemetry cache (inventory + N equipment calls is heavy; SolarEdge is
@@ -1003,9 +1028,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
 
     columns: list[dict] = []
     inv_total = 0
-    # Compute sun-up ONCE per fleet build (regional default; all arrays share it
-    # until per-array lat/long exists). The card uses this for the "Sleeping" state.
+    # Regional (central-VT) sun-up default, computed once per build — the
+    # board-wide summary flag and the fallback for arrays with no stored
+    # location. Arrays WITH a lat/long get their own per-site verdict below
+    # (_daylight_for), so a distant array is never gated on Vermont's sun.
     daylight = _is_daylight()
+    _dl_cache: dict = {}
     # Cross-tenant live-power borrow map (vendor,serial) -> best fresh wattage
     # across ALL tenants. Lets a tenant whose browser captured a bogus near-zero
     # for a SHARED physical system show the real reading another tenant captured
@@ -1022,6 +1050,9 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         # hidden. Kept in the DB for offtaker billing; just not shown in this view.
         if arr.id in _util_array_ids and arr.id not in _arrays_with_inverters:
             continue
+
+        # THIS array's sun-up: its own coordinates when stored, else regional.
+        arr_daylight = _daylight_for(arr, daylight, _dl_cache)
 
         # Pull telemetry per source site (cached), then build peer-units for THIS
         # owner group (cohort = the inverters the owner placed under this array).
@@ -1102,7 +1133,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "min_kwh": min_kwh,                   # lowest daily output in the window (real)
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
-                "current_power_w": _live_power_w(iv, m, daylight=daylight, borrow=borrow_live),
+                "current_power_w": _live_power_w(iv, m, daylight=arr_daylight, borrow=borrow_live),
                 # Freshness basis. For extension vendors prefer the SOURCE's own
                 # last-data time (source_last_data_at) — the real "is this current?"
                 # signal (Fronius LastImport / SMA reading ts) — falling back to OUR
@@ -1192,7 +1223,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         # updating" instead of a bald "not producing right now" when live≈0 but
         # the array clearly worked today. Read from the array's own daily history
         # (today's row), independent of the flaky instantaneous feed.
-        _today_iso = now().date().isoformat()
+        # Fleet-LOCAL day key — DailyGeneration/InverterDaily days are local
+        # (US/Eastern) production days; a UTC key made "produced today" point at
+        # an empty tomorrow-row every evening after ~8pm ET. Must move in
+        # lockstep with the capture write key (models.local_today).
+        _today_iso = local_today().isoformat()
         _daily_rows = _array_daily(db, arr.id)
         _today_row = next(
             (r for r in _daily_rows if r.get("date") == _today_iso), None
@@ -1264,9 +1299,9 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             "daily_split": _array_daily_split(db, arr.id),
             # Sun-up flag for the card "Sleeping" night state. The card gates
             # "Sleeping" on (is_daylight==False AND output==0) so a daytime fault
-            # that zeroes output never reads as "asleep". Regional (central VT)
-            # until a per-array lat/long exists; recomputed each fetch.
-            "is_daylight": daylight,
+            # that zeroes output never reads as "asleep". Per-array when the
+            # array has a stored lat/long, else regional central-VT.
+            "is_daylight": arr_daylight,
             # {"state": ok|stale|dark|none, "last_report": iso|None, "age_hours": float|None}
             # — surfaced on the card so a vendor-side reporting gap reads as a
             # SOURCE outage, not an app failure.
