@@ -23,7 +23,7 @@ SaaS that automates quarterly net-metering credit reports for VT community solar
 - `scripts/` — one-off ops scripts
 
 ## GMCS writer format rules (CRITICAL — do not break)
-- One sheet per array
+- One sheet per **producing** array — an array with zero generation in every month of the rolling window gets NO sheet (Bruce's ask, 2026-07-02: never send non-producing arrays to the REC agent). Manual hide = `Array.excluded`.
 - A1:C1 merged, value = `"<Array Name> (<NEPOOL-GIS ID>)"`
 - Row 5 = header row, font size 14
 - Rolling 6 quarters, each quarter is 3 month rows + 1 gap row

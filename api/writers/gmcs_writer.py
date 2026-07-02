@@ -2,7 +2,9 @@
 GMCS-format writer — mimics the Green Mountain Community Solar quarterly
 NEPOOL-GIS-ready workbook used by Bruce.
 
-Layout (one sheet per array):
+Layout (one sheet per producing array — an array with zero generation across
+every month of the reporting window gets NO sheet, so NEPOOL-GIS uploads only
+carry arrays with reportable generation):
   A1:C1 (merged) — "<Array Name> (<optional ID>)"
   Row 5 — header: Quarter | Generation (MWh) | Reporting Amount | RECs†
   Rows 7-29 — 6 quarter blocks × 3 month rows each
@@ -291,7 +293,7 @@ def build_workbook(tenant_id: Optional[str] = None,
             for (year, month), kwh in distribute_kwh_by_calendar_day(b).items():
                 per_group[grp][(year, month)] += kwh
 
-        groups = sorted(per_group.keys()) or sorted(set(group_of.values()))
+        groups = sorted(set(group_of.values()))
 
         # Query DailyGeneration for each array in the report window.
         # Results are stored outside the db session for use in workbook rendering.
@@ -311,6 +313,22 @@ def build_workbook(tenant_id: Optional[str] = None,
                 dg = _daily_generation_by_month(db, arr.id, report_start, report_end)
                 if dg:
                     daily_gen_by_group[grp_name] = dg
+
+    # Non-producing arrays get no sheet: a group whose every month in the
+    # reporting window is zero (from bills AND daily data, merged with the
+    # same daily-over-bill precedence the renderer uses) would render as an
+    # all-blank sheet, and NEPOOL-GIS uploads must only carry arrays with
+    # reportable generation. Operators can still force-hide an array via
+    # Array.excluded; this filter is the automatic counterpart.
+    window_months = {m for (qy, qq) in qlist for m in _quarter_months(qy, qq)}
+    groups = [
+        grp for grp in groups
+        if any(
+            {**per_group.get(grp, {}), **daily_gen_by_group.get(grp, {})}
+            .get(m, 0.0) > 0
+            for m in window_months
+        )
+    ]
 
     # ── Build workbook ──────────────────────────────────────────────
     wb = Workbook()

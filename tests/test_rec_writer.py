@@ -193,3 +193,27 @@ def test_registry_dispatches_wind_to_rec_writer(tmp_path):
     sh = wb.active
     assert sh.cell(5, 4).value == "Wind RECs\u2020"
     assert sh.cell(31, 1).value != GMCS_FOOTNOTE
+
+
+# \u2500\u2500 non-producing arrays skipped (same rule as gmcs_writer) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def test_nonproducing_array_gets_no_sheet(tmp_path):
+    """A wind array with no generation in the window is omitted from the
+    workbook \u2014 identical skip rule to the solar writer."""
+    tid, cid = _make_wind_client()
+    with SessionLocal() as db:
+        arr = Array(
+            tenant_id=tid, client_id=cid,
+            name="Idle Turbine", fuel_type="wind",
+        )
+        db.add(arr); db.flush()
+        db.add(UtilityAccount(
+            tenant_id=tid, array_id=arr.id,
+            provider="gmp", account_number="IDLE_" + secrets.token_hex(4),
+        ))
+        db.commit()
+
+    out = tmp_path / "idle_wind.xlsx"
+    rec_build_workbook(client_id=cid, out_path=out, reference_date=_REF)
+    wb = load_workbook(out)
+    assert wb.sheetnames == ["Ridgeline Wind"], f"sheets: {wb.sheetnames}"

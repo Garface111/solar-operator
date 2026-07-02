@@ -205,7 +205,7 @@ def build_workbook(tenant_id: Optional[str] = None,
             for (yy, mm), kwh in distribute_kwh_by_calendar_day(b).items():
                 per_group[grp][(yy, mm)] += kwh
 
-        groups = sorted(per_group.keys()) or sorted(set(group_of.values()))
+        groups = sorted(set(group_of.values()))
 
         # DailyGeneration precedence window.
         start_year, start_q = qlist[0]
@@ -233,6 +233,20 @@ def build_workbook(tenant_id: Optional[str] = None,
             group_fuel[grp_name] = _array_fuel(arr)
             group_registry[grp_name] = _array_registry(arr)
             group_asset[grp_name] = _array_asset_id(arr)
+
+    # Non-producing arrays get no sheet — identical rule to gmcs_writer: a
+    # group with zero generation across every month of the reporting window
+    # (bills AND daily data, daily-over-bill precedence) is omitted so the
+    # registry upload only carries arrays with reportable generation.
+    window_months = {m for (qy, qq) in qlist for m in _quarter_months(qy, qq)}
+    groups = [
+        grp for grp in groups
+        if any(
+            {**per_group.get(grp, {}), **daily_gen_by_group.get(grp, {})}
+            .get(m, 0.0) > 0
+            for m in window_months
+        )
+    ]
 
     # ── Build workbook ──────────────────────────────────────────────
     wb = Workbook()

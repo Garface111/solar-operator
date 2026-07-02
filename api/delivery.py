@@ -106,9 +106,10 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         subject_template = tenant.email_subject_template
         body_template = tenant.email_body_template
         signoff_template = tenant.email_signoff
-        # Count only arrays that actually appear in the workbook (not soft-
-        # deleted, not excluded) so the {{arrays_count}} merge tag in the email
-        # body matches what the client sees in the attachment.
+        # Provisional count for the {{arrays_count}} merge tag (not soft-
+        # deleted, not excluded). After the workbook is built this is replaced
+        # by the attachment's real sheet count, since the writers also omit
+        # non-producing arrays; this DB count is the fallback if that fails.
         arrays_count = db.execute(
             select(func.count()).select_from(Array)
             .where(
@@ -186,6 +187,19 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             return {"ok": False, "client_id": client_id,
                     "client_name": client_name, "recipient": "",
                     "reason": "report generation failed", "error": str(e)}
+
+        # The writers omit non-producing arrays, so the DB array count can
+        # overstate what the client sees. The attachment's real sheet list is
+        # the ground truth for {{arrays_count}}.
+        try:
+            from openpyxl import load_workbook
+            _wb = load_workbook(path, read_only=True)
+            _sheets = [s for s in _wb.sheetnames if s != "(no data)"]
+            _wb.close()
+            arrays_count = len(_sheets)
+        except Exception:
+            logger.warning("could not recount arrays from workbook %s", path,
+                           exc_info=True)
 
         # Render the email from the tenant's templates (or built-in defaults).
         # Merge tags resolve against this client's real name / array count /
