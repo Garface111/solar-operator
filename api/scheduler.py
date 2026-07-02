@@ -803,7 +803,100 @@ def refresh_expiring_gmp_tokens() -> dict:
         "refresh_expiring_gmp_tokens: refreshed=%d failed=%d skipped=%d",
         len(refreshed), len(failed), skipped,
     )
+    # The unconditional FINAL-WARNING backstop (see gmp_final_expiry_warnings):
+    # rides the same hourly tick, catches sessions the refresh loop can't see.
+    try:
+        gmp_final_expiry_warnings()
+    except Exception:
+        logger.exception("gmp_final_expiry_warnings failed")
     return {"refreshed": refreshed, "failed": failed, "skipped": skipped}
+
+
+# Final-warning window: alert when the authoritative GMP JWT is inside this many
+# days of expiry. By this point the extension keep-alive (T-8d window) has had
+# 5+ days of chances and never succeeded — no browser has been open, or the
+# portal session itself lapsed. Bills stop the moment the JWT dies.
+_GMP_FINAL_WARN_DAYS = 3
+# Re-alert cadence while the token keeps ticking down (bounded spam: at most
+# one email every this-many days until it dies or is rescued).
+_GMP_FINAL_WARN_REALERT_DAYS = 3
+
+
+def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
+                              dry_run: bool = False) -> dict:
+    """The EXPLICIT token-death alert: 'your GMP token expires in N days and no
+    keep-alive has run.' Unlike the refresh loop above, this pass is UNCONDITIONAL —
+    it looks at expires_at alone, so it also covers sessions with no refresh_token
+    (invisible to the loop) and fires even when failure counting never crossed its
+    threshold. A successful extension keep-alive pushes expires_at ~21 days out,
+    which silently disarms this alert — so firing at T-3d genuinely means nothing
+    has rescued the session for days. De-duped via InverterAlertState
+    (incident_key 'gmp_token_final:<tenant>'), re-armed on rescue."""
+    from .models import InverterAlertState, UtilitySession, Tenant
+    from .notify import send_gmp_reauth_needed_email, send_internal_alert
+
+    cutoff = datetime.utcnow() + timedelta(days=days_ahead)
+    out = {"warned": [], "skipped_dedup": 0, "rescued_cleared": 0, "dry_run": dry_run}
+    with SessionLocal() as db:
+        # Authoritative (newest-captured) GMP session per tenant — same selection
+        # rule the bill sweep uses, so we alert on the session that matters.
+        newest = {}
+        for tid, sid, exp in db.execute(
+            select(UtilitySession.tenant_id, UtilitySession.id, UtilitySession.expires_at)
+            .where(UtilitySession.provider == "gmp")
+            .order_by(UtilitySession.tenant_id, UtilitySession.captured_at.desc(),
+                      UtilitySession.id.desc())
+        ).all():
+            newest.setdefault(tid, (sid, exp))
+
+        for tid, (sid, exp) in newest.items():
+            key = f"gmp_token_final:{tid}"
+            state = db.execute(select(InverterAlertState).where(
+                InverterAlertState.tenant_id == tid,
+                InverterAlertState.incident_key == key)).scalar_one_or_none()
+            if exp is None or exp > cutoff:
+                # Healthy (keep-alive rescued it, or fresh login) → close any open
+                # incident so the NEXT death is a fresh alert.
+                if state is not None:
+                    if not dry_run:
+                        db.delete(state)
+                        db.commit()
+                    out["rescued_cleared"] += 1
+                continue
+            days_left = max(0.0, (exp - datetime.utcnow()).total_seconds() / 86400)
+            if state is not None and state.last_alerted_at is not None and \
+                    datetime.utcnow() - state.last_alerted_at < timedelta(days=_GMP_FINAL_WARN_REALERT_DAYS):
+                out["skipped_dedup"] += 1
+                continue
+            tenant = db.get(Tenant, tid)
+            if tenant is None:
+                continue
+            out["warned"].append({"tenant": tid, "email": tenant.contact_email,
+                                  "days_left": round(days_left, 1)})
+            if dry_run:
+                continue
+            try:
+                send_gmp_reauth_needed_email(
+                    to=tenant.contact_email,
+                    name=tenant.operator_name or tenant.company_name or tenant.name,
+                )
+            except Exception:
+                logger.exception("final-warning email failed for %s", tid)
+            send_internal_alert(
+                f"GMP token FINAL WARNING: {tid} dies in {days_left:.1f}d, no keep-alive has run",
+                f"Tenant: {tid} ({tenant.contact_email})\nSession: {sid}\n"
+                f"Expires: {exp}\nThe extension keep-alive window opened at T-8d and "
+                f"never succeeded — no browser has been open (or the portal session "
+                f"lapsed). Bills stop when this JWT dies. Operator emailed to re-login.",
+            )
+            if state is None:
+                state = InverterAlertState(tenant_id=tid, incident_key=key)
+                db.add(state)
+            state.last_alerted_at = datetime.utcnow()
+            db.commit()
+    logger.info("gmp_final_expiry_warnings: warned=%d dedup=%d rescued=%d dry=%s",
+                len(out["warned"]), out["skipped_dedup"], out["rescued_cleared"], dry_run)
+    return out
 
 
 def hard_delete_old_soft_deleted():
