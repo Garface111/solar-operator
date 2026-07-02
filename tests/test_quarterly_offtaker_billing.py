@@ -208,6 +208,45 @@ def test_quarterly_real_math_falls_back_when_host_pool_incomplete():
     assert abs(ci["kwh"] - Q2_EXCESS) < 0.01          # pct(1.0) × own-bill sum
 
 
+# ─── approval mode: a held quarter must not draft a $0 review ────────────────
+
+def test_held_quarter_skips_draft_and_keeps_schedule(monkeypatch):
+    """Approval mode on an INCOMPLETE quarter: no misleading $0 draft, no
+    'ready to review' email, and next_send_at is NOT stamped forward — the
+    scheduler retries until the missing bill lands."""
+    from api.models import ReportDraft
+    tid, sid = _seed([Q2[0], Q2[2]])            # May missing → held
+    monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sid)
+        before = sub.next_send_at
+        tenant = db.get(Tenant, tid)
+        res = delivery.draft_subscription(db, sub, tenant)
+        assert res.get("ok") is False
+        assert res.get("skipped") is True
+        assert "May 2026" in (res.get("error") or ""), res
+        db.refresh(sub)
+        assert sub.next_send_at == before       # scheduler will retry
+        n = db.execute(select(ReportDraft).where(
+            ReportDraft.subscription_id == sid)).scalars().all()
+        assert n == []                          # no $0 draft created
+
+
+def test_complete_quarter_drafts_the_quarter(monkeypatch):
+    from api.models import ReportDraft
+    tid, sid = _seed(Q2)
+    monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sid)
+        tenant = db.get(Tenant, tid)
+        res = delivery.draft_subscription(db, sub, tenant)
+        assert res.get("ok") is True and res.get("drafted") is True, res
+        d = db.get(ReportDraft, res["draft_id"])
+        assert abs(d.customer_kwh - 0.5 * Q2_EXCESS) < 0.01
+        assert d.array_total_kwh == Q2_EXCESS
+        assert d.period_label == "2026-04-01 → 2026-06-30"
+
+
 # ─── exactly-once per quarter ────────────────────────────────────────────────
 
 def test_quarter_sends_once_then_blocks_duplicate(monkeypatch):

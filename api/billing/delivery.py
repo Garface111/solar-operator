@@ -1827,6 +1827,23 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
         return {"ok": False, "error": "no current billing period in the stored workbook"}
 
     ci = match.computed_invoice or {}
+
+    # ── HOLD, don't draft, while waiting on the utility bill ─────────────────
+    # A bill-bound offtaker whose period isn't billable yet — no settled bill,
+    # or a QUARTERLY invoice held because one of the quarter's months is still
+    # missing — must not land a misleading $0 "ready to review" draft in the
+    # operator's inbox. Skip WITHOUT stamping next_send_at, so the scheduler
+    # retries each tick and the real draft appears the moment the bill lands
+    # (mirrors deliver_subscription's send guard). Workbook subs and legacy
+    # unbound generation subs keep their existing draft behavior.
+    if (not getattr(sub, "source_workbook", None)
+            and getattr(sub, "utility_account_id", None) is not None
+            and ci.get("has_utility_bill") is not True):
+        return {"ok": False, "skipped": True,
+                "error": ("; ".join(match.warnings or [])
+                          or "waiting on the utility bill for this period"),
+                "triggered_by": triggered_by}
+
     inv_no = ci.get("invoice_number")
     period_label = None
     if ci.get("period_start") or ci.get("period_end"):
