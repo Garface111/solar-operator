@@ -104,6 +104,10 @@
       provider: "beartooth",
       name: "Beartooth Electric Cooperative",
     },
+    "becsc.smarthub.coop": {
+      provider: "berkeley",
+      name: "Berkeley Electric Cooperative",
+    },
     "bedfordrec.smarthub.coop": {
       provider: "bedford_rec",
       name: "Bedford Rural Electric Cooperative",
@@ -200,6 +204,10 @@
       provider: "mo_callaway",
       name: "Callaway Electric Cooperative",
     },
+    "camwalnet.smarthub.coop": {
+      provider: "cam_wal",
+      name: "Cam Wal Electric Cooperative",
+    },
     "canadianvalley.smarthub.coop": {
       provider: "canadianvalley",
       name: "Canadian Valley Electric Cooperative",
@@ -275,6 +283,10 @@
     "clarkenergy.smarthub.coop": {
       provider: "clark_energy",
       name: "Clark Energy Cooperative",
+    },
+    "clarkremc.smarthub.coop": {
+      provider: "clark",
+      name: "Clark County REMC",
     },
     "clatskaniepud.smarthub.coop": {
       provider: "clatskanie_pud",
@@ -439,6 +451,10 @@
     "cvea.smarthub.coop": {
       provider: "cvea",
       name: "Copper Valley Electric Association",
+    },
+    "cvec.smarthub.coop": {
+      provider: "concho_valley",
+      name: "Concho Valley Electric Cooperative",
     },
     "cwpower.smarthub.coop": {
       provider: "crow_wing",
@@ -1112,6 +1128,10 @@
       provider: "mcdonough",
       name: "McDonough Power Cooperative",
     },
+    "mcec.smarthub.coop": {
+      provider: "mcec_il",
+      name: "Monroe County Electric Co-Operative",
+    },
     "mckenzieelectric.smarthub.coop": {
       provider: "mckenzieelectric",
       name: "McKenzie Electric Cooperative",
@@ -1135,6 +1155,10 @@
     "mea.smarthub.coop": {
       provider: "mea",
       name: "Matanuska Electric Association",
+    },
+    "mec.smarthub.coop": {
+      provider: "mo_macon",
+      name: "Macon Electric Cooperative",
     },
     "meccoop.smarthub.coop": {
       provider: "missoula",
@@ -1207,6 +1231,10 @@
     "mwpower.smarthub.coop": {
       provider: "mwpower",
       name: "Mt. Wheeler Power",
+    },
+    "mycentral.smarthub.coop": {
+      provider: "centralrural",
+      name: "Central Rural Electric Cooperative",
     },
     "myec.smarthub.coop": {
       provider: "myec",
@@ -1323,6 +1351,10 @@
     "nplains.smarthub.coop": {
       provider: "nplains",
       name: "Northern Plains Electric Cooperative",
+    },
+    "nrppd.smarthub.coop": {
+      provider: "northwest_rppd",
+      name: "Northwest Rural Public Power District",
     },
     "ntec.smarthub.coop": {
       provider: "nortex",
@@ -1460,6 +1492,14 @@
       provider: "oh_pioneerec",
       name: "Pioneer Rural Electric Cooperative",
     },
+    "pioneerelectriccom.smarthub.coop": {
+      provider: "pioneer_electric",
+      name: "Pioneer Electric Cooperative",
+    },
+    "pioneerelectriccoop.smarthub.coop": {
+      provider: "ks_pioneer",
+      name: "Pioneer Electric Cooperative (KS)",
+    },
     "pjecc.smarthub.coop": {
       provider: "pjecc",
       name: "Petit Jean Electric Cooperative",
@@ -1547,6 +1587,10 @@
     "rgec.smarthub.coop": {
       provider: "rgec",
       name: "Rio Grande Electric Cooperative",
+    },
+    "richec.smarthub.coop": {
+      provider: "richland",
+      name: "Richland Electric Cooperative",
     },
     "riverlandenergy.smarthub.coop": {
       provider: "riverlandenergy",
@@ -1647,6 +1691,10 @@
     "scaec.smarthub.coop": {
       provider: "scaec",
       name: "South Central Arkansas Electric Cooperative",
+    },
+    "scecnet.smarthub.coop": {
+      provider: "stcroix",
+      name: "St. Croix Electric Cooperative",
     },
     "sec.smarthub.coop": {
       provider: "sec",
@@ -1760,9 +1808,17 @@
       provider: "mn_spring_grove",
       name: "City of Spring Grove",
     },
+    "sre.smarthub.coop": {
+      provider: "scenic_rivers",
+      name: "Scenic Rivers Energy Cooperative",
+    },
     "srec.smarthub.coop": {
       provider: "id_srec",
       name: "Salmon River Electric Cooperative",
+    },
+    "ssemc.smarthub.coop": {
+      provider: "snapping_shoals_emc",
+      name: "Snapping Shoals Electric Membership Corporation (SSEMC)",
     },
     "ssvec.smarthub.coop": {
       provider: "ssvec",
@@ -1999,6 +2055,10 @@
     "websterec.smarthub.coop": {
       provider: "mo_webster",
       name: "Webster Electric Cooperative",
+    },
+    "weci.smarthub.coop": {
+      provider: "oh_washingtonec",
+      name: "Washington Electric Cooperative",
     },
     "wemc.smarthub.coop": {
       provider: "wake_emc",

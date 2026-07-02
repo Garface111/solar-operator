@@ -34,7 +34,7 @@ okefenokee_remc,Okefenokee REMC,GA,in-progress,,,Georgia EMC member. No verified
 rayle_emc,Rayle EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 satilla_remc,Satilla REMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 slash_pine_emc,Slash Pine EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
-snapping_shoals_emc,Snapping Shoals EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+snapping_shoals_emc,Snapping Shoals Electric Membership Corporation (SSEMC),GA,live,ssemc.smarthub.coop,https://ssemc.smarthub.coop,NISC SmartHub portal — extension scrapes billing + usage. siteName 'mySSEMC' + the co-op's own site ssemc.com (Covington GA) links this host — verified Jul 2026. kWh unverified on a real generation meter; verify before trusting reports.
 southern_rivers,Southern Rivers Energy,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 sumter_emc,Sumter EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 three_notch_emc,Three Notch EMC,GA,in-progress,,,Georgia EMC member. No verified SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
