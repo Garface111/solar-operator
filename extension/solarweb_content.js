@@ -427,15 +427,35 @@
   async function captureLocation(system) {
     try {
       const fromRow = findLocation(system);
-      if (fromRow && typeof fromRow.latitude === "number") return fromRow;
+      if (fromRow && typeof fromRow.latitude === "number") {
+        LOG("location FOUND on list row for", system && system.PvSystemName, ":", fromRow);
+        return fromRow;
+      }
       let rowAddr = fromRow && fromRow.address ? fromRow : null;
       const id = system && system.PvSystemId;
+      let detail = null;
       if (id) {
         try {
-          const detail = await getJson("/PvSystems/" + encodeURIComponent(id) + "?_=" + Date.now());
+          detail = await getJson("/PvSystems/" + encodeURIComponent(id) + "?_=" + Date.now());
           const loc = findLocation(detail);
-          if (loc && (typeof loc.latitude === "number" || (!rowAddr && loc.address))) return loc;
-        } catch (_) { /* detail endpoint may differ — fall back to any row address */ }
+          if (loc && (typeof loc.latitude === "number" || (!rowAddr && loc.address))) {
+            LOG("location FOUND on detail endpoint for", system && system.PvSystemName, ":", loc);
+            return loc;
+          }
+        } catch (e) {
+          LOG("location detail fetch FAILED for", system && system.PvSystemName, ":",
+              e && e.message ? e.message : e);
+        }
+      }
+      if (!rowAddr) {
+        // Nothing found anywhere. Dump the top-level keys of both payloads so a
+        // console paste tells us EXACTLY what Solar.web's real JSON shape is,
+        // without needing live-portal access to design the next fix — see
+        // findLocation()'s "endpoint URLs + coord field paths are INFERRED"
+        // caveat (ext v1.9.103, commit 001df34).
+        LOG("location NOT FOUND for", system && system.PvSystemName,
+            "— list-row keys:", system && Object.keys(system),
+            "| detail keys:", detail && Object.keys(detail));
       }
       return rowAddr;
     } catch (_) { return null; }

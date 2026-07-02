@@ -376,8 +376,20 @@
   async function fetchPlantLocation(plantId) {
     try {
       const plant = await getJson(UIAPI + "/api/v1/plants/" + encodeURIComponent(plantId));
-      return findLocation(plant);
-    } catch (_) { return null; }
+      const loc = findLocation(plant);
+      if (loc) {
+        LOG("location FOUND for plant", plantId, ":", loc);
+      } else {
+        // Dump the payload keys so a console paste (set SMA_DEBUG=true above to see
+        // it) tells us exactly what ennexOS's real JSON shape is here — matches the
+        // Fronius/Chint diagnostic added alongside this (ext v1.9.103, 001df34).
+        LOG("location NOT FOUND for plant", plantId, "— keys:", Object.keys(plant || {}));
+      }
+      return loc;
+    } catch (e) {
+      LOG("location fetch FAILED for plant", plantId, ":", e && e.message ? e.message : e);
+      return null;
+    }
   }
 
   // Capture one plant's per-inverter comb. Returns a site object or null.

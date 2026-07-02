@@ -372,6 +372,15 @@
       // exact coordinate field in these payloads is INFERRED, NEEDS a live verify.)
       let loc = null;
       try { loc = findLocation(st) || (devJson ? findLocation(devJson.data || devJson) : null); } catch (_) { loc = null; }
+      if (loc) {
+        LOG("location FOUND for", name, ":", loc);
+      } else {
+        // Dump the payload keys so a console paste tells us exactly what Chint's
+        // real JSON shape is, without needing live-portal access to refine the
+        // field-name patterns (ext v1.9.103, commit 001df34).
+        LOG("location NOT FOUND for", name, "— site-list-row keys:", Object.keys(st || {}),
+            "| device-json keys:", devJson && Object.keys(devJson.data || devJson || {}));
+      }
       const site = {
         site_id: String(sid != null ? sid : name),
         name,
