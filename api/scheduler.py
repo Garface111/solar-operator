@@ -931,8 +931,16 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
     not death). De-duped via InverterAlertState 'coop_session_dead:<tenant>:
     <provider>'; incident clears itself when data flows again."""
     from .adapters.smarthub import PROVIDER_TO_UTILITY, is_smarthub_provider
-    from .models import InverterAlertState, UtilitySession, Tenant, DailyGeneration
+    from .models import InverterAlertState, UtilitySession, Tenant, DailyGeneration, UtilityAccount
     from .notify import send_coop_reauth_needed_email, send_internal_alert
+
+    # What counts as EVIDENCE the session is alive: rows the session-riding paths
+    # write — 'utility_meter' (the extension's SmartHub usage capture, the ONLY
+    # path that has ever produced co-op rows in prod) and 'smarthub' (the
+    # server-side pull, included for when it starts working). 'bill_prorate' is
+    # EXCLUDED on purpose: it's a bill-derived estimate whose dates advance with
+    # billing cycles, not with session health — counting it would mask a death.
+    _LIVE_SOURCES = ("utility_meter", "smarthub")
 
     out = {"warned": [], "skipped_dedup": 0, "recovered_cleared": 0, "dry_run": dry_run}
     now_ = datetime.utcnow()
@@ -948,10 +956,17 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                 InverterAlertState.tenant_id == tid,
                 InverterAlertState.incident_key == key)).scalar_one_or_none()
 
+            # Newest live-source row on the arrays LINKED to this provider's
+            # accounts — provider-scoped so a healthy VEC can't mask a dead WEC.
             newest_day = db.execute(
-                select(func.max(DailyGeneration.day)).where(
-                    DailyGeneration.tenant_id == tid,
-                    DailyGeneration.source == "smarthub")).scalar()
+                select(func.max(DailyGeneration.day))
+                .join(UtilityAccount, UtilityAccount.array_id == DailyGeneration.array_id)
+                .where(
+                    UtilityAccount.tenant_id == tid,
+                    UtilityAccount.provider == prov,
+                    UtilityAccount.enabled.is_(True),
+                    UtilityAccount.deleted_at.is_(None),
+                    DailyGeneration.source.in_(_LIVE_SOURCES))).scalar()
             if newest_day is None:
                 continue          # never produced data → onboarding, not a death
             fresh = (now_.date() - newest_day).days < days_stale
