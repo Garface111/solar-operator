@@ -228,7 +228,12 @@ def _fleet_reference_day(cols: list[dict]) -> tuple[str | None, str | None, bool
     if not days:
         return None, None, False
     iso = max(days)
-    is_stale = iso < _yesterday_iso()
+    # Stale if ANY array is behind yesterday — a mixed fleet (fresh SolarEdge +
+    # extension-captured Fronius/SMA that report only on browser capture) must not
+    # let the fresh arrays MASK the stale ones. The header shows the freshest day;
+    # the note + per-array dates surface which arrays are behind.
+    yiso = _yesterday_iso()
+    is_stale = any(d < yiso for d in days)
     try:
         label = datetime.strptime(str(iso), "%Y-%m-%d").strftime("%A, %B %-d, %Y")
     except (ValueError, TypeError):
@@ -347,8 +352,8 @@ def build_digest_html(tenant, tree: dict) -> str:
     date_line = f"Full-day summary &middot; {data_label}" if data_label else "Full-day summary"
     stale_html = (
         f'<div style="color:{FAINT};font-size:12px;margin-top:3px;line-height:1.4;">'
-        f'This is the latest full day we have — some arrays haven&rsquo;t reported since. '
-        f'Open Array Operator (or run the capture extension) to refresh their readings.</div>'
+        f'Some arrays haven&rsquo;t reported a full day recently (see their dates below) — '
+        f'open Array Operator or run the capture extension to refresh their readings.</div>'
         if stale else ""
     )
 
@@ -596,8 +601,8 @@ def build_digest_text(tenant, tree: dict) -> str:
     date_line = f"Full-day summary · {data_label}" if data_label else "Full-day summary"
     lines = [f"Daily fleet health — {fleet}", date_line]
     if stale:
-        lines.append("(Latest full day we have — some arrays haven't reported since; "
-                     "open Array Operator to refresh.)")
+        lines.append("(Some arrays haven't reported a full day recently — see their "
+                     "dates below; open Array Operator to refresh.)")
     lines.append("")
     if attention == 0:
         lines.append("All systems healthy: every inverter we can see produced as expected over the full day.")

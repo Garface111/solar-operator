@@ -274,4 +274,20 @@ def test_stale_data_note():
     iso, label, stale = digest._fleet_reference_day([col])
     assert iso == old and stale is True
     html = digest.build_digest_html(_tenant(), {"columns": [col], "summary": {"attention": 0}})
-    assert "reported since" in html   # the staleness note rendered
+    assert "refresh their readings" in html   # the staleness note rendered
+
+
+def test_mixed_fleet_stale_not_masked_by_fresh_array():
+    """A fresh array (SolarEdge, yesterday) must NOT mask a stale one (Fronius, days
+    behind): the fleet still reads stale so the note fires."""
+    fresh_day = _iso_days_ago(1)
+    old_day = _iso_days_ago(3)
+    fresh = {"array_id": 1, "array_name": "SolarEdge Site", "inverter_count": 1,
+             "alert": {"level": "ok", "count": 0}, "inverters": [],
+             "daily": [{"date": _iso_days_ago(2), "kwh": 100}, {"date": fresh_day, "kwh": 100}]}
+    stale_arr = {"array_id": 2, "array_name": "Fronius Site", "inverter_count": 1,
+                 "alert": {"level": "ok", "count": 0}, "inverters": [],
+                 "daily": [{"date": _iso_days_ago(4), "kwh": 100}, {"date": old_day, "kwh": 100}]}
+    iso, label, stale = digest._fleet_reference_day([fresh, stale_arr])
+    assert iso == fresh_day     # header shows the freshest day...
+    assert stale is True        # ...but staleness is NOT masked by it
