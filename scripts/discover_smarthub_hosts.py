@@ -157,11 +157,28 @@ def match_names(label: str, sitename: str) -> str:
     return "reject"
 
 
-def candidates(code: str, label: str, taken: set[str]) -> list[str]:
-    """Candidate subdomains, mirroring patterns seen across the 471 known hosts."""
+# Suffix stems seen across the 496 known NISC hosts (electric/ec/emc/rec/…) plus
+# municipal/PUD forms (pud/mud/bpw/ppd/blp/…). Applied to condensed name stems.
+_SUFFIXES = [
+    "electric", "ec", "emc", "rec", "recc", "reca", "remc", "cea", "ce", "elec",
+    "ecc", "eci", "epa", "coop", "cooperative", "energy", "power", "light",
+    "lightandpower", "utilities", "utility", "pud", "mud", "bpw", "ppd", "ud",
+    "mu", "blp", "el", "e",
+]
+_QUALIFIERS = {"county", "village", "city", "town", "parish", "district",
+               "borough", "township", "of"}
+
+
+def candidates(code: str, label: str, taken: set[str], state: str = "") -> list[str]:
+    """Candidate subdomains, mirroring patterns seen across the known hosts. Round-2:
+    condensed stems (full / distinctive / distinctive-minus-geographic-qualifier),
+    each × the full suffix set; first-token × suffixes; hyphenated first-two;
+    acronym × suffixes; state-abbrev prefix; my+name. Priority-ordered, cap 36."""
     lt = norm_tokens(label)
     ld = [t for t in lt if t not in GENERIC]
+    ld_nq = [t for t in ld if t not in _QUALIFIERS]     # drop county/village/… noise
     acr = acronym(lt)
+    st = (state or "").strip().lower()
     outs: list[str] = []
 
     def add(x: str | None):
@@ -170,21 +187,78 @@ def candidates(code: str, label: str, taken: set[str]) -> list[str]:
             outs.append(x)
 
     add(code)
-    add("".join(lt))                        # full condensed name
-    add("".join(ld))                        # distinctive only
-    if ld:
-        add("".join(ld) + "electric")
-        add("".join(ld) + "ec")
-        add("".join(ld) + "emc")
-        add("".join(ld) + "rec")
-        add("".join(ld) + "coop")
-        add(ld[0])
-        add(ld[0] + "electric")
-        add(ld[0] + "ec")
+    # condensed-name stems, each with every suffix + a state-prefixed form
+    for stem in dict.fromkeys(["".join(ld_nq), "".join(ld), "".join(lt)]):
+        if not stem:
+            continue
+        add(stem)
+        for suf in _SUFFIXES:
+            add(stem + suf)
+        if st:
+            add(st + stem)
+    # first distinctive token alone + suffixes; hyphenated / joined first-two
+    if ld_nq:
+        add(ld_nq[0])
+        for suf in _SUFFIXES:
+            add(ld_nq[0] + suf)
+        if len(ld_nq) >= 2:
+            add(ld_nq[0] + "-" + ld_nq[1])
+            add(ld_nq[0] + ld_nq[1])
+    # acronym forms (WEC, DMEA, …)
     if len(acr) >= 3:
         add(acr)
-        add(acr + "ec")
-    return [c for c in outs if (c + SUFFIX) not in taken][:12]
+        for suf in ("ec", "emc", "rec", "coop", "energy", "power"):
+            add(acr + suf)
+    add("my" + "".join(ld_nq))
+    return [c for c in outs if (c + SUFFIX) not in taken][:36]
+
+
+_SH_RE = re.compile(r"https?://([a-z0-9][a-z0-9-]*\.smarthub\.coop)", re.I)
+
+
+def _fetch_page(url: str, timeout: int = 8) -> tuple[str | None, str]:
+    """Fetch a co-op's own site (follow redirects). Returns (final_url, body[:200k])."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 EnergyAgent-catalog/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+            body = r.read(200_000).decode("utf-8", "replace")
+            return r.geturl(), body
+    except Exception:
+        return None, ""
+
+
+def portal_hosts(rows: list[dict]) -> list[tuple[dict, str]]:
+    """High-yield mode: for each hostless row with a non-smarthub portal_url, fetch
+    the co-op's site and harvest any *.smarthub.coop host it links to or redirects
+    to (co-op homepages routinely deep-link their SmartHub billing portal). These
+    still flow through the same siteName-verify + conservative name-match, so a
+    harvested host is only wired if its branding confirms the utility."""
+    def probe(r: dict) -> tuple[dict, list[str]] | None:
+        url = (r.get("portal_url") or "").strip()
+        if not url or "smarthub.coop" in url.lower():
+            return None
+        final, body = _fetch_page(url)
+        hosts: set[str] = set()
+        if final:
+            m = _SH_RE.search(final)
+            if m:
+                hosts.add(m.group(1).lower())
+        for m in _SH_RE.finditer(body):
+            hosts.add(m.group(1).lower())
+        return (r, sorted(hosts)) if hosts else None
+
+    out: list[tuple[dict, str]] = []
+    probe_rows = [r for r in rows if (r.get("portal_url") or "").strip()]
+    with cf.ThreadPoolExecutor(24) as ex:
+        for res in ex.map(probe, probe_rows):
+            if res:
+                r, hosts = res
+                for h in hosts:
+                    out.append((r, h))
+    return out
 
 
 def dns_ok(host: str) -> bool:
@@ -280,13 +354,26 @@ def main() -> int:
         probe_rows = hostless[: args.limit] if args.limit else hostless
         cand_map: list[tuple[dict, str]] = []
         for r in probe_rows:
-            for c in candidates(r["code"], r["label"], taken):
+            for c in candidates(r["code"], r["label"], taken, r.get("state", "")):
                 cand_map.append((r, c + SUFFIX))
         print(f"probing DNS for {len(cand_map)} candidate hosts across {len(probe_rows)} utilities…")
         with cf.ThreadPoolExecutor(64) as ex:
             alive = list(ex.map(lambda rc: dns_ok(rc[1]), cand_map))
         live = [rc for rc, a in zip(cand_map, alive) if a]
-        print(f"  {len(live)} resolve — fetching siteName…")
+        print(f"  {len(live)} candidate hosts resolve")
+        # HIGH-YIELD: harvest hosts co-ops link from their OWN site (real links, no
+        # guessing). Merge into the verify set (dedup by host); they skip DNS.
+        harvested = portal_hosts(probe_rows)
+        seen_hosts = {h for _, h in live}
+        n_new_portal = 0
+        for r, h in harvested:
+            if h not in taken and h not in seen_hosts:
+                live.append((r, h))
+                seen_hosts.add(h)
+                n_new_portal += 1
+        report["stats"]["portal_hosts_harvested"] = n_new_portal
+        print(f"  portal-scrape harvested {n_new_portal} new smarthub host(s) from co-op sites")
+        print(f"  {len(live)} total to verify — fetching siteName…")
         with cf.ThreadPoolExecutor(8) as ex:
             sn = list(ex.map(lambda rc: fetch_sitename(rc[1]), live))
 
