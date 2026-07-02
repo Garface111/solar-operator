@@ -33,7 +33,7 @@ ferry_pud,Ferry County PUD,WA,in-progress,,,Public utility district serving Ferr
 peninsula_light,Peninsula Light Company,WA,in-progress,,https://www.peninsulalight.com,Member-owned cooperative. Portal exists but NOT on NISC SmartHub (peninsula.smarthub.coop returns 404). Adapter needs a live login. Manual upload meanwhile.
 modern_electric,Modern Electric Water Company,WA,in-progress,,https://www.modernelectricwater.com,Member-owned cooperative. Portal NOT on NISC SmartHub. Adapter needs a live login. Manual upload meanwhile.
 parkland_light,Parkland Light & Water,WA,in-progress,,,Utility district. No SmartHub host or customer portal found (Jun 2026). Manual upload until portal confirmed.
-ohop_mutual,Ohop Mutual Light Company,WA,in-progress,,,Mutual light company. No SmartHub host or customer portal found (Jun 2026). Manual upload until portal confirmed.
+ohop_mutual,Ohop Mutual Light Company,WA,live,ohopmutual.smarthub.coop,https://ohopmutual.smarthub.coop,Mutual light company. No SmartHub host or customer portal found (Jun 2026). Manual upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Ohop Mutual Light Company') Jul 2026.
 vera_water_power,Vera Water & Power,WA,in-progress,,,Irrigation district with electric service. No SmartHub host or customer portal found (Jun 2026). Manual upload until portal confirmed.
 richland_energy,City of Richland Energy Services,WA,in-progress,,https://www.ci.richland.wa.us,"Municipal utility serving Richland. City portal — bespoke, adapter needs a live login. Manual upload meanwhile."
 ellensburg,City of Ellensburg,WA,in-progress,,,Municipal utility serving Ellensburg. No SmartHub host or customer portal found (Jun 2026). Manual upload until portal confirmed.

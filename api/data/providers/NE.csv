@@ -9,12 +9,12 @@ prema,Panhandle Rural Electric Membership Association,NE,live,prema.smarthub.coo
 wheatbelt_ppd,Wheat Belt Public Power District,NE,live,wheatbelt.smarthub.coop,https://wheatbelt.smarthub.coop,NISC SmartHub portal (wheatbelt.smarthub.coop confirmed Jun 2026) — extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports.
 burt_ppd,Burt County Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
 cornhusker_ppd,Cornhusker Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
-cuming_ppd,Cuming County Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+cuming_ppd,Cuming County Public Power District,NE,live,ccppd.smarthub.coop,https://ccppd.smarthub.coop,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Cuming County Public Power District') Jul 2026.
 elkhorn_rppd,Elkhorn Rural Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
 loup_ppd,Loup Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
 midwest_ec,Midwest Electric Cooperative Corporation,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
-niobrara_valley_emc,Niobrara Valley Electric Membership Corporation,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
-norris_ppd,Norris Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
+niobrara_valley_emc,Niobrara Valley Electric Membership Corporation,NE,live,nvemc.smarthub.coop,https://nvemc.smarthub.coop,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Niobrara Valley Electric') Jul 2026.
+norris_ppd,Norris Public Power District,NE,live,norrisppd.smarthub.coop,https://norrisppd.smarthub.coop,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Norris Public Power District') Jul 2026.
 northwest_rppd,Northwest Rural Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
 twinvalley_ppd,Twin Valley Public Power District,NE,in-progress,,,No SmartHub host found (probed multiple patterns Jun 2026). Manual PDF upload until portal confirmed.
 auburn_mu,Auburn Municipal Utilities,NE,manual,,,No SmartHub host or customer portal found (Jun 2026). Manual PDF upload.
