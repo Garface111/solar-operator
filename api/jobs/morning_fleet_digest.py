@@ -96,27 +96,46 @@ def _last_full_day_point(col: dict) -> dict | None:
     snapshot, not a day's production. So we skip today and report the last FULL
     day (normally yesterday) — the honest "production of the last day". Returns
     None (not 0.0) when there is genuinely no complete-day history yet.
+
+    PARTIAL-CAPTURE GUARD: extension-captured vendors (Fronius/SMA/Chint) ship data
+    only when the owner's browser is open, so the most-recent stored day can be an
+    INCOMPLETE capture — the array actually ran ~100 kWh but the shipped day reads
+    ~0.1 because collection was interrupted. Reporting that as "the last full day"
+    is a fabricated-looking near-zero. So we skip trailing days that are < 10% of
+    the recent typical (median of nonzero complete days) and land on the last
+    plausibly-complete day. We never skip everything: if the whole recent window is
+    (near-)zero the array is genuinely dark, so we report the latest honestly and
+    let the health verdict flag it.
     """
     today = _local_today_iso()
     pts = _vendor_daily(col)
-    for pt in reversed(pts):                       # newest → oldest, skip today
+    complete: list[dict] = []                       # oldest → newest, excl. today
+    for pt in pts:
         if pt.get("kwh") is None or str(pt.get("date")) == today:
             continue
         try:
-            float(pt["kwh"])
-            return pt
+            complete.append({"date": pt.get("date"), "kwh": float(pt["kwh"])})
         except (TypeError, ValueError):
             continue
-    # Edge case: the ONLY data is today (a brand-new connect). Rather than say
-    # "no data", fall back to it — rare in the morning, and still honest via its date.
-    for pt in reversed(pts):
-        if pt.get("kwh") is not None:
-            try:
-                float(pt["kwh"])
-                return pt
-            except (TypeError, ValueError):
-                continue
-    return None
+    if not complete:
+        # Edge case: the ONLY data is today (a brand-new connect). Fall back to it —
+        # rare in the morning, still honest via its date.
+        for pt in reversed(pts):
+            if pt.get("kwh") is not None:
+                try:
+                    return {"date": pt.get("date"), "kwh": float(pt["kwh"])}
+                except (TypeError, ValueError):
+                    continue
+        return None
+    nonzero = sorted(p["kwh"] for p in complete if p["kwh"] > 0)
+    if nonzero:
+        ref = nonzero[len(nonzero) // 2]            # median of nonzero complete days
+        floor = ref * 0.10
+        i = len(complete) - 1
+        while i > 0 and complete[i]["kwh"] < floor:  # skip trailing partial captures
+            i -= 1
+        return complete[i]
+    return complete[-1]
 
 
 def _recent_kwh(col: dict) -> float | None:
@@ -189,6 +208,106 @@ def _ranked_arrays(cols: list[dict]) -> list[dict]:
     return scored
 
 
+def _yesterday_iso() -> str:
+    """Yesterday's date (ET) as 'YYYY-MM-DD' — the day a fresh fleet's data covers."""
+    try:
+        from zoneinfo import ZoneInfo
+        return (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)).date().isoformat()
+    except Exception:
+        return (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+
+
+def _fleet_reference_day(cols: list[dict]) -> tuple[str | None, str | None, bool]:
+    """(iso, label, is_stale) for the freshest COMPLETE day across the fleet — the
+    day the digest actually summarizes, READ FROM THE DATA, never a hardcoded
+    'yesterday'. Extension-captured vendors (Fronius/SMA/Chint) only report when the
+    owner's browser runs a capture, so a fleet can be days behind; we label it with
+    its REAL latest day and flag staleness (latest full day older than yesterday)
+    so the header never claims a day the data isn't from."""
+    days = [d for d in (_recent_day(c) for c in cols) if d]
+    if not days:
+        return None, None, False
+    iso = max(days)
+    is_stale = iso < _yesterday_iso()
+    try:
+        label = datetime.strptime(str(iso), "%Y-%m-%d").strftime("%A, %B %-d, %Y")
+    except (ValueError, TypeError):
+        label = str(iso)
+    return iso, label, is_stale
+
+
+# A unit below this fraction of its array cohort's output-per-kW ON A GIVEN DAY is
+# a same-day laggard. Conservative (0.6 → clearly below), so a whole-array weather
+# dip (every unit low together) never trips it — only a unit that fell behind its
+# own neighbors that day.
+LAG_RATIO = 0.6
+
+
+def _single_day_laggards(cols: list[dict]) -> list[dict]:
+    """"Look back one day" (Bruce): inverters that ran WELL BELOW their array cohort
+    on the array's LAST FULL DAY. Compares each unit's output-per-kW to the cohort
+    MEDIAN that same day, so it catches a unit that sagged for a day even if its
+    14-day peer average is fine — but NOT a weather day (weather moves the whole
+    cohort together, so no single unit stands out). Conservative: needs >= 2 peers
+    with a reading and a genuinely productive cohort that day (median per-kW > 0.5),
+    so a dark / partial-capture day yields no false alarms."""
+    out: list[dict] = []
+    for col in cols:
+        invs = col.get("inverters") or []
+        if len(invs) < 2:
+            continue
+        day = _recent_day(col)
+        if not day:
+            continue
+        perkw: list[tuple[dict, float]] = []
+        for iv in invs:
+            npk = iv.get("nameplate_kw")
+            if not npk or npk <= 0:
+                continue
+            kwh = None
+            for pt in (iv.get("daily") or []):
+                if str(pt.get("date")) == str(day):
+                    try:
+                        kwh = float(pt["kwh"])
+                    except (TypeError, ValueError):
+                        kwh = None
+                    break
+            if kwh is None:
+                continue
+            perkw.append((iv, kwh / npk))
+        if len(perkw) < 2:
+            continue
+        vals = sorted(v for _, v in perkw)
+        med = vals[len(vals) // 2]
+        if med <= 0.5:            # cohort barely produced that day → no signal
+            continue
+        for iv, v in perkw:
+            if v < LAG_RATIO * med:
+                pct = round(100 * v / med) if med else 0
+                out.append({
+                    "array_name": col.get("array_name", ""),
+                    "name": iv.get("name") or iv.get("sn") or "Inverter",
+                    "status": "underperforming",
+                    "phrase": (f"ran at {pct}% of its neighbors on {day} "
+                               "(well below the rest of the array that day)"),
+                    "rank": inverter_fleet._ALERT_PRIORITY.get("underperforming", 2),
+                    "single_day": True,
+                })
+    return out
+
+
+def _all_flagged(cols: list[dict]) -> list[dict]:
+    """The digest's flagged-inverter list: the 14-day peer/comm verdicts UNION the
+    same-day laggards (Bruce's look-back-one-day), deduped by (array, inverter),
+    worst-first. This is the single source of the digest's attention count so the
+    hero %, banner, subject and highlights all agree."""
+    base = _flagged_inverters(cols)
+    seen = {(f["array_name"], f["name"]) for f in base}
+    extra = [f for f in _single_day_laggards(cols)
+             if (f["array_name"], f["name"]) not in seen]
+    return sorted(base + extra, key=lambda x: x["rank"], reverse=True)
+
+
 # ─────────────────────────────── rendering ───────────────────────────────────
 
 def build_digest_html(tenant, tree: dict) -> str:
@@ -212,20 +331,26 @@ def build_digest_html(tenant, tree: dict) -> str:
     cols = _vendor_columns(tree)
     arrays_total = len(cols)
     inverters_total = sum(int(c.get("inverter_count") or 0) for c in cols)
-    attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
+    # SINGLE source of the attention count: the 14-day peer/comm verdicts UNION the
+    # same-day laggards (look-back-one-day) — so the hero %, banner, subject and
+    # highlights all agree.
+    flagged = _all_flagged(cols)
+    flagged_n = len(flagged)
+    attention = flagged_n
 
     fleet = _html.escape(_fleet_name(tenant))
-    # This digest summarizes the PREVIOUS FULL DAY, not a live morning instant:
-    # health verdicts are judged on complete days only (stable_verdicts) and each
-    # array's output is its last full day's total. So we label it with the day
-    # being summarized (yesterday), not the send time. ET (the fleets' region),
-    # UTC fallback if tz data is absent.
-    try:
-        from zoneinfo import ZoneInfo
-        _now = datetime.now(ZoneInfo("America/New_York")); _tzlabel = "ET"
-    except Exception:
-        _now = datetime.now(timezone.utc); _tzlabel = "UTC"
-    ref_day = (_now - timedelta(days=1)).strftime("%A, %B %-d, %Y")
+    # The day the digest ACTUALLY summarizes, read from the DATA (never a hardcoded
+    # 'yesterday'): extension-captured vendors report only when the owner's browser
+    # runs a capture, so a fleet can be days behind. We label it with its real latest
+    # full day and flag staleness so the header never claims a day the data isn't from.
+    data_iso, data_label, stale = _fleet_reference_day(cols)
+    date_line = f"Full-day summary &middot; {data_label}" if data_label else "Full-day summary"
+    stale_html = (
+        f'<div style="color:{FAINT};font-size:12px;margin-top:3px;line-height:1.4;">'
+        f'This is the latest full day we have — some arrays haven&rsquo;t reported since. '
+        f'Open Array Operator (or run the capture extension) to refresh their readings.</div>'
+        if stale else ""
+    )
 
     has_critical = any(
         (c.get("alert", {}) or {}).get("level") == "critical"
@@ -273,7 +398,6 @@ def build_digest_html(tenant, tree: dict) -> str:
     # Big health number + meter + a compact stat strip, the way the in-app Fleet
     # health card reads (Bruce asked the email to look like the dashboard). Health
     # % = share of inverters NOT flagged; email-safe (tables, solid colors).
-    flagged_n = len(_flagged_inverters(cols))
     health_pct = round(100 * (inverters_total - flagged_n) / inverters_total) if inverters_total else 100
     hero_color = BLUE if flagged_n == 0 else ("#dc2626" if has_critical else "#d97706")
     meter_fill = max(3, min(100, health_pct))
@@ -312,7 +436,6 @@ def build_digest_html(tenant, tree: dict) -> str:
     # exactly which ones — no top/lowest-producer chatter, no whole-fleet table.
     # When all-healthy, keep the richer producer highlights.
     highlight_rows: list[str] = []
-    flagged = _flagged_inverters(cols)
     if attention > 0:
         for fi in flagged[:12]:
             color = _LEVEL_COLOR["critical"] if fi["rank"] >= 4 else _LEVEL_COLOR["warn"]
@@ -426,7 +549,7 @@ def build_digest_html(tenant, tree: dict) -> str:
         'body,table,td{color-scheme:light only;}</style></head>'
         f'<body bgcolor="{PAGE}" style="margin:0;padding:0;background:{PAGE};color-scheme:light only;">'
         '<div style="display:none;max-height:0;overflow:hidden;opacity:0;">'
-        f'Your fleet health for {ref_day} (full day).</div>'
+        f'Your full-day fleet health{f" for {data_label}" if data_label else ""}.</div>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{PAGE}" '
         f'style="background:{PAGE};padding:24px 12px;"><tr><td align="center">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
@@ -439,7 +562,8 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'<div style="font-size:12px;color:{BLUE};font-weight:700;letter-spacing:.6px;'
         'text-transform:uppercase;">Array Operator · Daily fleet health</div>'
         f'<h1 style="font-size:23px;color:{INK};margin:7px 0 2px;font-weight:700;">{fleet}</h1>'
-        f'<div style="color:{MUTED};font-size:14px;">Full-day summary &middot; {ref_day}</div>'
+        f'<div style="color:{MUTED};font-size:14px;">{date_line}</div>'
+        + stale_html +
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
         + kpis + banner + highlights + per_array +
@@ -463,23 +587,24 @@ def build_digest_text(tenant, tree: dict) -> str:
     """A short plain-text fallback for the digest (mirrors the HTML's substance).
     Honest about missing data; never invents kWh."""
     fleet = _fleet_name(tenant)
-    try:
-        from zoneinfo import ZoneInfo
-        _now = datetime.now(ZoneInfo("America/New_York")); _tzlabel = "ET"
-    except Exception:
-        _now = datetime.now(timezone.utc); _tzlabel = "UTC"
-    ref_day = (_now - timedelta(days=1)).strftime("%A, %B %-d, %Y")
     # Vendor (inverter) arrays only — mirrors the HTML.
     cols = _vendor_columns(tree)
-    attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
+    data_iso, data_label, stale = _fleet_reference_day(cols)
+    flagged = _all_flagged(cols)
+    attention = len(flagged)
 
-    lines = [f"Daily fleet health — {fleet}", f"Full-day summary · {ref_day}", ""]
+    date_line = f"Full-day summary · {data_label}" if data_label else "Full-day summary"
+    lines = [f"Daily fleet health — {fleet}", date_line]
+    if stale:
+        lines.append("(Latest full day we have — some arrays haven't reported since; "
+                     "open Array Operator to refresh.)")
+    lines.append("")
     if attention == 0:
         lines.append("All systems healthy: every inverter we can see produced as expected over the full day.")
     else:
         lines.append(f"{attention} inverter(s) need attention.")
     inv_total = sum(int(c.get('inverter_count') or 0) for c in cols)
-    flagged_n = len(_flagged_inverters(cols))
+    flagged_n = attention
     health_pct = round(100 * (inv_total - flagged_n) / inv_total) if inv_total else 100
     lines += [
         "",
@@ -490,7 +615,7 @@ def build_digest_text(tenant, tree: dict) -> str:
     if attention > 0:
         # Just the flagged inverters — the per-array table is dropped (it repeats this).
         lines.append("Inverters needing attention:")
-        for fi in _flagged_inverters(cols)[:12]:
+        for fi in flagged[:12]:
             lines.append(f"  ! {fi['name']} ({fi['array_name']}): {fi['phrase']}")
     else:
         lines.append("Arrays (total production on their last full day):")
@@ -507,10 +632,13 @@ def build_digest_text(tenant, tree: dict) -> str:
 # ─────────────────────────────── send / batch ────────────────────────────────
 
 def _subject(tenant, tree: dict) -> str:
-    attention = int((tree.get("summary", {}) or {}).get("attention", 0) or 0)
+    # Same merged count the body uses (14-day verdicts + same-day laggards), so the
+    # subject can't disagree with the hero %. No temporal word ("this morning" /
+    # "yesterday") — the exact day is in the body and may be stale.
+    attention = len(_all_flagged(_vendor_columns(tree)))
     fleet = _fleet_name(tenant)
     if attention == 0:
-        return f"☀️ {fleet}: all systems healthy yesterday"
+        return f"☀️ {fleet}: all systems healthy"
     noun = "inverter needs" if attention == 1 else "inverters need"
     return f"⚠️ {fleet}: {attention} {noun} attention"
 

@@ -202,3 +202,76 @@ def test_empty_fleet_renders():
     # healthy banner (attention==0) and a no-arrays nudge
     assert "All systems healthy" in html
     assert "No arrays are connected yet" in html
+
+
+# ── look-back-one-day + data-honesty (Bruce's real feedback) ──────────────────
+from datetime import date, timedelta
+
+
+def _iso_days_ago(n: int) -> str:
+    base = date.fromisoformat(digest._local_today_iso())
+    return (base - timedelta(days=n)).isoformat()
+
+
+def _series(days, vals):
+    return [{"date": d, "kwh": v} for d, v in zip(days, vals)]
+
+
+def test_single_day_laggard_flagged():
+    """A unit that ran ~50% of its cohort on the LAST FULL DAY is flagged even
+    though its per-inverter status is 'ok' (14-day fine) — the look-back-one-day
+    check Bruce asked for."""
+    d = [_iso_days_ago(i) for i in (5, 4, 3, 2, 1)]
+    invs = [
+        {"name": "Primo-1", "status": "ok", "nameplate_kw": 10, "daily": _series(d, [50, 50, 50, 50, 50])},
+        {"name": "Primo-2", "status": "ok", "nameplate_kw": 10, "daily": _series(d, [50, 50, 50, 50, 50])},
+        {"name": "Primo-3", "status": "ok", "nameplate_kw": 10, "daily": _series(d, [50, 50, 50, 50, 25])},
+    ]
+    tree = {"columns": [{"array_id": 1, "array_name": "West Field", "inverter_count": 3,
+                         "alert": {"level": "ok", "count": 0}, "inverters": invs,
+                         "daily": _series(d, [150, 150, 150, 150, 125])}],
+            "summary": {"attention": 0}}
+    lags = digest._single_day_laggards(tree["columns"])
+    assert [l["name"] for l in lags] == ["Primo-3"]
+    html = digest.build_digest_html(_tenant(), tree)
+    assert "Primo-3" in html
+    assert "of its neighbors" in html
+    assert digest._subject(_tenant(), tree) == "⚠️ Sunny Acres Solar: 1 inverter needs attention"
+
+
+def test_weather_day_not_flagged():
+    """The whole array uniformly low on a cloudy day → NO single-unit laggard
+    (weather moves every unit together; only a divergent unit should flag)."""
+    d = [_iso_days_ago(i) for i in (5, 4, 3, 2, 1)]
+    invs = [{"name": f"P{i}", "status": "ok", "nameplate_kw": 10, "daily": _series(d, [50, 50, 50, 50, 25])}
+            for i in range(3)]
+    cols = [{"array_id": 1, "array_name": "Cloudy", "inverter_count": 3,
+             "alert": {"level": "ok", "count": 0}, "inverters": invs,
+             "daily": _series(d, [150, 150, 150, 150, 75])}]
+    assert digest._single_day_laggards(cols) == []
+
+
+def test_partial_capture_skipped():
+    """A near-zero trailing day (interrupted extension capture, e.g. 0.1 kWh) is
+    NOT reported as the last full day — we land on the prior complete day."""
+    d = [_iso_days_ago(i) for i in (5, 4, 3, 2, 1)]
+    col = {"array_id": 1, "array_name": "Waterford", "inverter_count": 1,
+           "alert": {"level": "ok", "count": 0}, "inverters": [],
+           "daily": _series(d, [100, 100, 100, 100, 0.1])}
+    assert digest._recent_kwh(col) == 100
+    assert digest._recent_day(col) == d[3]
+
+
+def test_stale_data_note():
+    """When the freshest full day is older than yesterday (extension hasn't
+    captured), the header shows that real day + an honest staleness note."""
+    old = _iso_days_ago(4)
+    col = {"array_id": 1, "array_name": "OldData", "inverter_count": 2,
+           "alert": {"level": "ok", "count": 0},
+           "inverters": [{"name": "x", "status": "ok", "nameplate_kw": 10, "daily": [{"date": old, "kwh": 50}]},
+                         {"name": "y", "status": "ok", "nameplate_kw": 10, "daily": [{"date": old, "kwh": 50}]}],
+           "daily": [{"date": old, "kwh": 100}]}
+    iso, label, stale = digest._fleet_reference_day([col])
+    assert iso == old and stale is True
+    html = digest.build_digest_html(_tenant(), {"columns": [col], "summary": {"attention": 0}})
+    assert "reported since" in html   # the staleness note rendered
