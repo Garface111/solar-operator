@@ -927,6 +927,55 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
     )
 
 
+def send_coop_reauth_needed_email(to: str, name: str, utility_name: str,
+                                  portal_url: str) -> bool:
+    """Notify an operator that their co-op (SmartHub) session has died and
+    server-side generation pulls stopped — one portal login restores them.
+    The co-op analog of send_gmp_reauth_needed_email."""
+    import html as _html
+    first = _html.escape((name or "there").split()[0])
+    util = _html.escape(utility_name or "your utility")
+
+    body_html = (
+        f"<p>Hi {first},</p>"
+        f"<p>Your {util} session has expired, so we can no longer pull your daily "
+        f"generation data automatically.</p>"
+        f"<p>Please log into "
+        f'<a href="{portal_url}" style="color:#047857;">{_html.escape(portal_url)}</a> '
+        f"once — the extension will capture a fresh session and automatic pulls "
+        f"will resume that night.</p>"
+        f"<p>Questions? Just reply.</p>"
+        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+    )
+    body_text = (
+        f"Hi {(name or 'there').split()[0]},\n\n"
+        f"Your {utility_name} session has expired, so we can no longer pull your "
+        f"daily generation data automatically.\n\n"
+        f"Please log into {portal_url} once — the extension will capture a fresh "
+        f"session and automatic pulls will resume that night.\n\n"
+        f"Questions? Just reply.\n\n— NEPOOL Operator"
+    )
+    html = render_email_skin(
+        preheader=f"Your {utility_name} session needs reconnecting.",
+        headline=f"Action needed: reconnect your {utility_name} account",
+        intro_line="Log in once to restore automatic generation pulls.",
+        body_html=body_html,
+        cta={"label": f"Log in to {utility_name}", "url": portal_url},
+    )
+    text = render_email_skin_text(
+        headline=f"Action needed: reconnect your {utility_name} account",
+        intro_line="Log in once to restore automatic generation pulls.",
+        body_text=body_text,
+        cta={"label": f"Log in to {utility_name}", "url": portal_url},
+    )
+    return _send_via_resend(
+        to=to,
+        subject=f"Action needed: reconnect your {utility_name} account",
+        html=html,
+        text=text,
+    )
+
+
 # ─── warranty claims (Array Operator) ────────────────────────────────────
 
 def send_warranty_claim_email(

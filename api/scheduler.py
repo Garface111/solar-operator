@@ -809,6 +809,12 @@ def refresh_expiring_gmp_tokens() -> dict:
         gmp_final_expiry_warnings()
     except Exception:
         logger.exception("gmp_final_expiry_warnings failed")
+    # Co-op (SmartHub) sessions have NO expiry field at all — their death alert
+    # is data-driven (see coop_session_death_warnings). Same tick, same dedupe.
+    try:
+        coop_session_death_warnings()
+    except Exception:
+        logger.exception("coop_session_death_warnings failed")
     return {"refreshed": refreshed, "failed": failed, "skipped": skipped}
 
 
@@ -901,6 +907,109 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
             db.commit()
     logger.info("gmp_final_expiry_warnings: warned=%d dedup=%d rescued=%d dry=%s",
                 len(out["warned"]), out["skipped_dedup"], out["rescued_cleared"], dry_run)
+    return out
+
+
+# Co-op staleness bar: SmartHub posts day-totals with ~1-2 days of lag and
+# weekends happen, so "no new smarthub row for this many days" is the earliest
+# HONEST death signal (a dead token can't be read from any expiry field — there
+# isn't one). 4 days ≈ pull failing for 2+ consecutive nights past normal lag.
+_COOP_STALE_DAYS = 4
+_COOP_REALERT_DAYS = 3
+
+
+def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
+                                dry_run: bool = False) -> dict:
+    """Data-driven death alert for co-op (SmartHub) sessions — VEC/WEC/sh_*.
+
+    These sessions have NO expires_at, so the detector is evidence-of-life:
+    a tenant whose smarthub pipeline USED to produce DailyGeneration rows
+    (source='smarthub'), whose newest row is now > days_stale old, and whose
+    session capture is ALSO older than days_stale (a fresh capture means the
+    extension just re-logged — tonight's pull will recover on its own).
+    Never fires for tenants that never had smarthub data (that's onboarding,
+    not death). De-duped via InverterAlertState 'coop_session_dead:<tenant>:
+    <provider>'; incident clears itself when data flows again."""
+    from .adapters.smarthub import PROVIDER_TO_UTILITY, is_smarthub_provider
+    from .models import InverterAlertState, UtilitySession, Tenant, DailyGeneration
+    from .notify import send_coop_reauth_needed_email, send_internal_alert
+
+    out = {"warned": [], "skipped_dedup": 0, "recovered_cleared": 0, "dry_run": dry_run}
+    now_ = datetime.utcnow()
+    with SessionLocal() as db:
+        # Tenant × co-op provider pairs that have a stored session.
+        pairs = [(tid, prov) for tid, prov in db.execute(
+            select(UtilitySession.tenant_id, UtilitySession.provider)
+            .where(UtilitySession.provider != "gmp").distinct()).all()
+            if is_smarthub_provider(prov)]
+        for tid, prov in pairs:
+            key = f"coop_session_dead:{tid}:{prov}"
+            state = db.execute(select(InverterAlertState).where(
+                InverterAlertState.tenant_id == tid,
+                InverterAlertState.incident_key == key)).scalar_one_or_none()
+
+            newest_day = db.execute(
+                select(func.max(DailyGeneration.day)).where(
+                    DailyGeneration.tenant_id == tid,
+                    DailyGeneration.source == "smarthub")).scalar()
+            if newest_day is None:
+                continue          # never produced data → onboarding, not a death
+            fresh = (now_.date() - newest_day).days < days_stale
+            if fresh:
+                if state is not None:      # recovered → close the incident
+                    if not dry_run:
+                        db.delete(state)
+                        db.commit()
+                    out["recovered_cleared"] += 1
+                continue
+
+            # Stale — but a capture newer than the staleness bar means the
+            # extension already rescued the session; tonight's pull recovers it.
+            last_cap = db.execute(
+                select(func.max(UtilitySession.captured_at)).where(
+                    UtilitySession.tenant_id == tid,
+                    UtilitySession.provider == prov)).scalar()
+            if last_cap is not None and now_ - last_cap < timedelta(days=days_stale):
+                continue
+
+            if state is not None and state.last_alerted_at is not None and \
+                    now_ - state.last_alerted_at < timedelta(days=_COOP_REALERT_DAYS):
+                out["skipped_dedup"] += 1
+                continue
+            tenant = db.get(Tenant, tid)
+            if tenant is None:
+                continue
+            info = PROVIDER_TO_UTILITY.get(prov) or {}
+            util_name = info.get("name") or prov.upper()
+            portal = "https://%s/" % info["host"] if info.get("host") else "https://smarthub.coop/"
+            days_dark = (now_.date() - newest_day).days
+            out["warned"].append({"tenant": tid, "provider": prov,
+                                  "email": tenant.contact_email, "days_dark": days_dark})
+            if dry_run:
+                continue
+            try:
+                send_coop_reauth_needed_email(
+                    to=tenant.contact_email,
+                    name=tenant.operator_name or tenant.company_name or tenant.name,
+                    utility_name=util_name, portal_url=portal,
+                )
+            except Exception:
+                logger.exception("co-op reauth email failed for %s/%s", tid, prov)
+            send_internal_alert(
+                f"Co-op session DEAD: {tid} {prov} — no generation for {days_dark}d",
+                f"Tenant: {tid} ({tenant.contact_email})\nProvider: {prov} ({util_name})\n"
+                f"Newest smarthub generation day: {newest_day} ({days_dark}d ago)\n"
+                f"Last session capture: {last_cap}\nServer-side pulls are failing "
+                f"silently — no expiry field exists for co-op tokens, so this "
+                f"data-staleness alert is the death signal. Operator emailed.",
+            )
+            if state is None:
+                state = InverterAlertState(tenant_id=tid, incident_key=key)
+                db.add(state)
+            state.last_alerted_at = now_
+            db.commit()
+    logger.info("coop_session_death_warnings: warned=%d dedup=%d recovered=%d dry=%s",
+                len(out["warned"]), out["skipped_dedup"], out["recovered_cleared"], dry_run)
     return out
 
 
