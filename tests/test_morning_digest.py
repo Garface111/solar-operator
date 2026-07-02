@@ -311,6 +311,30 @@ def test_nonreporting_inverter_flagged():
     assert "Dead-7" in digest.build_digest_html(_tenant(), {"columns": cols, "summary": {"attention": 0}})
 
 
+def test_recently_dead_inverter_caught_behind_overcast_day():
+    """Paul's case: inverter (54) died 2 days ago (0.1 kWh vs ~100 for peers), but the
+    LAST full day was heavy overcast (whole array ~5 kWh). Judging only the last day
+    skips it as weather — we must scan back to the last producing day and flag the
+    dead unit. Its healthy peers, which tracked the cohort, are NOT flagged."""
+    d = [_iso_days_ago(i) for i in (3, 2, 1)]  # d[2] = yesterday (overcast)
+    def inv(name, vals, peak=110):
+        return {"name": name, "status": "ok", "nameplate_kw": 12.5, "peak_kwh": peak,
+                "window_kwh": sum(vals), "daily": _series(d, vals)}
+    invs = [inv("A", [100, 100, 5]), inv("B", [100, 100, 5]),
+            inv("Dead-54", [100, 0.1, 0.05])]  # died on d[1]; overcast d[2]
+    cols = [{"array_id": 1, "array_name": "Danville", "inverter_count": 3,
+             "alert": {"level": "ok", "count": 0}, "inverters": invs,
+             "daily": _series(d, [300, 200, 10])}]
+    flags = digest._single_day_laggards(cols)
+    names = [f["name"] for f in flags]
+    assert "Dead-54" in names and "A" not in names and "B" not in names
+    f = next(x for x in flags if x["name"] == "Dead-54")
+    assert f["status"] == "dead"
+    assert "stopped" in f["phrase"] or "almost nothing" in f["phrase"]
+    # surfaces in the digest attention count
+    assert "Dead-54" in digest.build_digest_html(_tenant(), {"columns": cols, "summary": {"attention": 0}})
+
+
 def test_whole_array_gap_not_flagged():
     """When only a minority is producing (an array-wide capture gap), we do NOT flag
     every silent unit — the staleness note covers that instead."""

@@ -241,61 +241,90 @@ def _fleet_reference_day(cols: list[dict]) -> tuple[str | None, str | None, bool
     return iso, label, is_stale
 
 
-# A unit below this fraction of its array cohort's output-per-kW ON A GIVEN DAY is
-# a same-day laggard. Conservative (0.6 → clearly below), so a whole-array weather
-# dip (every unit low together) never trips it — only a unit that fell behind its
-# own neighbors that day.
+# A unit below this fraction of its array cohort's output-per-kW on the comparison
+# day is a laggard. Conservative (0.6 → clearly below), so a whole-array weather dip
+# (every unit low together) never trips it — only a unit that fell behind its own
+# neighbors. Below this fraction of its OWN recent peak it reads as effectively dead.
 LAG_RATIO = 0.6
+DEAD_OF_PEAK = 0.05        # < 5% of its own peak = produced ~nothing (dead/dark)
+LAG_LOOKBACK_DAYS = 5      # scan back this many complete days for the last day the
+                           # cohort genuinely produced (skips trailing overcast days)
 
 
 def _single_day_laggards(cols: list[dict]) -> list[dict]:
-    """"Look back one day" (Bruce): inverters that ran WELL BELOW their array cohort
-    on the array's LAST FULL DAY. Compares each unit's output-per-kW to the cohort
-    MEDIAN that same day, so it catches a unit that sagged for a day even if its
-    14-day peer average is fine — but NOT a weather day (weather moves the whole
-    cohort together, so no single unit stands out). Conservative: needs >= 2 peers
-    with a reading and a genuinely productive cohort that day (median per-kW > 0.5),
-    so a dark / partial-capture day yields no false alarms."""
+    """Recent per-inverter laggards / recently-dead units — the "look back a day"
+    check (Bruce & Paul). Compares each unit's output-per-kW to the cohort MEDIAN on
+    the MOST RECENT day the cohort genuinely produced (median per-kW > 0.5). Crucially
+    it scans BACK past a trailing overcast day: Paul's inverter (54) died on 06-30
+    (0.1 kWh vs ~78 for its peers) but the array's last full day was a heavy-overcast
+    07-01 where every unit was ~2.8 kWh — judging only that last day would skip the
+    whole cohort as weather and miss the dead unit. So we find the last real
+    producing day and judge there.
+
+    It catches a unit that sagged/died even if its 14-day peer average is still fine
+    (it produced normally most of the window), but NOT a weather day (weather moves
+    the whole cohort together, so no single unit stands out). Conservative: needs
+    >= 2 peers with a reading and a genuinely productive cohort that day."""
     out: list[dict] = []
+    today = _local_today_iso()
     for col in cols:
         invs = col.get("inverters") or []
         if len(invs) < 2:
             continue
-        day = _recent_day(col)
-        if not day:
-            continue
+        # Candidate complete days across the cohort, newest first (never today).
+        days = sorted(
+            {str(p.get("date")) for iv in invs for p in (iv.get("daily") or [])
+             if p.get("date") and str(p.get("date")) != today and p.get("kwh") is not None},
+            reverse=True,
+        )[:LAG_LOOKBACK_DAYS]
+        chosen = None
         perkw: list[tuple[dict, float]] = []
-        for iv in invs:
-            npk = iv.get("nameplate_kw")
-            if not npk or npk <= 0:
+        for day in days:
+            pk: list[tuple[dict, float]] = []
+            for iv in invs:
+                npk = iv.get("nameplate_kw")
+                if not npk or npk <= 0:
+                    continue
+                kwh = None
+                for pt in (iv.get("daily") or []):
+                    if str(pt.get("date")) == day:
+                        try:
+                            kwh = float(pt["kwh"])
+                        except (TypeError, ValueError):
+                            kwh = None
+                        break
+                if kwh is None:
+                    continue
+                pk.append((iv, kwh / npk))
+            if len(pk) < 2:
                 continue
-            kwh = None
-            for pt in (iv.get("daily") or []):
-                if str(pt.get("date")) == str(day):
-                    try:
-                        kwh = float(pt["kwh"])
-                    except (TypeError, ValueError):
-                        kwh = None
-                    break
-            if kwh is None:
-                continue
-            perkw.append((iv, kwh / npk))
-        if len(perkw) < 2:
-            continue
-        vals = sorted(v for _, v in perkw)
-        med = vals[len(vals) // 2]
-        if med <= 0.5:            # cohort barely produced that day → no signal
-            continue
+            vals = sorted(v for _, v in pk)
+            med = vals[len(vals) // 2]
+            if med > 0.5:                 # first (most recent) genuinely productive day
+                chosen, perkw, chosen_med = day, pk, med
+                break
+        if not chosen:
+            continue                      # no productive day in the window → weather/dark
         for iv, v in perkw:
-            if v < LAG_RATIO * med:
-                pct = round(100 * v / med) if med else 0
+            if v < LAG_RATIO * chosen_med:
+                pct = round(100 * v / chosen_med) if chosen_med else 0
+                peak = iv.get("peak_kwh") or 0
+                npk = iv.get("nameplate_kw") or 0
+                dead = peak > 0 and npk > 0 and (v * npk) < DEAD_OF_PEAK * peak
+                phrase = (
+                    (f"produced almost nothing on {chosen} ({pct}% of its neighbors) — "
+                     "looks stopped; check this inverter")
+                    if dead else
+                    (f"ran at {pct}% of its neighbors on {chosen} "
+                     "(well below the rest of the array that day)"))
                 out.append({
                     "array_name": col.get("array_name", ""),
                     "name": iv.get("name") or iv.get("sn") or "Inverter",
-                    "status": "underperforming",
-                    "phrase": (f"ran at {pct}% of its neighbors on {day} "
-                               "(well below the rest of the array that day)"),
-                    "rank": inverter_fleet._ALERT_PRIORITY.get("underperforming", 2),
+                    # A near-dead unit is a comm/output failure, not a mild sag —
+                    # rank it higher so it sorts to the top of the attention list.
+                    "status": "dead" if dead else "underperforming",
+                    "phrase": phrase,
+                    "rank": inverter_fleet._ALERT_PRIORITY.get("dead" if dead else "underperforming", 2),
                     "single_day": True,
                 })
     return out
