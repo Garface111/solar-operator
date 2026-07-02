@@ -291,3 +291,50 @@ def test_mixed_fleet_stale_not_masked_by_fresh_array():
     iso, label, stale = digest._fleet_reference_day([fresh, stale_arr])
     assert iso == fresh_day     # header shows the freshest day...
     assert stale is True        # ...but staleness is NOT masked by it
+
+
+def test_nonreporting_inverter_flagged():
+    """A unit with NO data while its cohort produces (the dead Tannery #7: empty
+    series, window_kwh 0, status 'ok') is flagged — the peer verdict couldn't judge
+    it, but its producing siblings make the silence obvious."""
+    d = [_iso_days_ago(i) for i in (3, 2, 1)]
+    invs = [{"name": n, "status": "ok", "nameplate_kw": 20, "window_kwh": 300,
+             "peak_kwh": 120, "daily": _series(d, [100, 100, 100])} for n in ("A", "B", "C")]
+    invs.append({"name": "Dead-7", "status": "ok", "nameplate_kw": 20,
+                 "window_kwh": 0, "peak_kwh": None, "daily": []})
+    cols = [{"array_id": 1, "array_name": "Tannery", "inverter_count": 4,
+             "alert": {"level": "ok", "count": 0}, "inverters": invs,
+             "daily": _series(d, [300, 300, 300])}]
+    flags = digest._nonreporting_inverters(cols)
+    assert [f["name"] for f in flags] == ["Dead-7"]
+    assert "isn't reporting" in flags[0]["phrase"]
+    assert "Dead-7" in digest.build_digest_html(_tenant(), {"columns": cols, "summary": {"attention": 0}})
+
+
+def test_whole_array_gap_not_flagged():
+    """When only a minority is producing (an array-wide capture gap), we do NOT flag
+    every silent unit — the staleness note covers that instead."""
+    d = [_iso_days_ago(i) for i in (3, 2, 1)]
+    invs = [{"name": "A", "status": "ok", "nameplate_kw": 20, "window_kwh": 300,
+             "peak_kwh": 120, "daily": _series(d, [100, 100, 100])}]
+    invs += [{"name": f"X{i}", "status": "ok", "nameplate_kw": 20, "window_kwh": 0,
+              "peak_kwh": None, "daily": []} for i in range(3)]
+    cols = [{"array_id": 1, "array_name": "Gap", "inverter_count": 4,
+             "alert": {"level": "ok", "count": 0}, "inverters": invs,
+             "daily": _series(d, [100, 100, 100])}]
+    assert digest._nonreporting_inverters(cols) == []
+
+
+def test_stopped_reporting_flagged():
+    """A unit that WAS reporting but went silent days ago while its siblings keep
+    reporting is flagged."""
+    d = [_iso_days_ago(i) for i in (5, 4, 3, 2, 1)]
+    invs = [{"name": n, "status": "ok", "nameplate_kw": 20, "window_kwh": 500,
+             "peak_kwh": 110, "daily": _series(d, [100, 100, 100, 100, 100])} for n in ("A", "B")]
+    invs.append({"name": "C", "status": "ok", "nameplate_kw": 20, "window_kwh": 200,
+                 "peak_kwh": 110, "daily": _series(d[:2], [100, 100])})  # last reading 4 days ago
+    cols = [{"array_id": 1, "array_name": "Arr", "inverter_count": 3,
+             "alert": {"level": "ok", "count": 0}, "inverters": invs,
+             "daily": _series(d, [300, 300, 300, 200, 200])}]
+    flags = digest._nonreporting_inverters(cols)
+    assert any(f["name"] == "C" and "stopped reporting" in f["phrase"] for f in flags)

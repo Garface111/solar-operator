@@ -301,16 +301,80 @@ def _single_day_laggards(cols: list[dict]) -> list[dict]:
     return out
 
 
+SILENT_DAYS = 2   # a unit whose last reading is this many days behind its cohort = silent
+
+
+def _iso_gap_days(a: str, b: str) -> int:
+    """Whole days between two 'YYYY-MM-DD' strings (b - a), or 0 if unparseable."""
+    try:
+        return (datetime.strptime(str(b), "%Y-%m-%d") - datetime.strptime(str(a), "%Y-%m-%d")).days
+    except (ValueError, TypeError):
+        return 0
+
+
+def _nonreporting_inverters(cols: list[dict]) -> list[dict]:
+    """"Was reporting, now silent" (Bruce's dead Tannery unit): an inverter with NO
+    production data — or one that STOPPED reporting days ago — while the MAJORITY of
+    its array cohort is still producing. Catches a unit the peer verdict marks 'ok'
+    only because it has no data to judge (empty series / window_kwh 0), and a unit
+    that went dark while its siblings kept going. Requires a producing majority, so a
+    whole-array capture gap (which the staleness note already covers) never flags
+    every unit."""
+    out: list[dict] = []
+    for col in cols:
+        invs = col.get("inverters") or []
+        if len(invs) < 2:
+            continue
+
+        def _last_day(iv):
+            ds = [str(p.get("date")) for p in (iv.get("daily") or []) if p.get("kwh") is not None]
+            return max(ds) if ds else None
+
+        def _produced(iv):
+            return (iv.get("window_kwh") or 0) > 0 or (iv.get("peak_kwh") or 0) > 0
+
+        lasts = {id(iv): _last_day(iv) for iv in invs}
+        cohort_last = max([v for v in lasts.values() if v], default=None)
+        producing = sum(1 for iv in invs if _produced(iv))
+        # Only judge when a producing MAJORITY of the cohort is reporting — otherwise
+        # it's an array-wide capture gap, not a single dead unit.
+        if not cohort_last or producing < 2 or producing * 2 < len(invs):
+            continue
+        for iv in invs:
+            name = iv.get("name") or iv.get("sn") or "Inverter"
+            ld = lasts[id(iv)]
+            if not _produced(iv) and ld is None:
+                phrase = ("isn't reporting any production while the rest of the array is "
+                          "— check this inverter (it may be down or disconnected)")
+            elif ld and _iso_gap_days(ld, cohort_last) >= SILENT_DAYS and _produced(iv):
+                phrase = (f"stopped reporting after {ld} while the rest of the array kept "
+                          "going — check this inverter")
+            else:
+                continue
+            out.append({
+                "array_name": col.get("array_name", ""),
+                "name": name,
+                "status": "comm_gap",
+                "phrase": phrase,
+                "rank": inverter_fleet._ALERT_PRIORITY.get("comm_gap", 3),
+                "single_day": True,
+            })
+    return out
+
+
 def _all_flagged(cols: list[dict]) -> list[dict]:
     """The digest's flagged-inverter list: the 14-day peer/comm verdicts UNION the
-    same-day laggards (Bruce's look-back-one-day), deduped by (array, inverter),
-    worst-first. This is the single source of the digest's attention count so the
-    hero %, banner, subject and highlights all agree."""
+    same-day laggards (look-back-one-day) UNION silent/non-reporting units, deduped
+    by (array, inverter), worst-first. Single source of the digest's attention count
+    so the hero %, banner, subject and highlights all agree."""
     base = _flagged_inverters(cols)
     seen = {(f["array_name"], f["name"]) for f in base}
-    extra = [f for f in _single_day_laggards(cols)
-             if (f["array_name"], f["name"]) not in seen]
-    return sorted(base + extra, key=lambda x: x["rank"], reverse=True)
+    for f in _nonreporting_inverters(cols) + _single_day_laggards(cols):
+        key = (f["array_name"], f["name"])
+        if key not in seen:
+            seen.add(key)
+            base.append(f)
+    return sorted(base, key=lambda x: x["rank"], reverse=True)
 
 
 # ─────────────────────────────── rendering ───────────────────────────────────
