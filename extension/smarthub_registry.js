@@ -49,12 +49,16 @@
       name: "A&N Electric Cooperative",
     },
     "arkvalley.smarthub.coop": {
-      provider: "arkvalley",
-      name: "Arkansas Valley Electric Cooperative",
+      provider: "ks_ark_valley",
+      name: "Ark Valley Electric Cooperative Association",
     },
     "ashleychicot.smarthub.coop": {
       provider: "ashleychicot",
       name: "Ashley-Chicot Electric Cooperative",
+    },
+    "avecc.smarthub.coop": {
+      provider: "arkvalley",
+      name: "Arkansas Valley Electric Cooperative Corporation (AVECC)",
     },
     "baelectric.smarthub.coop": {
       provider: "ba_electric",
@@ -169,8 +173,8 @@
       name: "Black River Electric Cooperative",
     },
     "bremc.smarthub.coop": {
-      provider: "blue_ridge_emc",
-      name: "Blue Ridge Electric Membership Corporation",
+      provider: "boone",
+      name: "Boone REMC",
     },
     "broadriverelectric.smarthub.coop": {
       provider: "broad_river",
@@ -1005,8 +1009,8 @@
       name: "Lane-Scott Electric Cooperative",
     },
     "lcec.smarthub.coop": {
-      provider: "lcec",
-      name: "Lee County Electric Cooperative (LCEC)",
+      provider: "lamb_county",
+      name: "Lamb County Electric Cooperative",
     },
     "lcpd1.smarthub.coop": {
       provider: "lcpd",
@@ -1820,17 +1824,17 @@
       provider: "tanner_electric",
       name: "Tanner Electric Cooperative",
     },
-    "taylorelectric.smarthub.coop": {
-      provider: "taylor_electric",
-      name: "Taylor County RECC",
-    },
     "tcec.smarthub.coop": {
+      provider: "ok_tcec",
+      name: "Tri County Electric Cooperative",
+    },
+    "tcecfl.smarthub.coop": {
       provider: "tcec",
       name: "Tri-County Electric Cooperative",
     },
     "tcrecc.smarthub.coop": {
-      provider: "tri_county_ky",
-      name: "Tri-County Electric Membership Corporation (KY)",
+      provider: "taylor_electric",
+      name: "Taylor County RECC",
     },
     "tdpud.smarthub.coop": {
       provider: "tdpud",
@@ -1901,8 +1905,8 @@
       name: "Tri-State EMC",
     },
     "tvec.smarthub.coop": {
-      provider: "tvec_al",
-      name: "Tennessee Valley Electric Cooperative (AL)",
+      provider: "trinity_valley",
+      name: "Trinity Valley Electric Cooperative",
     },
     "twinvalleyelectric.smarthub.coop": {
       provider: "twin_valley",

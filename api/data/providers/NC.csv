@@ -1,6 +1,6 @@
 code,label,state,scrape_status,smarthub_host,portal_url,notes
 duke_energy,Duke Energy (NC),NC,in-progress,,https://duke-energy.com,"Dominant NC IOU (~80% market share). Bespoke customer portal, not SmartHub. Adapter needs live login. Manual upload meanwhile."
-blue_ridge_emc,Blue Ridge Electric Membership Corporation,NC,live,bremc.smarthub.coop,https://bremc.smarthub.coop,NISC SmartHub portal (bremc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
+blue_ridge_emc,Blue Ridge Electric Membership Corporation,NC,in-progress,,https://www.blueridgeenergy.com,"Blue Ridge Energy (Lenoir NC). MIS-PAIRED host bremc.smarthub.coop removed Jul 2026 — siteName brands 'Boone Power' = Boone REMC (IN), whose own site boonepower.com links it. blueridgeenergy.com shows no SmartHub (bespoke portal). Manual PDF upload until adapter."
 brunswick_emc,Brunswick Electric Membership Corporation,NC,live,bemc.smarthub.coop,https://bemc.smarthub.coop,NISC SmartHub portal (bemc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter; verify before trusting reports.
 cape_hatteras_emc,Cape Hatteras Electric Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.
 carteret_craven_emc,Carteret-Craven Electric Cooperative,NC,in-progress,,,NC co-op. No SmartHub host found (Jun 2026). Check for bespoke portal or manual upload.

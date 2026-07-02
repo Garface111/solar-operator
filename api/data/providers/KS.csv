@@ -38,3 +38,4 @@ mcpherson,City of McPherson Electric Department,KS,live,mcphersonpower.smarthub.
 iola,City of Iola Electric Department,KS,in-progress,,,Kansas municipal utility. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
 ottawa,City of Ottawa Electric Department,KS,in-progress,,,Kansas municipal utility. No SmartHub (checked Jun 2026). Manual upload until portal confirmed.
 gardner,City of Gardner Energy,KS,in-progress,,https://www.gardnerkansas.gov,"Municipal utility serving Gardner, KS. No SmartHub (checked Jun 2026). Manual upload until portal confirmed."
+ks_ark_valley,Ark Valley Electric Cooperative Association,KS,live,arkvalley.smarthub.coop,https://arkvalley.smarthub.coop,"NISC SmartHub portal — extension scrapes billing + usage. siteName 'Ark Valley Electric Cooperative' + own site arkvalley.com (South Hutchinson, KS) links this host — verified Jul 2026. kWh unverified on a real generation meter; verify before trusting reports."
