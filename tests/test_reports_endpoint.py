@@ -118,16 +118,22 @@ class TestReportsEmpty:
         assert len(resp.json()["reports"]) == 3
 
     def test_most_recent_quarter_is_first(self, client):
-        """reports[0] should be the current in-progress quarter (Q2-2026)."""
+        """reports[0] should be the CURRENT in-progress quarter. Computed from
+        today's date rather than hardcoded so this never drifts across quarter
+        boundaries (it previously pinned Q2-2026 and broke on 2026-07-01)."""
+        from datetime import datetime
+        today = datetime.utcnow()
+        exp_q = (today.month - 1) // 3 + 1
+        exp_year = today.year
+
         _, auth = _make_tenant()
         resp = _get_reports(client, auth, quarters=6)
         assert resp.status_code == 200
         reports = resp.json()["reports"]
         first = reports[0]
-        # Today is 2026-06-04 → Q2-2026
-        assert first["year"] == 2026
-        assert first["quarter_num"] == 2
-        assert first["quarter"] == "Q2-2026"
+        assert first["year"] == exp_year
+        assert first["quarter_num"] == exp_q
+        assert first["quarter"] == f"Q{exp_q}-{exp_year}"
 
 
 class TestReportsReady:

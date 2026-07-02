@@ -130,11 +130,14 @@ def test_ao_plan_features_entitlements():
     # both → everything
     assert f("both") == {"plan": "both", "plan_chosen": True,
                          "vendor_data": True, "invoicing": True}
-    # not chosen yet → plan_chosen False, both features off (the login picker prompts)
-    assert f(None) == {"plan": None, "plan_chosen": False,
-                       "vendor_data": False, "invoicing": False}
-    assert f("") == {"plan": None, "plan_chosen": False,
-                     "vendor_data": False, "invoicing": False}
+    # not chosen yet → defaults to FULL functionality (commit 342a8ac removed the
+    # forced plan-picker: a fresh trial shows everything, treated as "chosen" so the
+    # operator is never blocked; billing still reads billing_plan directly and bills
+    # the conservative monitoring default until they explicitly narrow their plan).
+    assert f(None) == {"plan": "both", "plan_chosen": True,
+                       "vendor_data": True, "invoicing": True}
+    assert f("") == {"plan": "both", "plan_chosen": True,
+                     "vendor_data": True, "invoicing": True}
     # NEPOOL tenants are ungated (no AO plan-picker).
     nep = ao_plan_features("nepool", None)
     assert nep["plan_chosen"] is True and nep["vendor_data"] is True and nep["invoicing"] is True

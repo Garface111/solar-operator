@@ -56,7 +56,12 @@ def test_daily_pull_backfills_missing_solaredge_location():
     }):
         result = pull_all_inverters(days_back=1)
 
-    assert not any(r.get("errors") for r in result["results"])
+    # Scope the error check to THIS test's array. pull_all_inverters walks every
+    # connected array in the shared test DB, so a fixture left by an earlier test
+    # can add its own error row — that's unrelated to whether OUR backfill worked.
+    mine = [r for r in result["results"] if r.get("array_id") == arr_id]
+    assert mine, "our array was not processed by the daily pull"
+    assert not any(r.get("errors") for r in mine)
     arr = _array(arr_id)
     assert arr.latitude is not None and abs(arr.latitude - 43.6464) < 1e-3
     assert arr.geocode_source == "vendor:solaredge-geo"
@@ -87,8 +92,11 @@ def test_site_details_failure_never_breaks_the_daily_pull():
     ]), patch("api.jobs.inverter_pull._se.site_details", side_effect=RuntimeError("boom")):
         result = pull_all_inverters(days_back=1)
 
-    # The daily energy pull itself must still have succeeded.
-    assert result["results"][0]["days_pulled"] == 1
-    assert not result["results"][0].get("errors")
+    # The daily energy pull itself must still have succeeded — scope to OUR array
+    # (the shared DB may hold other arrays from earlier tests; result[0] isn't
+    # guaranteed to be ours).
+    mine = next(r for r in result["results"] if r.get("array_id") == arr_id)
+    assert mine["days_pulled"] == 1
+    assert not mine.get("errors")
     arr = _array(arr_id)
     assert arr.latitude is None   # backfill failed silently, nothing fabricated

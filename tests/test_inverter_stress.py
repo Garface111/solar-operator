@@ -139,7 +139,10 @@ def test_discover_paginates_over_100_sites(client, monkeypatch):
     # paginated, de-duped, all distinct ids
     assert len({s["site_id"] for s in out["sites"]}) == 130
     first = out["sites"][0]
-    assert set(first) == {"site_id", "name", "peak_power_kw", "status"}
+    # Required discover fields must be present. Use subset (not exact-set) so an
+    # additive field like `address` (added in be3315e7 for weather-model location
+    # auto-capture) doesn't break this — the contract is "at least these keys".
+    assert {"site_id", "name", "peak_power_kw", "status"} <= set(first)
 
 
 def test_discover_empty_account_friendly_message(client, monkeypatch):

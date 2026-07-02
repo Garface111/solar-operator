@@ -729,12 +729,16 @@ def test_fleet_tree_produced_today_falls_back_to_per_inverter_sum(client):
     — the array's produced_today_kwh falls back to summing each inverter's live daily
     series for today. So the daily total shows intraday like the extension vendors do.
     (Bruce: 'SolarEdge total kWh for the day not showing like the other vendors.')"""
-    from api.models import Inverter, InverterDaily, DailyGeneration
-    from datetime import date, timedelta
+    from api.models import Inverter, InverterDaily, DailyGeneration, now
+    from datetime import timedelta
     tid, key = _make_tenant()
     client.post("/v1/array-owners/inverter-capture",
                 json=_fronius_payload_with_inverters(), headers=_auth(key))
-    today = date.today()
+    # Use the app's clock (UTC now()), NOT local date.today(): the fleet-tree
+    # endpoint keys "today" off now().date(), so on a box whose local date differs
+    # from UTC (evening in a behind-UTC tz) date.today() writes the per-inverter
+    # rows under the WRONG day and the fallback sums nothing / a prior day.
+    today = now().date()
     with SessionLocal() as db:
         inv_by_sn = {i.serial: i.id for i in db.execute(
             select(Inverter).where(Inverter.tenant_id == tid)).scalars()}
@@ -1213,14 +1217,21 @@ def test_inverter_capture_readd_with_today_in_site_daily(client):
         assert td[0].kwh == 120.0              # max(120 today-row, 95 history)
 
 
-def test_inverter_capture_chint_keeps_per_inverter_live_power(client):
+def test_inverter_capture_chint_keeps_per_inverter_live_power(client, monkeypatch):
     """REGRESSION (Jun 2026): Chint's portal reports live AC power PER inverter
     (commDevice.currentPower), but CaptureInverter had no current_power_w field,
     so Pydantic silently dropped it — every card showed 'not producing right now'
     even mid-day. The real per-inverter watts must now persist as Inverter.last_power_w
     and surface on the fleet tree (NOT a site-allocated estimate).
+
+    Force daylight: the fleet tree daylight-gates captured live power (the honest
+    "don't show a midday reading as producing at 9pm" rule), so this test is
+    otherwise time-of-day fragile — it passes only when run during central-VT
+    daylight. Pinning _is_daylight=True tests the surfacing contract deterministically.
     """
     from api.models import Inverter
+    import api.inverter_fleet as inverter_fleet
+    monkeypatch.setattr(inverter_fleet, "_is_daylight", lambda *a, **k: True)
     tid, key = _make_tenant()
     payload = {
         "provider": "chint",

@@ -1,9 +1,39 @@
 """
 Tests for api/email_skin.py — solarpunk design token presence and structure.
+
+Re-baselined 2026-07-01 to the CURRENT product-aware skin (commits 43634c9 →
+319a681). The NEPOOL theme was redesigned from the old dark-emerald + gold-
+underline block to a solarpunk-LIGHT palette lifted from the live site tokens:
+  page  #f4f1e4  (warm cream, was #faf8f5)
+  header #dcebda  (mint hero band, was dark #064e3b)
+  accent #047857  (emerald hairline under the header, replaced gold #e6b470)
+  wordmark strip #c3e6cb / ink #0d3b2e  (soft light-green, was dark #022c22)
+The wordmark is now HTML-wrapped (an <a> around the domain) so the brand text
+and domain appear as separate substrings, not one contiguous string, in HTML.
+Array Operator renders its own light "day" (utility-blue) theme — see the AO
+tests below. Do NOT revert the skin to satisfy these; the design is intentional.
 """
 from __future__ import annotations
 
 from api.email_skin import render_email_skin, render_email_skin_text
+
+# Current NEPOOL (default) design tokens — kept in one place so a future skin
+# refresh updates the tests by editing here, not hunting inline hex literals.
+NEPOOL_PAGE_BG = "#f4f1e4"
+NEPOOL_HEADER_BG = "#dcebda"
+NEPOOL_ACCENT = "#047857"       # emerald hairline under the header (was gold)
+NEPOOL_WORDMARK_BG = "#c3e6cb"
+NEPOOL_WORDMARK_INK = "#0d3b2e"
+# Old dark tokens that must NOT reappear (guards against an accidental revert).
+NEPOOL_OLD_DARK = ("#064e3b", "#e6b470", "#faf8f5", "#022c22", "#e8e2d9")
+
+
+def _assert_nepool_wordmark(blob: str) -> None:
+    """The NEPOOL wordmark strip carries the brand + domain. In HTML the domain
+    is wrapped in an <a>, so the two halves are separate substrings; in plain
+    text it's one contiguous line."""
+    assert "NEPOOL Operator ·" in blob
+    assert "nepooloperator.com" in blob
 
 
 # ── render_email_skin ─────────────────────────────────────────────────────────
@@ -12,28 +42,31 @@ def test_skin_contains_header_bg_color():
     html = render_email_skin(
         preheader="test pre", headline="X", intro_line="Y", body_html="<p>Z</p>"
     )
-    assert "#064e3b" in html, "header bg #064e3b missing"
+    assert NEPOOL_HEADER_BG in html, "NEPOOL mint header bg missing"
 
 
-def test_skin_contains_gold_underline():
+def test_skin_contains_accent_hairline():
+    """The NEPOOL header now carries an emerald accent hairline (the old gold
+    underline #e6b470 was dropped in the solarpunk-light redesign)."""
     html = render_email_skin(
         preheader="test pre", headline="X", intro_line="Y", body_html="<p>Z</p>"
     )
-    assert "#e6b470" in html, "gold underline #e6b470 missing"
+    assert NEPOOL_ACCENT in html, "emerald accent hairline missing"
+    assert "#e6b470" not in html, "old gold underline should be gone"
 
 
 def test_skin_contains_page_bg():
     html = render_email_skin(
         preheader="test pre", headline="X", intro_line="Y", body_html="<p>Z</p>"
     )
-    assert "#faf8f5" in html, "page bg #faf8f5 missing"
+    assert NEPOOL_PAGE_BG in html, "NEPOOL cream page bg missing"
 
 
 def test_skin_contains_wordmark_footer():
     html = render_email_skin(
         preheader="test pre", headline="X", intro_line="Y", body_html="<p>Z</p>"
     )
-    assert "NEPOOL Operator · nepooloperator.com" in html  # rebranded from "Solar Operator · solaroperator.org"
+    _assert_nepool_wordmark(html)
 
 
 def test_skin_contains_preheader_mso_hide():
@@ -58,15 +91,19 @@ def test_skin_cta_button_rendered():
     )
     assert "Click here" in html
     assert "https://example.com/action" in html
-    assert "#047857" in html  # CTA button background
+    assert "mso-padding-alt" in html  # CTA button padding present
+    assert NEPOOL_ACCENT in html      # CTA button background is the emerald accent
 
 
 def test_skin_no_cta_when_not_provided():
     html = render_email_skin(
         preheader="p", headline="X", intro_line="Y", body_html="<p>body</p>",
     )
-    # No anchor tag pointing to an action URL
-    assert "#047857" not in html  # CTA bg should not appear without CTA
+    # Emerald #047857 is now a structural brand color (header hairline + links),
+    # so its presence no longer signals a CTA. The CTA <table> is the only place
+    # that emits the Outlook `mso-padding-alt` button padding — use that as the
+    # discriminator instead.
+    assert "mso-padding-alt" not in html  # no CTA button when none provided
 
 
 def test_skin_custom_footer_line():
@@ -84,10 +121,10 @@ def test_skin_long_body_does_not_break():
         body_html=long_body,
     )
     assert len(html) > 5000
-    assert "#064e3b" in html
-    assert "#e6b470" in html
-    assert "#faf8f5" in html
-    assert "NEPOOL Operator · nepooloperator.com" in html  # rebranded from "Solar Operator · solaroperator.org"
+    assert NEPOOL_HEADER_BG in html
+    assert NEPOOL_ACCENT in html
+    assert NEPOOL_PAGE_BG in html
+    _assert_nepool_wordmark(html)
     assert "mso-hide:all" in html
 
 
@@ -146,15 +183,18 @@ def test_send_welcome_smoke():
         notify.send_welcome_email("x@test.com", "Alice Test", "key_abc", "standard")
 
     html = captured["html"]
-    for color in ("#064e3b", "#e6b470", "#faf8f5", "#e8e2d9", "#022c22"):
+    for color in (NEPOOL_PAGE_BG, NEPOOL_HEADER_BG, NEPOOL_ACCENT,
+                  NEPOOL_WORDMARK_BG, NEPOOL_WORDMARK_INK):
         assert color in html, f"Brand color {color} missing from welcome email HTML"
-    assert "NEPOOL Operator · nepooloperator.com" in html  # rebranded from "Solar Operator · solaroperator.org"
+    for old in NEPOOL_OLD_DARK:
+        assert old not in html, f"old dark token {old} leaked into welcome email"
+    _assert_nepool_wordmark(html)
     assert "mso-hide:all" in html
 
     text = captured["text"]
     assert text is not None
     assert "NEPOOL OPERATOR" in text  # rebranded from "SOLAR OPERATOR"
-    assert "NEPOOL Operator · nepooloperator.com" in text  # rebranded from "Solar Operator · solaroperator.org"
+    assert "NEPOOL Operator · nepooloperator.com" in text  # plain-text wordmark is contiguous
 
 
 # ── Array Operator (light "day") theme ────────────────────────────────────────
@@ -196,10 +236,10 @@ def test_ao_cta_uses_blue():
 
 def test_nepool_remains_default_and_light():
     html = render_email_skin(preheader="p", intro_line="Y", body_html="<p>Z</p>")
-    assert "#faf8f5" in html
-    assert "NEPOOL Operator · nepooloperator.com" in html
-    assert "#0a0e14" not in html
-    assert "light only" in html   # NEPOOL is force-light too
+    assert NEPOOL_PAGE_BG in html          # warm cream page (solarpunk-light)
+    _assert_nepool_wordmark(html)
+    assert "#0a0e14" not in html           # no dark AO tokens
+    assert "light only" in html            # NEPOOL is force-light too
 
 
 def test_text_skin_is_product_aware():

@@ -671,6 +671,13 @@ def send_trial_ending_reminders() -> dict:
                 Tenant.trial_reminder_sent_at.is_not(None),
             )
         ).scalars().all()
+        # A tenant whose trial ends within the URGENT window (<=2d) also matches
+        # the EARLY window (<=7d), so it just got its EARLY reminder stamped
+        # above. Skip it here so it doesn't receive BOTH touches in one sweep —
+        # the URGENT nudge is a distinct later tick, fired once the EARLY stamp
+        # was set on a PRIOR run. Without this guard a <=2d no-card tenant gets
+        # two identical reminder emails in a single pass.
+        urgent_rows = [t for t in urgent_rows if t.id not in reminded]
         _send(db, "trial_final_reminder_sent_at", urgent_rows, urgent)
 
     logger.info("send_trial_ending_reminders: early=%d urgent=%d",

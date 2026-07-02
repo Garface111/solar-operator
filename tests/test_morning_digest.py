@@ -107,8 +107,9 @@ def test_healthy_renders_valid_html_with_green_banner():
 
 def test_healthy_kpis_present():
     html = digest.build_digest_html(_tenant(), _healthy_tree())
-    # health hero (mirrors the dashboard's "% fleet healthy" card)
-    assert "Fleet healthy" in html
+    # health hero (mirrors the dashboard's "% fleet healthy" card). The label was
+    # tightened to "Fleet health" in 3f67a98 ("clearer health %").
+    assert "Fleet health" in html
     assert "100" in html                 # 100% healthy: 0 flagged of 3 inverters
     # stat strip (2 arrays, 3 inverters, 0 need a look)
     assert "arrays" in html
