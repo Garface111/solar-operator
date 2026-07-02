@@ -29,11 +29,12 @@
 
 (function () {
   "use strict";
-  if (!/(^|\.)chintpowersystems\.com$/.test(location.hostname)) return;
+  var _SO_BROWSER = (typeof window !== "undefined" && typeof location !== "undefined");
+  if (_SO_BROWSER && !/(^|\.)chintpowersystems\.com$/.test(location.hostname)) return;
 
   const CHINT_DEBUG = true;
   const LOG = (...a) => { if (CHINT_DEBUG) { try { console.log("[EnergyAgent CHINT]", ...a); } catch (_) {} } };
-  LOG("content script LOADED on", location.href);
+  if (_SO_BROWSER) LOG("content script LOADED on", location.href);
 
   const INTENT_KEY = "so_capture_intent";
   const INTENT_TTL_MS = 10 * 60 * 1000;
@@ -220,7 +221,7 @@
     return Array.from(m.keys()).sort().map((k) => ({ date: k, kwh: m.get(k) }));
   }
 
-  window.addEventListener("message", (e) => {
+  if (_SO_BROWSER) window.addEventListener("message", (e) => {
     if (e.source !== window || e.origin !== location.origin) return;
     const d = e.data;
     // The walk (chint_inject.js) signals when it has stepped through every site, so a
@@ -513,6 +514,17 @@
     payload.walkComplete = !_walkStarted ? true : (_walkDone || (_walkExpected > 0 && withInv >= _walkExpected));
     chrome.runtime.sendMessage({ type: "CHINT_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
+
+  // TEST HOOK (browser-inert) — see extension/tests/. No-op in a browser.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      dailyFromChart, siteIdFromSearch, weekTrendDaily, mergeDaily,
+      num, kwFromStr, parsePowerToW, mapStatus, invertersFrom, countInverters,
+      findLocation, applyLocation, _soValidLatLng,
+    };
+  }
+
+  if (!_SO_BROWSER) return;
 
   tick();
   const iv = setInterval(() => {
