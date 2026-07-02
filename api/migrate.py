@@ -930,6 +930,16 @@ def main():
             ))
             print("  + billing_report_subscriptions.budget_amount_usd")
 
+        # Exactly-once-per-period send guard (#5): remembers the billing period of
+        # the last invoice actually sent, so a late GMP bill / ops re-run can't
+        # duplicate-bill the same period.
+        if not column_exists(conn, "billing_report_subscriptions", "last_sent_period_end"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN last_sent_period_end VARCHAR(40)"
+            ))
+            print("  + billing_report_subscriptions.last_sent_period_end")
+
         # 2026-06-16 Live current power for extension-captured inverters.
         # The inverters table came free via create_all, but an EXISTING prod table
         # won't gain new columns from create_all — add them explicitly so the

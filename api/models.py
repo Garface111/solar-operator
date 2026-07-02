@@ -1326,6 +1326,11 @@ class BillingReportSubscription(Base):
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     next_send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     last_invoice_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Exactly-once-per-period guard (#5): the billing PERIOD (bill period_end, or
+    # its "start → end" label) of the last invoice actually SENT to this offtaker.
+    # deliver_subscription refuses to re-send the same period (a late GMP bill or
+    # an ops re-run would otherwise duplicate-bill), unless a re-send is forced.
+    last_sent_period_end: Mapped[str | None] = mapped_column(String(40), nullable=True)
     # "Come review your next bill" dedup (Jun 2026, Ford's GMP-update trigger).
     # The latest GMP-bill PERIOD label (YYYY-MM of the bill's period_end) for
     # which api/jobs/new_bill_review already emailed the operator a "your next

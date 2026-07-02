@@ -100,10 +100,13 @@ DEFAULT_PR = 0.84               # default lumped performance ratio (see module d
 DEFAULT_WINDOW_DAYS = 14
 # Daily-generation sources that are REAL measured single-day energy. Anything
 # else (bill_prorate, utility_meter monthly smears) is excluded from "actual".
-MEASURED_DAILY_SOURCES = {
-    "csv", "manual", "extension_pull", "gmp_portal_scrape",
-    "solaredge", "locus", "vendor", "live",
-}
+# DERIVED from the canonical registry (api.generation_sources) so this set can
+# never drift from inverter_fleet / bill_to_daily again (audit #12). The historic
+# generic "vendor" alias is kept for pre-registry rows; the canonical set now
+# also covers every real vendor slug (fronius/sma/enphase/solis/tigo/alsoenergy/…)
+# plus the real utility reads (gmp_api/smarthub) that this list used to drop.
+from .generation_sources import MEASURED_SOURCES as _MEASURED_SOURCES
+MEASURED_DAILY_SOURCES = _MEASURED_SOURCES | {"vendor"}
 _OPEN_METEO_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 _OPEN_METEO_TZ = "America/New_York"   # all current customers are New-England VT
 
@@ -305,8 +308,13 @@ class Forecast:
     reason: Optional[str] = None              # set when available=False
     inputs: dict = field(default_factory=dict)
     days: list[DayForecast] = field(default_factory=list)
-    expected_kwh: float = 0.0
-    actual_kwh: float = 0.0
+    expected_kwh: float = 0.0                 # expected over the FULL window
+    # Expected restricted to the days we actually MEASURED. actual_kwh sums matched
+    # days only, so the per-array "actual vs expected %" must divide by THIS, not by
+    # the full-window expected — otherwise a healthy site with only a few measured
+    # days (e.g. 6 of 14) reads as a huge shortfall (audit #15).
+    expected_matched_kwh: float = 0.0
+    actual_kwh: float = 0.0                   # sum over MEASURED days only
     performance_ratio_measured: Optional[float] = None   # actual/expected over the window
     confidence: str = "none"                  # high | medium | low | none
 
@@ -316,10 +324,15 @@ class Forecast:
             "reason": self.reason,
             "inputs": self.inputs,
             "expected_kwh": round(self.expected_kwh, 1),
+            # Expected over the measured days only — the correct denominator for the
+            # per-array actual-vs-expected % (audit #15). Surfaced so the frontend
+            # sites-grid / any rollup divides matched actual by matched-day expected
+            # too, not by the full-window expected.
+            "expected_matched_kwh": round(self.expected_matched_kwh, 1),
             "actual_kwh": round(self.actual_kwh, 1),
             "ratio_pct": (
-                round(self.actual_kwh / self.expected_kwh * 100)
-                if self.expected_kwh > 0 and self.actual_kwh is not None else None
+                round(self.actual_kwh / self.expected_matched_kwh * 100)
+                if self.expected_matched_kwh > 0 and self.actual_kwh is not None else None
             ),
             "performance_ratio_measured": (
                 round(self.performance_ratio_measured, 3)
@@ -431,7 +444,7 @@ def build_forecast(
 
     return Forecast(
         available=True, inputs=inputs, days=days,
-        expected_kwh=exp_total, actual_kwh=act_total,
+        expected_kwh=exp_total, expected_matched_kwh=exp_matched, actual_kwh=act_total,
         performance_ratio_measured=pr_measured, confidence=confidence,
     )
 

@@ -1051,12 +1051,16 @@ def _render_from_repro(match, sub, out_path) -> bool:
 
 def generate_files(match: BillingMatch, formats: list[str], include_summary: bool,
                    out_dir: pathlib.Path, invoice_date: Optional[date] = None,
-                   peer: Optional[dict] = None, sub=None) -> list[pathlib.Path]:
+                   peer: Optional[dict] = None, sub=None,
+                   gmp_pdf_override: Optional[bytes] = None) -> list[pathlib.Path]:
     """Render the chosen attachment files into out_dir. Returns their paths.
 
-    When `sub` carries a stored GMP invoice PDF (Paul's dormant hook), it's
-    written out and appended so it rides the same email. `sub` is optional and
-    defaults to None, keeping the signature back-compatible.
+    `gmp_pdf_override` (bytes) is a GMP bill PDF to attach for THIS render only —
+    passed by an approved draft so the manually-attached bill is scoped to this
+    one send and never persisted onto the sub to ride future periods' invoices.
+    When absent, a `sub` carrying a stored GMP invoice PDF still rides it (Paul's
+    dormant hook). `sub`/`gmp_pdf_override` are optional, keeping the signature
+    back-compatible.
     """
     invoice_date = invoice_date or date.today()
     safe = (match.customer.get("name") or "customer").replace(" ", "_").replace("/", "-")
@@ -1101,9 +1105,12 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
     #   2. auto-attach — when sub.auto_attach_gmp is on AND no manual PDF, look
     #      up the captured bill PDF for this array+period via the read seam.
     #      Returns nothing until ingestion persists durable bytes (never fabricated).
-    if sub is not None and getattr(sub, "gmp_invoice_pdf", None):
+    _manual_pdf = gmp_pdf_override
+    if _manual_pdf is None and sub is not None and getattr(sub, "gmp_invoice_pdf", None):
+        _manual_pdf = bytes(sub.gmp_invoice_pdf)
+    if _manual_pdf:
         gmp_path = out_dir / gmp_name
-        gmp_path.write_bytes(bytes(sub.gmp_invoice_pdf))
+        gmp_path.write_bytes(_manual_pdf)
         paths.append(gmp_path)
     elif sub is not None and getattr(sub, "auto_attach_gmp", False):
         try:
@@ -1166,7 +1173,11 @@ def resolve_recipients(sub, tenant) -> tuple[list[str], list[str], list[str]]:
         if not client:
             problems.append("Send mode is 'to client' but no client email is set.")
     else:  # to_both
-        to = [client] if client else ([op] if op else [])
+        # No client → NO primary recipient. Do NOT fall back to operator-only:
+        # that silently sends the operator a copy while the customer is never
+        # invoiced, and the caller believed the customer was billed (#28). Leaving
+        # `to` empty makes deliver_subscription surface the problem and abort.
+        to = [client] if client else []
         cc = ([op] if (op and client) else []) + extra
         if not client:
             problems.append("Send mode is 'to both' but no client email is set.")
@@ -1280,13 +1291,27 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
 
 def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None,
                          triggered_by: str = "manual", is_test: bool = False,
-                         note: Optional[str] = None) -> dict:
+                         note: Optional[str] = None,
+                         expected_period_label: Optional[str] = None,
+                         gmp_pdf_override: Optional[bytes] = None,
+                         force: bool = False) -> dict:
     """Generate + email one subscription's report. Stamps schedule fields on
     success. Returns a structured result dict (never raises for the common
     failure cases — surfaces them in the result instead).
 
     `note` is the operator's edited email body (from an approved draft); when
-    present it leads the email above the figure table."""
+    present it leads the email above the figure table.
+
+    `expected_period_label` pins the period the operator reviewed: if a newer
+    utility bill has landed and the freshly-built invoice is for a different
+    period, we refuse (period_changed) rather than silently sending the drift.
+
+    `gmp_pdf_override` is the GMP bill PDF to attach for THIS send only (from an
+    approved draft), passed through instead of being persisted onto the sub — so
+    a once-attached bill never rides future periods' invoices.
+
+    `force=True` bypasses the exactly-once-per-period guard for a deliberate
+    operator re-send."""
     from ..notify import _send_via_resend
 
     try:
@@ -1295,6 +1320,36 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
         return {"ok": False, "error": "no current billing period in the stored workbook"}
+
+    # ── Guard: don't send a period the operator didn't review (#3) ────────────
+    # approve_draft rebuilds the invoice fresh here; if a newer utility bill landed
+    # between drafting and approval, the customer would otherwise receive a
+    # DIFFERENT period than the one reviewed. When the caller pins the reviewed
+    # period, refuse (and prompt to regenerate) rather than sending the drift.
+    _ci = match.computed_invoice or {}
+    cur_period_label = None
+    if _ci.get("period_start") or _ci.get("period_end"):
+        cur_period_label = f"{_ci.get('period_start') or '—'} → {_ci.get('period_end') or '—'}"
+    if expected_period_label is not None and cur_period_label != expected_period_label:
+        return {"ok": False, "period_changed": True,
+                "error": ("The utility bill changed since you reviewed this draft "
+                          f"(reviewed {expected_period_label or '—'}; the current bill is "
+                          f"{cur_period_label or '—'}). Regenerate the draft to review the "
+                          "current period, then send.")}
+
+    # ── Guard: exactly-once per billing period (#5) ───────────────────────────
+    # Neither the scheduler nor a manual re-run may bill the same period twice. A
+    # late GMP bill (build_match returns last month's) or an ops re-run would
+    # otherwise re-send with a fresh invoice number. Skip when this exact period
+    # was already sent to this offtaker, unless the caller explicitly forces it.
+    cur_period_key = (_ci.get("period_end") or cur_period_label or None)
+    if (not is_test) and (not force) and cur_period_key and \
+            getattr(sub, "last_sent_period_end", None) == cur_period_key:
+        return {"ok": False, "skipped": True, "already_sent": True,
+                "error": (f"This offtaker's invoice for {cur_period_key} was already "
+                          "sent — not sending a duplicate for the same period."),
+                "invoice_number": _ci.get("invoice_number"),
+                "amount_owed": _ci.get("amount_owed")}
 
     # ── OFFTAKER ↔ UTILITY BILL guardrail (Ford's rule) ───────────────────────
     # A typed/manual offtaker (no uploaded workbook) is invoiced EXCLUSIVELY from
@@ -1378,7 +1433,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         try:
             paths = generate_files(match, formats, sub.include_summary,
                                    pathlib.Path(tmp), invoice_date=invoice_date,
-                                   sub=sub)
+                                   sub=sub, gmp_pdf_override=gmp_pdf_override)
         except Exception as e:  # noqa: BLE001
             logger.exception("billing render failed")
             return {"ok": False, "error": f"render failed: {e}"}
@@ -1414,6 +1469,10 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         now = datetime.utcnow()
         sub.last_sent_at = now
         sub.last_invoice_number = result["invoice_number"]
+        # Record the period just sent so the exactly-once guard (#5) can block a
+        # duplicate send of the same billing period (late bill / ops re-run).
+        if cur_period_key:
+            sub.last_sent_period_end = cur_period_key
         # Sequential numbering: this number is now used — advance the counter so the
         # next invoice gets start+1, start+2, …
         if getattr(sub, "invoice_number_next", None) is not None:

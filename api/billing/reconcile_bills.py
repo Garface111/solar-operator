@@ -315,8 +315,19 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
     # Map array_id -> our produced kWh for the period, from the match breakdown.
     our_by_array: dict[int, float] = {}
     inv_period = (None, None)
+    # Is the invoice billed on the array's EXCESS sent to grid (GMP/VEC utility-bill
+    # path — our_kwh = kwh_sent_to_grid) rather than GROSS generation? If so we must
+    # compare like-for-like against the bill's EXCESS, not its gross kwh_generated,
+    # or every GMP offtaker reads a permanent false "Differs from the GMP bill"
+    # (7,000 excess vs 10,000 gross ≈ -30%). See audit #14 and delivery.py
+    # (kwh_source == "utility_bill" / billing_basis in real_math|gmp_credited).
+    excess_basis = False
     if match is not None:
         ci = match.computed_invoice or {}
+        excess_basis = (
+            ci.get("kwh_source") == "utility_bill"
+            or ci.get("billing_basis") in ("real_math", "gmp_credited")
+        )
         bd = ci.get("array_breakdown") or (match.project_totals or {}).get("array_breakdown")
         if bd:
             for b in bd:
@@ -365,7 +376,14 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
         our_kwh = our_by_array.get(aid)
         bill = _bill_for_array_period(db, aid, start, end)
         array_bill_by_aid[aid] = bill
-        gmp_kwh = float(bill.kwh_generated) if (bill and bill.kwh_generated is not None) else None
+        if excess_basis:
+            # our_kwh is the invoice EXCESS (kwh_sent_to_grid) — compare against the
+            # bill's EXCESS, not its GROSS kwh_generated. _array_group_excess already
+            # prefers kwh_sent_to_grid (falling back to net generated only when an
+            # older parse never captured it), the same pool the allocation check uses.
+            gmp_kwh = _array_group_excess(bill)
+        else:
+            gmp_kwh = float(bill.kwh_generated) if (bill and bill.kwh_generated is not None) else None
         status, delta, pct = _verdict(our_kwh, gmp_kwh)
         reason, genuine = _mismatch_reason(db, aid, status, start, end, bill)
         # A "mismatch" whose only cause is missing/estimated measured data (no

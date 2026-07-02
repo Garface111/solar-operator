@@ -127,12 +127,72 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
     }
 
 
+async def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
+    """Read an upload into memory but NEVER buffer more than max_bytes (+1 chunk):
+    stop and 413 as soon as the body exceeds the cap, instead of loading the whole
+    (possibly multi-GB) body into one bytes object and checking size afterwards —
+    which let an authenticated caller OOM the shared worker (#33)."""
+    declared = getattr(file, "size", None)
+    if declared is not None and declared > max_bytes:
+        raise HTTPException(413, f"File too large (max {max_bytes // (1024 * 1024)} MB)")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(413, f"File too large (max {max_bytes // (1024 * 1024)} MB)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _reject_zip_bomb(data: bytes, max_uncompressed: int = 200 * 1024 * 1024) -> None:
+    """An .xlsx is a ZIP; a tiny upload can inflate to gigabytes and OOM the shared
+    worker when openpyxl parses it (#34). Reject BEFORE parsing when the zip's
+    declared uncompressed size exceeds a sane bound. Best-effort: a non-zip /
+    unreadable central directory just passes (the real parse will reject it)."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            total = sum(getattr(i, "file_size", 0) or 0 for i in z.infolist())
+    except Exception:  # noqa: BLE001 — not a zip / unreadable → let the parser judge
+        return
+    if total > max_uncompressed:
+        raise HTTPException(
+            413, "That spreadsheet expands to too much data to process safely.")
+
+
+def _xlsx_formula_values_missing(data: bytes) -> bool:
+    """True when the workbook has formula cells with NO cached values (e.g. exported
+    by Google Sheets / LibreOffice) — so data_only reads come back blank and a seeded
+    invoice template would show an empty Amount Due (#11). Best-effort, read-only,
+    bounded; False on any error (don't block a normal upload on a probe hiccup)."""
+    try:
+        import openpyxl
+        wb_f = openpyxl.load_workbook(io.BytesIO(data), data_only=False, read_only=True)
+        wb_v = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        scanned = 0
+        for ws_f in wb_f.worksheets:
+            ws_v = wb_v[ws_f.title]
+            for row_f, row_v in zip(ws_f.iter_rows(), ws_v.iter_rows()):
+                for cf, cv in zip(row_f, row_v):
+                    scanned += 1
+                    if scanned > 50000:      # bound the scan; huge sheets pass
+                        return False
+                    val = cf.value
+                    if isinstance(val, str) and val.startswith("=") and cv.value is None:
+                        return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _read_upload(file: UploadFile) -> bytes:
-    data = await file.read()
+    data = await _read_capped(file, MAX_UPLOAD_BYTES)
     if not data:
         raise HTTPException(400, "The uploaded file is empty")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, "File too large (max 8 MB)")
     # Detect actual file type by magic bytes before trusting the extension.
     if data[:4] == _MAGIC_PDF:
         raise HTTPException(
@@ -142,6 +202,7 @@ async def _read_upload(file: UploadFile) -> bytes:
     is_excel = data[:4] in (_MAGIC_XLSX[:4], _MAGIC_XLS)
     if not (name.endswith(".xlsx") or name.endswith(".xls") or is_excel):
         raise HTTPException(400, "Upload an .xlsx billing workbook")
+    _reject_zip_bomb(data)   # #34: refuse a decompression bomb before openpyxl
     return data
 
 
@@ -243,11 +304,9 @@ async def upload_vec_bill(utility_account_id: int,
 
     t = tenant_from_session(authorization)
     require_not_demo(t)
-    raw = await file.read()
+    raw = await _read_capped(file, MAX_PDF_BYTES)
     if not raw:
         raise HTTPException(400, "The uploaded file is empty")
-    if len(raw) > MAX_PDF_BYTES:
-        raise HTTPException(413, "File too large (max 12 MB).")
     if raw[:4] != _MAGIC_PDF:
         raise HTTPException(415, "Upload a PDF bill.")
     with SessionLocal() as db:
@@ -702,6 +761,16 @@ async def _create_manual_subscription(
         if not (0.0 < pct <= 1.0):
             raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
                                      "(e.g. 0.25 for 25%)")
+        # #6: a utility-bill offtaker is priced from a single monthly bill; the
+        # invoice math does NOT aggregate a quarter, so a quarterly cadence would
+        # bill only ONE of the three months (silently dropping the other two).
+        # Forbid it until real quarter aggregation exists, rather than under-bill.
+        if (cadence or "monthly") != "monthly":
+            raise HTTPException(
+                400, "Quarterly billing isn't available for utility-bill offtakers "
+                     "yet — GMP bills monthly and a quarter isn't summed, so a "
+                     "quarterly invoice would bill only one of the three months. "
+                     "Use monthly cadence.")
         rate_val = _validate_rate(rate_per_kwh)
         disc_val = _validate_discount(discount_pct)
         net_val = _validate_rate(net_rate_per_kwh)
@@ -718,6 +787,26 @@ async def _create_manual_subscription(
                 raise HTTPException(
                     400, "Offtaker reports bind to a GMP or VEC/SmartHub utility "
                          "account (utility-bill data only).")
+            # #7: offtaker allocations on ONE utility meter can't sum past 100%, or
+            # the same excess is billed to two people. Sum the live offtakers already
+            # bound to this account and reject if adding this share crosses 100%
+            # (0.5pp rounding epsilon). Runs for both single-create and each
+            # bulk-commit row (earlier rows are already committed, so the running
+            # total stays correct across a batch).
+            _existing_alloc = float(db.execute(
+                select(func.coalesce(func.sum(BillingReportSubscription.allocation_pct), 0.0))
+                .where(
+                    BillingReportSubscription.tenant_id == t.id,
+                    BillingReportSubscription.utility_account_id == utility_account_id,
+                    BillingReportSubscription.deleted_at.is_(None),
+                )
+            ).scalar() or 0.0)
+            if _existing_alloc + pct > 1.0 + 0.005:
+                raise HTTPException(
+                    409,
+                    f"This would over-allocate the meter to {(_existing_alloc + pct) * 100:.0f}% "
+                    f"— offtakers sharing one utility account can't sum past 100% or the "
+                    f"meter's excess is billed twice. It's already at {_existing_alloc * 100:.0f}%.")
             client = db.execute(
                 select(Client).where(Client.tenant_id == t.id, Client.name == name,
                                      Client.deleted_at.is_(None))
@@ -922,6 +1011,13 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
         if body.cadence is not None:
             if body.cadence not in VALID_CADENCE:
                 raise HTTPException(400, "cadence must be monthly or quarterly")
+            # #6: no quarter aggregation for utility-bill offtakers — a quarterly
+            # cadence would bill only one of the three months. Block the switch.
+            if body.cadence != "monthly" and getattr(sub, "utility_account_id", None) is not None:
+                raise HTTPException(
+                    400, "Quarterly billing isn't available for utility-bill offtakers "
+                         "yet — a quarterly invoice would bill only one of the three "
+                         "months. Keep this offtaker on monthly cadence.")
             sub.cadence = body.cadence
             sub.next_send_at = next_send_at(body.cadence)
         if body.send_mode is not None:
@@ -1082,11 +1178,10 @@ async def _read_roster_upload(file: UploadFile) -> bytes:
     workbook path but WITHOUT the xlsx-magic-bytes gate (that gate rejects CSVs).
     Accepts both .csv (plain text) and .xlsx (OpenXML). Returns raw bytes; the
     caller sniffs the type."""
-    data = await file.read()
+    data = await _read_capped(file, MAX_UPLOAD_BYTES)
     if not data:
         raise HTTPException(400, "The uploaded file is empty")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, "File too large (max 8 MB)")
+    _reject_zip_bomb(data)   # #34: refuse a decompression bomb before openpyxl
     return data
 
 
@@ -1134,8 +1229,13 @@ def _bulk_pct(raw: str) -> tuple[Optional[float], Optional[str]]:
         v = float(raw.replace("%", "").strip())
     except ValueError:
         return None, f'"{raw}" isn\'t a number'
-    if v > 1.0:
-        v = v / 100.0  # accept "25" or "25%" or "0.25" — never "2500%"
+    # Percent-first (the template says "Accepts 25, 25%, or 0.25"): a value >= 1 is
+    # a whole-number percent, only a value < 1 is already a fraction. Crucially "1"
+    # is 1%, NOT 100% — the old `> 1.0` test read "1" as the fraction 1.0 = 100%, a
+    # 100x over-billing multiplier for an offtaker meant to get 1% (#8). A genuine
+    # 100% share is entered as "100".
+    if v >= 1.0:
+        v = v / 100.0  # "25"/"25%" -> 0.25, "1" -> 0.01, "100" -> 1.0; never "2500%"
     if not (0.0 < v <= 1.0):
         return None, "percent must be between 0 and 100"
     return v, None
@@ -1149,7 +1249,9 @@ def _bulk_discount(raw: str) -> tuple[Optional[float], Optional[str]]:
         v = float(raw.replace("%", "").strip())
     except ValueError:
         return None, f'"{raw}" isn\'t a valid discount'
-    if v > 1.0:
+    # Same percent-first convention as _bulk_pct: "10"/"10%" -> 0.10, "1" -> 1%
+    # (not 100%), "0.1" -> 10%. A 100% discount is invalid and still rejected.
+    if v >= 1.0:
         v = v / 100.0
     if not (0.0 <= v < 1.0):
         return None, "discount must be between 0 and 100 (and under 100)"
@@ -1526,11 +1628,20 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
         }
         existing = db.execute(
             select(BillingReportSubscription.customer_name,
-                   BillingReportSubscription.utility_account_id).where(
+                   BillingReportSubscription.utility_account_id,
+                   BillingReportSubscription.allocation_pct,
+                   BillingReportSubscription.client_email,
+                   BillingReportSubscription.discount_pct).where(
                 BillingReportSubscription.tenant_id == t.id,
                 BillingReportSubscription.deleted_at.is_(None))
         ).all()
-    existing_keys = {((n or "").strip().lower(), ua) for (n, ua) in existing}
+    # Key -> the live sub's money-driving values, so we can tell a true no-op
+    # (same values → safe skip) from a real conflict (already live with DIFFERENT
+    # allocation/email/discount → must NOT silently skip and leave the stale value,
+    # nor silently overwrite live billing; surface it for the operator to resolve).
+    existing_vals = {((n or "").strip().lower(), ua): (al, em, di)
+                     for (n, ua, al, em, di) in existing}
+    existing_keys = set(existing_vals.keys())
 
     created: list[dict] = []
     skipped: list[dict] = []
@@ -1545,11 +1656,33 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
             failed.append({"offtaker_name": name,
                            "error": f"utility account {r.utility_account_id} not found"})
             continue
-        # Idempotency: skip a row that already exists live.
-        if (name.lower(), r.utility_account_id) in existing_keys:
-            skipped.append({"offtaker_name": name,
-                            "utility_account_id": r.utility_account_id,
-                            "reason": "already exists"})
+        # Idempotency vs conflict (#16). A row that already exists live is a safe
+        # no-op ONLY if its money-driving values match; if allocation/email/discount
+        # DIFFER, skipping would silently keep the stale value — surface it as a
+        # conflict for the operator to resolve (edit or remove the live offtaker)
+        # rather than framing it as "already exists".
+        _key = (name.lower(), r.utility_account_id)
+        if _key in existing_vals:
+            _al, _em, _di = existing_vals[_key]
+            def _num_eq(a, b):
+                if a is None and b is None:
+                    return True
+                if a is None or b is None:
+                    return False
+                return abs(float(a) - float(b)) < 1e-9
+            _same = (_num_eq(_al, r.allocation_pct)
+                     and (_em or None) == (r.email or None)
+                     and _num_eq(_di, r.discount_pct))
+            if _same:
+                skipped.append({"offtaker_name": name,
+                                "utility_account_id": r.utility_account_id,
+                                "reason": "already exists (identical) — no change"})
+            else:
+                failed.append({"offtaker_name": name,
+                               "error": (f"'{name}' already exists on this utility account "
+                                         f"with different values (live allocation "
+                                         f"{(_al or 0) * 100:.0f}%). Import won't overwrite live "
+                                         f"billing — edit or remove the existing offtaker first.")})
             continue
         # _create_manual_subscription is async but performs only sync DB work; the
         # OFFTAKER↔UTILITY-BILL path validates array_id + utility_account_id
@@ -1721,6 +1854,10 @@ def invoice_archive_zip(authorization: Optional[str] = Header(default=None),
     to the latest month present. Missing files are omitted, never fabricated."""
     from .invoice_archive import build_archive_zip
     t = tenant_from_session(authorization)
+    # Validate `month` before it reaches the Content-Disposition filename and the
+    # zip arcnames (#37) — the sibling download endpoints sanitize, this one didn't.
+    if month is not None and not _re.match(r"^\d{4}-\d{2}$", month):
+        raise HTTPException(400, "month must be in YYYY-MM format")
     with SessionLocal() as db:
         data, fname, count = build_archive_zip(db, t.id, month=month)
     return Response(
@@ -2082,11 +2219,9 @@ async def tracker_upload(sub_id: int,
     require_not_demo(t)
     if not tracker_enabled():
         raise HTTPException(404, "Spreadsheet tracker is not enabled.")
-    raw = await file.read()
+    raw = await _read_capped(file, MAX_UPLOAD_BYTES)
     if not raw:
         raise HTTPException(400, "Empty file.")
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File too large (8 MB max).")
     name = file.filename or "generation.xlsx"
     is_x = raw[:4] in (_MAGIC_XLSX, _MAGIC_XLS)
     is_csv = name.lower().endswith(".csv") or (not is_x)
@@ -2138,6 +2273,7 @@ def tracker_remap(sub_id: int, body: dict,
     against the stored headers and updates the mapping in place."""
     from .sheet_tracker import tracker_enabled
     t = tenant_from_session(authorization)
+    require_not_demo(t)   # mutates + commits — never on the shared demo tenant (#36)
     if not tracker_enabled():
         raise HTTPException(404, "Spreadsheet tracker is not enabled.")
     cols = (body or {}).get("columns")
@@ -2172,6 +2308,7 @@ def tracker_remove(sub_id: int, authorization: Optional[str] = Header(default=No
     """Detach the BYO sheet from this offtaker."""
     from .sheet_tracker import tracker_enabled
     t = tenant_from_session(authorization)
+    require_not_demo(t)   # mutates + commits — never on the shared demo tenant (#36)
     if not tracker_enabled():
         raise HTTPException(404, "Spreadsheet tracker is not enabled.")
     with SessionLocal() as db:
@@ -2192,6 +2329,7 @@ def tracker_download(sub_id: int, authorization: Optional[str] = Header(default=
     latest' always reflects the freshest computed bill even between worker runs."""
     from .sheet_tracker import tracker_enabled, update_subscription_sheet
     t = tenant_from_session(authorization)
+    require_not_demo(t)   # opportunistic append below commits — never on demo (#36)
     if not tracker_enabled():
         raise HTTPException(404, "Spreadsheet tracker is not enabled.")
     with SessionLocal() as db:
@@ -2714,11 +2852,9 @@ async def attach_gmp_invoice(draft_id: int, file: UploadFile = File(...),
     alongside the customer invoice 'to prove we're not just making this up.'"""
     t = tenant_from_session(authorization)
     require_not_demo(t)
-    data = await file.read()
+    data = await _read_capped(file, MAX_PDF_BYTES)
     if not data:
         raise HTTPException(400, "empty file")
-    if len(data) > MAX_PDF_BYTES:
-        raise HTTPException(413, "PDF too large (max 12 MB)")
     head = data[:5]
     if head[:4] != b"%PDF":
         raise HTTPException(400, "that doesn't look like a PDF")
@@ -2804,17 +2940,36 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
     require_not_demo(t)
     with SessionLocal() as db:
         d = _get_owned_draft(db, t.id, draft_id)
-        if d.status != "pending":
+        # #17: claim the draft atomically before the slow send. Lock the row,
+        # re-read status inside the txn, and flip pending→sending; a second
+        # concurrent approve (double-click / client retry) then sees it's no
+        # longer pending and 409s instead of sending a duplicate invoice.
+        locked = db.execute(
+            select(ReportDraft).where(ReportDraft.id == d.id).with_for_update()
+        ).scalars().first()
+        if locked is None or locked.status != "pending":
             raise HTTPException(409, "draft already resolved")
-        sub = _get_owned(db, t.id, d.subscription_id)
-        # Move the draft's GMP PDF onto the subscription so delivery's existing
-        # attach hook (generate_files) rides it onto the email, then send live.
-        if d.gmp_invoice_pdf is not None:
-            sub.gmp_invoice_pdf = d.gmp_invoice_pdf
+        locked.status = "sending"
         db.commit()
-        result = deliver_subscription(db, sub, t, triggered_by="approval",
-                                      is_test=False, note=d.note)
+        d = locked
+        sub = _get_owned(db, t.id, d.subscription_id)
+        # #4: attach the draft's manually-uploaded GMP bill for THIS send only —
+        # passed through, never persisted onto the sub (persisting it made a stale
+        # bill ride every future period's invoice and defeat period-correct auto-
+        # attach). #3: pin the period the operator reviewed so a bill that landed
+        # after review can't be sent unreviewed.
+        gmp_override = bytes(d.gmp_invoice_pdf) if d.gmp_invoice_pdf is not None else None
+        try:
+            result = deliver_subscription(
+                db, sub, t, triggered_by="approval", is_test=False, note=d.note,
+                expected_period_label=d.period_label, gmp_pdf_override=gmp_override)
+        except Exception:
+            d.status = "pending"      # release the claim so it can be retried
+            db.commit()
+            raise
         if not result.get("ok"):
+            d.status = "pending"      # release the claim; nothing was sent
+            db.commit()
             raise HTTPException(422, result.get("error", "send failed"))
         d.status = "sent"
         d.sent_at = datetime.utcnow()
@@ -2833,12 +2988,12 @@ def test_draft(draft_id: int, authorization: Optional[str] = Header(default=None
     with SessionLocal() as db:
         d = _get_owned_draft(db, t.id, draft_id)
         sub = _get_owned(db, t.id, d.subscription_id)
-        # Attach the draft's GMP PDF for this test in-memory only (no commit — a
-        # test must not mutate the live subscription).
-        if d.gmp_invoice_pdf is not None:
-            sub.gmp_invoice_pdf = d.gmp_invoice_pdf
+        # Attach the draft's GMP PDF for this test send only, passed through (never
+        # written onto the sub) — same per-send scoping as approve (#4).
+        gmp_override = bytes(d.gmp_invoice_pdf) if d.gmp_invoice_pdf is not None else None
         result = deliver_subscription(db, sub, t, triggered_by="test",
-                                      is_test=True, note=d.note)
+                                      is_test=True, note=d.note,
+                                      gmp_pdf_override=gmp_override)
         if not result.get("ok"):
             raise HTTPException(422, result.get("error", "test send failed"))
         return {"ok": True, "result": result}
@@ -2947,11 +3102,9 @@ TEMPLATE_EXT = {".pdf", ".html", ".htm", ".docx", ".doc", ".png", ".jpg", ".jpeg
 
 
 async def _read_template_upload(file: UploadFile):
-    data = await file.read()
+    data = await _read_capped(file, TEMPLATE_MAX_BYTES)
     if not data:
         raise HTTPException(400, "The uploaded file is empty")
-    if len(data) > TEMPLATE_MAX_BYTES:
-        raise HTTPException(400, "File too large (max 12 MB)")
     name = (file.filename or "template").strip()
     ext = ("." + name.rsplit(".", 1)[1].lower()) if "." in name else ""
     # Detect actual type by magic bytes and override the extension when possible.
@@ -2964,6 +3117,8 @@ async def _read_template_upload(file: UploadFile):
         ext = ".xls"
     if ext not in TEMPLATE_EXT:
         raise HTTPException(400, "Upload a PDF, Word doc, HTML, or image of your invoice template")
+    if ext in (".xlsx", ".xlsm", ".xls"):
+        _reject_zip_bomb(data)   # #34: refuse a decompression bomb before openpyxl
     return data, name
 
 
@@ -3038,6 +3193,11 @@ def preview_invoice_template(body: InvoiceTemplatePreview,
                              authorization: Optional[str] = Header(default=None)):
     """Render the (provided or stored) token-HTML with SAMPLE data → PDF preview."""
     t = tenant_from_session(authorization)
+    # Rendering CALLER-SUPPLIED html is a compute action on operator input; keep it
+    # off the shared demo session (defense-in-depth alongside the sandboxed renderer,
+    # #1). Previewing the stored/default template (html is None) stays open.
+    if body.html is not None:
+        require_not_demo(t)
     from ..models import OfftakerInvoiceTemplate
     from .template_render import render_template_pdf, SAMPLE_CONTEXT, DEFAULT_TEMPLATE_HTML
     html = body.html
@@ -3096,12 +3256,27 @@ async def upload_invoice_template(file: UploadFile = File(...),
         # so the operator doesn't have to separately flip it on (they switch to the
         # standard format with the slider). Only when it's actually renderable
         # (xlsx pixel repro, or seeded token-HTML); otherwise leave it off.
-        if is_excel or tpl.html:
+        # BUT (#11): an .xlsx exported without cached formula values (Google Sheets /
+        # LibreOffice) reads blank, so auto-enabling it would email a blank Amount
+        # Due. In that case DON'T enable (turn it off if it was on) and warn — the
+        # operator opens+saves it in Excel, or uses the token editor.
+        warning = None
+        if is_excel and _xlsx_formula_values_missing(data):
+            tpl.enabled = False
+            warning = ("We stored your template but couldn't read its computed values — "
+                       "it looks like it was exported without cached formula results "
+                       "(e.g. from Google Sheets). Open it in Excel and Save once, then "
+                       "re-upload, or use the token editor. It is NOT set as your live "
+                       "invoice format yet, so nothing sends blank.")
+        elif is_excel or tpl.html:
             tpl.enabled = True
         tpl.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(tpl)
-        return {"ok": True, "template": _template_dict(tpl)}
+        out = {"ok": True, "template": _template_dict(tpl)}
+        if warning:
+            out["warning"] = warning
+        return out
 
 
 @router.get("/invoice-template/file")

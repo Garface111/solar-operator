@@ -353,6 +353,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     sent: list[int] = []
     drafted: list[int] = []
     failed: list[int] = []
+    skipped: list[int] = []   # benign no-ops (waiting on a bill, or already sent
+                              # this period) — NOT failures; don't alert on them.
     with SessionLocal() as db:
         q = (
             select(BillingReportSubscription, Tenant)
@@ -375,6 +377,16 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
             if sub is None or tenant is None:
                 continue
+            # #18: annual true-up has no real banked-vs-cashed reconciliation for
+            # utility-bill offtakers — the normal delivery path would send a single
+            # MONTH's invoice mislabeled as an annual true-up (and burn an invoice
+            # number). Skip them (honest no-op) until a real annual reconciliation
+            # exists, rather than imply a capability that isn't there.
+            if trueup_only and getattr(sub, "utility_account_id", None) is not None:
+                logger.info(
+                    "annual true-up skipped for utility-bill offtaker sub %s — no "
+                    "annual reconciliation implemented (would mis-send one month)", sid)
+                continue
             # Per-customer choice: "approval" (default) drafts into the operator's
             # inbox for review-and-send; "auto" sends straight to the recipient.
             mode = getattr(sub, "delivery_mode", "approval") or "approval"
@@ -383,15 +395,26 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                     result = deliver_subscription(
                         db, sub, tenant,
                         triggered_by=f"sched-billing-{'trueup' if trueup_only else cadence}")
-                    (sent if result.get("ok") else failed).append(sid)
+                    if result.get("ok"):
+                        sent.append(sid)
+                    elif result.get("skipped"):
+                        skipped.append(sid)   # waiting on bill / already sent — benign
+                    else:
+                        failed.append(sid)
                 else:
                     result = draft_subscription(
                         db, sub, tenant,
                         triggered_by=f"sched-draft-{'trueup' if trueup_only else cadence}")
-                    (drafted if result.get("ok") else failed).append(sid)
+                    if result.get("ok"):
+                        drafted.append(sid)
+                    elif result.get("skipped"):
+                        skipped.append(sid)
+                    else:
+                        failed.append(sid)
                 if not result.get("ok"):
-                    logger.warning("billing delivery skipped sub %s: %s",
-                                   sid, result.get("error"))
+                    logger.info("billing delivery %s sub %s: %s",
+                                "skipped" if result.get("skipped") else "FAILED",
+                                sid, result.get("error"))
             except Exception as e:  # noqa: BLE001
                 failed.append(sid)
                 send_internal_alert(
@@ -402,10 +425,11 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     if failed:
         send_internal_alert(
             f"Array Operator billing — partial failures ({cadence})",
-            f"Sent OK: {sent}\nDrafted: {drafted}\nFailed/skipped: {failed}",
+            f"Sent OK: {sent}\nDrafted: {drafted}\nSkipped (benign): {skipped}\n"
+            f"Failed: {failed}",
         )
     return {"cadence": cadence, "trueup_only": trueup_only,
-            "sent": sent, "drafted": drafted, "failed": failed}
+            "sent": sent, "drafted": drafted, "failed": failed, "skipped": skipped}
 
 
 def deliver_monthly_billing_reports() -> dict:

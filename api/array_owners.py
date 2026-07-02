@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from . import generation_sources
 from . import inverters
 from . import ratelimit
 from .adapters import gmp as gmp_adapter
@@ -4152,13 +4153,20 @@ def _persist_meter_accounts(
                             tenant_id=tenant.id, array_id=arr.id, day=day,
                             kwh=dk, source="utility_meter",
                         ))
-                    else:
-                        # Same idempotency as inverter_capture: never lower a row.
-                        row.kwh = max(row.kwh, dk)
+                        kwh_recorded += dk
+                        days_written += 1
+                    elif not generation_sources.is_measured(row.source):
+                        # Only refresh a None / bill_prorate / prior utility_meter row.
+                        # NEVER overwrite, raise, or relabel a real metered reading
+                        # (solaredge/fronius/gmp_api/…): a utility-meter figure must
+                        # not clobber a finer real vendor day. Mirrors bill_to_daily's
+                        # real-source guard (audit #9).
+                        row.kwh = dk
                         row.source = "utility_meter"
                         row.uploaded_at = now()
-                    kwh_recorded += dk
-                    days_written += 1
+                        kwh_recorded += dk
+                        days_written += 1
+                    # else: a real measured reading already owns this day — leave it.
             else:
                 # ── Billing-period TOTAL: prorate across the period's days ───────
                 # NEVER write a whole period's kWh into one day — that is a physically
@@ -4199,11 +4207,19 @@ def _persist_meter_accounts(
                                     tenant_id=tenant.id, array_id=arr.id, day=day,
                                     kwh=per_day, source="bill_prorate",
                                 ))
-                            else:
-                                row.kwh = max(row.kwh, per_day)
+                                _wrote += 1
+                            elif row.source is None or row.source == "bill_prorate":
+                                # Only fill/refresh a gap or our own earlier estimate.
+                                # NEVER overwrite, RAISE, or relabel a real metered
+                                # reading (solaredge/fronius/gmp_api/…) or a finer
+                                # utility_meter day with this coarse bill smear — that
+                                # is exactly the over-invoice bug (audit #9). Mirrors
+                                # bill_to_daily's guard.
+                                row.kwh = per_day
                                 row.source = "bill_prorate"
                                 row.uploaded_at = now()
-                            _wrote += 1
+                                _wrote += 1
+                            # else: real / utility_meter reading owns this day — skip.
                             day += timedelta(days=1)
                         kwh_recorded = per_day * _wrote
                         days_written = _wrote
@@ -4609,12 +4625,18 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
             )
             d = fc.to_dict()
             measured_days = d["inputs"].get("measured_days", 0) if d.get("available") else 0
-            # expected restricted to matched days, for an apples-to-apples ratio
-            exp_matched = sum(x["expected_kwh"] for x in d["days"] if x["actual_kwh"] is not None)
+            # Expected restricted to matched days — the apples-to-apples denominator
+            # for the ratio (audit #15). Now carried on the Forecast itself, so the
+            # fleet headline and the per-array row share ONE matched-day expected.
+            exp_matched = d["expected_matched_kwh"]
             rows.append({
                 "array_id": arr.id, "array_name": arr.name,
                 "nameplate_kw": round(nameplate, 1),
-                "expected_kwh": d["expected_kwh"], "actual_kwh": d["actual_kwh"],
+                "expected_kwh": d["expected_kwh"],
+                # Matched-day expected so a frontend sites-grid rollup divides matched
+                # actual by matched-day expected too (never by the full window).
+                "expected_matched_kwh": exp_matched,
+                "actual_kwh": d["actual_kwh"],
                 "ratio_pct": d["ratio_pct"], "measured_days": measured_days,
                 "confidence": d["confidence"],
                 "tilt_assumed": tilt_assumed, "geocode_source": arr.geocode_source,

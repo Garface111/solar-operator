@@ -34,12 +34,16 @@ from ..models import Bill, UtilityAccount, DailyGeneration, Array, now
 logger = logging.getLogger(__name__)
 
 BILL_SOURCE = "bill_prorate"
-# Real metered sources we must never overwrite with a coarse bill estimate.
-_REAL_SOURCES = {
-    "solaredge", "fronius", "sma", "chint", "extension_pull",
-    "extension_pull_corrected", "csv", "manual", "gmp_api",
-    "gmp_portal_scrape", "utility_meter", "smarthub",
-}
+# Sources we must never overwrite with a coarse bill_prorate estimate. DERIVED
+# from the canonical registry (api.generation_sources) so it can't drift from
+# forecasting / inverter_fleet again (audit #12) — this formerly hard-coded only
+# solaredge/fronius/sma/chint and silently omitted enphase/solis/tigo/alsoenergy/
+# locus, letting a bill smear clobber those real vendors. `utility_meter` is added
+# on top: it is a finer per-day meter reading than a whole-bill smear, so the
+# coarser bill_prorate must never overwrite it either. Only a None row or our own
+# earlier bill_prorate estimate may be written/refreshed below.
+from ..generation_sources import MEASURED_SOURCES as _MEASURED_SOURCES
+_REAL_SOURCES = _MEASURED_SOURCES | {"utility_meter"}
 
 # bill-prorate is an ESTIMATE (a monthly bill spread flat across its days). It must
 # NEVER stand in for real metered production on days the inverter / GMP-API pull

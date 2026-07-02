@@ -35,6 +35,20 @@ RATIO_MEDIUM = 0.66
 _TRAILING_PAREN = re.compile(r"\s*\([^)]*\)\s*$")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# Generic solar-site words that carry almost no identifying signal. A match on
+# these alone (e.g. "Community Solar" ⊆ "Elm Street Community Solar") must NEVER
+# reach auto-committable `high` — dozens of arrays share them. Only DISTINCTIVE
+# (non-stopword) tokens count toward the ≥2-distinctive-token bar for `high`.
+_STOPWORDS = frozenset({
+    "solar", "community", "farm", "field", "street", "st", "road", "rd",
+    "project", "site", "array", "power", "energy", "the", "of", "and",
+})
+
+
+def _distinctive(tokens: frozenset[str]) -> frozenset[str]:
+    """Tokens that actually identify a site (drop generic solar-site words)."""
+    return frozenset(t for t in tokens if t not in _STOPWORDS)
+
 
 def _normalize(raw: Optional[str]) -> str:
     """lowercase → strip a trailing parenthetical → strip punctuation → collapse
@@ -80,33 +94,58 @@ def _seq_ratio(a_norm: str, b_norm: str) -> float:
     return SequenceMatcher(None, a_norm, b_norm).ratio()
 
 
-def _classify(a_norm: str, b_norm: str) -> tuple[str, float]:
-    """Return (confidence, score) for a single candidate name vs the raw name.
-    `score` is the blended ranking number (higher = better). Confidence classes:
+def _shared_distinctive(a_norm: str, b_norm: str) -> int:
+    """Count of DISTINCTIVE (non-stopword) tokens shared by both names. This is
+    the signal that separates a real site match ("Maple Street" ⊆ "Maple Street
+    Solar" → {maple} … 1 distinctive) from a generic-word collision ("Community
+    Solar" ⊆ "Elm Street Community Solar" → {} … 0 distinctive)."""
+    da = _distinctive(_tokens(a_norm))
+    db = _distinctive(_tokens(b_norm))
+    return len(da & db)
+
+
+def _classify(a_norm: str, b_norm: str) -> tuple[str, float, bool]:
+    """Return (confidence, score, is_containment) for a single candidate name vs
+    the raw name. `score` is the blended ranking number (higher = better).
+    `is_containment` is True when the match reached `high` purely on whole-token
+    containment (so the caller can detect a multi-array containment tie and demote
+    it — see match_array). Confidence classes:
       exact  — normalized strings equal
-      high   — seq ratio ≥ .88, OR whole-token containment (one ⊆ other)
-      medium — seq ratio ≥ .66, OR token-set overlap ≥ .66
+      high   — seq ratio ≥ .88, OR whole-token containment backed by ≥2
+               DISTINCTIVE (non-stopword) shared tokens
+      medium — seq ratio ≥ .66, OR token-set overlap ≥ .66, OR whole-token
+               containment on a single distinctive token (needs_review)
       none   — below all of the above
+
+    A bare subset on generic solar-site words alone ("Community Solar") can never
+    reach `high`: it lacks the ≥2 distinctive tokens, so it tops out at `medium`.
     """
     if not a_norm or not b_norm:
-        return "none", 0.0
+        return "none", 0.0, False
     if a_norm == b_norm:
-        return "exact", 1.0
+        return "exact", 1.0, False
     seq = _seq_ratio(a_norm, b_norm)
     tok = _token_set_ratio(a_norm, b_norm)
     contained = _whole_token_containment(a_norm, b_norm)
+    shared_distinctive = _shared_distinctive(a_norm, b_norm)
+    # Containment only earns `high` when it's backed by real identifying signal:
+    # at least two distinctive (non-stopword) tokens in common. A single
+    # distinctive token — or only stopwords — is too weak to auto-commit.
+    containment_high = contained and shared_distinctive >= 2
     # Blended score for ranking alternatives — take the strongest signal, then
     # nudge with the other so ties break sensibly. Containment is a strong signal.
     score = max(seq, tok)
-    if contained:
+    if containment_high:
         score = max(score, RATIO_HIGH)
-    if seq >= RATIO_HIGH or contained:
+    if seq >= RATIO_HIGH or containment_high:
         conf = "high"
-    elif seq >= RATIO_MEDIUM or tok >= RATIO_MEDIUM:
+    elif seq >= RATIO_MEDIUM or tok >= RATIO_MEDIUM or contained:
+        # Containment on <2 distinctive tokens still deserves review (medium),
+        # not silence — the operator confirms it in the frontend.
         conf = "medium"
     else:
         conf = "none"
-    return conf, score
+    return conf, score, containment_high
 
 
 # Confidence ordering for picking the single best candidate.
@@ -170,21 +209,44 @@ def match_array(raw_name: str,
     # Score every candidate array. For each array the "name" we compare against is
     # the best of: the Array.name and each linked account's array_name/nickname.
     scored: list[tuple[int, str, float]] = []  # (array_id, best_conf, best_score)
+    # Arrays that reached `high` PURELY on whole-token containment. If more than
+    # one array lands here for the same raw name (e.g. two "* Community Solar"
+    # sites both containing the raw "Community Solar"), the pick is an arbitrary
+    # array_id tiebreak — exactly the silent-wrong-meter trap. We demote every
+    # such contender to `medium` (→ needs_review) so BOTH surface for the
+    # operator instead of one being auto-committed.
+    containment_high_aids: list[int] = []
     for aid, aname in array_names.items():
         candidates = [aname]
         for ua in ua_by_array.get(aid, []):
             candidates.append(ua.get("array_name") or "")
             candidates.append(ua.get("nickname") or "")
         best_conf, best_score = "none", -1.0
+        arr_containment_high = False
         for cand in candidates:
             cnorm = _normalize(cand)
             if not cnorm:
                 continue
-            conf, score = _classify(raw_norm, cnorm)
+            conf, score, is_containment = _classify(raw_norm, cnorm)
             # Prefer higher confidence class first, then higher raw score.
             if (_CONF_RANK[conf], score) > (_CONF_RANK[best_conf], best_score):
                 best_conf, best_score = conf, score
+            if conf == "high" and is_containment:
+                arr_containment_high = True
+        if arr_containment_high:
+            containment_high_aids.append(aid)
         scored.append((aid, best_conf, best_score))
+
+    # Two-way (or more) containment tie → ambiguous. Demote each containment-only
+    # `high` array to `medium` so none auto-commits and all surface for review.
+    # Arrays that earned `high` some other way (exact/strong seq ratio) are left
+    # alone — only the ambiguous bare-containment picks are pulled back.
+    if len(containment_high_aids) > 1:
+        ambiguous = set(containment_high_aids)
+        scored = [
+            (aid, "medium" if (aid in ambiguous and conf == "high") else conf, score)
+            for (aid, conf, score) in scored
+        ]
 
     # Rank: confidence class desc, then blended score desc, then array_id asc
     # (stable/deterministic tiebreak).
@@ -294,9 +356,12 @@ if __name__ == "__main__":
     check("exact match binds billed utility account",
           r["utility_account_id"] == 101, f"got {r['utility_account_id']}")
 
-    # 2. High confidence via whole-token containment ("maple street" ⊆ array).
+    # 2. Single-distinctive-token containment ("maple street" ⊆ array; only
+    #    "maple" is distinctive — "street" is a stopword) → NOT auto-high. It
+    #    tops out at medium/needs_review, and still resolves to the right array.
     r = match_array("Maple Street", arrays, uaccts)
-    check("containment → high", r["confidence"] in ("exact", "high") and r["array_id"] == 1,
+    check("single-distinctive containment → medium not high",
+          r["confidence"] == "medium" and r["array_id"] == 1,
           f"got {r['confidence']}/{r['array_id']}")
 
     # 3. Typo → high via sequence ratio.
@@ -345,6 +410,36 @@ if __name__ == "__main__":
     # 10. Empty / None raw name → none, no crash.
     r = match_array("", arrays, uaccts)
     check("empty raw → none", r["confidence"] == "none" and r["array_id"] is None)
+
+    # ── Adversarial cases for finding #2 (generic-token containment trap) ──
+
+    # 11. (a) A bare generic name ("Community Solar") that is a whole-token subset
+    #     of TWO distinct "* Community Solar" arrays must NOT auto-commit to one.
+    #     Every shared token is a stopword (community, solar) → 0 distinctive, and
+    #     two arrays tie on containment → demote to medium, surface BOTH.
+    ambig_arrays = [
+        {"id": 10, "name": "Elm Street Community Solar"},
+        {"id": 11, "name": "Oak Street Community Solar"},
+    ]
+    r = match_array("Community Solar", ambig_arrays, [])
+    check("generic 2-array containment NOT auto-high",
+          r["confidence"] != "high" and r["confidence"] != "exact",
+          f"got {r['confidence']}/{r['array_id']}")
+    alt_ids_a = {r["array_id"]} | {a["array_id"] for a in r["alternatives"]}
+    check("generic 2-array containment surfaces BOTH candidates",
+          {10, 11} <= alt_ids_a, f"surfaced={sorted(x for x in alt_ids_a if x is not None)}")
+
+    # 12. (b) A genuinely DISTINCTIVE 2-token match still resolves `high` cleanly.
+    #     "Elm Street Community Solar" carries distinctive {elm} — only 1 — so use
+    #     a raw name sharing TWO distinctive tokens with exactly one array.
+    distinct_arrays = [
+        {"id": 20, "name": "Elm Ridge Community Solar"},
+        {"id": 21, "name": "Oak Street Community Solar"},
+    ]
+    r = match_array("Elm Ridge", distinct_arrays, [])
+    check("distinctive 2-token containment → high",
+          r["confidence"] == "high" and r["array_id"] == 20,
+          f"got {r['confidence']}/{r['array_id']}")
 
     print()
     if failures:

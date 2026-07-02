@@ -31,6 +31,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from . import generation_sources
 from .db import SessionLocal
 from .models import Array, DailyGeneration, Inverter, InverterConnection, InverterDaily, Tenant, UtilityAccount, now
 from .inverters import peer_analysis
@@ -794,19 +795,33 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
 # The sandbox slider switches between these. The system still INTEGRATES both
 # (the blended `daily` is what dedup/Trends use); these split views just let the
 # owner SEE each feed on its own. Classify DailyGeneration.source into one stream.
-_VENDOR_SOURCES = {
-    "solaredge", "fronius", "sma", "chint",
-    "extension_pull", "extension_pull_corrected",
-    "csv", "manual",                      # operator-supplied independent production
-}
+# DERIVED from the canonical registry (api.generation_sources) so this can't
+# drift from forecasting / bill_to_daily again (audit #12). The VENDOR stream is
+# inverter telemetry + the extension captures + operator-supplied independent
+# production. It formerly hard-coded only solaredge/fronius/sma/chint and silently
+# dropped enphase/solis/tigo/alsoenergy/locus — those now flow in from VENDORS.
+# The utility-side reads (gmp_api/gmp_portal_scrape/smarthub) belong to the
+# UTILITY stream below, not here, so they are excluded.
+_VENDOR_SOURCES = (
+    generation_sources.VENDOR_TELEMETRY_SOURCES
+    | generation_sources.EXTENSION_SOURCES
+    | {"csv", "manual"}                   # operator-supplied independent production
+)
 # NOTE: 'bill_prorate' is deliberately NOT here (audit #9). It's a monthly utility bill
 # smeared flat across its days — an ESTIMATE, not a settled meter reading — so it must
 # not blend into the "Utility meter · settled generation" stream as if it were one. It
 # still appears in the BLENDED array-production view (_array_daily); it's just never
 # mislabeled as settled-meter data.
-_UTILITY_SOURCES = {
-    "gmp_api", "gmp_portal_scrape", "utility_meter", "smarthub",
-}
+# The UTILITY-meter STREAM (what the sandbox slider shows as the meter feed).
+# Its real reads track the canonical registry's UTILITY_REAL_SOURCES so they can't
+# drift, PLUS 'utility_meter' — the operator-entered per-day meter reading. This
+# is a STREAM classifier, not the MEASURED/estimate distinction: 'utility_meter'
+# is intentionally shown here as a utility feed. 'bill_prorate' is deliberately
+# still NOT in either stream (it's a bill smear — see the note above _daily_stream
+# and audit #9); it only appears in the BLENDED array-production view.
+_UTILITY_SOURCES = (
+    generation_sources.UTILITY_REAL_SOURCES | {"utility_meter"}
+)
 
 
 def _daily_stream(src: str | None) -> str:
