@@ -505,16 +505,27 @@ def _normalized_allocations(sub) -> list[dict]:
     return out
 
 
-def _array_group_excess_for_sub(db, sub, period_label=None):
+def _array_group_excess_for_sub(sub, period_label=None):
     """The array's GROUP excess (its host bill's kwh_sent_to_grid) — the pool GMP
     allocates among the array's offtakers by share — for the "real math" invoice.
     Returns None (→ fall back to GMP's own-bill figure) when it can't be trusted:
     a multi-array offtaker, no linked array/host bill, or the host account IS the
     offtaker's own account (single-meter — then share × host would double-count).
     Never raises — any error falls back to GMP's own-bill figure (the safe default
-    for a billing path)."""
+    for a billing path).
+
+    Opens its OWN short-lived session. build_manual_match calls this AFTER its
+    `with SessionLocal()` block has already closed, so a passed-in session was
+    dead — `.execute()` on it autobegins a fresh transaction that checks out a
+    pool connection which is never returned (the `with` won't fire again). One
+    leak per offtaker with a share set exhausted the pool: reconcile-bills /
+    audit-by-array HUNG then 500'd (`QueuePool ... timed out`) on a 60-offtaker
+    tenant. Owning the session here makes the helper leak-proof regardless of
+    caller lifecycle."""
+    from ..db import SessionLocal
     try:
-        return _array_group_excess_for_sub_inner(db, sub, period_label)
+        with SessionLocal() as db:
+            return _array_group_excess_for_sub_inner(db, sub, period_label)
     except Exception:
         return None
 
@@ -674,7 +685,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # amount per-customer (budget_amount_usd).
         gmp_credited_kwh = round((array_kwh or 0.0) * pct, 2)
         _share = getattr(sub, "array_share_pct", None)
-        _group = (_array_group_excess_for_sub(db, sub, label)
+        _group = (_array_group_excess_for_sub(sub, label)
                   if (_share and array_kwh is not None) else None)
         if _share and _group:
             customer_kwh = round(_share * _group, 2)
