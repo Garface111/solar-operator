@@ -420,7 +420,13 @@ def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
          .join(Array, UtilityAccount.array_id == Array.id, isouter=True)
          .where(UtilityAccount.provider == provider,
                 Bill.solar_credit_usd.isnot(None), Bill.solar_credit_usd > 0,
-                Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0))
+                Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
+         # DETERMINISM (found 2026-07-02): prod has >20k qualifying bills, and
+         # an UNORDERED limit let Postgres return an arbitrary subset per call —
+         # the fleet median (and thus every reference-rate invoice amount)
+         # drifted ~0.4% between two builds of the SAME period. Newest-first
+         # makes the sample stable AND most representative of current rates.
+         .order_by(Bill.period_end.desc(), Bill.id.desc()))
     rates = []
     for cu, k, fc, pe in db.execute(q.limit(20000)).all():
         if not k:
