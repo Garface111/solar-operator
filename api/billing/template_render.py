@@ -15,13 +15,21 @@ from __future__ import annotations
 import io
 import logging
 
-from jinja2 import Environment, BaseLoader, ChainableUndefined
+from jinja2 import BaseLoader, ChainableUndefined
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 logger = logging.getLogger(__name__)
 
-# autoescape so customer/operator names can't inject markup; ChainableUndefined so
-# unknown tokens are blank, not errors (the graceful-fill rule).
-_env = Environment(loader=BaseLoader(), undefined=ChainableUndefined, autoescape=True)
+# The template HTML is fully operator-controlled (they upload/paste their own
+# invoice layout), so this MUST be sandboxed: a plain Environment lets a template
+# reach `{{ self.__init__.__globals__ }}` and read process env (Stripe/DB creds)
+# or execute code on the shared host. ImmutableSandboxedEnvironment blocks access
+# to dunder attributes / globals and mutation of builtin types, so a malicious
+# template can only ever touch the tokens we put in `context`.
+#   autoescape       — customer/operator names can't inject markup
+#   ChainableUndefined — unknown tokens render blank, not errors (graceful-fill)
+_env = ImmutableSandboxedEnvironment(
+    loader=BaseLoader(), undefined=ChainableUndefined, autoescape=True)
 
 
 def _money(v):
