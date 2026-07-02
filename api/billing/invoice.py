@@ -65,6 +65,12 @@ def invoice_for_period(match: BillingMatch, period: Period,
         "budget_override": bool((match.computed_invoice or {}).get("budget_override")),
         "budgeted_amount": ((match.computed_invoice or {}).get("amount_owed")
                             if (match.computed_invoice or {}).get("budget_override") else None),
+        # Quarterly coverage: which months this invoice sums, plus a human note
+        # marking the covered range (esp. a mid-quarter service start) — the
+        # renderers print it so a quarter is never mistaken for one month.
+        "billing_cadence": (match.computed_invoice or {}).get("billing_cadence"),
+        "period_months": (match.computed_invoice or {}).get("period_months"),
+        "period_note": (match.computed_invoice or {}).get("period_note"),
     })
     return inv
 
@@ -175,6 +181,8 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     # One note line at B19 (the layout reserves a single row before Amount Owed).
     # Combine the data-source provenance with the banked-credit note if both apply.
     _notes = []
+    if inv.get("period_note"):
+        _notes.append(str(inv["period_note"]))
     _src_note = _kwh_source_note(inv.get("kwh_source"))
     if _src_note:
         _notes.append(f"Data source: {_src_note}")
@@ -373,6 +381,9 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     ]))
     story.append(rt)
     story.append(Spacer(1, 6))
+    if inv.get("period_note"):
+        story.append(Paragraph(_xesc(str(inv["period_note"])), small))
+        story.append(Spacer(1, 3))
     _src_note = _kwh_source_note(inv.get("kwh_source"))
     if _src_note:
         story.append(Paragraph(f"Data source: {_xesc(_src_note)}", small))

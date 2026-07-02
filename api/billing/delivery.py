@@ -18,6 +18,7 @@ import base64
 import logging
 import os
 import pathlib
+import re
 import tempfile
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -51,6 +52,37 @@ def next_send_at(cadence: str, after: Optional[datetime] = None) -> datetime:
     # monthly (default): the 1st of next month
     ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
     return datetime(ny, nm, 1, 9, 0)
+
+
+# ─── quarter labels ──────────────────────────────────────────────────────────
+
+_QUARTER_LABEL_RE = re.compile(r"^(\d{4})-Q([1-4])$")
+
+
+def _is_quarter_label(label) -> bool:
+    """True for a 'YYYY-Qn' quarter label (vs the 'YYYY-MM' month labels)."""
+    return bool(label) and bool(_QUARTER_LABEL_RE.match(str(label)))
+
+
+def _quarter_of_month_label(label: str) -> tuple[int, int]:
+    """'2026-05' -> (2026, 2)."""
+    y, m = str(label).split("-")
+    return int(y), (int(m) - 1) // 3 + 1
+
+
+def _quarter_month_labels(year: int, quarter: int) -> list[str]:
+    """(2026, 2) -> ['2026-04', '2026-05', '2026-06']."""
+    first = 3 * (quarter - 1) + 1
+    return [f"{year:04d}-{m:02d}" for m in (first, first + 1, first + 2)]
+
+
+def _month_label_pretty(label: str) -> str:
+    """'2026-04' -> 'April 2026' (falls back to the raw label)."""
+    try:
+        y, m = str(label).split("-")
+        return date(int(y), int(m), 1).strftime("%B %Y")
+    except (ValueError, TypeError):
+        return str(label)
 
 
 # ─── attachment generation ──────────────────────────────────────────────────
@@ -476,6 +508,133 @@ def _utility_bill_credit(
     return r
 
 
+def _utility_bill_credit_quarter(db, utility_account_id: int,
+                                 target_label: Optional[str] = None) -> Optional[dict]:
+    """QUARTERLY offtaker billing basis: sum the FULL quarter's settled utility
+    bills — every month's EXCESS sent to grid + its own net-metering credit —
+    into one aggregate (Ford, backlog #6: a quarterly cadence must never bill
+    just one of the three months).
+
+    Anchoring mirrors the monthly path: without `target_label` we bill the
+    calendar quarter of the account's NEWEST bill with billable excess; a
+    'YYYY-Qn' target pins a specific historical quarter.
+
+    HONESTY RULES (same paper-bill-only discipline as the monthly path):
+      • only settled utility bills count — a month with no settled bill is
+        MISSING, never estimated, prorated, or silently dropped;
+      • a quarter with a missing month is returned complete=False so the caller
+        HOLDS the invoice (delivery waits for the bill) instead of under-billing;
+      • the ONE exception: months before the account's FIRST-EVER settled bill
+        (service started mid-quarter) aren't "missing" — the quarter bills the
+        covered months with the covered range clearly marked (partial_start);
+      • a settled month with zero excess contributes 0 kWh (it is covered).
+
+    Returns None when the account has no bill with billable excess at all
+    (→ caller waits, exactly like the monthly path). Otherwise a dict:
+      {label:'YYYY-Qn', complete:bool, partial_start:bool,
+       covered_labels:[...], missing_labels:[...],
+       months:[{label, excess_kwh, credit_usd, credit_rate, rate_source}],
+       excess_kwh, credit_usd, credit_rate (blended = credit/excess),
+       start, end, rate_source ('bill_cash' | 'reference' when ANY month
+       needed a reference rate)}.
+    """
+    from ..models import Bill
+    from ..rate_schedule import resolve_offtaker_excess_credit
+
+    bills = db.execute(
+        select(Bill)
+        .where(Bill.account_id == utility_account_id,
+               Bill.period_end.isnot(None))
+        .order_by(Bill.period_end.asc())
+    ).scalars().all()
+
+    def _lbl(b) -> Optional[str]:
+        pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
+        return pe.strftime("%Y-%m") if pe else None
+
+    # A SETTLED bill states real figures (generation and/or excess). Stub rows
+    # with neither are ignored — they don't cover a month.
+    settled: dict[str, list] = {}
+    excess_labels: list[str] = []
+    for b in bills:
+        if b.kwh_generated is None and b.kwh_sent_to_grid is None:
+            continue
+        lb = _lbl(b)
+        if not lb:
+            continue
+        settled.setdefault(lb, []).append(b)
+        if b.kwh_sent_to_grid is not None and float(b.kwh_sent_to_grid) > 0:
+            excess_labels.append(lb)
+    if not settled or not excess_labels:
+        return None                      # nothing billable yet → caller waits
+
+    if target_label and _is_quarter_label(target_label):
+        y, q = _QUARTER_LABEL_RE.match(str(target_label)).groups()
+        year, quarter = int(y), int(q)
+    else:
+        year, quarter = _quarter_of_month_label(max(excess_labels))
+    q_label = f"{year:04d}-Q{quarter}"
+    months = _quarter_month_labels(year, quarter)
+
+    first_ever = min(settled)
+    required = [m for m in months if m >= first_ever]
+    if not required:
+        return None                      # quarter predates the account entirely
+    covered = [m for m in required if m in settled]
+    missing = [m for m in required if m not in settled]
+    partial_start = any(m < first_ever for m in months)
+
+    month_rows: list[dict] = []
+    excess_total = 0.0
+    credit_total = 0.0
+    any_reference = False
+    starts: list[date] = []
+    ends: list[date] = []
+    for m in covered:
+        r = resolve_offtaker_excess_credit(db, utility_account_id, m)
+        if r is not None:
+            m_excess, m_credit, m_rate, m_ps, m_pe, _, m_src = r
+            excess_total += float(m_excess or 0.0)
+            credit_total += float(m_credit or 0.0)
+            any_reference = any_reference or (m_src == "reference")
+            month_rows.append({"label": m, "excess_kwh": m_excess,
+                               "credit_usd": m_credit, "credit_rate": m_rate,
+                               "rate_source": m_src})
+            if m_ps:
+                starts.append(m_ps)
+            if m_pe:
+                ends.append(m_pe)
+        else:
+            # Settled month with no billable excess → covered, contributes 0.
+            month_rows.append({"label": m, "excess_kwh": 0.0, "credit_usd": 0.0,
+                               "credit_rate": None, "rate_source": None})
+            for b in settled[m]:
+                ps = b.period_start.date() if isinstance(b.period_start, datetime) else b.period_start
+                pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
+                if ps:
+                    starts.append(ps)
+                if pe:
+                    ends.append(pe)
+
+    excess_total = round(excess_total, 1)
+    credit_total = round(credit_total, 2)
+    blended = round(credit_total / excess_total, 6) if excess_total > 0 else None
+    return {
+        "label": q_label,
+        "complete": not missing,
+        "partial_start": partial_start,
+        "covered_labels": covered,
+        "missing_labels": missing,
+        "months": month_rows,
+        "excess_kwh": excess_total,
+        "credit_usd": credit_total,
+        "credit_rate": blended,
+        "start": min(starts) if starts else None,
+        "end": max(ends) if ends else None,
+        "rate_source": "reference" if any_reference else "bill_cash",
+    }
+
+
 def _normalized_allocations(sub) -> list[dict]:
     """Return a clean list of {array_id:int, allocation_pct:float} for a sub.
 
@@ -505,7 +664,7 @@ def _normalized_allocations(sub) -> list[dict]:
     return out
 
 
-def _array_group_excess_for_sub(sub, period_label=None):
+def _array_group_excess_for_sub(sub, period_label=None, period_labels=None):
     """The array's GROUP excess (its host bill's kwh_sent_to_grid) — the pool GMP
     allocates among the array's offtakers by share — for the "real math" invoice.
     Returns None (→ fall back to GMP's own-bill figure) when it can't be trusted:
@@ -513,6 +672,11 @@ def _array_group_excess_for_sub(sub, period_label=None):
     offtaker's own account (single-meter — then share × host would double-count).
     Never raises — any error falls back to GMP's own-bill figure (the safe default
     for a billing path).
+
+    `period_labels` (quarterly cadence) sums the host bills across ALL the given
+    'YYYY-MM' months — and requires a host bill for EVERY one of them, else None
+    (a partially-covered quarter must fall back to gmp_credited, never mix bases
+    month-by-month or silently under-count the pool).
 
     Opens its OWN short-lived session. build_manual_match calls this AFTER its
     `with SessionLocal()` block has already closed, so a passed-in session was
@@ -525,12 +689,14 @@ def _array_group_excess_for_sub(sub, period_label=None):
     from ..db import SessionLocal
     try:
         with SessionLocal() as db:
-            return _array_group_excess_for_sub_inner(db, sub, period_label)
+            return _array_group_excess_for_sub_inner(db, sub, period_label,
+                                                     period_labels)
     except Exception:
         return None
 
 
-def _array_group_excess_for_sub_inner(db, sub, period_label=None):
+def _array_group_excess_for_sub_inner(db, sub, period_label=None,
+                                      period_labels=None):
     from ..models import UtilityAccount, Bill
     aid = getattr(sub, "array_id", None)
     if aid is None or getattr(sub, "array_allocations", None):
@@ -547,21 +713,41 @@ def _array_group_excess_for_sub_inner(db, sub, period_label=None):
     ).scalars().all())
     if not bills:
         return None
+
+    def _bill_excess(b):
+        v = getattr(b, "kwh_sent_to_grid", None)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+        return float(b.kwh_generated) if b.kwh_generated is not None else None
+
+    def _bill_label(b):
+        pe = b.period_end.date() if hasattr(b.period_end, "date") else b.period_end
+        return pe.strftime("%Y-%m") if pe else None
+
+    if period_labels:
+        # Quarterly: one host bill per month, ALL months required.
+        by_label: dict[str, float] = {}
+        for b in bills:
+            lb = _bill_label(b)
+            if lb in period_labels and lb not in by_label:
+                v = _bill_excess(b)
+                if v is not None:
+                    by_label[lb] = v
+        if any(lb not in by_label for lb in period_labels):
+            return None
+        return round(sum(by_label[lb] for lb in period_labels), 1)
+
     bill = None
     if period_label:
         for b in bills:
-            pe = b.period_end.date() if hasattr(b.period_end, "date") else b.period_end
-            if pe and pe.strftime("%Y-%m") == period_label:
+            if _bill_label(b) == period_label:
                 bill = b
                 break
     bill = bill or bills[0]
-    v = getattr(bill, "kwh_sent_to_grid", None)
-    if v is not None:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            pass
-    return float(bill.kwh_generated) if bill.kwh_generated is not None else None
+    return _bill_excess(bill)
 
 
 def _operator_company_name(tenant_id):
@@ -645,6 +831,12 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # SmartHub WITH a parsed bill → fall through to the bill-priced GMP block.
         if _is_sh and not _sh_has_bill:
             return _build_smarthub_offtaker_match(sub, operator, warnings)
+        # QUARTERLY cadence aggregates the FULL quarter of settled bills (#6). A
+        # month-targeted period_label (sheet-tracker backfill) keeps the single-
+        # month math; a 'YYYY-Qn' label pins a specific historical quarter.
+        _quarterly = ((getattr(sub, "cadence", None) or "monthly") == "quarterly"
+                      and (period_label is None or _is_quarter_label(period_label)))
+        q = None
         with SessionLocal() as db:
             acct = db.get(UtilityAccount, sub.utility_account_id)
             # Provider-aware label: don't hardcode "GMP " for a VEC/SmartHub account.
@@ -655,21 +847,58 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
                 array_name = f"{_prov} {acct.account_number}"
             else:
                 array_name = None
-            excess_kwh, credit_usd, credit_rate, start, end, label, rate_source = \
-                _utility_bill_credit(db, sub.utility_account_id, target_label=period_label)
+            if _quarterly:
+                q = _utility_bill_credit_quarter(db, sub.utility_account_id,
+                                                 target_label=period_label)
+                if q is not None:
+                    # An INCOMPLETE quarter is held (credit None → delivery skips)
+                    # — never billed short with months silently missing.
+                    excess_kwh = q["excess_kwh"] if q["complete"] else None
+                    credit_usd = q["credit_usd"] if q["complete"] else None
+                    credit_rate = q["credit_rate"] if q["complete"] else None
+                    start, end, label = q["start"], q["end"], q["label"]
+                    rate_source = q["rate_source"]
+                else:
+                    excess_kwh = credit_usd = credit_rate = None
+                    start = end = label = rate_source = None
+            else:
+                excess_kwh, credit_usd, credit_rate, start, end, label, rate_source = \
+                    _utility_bill_credit(db, sub.utility_account_id,
+                                         target_label=period_label)
         kwh_source = "utility_bill"
         if credit_usd is None:
             # No GMP bill with excess generation yet → wait. NEVER substitute gross
             # kWh × a flat rate (that over-charged a banked month $10,659 for ~$2).
             # array_kwh None → delivery skips.
-            warnings.append(
-                "Waiting on a GMP bill with excess generation for this offtaker — "
-                "the invoice generates from the bill's EXCESS sent to grid once it "
-                "lands; no vendor data, gross kWh, or flat rate is substituted.")
+            if _quarterly and q is not None and q["missing_labels"]:
+                warnings.append(
+                    f"Holding the {q['label']} quarterly invoice — waiting on the "
+                    f"utility bill{'s' if len(q['missing_labels']) > 1 else ''} for "
+                    f"{', '.join(_month_label_pretty(m) for m in q['missing_labels'])}. "
+                    "A quarterly invoice sums all of the quarter's settled bills; a "
+                    "missing month is never dropped, estimated, or billed short.")
+            else:
+                warnings.append(
+                    "Waiting on a GMP bill with excess generation for this offtaker — "
+                    "the invoice generates from the bill's EXCESS sent to grid once it "
+                    "lands; no vendor data, gross kWh, or flat rate is substituted.")
             array_kwh = None
             credit_rate = None
         else:
             array_kwh = excess_kwh          # bill the EXCESS sent to grid, not gross
+        # Human-readable coverage note for a quarterly invoice — mark the covered
+        # range explicitly, especially when service started mid-quarter.
+        period_note = None
+        if _quarterly and q is not None and credit_usd is not None:
+            _cov = [_month_label_pretty(m) for m in q["covered_labels"]]
+            if q["partial_start"]:
+                period_note = (f"Quarterly invoice for {q['label']} — covers "
+                               f"{', '.join(_cov)} (service began mid-quarter; "
+                               "earlier months have no utility bill).")
+                warnings.append(period_note)
+            else:
+                period_note = (f"Quarterly invoice for {q['label']} — sums the "
+                               f"{', '.join(_cov)} utility bills.")
         if not pct:
             warnings.append("No allocation % set for this offtaker.")
             pct = 0.0
@@ -685,21 +914,40 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # amount per-customer (budget_amount_usd).
         gmp_credited_kwh = round((array_kwh or 0.0) * pct, 2)
         _share = getattr(sub, "array_share_pct", None)
-        _group = (_array_group_excess_for_sub(sub, label)
-                  if (_share and array_kwh is not None) else None)
+        if _share and array_kwh is not None:
+            # Quarterly real-math needs the host pool summed over the SAME months;
+            # the helper returns None unless EVERY covered month has a host bill.
+            _group = (_array_group_excess_for_sub(sub, period_labels=q["covered_labels"])
+                      if _quarterly and q is not None
+                      else _array_group_excess_for_sub(sub, label))
+        else:
+            _group = None
+        # ONE consistent displayed pair (base × share = billed kWh) — the bases
+        # must never mix (backlog 2026-07-01: allocation_pct=1.0 rendered next to
+        # a customer_kwh that was 99.4% of a DIFFERENT total read as an arithmetic
+        # error). real_math bills share × the array's GROUP excess, so THAT pair
+        # is what previews/drafts/invoices display; gmp_credited bills pct × the
+        # offtaker's OWN bill excess. Both figures stay on computed_invoice for
+        # the side-by-side audit.
         if _share and _group:
             customer_kwh = round(_share * _group, 2)
             _billing_basis = "real_math"
+            _base_kwh, _base_pct = _group, _share
         else:
             customer_kwh = gmp_credited_kwh
             _billing_basis = "gmp_credited"
+            _base_kwh, _base_pct = array_kwh, pct
         pricing = resolve_discount_pricing(sub, period_end=end)
         discount = pricing["discount_pct"]
         billing_rate = 1.0 - discount
         # The net rate is the solar CREDIT rate. An explicit per-customer override
         # wins; else the bill's own EXCESS+SOLCRED rate when the month CASHED, or a
         # reference rate when the month's excess was BANKED (so the offtaker still
-        # pays for the solar received — option B).
+        # pays for the solar received — option B). A quarterly invoice blends the
+        # quarter's per-bill rates (Σ credit ÷ Σ excess), which reproduces each
+        # month's own-rate dollars exactly.
+        _blend = (_quarterly and q is not None
+                  and len(q.get("covered_labels") or []) > 1)
         if pricing["net_source"] == "customer":
             net_rate, net_source = pricing["net_rate"], "customer"
             net_note = pricing.get("net_rate_note")
@@ -707,23 +955,31 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             net_rate, net_source = (credit_rate or 0.0), "gmp_credit_reference"
             net_note = ("the solar credit rate for comparable months — this period's "
                         "excess was banked (not cashed), trued up annually")
+            if _blend:
+                net_note += " (blended across the quarter's bills)"
         else:
             net_rate, net_source = (credit_rate or 0.0), "gmp_bill_credit"
-            net_note = "the bill's EXCESS + SOLCRED net-metering credit"
+            net_note = ("the quarter's blended EXCESS + SOLCRED net-metering credit"
+                        if _blend else
+                        "the bill's EXCESS + SOLCRED net-metering credit")
         period = Period(
             month=label, start=start, end=end,
-            array_kwh=(array_kwh or 0.0), customer_kwh=customer_kwh,
+            array_kwh=(_base_kwh or 0.0), customer_kwh=customer_kwh,
             tariff=net_rate, adder=0.0,
         )
         computed = compute_invoice(customer_kwh, net_rate, 0.0,
                                    billing_rate, "percent_of_array", None)
-        computed["invoice_number"] = end.strftime("%Y-%m") if end else label
+        computed["invoice_number"] = (label if (_quarterly and label)
+                                      else (end.strftime("%Y-%m") if end else label))
         computed["period_start"] = start.isoformat() if start else None
         computed["period_end"] = end.isoformat() if end else None
         computed["month"] = label
-        computed["project_total_kwh"] = (array_kwh or 0.0)
-        computed["array_kwh"] = (array_kwh or 0.0)
-        computed["excess_kwh"] = (array_kwh or 0.0)
+        computed["project_total_kwh"] = (_base_kwh or 0.0)
+        computed["array_kwh"] = (_base_kwh or 0.0)
+        computed["excess_kwh"] = (_base_kwh or 0.0)
+        # The offtaker's OWN bill excess — kept distinct from the billed base so
+        # the two never read as the same number when the basis is real_math.
+        computed["own_bill_excess_kwh"] = array_kwh
         computed["solar_credit_usd"] = credit_usd
         computed["net_rate_per_kwh"] = round(net_rate, 6)
         computed["discount_pct"] = round(discount, 6)
@@ -744,16 +1000,23 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["array_group_excess_kwh"] = _group
         computed["realmath_kwh"] = (round(_share * _group, 2)
                                     if (_share and _group) else None)
+        # Quarterly coverage provenance (renderers mark the covered range).
+        computed["billing_cadence"] = "quarterly" if _quarterly else "monthly"
+        if _quarterly and q is not None:
+            computed["period_months"] = q["covered_labels"]
+            computed["period_missing_months"] = q["missing_labels"]
+            computed["quarter_month_breakdown"] = q["months"]
+        computed["period_note"] = period_note
         return BillingMatch(
             matched=True, confidence=1.0, source="manual", data_sheet=None,
             customer={"name": sub.customer_name, "email": sub.client_email},
-            allocation_pct=pct,
+            allocation_pct=_base_pct,
             billing_rate=billing_rate, billing_model="percent_of_array",
             periods=[period], latest_period=period,
             template={"title": "Invoice - Solar Power Generation", "operator": operator},
             computed_invoice=computed,
             project_totals={
-                "total_array_kwh": (array_kwh or 0.0),
+                "total_array_kwh": (_base_kwh or 0.0),
                 "total_customer_kwh": customer_kwh,
                 "array_name": array_name,
             },

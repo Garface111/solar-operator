@@ -111,3 +111,70 @@ def test_no_host_bill_falls_back(monkeypatch):
     ci = _match(tid)
     assert ci["billing_basis"] == "gmp_credited"
     assert abs(ci["kwh"] - 7343.0) < 0.1
+
+
+# ─── displayed pair consistency (backlog 2026-07-01, dogfood) ────────────────
+# preview-math used to return allocation_pct=1.0 beside a customer_kwh that was
+# 99.4% of the displayed array total — the % was the sub's own-bill allocation
+# while the kWh was share × the GROUP excess (two different bases). The
+# displayed (share, base, billed-kWh) triple must live on ONE basis, with both
+# raw figures kept for the side-by-side audit.
+
+def _full_match(tid):
+    from api.billing.delivery import build_match
+    with SessionLocal() as db:
+        sub = db.execute(
+            __import__("sqlalchemy").select(BillingReportSubscription)
+            .where(BillingReportSubscription.tenant_id == tid)).scalars().first()
+        return sub.id, build_match(sub)
+
+
+def test_real_math_displayed_pair_is_consistent(monkeypatch):
+    tid, off_id = _seed(share=0.2553)
+    _patch_resolver(monkeypatch, off_id)
+    _, m = _full_match(tid)
+    ci = m.computed_invoice
+    assert ci["billing_basis"] == "real_math"
+    # The pair actually billed: SHARE × the array's GROUP excess.
+    assert m.allocation_pct == 0.2553
+    assert ci["project_total_kwh"] == GROUP
+    assert ci["array_kwh"] == GROUP
+    assert abs(m.allocation_pct * ci["project_total_kwh"] - ci["kwh"]) < 0.01
+    # Both raw figures preserved, clearly named, for the audit.
+    assert ci["own_bill_excess_kwh"] == CREDITED
+    assert ci["gmp_credited_kwh"] == CREDITED          # 1.0 × own-bill excess
+
+
+def test_gmp_credited_displayed_pair_unchanged(monkeypatch):
+    """Without a share the basis stays gmp_credited and the displayed pair is
+    the classic one: own-bill excess × allocation_pct."""
+    tid, off_id = _seed(share=None)
+    _patch_resolver(monkeypatch, off_id)
+    _, m = _full_match(tid)
+    ci = m.computed_invoice
+    assert m.allocation_pct == 1.0
+    assert ci["project_total_kwh"] == CREDITED
+    assert abs(m.allocation_pct * ci["project_total_kwh"] - ci["kwh"]) < 0.01
+
+
+def test_preview_math_endpoint_returns_consistent_pair(client, monkeypatch):
+    """Route-level regression: /preview-math must return a self-consistent
+    (allocation_pct, array_total_kwh, customer_kwh) plus the labeled basis."""
+    from api.account import mint_session_for_tenant
+    tid, off_id = _seed(share=0.2553)
+    _patch_resolver(monkeypatch, off_id)
+    sub_id, _ = _full_match(tid)
+    auth = f"Bearer {mint_session_for_tenant(tid)}"
+    r = client.get(
+        f"/v1/array-operator/billing/subscriptions/{sub_id}/preview-math",
+        headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["has_data"] is True
+    assert p["billing_basis"] == "real_math"
+    assert p["allocation_pct"] == 0.2553
+    assert p["array_total_kwh"] == GROUP
+    assert abs(p["allocation_pct"] * p["array_total_kwh"] - p["customer_kwh"]) < 0.01
+    assert p["own_bill_excess_kwh"] == CREDITED
+    assert p["month"] == "2026-06"
+    assert p["billing_cadence"] == "monthly"

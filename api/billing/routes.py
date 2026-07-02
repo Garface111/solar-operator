@@ -761,16 +761,6 @@ async def _create_manual_subscription(
         if not (0.0 < pct <= 1.0):
             raise HTTPException(400, "allocation_pct must be a fraction in (0, 1] "
                                      "(e.g. 0.25 for 25%)")
-        # #6: a utility-bill offtaker is priced from a single monthly bill; the
-        # invoice math does NOT aggregate a quarter, so a quarterly cadence would
-        # bill only ONE of the three months (silently dropping the other two).
-        # Forbid it until real quarter aggregation exists, rather than under-bill.
-        if (cadence or "monthly") != "monthly":
-            raise HTTPException(
-                400, "Quarterly billing isn't available for utility-bill offtakers "
-                     "yet — GMP bills monthly and a quarter isn't summed, so a "
-                     "quarterly invoice would bill only one of the three months. "
-                     "Use monthly cadence.")
         rate_val = _validate_rate(rate_per_kwh)
         disc_val = _validate_discount(discount_pct)
         net_val = _validate_rate(net_rate_per_kwh)
@@ -787,6 +777,19 @@ async def _create_manual_subscription(
                 raise HTTPException(
                     400, "Offtaker reports bind to a GMP or VEC/SmartHub utility "
                          "account (utility-bill data only).")
+            # Quarterly cadence for a GMP (bill-priced) offtaker aggregates the
+            # FULL quarter — delivery sums all three monthly bills and HOLDS the
+            # invoice until every month's bill has landed (never bills short).
+            # VEC/SmartHub model-A offtakers price a single month of measured
+            # generation (no parsed bill), so quarterly stays blocked for them
+            # until that path aggregates too — rather than under-bill 2 of 3
+            # months.
+            if (cadence or "monthly") == "quarterly" and is_smarthub_provider(_prov):
+                raise HTTPException(
+                    400, "Quarterly billing isn't available for VEC/SmartHub "
+                         "offtakers yet — their invoices price a single month of "
+                         "measured generation, so a quarterly invoice would bill "
+                         "only one of the three months. Use monthly cadence.")
             # #7: offtaker allocations on ONE utility meter can't sum past 100%, or
             # the same excess is billed to two people. Sum the live offtakers already
             # bound to this account and reject if adding this share crosses 100%
@@ -1011,13 +1014,23 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
         if body.cadence is not None:
             if body.cadence not in VALID_CADENCE:
                 raise HTTPException(400, "cadence must be monthly or quarterly")
-            # #6: no quarter aggregation for utility-bill offtakers — a quarterly
-            # cadence would bill only one of the three months. Block the switch.
-            if body.cadence != "monthly" and getattr(sub, "utility_account_id", None) is not None:
-                raise HTTPException(
-                    400, "Quarterly billing isn't available for utility-bill offtakers "
-                         "yet — a quarterly invoice would bill only one of the three "
-                         "months. Keep this offtaker on monthly cadence.")
+            # Quarterly for a GMP (bill-priced) offtaker aggregates the full
+            # quarter (all three bills summed; delivery holds until complete).
+            # VEC/SmartHub model-A offtakers still price a single month of
+            # measured generation → quarterly stays blocked for them.
+            if (body.cadence == "quarterly"
+                    and getattr(sub, "utility_account_id", None) is not None):
+                from ..models import UtilityAccount
+                from ..adapters import is_smarthub_provider
+                _acct = db.get(UtilityAccount, sub.utility_account_id)
+                if _acct is not None and is_smarthub_provider(
+                        (_acct.provider or "").lower()):
+                    raise HTTPException(
+                        400, "Quarterly billing isn't available for VEC/SmartHub "
+                             "offtakers yet — their invoices price a single month "
+                             "of measured generation, so a quarterly invoice would "
+                             "bill only one of the three months. Keep this "
+                             "offtaker on monthly cadence.")
             sub.cadence = body.cadence
             sub.next_send_at = next_send_at(body.cadence)
         if body.send_mode is not None:
@@ -2402,12 +2415,24 @@ def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None
         "subscription_id": sub.id,
         "source": match.source,
         "has_data": has_data,
+        # allocation_pct is the share ACTUALLY multiplied against
+        # array_total_kwh: build_match keeps the (base, share, billed-kWh)
+        # triple on ONE basis, so allocation_pct × array_total_kwh ==
+        # customer_kwh always holds — the operator never sees "100%" beside a
+        # kWh figure that is 99.4% of the displayed total (mixed bases).
         "allocation_pct": pct,
         "array_total_kwh": array_total if has_data else None,
         "customer_kwh": cust_kwh if has_data else None,
         "amount_usd": amount if has_data else None,
         "rate": rate if has_data else None,
         "rate_source": ci.get("rate_source"),
+        # Which basis the pair above uses ('real_math' = share × the array's
+        # group excess; 'gmp_credited' = pct × the offtaker's own bill excess),
+        # plus both raw figures for the side-by-side audit.
+        "billing_basis": ci.get("billing_basis"),
+        "gmp_credited_kwh": (ci.get("gmp_credited_kwh") if has_data else None),
+        "own_bill_excess_kwh": (ci.get("own_bill_excess_kwh") if has_data else None),
+        "array_group_excess_kwh": (ci.get("array_group_excess_kwh") if has_data else None),
         # Discount model: the savings story the customer sees.
         "net_rate_per_kwh": ci.get("net_rate_per_kwh"),
         "discount_pct": ci.get("discount_pct"),
@@ -2417,6 +2442,12 @@ def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None
         "discount_source": ci.get("discount_source"),
         "solar_savings_usd": (ci.get("solar_savings") if has_data else None),
         "kwh_source": ci.get("kwh_source"),
+        # Period identity: month is 'YYYY-MM' (or 'YYYY-Qn' for a quarterly
+        # offtaker); period_months lists the months a quarterly invoice sums.
+        "month": ci.get("month"),
+        "billing_cadence": ci.get("billing_cadence"),
+        "period_months": ci.get("period_months"),
+        "period_note": ci.get("period_note"),
         "period_start": ci.get("period_start"),
         "period_end": ci.get("period_end"),
     }
