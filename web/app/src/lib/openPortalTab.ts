@@ -62,12 +62,24 @@ export function gmpPortalUrl(version: string | null): string {
 // after WIPE_TIMEOUT_MS — whichever comes first. If the extension is
 // absent the timeout fires and the caller navigates anyway (best-effort,
 // same behaviour as the old fire-and-forget).
+//
+// Extension v1.9.109 hardening: a page-initiated wipe no longer executes
+// directly — the extension stashes an intent and the owner approves it with
+// one click in the EnergyAgent popup (so an XSS'd page can't DoS utility
+// sessions). The ack then carries `pending: true`; we resolve "pending" so
+// the caller can point the operator at the toolbar icon. Older extensions
+// wipe immediately and ack `ok: true` → "wiped".
+//   "wiped"       → cookies are gone, session is fresh
+//   "pending"     → extension wants a one-click confirm in its popup
+//   "unavailable" → no extension / no ack / refused — proceed best-effort
+
+export type WipeResult = "wiped" | "pending" | "unavailable";
 
 export const WIPE_TIMEOUT_MS = 800;
 
 let _wipeCtr = 0;
 
-export function wipeCookiesAndWait(domain: string): Promise<void> {
+export function wipeCookiesAndWait(domain: string): Promise<WipeResult> {
   return new Promise((resolve) => {
     const reqId = `w-${Date.now()}-${++_wipeCtr}`;
     let done = false;
@@ -79,7 +91,7 @@ export function wipeCookiesAndWait(domain: string): Promise<void> {
       window.removeEventListener("message", onAck);
       if (done) return;
       done = true;
-      resolve();
+      resolve(d.pending ? "pending" : d.ok ? "wiped" : "unavailable");
     }
 
     window.addEventListener("message", onAck);
@@ -87,7 +99,7 @@ export function wipeCookiesAndWait(domain: string): Promise<void> {
       window.postMessage({ type: "SO_WIPE_COOKIES", domain, reqId }, "*");
     } catch {
       window.removeEventListener("message", onAck);
-      resolve();
+      resolve("unavailable");
       return;
     }
 
@@ -95,7 +107,7 @@ export function wipeCookiesAndWait(domain: string): Promise<void> {
       if (done) return;
       done = true;
       window.removeEventListener("message", onAck);
-      resolve();
+      resolve("unavailable");
     }, WIPE_TIMEOUT_MS);
   });
 }

@@ -193,16 +193,28 @@ export function AddClientByLoginModal({
     // Await the cookie wipe ack, THEN navigate. This prevents the race where
     // the portal loads with stale session cookies and lands on the previous
     // customer's dashboard.
+    //
+    // Extension v1.9.109+: a page-initiated wipe needs a one-click approval in
+    // the EnergyAgent popup (security hardening — a page script can't silently
+    // wipe sessions anymore). We still navigate right away (best-effort, the
+    // old behaviour), and tell the operator how to finish the reset: approving
+    // in the popup wipes the cookies AND reloads the portal tab signed-out.
     (async () => {
       console.log(`[SO ${Date.now()}] add-login: wipe-start for ${host}`);
-      await wipeCookiesAndWait(host);
-      console.log(`[SO ${Date.now()}] add-login: wipe-done (+${Date.now() - t0}ms), navigating tab`);
+      const wipe = await wipeCookiesAndWait(host);
+      console.log(`[SO ${Date.now()}] add-login: wipe=${wipe} (+${Date.now() - t0}ms), navigating tab`);
       try {
         newTab.location.href = url;
         console.log(`[SO ${Date.now()}] add-login: tab.location.href set → ${url}`);
       } catch (e) {
         // Should not happen while tab is on about:blank but log if it does.
         console.error("[SO] could not navigate new tab:", e);
+      }
+      if (wipe === "pending") {
+        toast.show(
+          `Almost there — if ${friendly} opens already signed in, click the EnergyAgent icon in your toolbar and approve "Reset session". The portal reloads signed-out so you can sign in as the client.`,
+          "info",
+        );
       }
     })();
 

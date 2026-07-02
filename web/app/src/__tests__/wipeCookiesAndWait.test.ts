@@ -41,10 +41,13 @@ describe("wipeCookiesAndWait", () => {
     vi.restoreAllMocks();
   });
 
-  function fireAck(reqId: string) {
+  function fireAck(
+    reqId: string,
+    ack: Record<string, unknown> = { ok: true, wiped: 3 },
+  ) {
     const event = new MessageEvent("message", {
       source: window,
-      data: { type: "SO_WIPE_COOKIES_ACK", reqId, ok: true, wiped: 3 },
+      data: { type: "SO_WIPE_COOKIES_ACK", reqId, ...ack },
     });
     for (const l of messageListeners) l(event);
   }
@@ -61,11 +64,25 @@ describe("wipeCookiesAndWait", () => {
     await promise;
   });
 
-  it("resolves when the matching ACK arrives", async () => {
+  it("resolves 'wiped' when the matching ok ACK arrives", async () => {
     const promise = wipeCookiesAndWait("greenmountainpower.com");
     const posted = lastPostMessage as { reqId: string };
     fireAck(posted.reqId);
-    await expect(promise).resolves.toBeUndefined();
+    await expect(promise).resolves.toBe("wiped");
+  });
+
+  it("resolves 'pending' when the extension intent-gates the wipe (v1.9.109+)", async () => {
+    const promise = wipeCookiesAndWait("greenmountainpower.com");
+    const posted = lastPostMessage as { reqId: string };
+    fireAck(posted.reqId, { ok: false, pending: true, error: "confirm-in-extension" });
+    await expect(promise).resolves.toBe("pending");
+  });
+
+  it("resolves 'unavailable' on a refused (ok:false, non-pending) ACK", async () => {
+    const promise = wipeCookiesAndWait("greenmountainpower.com");
+    const posted = lastPostMessage as { reqId: string };
+    fireAck(posted.reqId, { ok: false, error: "domain-not-allowed" });
+    await expect(promise).resolves.toBe("unavailable");
   });
 
   it("ignores ACKs with a different reqId", async () => {
