@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
+from ..adapters import solaredge as _se
 from ..db import SessionLocal
 from ..inverters import VENDORS, InverterError
 from ..models import Array, DailyGeneration, InverterConnection, now
@@ -60,6 +61,31 @@ def _resolve_connections(db) -> list:
         ))
 
     return out
+
+
+def _backfill_solaredge_location(db, arr: Array, config: dict) -> None:
+    """SolarEdge's site address was only ever captured ONCE, at initial connect
+    (array_owners.py's _attach_solaredge) — an array connected before that existed,
+    or whose first capture missed it, is stuck on "set location" forever with no
+    other chance to pick it up (Ford, 2026-07-02: "still not working for ...
+    SolarEdge"). Piggyback on the daily pull, which already runs for every
+    connected array regardless of connect date, so this self-heals automatically.
+    Cheap: only fires when the array has no location yet (the common case is a
+    no-op check); never blocks or fails the actual daily energy pull."""
+    if arr.latitude is not None:
+        return
+    try:
+        api_key = config.get("api_key")
+        site_id = config.get("site_id")
+        if not api_key or not site_id:
+            return
+        details = _se.site_details(api_key, int(site_id))
+        if details.get("address"):
+            from .. import array_owners as _ao
+            _ao._set_array_location(db, arr, address=details["address"],
+                                    source_label="vendor:solaredge")
+    except Exception:  # noqa: BLE001 — best-effort only, never break the daily pull
+        log.info("solaredge location backfill failed for array=%s", arr.id, exc_info=True)
 
 
 def _upsert_daily(db, tenant_id: str, array_id: int, vendor: str, entries: list[dict]) -> int:
@@ -125,6 +151,8 @@ def pull_all_inverters(days_back: int = 90) -> dict:
                     c.row.status = "ok"
                     c.row.last_error = None
                     c.row.last_sync_at = now()
+                if c.vendor == "solaredge":
+                    _backfill_solaredge_location(db, arr, c.config)
                 db.commit()
                 results.append({"array_id": arr.id, "vendor": c.vendor, "days_pulled": n})
             except InverterError as exc:
