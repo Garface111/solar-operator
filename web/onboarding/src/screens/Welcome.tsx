@@ -5,6 +5,7 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Checkbox } from "../ui/Checkbox";
 import { MarkdownDoc } from "../ui/MarkdownDoc";
+import { setConsentAccepted } from "../lib/onboarding";
 
 const SERVICES = [
   "Auto-pull bills from your utility — hundreds supported nationwide",
@@ -89,7 +90,13 @@ export default function Welcome() {
           <Checkbox
             id="agree"
             checked={agreed}
-            onChange={(e) => setAgreed(e.target.checked)}
+            onChange={(e) => {
+              setAgreed(e.target.checked);
+              // Persist the affirmative acceptance so ClientSetup's
+              // startOnboarding() call carries consent_version to the backend
+              // (which now REJECTS a signup without it). Unticking clears it.
+              setConsentAccepted(e.target.checked);
+            }}
             label="I agree to the Terms of Service and Privacy Policy"
           />
         </div>

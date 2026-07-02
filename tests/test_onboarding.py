@@ -62,11 +62,17 @@ def mocks(monkeypatch):
 
 # ─── helpers ─────────────────────────────────────────────────────────────
 
+# Every signup must now carry an affirmatively-accepted Terms/Privacy version —
+# the backend fails CLOSED without it (stress-test follow-up #21).
+CONSENT = {"consent_version": "2026-06-27"}
+
+
 def _do_checkout(client, email="op@example.com"):
     resp = client.post("/v1/onboarding/checkout", json={
         "email": email,
         "full_name": "Olivia Operator",
         "company": "Green Ridge Solar",
+        **CONSENT,
     })
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -108,6 +114,7 @@ def test_start_creates_trialing_tenant_no_stripe(client, mocks, monkeypatch):
         "full_name": "Stella Start",
         "company": "Start Solar",
         "array_count": 7,
+        **CONSENT,
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -162,6 +169,7 @@ def test_start_without_company_leaves_company_name_blank(client, mocks, monkeypa
         "full_name": "Nora NoCompany",
         "array_count": 2,
         "product": "array_operator",
+        **CONSENT,
     })
     assert resp.status_code == 200, resp.text
     token = resp.json()["onboarding_token"]
@@ -181,6 +189,7 @@ def test_start_without_company_leaves_company_name_blank(client, mocks, monkeypa
         "company": "Bright Fields Solar",
         "array_count": 1,
         "product": "array_operator",
+        **CONSENT,
     })
     assert resp2.status_code == 200, resp2.text
     token2 = resp2.json()["onboarding_token"]
@@ -204,6 +213,7 @@ def test_start_array_operator_product_same_trial(client, mocks, monkeypatch):
         "company": "Owner Arrays",
         "array_count": 3,
         "product": "array_operator",
+        **CONSENT,
     })
     assert resp.status_code == 200, resp.text
     token = resp.json()["onboarding_token"]
@@ -253,6 +263,7 @@ def test_start_with_duplicate_active_email_returns_409_not_500(client, mocks):
         "company": "Dupe Co",
         "array_count": 2,
         "product": "array_operator",
+        **CONSENT,
     })
     assert resp.status_code == 409, resp.text
     assert "already exists" in resp.json()["detail"].lower()
@@ -277,7 +288,7 @@ def test_start_blocks_inactive_duplicate_same_product(client, mocks):
         db.commit()
     resp = client.post("/v1/onboarding/start", json={
         "email": email, "full_name": "Iris Inactive", "array_count": 1,
-        "product": "array_operator",
+        "product": "array_operator", **CONSENT,
     })
     assert resp.status_code == 409, resp.text
     # A DEACTIVATED account is recoverable: the copy must read as welcome-back /
@@ -306,9 +317,52 @@ def test_start_allows_same_email_different_product(client, mocks):
     # Signing up for array_operator on the SAME email must succeed.
     resp = client.post("/v1/onboarding/start", json={
         "email": email, "full_name": "Cross Product", "array_count": 1,
-        "product": "array_operator",
+        "product": "array_operator", **CONSENT,
     })
     assert resp.status_code == 200, resp.text
+
+
+# ─── server-side consent gate (stress-test follow-up #21) ─────────────────
+
+def test_start_without_consent_is_rejected_and_creates_nothing(client, mocks):
+    """A /start submission with NO consent_version must 422 (fail closed) and
+    must NOT mint a tenant — client-side gating alone can be bypassed with a
+    crafted POST, and consent_version/at/ip are the durable proof of consent."""
+    for payload in (
+        {},                          # field absent entirely
+        {"consent_version": ""},     # present but empty
+        {"consent_version": "   "},  # whitespace only
+    ):
+        resp = client.post("/v1/onboarding/start", json={
+            "email": "noconsent@example.com",
+            "full_name": "Nina NoConsent",
+            "array_count": 1,
+            "product": "array_operator",
+            **payload,
+        })
+        assert resp.status_code == 422, resp.text
+        assert "terms" in resp.json()["detail"].lower()
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.contact_email == "noconsent@example.com")
+        ).scalars().first()
+        assert t is None, "a consent-less signup must never create a tenant"
+
+
+def test_checkout_shim_without_consent_is_rejected(client, mocks):
+    """The deprecated /checkout shim must not be a consent-bypass side door."""
+    resp = client.post("/v1/onboarding/checkout", json={
+        "email": "shim-noconsent@example.com",
+        "full_name": "Shim NoConsent",
+        "company": "Shim Co",
+    })
+    assert resp.status_code == 422, resp.text
+    assert "terms" in resp.json()["detail"].lower()
+    with SessionLocal() as db:
+        t = db.execute(
+            select(Tenant).where(Tenant.contact_email == "shim-noconsent@example.com")
+        ).scalars().first()
+        assert t is None
 
 
 # ─── (a) checkout shim now creates a live trial (no card) ────────────────

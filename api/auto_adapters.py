@@ -332,7 +332,17 @@ def _conn():
         fingerprint TEXT PRIMARY KEY, fmt TEXT, spec TEXT, status TEXT,
         reconcile REAL, source TEXT, version INTEGER, created TEXT, updated TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS auto_readings(
-        source TEXT, fingerprint TEXT, date TEXT, kwh REAL, captured_at TEXT)""")
+        source TEXT, fingerprint TEXT, date TEXT, kwh REAL, captured_at TEXT,
+        tenant_id TEXT)""")
+    # In-place sqlite migration — this module owns its own schema (the Postgres
+    # api/migrate.py never touches this file). Legacy auto_readings tables
+    # pre-date tenant attribution: add the nullable column so old rows read
+    # tenant_id=NULL while every NEW insert is attributed to the authenticated
+    # tenant (see adapters_readings). Idempotent: no-op once the column exists.
+    cols = [r[1] for r in c.execute("PRAGMA table_info(auto_readings)").fetchall()]
+    if "tenant_id" not in cols:
+        c.execute("ALTER TABLE auto_readings ADD COLUMN tenant_id TEXT")
+        c.commit()
     return c
 
 
@@ -474,8 +484,14 @@ def adapters_list(x_admin_key: str = Header(default=None)):
 
 @router.post("/v1/adapters/readings")
 async def adapters_readings(request: Request, authorization: str = Header(default=None)):
-    _auth_tenant(authorization)
-    """Sink for normalized generation the extension extracted via a served adapter."""
+    """Sink for normalized generation the extension extracted via a served adapter.
+
+    Every stored row is attributed to the AUTHENTICATED tenant (never a
+    body-supplied id), so one tenant's uploads can't pollute the admin fleet
+    view anonymously or masquerade as another tenant's. Rows written before
+    the tenant_id column existed stay NULL (legacy/unattributed)."""
+    tenant = _auth_tenant(authorization)
+    tenant_id = getattr(tenant, "id", None)
     body = await request.json()
     source = body.get("source", "?")
     fp = body.get("fingerprint", "?")
@@ -483,20 +499,33 @@ async def adapters_readings(request: Request, authorization: str = Header(defaul
     now = dt.datetime.utcnow().isoformat(timespec="seconds")
     c = _conn()
     for r in recs:
-        c.execute("INSERT INTO auto_readings VALUES(?,?,?,?,?)",
-                  (source, fp, r.get("date"), r.get("generation_kwh"), now))
+        c.execute("INSERT INTO auto_readings(source,fingerprint,date,kwh,captured_at,tenant_id)"
+                  " VALUES(?,?,?,?,?,?)",
+                  (source, fp, r.get("date"), r.get("generation_kwh"), now, tenant_id))
     c.commit()
     c.close()
     return {"stored": len(recs), "source": source, "fingerprint": fp}
 
 
 @router.get("/v1/adapters/fleet")
-def adapters_fleet(x_admin_key: str = Header(default=None)):
+def adapters_fleet(x_admin_key: str = Header(default=None), tenant_id: str = None):
+    """Admin-only fleet roll-up, attributed per (source, tenant): a tenant that
+    floods readings under someone else's source label now shows up as ITS OWN
+    row instead of silently inflating the victim's aggregate. Optional
+    ?tenant_id= filters to one tenant ('legacy' selects pre-attribution NULL rows)."""
     _require_admin(x_admin_key)
     c = _conn()
-    sites = c.execute("""SELECT source, COUNT(*), ROUND(SUM(kwh),1), MIN(date), MAX(date)
-                         FROM auto_readings GROUP BY source ORDER BY SUM(kwh) DESC""").fetchall()
-    total = c.execute("SELECT ROUND(SUM(kwh),1), COUNT(DISTINCT source) FROM auto_readings").fetchone()
+    where, params = "", ()
+    if tenant_id:
+        # 'legacy' -> the unattributed rows written before the tenant_id column.
+        where = " WHERE tenant_id IS NULL" if tenant_id == "legacy" else " WHERE tenant_id=?"
+        params = () if tenant_id == "legacy" else (tenant_id,)
+    sites = c.execute("""SELECT source, tenant_id, COUNT(*), ROUND(SUM(kwh),1), MIN(date), MAX(date)
+                         FROM auto_readings%s GROUP BY source, tenant_id
+                         ORDER BY SUM(kwh) DESC""" % where, params).fetchall()
+    total = c.execute("SELECT ROUND(SUM(kwh),1), COUNT(DISTINCT source) FROM auto_readings" + where,
+                      params).fetchone()
     c.close()
-    return {"sites": [{"source": s[0], "readings": s[1], "kwh": s[2], "from": s[3], "to": s[4]} for s in sites],
+    return {"sites": [{"source": s[0], "tenant_id": s[1], "readings": s[2], "kwh": s[3],
+                       "from": s[4], "to": s[5]} for s in sites],
             "total_kwh": total[0], "site_count": total[1]}

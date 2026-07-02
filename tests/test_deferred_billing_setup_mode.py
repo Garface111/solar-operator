@@ -57,6 +57,8 @@ def _do_checkout(client, email="setup@example.com"):
         "email": email,
         "full_name": "Sam Setup",
         "company": "Setup Solar",
+        # Signup fails closed without an affirmatively-accepted consent version.
+        "consent_version": "2026-06-27",
     })
     assert resp.status_code == 200, resp.text
     return resp.json()

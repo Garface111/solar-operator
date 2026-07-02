@@ -137,6 +137,10 @@ class CheckoutRequest(BaseModel):
     clients: Optional[list[ClientSeed]] = None
     # Path B — operator provides an estimate; quantity syncs to reality later.
     array_count: Optional[int] = Field(None, ge=1)
+    # Terms/Privacy consent version — enforced server-side (see
+    # _require_affirmative_consent); the deprecated shim gets the same gate as
+    # /start so no path can mint a tenant without recorded consent.
+    consent_version: Optional[str] = Field(None, max_length=40)
 
 
 class CheckoutResponse(BaseModel):
@@ -162,6 +166,8 @@ class StartRequest(BaseModel):
     product: Optional[str] = Field("nepool", pattern="^(nepool|array_operator)$")
     # Terms/Privacy + account-access authorization version the user accepted at
     # signup (the consent checkbox). Persisted on the tenant as proof of consent.
+    # Optional in the SCHEMA (so a stale bundle gets a clear 422, not a shape
+    # error) but REQUIRED by the endpoint — see _require_affirmative_consent.
     consent_version: Optional[str] = Field(None, max_length=40)
 
 
@@ -254,6 +260,25 @@ def _line_items(quantity: int = 1) -> list[dict]:
 
 
 # ─── 1. start (no-upfront-payment signup) ────────────────────────────────
+
+def _require_affirmative_consent(consent_version: Optional[str]) -> str:
+    """Server-side consent gate — fail CLOSED (stress-test follow-up #21).
+
+    The clients (NEPOOL wizard Welcome screen, AO onboarding.html) only send
+    consent_version when the Terms/Privacy box was genuinely ticked, but a
+    client-side gate alone means a crafted POST (or a client bug) could mint a
+    tenant with NO recorded consent — and consent_at/consent_ip are our durable
+    proof of authorization for the account access the extension performs.
+    No affirmed consent -> no tenant. Returns the trimmed version string."""
+    v = (consent_version or "").strip()
+    if not v:
+        raise HTTPException(
+            422,
+            "Please accept the Terms of Service and Privacy Policy to create "
+            "your account — tick the consent box and try again.",
+        )
+    return v
+
 
 def _create_trial_tenant(
     *, email: str, full_name: str, company: Optional[str],
@@ -399,11 +424,12 @@ def start(req: StartRequest, request: Request, background_tasks: BackgroundTasks
     from . import ratelimit
     ratelimit.enforce(request, "onboarding_start_ip", max_hits=10, window_s=600,
                       message="Too many signups from your network — please try again in a few minutes.")
+    consent_version = _require_affirmative_consent(req.consent_version)
     onboarding_token, tenant_id = _create_trial_tenant(
         email=req.email, full_name=req.full_name, company=req.company,
         password=req.password, array_count=req.array_count,
         product=req.product or "nepool",
-        consent_version=req.consent_version,
+        consent_version=consent_version,
         consent_ip=ratelimit.client_ip(request),
     )
     # Internal alert is non-critical — send it AFTER the response so the Resend
@@ -432,6 +458,11 @@ def checkout(req: CheckoutRequest):
         "DEPRECATED /v1/onboarding/checkout called (use /v1/onboarding/start). "
         "email=%s", req.email,
     )
+    # Same fail-closed consent gate as /start — the shim must not be a side
+    # door that mints a tenant with no recorded consent. A stale bundle that
+    # never sends consent_version gets a clear 422 telling the user to
+    # re-accept the terms (i.e. reload into the current wizard).
+    consent_version = _require_affirmative_consent(req.consent_version)
     # Old Path A bundles sent pre-entered clients; Path B sent array_count.
     # We only need the count now (real clients are added post-signup).
     if req.clients is not None:
@@ -442,6 +473,7 @@ def checkout(req: CheckoutRequest):
     onboarding_token, tenant_id = _create_trial_tenant(
         email=req.email, full_name=req.full_name, company=req.company,
         password=None, array_count=array_count,
+        consent_version=consent_version,
     )
     return CheckoutResponse(
         checkout_url=None, onboarding_token=onboarding_token, tenant_id=tenant_id)

@@ -4,6 +4,54 @@
 const TOKEN_KEY = "onboarding_token";
 
 /**
+ * Terms/Privacy + account-access authorization version the Welcome screen's
+ * consent checkbox covers. Bump when tos.md / privacy.md change materially.
+ * Mirrors the Array Operator client's CONSENT_VERSION so both products record
+ * comparable proof-of-consent on the tenant. The backend REJECTS a signup
+ * that arrives without this (fail-closed server-side consent gate).
+ */
+export const CONSENT_VERSION = "2026-06-27";
+
+const CONSENT_KEY = "so_consent_version";
+
+/**
+ * Record (or clear) the user's affirmative Terms/Privacy acceptance. Written
+ * to BOTH storages for the same fresh-tab-survival reasons as setToken.
+ * HONESTY RULE: only ever stored when the box was genuinely ticked — the
+ * stored value becomes the tenant's durable consent_version proof, so it must
+ * never be fabricated for an unticked box (untick -> cleared).
+ */
+export function setConsentAccepted(accepted: boolean): void {
+  try {
+    if (accepted) localStorage.setItem(CONSENT_KEY, CONSENT_VERSION);
+    else localStorage.removeItem(CONSENT_KEY);
+  } catch {
+    /* localStorage may be unavailable (private mode) — sessionStorage still set */
+  }
+  try {
+    if (accepted) sessionStorage.setItem(CONSENT_KEY, CONSENT_VERSION);
+    else sessionStorage.removeItem(CONSENT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** The consent version the user accepted on the Welcome screen, or null. */
+export function getAcceptedConsentVersion(): string | null {
+  try {
+    const v = localStorage.getItem(CONSENT_KEY);
+    if (v) return v;
+  } catch {
+    /* fall through to sessionStorage */
+  }
+  try {
+    return sessionStorage.getItem(CONSENT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Persist the onboarding token for the rest of the wizard.
  *
  * Written to BOTH localStorage and sessionStorage: sessionStorage keeps the
@@ -102,11 +150,17 @@ export async function startOnboarding(body: {
   password?: string;
   /** Operator's array estimate; quantity syncs to reality when real arrays are added. */
   array_count?: number;
+  /** Terms/Privacy version accepted on Welcome; auto-attached from storage when omitted. */
+  consent_version?: string;
 }): Promise<StartResponse> {
+  // Attach the consent recorded on the Welcome screen. Only sent when the box
+  // was genuinely ticked (see setConsentAccepted) — the backend persists it as
+  // proof of consent, and rejects the signup with a clear message without it.
+  const consent = body.consent_version ?? getAcceptedConsentVersion() ?? undefined;
   const res = await fetchWithTimeout("/v1/onboarding/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, ...(consent ? { consent_version: consent } : {}) }),
   });
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
