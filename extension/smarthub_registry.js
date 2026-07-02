@@ -593,8 +593,8 @@
       name: "Fannin County Electric Cooperative",
     },
     "fcremc.smarthub.coop": {
-      provider: "four_county_emc",
-      name: "Four County EMC",
+      provider: "fulton",
+      name: "Fulton County REMC",
     },
     "femelectric.smarthub.coop": {
       provider: "fem",
@@ -1729,8 +1729,8 @@
       name: "Sun River Electric Cooperative",
     },
     "svec.smarthub.coop": {
-      provider: "svec",
-      name: "Shenandoah Valley Electric Cooperative (SVEC)",
+      provider: "surprise_valley",
+      name: "Surprise Valley Electrification Corp",
     },
     "swce.smarthub.coop": {
       provider: "steele_waseca",
@@ -1925,8 +1925,8 @@
       name: "Washington EMC",
     },
     "wcec.smarthub.coop": {
-      provider: "wcec",
-      name: "Wood County Electric Cooperative",
+      provider: "wharton",
+      name: "Wharton County Electric Cooperative",
     },
     "websterec.smarthub.coop": {
       provider: "mo_webster",
