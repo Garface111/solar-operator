@@ -28,7 +28,8 @@
 
 (function () {
   "use strict";
-  if (!/(^|\.)solarweb\.com$/.test(location.hostname)) return;
+  var _SO_BROWSER = (typeof window !== "undefined" && typeof location !== "undefined");
+  if (_SO_BROWSER && !/(^|\.)solarweb\.com$/.test(location.hostname)) return;
 
   const INTENT_KEY = "so_capture_intent";   // {vendor, ts} set by background on SO_OPEN_PORTAL
   const SYNC_INTENT_KEY = "so_sync_intent";  // {vendor: ts} per-vendor map armed by a PARALLEL Sync-all
@@ -152,7 +153,7 @@
     // Surface capture diagnostics in the page console (prefixed for grep-ability).
     try { console.warn.apply(console, ["[solar-operator/fronius]"].concat([].slice.call(arguments))); } catch (_) {}
   }
-  LOG("content script loaded v1.9.45 on", location.hostname, "\u2014 watching for a Connect-Fronius capture. If you DON'T see this line, the extension isn't injected on this tab (reload solarweb.com with the extension enabled).");
+  if (_SO_BROWSER) LOG("content script loaded v1.9.45 on", location.hostname, "\u2014 watching for a Connect-Fronius capture. If you DON'T see this line, the extension isn't injected on this tab (reload solarweb.com with the extension enabled).");
   async function getJson(url, opts) {
     const r = await fetch(url, Object.assign({ credentials: "include" }, opts || {}));
     if (!r.ok) throw new Error(url + " -> " + r.status);
@@ -631,9 +632,20 @@
     chrome.runtime.sendMessage({ type: "FRONIUS_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
-  tick();
-  const iv = setInterval(() => {
-    if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+  // TEST HOOK (browser-inert): export PURE helpers for the Node harness. In a
+  // browser module is undefined so this is a no-op; the runtime below is unchanged.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      _soCoerceNum, _soValidLatLng, _soExtractAddress, findLocation, applyLocation,
+      parseAspNetDate, deriveNameplateKw, deriveStatus, nameplateFromModel, integrateKwh,
+    };
+  }
+
+  if (_SO_BROWSER) {
     tick();
-  }, POLL_INTERVAL_MS);
+    const iv = setInterval(() => {
+      if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+      tick();
+    }, POLL_INTERVAL_MS);
+  }
 })();

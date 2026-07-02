@@ -26,7 +26,8 @@
 
 (function () {
   "use strict";
-  if (!/(^|\.)sunnyportal\.com$/.test(location.hostname)) return;
+  var _SO_BROWSER = (typeof window !== "undefined" && typeof location !== "undefined");
+  if (_SO_BROWSER && !/(^|\.)sunnyportal\.com$/.test(location.hostname)) return;
 
   const UIAPI = "https://uiapi.sunnyportal.com";
   const INTENT_KEY = "so_capture_intent";
@@ -556,7 +557,7 @@
   // Loud, prefixed console trace so the SMA tab's console shows EXACTLY how far
   // each attempt gets. Search the console for "[EnergyAgent SMA]". (Gated by
   // SMA_DEBUG, declared at top — silent in prod.)
-  LOG("content script loaded on", location.href);
+  if (_SO_BROWSER) LOG("content script loaded on", location.href);
 
   async function tick() {
     if (done) return;
@@ -588,6 +589,16 @@
     LOG("CAPTURED — sending to Array Operator:", sites.length, "plant(s)");
     chrome.runtime.sendMessage({ type: "SMA_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
+
+  // TEST HOOK (browser-inert) — see extension/tests/. No-op in a browser.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      _soCoerceNum, _soValidLatLng, _soExtractAddress, findLocation, applyLocation,
+      nameplateKw, deriveStatus,
+    };
+  }
+
+  if (!_SO_BROWSER) return;
 
   tick();
   // Fast token-watcher: SMA's Bearer token only lands in localStorage AFTER the heavy

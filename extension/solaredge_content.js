@@ -20,7 +20,8 @@
 
 (function () {
   "use strict";
-  if (!/(^|\.)solaredge\.com$/.test(location.hostname)) return;
+  var _SO_BROWSER = (typeof window !== "undefined" && typeof location !== "undefined");
+  if (_SO_BROWSER && !/(^|\.)solaredge\.com$/.test(location.hostname)) return;
 
   const INTENT_KEY = "so_capture_intent";   // {vendor, ts} set by background on SO_OPEN_PORTAL
   const SYNC_INTENT_KEY = "so_sync_intent";  // {vendor: ts} per-vendor map armed by a PARALLEL Sync-all
@@ -59,10 +60,12 @@
 
   // Read (never generate) the durable account API key. The endpoint may return
   // JSON ({apiKey|key|...}) or a bare string — handle both, defensively.
-  async function readApiKey(accountUuid) {
-    const r = await fetch("/services/account-admin/accounts/" + accountUuid + "/api-key", { credentials: "include" });
-    if (!r.ok) return null;
-    const trimmed = ((await r.text()) || "").trim();
+  // PURE: given the raw api-key endpoint body (string), return the durable key or
+  // null. Handles a JSON string, a JSON object with a *key*-ish field (top-level or
+  // under .data), or a bare ~32-char alphanumeric token. Extracted so the test
+  // harness can exercise every shape without a live fetch.
+  function _parseApiKey(text) {
+    const trimmed = String(text == null ? "" : text).trim();
     if (!trimmed) return null;
     try {
       const j = JSON.parse(trimmed);
@@ -80,6 +83,22 @@
     // SolarEdge account keys are ~32 alphanumeric chars.
     return /^[A-Z0-9]{16,}$/i.test(trimmed) ? trimmed : null;
   }
+  async function readApiKey(accountUuid) {
+    const r = await fetch("/services/account-admin/accounts/" + accountUuid + "/api-key", { credentials: "include" });
+    if (!r.ok) return null;
+    return _parseApiKey(await r.text());
+  }
+
+  // PURE: map the searchSites  rows to our site shape. Extracted for tests.
+  function _mapSites(page) {
+    return (Array.isArray(page) ? page : []).map((s) => ({
+      site_id: s.solarFieldId,
+      name: s.name,
+      peak_power_kw: s.peakPower,
+      status: s.status,
+      inverter_count: s.inverterCount,
+    }));
+  }
 
   async function captureFlow() {
     const userInfo = await getJson("/services/cni/ui-api/user-info");
@@ -96,13 +115,7 @@
       const sl = await getJson("/services/sitelist/searchSites?v=" + Date.now(), {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
       });
-      sites = ((sl && sl.page) || []).map((s) => ({
-        site_id: s.solarFieldId,
-        name: s.name,
-        peak_power_kw: s.peakPower,
-        status: s.status,
-        inverter_count: s.inverterCount,
-      }));
+      sites = _mapSites((sl && sl.page) || []);
     } catch (_) { /* site list is a bonus; the key is what matters */ }
 
     return {
@@ -164,9 +177,16 @@
     chrome.runtime.sendMessage({ type: "SOLAREDGE_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
-  tick();
-  const iv = setInterval(() => {
-    if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+  // TEST HOOK (browser-inert) — see extension/tests/. No-op in a browser.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { _parseApiKey, _mapSites };
+  }
+
+  if (_SO_BROWSER) {
     tick();
-  }, POLL_INTERVAL_MS);
+    const iv = setInterval(() => {
+      if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+      tick();
+    }, POLL_INTERVAL_MS);
+  }
 })();
