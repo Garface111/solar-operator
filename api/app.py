@@ -525,7 +525,16 @@ def extension_heartbeat(authorization: str | None = Header(default=None)):
         if t:
             t.extension_heartbeat_at = now()
             db.commit()
-    return {"ok": True, "at": datetime.utcnow().isoformat()}
+        # Capture debt rides the heartbeat: if this tenant's extension-captured
+        # vendors/utilities have gone stale (machine was asleep, session lapsed),
+        # tell WHICHEVER browser pinged us what to re-capture. Any signed-in
+        # machine drains the debt — that's the single-machine-dependency fix.
+        from .capture_debt import debt_for_heartbeat
+        debt = debt_for_heartbeat(db, tenant.id)
+    out = {"ok": True, "at": datetime.utcnow().isoformat()}
+    if debt:
+        out["debt"] = debt
+    return out
 
 
 @app.post("/v1/extension/scrape-miss")

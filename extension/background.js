@@ -1306,13 +1306,63 @@ async function sendHeartbeat() {
   // Derive the base URL from the sync endpoint (same origin).
   const base = endpoint.replace(/\/v1\/sync$/, "");
   try {
-    await fetch(`${base}${HEARTBEAT_ENDPOINT_PATH}`, {
+    const resp = await fetch(`${base}${HEARTBEAT_ENDPOINT_PATH}`, {
       method: "POST",
       headers: { "Authorization": `Bearer ${tenantKey}` },
     });
+    // v1.9.110 — CAPTURE DEBT rides the heartbeat reply: when the server says a
+    // vendor/utility has gone stale (this or any machine was asleep, a session
+    // lapsed), whichever browser heartbeats first drains it. This is the fix for
+    // the single-machine dependency: staleness recovery no longer waits for the
+    // hourly sweep or an operator visit — the first waking browser catches up.
+    try {
+      const body = await resp.json();
+      if (body && body.debt) drainCaptureDebt(body.debt);   // fire-and-forget
+    } catch (_) { /* older server / non-JSON — heartbeat still counts */ }
   } catch {
     // Non-fatal — heartbeat is best-effort.
   }
+}
+
+// ── Capture-debt drain (v1.9.110) ────────────────────────────────────────────
+// The server pre-chews the work: {drain:[fronius|sma], drain_chint, keepalive_gmp,
+// drain_utilities:[vec|sh_*...]}. Everything goes through the EXISTING proven
+// machinery (sync-all background tabs, the single-surface recapture walk, the GMP
+// keep-alive) — this function only routes + rate-limits. Per-target cooldown so a
+// dead session can't be hammered every minute by its own failure.
+const DEBT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+async function drainCaptureDebt(debt) {
+  if (!debt || typeof debt !== "object") return;
+  let st = {};
+  try { st = (await chrome.storage.local.get("so_debt_drain")).so_debt_drain || {}; } catch (_) {}
+  const now = Date.now();
+  const due = (k) => !(st[k] && now - st[k] < DEBT_COOLDOWN_MS);
+  const mark = (k) => { st[k] = now; };
+
+  // Fronius/SMA: the parallel background sync-all path (self-closing tabs).
+  const vendors = (Array.isArray(debt.drain) ? debt.drain : []).filter(due);
+  if (vendors.length && typeof self.__soSyncAllVendors === "function") {
+    vendors.forEach(mark);
+    try { await self.__soSyncAllVendors(vendors); } catch (_) {}
+  }
+  // Chint + stale co-op portals: the one-slot recapture walk, staggered so the
+  // sequential state machine never sees two at once.
+  const seq = [];
+  if (debt.drain_chint && due("chint")) { mark("chint"); seq.push("chint"); }
+  for (const u of (Array.isArray(debt.drain_utilities) ? debt.drain_utilities : [])) {
+    if (due("util_" + u)) { mark("util_" + u); seq.push(u); }
+  }
+  seq.forEach((code, i) => {
+    setTimeout(() => {
+      try { if (typeof self.__soRecaptureVendor === "function") self.__soRecaptureVendor(code, {}); } catch (_) {}
+    }, i * 120 * 1000);
+  });
+  // GMP JWT nearing expiry: the silent in-browser keep-alive (rides "remember me").
+  if (debt.keepalive_gmp && due("gmp_keepalive")) {
+    mark("gmp_keepalive");
+    try { await gmpKeepAlive(); } catch (_) {}
+  }
+  try { await chrome.storage.local.set({ so_debt_drain: st }); } catch (_) {}
 }
 
 // ── GMP session keep-alive (v1.9.49) ─────────────────────────────────────────
@@ -3012,6 +3062,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message || e) }));
     return true;   // async sendResponse
   });
+
+  // v1.9.110: the capture-debt drain (rides the 1-min heartbeat, defined top-level)
+  // routes through this machinery — expose the two entry points it needs.
+  self.__soSyncAllVendors = syncAllVendors;
+  self.__soRecaptureVendor = recaptureVendor;
 
   async function _onWake() {
     try { await reapTrackedRecapTabs(); } catch (_) {}   // close any recap tab orphaned before this wake
