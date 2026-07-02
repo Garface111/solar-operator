@@ -308,6 +308,86 @@
     });
   }
 
+  // ── Pending approvals (v1.9.109) ──────────────────────────────────────────
+  // Page-initiated SO_VAULT set / SO_WIPE_COOKIES requests are intent-gated in
+  // the background: the dashboard can only ASK, and the operation runs when the
+  // owner clicks the confirm card here. One click = done; Dismiss = dropped.
+  const pendingBlockEl = document.getElementById("pending-block");
+
+  function credLabel(code) {
+    const known = {
+      fronius: "Fronius (Solar.web)", sma: "SMA (Sunny Portal)", chint: "Chint",
+      gmp: "Green Mountain Power", vec: "Vermont Electric Co-op (SmartHub)",
+      wec: "Washington Electric Co-op (SmartHub)",
+    };
+    if (known[code]) return known[code];
+    try {
+      const reg = window.SMARTHUB_REGISTRY;
+      if (reg) { for (const host of Object.keys(reg)) { if (reg[host] && reg[host].provider === code) return (reg[host].name || code) + " (SmartHub)"; } }
+    } catch (_) {}
+    return String(code || "").toUpperCase();
+  }
+  function originHost(origin) {
+    try { return new URL(origin).host || "your dashboard"; } catch (_) { return "your dashboard"; }
+  }
+
+  function pendingCard({ title, detail, confirmLabel, onConfirm, onDismiss }) {
+    const card = document.createElement("div");
+    card.className = "pending-card";
+    const t = document.createElement("div"); t.className = "pending-title"; t.textContent = title;
+    const d = document.createElement("div"); d.className = "pending-text"; d.textContent = detail;
+    const actions = document.createElement("div"); actions.className = "pending-actions";
+    const okBtn = document.createElement("button"); okBtn.className = "pending-ok"; okBtn.type = "button"; okBtn.textContent = confirmLabel;
+    const noBtn = document.createElement("button"); noBtn.className = "pending-no"; noBtn.type = "button"; noBtn.textContent = "Dismiss";
+    okBtn.addEventListener("click", async () => {
+      okBtn.disabled = true; noBtn.disabled = true; okBtn.textContent = "Working…";
+      const r = await onConfirm();
+      okBtn.textContent = r && r.ok ? "✓ Done" : "Failed";
+      setTimeout(renderPendingApprovals, 700);
+    });
+    noBtn.addEventListener("click", async () => {
+      okBtn.disabled = true; noBtn.disabled = true;
+      await onDismiss();
+      renderPendingApprovals();
+    });
+    actions.appendChild(okBtn); actions.appendChild(noBtn);
+    card.appendChild(t); card.appendChild(d); card.appendChild(actions);
+    return card;
+  }
+
+  async function renderPendingApprovals() {
+    if (!pendingBlockEl) return;
+    const resp = await vaultMsg({ type: "SO_PENDING_LIST" });
+    const vault = (resp && resp.ok && Array.isArray(resp.vault)) ? resp.vault : [];
+    const wipes = (resp && resp.ok && Array.isArray(resp.wipes)) ? resp.wipes : [];
+    pendingBlockEl.innerHTML = "";
+    if (!vault.length && !wipes.length) { pendingBlockEl.classList.add("hidden"); return; }
+    const head = document.createElement("div");
+    head.className = "pending-head";
+    head.textContent = "Waiting for your OK";
+    pendingBlockEl.appendChild(head);
+    for (const p of vault) {
+      pendingBlockEl.appendChild(pendingCard({
+        title: `Save your ${credLabel(p.vendor)} sign-in?`,
+        detail: `${originHost(p.origin)} asked to save the login for ${p.username || "this portal"} so it can auto-refresh. Stored encrypted, only on this device.`,
+        confirmLabel: "Save & turn on",
+        onConfirm: () => vaultMsg({ type: "SO_PENDING_CONFIRM", kind: "vault", vendor: p.vendor }),
+        onDismiss: () => vaultMsg({ type: "SO_PENDING_DISMISS", kind: "vault", vendor: p.vendor }),
+      }));
+    }
+    for (const w of wipes) {
+      pendingBlockEl.appendChild(pendingCard({
+        title: `Reset your ${w.domain} session?`,
+        detail: `${originHost(w.origin)} asked to sign this browser out of ${w.domain} so a different account can sign in. Open portal tabs will reload signed-out.`,
+        confirmLabel: "Reset session",
+        onConfirm: () => vaultMsg({ type: "SO_PENDING_CONFIRM", kind: "wipe", domain: w.domain }),
+        onDismiss: () => vaultMsg({ type: "SO_PENDING_DISMISS", kind: "wipe", domain: w.domain }),
+      }));
+    }
+    pendingBlockEl.classList.remove("hidden");
+  }
+  renderPendingApprovals();
+
   if (alToggle) {
     alToggle.addEventListener("click", () => {
       const open = alBody.classList.toggle("hidden") === false;

@@ -320,6 +320,100 @@ async function _handleSync(payload, tokenHash, sendResponse) {
   }
 }
 
+// ── Extension-UI sender gate + pending-approval intents (v1.9.109) ──────────
+// Two bridge-reachable operations are destructive or credential-bearing:
+//   SO_VAULT_SET     — writes a portal password into the vault (drives auto-login)
+//   SO_WIPE_COOKIES  — deletes the owner's utility-portal session cookies
+// Both used to execute directly off a page postMessage relayed by so_bridge.js,
+// so any script running on a legit app origin (stored XSS / compromised dep)
+// could overwrite saved creds or DoS utility sessions. Now: a PAGE request only
+// stashes an INTENT; the operation runs when the owner clicks the confirm card
+// in the popup — a real user gesture inside extension UI. Requests coming FROM
+// extension UI (the popup itself) still execute immediately.
+function soSenderIsExtensionUi(sender) {
+  try {
+    if (!sender || sender.tab) return false;              // content scripts always carry a tab
+    if (sender.id && sender.id !== chrome.runtime.id) return false;
+    const base = chrome.runtime.getURL("");               // chrome-extension://<id>/
+    if (typeof sender.url === "string" && sender.url.startsWith(base)) return true;
+    if (typeof sender.origin === "string" && sender.origin + "/" === base) return true;
+    return false;
+  } catch (_) { return false; }
+}
+
+const WIPE_PENDING_KEY = "so_wipe_pending";   // { <domain>: {origin, at} }
+
+// Badge shows the number of approvals waiting in the popup (octarine, so it reads
+// as "the extension wants your attention", distinct from the green capture ✓).
+// Never stomps a non-numeric badge (capture ✓/!) when the count is zero.
+// Intents older than 24h are pruned — an ignored request shouldn't nag forever
+// (the page re-asks on the next legit user action anyway).
+const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+async function soPrunePendingIntents(s) {
+  const now = Date.now();
+  for (const key of ["so_vault_pending", WIPE_PENDING_KEY]) {
+    const m = s[key] || {};
+    let changed = false;
+    for (const k of Object.keys(m)) {
+      if (!m[k] || !m[k].at || now - m[k].at > PENDING_TTL_MS) { delete m[k]; changed = true; }
+    }
+    if (changed) { s[key] = m; await chrome.storage.local.set({ [key]: m }); }
+  }
+  return s;
+}
+async function soUpdatePendingBadge() {
+  try {
+    const s = await soPrunePendingIntents(
+      await chrome.storage.local.get(["so_vault_pending", WIPE_PENDING_KEY]));
+    const n = Object.keys(s.so_vault_pending || {}).length
+            + Object.keys(s[WIPE_PENDING_KEY] || {}).length;
+    if (n > 0) {
+      await chrome.action.setBadgeText({ text: String(n) });
+      await chrome.action.setBadgeBackgroundColor({ color: "#a368ff" });
+    } else {
+      const cur = await chrome.action.getBadgeText({});
+      if (/^\d+$/.test(cur || "")) await chrome.action.setBadgeText({ text: "" });
+    }
+  } catch (_) {}
+}
+soUpdatePendingBadge();   // reflect any stashed intents across SW restarts
+
+// The actual cookie wipe, shared by the (extension-UI) SO_WIPE_COOKIES handler
+// and the popup confirm path. Caller has already allowlisted `domain`.
+async function soWipeCookiesForDomain(domain, reqId) {
+  const t0 = Date.now();
+  console.log(`[SO ${t0}] wipe-start domain=${domain} reqId=${reqId || ""}`);
+  const cookies = await chrome.cookies.getAll({ domain });
+  await Promise.all(cookies.map((c) => {
+    const protocol = c.secure ? "https://" : "http://";
+    const cookieUrl = `${protocol}${c.domain.replace(/^\./, "")}${c.path}`;
+    return chrome.cookies.remove({
+      url: cookieUrl, name: c.name, storeId: c.storeId,
+    });
+  }));
+  const elapsed = Date.now() - t0;
+  console.log(`[SO ${Date.now()}] wipe-done domain=${domain} wiped=${cookies.length} +${elapsed}ms`);
+  // Signal portal_cleaner.js to clear localStorage/sessionStorage on next portal load.
+  await chrome.storage.local.set({
+    so_pending_storage_wipe: { domain, ts: t0 },
+  });
+  return { wiped: cookies.length };
+}
+
+// After a popup-confirmed wipe, reload any open tab on that domain so an
+// already-open portal lands signed-out (portal_cleaner clears its storage at
+// document_start of the reload) instead of riding a half-dead session.
+async function soReloadTabsOnDomain(domain) {
+  try {
+    const tabs = await chrome.tabs.query({ url: [`https://${domain}/*`, `https://*.${domain}/*`] });
+    for (const t of tabs) {
+      if (t && typeof t.id === "number") {
+        try { chrome.tabs.reload(t.id, () => void chrome.runtime.lastError); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (
     msg.type === "GMP_TOKEN_CAPTURED" ||
@@ -954,25 +1048,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: "domain-not-allowed" });
       return;
     }
+    // SECURITY (v1.9.109): deleting the owner's utility cookies is destructive and
+    // this message is page-reachable via the so_bridge relay — an in-page script on
+    // a legit app origin (stored XSS / compromised dep) could DoS the owner's
+    // utility sessions. A PAGE request only stashes an intent; the wipe runs when
+    // the owner clicks "Reset session" in the popup (SO_PENDING_CONFIRM below).
+    // The page gets { pending: true } so the SPA can point at the toolbar icon.
+    if (!soSenderIsExtensionUi(sender)) {
+      (async () => {
+        try {
+          const s = await chrome.storage.local.get(WIPE_PENDING_KEY);
+          const m = s[WIPE_PENDING_KEY] || {};
+          m[domain] = { origin: (sender && sender.url) || "", at: Date.now() };
+          await chrome.storage.local.set({ [WIPE_PENDING_KEY]: m });
+          await soUpdatePendingBadge();
+          console.log(`[SO ${Date.now()}] wipe request from page stashed for popup confirm domain=${domain} reqId=${reqId}`);
+        } catch (_) {}
+        sendResponse({ ok: false, pending: true, error: "confirm-in-extension" });
+      })();
+      return true;
+    }
     (async () => {
-      const t0 = Date.now();
-      console.log(`[SO ${t0}] wipe-start domain=${domain} reqId=${reqId}`);
       try {
-        const cookies = await chrome.cookies.getAll({ domain });
-        await Promise.all(cookies.map((c) => {
-          const protocol = c.secure ? "https://" : "http://";
-          const cookieUrl = `${protocol}${c.domain.replace(/^\./, "")}${c.path}`;
-          return chrome.cookies.remove({
-            url: cookieUrl, name: c.name, storeId: c.storeId,
-          });
-        }));
-        const elapsed = Date.now() - t0;
-        console.log(`[SO ${Date.now()}] wipe-done domain=${domain} wiped=${cookies.length} +${elapsed}ms`);
-        // Signal portal_cleaner.js to clear localStorage/sessionStorage on next portal load.
-        await chrome.storage.local.set({
-          so_pending_storage_wipe: { domain, ts: t0 },
-        });
-        sendResponse({ ok: true, wiped: cookies.length });
+        const out = await soWipeCookiesForDomain(domain, reqId);
+        sendResponse({ ok: true, wiped: out.wiped });
       } catch (e) {
         console.warn(`[SO ${Date.now()}] wipe-error domain=${domain}:`, e);
         sendResponse({ ok: false, error: String(e) });
@@ -1075,40 +1174,104 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// Commit a credential to the vault + fire the "I use this vendor" side effects.
+// Shared by the popup's direct SO_VAULT_SET and the pending-intent confirm path.
+async function soVaultSetAndArm(vendor, username, password) {
+  const ok = await SoVault.set(vendor, username, password);
+  if (ok) {
+    // Saving a portal password is an explicit "I use this vendor" signal: clear
+    // any auto-login pause so the new creds get a fresh try, and arm tight
+    // live-mode so production refreshes every few minutes and the next silent
+    // recapture self-heals a lapsed session with these creds. Fronius/SMA use the
+    // tab-based armLive; Chint uses its minimized-popup walk (armChintLive). With
+    // creds saved, Chint's walk now auto-logs in on a dead session too (v1.9.87) —
+    // the login_required → recapTryAutoLogin → soFillLoginForm path fires on the
+    // same-origin Chint login page, so Chint is hands-off like SMA/Fronius.
+    try { if (typeof self.__soAutoLoginResetFails === "function") self.__soAutoLoginResetFails(vendor); } catch (_) {}
+    try { if (typeof self.__soKeepwarmResetFails === "function") self.__soKeepwarmResetFails(vendor); } catch (_) {}
+    try { if ((vendor === "fronius" || vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(vendor); } catch (_) {}
+    try { if (vendor === "chint" && typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}
+    // v1.9.97 — saving a UTILITY login (GMP / a SmartHub co-op) arms its
+    // DAILY background refresh (NOT the 6-min live loop — bills are monthly)
+    // so we keep the owner's bills current + the session warm hands-off.
+    try {
+      const isUtil = (typeof SoVault.isUtilityCode === "function") ? SoVault.isUtilityCode(vendor) : false;
+      if (isUtil && typeof self.__soArmUtilityLive === "function") await self.__soArmUtilityLive(vendor);
+    } catch (_) {}
+  }
+  return ok;
+}
+
 // v1.9.33: vault message API for the popup UI — set/clear creds + toggle opt-out +
 // status. Secrets only ever flow popup -> background (to be encrypted at rest); the
 // status reply NEVER includes the actual password.
+// v1.9.109: SO_VAULT_SET from PAGE context (so_bridge relay) is intent-gated (see
+// soSenderIsExtensionUi), and SO_PENDING_* lets the popup list/confirm/dismiss the
+// stashed intents. SO_PENDING_* is EXTENSION-UI-ONLY — a page must never be able
+// to confirm its own stashed request.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("SO_VAULT_")) return;
+  if (!msg || typeof msg.type !== "string" ||
+      !(msg.type.startsWith("SO_VAULT_") || msg.type.startsWith("SO_PENDING_"))) return;
   (async () => {
     try {
       if (typeof SoVault === "undefined") { sendResponse({ ok: false, error: "vault-unavailable" }); return; }
+      if (msg.type.startsWith("SO_PENDING_")) {
+        if (!soSenderIsExtensionUi(sender)) { sendResponse({ ok: false, error: "extension-ui-only" }); return; }
+        if (msg.type === "SO_PENDING_LIST") {
+          await soUpdatePendingBadge();   // prunes stale (>24h) intents first
+          const s = await chrome.storage.local.get(WIPE_PENDING_KEY);
+          const wm = s[WIPE_PENDING_KEY] || {};
+          sendResponse({
+            ok: true,
+            vault: await SoVault.listPending(),
+            wipes: Object.keys(wm).map((domain) => ({ domain, origin: wm[domain].origin || "", at: wm[domain].at || 0 })),
+          });
+        } else if (msg.type === "SO_PENDING_CONFIRM" && msg.kind === "vault") {
+          const rec = await SoVault.takePending(String(msg.vendor || ""));
+          await soUpdatePendingBadge();
+          if (!rec) { sendResponse({ ok: false, error: "no-pending" }); return; }
+          sendResponse({ ok: await soVaultSetAndArm(String(msg.vendor), rec.username, rec.password) });
+        } else if (msg.type === "SO_PENDING_CONFIRM" && msg.kind === "wipe") {
+          const domain = String(msg.domain || "");
+          const s = await chrome.storage.local.get(WIPE_PENDING_KEY);
+          const m = s[WIPE_PENDING_KEY] || {};
+          if (!m[domain]) { sendResponse({ ok: false, error: "no-pending" }); return; }
+          delete m[domain];
+          await chrome.storage.local.set({ [WIPE_PENDING_KEY]: m });
+          await soUpdatePendingBadge();
+          const out = await soWipeCookiesForDomain(domain, "popup-confirm");
+          await soReloadTabsOnDomain(domain);   // an open portal tab lands signed-out
+          sendResponse({ ok: true, wiped: out.wiped });
+        } else if (msg.type === "SO_PENDING_DISMISS") {
+          if (msg.kind === "vault") { await SoVault.dismissPending(String(msg.vendor || "")); }
+          else if (msg.kind === "wipe") {
+            const s = await chrome.storage.local.get(WIPE_PENDING_KEY);
+            const m = s[WIPE_PENDING_KEY] || {};
+            delete m[String(msg.domain || "")];
+            await chrome.storage.local.set({ [WIPE_PENDING_KEY]: m });
+          }
+          await soUpdatePendingBadge();
+          sendResponse({ ok: true });
+        } else {
+          sendResponse({ ok: false, error: "unknown" });
+        }
+        return;
+      }
       if (msg.type === "SO_VAULT_STATUS") {
         sendResponse({ ok: true, status: await SoVault.status() });
       } else if (msg.type === "SO_VAULT_SET") {
-        const ok = await SoVault.set(msg.vendor, msg.username, msg.password);
-        if (ok) {
-          // Saving a portal password is an explicit "I use this vendor" signal: clear
-          // any auto-login pause so the new creds get a fresh try, and arm tight
-          // live-mode so production refreshes every few minutes and the next silent
-          // recapture self-heals a lapsed session with these creds. Fronius/SMA use the
-          // tab-based armLive; Chint uses its minimized-popup walk (armChintLive). With
-          // creds saved, Chint's walk now auto-logs in on a dead session too (v1.9.87) —
-          // the login_required → recapTryAutoLogin → soFillLoginForm path fires on the
-          // same-origin Chint login page, so Chint is hands-off like SMA/Fronius.
-          try { if (typeof self.__soAutoLoginResetFails === "function") self.__soAutoLoginResetFails(msg.vendor); } catch (_) {}
-          try { if (typeof self.__soKeepwarmResetFails === "function") self.__soKeepwarmResetFails(msg.vendor); } catch (_) {}
-          try { if ((msg.vendor === "fronius" || msg.vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(msg.vendor); } catch (_) {}
-          try { if (msg.vendor === "chint" && typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}
-          // v1.9.97 — saving a UTILITY login (GMP / a SmartHub co-op) arms its
-          // DAILY background refresh (NOT the 6-min live loop — bills are monthly)
-          // so we keep the owner's bills current + the session warm hands-off.
-          try {
-            const isUtil = (typeof SoVault.isUtilityCode === "function") ? SoVault.isUtilityCode(msg.vendor) : false;
-            if (isUtil && typeof self.__soArmUtilityLive === "function") await self.__soArmUtilityLive(msg.vendor);
-          } catch (_) {}
+        // SECURITY (v1.9.109): only extension UI (the popup) writes creds directly.
+        // A page-relayed set (the Master Account save via so_bridge) stashes a
+        // pending intent — encrypted at rest, committed only when the owner clicks
+        // Save in the popup. The page gets { pending: true } so the SPA can point
+        // the owner at the toolbar icon.
+        if (!soSenderIsExtensionUi(sender)) {
+          const stashed = await SoVault.stashPending(msg.vendor, msg.username, msg.password, (sender && sender.url) || "");
+          await soUpdatePendingBadge();
+          sendResponse({ ok: false, pending: !!stashed, error: stashed ? "confirm-in-extension" : "invalid-request" });
+          return;
         }
-        sendResponse({ ok });
+        sendResponse({ ok: await soVaultSetAndArm(msg.vendor, msg.username, msg.password) });
       } else if (msg.type === "SO_VAULT_CLEAR") {
         await SoVault.clear(msg.vendor);
         // v1.9.97 — clearing a utility credential disarms its daily background

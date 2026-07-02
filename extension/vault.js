@@ -6,12 +6,29 @@
 //     stored in chrome.storage.local. They are NEVER sent to the Array Operator
 //     backend and NEVER appear in any network request to our servers. If our
 //     servers are breached, there are ZERO customer portal passwords to steal.
-//   * The encryption key is generated once per install (non-extractable would be
-//     ideal, but we must persist it to decrypt across service-worker restarts, so
-//     we store a per-install random key in chrome.storage.local alongside the
-//     ciphertext). This protects against casual disk inspection / sync leakage of
-//     the raw password, not against an attacker who already has full local profile
-//     access (at which point the live portal session is compromised anyway).
+//   * ⚠️ HONESTY — THIS IS OBFUSCATION-AT-REST, NOT REAL ENCRYPTION-AT-REST.
+//     The AES-256 key is generated once per install and persisted in
+//     chrome.storage.local (`so_vault_key`) RIGHT BESIDE the ciphertext
+//     (`so_vault_creds`). Anyone who can read the extension's storage on disk can
+//     read both and recover the passwords. Why we knowingly live with that in MV3:
+//       - Chrome extensions have NO OS-keychain access (no DPAPI/Keychain/libsecret
+//         API surface), so there is nowhere non-colocated to root a key.
+//       - Any derivation input we could use instead (extension id, profile paths,
+//         install time) sits on the same disk with the same readability — it adds
+//         indirection, not protection.
+//       - A non-extractable CryptoKey in IndexedDB would stop JS-context key export
+//         and split key from ciphertext across stores, but Chrome still persists the
+//         key material in the profile directory (same-disk attacker still wins), and
+//         IndexedDB for an extension SW can be EVICTED under storage pressure — an
+//         evicted key silently bricks every saved login, killing the flagship
+//         "password once, never sign in again" feature. Marginal gain, real risk.
+//       - A user master-password (real KDF-rooted encryption) would defeat the whole
+//         point of hands-off auto-login.
+//     What the AES layer DOES buy: the raw password never sits as plaintext in
+//     storage dumps/logs/exports, and a leak of the cred blob ALONE (without the key
+//     record) is useless. What it does NOT buy: protection from an attacker with
+//     full local profile access — but that attacker already owns the live portal
+//     sessions (cookies) anyway. See extension/README.md "Vault security posture".
 //   * Auto-login is OPT-OUT (default ON) and per-vendor; the owner can clear a
 //     vendor's creds at any time, which deletes the ciphertext.
 //
@@ -138,6 +155,79 @@ const SoVault = (() => {
     } catch (_) { return false; }
   }
 
+  // ── Page-initiated save intents (v1.9.109) ────────────────────────────────
+  // SO_VAULT op:"set" arriving from PAGE context (the so_bridge relay) no longer
+  // writes the vault directly — a page script (XSS / compromised dep on a legit
+  // app origin) must never be able to overwrite the owner's saved portal logins.
+  // Instead the request is STASHED here (password AES-encrypted with the same
+  // vault key, never plaintext at rest) and committed only when the owner clicks
+  // Save in the extension popup — a user gesture inside extension UI that a web
+  // page cannot fake. One pending intent per vendor code; newest wins.
+  const PENDING_STORE = "so_vault_pending";  // { <code>: {u, iv, ct, origin, at} }
+
+  async function stashPending(vendor, username, password, origin) {
+    if (!accepts(vendor)) return false;
+    if (!username || !password) return false;
+    try {
+      const key = await getKey();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const plain = new TextEncoder().encode(JSON.stringify({ u: username, p: password }));
+      const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain);
+      const s = await chrome.storage.local.get(PENDING_STORE);
+      const m = s[PENDING_STORE] || {};
+      // `u` is kept in the clear ONLY for the popup's confirm card ("save the
+      // sign-in for <username>?") — the password is never stored unencrypted.
+      m[vendor] = { u: String(username), iv: b64(iv), ct: b64(ct), origin: String(origin || ""), at: Date.now() };
+      await chrome.storage.local.set({ [PENDING_STORE]: m });
+      return true;
+    } catch (e) {
+      try { console.warn("[SoVault] stashPending failed", vendor, e && e.message); } catch (_) {}
+      return false;
+    }
+  }
+
+  // [{vendor, username, origin, at}] for the popup confirm card. No passwords.
+  async function listPending() {
+    try {
+      const s = await chrome.storage.local.get(PENDING_STORE);
+      const m = s[PENDING_STORE] || {};
+      return Object.keys(m).map((vendor) => ({
+        vendor, username: m[vendor].u || "", origin: m[vendor].origin || "", at: m[vendor].at || 0,
+      }));
+    } catch (_) { return []; }
+  }
+
+  // Decrypt + REMOVE a pending intent (popup confirm path). Returns
+  // {username, password} or null. The caller commits via set().
+  async function takePending(vendor) {
+    try {
+      const s = await chrome.storage.local.get(PENDING_STORE);
+      const m = s[PENDING_STORE] || {};
+      const rec = m[vendor];
+      if (!rec || !rec.iv || !rec.ct) return null;
+      delete m[vendor];
+      await chrome.storage.local.set({ [PENDING_STORE]: m });
+      const key = await getKey();
+      const plain = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: unb64(rec.iv) }, key, unb64(rec.ct));
+      const obj = JSON.parse(new TextDecoder().decode(plain));
+      return { username: obj.u, password: obj.p };
+    } catch (e) {
+      try { console.warn("[SoVault] takePending failed", vendor, e && e.message); } catch (_) {}
+      return null;
+    }
+  }
+
+  async function dismissPending(vendor) {
+    try {
+      const s = await chrome.storage.local.get(PENDING_STORE);
+      const m = s[PENDING_STORE] || {};
+      delete m[vendor];
+      await chrome.storage.local.set({ [PENDING_STORE]: m });
+      return true;
+    } catch (_) { return false; }
+  }
+
   // Auto-login is OPT-OUT: enabled unless explicitly disabled for that vendor.
   async function isEnabled(vendor) {
     const s = await chrome.storage.local.get(OPT_OUT_STORE);
@@ -172,5 +262,9 @@ const SoVault = (() => {
     return out;
   }
 
-  return { set, get, has, clear, isEnabled, setOptOut, status, VENDORS, UTILITIES, isUtilityCode, accepts };
+  return { set, get, has, clear, isEnabled, setOptOut, status, VENDORS, UTILITIES, isUtilityCode, accepts,
+           stashPending, listPending, takePending, dismissPending };
 })();
+
+// Browser-inert test hook (Node regression harness only — see extension/tests/).
+if (typeof module !== "undefined" && module.exports) module.exports = SoVault;

@@ -123,3 +123,66 @@ to the tenant's master spreadsheet, draft the report.
 - Cloudflare Turnstile sits in front of the login form — the extension cannot
   bypass it. It only activates once the user is already past Turnstile, which
   is fine because we're not trying to automate the login itself.
+
+## Vault security posture (encryption-at-rest honesty)
+
+`vault.js` stores portal passwords AES-256-GCM encrypted in
+`chrome.storage.local` — but the AES key is generated per-install and persisted
+in the SAME store (`so_vault_key` beside `so_vault_creds`). **That makes the
+at-rest layer obfuscation, not real encryption**: an attacker who can read the
+extension's storage from disk gets both the key and the ciphertext.
+
+This is a deliberate, documented MV3 limitation, not an oversight:
+
+- Chrome extensions have **no OS-keychain access** (no DPAPI / macOS Keychain /
+  libsecret surface), so there is nowhere non-colocated to root a key.
+- Every derivation input available to us (extension id, install-time salt)
+  lives on the same disk with the same readability — indirection, not defense.
+- A non-extractable `CryptoKey` persisted in IndexedDB would prevent JS-context
+  key export and split the stores, but Chrome still writes the key material into
+  the profile directory (a disk attacker still wins), and extension-SW IndexedDB
+  can be **evicted under storage pressure** — an evicted key silently destroys
+  every saved login and with it the flagship "password once, never sign in
+  again" feature. We judged that marginal gain not worth that real risk.
+- A user-supplied master password would be real encryption but defeats
+  hands-off auto-login entirely.
+
+What the AES layer genuinely provides: no plaintext passwords in storage dumps,
+logs, or exports, and a leak of the credential blob alone (without the key
+record) is useless. What it cannot provide: protection against full local
+profile access — an attacker in that position already owns the live portal
+session cookies anyway. Credentials still never leave the machine; nothing is
+ever sent to EnergyAgent servers.
+
+## host_permissions rationale (why the wildcards stay)
+
+Reviewed 2026-07-02 (security lane). The manifest's host patterns look broad
+but each wildcard is load-bearing — narrowing them breaks captures or
+auto-login:
+
+- `https://*.smarthub.coop/*` — SmartHub is a multi-tenant platform hosting
+  ~500 co-op subdomains (see `smarthub_registry.js`, generated), and the
+  extension supports **discovered** co-ops (`sh_<subdomain>` codes) that are not
+  in the registry yet. Enumerating hosts would cap coverage at the registry
+  snapshot and require a Web Store re-review for every new co-op.
+- `https://*.fronius.com/*`, `https://*.sma.energy/*` — a lapsed dashboard
+  session redirects to the vendor's SSO IdP on a *different subdomain*
+  (`login.fronius.com`, `auth.fronius.com`, `login.sma.energy`); auto-login
+  must `executeScript` there, and the IdP host has changed before. The
+  `_LOGIN_HOSTS` matcher deliberately accepts any host on these vendor-owned
+  apex domains (dot-anchored against lookalikes).
+- `https://*.solarweb.com/*`, `https://*.sunnyportal.com/*`,
+  `https://*.chintpower.com/*`, `https://*.chintpowersystems.com/*`,
+  `https://*.greenmountainpower.com/*` — vendor/utility-owned single-purpose
+  domains whose dashboards call sibling API subdomains (e.g.
+  `uiapi.sunnyportal.com`, `api.greenmountainpower.com`); the wildcard is
+  within a domain the vendor owns, not across third parties.
+- App origins (`*.nepooloperator.com`, `*.arrayoperator.com`,
+  `*.solaroperator.org`, Railway) — the bridge content script matches wildcard
+  subdomains but is **inert off the real app origins** (`so_bridge.js`
+  `ALLOWED_ORIGINS` origin lock), so a rogue subdomain cannot drive the
+  protocol even though the manifest matches it.
+
+Cookie-wipe blast radius is bounded separately: `SO_WIPE_COOKIES` has its own
+dot-anchored domain allowlist (greenmountainpower.com / smarthub.coop only) and
+since v1.9.109 requires an in-popup confirmation when requested by a page.

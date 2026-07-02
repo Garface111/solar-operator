@@ -166,6 +166,10 @@
       return;
     }
 
+    // SECURITY (v1.9.109): a page-initiated wipe no longer executes directly — the
+    // background stashes an intent and the owner confirms it in the extension popup.
+    // The ack carries `pending: true` in that case so the SPA can point the owner
+    // at the toolbar icon instead of assuming the session was reset.
     if (data.type === "SO_WIPE_COOKIES") {
       const reqId = data.reqId || null;
       const domain = String(data.domain || "");
@@ -175,6 +179,7 @@
           type: "SO_WIPE_COOKIES_ACK",
           reqId,
           ok: !!(resp && resp.ok),
+          pending: !!(resp && resp.pending),
           wiped: resp ? resp.wiped : undefined,
           error: err,
         }, TARGET);
@@ -185,6 +190,10 @@
     // v1.9.34: auto-login vault relay. The Master Account tab manages auto-refresh
     // credentials + opt-out through these; secrets only ever go page → background to
     // be encrypted at rest, and the status reply NEVER includes a password.
+    // v1.9.109: op:"set" from the page no longer writes the vault directly — the
+    // background stashes an encrypted intent and the owner confirms it with one
+    // click in the extension popup. The ack carries `pending: true` in that case so
+    // the SPA can show "finish in the extension" instead of a false "saved ✓".
     if (data.type === "SO_VAULT") {
       const reqId = data.reqId || null;
       const op = String(data.op || "");                 // status | set | clear | optout
@@ -198,6 +207,7 @@
           reqId,
           op,
           ok: !!(resp && resp.ok),
+          pending: !!(resp && resp.pending),        // op:"set" awaiting popup confirm
           status: resp ? resp.status : undefined,   // only for op==="status"
           error: err,
         }, TARGET);

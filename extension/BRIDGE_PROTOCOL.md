@@ -64,3 +64,43 @@ EXTENSION INTERNALS
   inspecting the DOM after a short settle delay (login form vs.
   account widgets) and call chrome.runtime.sendMessage with
   type=LOGIN_STATE_DETECTED — background.js debounces and rebroadcasts.
+
+────────────────────────────────────────────────────────────────────────
+INTENT-GATED OPERATIONS (v1.9.109 — security hardening)
+────────────────────────────────────────────────────────────────────────
+
+Two page-reachable operations are destructive or credential-bearing and
+NO LONGER execute directly off a page postMessage. The page can only
+POST AN INTENT; the operation runs when the owner clicks the confirm
+card in the extension popup (a user gesture inside extension UI that a
+web page — including an XSS'd legit origin — cannot fake). The toolbar
+icon shows an octarine badge with the number of approvals waiting.
+
+1.  `SO_VAULT { op:"set", vendor, username, password, reqId }`
+    → ack: `SO_VAULT_ACK { reqId, op:"set", ok:false, pending:true,
+                           error:"confirm-in-extension" }`
+    The background stashes the request AES-encrypted at rest
+    (`so_vault_pending`, password never plaintext) and the popup shows
+    "Save your <vendor> sign-in?" with the requesting origin + username.
+    Confirm = commit to the vault + the usual arming side effects
+    (fail-counter reset, live-mode arm). Dismiss = dropped.
+    `op:"status" | "clear" | "optout"` are unchanged (status carries no
+    secrets; clear/optout are non-credential-bearing).
+
+2.  `SO_WIPE_COOKIES { domain, reqId }`
+    → ack: `SO_WIPE_COOKIES_ACK { reqId, ok:false, pending:true,
+                                  error:"confirm-in-extension" }`
+    Domain must still pass the dot-anchored allowlist
+    (greenmountainpower.com / smarthub.coop). The popup shows "Reset
+    your <domain> session?"; confirm = wipe cookies + flag
+    portal_cleaner's storage wipe + RELOAD any open tab on that domain
+    so an already-open portal lands signed-out.
+
+SPA handling: check `pending` on both acks and point the owner at the
+toolbar icon ("click the EnergyAgent icon and approve") instead of
+assuming the operation completed. The extension POPUP's own requests
+(chrome.runtime senders with no tab) still execute immediately.
+
+Popup-internal messages (never relayed by the bridge, rejected from any
+non-extension-UI sender): `SO_PENDING_LIST`, `SO_PENDING_CONFIRM
+{ kind:"vault"|"wipe", vendor?|domain? }`, `SO_PENDING_DISMISS { … }`.

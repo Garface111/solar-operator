@@ -242,4 +242,29 @@ a:hover { color: #1d4ed8; text-decoration: underline; }
 .al-clear { background: #fef2f2; color: #c0392b; border: 1px solid #fecaca; }
 .al-clear:hover { background: #fee2e2; }
 .al-optout { margin-left: auto; font-size: 10.5px; color: #64748b; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+/* ── Pending approvals (v1.9.109) — page-initiated requests await one click ── */
+/* Octarine-edged so it reads as "EnergyAgent needs YOUR ok", matching the badge. */
+.pending-block { margin-bottom: 10px; }
+.pending-head {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
+  color: #a368ff; margin-bottom: 6px;
+}
+.pending-card {
+  border: 1px solid #d9c4ff; border-left: 3px solid #a368ff; border-radius: 7px;
+  background: #ffffff; padding: 9px 10px; margin-bottom: 7px;
+}
+.pending-title { font-size: 12px; font-weight: 650; color: #0f172a; margin-bottom: 3px; }
+.pending-text { font-size: 10.5px; color: #64748b; line-height: 1.45; margin-bottom: 8px; }
+.pending-actions { display: flex; gap: 6px; }
+.pending-ok, .pending-no {
+  font-size: 11px; font-weight: 700; padding: 6px 11px; border-radius: 6px;
+  border: 0; cursor: pointer;
+}
+.pending-ok { background: linear-gradient(180deg, #b184ff, #a368ff); color: #ffffff; }
+.pending-ok:hover { filter: brightness(1.06); }
+.pending-ok:disabled, .pending-no:disabled { opacity: 0.6; cursor: default; }
+.pending-no { background: #eef2f7; color: #64748b; border: 1px solid #e2e8f0; }
+.pending-no:hover { background: #e2e8f0; }
+
 .hidden { display: none !important; }

@@ -35,6 +35,10 @@
       <button id="retry-btn" class="retry-btn">Retry</button>
     </div>
 
+    <!-- v1.9.109: page-initiated credential saves / session resets wait here for
+         the owner's explicit OK — a web page can never drive those directly. -->
+    <div id="pending-block" class="pending-block hidden"></div>
+
     <!-- ── Per-product live stats (filled by JS from extension-status) ──────── -->
     <div id="stat-block" class="stat-block hidden"></div>
 
