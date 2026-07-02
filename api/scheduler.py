@@ -854,6 +854,11 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
             state = db.execute(select(InverterAlertState).where(
                 InverterAlertState.tenant_id == tid,
                 InverterAlertState.incident_key == key)).scalar_one_or_none()
+            # Long-dead sessions (expired >24h ago — abandoned test tenants, ancient
+            # logins) are a post-mortem, not a *final warning* — never alert on them.
+            # (Prod dry-run found 7 such tenants at 0.0d that would have spammed.)
+            if exp is not None and exp < datetime.utcnow() - timedelta(hours=24):
+                continue
             if exp is None or exp > cutoff:
                 # Healthy (keep-alive rescued it, or fresh login) → close any open
                 # incident so the NEXT death is a fresh alert.
