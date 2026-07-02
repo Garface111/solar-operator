@@ -163,8 +163,8 @@ def test_attention_no_green_banner():
 
 
 def test_no_data_array_is_honest():
-    """An array WITH inverters but NO daily history must show 'no recent data',
-    never a fabricated kWh. (A 0-inverter array isn't a vendor array so the digest
+    """An array WITH inverters but NO daily history must show 'no full-day reading
+    yet', never a fabricated kWh. (A 0-inverter array isn't a vendor array so the digest
     omits it entirely; and on an attention day only flagged arrays are listed — so we
     assert the honesty rule on a healthy day where every vendor array is shown.)"""
     tree = {
@@ -180,8 +180,8 @@ def test_no_data_array_is_honest():
                     "attention": 0, "is_daylight": True},
     }
     html = digest.build_digest_html(_tenant(), tree)
-    assert "Fresh Connect" in html       # shown on a healthy day...
-    assert "no recent data" in html      # ...honestly, never a fabricated kWh
+    assert "Fresh Connect" in html                 # shown on a healthy day...
+    assert "no full-day reading yet" in html       # ...honestly, never a fabricated kWh
 
 
 def test_subject_lines():

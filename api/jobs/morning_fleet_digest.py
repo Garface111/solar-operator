@@ -1,7 +1,9 @@
 """Morning fleet-health digest (Array Operator).
 
 A once-a-day, plain-language email that tells an array owner — at a glance, over
-coffee — whether their whole solar fleet is healthy. It mirrors the structure of
+coffee — whether their whole solar fleet is healthy. It summarizes the PREVIOUS
+FULL DAY (health verdicts are judged on complete days only; each array's output
+is its last full-day total) — NOT a live morning instant. It mirrors the structure of
 generation_watchdog.py (scan_* / run_* + read-only + a small per-tenant batch),
 but instead of an INTERNAL billing-safety alert it sends a TENANT-FACING email:
 one digest per active Array Operator owner, rendered from the SAME truth the
@@ -9,7 +11,7 @@ dashboard shows (build_fleet_tree).
 
 What's in the email:
   * a header (fleet/operator name + the date)
-  * top-line KPIs (arrays, inverters, # needing attention, producing-now / asleep)
+  * top-line KPIs (arrays, inverters, # needing attention)
   * a HIGHLIGHTS block (best & worst arrays by their LAST FULL DAY's kWh — never
     today's still-accumulating partial, which would read like a live snapshot; any
     arrays carrying an alert called out in amber/red, any inverter flagged)
@@ -18,8 +20,8 @@ What's in the email:
     amber/red attention callout when something needs a look.
 
 HONESTY (CLAUDE.md): we never invent production numbers. If an array has no
-recent daily reading, or the fleet is asleep at send time (sun down), we say so
-in words — "—" / "asleep" / "no recent data" — rather than printing a fake kWh.
+full-day reading yet, we say so in words — "—" / "no full-day reading yet" —
+rather than printing a fake kWh.
 
 Read-only on the data side: it builds the tree (which persists daily history as
 a normal side effect of a fleet read, exactly like the dashboard) and emails. It
@@ -29,7 +31,7 @@ from __future__ import annotations
 
 import html as _html
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -205,8 +207,6 @@ def build_digest_html(tenant, tree: dict) -> str:
     BLUE, BLUE_DEEP = "#2563eb", "#1d4ed8"
     BLUE_BG, BLUE_BORDER, BLUE_TEXT = "#eff6ff", "#bfdbfe", "#1e40af"
 
-    summary = tree.get("summary", {}) or {}
-    is_daylight = bool(summary.get("is_daylight", False))
     # VENDOR (inverter) arrays only — drop GMP-only utility-bill arrays so the
     # counts + list match what the owner sees in their inverter sandbox.
     cols = _vendor_columns(tree)
@@ -215,15 +215,17 @@ def build_digest_html(tenant, tree: dict) -> str:
     attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
 
     fleet = _html.escape(_fleet_name(tenant))
-    # Snapshot timing — shown in Eastern (the fleets' region) so the reader knows
-    # exactly when this fleet state was captured. Falls back to UTC if tz data is absent.
+    # This digest summarizes the PREVIOUS FULL DAY, not a live morning instant:
+    # health verdicts are judged on complete days only (stable_verdicts) and each
+    # array's output is its last full day's total. So we label it with the day
+    # being summarized (yesterday), not the send time. ET (the fleets' region),
+    # UTC fallback if tz data is absent.
     try:
         from zoneinfo import ZoneInfo
         _now = datetime.now(ZoneInfo("America/New_York")); _tzlabel = "ET"
     except Exception:
         _now = datetime.now(timezone.utc); _tzlabel = "UTC"
-    today = _now.strftime("%A, %B %-d, %Y")
-    snapshot = _now.strftime("%-I:%M %p ") + _tzlabel
+    ref_day = (_now - timedelta(days=1)).strftime("%A, %B %-d, %Y")
 
     has_critical = any(
         (c.get("alert", {}) or {}).get("level") == "critical"
@@ -246,7 +248,7 @@ def build_digest_html(tenant, tree: dict) -> str:
             f'<div style="font-size:17px;font-weight:700;color:{BLUE_DEEP};line-height:1.2;">'
             f'All systems healthy</div>'
             f'<div style="color:{BLUE_TEXT};font-size:13px;margin-top:2px;">'
-            f'Every inverter we can see is producing as expected this morning.</div>'
+            f'Every inverter we can see produced as expected over the full day.</div>'
             f'</td></tr></table></td></tr></table>'
         )
     else:
@@ -287,7 +289,7 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'<div style="font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:{FAINT};'
         f'font-weight:700;margin:5px 0 0;">Fleet health</div>'
         f'<div style="font-size:12.5px;color:{MUTED};margin:3px 0 0;">'
-        f'{inverters_total - flagged_n} of {inverters_total} inverters reporting normally</div>'
+        f'{inverters_total - flagged_n} of {inverters_total} inverters produced normally</div>'
         # meter (nested-table fill for client-safe %-width)
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
         f'style="margin:14px 0 0;table-layout:fixed;"><tr>'
@@ -338,10 +340,9 @@ def build_digest_html(tenant, tree: dict) -> str:
                     f' — {_fmt_kwh(worst_a["kwh"])} on its last full day.</li>'
                 )
         else:
-            why = "the fleet is asleep right now" if not is_daylight else "no recent daily data has landed yet"
             highlight_rows.append(
                 f'<li style="margin:6px 0;color:{MUTED};">'
-                f'No recent production numbers to rank — {why}.</li>'
+                f'No full-day production numbers to rank yet.</li>'
             )
         highlights_label = "Highlights"
 
@@ -368,7 +369,7 @@ def build_digest_html(tenant, tree: dict) -> str:
         kwh = _recent_kwh(col)
         day = _recent_day(col)
         if kwh is None:
-            output = "asleep" if not is_daylight else "no recent data"
+            output = "no full-day reading yet"
         else:
             output = _fmt_kwh(kwh)
             if day:
@@ -420,12 +421,12 @@ def build_digest_html(tenant, tree: dict) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
         '<meta name="color-scheme" content="light only">'
         '<meta name="supported-color-schemes" content="light">'
-        f'<title>Morning fleet health — {fleet}</title>'
+        f'<title>Daily fleet health — {fleet}</title>'
         '<style>:root{color-scheme:light only;supported-color-schemes:light;}'
         'body,table,td{color-scheme:light only;}</style></head>'
         f'<body bgcolor="{PAGE}" style="margin:0;padding:0;background:{PAGE};color-scheme:light only;">'
         '<div style="display:none;max-height:0;overflow:hidden;opacity:0;">'
-        f'Your morning fleet health for {today}.</div>'
+        f'Your fleet health for {ref_day} (full day).</div>'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{PAGE}" '
         f'style="background:{PAGE};padding:24px 12px;"><tr><td align="center">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
@@ -436,9 +437,9 @@ def build_digest_html(tenant, tree: dict) -> str:
         f'background:linear-gradient(90deg,{BLUE_DEEP},{BLUE},#3b82f6);">&nbsp;</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:24px 28px 8px;">'
         f'<div style="font-size:12px;color:{BLUE};font-weight:700;letter-spacing:.6px;'
-        'text-transform:uppercase;">Array Operator · Morning fleet health</div>'
+        'text-transform:uppercase;">Array Operator · Daily fleet health</div>'
         f'<h1 style="font-size:23px;color:{INK};margin:7px 0 2px;font-weight:700;">{fleet}</h1>'
-        f'<div style="color:{MUTED};font-size:14px;">{today} &middot; snapshot as of {snapshot}</div>'
+        f'<div style="color:{MUTED};font-size:14px;">Full-day summary &middot; {ref_day}</div>'
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
         + kpis + banner + highlights + per_array +
@@ -448,10 +449,11 @@ def build_digest_html(tenant, tree: dict) -> str:
         'text-decoration:none;font-weight:600;font-size:14px;padding:12px 22px;'
         'border-radius:9px;">Open Array Operator →</a>'
         f'<p style="color:{FAINT};font-size:12px;margin:20px 0 0;line-height:1.5;">'
-        'You\'re getting this because morning fleet-health digests are on for your '
-        'account. Production figures are the latest daily readings we have; an '
-        'em-dash means no recent data, never an estimate. Manage or turn off these '
-        'digests any time in Array Operator.</p>'
+        'You\'re getting this because daily fleet-health digests are on for your '
+        'account. It summarizes the previous full day (health is judged on complete '
+        'days, output is each array\'s last full-day total) — not a live morning '
+        'snapshot. An em-dash means no full-day reading yet, never an estimate. '
+        'Manage or turn off these digests any time in Array Operator.</p>'
         '</td></tr>'
         '</table></td></tr></table></body></html>'
     )
@@ -460,31 +462,28 @@ def build_digest_html(tenant, tree: dict) -> str:
 def build_digest_text(tenant, tree: dict) -> str:
     """A short plain-text fallback for the digest (mirrors the HTML's substance).
     Honest about missing data; never invents kWh."""
-    summary = tree.get("summary", {}) or {}
-    is_daylight = bool(summary.get("is_daylight", False))
     fleet = _fleet_name(tenant)
     try:
         from zoneinfo import ZoneInfo
         _now = datetime.now(ZoneInfo("America/New_York")); _tzlabel = "ET"
     except Exception:
         _now = datetime.now(timezone.utc); _tzlabel = "UTC"
-    today = _now.strftime("%A, %B %-d, %Y")
-    snapshot = _now.strftime("%-I:%M %p ") + _tzlabel
+    ref_day = (_now - timedelta(days=1)).strftime("%A, %B %-d, %Y")
     # Vendor (inverter) arrays only — mirrors the HTML.
     cols = _vendor_columns(tree)
     attention = sum(int((c.get("alert") or {}).get("count") or 0) for c in cols)
 
-    lines = [f"Morning fleet health — {fleet}", f"{today} · snapshot as of {snapshot}", ""]
+    lines = [f"Daily fleet health — {fleet}", f"Full-day summary · {ref_day}", ""]
     if attention == 0:
-        lines.append("All systems healthy: every inverter we can see is producing as expected.")
+        lines.append("All systems healthy: every inverter we can see produced as expected over the full day.")
     else:
-        lines.append(f"{attention} inverter(s) need attention this morning.")
+        lines.append(f"{attention} inverter(s) need attention.")
     inv_total = sum(int(c.get('inverter_count') or 0) for c in cols)
     flagged_n = len(_flagged_inverters(cols))
     health_pct = round(100 * (inv_total - flagged_n) / inv_total) if inv_total else 100
     lines += [
         "",
-        f"Fleet health: {health_pct}% ({inv_total - flagged_n} of {inv_total} inverters reporting normally)",
+        f"Fleet health: {health_pct}% ({inv_total - flagged_n} of {inv_total} inverters produced normally)",
         f"Arrays: {len(cols)}   Inverters: {inv_total}   Need attention: {attention}",
         "",
     ]
@@ -499,8 +498,7 @@ def build_digest_text(tenant, tree: dict) -> str:
             alert = col.get("alert", {}) or {}
             state = _LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
             kwh = _recent_kwh(col)
-            out = (_fmt_kwh(kwh) if kwh is not None
-                   else ("asleep" if not is_daylight else "no recent data"))
+            out = (_fmt_kwh(kwh) if kwh is not None else "no full-day reading yet")
             lines.append(f"  - {col.get('array_name', 'Array')}: {state}, {out}")
     lines += ["", "Open Array Operator: https://arrayoperator.com"]
     return "\n".join(lines)
@@ -512,7 +510,7 @@ def _subject(tenant, tree: dict) -> str:
     attention = int((tree.get("summary", {}) or {}).get("attention", 0) or 0)
     fleet = _fleet_name(tenant)
     if attention == 0:
-        return f"☀️ {fleet}: all systems healthy this morning"
+        return f"☀️ {fleet}: all systems healthy yesterday"
     noun = "inverter needs" if attention == 1 else "inverters need"
     return f"⚠️ {fleet}: {attention} {noun} attention"
 
