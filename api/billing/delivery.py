@@ -951,6 +951,17 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         if pricing["net_source"] == "customer":
             net_rate, net_source = pricing["net_rate"], "customer"
             net_note = pricing.get("net_rate_note")
+        elif (getattr(sub, "rate_per_kwh", None) or 0) > 0:
+            # Legacy flat $/kWh on a BILL-BOUND offtaker: the flat rate IS the
+            # agreed price — bill it (no re-discount unless one is explicitly
+            # set). Without this, the sub billed the BILL's credit rate paired
+            # with the flat rule's zero discount — neither semantic (caught at
+            # 800-offtaker scale; prod carried 0 such subs when this landed).
+            net_rate, net_source = float(sub.rate_per_kwh), "legacy_flat_customer"
+            net_note = "the customer's legacy flat $/kWh — the agreed price"
+            if sub.discount_pct is None or not (0 <= sub.discount_pct < 1):
+                discount = 0.0
+                billing_rate = 1.0
         elif rate_source == "reference":
             net_rate, net_source = (credit_rate or 0.0), "gmp_credit_reference"
             net_note = ("the solar credit rate for comparable months — this period's "

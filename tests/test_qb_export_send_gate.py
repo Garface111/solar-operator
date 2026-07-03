@@ -95,6 +95,50 @@ def test_register_excludes_unsendable_and_disabled():
     assert "Disabled Offtaker" not in csv_text
 
 
+def test_bill_bound_legacy_flat_rate_is_the_price():
+    """A bill-bound offtaker with a legacy flat rate_per_kwh bills at THAT rate
+    with no re-discount (the flat rate encodes the agreed price). Before the
+    800-scale catch, it billed the BILL's credit rate paired with the flat
+    rule's zero discount — neither semantic."""
+    from api.billing.delivery import build_match
+
+    init_db()
+    with SessionLocal() as db:
+        tid = "ten_" + secrets.token_hex(4)
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="FL",
+                      contact_email=f"{tid}@e.com", active=True,
+                      product="array_operator"))
+        db.flush()
+        arr = Array(tenant_id=tid, name="Flat Rate Array", region="VT")
+        db.add(arr)
+        db.flush()
+        host = UtilityAccount(tenant_id=tid, provider="gmp", array_id=arr.id,
+                              account_number="HOST-FL")
+        db.add(host)
+        db.flush()
+        _mk_bill(db, tid, host.id, 10000, 1700.0)   # bill credit rate 0.17
+        own = UtilityAccount(tenant_id=tid, provider="gmp",
+                             account_number="OWN-FL")
+        db.add(own)
+        db.flush()
+        _mk_bill(db, tid, own.id, 500, 85.0)
+        sub = BillingReportSubscription(
+            tenant_id=tid, customer_name="Flat Rate Offtaker", array_id=arr.id,
+            allocation_pct=1.0, array_share_pct=0.05, utility_account_id=own.id,
+            rate_per_kwh=0.145,   # the agreed legacy flat price
+            billing_model="percent_of_array", cadence="monthly", enabled=True)
+        db.add(sub)
+        db.commit()
+        try:
+            ci = build_match(sub).computed_invoice or {}
+            # real-math kwh = 0.05 × 10000 = 500; amount = 500 × 0.145 exactly.
+            assert ci.get("net_rate_per_kwh") == 0.145, ci.get("net_rate_per_kwh")
+            assert ci.get("discount_pct") == 0.0, ci.get("discount_pct")
+            assert abs(ci.get("amount_owed") - 72.50) < 0.011, ci.get("amount_owed")
+        finally:
+            _cleanup(db, tid)
+
+
 def test_draft_not_recreated_after_period_sent(monkeypatch):
     """Exactly-once for DRAFTS (caught at 800-offtaker scale): after a period is
     approved+sent, the scheduler tick must NOT re-draft a phantom 'ready to

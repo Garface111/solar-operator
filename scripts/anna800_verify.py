@@ -34,7 +34,7 @@ from sqlalchemy import select
 
 from api.db import SessionLocal, init_db
 from api.models import (Tenant, Array, UtilityAccount, Bill,
-                        BillingReportSubscription, RateSchedule)
+                        BillingReportSubscription)
 
 TENANT_ID = "ten_anna_800"
 MONTH_LABEL = "2026-06"
@@ -72,11 +72,7 @@ def load_ground_truth(db) -> dict:
             .where(Bill.tenant_id == TENANT_ID, Bill.period_end.isnot(None))):
         if excess is not None:
             bills[(acct_id, _label(pe))] = (float(excess), float(credit or 0.0))
-    has_gmp_schedule = bool(db.execute(
-        select(RateSchedule.id).where(RateSchedule.utility.in_(["gmp", "*"]))
-        .limit(1)).first())
-    return {"subs": subs, "host_by_array": host_by_array, "bills": bills,
-            "has_gmp_schedule": has_gmp_schedule}
+    return {"subs": subs, "host_by_array": host_by_array, "bills": bills}
 
 
 def expected_invoice(sub, gt) -> dict | None:
@@ -112,20 +108,24 @@ def expected_invoice(sub, gt) -> dict | None:
         kwh = round(own_excess * (sub.allocation_pct or 0.0), 2)
         basis = "gmp_credited"
 
-    # Rate chain (documented): customer net override → the bill's own credit
-    # rate. Discount: customer → default 10% — EXCEPT a legacy flat-rate sub
-    # when no auto RateSchedule row exists (then flat rate, no re-discount).
+    # Rate chain (documented): customer net override → legacy flat $/kWh (the
+    # agreed price, no re-discount unless explicit) → the bill's own credit
+    # rate with customer discount → default 10%.
     if sub.net_rate_per_kwh and sub.net_rate_per_kwh > 0:
         net_rate = float(sub.net_rate_per_kwh)
+        discount = (float(sub.discount_pct)
+                    if sub.discount_pct is not None and 0 <= sub.discount_pct < 1
+                    else DEFAULT_DISCOUNT)
+    elif sub.rate_per_kwh and sub.rate_per_kwh > 0:
+        net_rate = float(sub.rate_per_kwh)
+        discount = (float(sub.discount_pct)
+                    if sub.discount_pct is not None and 0 <= sub.discount_pct < 1
+                    else 0.0)
     else:
         net_rate = credit_rate
-    if sub.discount_pct is not None and 0 <= sub.discount_pct < 1:
-        discount = float(sub.discount_pct)
-    elif (sub.rate_per_kwh and sub.rate_per_kwh > 0
-          and not gt["has_gmp_schedule"]):
-        discount = 0.0                              # legacy flat, no re-discount
-    else:
-        discount = DEFAULT_DISCOUNT
+        discount = (float(sub.discount_pct)
+                    if sub.discount_pct is not None and 0 <= sub.discount_pct < 1
+                    else DEFAULT_DISCOUNT)
     amount = round(kwh * net_rate * (1 - discount), 2)
     budget = sub.budget_amount_usd
     if budget is not None:
