@@ -46,6 +46,12 @@ _PCT_TOL = 0.01   # 1%
 # errors; we always surface the full math so the operator makes the final call.
 _ALLOC_TOL_KWH = 2.0
 
+# What a confirmed catch is WORTH: GMP credits $25 per billing error they made
+# (Ford, 2026-07-03: "GMP gives you twenty five dollars per failed math") — so
+# the stake on a flagged bill is $25, not the kWh-delta dollars (which is just
+# the size of the mis-allocation, often cents). Surfaced per row and summed.
+GMP_BILLING_ERROR_CREDIT_USD = 25.0
+
 
 def _bill_for_array_period(
     db: Session, array_id: int, start: Optional[date], end: Optional[date]
@@ -277,6 +283,9 @@ def _allocation_check(
         "per_array": per_array,
     }
     if status == "mismatch":
+        # The stake on a confirmed catch is GMP's $25 billing-error credit —
+        # not the kWh-delta dollars (that's just the mis-allocation's size).
+        out["at_stake_usd"] = GMP_BILLING_ERROR_CREDIT_USD
         if implied_base is not None and array_excess_total:
             head = (f"GMP credited this offtaker {offtaker_excess:,.0f} kWh — at the "
                     f"{single_share*100:.2f}% share you entered that implies a group total "
@@ -289,7 +298,8 @@ def _allocation_check(
         if dollars:
             tail += f" ≈ ${dollars:,.2f}"
         tail += "). Either the entered share is slightly off, or GMP allocated from a base "
-        tail += "that appears on neither bill — worth a look."
+        tail += ("that appears on neither bill — worth a look: GMP credits "
+                 f"${GMP_BILLING_ERROR_CREDIT_USD:,.0f} per billing error they made.")
         out["note"] = head + tail
     else:
         out["note"] = (f"GMP's allocation ({offtaker_excess:,.0f} kWh) matches this offtaker's "
@@ -481,6 +491,9 @@ def reconcile_tenant(db: Session, tenant_id: str) -> dict:
         "allocation_counts": alloc_counts,
         "allocation_flagged": alloc_counts.get("mismatch", 0),
         "allocation_dollars_flagged": round(alloc_dollars, 2),
+        # The real stake: GMP credits $25 per billing error — flagged × $25.
+        "allocation_at_stake_usd": round(
+            alloc_counts.get("mismatch", 0) * GMP_BILLING_ERROR_CREDIT_USD, 2),
         "subscriptions": results,
     }
 
@@ -562,6 +575,7 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
             "should_be_kwh": a.get("expected_kwh"),
             "delta_kwh": a.get("delta_kwh"),
             "delta_dollars": a.get("delta_dollars"),
+            "at_stake_usd": a.get("at_stake_usd"),
             "status": a.get("status"),
             "note": a.get("note"),
         })
@@ -583,5 +597,7 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
             "offtakers": total_offtakers,
             "flagged": total_flagged,
             "dollars_flagged": round(total_dollars, 2),
+            # flagged × GMP's $25 billing-error credit — the headline stake.
+            "at_stake_usd": round(total_flagged * GMP_BILLING_ERROR_CREDIT_USD, 2),
         },
     }
