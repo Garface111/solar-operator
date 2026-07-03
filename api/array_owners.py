@@ -4500,7 +4500,12 @@ def array_forecast_ep(array_id: int = Query(...),
             return {"array_id": arr.id, "array_name": arr.name,
                     **forecasting.Forecast(False, reason="no_nameplate").to_dict()}
 
-        if not _ensure_array_geocoded(db, arr):
+        # Operator-entered expected specific yield (kWh/kW per DAY). When set,
+        # "expected" = ratio × nameplate (flat) and a location is NOT required —
+        # the ratio basis works for inverter-only arrays with no address.
+        expected_ratio = arr.expected_kwh_per_kw_day
+        has_loc = _ensure_array_geocoded(db, arr)
+        if expected_ratio is None and not has_loc:
             return {"array_id": arr.id, "array_name": arr.name,
                     **forecasting.Forecast(False, reason="no_location").to_dict()}
 
@@ -4508,7 +4513,8 @@ def array_forecast_ep(array_id: int = Query(...),
         # default (tilt ≈ latitude, due south).
         tilt_assumed = arr.tilt_deg is None
         az_assumed = arr.azimuth_deg is None
-        tilt = arr.tilt_deg if arr.tilt_deg is not None else forecasting.default_tilt_deg(arr.latitude)
+        tilt = arr.tilt_deg if arr.tilt_deg is not None else (
+            forecasting.default_tilt_deg(arr.latitude) if has_loc else 0.0)
         az = arr.azimuth_deg if arr.azimuth_deg is not None else forecasting.DEFAULT_AZIMUTH_DEG
 
         today = now().date()
@@ -4522,6 +4528,7 @@ def array_forecast_ep(array_id: int = Query(...),
             tilt_assumed=tilt_assumed, azimuth_assumed=az_assumed,
             geocode_source=arr.geocode_source, geocoded_address=arr.geocoded_address,
             actual_by_day=actual_by_day, window_days=window_days, today=today,
+            expected_kwh_per_kw_day=expected_ratio,
         )
         return {"array_id": arr.id, "array_name": arr.name, **fc.to_dict()}
 
@@ -4560,6 +4567,45 @@ def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
         return {"ok": True, "array_id": arr.id,
                 "tilt_deg": arr.tilt_deg, "azimuth_deg": arr.azimuth_deg,
                 "geometry_source": arr.geometry_source}
+
+
+class ArrayExpectedRatioBody(BaseModel):
+    # UNITS: kWh per kW PER DAY (specific yield). null clears the override →
+    # back to the weather back-calculation.
+    expected_kwh_per_kw_day: Optional[float] = None
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/expected-ratio")
+def set_array_expected_ratio_ep(array_id: int, body: ArrayExpectedRatioBody,
+                                authorization: str | None = Header(default=None)) -> dict:
+    """Operator override of an array's EXPECTED specific yield (kWh per kW per
+    day). Bruce's ask: the operator knows a site's unique derates (2014-era
+    panels, rack orientation, wire-run losses) better than a generic weather
+    model — when set, predicted-vs-actual uses expected = ratio × nameplate
+    (flat per day over the window) for THIS array. Sending null clears it →
+    back to the weather back-calculation. Follows the /geometry override
+    pattern (tenant-scoped, demo-blocked, physical-range validated)."""
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    v = body.expected_kwh_per_kw_day
+    if v is not None and not (0 < v <= 12):
+        # >12 kWh/kW/day would beat the sunniest desert with a tracker — a typo.
+        raise HTTPException(400, "expected_kwh_per_kw_day must be between 0 and 12 (kWh per kW per day)")
+    with SessionLocal() as db:
+        arr = db.execute(
+            select(Array).where(
+                Array.id == array_id, Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if arr is None:
+            raise HTTPException(404, "Array not found")
+        arr.expected_kwh_per_kw_day = (round(float(v), 2) if v is not None else None)
+        db.commit()
+        return {"ok": True, "array_id": arr.id,
+                "expected_kwh_per_kw_day": arr.expected_kwh_per_kw_day,
+                "units": "kWh per kW per day"}
 
 
 class ArrayLocationBody(BaseModel):
@@ -4686,26 +4732,66 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
         total_measured_days = 0
         rep_inputs = None        # a representative array's inputs for the card's "how"
         rep_nameplate = 0.0
+        rep_is_weather = False   # prefer a weather-model array for the "how" panel
         sunny_rows: list[dict] = []
+        ratio_based = 0          # arrays whose expected is an operator-set kWh/kW
+        # kWh/kW health headline (Bruce): nameplate-weighted fleet specific yield,
+        # measured days only. per-day = Σ actual ÷ Σ (nameplate × measured_days).
+        kk_act = 0.0
+        kk_np_days = 0.0
+        kk_np = 0.0
+        kk_arrays = 0
+
+        def _skip_with_measured_kk(arr, nameplate: float, reason: str) -> None:
+            """Record a skip — but when the array has a nameplate AND measured
+            days, still carry its kWh/kW (Bruce's headline health metric needs
+            only actual ÷ kW, no weather model) so the ranking isn't blind to
+            un-geocoded arrays. Counted into the fleet kWh/kW aggregate too."""
+            nonlocal kk_act, kk_np_days, kk_np, kk_arrays
+            entry: dict = {"array_id": arr.id, "array_name": arr.name, "reason": reason}
+            if nameplate > 0:
+                by_day = _clean_actual_by_day(db, arr, start, end)
+                mdays = len(by_day)
+                if mdays > 0:
+                    act = sum(by_day.values())
+                    entry.update({
+                        "nameplate_kw": round(nameplate, 1),
+                        "measured_days": mdays,
+                        "actual_kwh": round(act, 1),
+                        "kwh_per_kw_day": round(act / nameplate / mdays, 2),
+                        "kwh_per_kw_window": round(act / nameplate, 1),
+                    })
+                    kk_act += act
+                    kk_np_days += nameplate * mdays
+                    kk_np += nameplate
+                    kk_arrays += 1
+            skipped.append(entry)
 
         for arr in arrays:
             nameplate = _array_nameplate_kw(db, arr)
             if nameplate <= 0:
                 skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "no_nameplate"})
                 continue
-            if not _ensure_array_geocoded(db, arr):
-                skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "no_location"})
+            # Operator-entered expected kWh/kW/day: expected works WITHOUT a
+            # location, so only the weather basis requires geocoding.
+            expected_ratio = arr.expected_kwh_per_kw_day
+            has_loc = _ensure_array_geocoded(db, arr)
+            if expected_ratio is None and not has_loc:
+                _skip_with_measured_kk(arr, nameplate, "no_location")
                 continue
 
             tilt_assumed = arr.tilt_deg is None
             az_assumed = arr.azimuth_deg is None
-            tilt = arr.tilt_deg if arr.tilt_deg is not None else forecasting.default_tilt_deg(arr.latitude)
+            tilt = arr.tilt_deg if arr.tilt_deg is not None else (
+                forecasting.default_tilt_deg(arr.latitude) if has_loc else 0.0)
             az = arr.azimuth_deg if arr.azimuth_deg is not None else forecasting.DEFAULT_AZIMUTH_DEG
 
-            poa_by_day = poa_for(arr.latitude, arr.longitude, tilt, az)
-            if not poa_by_day:
-                skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "irradiance_unavailable"})
-                continue
+            poa_by_day = None
+            if expected_ratio is None:
+                poa_by_day = poa_for(arr.latitude, arr.longitude, tilt, az)
+                if not poa_by_day:
+                    _skip_with_measured_kk(arr, nameplate, "irradiance_unavailable")
+                    continue
 
             actual_by_day = _clean_actual_by_day(db, arr, start, end)
             fc = forecasting.build_forecast(
@@ -4715,6 +4801,7 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
                 geocode_source=arr.geocode_source, geocoded_address=arr.geocoded_address,
                 actual_by_day=actual_by_day, window_days=window_days, today=today,
                 _poa_by_day=poa_by_day,
+                expected_kwh_per_kw_day=expected_ratio,
             )
             d = fc.to_dict()
             measured_days = d["inputs"].get("measured_days", 0) if d.get("available") else 0
@@ -4722,6 +4809,21 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
             # for the ratio (audit #15). Now carried on the Forecast itself, so the
             # fleet headline and the per-array row share ONE matched-day expected.
             exp_matched = d["expected_matched_kwh"]
+            basis = d["inputs"].get("expected_basis", "weather_model")
+            if basis == "operator_ratio":
+                ratio_based += 1
+            # Per-array MEASURED specific yield — Bruce's headline health number.
+            # UNITS: kwh_per_kw_day = kWh per kW per DAY averaged over the days we
+            # actually measured; kwh_per_kw_window = the measured total ÷ nameplate
+            # (covers only the measured days within the window — never extrapolated).
+            kk_day = (
+                round(d["actual_kwh"] / nameplate / measured_days, 2)
+                if measured_days > 0 else None
+            )
+            kk_window = (
+                round(d["actual_kwh"] / nameplate, 1)
+                if measured_days > 0 else None
+            )
             rows.append({
                 "array_id": arr.id, "array_name": arr.name,
                 "nameplate_kw": round(nameplate, 1),
@@ -4730,17 +4832,33 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
                 # actual by matched-day expected too (never by the full window).
                 "expected_matched_kwh": exp_matched,
                 "actual_kwh": d["actual_kwh"],
+                "kwh_per_kw_day": kk_day,
+                "kwh_per_kw_window": kk_window,
+                "expected_basis": basis,
+                "expected_kwh_per_kw_day": (
+                    round(float(expected_ratio), 2) if expected_ratio is not None else None
+                ),
                 "ratio_pct": d["ratio_pct"], "measured_days": measured_days,
                 "confidence": d["confidence"],
                 "tilt_assumed": tilt_assumed, "geocode_source": arr.geocode_source,
-                "weather_code": wx_for(arr.latitude, arr.longitude),
+                "weather_code": (wx_for(arr.latitude, arr.longitude) if has_loc else None),
             })
+            if measured_days > 0:
+                kk_act += d["actual_kwh"]
+                kk_np_days += nameplate * measured_days
+                kk_np += nameplate
+                kk_arrays += 1
             fleet_exp += exp_matched
             fleet_act += d["actual_kwh"]
             fleet_exp_all += d["expected_kwh"]
             total_measured_days = max(total_measured_days, measured_days)
-            if rep_inputs is None or nameplate > rep_nameplate:
-                rep_inputs, rep_nameplate = d["inputs"], nameplate
+            # Representative inputs for the card's "How we calculated this": prefer
+            # the biggest WEATHER-modeled array (its inputs show the full model);
+            # fall back to a ratio-based array only when nothing is weather-modeled.
+            is_weather = basis == "weather_model"
+            if (rep_inputs is None or (is_weather and not rep_is_weather)
+                    or (is_weather == rep_is_weather and nameplate > rep_nameplate)):
+                rep_inputs, rep_nameplate, rep_is_weather = d["inputs"], nameplate, is_weather
             for x in d["days"]:
                 if x["sunny"] and x["actual_kwh"] is not None:
                     sunny_rows.append({"array_id": arr.id, "array_name": arr.name, **x})
@@ -4771,6 +4889,18 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
             "confidence": confidence,
             "arrays_modeled": len(rows),
             "arrays_skipped": len(skipped),
+            # How many arrays' "expected" is an operator-entered kWh/kW target
+            # (vs the weather model) — so the UI can footnote the mix honestly.
+            "arrays_ratio_based": ratio_based,
+            # Fleet kWh/kW health headline (Bruce): nameplate-weighted measured
+            # specific yield. UNITS: kWh per kW per DAY, over measured days only —
+            # never extrapolated across unmeasured days.
+            "kwh_per_kw": {
+                "fleet_per_day": (round(kk_act / kk_np_days, 2) if kk_np_days > 0 else None),
+                "nameplate_kw": round(kk_np, 1),
+                "arrays_counted": kk_arrays,
+                "units": "kWh per kW per day, averaged over measured days",
+            },
             "inputs": rep_inputs or {},
             "rows": sorted(rows, key=lambda r: (r["ratio_pct"] is None, r["ratio_pct"] or 0)),
             "skipped": skipped,

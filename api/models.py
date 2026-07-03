@@ -505,6 +505,14 @@ class Array(Base):
     tilt_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
     azimuth_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
     geometry_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 'default' | 'manual'
+    # Operator-entered EXPECTED specific yield for this array, in kWh per kW
+    # PER DAY (e.g. 3.5 = "I expect ~3.5 kWh per installed kW on a typical day
+    # this season"). When set, predicted-vs-actual uses it as the array's
+    # "expected" basis (expected_kwh = ratio × nameplate × days) INSTEAD of the
+    # Open-Meteo weather model — Bruce's ask: the operator knows the site's
+    # unique derates (2014-era panels, rack orientation, wire runs) better than
+    # a generic weather model. NULL = weather back-calculation (the default).
+    expected_kwh_per_kw_day: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # V2 (feat/v2-rec-fuels): the REC-minting fuel this array represents.
     # Allowed values: solar | wind | hydro | digester | storage. Defaults to
