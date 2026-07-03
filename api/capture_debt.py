@@ -16,9 +16,9 @@ any browser (poll_inverter_sources).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 log = logging.getLogger("capture_debt")
 
@@ -32,8 +32,65 @@ EXTENSION_VENDORS = ("fronius", "sma", "chint")
 # the extension's own GMP_RECAP_AHEAD_DAYS so either trigger works).
 GMP_KEEPALIVE_AHEAD_DAYS = 8
 # Co-op (SmartHub) sessions have no tracked expiry — nudge a portal re-visit
-# when the captured token is older than this.
+# when the captured token is older than this. Also the bar for a co-op's browser-
+# fed GENERATION stream going stale (see _stale_coop_providers).
 UTILITY_STALE_DAYS = 5
+
+# Co-op generation only ever arrives via these (client-side, browser-captured)
+# sources. There is deliberately NO server-side SmartHub pull — the NISC usage
+# API is cookie-bound and can't be replayed headlessly (see the unscheduled
+# api/jobs/smarthub_pull.py). 'smarthub' is listed only for forward-compat; it
+# has never produced a row.
+_COOP_GEN_SOURCES = ("utility_meter", "smarthub")
+
+
+def _stale_coop_providers(db, tenant_id: str, today: date | None = None) -> dict[str, dict]:
+    """SmartHub providers whose browser-fed GENERATION stream has gone stale.
+
+    Keyed on the DATA stream (newest DailyGeneration day on any array linked to
+    an enabled SmartHub account), NOT on utility_sessions — because SmartHub
+    meter-captures never carry an apiToken, so they never refresh a session row,
+    so a real co-op customer with fresh browser data but no stored session is
+    INVISIBLE to the session-based loop (prod 2026-07-02: ten_bae078ae4c81bb24,
+    VEC West Glover, had current generation but drain_utilities=[]). Flagging by
+    the data stream instead covers every co-op, session or not, so any waking
+    browser drains it via the extension's recaptureVendor(vec/wec) portal path.
+    SQLAlchemy Core so it runs on both Postgres and SQLite.
+
+    Returns {provider: {"reason": "gen_stale_Nd", "last_day": "YYYY-MM-DD"}}.
+    """
+    from .adapters.smarthub import is_smarthub_provider
+    from .models import DailyGeneration, UtilityAccount
+
+    today = today or datetime.utcnow().date()
+    rows = db.execute(
+        select(UtilityAccount.provider, func.max(DailyGeneration.day))
+        .join(
+            DailyGeneration,
+            (DailyGeneration.array_id == UtilityAccount.array_id)
+            & (DailyGeneration.tenant_id == UtilityAccount.tenant_id),
+        )
+        .where(
+            UtilityAccount.tenant_id == tenant_id,
+            UtilityAccount.array_id.is_not(None),
+            UtilityAccount.enabled.is_(True),
+            UtilityAccount.deleted_at.is_(None),
+            DailyGeneration.source.in_(_COOP_GEN_SOURCES),
+        )
+        .group_by(UtilityAccount.provider)
+    ).all()
+    out: dict[str, dict] = {}
+    for provider, last_day in rows:
+        if not is_smarthub_provider(provider or ""):
+            continue
+        if last_day is None:
+            continue          # never captured → onboarding's problem, not debt
+        behind = (today - last_day).days
+        if behind >= UTILITY_STALE_DAYS:
+            out[provider] = {"reason": "gen_stale_%dd" % behind,
+                             "last_day": last_day.isoformat()}
+    return out
+
 
 # Best-effort duplicate-drain damper: once debt is HANDED to some browser,
 # don't hand the same tenant's debt out again for this long. In-process only
@@ -48,8 +105,10 @@ def compute_capture_debt(db, tenant_id: str) -> dict | None:
 
     Shape (only stale entries appear):
       {"vendors":   {"fronius": {"last_day": "2026-06-29", "days_behind": 3}},
-       "utilities": {"gmp": {"reason": "expires_in_2d"}},
-       "drain": ["fronius"], "drain_chint": true, "keepalive_gmp": true}
+       "utilities": {"gmp": {"reason": "expires_in_2d"},
+                     "vec": {"reason": "gen_stale_6d", "last_day": "2026-06-27"}},
+       "drain": ["fronius"], "drain_chint": true, "keepalive_gmp": true,
+       "drain_utilities": ["vec"]}
     """
     debt_vendors: dict[str, dict] = {}
     debt_utils: dict[str, dict] = {}
@@ -83,6 +142,14 @@ def compute_capture_debt(db, tenant_id: str) -> dict | None:
                 now - captured_at > timedelta(days=UTILITY_STALE_DAYS):
             days = (now - captured_at).days
             debt_utils[provider] = {"reason": "token_age_%dd" % days}
+
+    # Stale co-op GENERATION streams — the signal that actually matters for
+    # SmartHub (there is no server-side pull; the browser is the only source).
+    # This catches co-op customers the session loop above misses entirely
+    # (fresh browser data, no stored session). A data-driven reason wins over a
+    # bare token-age one. Any waking browser then drains them via drain_utilities.
+    for provider, info in _stale_coop_providers(db, tenant_id, today).items():
+        debt_utils[provider] = info
 
     if not debt_vendors and not debt_utils:
         return None
