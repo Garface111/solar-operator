@@ -429,6 +429,47 @@ def test_patch_subscription_sets_and_clears_array_share(client):
     assert r.json()["subscription"]["array_share_pct"] is None
 
 
+def test_share_percents_round_trip_at_three_decimals(client):
+    """Bruce (2026-07-03): the share fields carry 3-decimal PERCENT precision
+    (e.g. 24.783% = 0.24783). Nothing in the pipeline may round the stored
+    fraction: POST keeps it exactly, GET /subscriptions (the list the editor
+    prefills from) returns it exactly, and PATCH (the accordion-editor path)
+    keeps it exactly. The UI renders (value * 100).toFixed(3), so any backend
+    rounding here would corrupt the third decimal on the very next save."""
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid)
+    r = _create_manual(client, auth, customer_name="Three Decimals",
+                       array_id=aid, allocation_pct="0.24783",
+                       array_share_pct="0.31417")
+    assert r.status_code == 200, r.text
+    sub = r.json()["subscription"]
+    sub_id = sub["id"]
+    # Exact float equality on purpose — "0.24783" parses to one double and it
+    # must survive bit-for-bit (Float/DOUBLE PRECISION column, no rounding).
+    assert sub["allocation_pct"] == 0.24783
+    assert sub["array_share_pct"] == 0.31417
+
+    with SessionLocal() as db:
+        s = db.get(BillingReportSubscription, sub_id)
+        assert s.allocation_pct == 0.24783
+        assert s.array_share_pct == 0.31417
+
+    lst = client.get("/v1/array-operator/billing/subscriptions",
+                     headers={"Authorization": auth}).json()
+    row = next(x for x in lst["subscriptions"] if x["id"] == sub_id)
+    assert row["allocation_pct"] == 0.24783
+    assert row["array_share_pct"] == 0.31417
+
+    # PATCH both shares to another 3-decimal value; the third decimal survives.
+    r = client.patch(f"/v1/array-operator/billing/subscriptions/{sub_id}",
+                     json={"allocation_pct": 0.10057, "array_share_pct": 0.10057},
+                     headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    s2 = r.json()["subscription"]
+    assert s2["allocation_pct"] == 0.10057
+    assert s2["array_share_pct"] == 0.10057
+
+
 def test_patch_subscription_with_utility_account_id_succeeds(client):
     """REGRESSION: the edit-offtaker form re-sends utility_account_id on every save
     (the GMP bill picker is pre-selected to the current bill). patch_subscription
