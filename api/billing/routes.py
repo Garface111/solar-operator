@@ -1898,19 +1898,31 @@ def invoice_archive_zip(authorization: Optional[str] = Header(default=None),
 @router.get("/gmp-expected-rate")
 def gmp_expected_rate(authorization: Optional[str] = Header(default=None),
                       year: int = Query(...), month: int = Query(...),
+                      commission_date: Optional[str] = Query(default=None),
                       commission_year: Optional[int] = Query(default=None),
                       age_years: Optional[int] = Query(default=None),
                       regime: Optional[str] = Query(default=None)):
     """Expected GMP $/kWh from the published rate schedule (Anna/Bruce's ask #4).
 
-    An array uses GMP Rate #1 before its 10-year anniversary, the Blended
-    Statewide Rate after — age picks the regime, year+month picks the cell.
-    Feeds the setup page's 'expected billing rate' and a bill-rate cross-check.
-    Reference only; never overrides a bill's own billed rate.
+    An array uses GMP Rate #1 for its first 11 years from its commissioning
+    DATE and the Blended Statewide Rate from the 11-year anniversary on — the
+    boundary is day-accurate (Bruce's C4 ask: a bare year can misclassify an
+    array near the mark; GMP itself has called an array 11 two years early).
+    `commission_date` (YYYY-MM-DD) is preferred; `commission_year` is the
+    legacy year-only path (read as Jan 1 of that year). Age picks the regime,
+    year+month picks the cell. Feeds the setup page's 'expected billing rate'
+    and a bill-rate cross-check. Reference only; never overrides a bill's own
+    billed rate.
     """
     from ..rate_schedule_gmp import expected_gmp_rate as _er
     tenant_from_session(authorization)  # gate to signed-in operators
-    out = _er(year, month, commission_year=commission_year,
+    cd = None
+    if commission_date:
+        try:
+            cd = date.fromisoformat(commission_date[:10])
+        except ValueError:
+            raise HTTPException(400, "commission_date must be YYYY-MM-DD")
+    out = _er(year, month, commission_date=cd, commission_year=commission_year,
               age_years=age_years, regime=regime)
     if out is None:
         raise HTTPException(503, "GMP rate schedule unavailable")
@@ -2027,7 +2039,8 @@ def setup_state(authorization: Optional[str] = Header(default=None)):
 
 
 class ArrayAgeBody(BaseModel):
-    # Either an install year (YYYY) or a full ISO date; year is the friendly path.
+    # Either a full ISO commissioning date (the day-accurate path the UI now
+    # sends — Bruce's C4 ask) or a bare install year (legacy; read as Jan 1).
     install_year: Optional[int] = None
     first_connect_date: Optional[str] = None
     region: Optional[str] = None   # north | central | south (optional location)
@@ -2036,8 +2049,9 @@ class ArrayAgeBody(BaseModel):
 @router.patch("/arrays/{array_id}")
 def set_array_setup(array_id: int, body: ArrayAgeBody,
                     authorization: Optional[str] = Header(default=None)):
-    """Set an array's install age (feeds the auto rate buckets ≤11 vs >11 yr)
-    and optional region. Tenant-scoped. Year is validated to a sane range."""
+    """Set an array's commissioning (in-service) date — feeds the GMP rate
+    regime, day-accurate at the 11-year boundary — and optional region.
+    Tenant-scoped. Both paths are validated to 1990-01-01..today."""
     from datetime import date as _date
     from ..models import Array
     t = tenant_from_session(authorization)
@@ -2048,6 +2062,8 @@ def set_array_setup(array_id: int, body: ArrayAgeBody,
             fc = datetime.fromisoformat(body.first_connect_date[:10])
         except ValueError:
             raise HTTPException(400, "first_connect_date must be YYYY-MM-DD")
+        if fc.date() < _date(1990, 1, 1) or fc.date() > _date.today():
+            raise HTTPException(400, "first_connect_date must be between 1990-01-01 and today")
     elif body.install_year is not None:
         yr = int(body.install_year)
         if yr < 1990 or yr > _date.today().year:
