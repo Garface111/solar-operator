@@ -2049,7 +2049,11 @@ def add_payment_method(authorization: Optional[str] = Header(default=None)):
             customer=customer_id,
             # Return to the product's OWN dashboard. NEPOOL = /accounts (its SPA);
             # Array Operator = site root (its /accounts proxies to the NEPOOL SPA).
-            success_url=f"{branding.dashboard_url(t.product)}/?card_added=1",
+            # session_id lets the landing page confirm the card SYNCHRONOUSLY via
+            # POST /v1/account/confirm-setup instead of racing the webhook —
+            # {CHECKOUT_SESSION_ID} is substituted by Stripe at redirect time.
+            success_url=(f"{branding.dashboard_url(t.product)}/?card_added=1"
+                         "&session_id={CHECKOUT_SESSION_ID}"),
             cancel_url=f"{branding.dashboard_url(t.product)}/?card_cancelled=1",
             setup_intent_data={"metadata": {"tenant_id": t.id}},
             metadata={"tenant_id": t.id},
@@ -2058,6 +2062,77 @@ def add_payment_method(authorization: Optional[str] = Header(default=None)):
         return {"checkout_url": url}
     except stripe.error.StripeError as e:
         raise HTTPException(502, f"Stripe error: {e}")
+
+
+class _ConfirmSetupBody(BaseModel):
+    session_id: str
+
+
+@router.post("/v1/account/confirm-setup")
+def confirm_setup(body: _ConfirmSetupBody,
+                  authorization: Optional[str] = Header(default=None)):
+    """Synchronously confirm a completed Checkout setup session on return.
+
+    The add-card / reactivate success_url carries ?session_id={CHECKOUT_SESSION_ID}.
+    The dashboard posts it here the moment the operator lands back, so the UI can
+    confirm "card saved" instantly instead of racing the setup_intent.succeeded
+    webhook (which can lag by seconds and used to leave the returning operator
+    staring at the same "add a card" nudge they just completed).
+
+    ATTRIBUTION ONLY — stores stripe_payment_method_id / stripe_customer_id on
+    the tenant (the same columns the webhook writes; idempotent whichever lands
+    first). It deliberately does NOT create/resume subscriptions — the webhook
+    remains the single place billing state changes.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(500, "Stripe not configured")
+    sid = (body.session_id or "").strip()
+    if not sid or not sid.startswith("cs_"):
+        raise HTTPException(422, "session_id must be a Stripe Checkout session id")
+    try:
+        sess = stripe.checkout.Session.retrieve(sid)
+    except stripe.error.StripeError as e:
+        raise HTTPException(502, f"Stripe error: {e}")
+    g = (lambda o, k: o.get(k) if isinstance(o, dict) else getattr(o, k, None))
+    meta = g(sess, "metadata") or {}
+    if (meta.get("tenant_id") if isinstance(meta, dict)
+            else getattr(meta, "tenant_id", None)) != t.id:
+        # Never confirm someone else's checkout session onto this tenant.
+        raise HTTPException(403, "This checkout session belongs to a different account.")
+    si_id = g(sess, "setup_intent")
+    pm_id = None
+    customer_id = None
+    if si_id:
+        try:
+            si = stripe.SetupIntent.retrieve(si_id)
+            pm_id = g(si, "payment_method")
+            customer_id = g(si, "customer")
+        except stripe.error.StripeError as e:
+            raise HTTPException(502, f"Stripe error: {e}")
+    if pm_id:
+        with SessionLocal() as db:
+            db_t = db.get(Tenant, t.id)
+            if db_t:
+                db_t.stripe_payment_method_id = pm_id
+                if customer_id:
+                    db_t.stripe_customer_id = customer_id
+                db.commit()
+        try:  # reflect for _card_brief below without a re-read
+            t.stripe_payment_method_id = pm_id
+            if customer_id:
+                t.stripe_customer_id = customer_id
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "ok": True,
+        "card_saved": pm_id is not None,
+        **_card_brief(t),
+        "trial_ends_at": t.trial_ends_at.isoformat() if t.trial_ends_at else None,
+        "subscription_status": t.subscription_status,
+        "active": t.active,
+    }
 
 
 @router.post("/v1/account/reactivate")
@@ -2108,7 +2183,8 @@ def reactivate_account(authorization: Optional[str] = Header(default=None)):
             mode="setup",
             payment_method_types=["card"],
             customer=customer_id,
-            success_url=f"{branding.dashboard_url(t.product)}/?reactivated=1",
+            success_url=(f"{branding.dashboard_url(t.product)}/?reactivated=1"
+                         "&session_id={CHECKOUT_SESSION_ID}"),
             cancel_url=f"{branding.dashboard_url(t.product)}/?reactivate_cancelled=1",
             # reactivate=1 lets the webhook distinguish a reactivation from a
             # plain add-card; it also reactivates on tenant state alone, so this

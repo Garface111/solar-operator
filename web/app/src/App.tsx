@@ -26,6 +26,7 @@ import {
   setSession,
   clearSession,
   verifyLoginToken,
+  confirmCardSetup,
   UNAUTHORIZED_EVENT,
 } from "./lib/api";
 
@@ -77,6 +78,27 @@ function AuthGate() {
     // `session` for forward-compat with the spec's wording) that we exchange
     // for a real session token here.
     const loginToken = params.get("token") ?? params.get("session");
+    // Stripe checkout return (?card_added=1&session_id=… / ?reactivated=1 …):
+    // remember + scrub the params so a refresh doesn't replay them, then
+    // confirm the card below once the session has settled.
+    const checkoutReturn =
+      params.get("card_added") === "1"
+        ? "card_added"
+        : params.get("card_cancelled") === "1"
+          ? "card_cancelled"
+          : params.get("reactivated") === "1"
+            ? "reactivated"
+            : params.get("reactivate_cancelled") === "1"
+              ? "reactivate_cancelled"
+              : null;
+    const checkoutSessionId = params.get("session_id");
+    if (checkoutReturn) {
+      const url = new URL(window.location.href);
+      ["card_added", "card_cancelled", "reactivated", "reactivate_cancelled", "session_id"].forEach(
+        (k) => url.searchParams.delete(k),
+      );
+      window.history.replaceState({}, "", url.toString());
+    }
 
     async function boot() {
       let loginError: string | null = null;
@@ -104,6 +126,35 @@ function AuthGate() {
         return;
       }
       setState(getSession() ? "authed" : "anon");
+      // Landing back from Stripe checkout: confirm the card SYNCHRONOUSLY (no
+      // webhook race) and say so in-product — the operator must never return
+      // to a dashboard that looks like nothing happened.
+      if (checkoutReturn && getSession()) {
+        if (checkoutReturn === "card_added" || checkoutReturn === "reactivated") {
+          let brief = "";
+          if (checkoutSessionId) {
+            try {
+              const d = await confirmCardSetup(checkoutSessionId);
+              if (d.card_brand) {
+                const brand =
+                  d.card_brand.charAt(0).toUpperCase() + d.card_brand.slice(1).toLowerCase();
+                brief = ` — ${brand}${d.card_last4 ? " ···· " + d.card_last4 : ""}`;
+              }
+            } catch {
+              /* best-effort: the webhook attributes the card seconds later */
+            }
+          }
+          if (cancelled) return;
+          toast.success(
+            checkoutReturn === "reactivated"
+              ? `Card saved${brief}. Your subscription is restarting now.`
+              : `Card saved${brief}. Your subscription continues automatically after your free trial — nothing else to do.`,
+          );
+        } else if (checkoutReturn === "card_cancelled") {
+          toast.show("Checkout closed — no card was added and nothing was charged.", "info");
+        }
+        // reactivate_cancelled: silent — the account state speaks for itself.
+      }
     }
 
     boot();

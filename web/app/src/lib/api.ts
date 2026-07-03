@@ -495,6 +495,23 @@ export async function addPaymentMethod(): Promise<void> {
   window.location.href = res.checkout_url;
 }
 
+/** Confirm a completed Checkout setup session the moment the operator lands
+ *  back (?card_added=1&session_id=…). Attribution-only on the backend: stores
+ *  the card on the tenant synchronously so the UI can confirm "card saved"
+ *  without racing the setup_intent.succeeded webhook. */
+export async function confirmCardSetup(sessionId: string): Promise<{
+  ok: boolean;
+  card_saved: boolean;
+  card_brand: string | null;
+  card_last4: string | null;
+  trial_ends_at: string | null;
+}> {
+  return request("/v1/account/confirm-setup", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
 /** Restart a CANCELLED account: returns a Stripe Checkout setup-mode URL and
  *  redirects to it. The setup_intent.succeeded webhook recaptures the card and
  *  starts a fresh PAID subscription with NO trial (create_subscription_for_tenant),

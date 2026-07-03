@@ -101,3 +101,83 @@ def test_add_payment_method_reuses_existing_customer(client):
 def test_add_payment_method_requires_auth(client):
     resp = client.post("/v1/account/add-payment-method")
     assert resp.status_code == 401
+
+
+# ─── POST /v1/account/confirm-setup ─────────────────────────────────────────
+# The success_url return path: the dashboard posts the Checkout session id back
+# so "card saved" confirms synchronously instead of racing the webhook.
+
+def test_success_url_carries_checkout_session_id_template(client):
+    tid, auth = _make_tenant(stripe_customer_id="cus_existing")
+    captured: dict = {}
+    with patch("api.account.stripe") as mock_stripe:
+        def fake_session_create(**kwargs):
+            captured.update(kwargs)
+            return {"url": "https://checkout.stripe.test/cs_setup_3"}
+        mock_stripe.checkout.Session.create.side_effect = fake_session_create
+        resp = client.post("/v1/account/add-payment-method",
+                           headers={"Authorization": auth})
+        assert resp.status_code == 200, resp.text
+    # Literal Stripe template — substituted by Stripe at redirect time.
+    assert "session_id={CHECKOUT_SESSION_ID}" in captured["success_url"]
+
+
+def test_confirm_setup_stores_pm_and_customer(client):
+    tid, auth = _make_tenant()
+    with patch("api.account.stripe") as mock_stripe:
+        mock_stripe.error.StripeError = Exception
+        mock_stripe.checkout.Session.retrieve.return_value = {
+            "id": "cs_test_ok", "metadata": {"tenant_id": tid},
+            "setup_intent": "seti_1",
+        }
+        mock_stripe.SetupIntent.retrieve.return_value = {
+            "id": "seti_1", "payment_method": "pm_123", "customer": "cus_conf",
+        }
+        mock_stripe.PaymentMethod.retrieve.return_value = {
+            "card": {"brand": "visa", "last4": "4242", "exp_month": 4, "exp_year": 2030},
+        }
+        resp = client.post("/v1/account/confirm-setup",
+                           json={"session_id": "cs_test_ok"},
+                           headers={"Authorization": auth})
+    assert resp.status_code == 200, resp.text
+    d = resp.json()
+    assert d["card_saved"] is True
+    # card_brand/last4 are best-effort (_card_brief talks to the real stripe
+    # module, unmockable here) — present in the payload, null in tests.
+    assert "card_last4" in d
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert t.stripe_payment_method_id == "pm_123"
+        assert t.stripe_customer_id == "cus_conf"
+
+
+def test_confirm_setup_rejects_foreign_session(client):
+    """A checkout session minted for ANOTHER tenant must never attach here."""
+    tid, auth = _make_tenant()
+    with patch("api.account.stripe") as mock_stripe:
+        mock_stripe.error.StripeError = Exception
+        mock_stripe.checkout.Session.retrieve.return_value = {
+            "id": "cs_foreign", "metadata": {"tenant_id": "ten_other"},
+            "setup_intent": "seti_x",
+        }
+        resp = client.post("/v1/account/confirm-setup",
+                           json={"session_id": "cs_foreign"},
+                           headers={"Authorization": auth})
+    assert resp.status_code == 403
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert t.stripe_payment_method_id is None
+
+
+def test_confirm_setup_rejects_malformed_session_id(client):
+    tid, auth = _make_tenant()
+    with patch("api.account.stripe"):
+        resp = client.post("/v1/account/confirm-setup",
+                           json={"session_id": "not-a-session"},
+                           headers={"Authorization": auth})
+    assert resp.status_code == 422
+
+
+def test_confirm_setup_requires_auth(client):
+    resp = client.post("/v1/account/confirm-setup", json={"session_id": "cs_x"})
+    assert resp.status_code == 401
