@@ -453,6 +453,76 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
     }
 
 
+# ── Generation-time cross-check (Bruce, 2026-07) ────────────────────────────
+# Share-variance flag threshold, in PERCENTAGE POINTS: GMP's implied share for
+# the offtaker (their credited excess ÷ the array bill's group excess) vs the
+# "Their share of the array (%)" the operator entered. Bruce: "You should pick
+# a threshold for the variance flag. Maybe .1%? This would be a good discussion
+# point with Anna." — so it lives here as ONE named constant, ready to retune
+# after that conversation.
+SHARE_VARIANCE_THRESHOLD_PCT = 0.1
+
+
+def generation_crosscheck(db: Session, sub: BillingReportSubscription) -> Optional[dict]:
+    """Bruce's automatic invoice-time cross-check: runs in the background when an
+    invoice draft is generated and surfaces WITH it — no button, no extra tab.
+
+    Verifies GMP's own numbers against the operator's inputs:
+      • share — the share GMP effectively used (credited ÷ the array bill's
+        group excess) vs the entered share, flagged beyond
+        SHARE_VARIANCE_THRESHOLD_PCT percentage points;
+      • kWh — the credited excess vs share × the array bill's pool, flagged
+        beyond the same _ALLOC_TOL_KWH the audit surfaces use (this is what
+        catches Bruce's real worked example, where the share variance itself
+        is only ~0.009 points).
+    `flagged` is the OR of the two, so the invoice-time check is never weaker
+    than the audit sandbox. Per Bruce there is deliberately NO rate-vs-published-
+    schedule comparison here — the bill's own scraped credit rate is the billing
+    truth (the GMP schedule stays a passive reference on the setup form).
+
+    Reuses reconcile_subscription — the SAME engine behind /reconcile-bills and
+    the audit sandbox — so the numbers can never drift between surfaces. Fail-
+    soft BY DESIGN: any state where the check can't run honestly (no settled
+    bill, no entered share, single-meter setup, no offtaker account/bill)
+    returns None; generation is never blocked and no verdict is fabricated.
+    """
+    try:
+        rep = reconcile_subscription(db, sub)
+    except Exception:  # noqa: BLE001 — the cross-check must never break generation
+        return None
+    alloc = (rep or {}).get("allocation") or {}
+    if alloc.get("status") not in ("match", "mismatch"):
+        return None                       # honest can't-run states → no verdict
+    credited = alloc.get("offtaker_credited_kwh")
+    expected = alloc.get("expected_kwh")
+    master = alloc.get("array_group_excess_kwh")
+    if credited is None or expected is None or not master:
+        return None
+    computed_share = float(credited) / float(master) * 100.0
+    per_array = alloc.get("per_array") or []
+    if len(per_array) == 1 and per_array[0].get("share"):
+        # Single-array (the normal case): show the exact share the operator typed.
+        entered_share = float(per_array[0]["share"]) * 100.0
+    else:
+        # Multi-array: the effective blended share the entered values imply.
+        entered_share = float(expected) / float(master) * 100.0
+    variance = computed_share - entered_share
+    flagged = (abs(variance) > SHARE_VARIANCE_THRESHOLD_PCT
+               or alloc.get("status") == "mismatch")
+    return {
+        "computed_share_pct": round(computed_share, 4),
+        "entered_share_pct": round(entered_share, 4),
+        "variance_pct": round(variance, 4),
+        "kwh_master": round(float(master), 1),
+        "kwh_offtaker_expected": round(float(expected), 1),
+        "kwh_offtaker_credited": round(float(credited), 1),
+        "delta_kwh": alloc.get("delta_kwh"),
+        "delta_dollars": alloc.get("delta_dollars"),
+        "flagged": flagged,
+        "threshold_pct": SHARE_VARIANCE_THRESHOLD_PCT,
+    }
+
+
 def reconcile_tenant(db: Session, tenant_id: str) -> dict:
     """Reconcile every active subscription for a tenant. Summary + per-sub rows."""
     subs = db.execute(

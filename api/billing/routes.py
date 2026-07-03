@@ -1905,8 +1905,11 @@ def gmp_expected_rate(authorization: Optional[str] = Header(default=None),
 
     An array uses GMP Rate #1 before its 10-year anniversary, the Blended
     Statewide Rate after — age picks the regime, year+month picks the cell.
-    Feeds the setup page's 'expected billing rate' and a bill-rate cross-check.
-    Reference only; never overrides a bill's own billed rate.
+    Feeds the setup page's passive 'expected billing rate' hint ONLY. Per Bruce
+    (2026-07) this is deliberately NOT an active rate-vs-bill cross-check: the
+    schedule needs hand-maintenance and can slip, while the bill's own scraped
+    credit rate is the billing truth — so no flag ever raises from this, and it
+    never overrides a bill's own billed rate.
     """
     from ..rate_schedule_gmp import expected_gmp_rate as _er
     tenant_from_session(authorization)  # gate to signed-in operators
@@ -2881,6 +2884,17 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         if existing is None:
             db.add(d)
         db.commit()
+        # Bruce's automatic cross-check (2026-07): at the moment an invoice is
+        # generated, verify GMP's allocation against the operator's entered share
+        # in the background and surface the verdict WITH the draft — the check
+        # "pops up when an invoice is generated", no button. Single-subscription
+        # only (~tens of ms); the batch surface stays /reconcile-bills. Fail-soft
+        # by contract: a cross-check that can't run is null, never a blocker.
+        try:
+            from .reconcile_bills import generation_crosscheck
+            crosscheck = generation_crosscheck(db, sub)
+        except Exception:  # noqa: BLE001 — never block a draft on the cross-check
+            crosscheck = None
         # Pass `sub` so the recompute response carries the SUBSCRIPTION-derived fields
         # (budget_amount_usd + the CALCULATED solar_credit_value) — without it the
         # frontend's post-edit refresh got nulls, so the "How we calculated" panel lost
@@ -2889,7 +2903,8 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         return {"ok": True, "draft": _draft_dict(
             d, sub=sub,
             gmp_auto_status=_resolve_gmp_auto_status(db, sub),
-            operator_name=getattr(t, "name", None))}
+            operator_name=getattr(t, "name", None)),
+            "crosscheck": crosscheck}
 
 
 @router.post("/drafts/{draft_id}/gmp-invoice")
