@@ -192,8 +192,12 @@ def test_forecast_fleet_ratio_override_models_without_location(client):
     # A: 100 kW, NO location, operator expected 3.0 → modeled on the ratio basis
     a = _make_array(tid, "Ratio Array", nameplate_kw=100, expected_ratio=3.0)
     _add_daily(tid, a, [(end, 250.0), (end - timedelta(days=1), 250.0)])
-    # B: no location, no override → honestly skipped
+    # B: no location, no override → honestly skipped (but see C)
     b = _make_array(tid, "Unlocated", nameplate_kw=50)
+    # C: no location, no override, BUT measured data → skipped from the weather
+    # model yet still carries kWh/kW (the health ranking needs no weather model)
+    c = _make_array(tid, "Unlocated Measured", nameplate_kw=50)
+    _add_daily(tid, c, [(end, 100.0), (end - timedelta(days=1), 100.0)])
 
     r = client.get("/v1/array-owners/forecast-fleet?window_days=10", headers=_auth(key))
     assert r.status_code == 200, r.text
@@ -214,15 +218,23 @@ def test_forecast_fleet_ratio_override_models_without_location(client):
     assert row["ratio_pct"] == round(500 / 600 * 100)
     assert row["weather_code"] is None            # no location → no sky claim
 
-    # fleet kWh/kW headline: nameplate-weighted, measured days only
+    # fleet kWh/kW headline: nameplate-weighted, measured days only, and it
+    # INCLUDES the unlocated-but-measured array C:
+    # (500 + 200) kWh ÷ (100×2 + 50×2) kW·days = 700/300 ≈ 2.33
     kk = body["kwh_per_kw"]
-    assert kk["fleet_per_day"] == 2.5
-    assert kk["nameplate_kw"] == 100.0
-    assert kk["arrays_counted"] == 1
+    assert kk["fleet_per_day"] == round(700 / 300, 2)
+    assert kk["nameplate_kw"] == 150.0
+    assert kk["arrays_counted"] == 2
     assert "per day" in kk["units"]
 
-    skipped = {s["array_id"]: s["reason"] for s in body["skipped"]}
-    assert skipped[b] == "no_location"
+    skipped = {s["array_id"]: s for s in body["skipped"]}
+    assert skipped[b]["reason"] == "no_location"
+    assert "kwh_per_kw_day" not in skipped[b]      # no data → no number, no fake
+    # C is still skipped from the weather model but carries its measured kWh/kW
+    assert skipped[c]["reason"] == "no_location"
+    assert skipped[c]["kwh_per_kw_day"] == 2.0     # 200 ÷ 50 kW ÷ 2 days
+    assert skipped[c]["kwh_per_kw_window"] == 4.0
+    assert skipped[c]["measured_days"] == 2
 
 
 def test_forecast_fleet_weather_mode_carries_kwh_per_kw(client, monkeypatch):

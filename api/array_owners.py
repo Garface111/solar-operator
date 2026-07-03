@@ -4661,6 +4661,31 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
         kk_np = 0.0
         kk_arrays = 0
 
+        def _skip_with_measured_kk(arr, nameplate: float, reason: str) -> None:
+            """Record a skip — but when the array has a nameplate AND measured
+            days, still carry its kWh/kW (Bruce's headline health metric needs
+            only actual ÷ kW, no weather model) so the ranking isn't blind to
+            un-geocoded arrays. Counted into the fleet kWh/kW aggregate too."""
+            nonlocal kk_act, kk_np_days, kk_np, kk_arrays
+            entry: dict = {"array_id": arr.id, "array_name": arr.name, "reason": reason}
+            if nameplate > 0:
+                by_day = _clean_actual_by_day(db, arr, start, end)
+                mdays = len(by_day)
+                if mdays > 0:
+                    act = sum(by_day.values())
+                    entry.update({
+                        "nameplate_kw": round(nameplate, 1),
+                        "measured_days": mdays,
+                        "actual_kwh": round(act, 1),
+                        "kwh_per_kw_day": round(act / nameplate / mdays, 2),
+                        "kwh_per_kw_window": round(act / nameplate, 1),
+                    })
+                    kk_act += act
+                    kk_np_days += nameplate * mdays
+                    kk_np += nameplate
+                    kk_arrays += 1
+            skipped.append(entry)
+
         for arr in arrays:
             nameplate = _array_nameplate_kw(db, arr)
             if nameplate <= 0:
@@ -4671,7 +4696,7 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
             expected_ratio = arr.expected_kwh_per_kw_day
             has_loc = _ensure_array_geocoded(db, arr)
             if expected_ratio is None and not has_loc:
-                skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "no_location"})
+                _skip_with_measured_kk(arr, nameplate, "no_location")
                 continue
 
             tilt_assumed = arr.tilt_deg is None
@@ -4684,7 +4709,7 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
             if expected_ratio is None:
                 poa_by_day = poa_for(arr.latitude, arr.longitude, tilt, az)
                 if not poa_by_day:
-                    skipped.append({"array_id": arr.id, "array_name": arr.name, "reason": "irradiance_unavailable"})
+                    _skip_with_measured_kk(arr, nameplate, "irradiance_unavailable")
                     continue
 
             actual_by_day = _clean_actual_by_day(db, arr, start, end)
