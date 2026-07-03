@@ -793,6 +793,19 @@ async def _create_manual_subscription(
                 raise HTTPException(
                     400, "Offtaker reports bind to a GMP or VEC/SmartHub utility "
                          "account (utility-bill data only).")
+            # Self-heal the account ↔ array link (Bruce, 2026-07-03): a freshly
+            # captured GMP account lands with array_id = NULL until it's matched
+            # to an array, which left the add-offtaker bill picker empty even
+            # though every bill was downloaded. When the operator explicitly
+            # binds this account while creating an offtaker for a named array,
+            # record that link so the group resolves silently ("Invoices
+            # from: …") on the next add. Never re-links an account already tied
+            # to a different array — an explicit prior binding wins.
+            if acct.array_id is None and array_id is not None:
+                _heal_arr = db.get(Array, array_id)
+                if (_heal_arr is not None and _heal_arr.tenant_id == t.id
+                        and _heal_arr.deleted_at is None):
+                    acct.array_id = array_id
             # Quarterly cadence for a GMP (bill-priced) offtaker aggregates the
             # FULL quarter — delivery sums all three monthly bills and HOLDS the
             # invoice until every month's bill has landed (never bills short).
