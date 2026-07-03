@@ -236,6 +236,13 @@ def main():
             ))
             print("  + tenants.email_signoff")
 
+        # 2026-07-03 AO offtaker invoice email mass template (Anna-scale ask):
+        # the letter above the figures on every offtaker invoice email.
+        for col in ("offtaker_email_subject_template", "offtaker_email_body_template"):
+            if not column_exists(conn, "tenants", col):
+                conn.execute(text(f"ALTER TABLE tenants ADD COLUMN {col} TEXT"))
+                print(f"  + tenants.{col}")
+
         # 2026-06 W2-6: per-client email delivery health (Resend webhook).
         delivery_health_cols = [
             ("last_delivered_at",

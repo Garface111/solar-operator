@@ -171,6 +171,13 @@ class Tenant(Base):
     email_signoff: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Merge-tag templates ({{client_name}}, {{tenant_name}}, {{quarter}}, …).
     # null → built-in default template.
+    # Array Operator: the OFFTAKER invoice email's mass template (the letter
+    # above the figures table on every offtaker invoice email). Same merge-tag
+    # engine, offtaker-specific tag set ({{greeting}}, {{offtaker_first_name}},
+    # {{period}}, {{kwh}}, {{amount}}, …). null → built-in default. The
+    # sign-off is shared with email_signoff above (one operator identity).
+    offtaker_email_subject_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    offtaker_email_body_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     send_mode: Mapped[str] = mapped_column(String(20), default="to_client")
     # to_client = primary recipient is the client (+ cc tenant if cc_on_reports)
     # to_me     = primary recipient is tenant.contact_email (tenant forwards);

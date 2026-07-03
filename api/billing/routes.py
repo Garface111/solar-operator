@@ -2655,8 +2655,62 @@ def _calc_credit_for_budget(sub):
         return None
 
 
-def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=None) -> dict:
+def _draft_letter_default(d: ReportDraft, sub, email_fields: dict) -> Optional[dict]:
+    """{'letter': plain-text mass-template letter, 'subject': rendered subject}
+    for THIS draft — what the send uses when the operator hasn't written a
+    note, so the card's 'Edit email' box + envelope prefill with exactly what
+    would go out. Rendered from the draft's own snapshot figures (no
+    build_match). email_fields comes from delivery._offtaker_email_fields —
+    fetch it ONCE per request and share it across a draft loop (a per-draft
+    fetch would be the next N+1)."""
+    if not email_fields:
+        return None
+    try:
+        from ..email_templates import (DEFAULT_OFFTAKER_BODY_TEMPLATE,
+                                       DEFAULT_OFFTAKER_SUBJECT_TEMPLATE,
+                                       build_offtaker_context, render_merge,
+                                       html_to_text)
+        from .delivery import _attachments_line
+        kwh_s = (f"{d.customer_kwh:,.0f} kWh" if d.customer_kwh is not None
+                 else "your production")
+        amount_s = (f"${d.amount_usd:,.2f}" if d.amount_usd is not None
+                    else "the amount due")
+        ctx = build_offtaker_context(
+            offtaker_name=((getattr(sub, "customer_name", None) or d.customer_name)
+                           if sub else d.customer_name),
+            tenant_name=email_fields.get("tenant_name") or "your solar provider",
+            tenant_email=email_fields.get("tenant_email", ""),
+            period=(d.period_label or "the latest period"),
+            kwh=kwh_s, amount=amount_s,
+            invoice_number=str(d.invoice_number or ""),
+            attachments_line=_attachments_line(
+                getattr(sub, "auto_attach_gmp", True) is not False if sub else True,
+                getattr(sub, "include_summary", False) is True if sub else False),
+            signoff_template=email_fields.get("signoff_t"),
+            tenant_signoff_name=email_fields.get("signoff_name"),
+        )
+        body_t = (email_fields.get("body_t") or "").strip() or DEFAULT_OFFTAKER_BODY_TEMPLATE
+        subj_t = (email_fields.get("subject_t") or "").strip() or DEFAULT_OFFTAKER_SUBJECT_TEMPLATE
+        subject = render_merge(subj_t, ctx)
+        if not ctx["invoice_number"]:
+            subject = subject.replace(" ()", "")
+        return {"letter": html_to_text(render_merge(body_t, ctx)),
+                "subject": subject}
+    except Exception:  # noqa: BLE001 — the prefill is a nicety, never break a draft
+        logger.exception("draft letter-default render failed")
+        return None
+
+
+def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=None,
+                email_fields: Optional[dict] = None) -> dict:
+    _letter = (_draft_letter_default(d, sub, email_fields)
+               if email_fields else None) or {}
     return {
+        # The mass-template letter + subject rendered for this draft — the
+        # operator's per-draft note overrides the letter; None when
+        # email_fields wasn't supplied (payloads that don't render the email).
+        "email_letter_default": _letter.get("letter"),
+        "email_subject_default": _letter.get("subject"),
         "id": d.id,
         "subscription_id": d.subscription_id,
         # Display name follows the LIVE subscription (renaming the offtaker
@@ -2751,12 +2805,17 @@ def list_drafts(status: str = Query(default="pending"),
         if status != "all":
             q = q.where(ReportDraft.status == status)
         rows = db.execute(q.order_by(ReportDraft.created_at.desc())).scalars().all()
+        # One tenant fetch for the mass-template fields, shared by every draft
+        # in the loop (per-draft fetches would be the next 800-scale N+1).
+        from .delivery import _offtaker_email_fields
+        email_fields = _offtaker_email_fields(t.id)
         out = []
         for d in rows:
             sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
             out.append(_draft_dict(d, sub=sub,
                                    gmp_auto_status=_resolve_gmp_auto_status(db, sub),
-                                   operator_name=getattr(t, "name", None)))
+                                   operator_name=getattr(t, "name", None),
+                                   email_fields=email_fields))
         return {"drafts": out}
 
 
@@ -2886,10 +2945,12 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         # frontend's post-edit refresh got nulls, so the "How we calculated" panel lost
         # the budget split and back-derived a fake rate (budget ÷ kWh) from amount_usd,
         # and the email preview collapsed to one row. Mirror the /drafts list overlay.
+        from .delivery import _offtaker_email_fields
         return {"ok": True, "draft": _draft_dict(
             d, sub=sub,
             gmp_auto_status=_resolve_gmp_auto_status(db, sub),
-            operator_name=getattr(t, "name", None))}
+            operator_name=getattr(t, "name", None),
+            email_fields=_offtaker_email_fields(t.id))}
 
 
 @router.post("/drafts/{draft_id}/gmp-invoice")
@@ -3664,3 +3725,285 @@ def get_gmp_bill_file(bill_id: int, authorization: Optional[str] = Header(defaul
         return StreamingResponse(io.BytesIO(b.pdf_bytes),
             media_type=b.pdf_content_type or "application/pdf",
             headers={"Content-Disposition": "inline; filename=gmp_bill.pdf"})
+
+
+# ─── Offtaker invoice email — MASS TEMPLATE studio (Anna-scale ask) ──────────
+# The letter at the top of every offtaker invoice email is a tenant-wide
+# merge-tag template (same engine + studio UX as the NEPOOL report-email
+# customizer; offtaker tag set). A per-draft note still overrides the letter
+# for that one send. Endpoints mirror api/account.py's suite so the studio
+# frontend contract is identical.
+
+class _OfftakerTemplateBody(BaseModel):
+    subject_template: Optional[str] = None
+    body_template: Optional[str] = None
+    signoff: Optional[str] = None
+
+
+class _OfftakerChatBody(BaseModel):
+    messages: list[dict]
+    current_body: str
+    current_subject: Optional[str] = None
+
+
+def _sample_offtaker_ctx(db, t) -> tuple[dict, Optional[str], Optional[str]]:
+    """(merge_ctx, sample_name, sample_email) for the studio preview, using the
+    tenant's FIRST enabled offtaker with an email + their REAL current invoice
+    figures (build_match), so the preview shows true numbers like the NEPOOL
+    studio previews with a real client. Falls back to canned sample values."""
+    from ..email_templates import build_offtaker_context
+    from .delivery import _attachments_line
+
+    sub = db.execute(
+        select(BillingReportSubscription).where(
+            BillingReportSubscription.tenant_id == t.id,
+            BillingReportSubscription.enabled == True,  # noqa: E712
+            BillingReportSubscription.deleted_at.is_(None),
+            BillingReportSubscription.client_email.is_not(None),
+        ).order_by(BillingReportSubscription.customer_name.asc()).limit(1)
+    ).scalars().first()
+
+    name, email = "Sample Offtaker", None
+    period, ps, pe = "the latest period", "", ""
+    kwh_s, amount_s, inv_no = "1,265 kWh", "$190.20", "2026-06"
+    has_summary = False
+    if sub is not None:
+        name, email = sub.customer_name, sub.client_email
+        has_summary = sub.include_summary is True
+        try:
+            ci = (build_match(sub).computed_invoice or {})
+            if ci.get("period_start") and ci.get("period_end"):
+                ps, pe = str(ci["period_start"]), str(ci["period_end"])
+                period = f"{ps} → {pe}"
+            if ci.get("kwh") is not None:
+                kwh_s = f"{ci['kwh']:,.0f} kWh"
+            if isinstance(ci.get("amount_owed"), (int, float)):
+                amount_s = f"${ci['amount_owed']:,.2f}"
+            if ci.get("invoice_number"):
+                inv_no = str(ci["invoice_number"])
+        except Exception:  # noqa: BLE001 — canned values are fine for a preview
+            logger.exception("sample offtaker preview build failed")
+
+    tenant_name = t.company_name or t.operator_name or t.name or "Your Company"
+    ctx = build_offtaker_context(
+        offtaker_name=name,
+        tenant_name=tenant_name,
+        tenant_email=(t.contact_email or ""),
+        period=period, period_start=ps, period_end=pe,
+        kwh=kwh_s, amount=amount_s, invoice_number=inv_no,
+        attachments_line=_attachments_line(True, has_summary),
+        signoff_template=t.email_signoff,
+        tenant_signoff_name=(t.send_from_name or t.operator_name),
+    )
+    return ctx, (sub.customer_name if sub else None), email
+
+
+@router.get("/email-template")
+def get_offtaker_email_template(authorization: Optional[str] = Header(default=None)):
+    """The tenant's offtaker invoice email template, with resolved defaults."""
+    from ..email_templates import (
+        DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
+        DEFAULT_SIGNOFF, OFFTAKER_ALLOWED_MERGE_TAGS,
+    )
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        sample = db.execute(
+            select(BillingReportSubscription).where(
+                BillingReportSubscription.tenant_id == t.id,
+                BillingReportSubscription.enabled == True,  # noqa: E712
+                BillingReportSubscription.deleted_at.is_(None),
+                BillingReportSubscription.client_email.is_not(None),
+            ).order_by(BillingReportSubscription.customer_name.asc()).limit(1)
+        ).scalars().first()
+        return {
+            "subject_template": t.offtaker_email_subject_template
+                                or DEFAULT_OFFTAKER_SUBJECT_TEMPLATE,
+            "body_template": t.offtaker_email_body_template
+                             or DEFAULT_OFFTAKER_BODY_TEMPLATE,
+            "signoff": t.email_signoff or DEFAULT_SIGNOFF,
+            "is_default_subject": t.offtaker_email_subject_template is None,
+            "is_default_body": t.offtaker_email_body_template is None,
+            "is_default_signoff": t.email_signoff is None,
+            "from_email": t.send_from_email or t.contact_email,
+            "available_tokens": sorted(OFFTAKER_ALLOWED_MERGE_TAGS),
+            "has_client_with_email": sample is not None,
+            "sample_client_email": sample.client_email if sample else None,
+        }
+
+
+@router.post("/email-template/preview")
+def preview_offtaker_email_template(body: _OfftakerTemplateBody,
+                                    authorization: Optional[str] = Header(default=None)):
+    """Render the proposed template with a REAL sample offtaker's figures."""
+    from ..email_templates import (
+        DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
+        DEFAULT_SIGNOFF, render_merge,
+    )
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        stored_subject = t.offtaker_email_subject_template
+        stored_body = t.offtaker_email_body_template
+        # Request body overrides stored; stored overrides default — same
+        # resolution as the send path, so the preview IS the send.
+        signoff_t = (body.signoff or "").strip() or t.email_signoff or DEFAULT_SIGNOFF
+        t.email_signoff = signoff_t     # in-memory only, feeds ctx below
+        ctx, sample_name, _ = _sample_offtaker_ctx(db, t)
+        db.rollback()                   # never persist the preview signoff
+    subj_t = (body.subject_template or "").strip() or stored_subject \
+        or DEFAULT_OFFTAKER_SUBJECT_TEMPLATE
+    body_t = (body.body_template or "").strip() or stored_body \
+        or DEFAULT_OFFTAKER_BODY_TEMPLATE
+    return {
+        "subject_rendered": render_merge(subj_t, ctx),
+        "body_rendered": render_merge(body_t, ctx),
+        "sample_client": sample_name or "Sample Offtaker",
+    }
+
+
+@router.post("/email-template/chat")
+def chat_offtaker_email_template(body: _OfftakerChatBody,
+                                 authorization: Optional[str] = Header(default=None)):
+    """AI assistant: regenerate the offtaker template from the conversation."""
+    import os as _os
+    from ..email_templates import (
+        regenerate_template_via_ai, _OFFTAKER_TEMPLATE_SYSTEM_PROMPT,
+        OFFTAKER_ALLOWED_MERGE_TAGS, DEFAULT_OFFTAKER_SUBJECT_TEMPLATE,
+    )
+    tenant_from_session(authorization)
+    api_key = _os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "AI assistant not configured — set ANTHROPIC_API_KEY")
+    recent = body.messages[-10:]
+    for m in recent:
+        if m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str):
+            raise HTTPException(400, "Each message must have role user|assistant and string content")
+    current_subject = (body.current_subject or "").strip() or DEFAULT_OFFTAKER_SUBJECT_TEMPLATE
+    try:
+        result = regenerate_template_via_ai(
+            current_body=body.current_body,
+            current_subject=current_subject,
+            messages=recent,
+            api_key=api_key,
+            system_prompt=_OFFTAKER_TEMPLATE_SYSTEM_PROMPT,
+            allowed_tags=OFFTAKER_ALLOWED_MERGE_TAGS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Offtaker template AI regen failed")
+        raise HTTPException(502, f"AI request failed: {exc}") from exc
+    return {
+        "assistant_reply": result["reply"],
+        "proposed_body": result["body"],
+        "proposed_subject": result["subject"],
+    }
+
+
+@router.put("/email-template")
+def save_offtaker_email_template(body: _OfftakerTemplateBody,
+                                 authorization: Optional[str] = Header(default=None)):
+    """Persist the tenant's offtaker email template (null/blank → default)."""
+    from ..email_templates import unknown_tags, OFFTAKER_ALLOWED_MERGE_TAGS
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    for field, value in [("subject_template", body.subject_template),
+                         ("body_template", body.body_template)]:
+        if value:
+            bad = unknown_tags(value, OFFTAKER_ALLOWED_MERGE_TAGS)
+            if bad:
+                listed = ", ".join("{{" + tag + "}}" for tag in sorted(bad))
+                raise HTTPException(422, f"Unknown merge tags in {field}: {listed}")
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        if body.subject_template is not None:
+            t.offtaker_email_subject_template = (body.subject_template or "").strip() or None
+        if body.body_template is not None:
+            t.offtaker_email_body_template = (body.body_template or "").strip() or None
+        db.commit()
+        return {"ok": True,
+                "subject_template": t.offtaker_email_subject_template,
+                "body_template": t.offtaker_email_body_template}
+
+
+@router.put("/email-template/signoff")
+def save_offtaker_email_signoff(body: _OfftakerTemplateBody,
+                                authorization: Optional[str] = Header(default=None)):
+    """Persist the SHARED operator sign-off (same block the NEPOOL report email
+    uses — one operator identity across products). null/blank → default."""
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.email_signoff = (body.signoff or "").strip() or None
+        db.commit()
+        return {"ok": True, "signoff": t.email_signoff}
+
+
+@router.post("/email-template/test-send")
+def test_send_offtaker_email_template(body: _OfftakerTemplateBody,
+                                      authorization: Optional[str] = Header(default=None)):
+    """Send a [TEST] of the proposed template (real sample figures) to the operator."""
+    from ..email_templates import (
+        DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
+        DEFAULT_SIGNOFF, render_merge, html_to_text,
+    )
+    from ..models import Tenant
+    from ..notify import _send_via_resend
+    from ..email_skin import render_email_skin, render_email_skin_text
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    to_email = (t.contact_email or "").strip()
+    if not to_email:
+        raise HTTPException(422, "Add an email address to your account first.")
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        stored_subject = t.offtaker_email_subject_template
+        stored_body = t.offtaker_email_body_template
+        signoff_t = (body.signoff or "").strip() or t.email_signoff or DEFAULT_SIGNOFF
+        t.email_signoff = signoff_t
+        ctx, sample_name, _ = _sample_offtaker_ctx(db, t)
+        operator = t.company_name or t.operator_name or t.name or "your solar provider"
+        db.rollback()
+    subj_t = (body.subject_template or "").strip() or stored_subject \
+        or DEFAULT_OFFTAKER_SUBJECT_TEMPLATE
+    body_t = (body.body_template or "").strip() or stored_body \
+        or DEFAULT_OFFTAKER_BODY_TEMPLATE
+    subject = render_merge(subj_t, ctx)
+    letter = render_merge(body_t, ctx)
+    html = render_email_skin(
+        preheader="Test of your offtaker invoice email template.",
+        headline="Your solar credit invoice",
+        intro_line=(sample_name or "sample offtaker"),
+        body_html=letter,
+        footer_line=f"Solar credit invoice from {operator}.  ·  Questions? just reply to this email.",
+        wordmark=operator, product="array_operator")
+    sent = _send_via_resend(
+        to=to_email, subject=f"[TEST] {subject}", html=html,
+        text=render_email_skin_text(
+            headline="Your solar credit invoice",
+            intro_line=(sample_name or "sample offtaker"),
+            body_text=html_to_text(letter), wordmark=operator,
+            product="array_operator"),
+        product="array_operator")
+    if not sent:
+        raise HTTPException(502, "Email delivery failed — check your Resend configuration.")
+    return {"ok": True, "sent_to": to_email}
+
+
+@router.post("/email-template/reset")
+def reset_offtaker_email_template(authorization: Optional[str] = Header(default=None)):
+    """Revert the offtaker subject/body to the built-in defaults. The shared
+    sign-off is left alone (the NEPOOL report email uses it too)."""
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.offtaker_email_subject_template = None
+        t.offtaker_email_body_template = None
+        db.commit()
+    return {"ok": True}

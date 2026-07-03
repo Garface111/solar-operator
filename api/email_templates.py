@@ -163,9 +163,10 @@ def extract_tags(template: str) -> set[str]:
     return set(_TAG_RE.findall(template))
 
 
-def unknown_tags(template: str) -> set[str]:
-    """Tags used in `template` that are NOT in the canonical allowlist."""
-    return extract_tags(template) - ALLOWED_MERGE_TAGS
+def unknown_tags(template: str, allowed: frozenset[str] = ALLOWED_MERGE_TAGS) -> set[str]:
+    """Tags used in `template` that are NOT in the given allowlist
+    (defaults to the NEPOOL client-report tag set)."""
+    return extract_tags(template) - allowed
 
 
 def render_merge(template: str, ctx: dict) -> str:
@@ -294,6 +295,86 @@ def resolve_from_header(send_from_email: Optional[str],
     return f"{name} <{email}>" if name else email
 
 
+# ── Array Operator: OFFTAKER invoice email template ─────────────────────────
+# Same merge-tag engine, offtaker-specific tag set. This template is the
+# LETTER at the top of every offtaker invoice email (the figures table, the
+# attachments, and the email skin stay system-rendered below it). A per-draft
+# operator note, when present, REPLACES the letter for that one send —
+# explicit always beats the mass template.
+
+OFFTAKER_ALLOWED_MERGE_TAGS = frozenset({
+    "greeting",
+    "offtaker_name",
+    "offtaker_first_name",
+    "period",
+    "period_start",
+    "period_end",
+    "kwh",
+    "amount",
+    "invoice_number",
+    "tenant_name",
+    "company_name",
+    "operator_name",
+    "tenant_email_line",
+    "attachments_line",
+    "signoff",
+})
+
+DEFAULT_OFFTAKER_SUBJECT_TEMPLATE = (
+    "Your solar credit invoice — {{offtaker_name}} ({{invoice_number}})"
+)
+
+DEFAULT_OFFTAKER_BODY_TEMPLATE = (
+    "<p>{{greeting}},</p>"
+    "<p>Attached is your solar credit invoice for {{period}}. Your share of the"
+    " array's production this period came to <strong>{{kwh}}</strong>, for a"
+    " total of <strong>{{amount}}</strong>.</p>"
+    "<p>{{attachments_line}} If anything looks off, just reply to this email"
+    " and we'll take a look together.</p>"
+    "<p>Thanks for going solar!</p>"
+    "{{signoff}}"
+)
+
+
+def build_offtaker_context(*, offtaker_name: str, tenant_name: str,
+                           tenant_email: str = "",
+                           period: str = "", period_start: str = "",
+                           period_end: str = "", kwh: str = "",
+                           amount: str = "", invoice_number: str = "",
+                           attachments_line: str = "",
+                           signoff_template: Optional[str] = None,
+                           tenant_signoff_name: Optional[str] = None) -> dict:
+    """Merge-tag context for ONE offtaker's invoice email. All value tokens
+    arrive pre-formatted strings (e.g. kwh='1,265 kWh', amount='$190.20') so
+    the template layer never re-does number formatting."""
+    email = (tenant_email or "").strip()
+    tenant_email_line = f"<br>{email}" if email else ""
+    signoff_t = (signoff_template or "").strip() or DEFAULT_SIGNOFF
+    effective_signoff_name = (tenant_signoff_name or "").strip() or tenant_name
+    rendered_signoff = render_merge(signoff_t, {
+        "tenant_name": effective_signoff_name,
+        "tenant_email": email,
+        "tenant_email_line": tenant_email_line,
+    })
+    return {
+        "offtaker_name": offtaker_name,
+        "offtaker_first_name": derive_client_first_name(offtaker_name) or offtaker_name,
+        "greeting": derive_greeting(offtaker_name),
+        "period": period,
+        "period_start": period_start,
+        "period_end": period_end,
+        "kwh": kwh,
+        "amount": amount,
+        "invoice_number": invoice_number,
+        "tenant_name": tenant_name,
+        "company_name": tenant_name,
+        "operator_name": effective_signoff_name,
+        "tenant_email_line": tenant_email_line,
+        "attachments_line": attachments_line,
+        "signoff": rendered_signoff,
+    }
+
+
 # ── AI template regeneration ──────────────────────────────────────────────────
 
 _TEMPLATE_SYSTEM_PROMPT = (
@@ -351,22 +432,69 @@ _TEMPLATE_SYSTEM_PROMPT = (
 )
 
 
+# Offtaker-invoice variant of the system prompt: same guardrails, the
+# offtaker tag set, and invoice-letter context instead of quarterly reports.
+_OFFTAKER_TEMPLATE_SYSTEM_PROMPT = (
+    "You are a writing assistant helping a community-solar operator customize "
+    "the email that delivers each offtaker's monthly solar credit invoice.\n\n"
+    "THE ONLY MERGE TAGS THAT EXIST IN THE SYSTEM ARE:\n"
+    "  {{greeting}}, {{offtaker_name}}, {{offtaker_first_name}}, {{period}},\n"
+    "  {{period_start}}, {{period_end}}, {{kwh}}, {{amount}}, {{invoice_number}},\n"
+    "  {{tenant_name}}, {{company_name}}, {{operator_name}}, {{tenant_email_line}},\n"
+    "  {{attachments_line}}, {{signoff}}\n\n"
+    "WHEN TO USE WHICH NAME TAG:\n"
+    "- {{greeting}} is the smart auto-pick: 'Hi <first>' for people (e.g. 'Hi "
+    "Abigail') and 'Dear <full name>' for organizations (e.g. 'Dear Hartland "
+    "Feed & Grain'). USE {{greeting}} as the default opening line.\n"
+    "- {{offtaker_first_name}} forces a first-name greeting; {{offtaker_name}} "
+    "is the formal full name.\n\n"
+    "VALUE TAGS: {{kwh}} renders like '1,265 kWh', {{amount}} like '$190.20', "
+    "{{period}} like '2026-06-01 → 2026-06-30'. {{attachments_line}} renders a "
+    "system-written sentence about which files are attached (invoice PDF, the "
+    "GMP source bill, an optional production summary) — keep it unless the "
+    "operator asks to drop it.\n\n"
+    "NOTE: the email ALWAYS shows a small figures table (billing period / "
+    "production / amount due) below this letter, and the invoice PDF is always "
+    "attached — the letter doesn't need to repeat every number.\n\n"
+    "CRITICAL RULES:\n"
+    "- You may ONLY use the tags listed above. Do NOT invent new merge tags — "
+    "they DO NOT EXIST and will render as raw broken text in the customer's "
+    "inbox.\n"
+    "- If the operator asks for content backed by a value that isn't in the "
+    "allowlist, write plain prose instead, OR say in your 'reply' that the "
+    "value isn't available and suggest the closest supported tag.\n"
+    "- Preserve any allowlisted {{...}} merge tags exactly.\n"
+    "- The body is simple HTML: only <p>, <br>, <a href='...'>, <b>, <strong>, <em> tags.\n"
+    "- Keep a warm, plain-English tone — these go to households and small "
+    "businesses, not lawyers.\n\n"
+    "Respond ONLY with a JSON object, NO markdown fences, with this exact shape:\n"
+    '{"reply": "Brief 1-2 sentence description of what you changed", '
+    '"body": "complete updated HTML body template", '
+    '"subject": null}'
+    "\nSet subject to null when unchanged, or to the new subject string if you changed it."
+)
+
+
 def regenerate_template_via_ai(
     *,
     current_body: str,
     current_subject: str,
     messages: list[dict],
     api_key: str,
+    system_prompt: str = _TEMPLATE_SYSTEM_PROMPT,
+    allowed_tags: frozenset[str] = ALLOWED_MERGE_TAGS,
 ) -> dict:
     """Call Anthropic to regenerate the email template body/subject.
 
     messages is the full conversation history [{role, content}].
+    system_prompt/allowed_tags default to the NEPOOL client-report variant;
+    the AO offtaker studio passes its own prompt + tag set.
     Returns {'reply': str, 'body': str, 'subject': str | None}.
     Raises httpx.HTTPStatusError on API failure, ValueError on bad JSON.
     """
     model = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5")
     system = (
-        f"{_TEMPLATE_SYSTEM_PROMPT}\n\n"
+        f"{system_prompt}\n\n"
         f"Current subject template:\n{current_subject}\n\n"
         f"Current body template:\n{current_body}"
     )
@@ -404,15 +532,16 @@ def regenerate_template_via_ai(
         "reply": _augment_reply_with_strip_notice(
             str(result.get("reply") or "Updated."),
             stripped_subject=_strip_unknown_tags_collect(
-                result.get("subject"), label="subject"
+                result.get("subject"), allowed=allowed_tags
             ),
             stripped_body=_strip_unknown_tags_collect(
-                result.get("body"), label="body"
+                result.get("body"), allowed=allowed_tags
             ),
         ),
-        "body": _strip_unknown_tags(str(result.get("body") or current_body)),
+        "body": _strip_unknown_tags(str(result.get("body") or current_body),
+                                    allowed=allowed_tags),
         "subject": (
-            _strip_unknown_tags(result["subject"])
+            _strip_unknown_tags(result["subject"], allowed=allowed_tags)
             if isinstance(result.get("subject"), str)
             else result.get("subject")
         ),
@@ -421,7 +550,8 @@ def regenerate_template_via_ai(
 
 # ── Server-side guardrail: strip any merge tag the AI invented ────────────────
 
-def _strip_unknown_tags(template: str | None) -> str | None:
+def _strip_unknown_tags(template: str | None,
+                        allowed: frozenset[str] = ALLOWED_MERGE_TAGS) -> str | None:
     """Replace any non-allowlisted {{tag}} in `template` with neutral prose.
 
     The system prompt tells the LLM not to invent tags, but we treat that as
@@ -435,17 +565,19 @@ def _strip_unknown_tags(template: str | None) -> str | None:
 
     def replace(m: re.Match) -> str:
         key = m.group(1)
-        if key in ALLOWED_MERGE_TAGS:
+        if key in allowed:
             return m.group(0)
         return "[…]"
 
     return _TAG_RE.sub(replace, template)
 
 
-def _strip_unknown_tags_collect(template, *, label: str) -> list[str]:
+def _strip_unknown_tags_collect(template, *,
+                                allowed: frozenset[str] = ALLOWED_MERGE_TAGS,
+                                label: str = "") -> list[str]:
     if not isinstance(template, str):
         return []
-    return sorted(unknown_tags(template))
+    return sorted(unknown_tags(template, allowed))
 
 
 def _augment_reply_with_strip_notice(

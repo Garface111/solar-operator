@@ -1533,8 +1533,47 @@ def _b64(path: pathlib.Path) -> dict:
             "content": base64.b64encode(path.read_bytes()).decode()}
 
 
+def _offtaker_email_fields(tenant_id) -> dict:
+    """One fetch of the tenant fields the offtaker invoice email letter needs:
+    the mass template (subject/body), the shared sign-off, and the operator
+    identity. Empty dict when the tenant can't be resolved."""
+    from ..db import SessionLocal
+    from ..models import Tenant
+    if not tenant_id:
+        return {}
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            return {}
+        return {
+            "subject_t": getattr(t, "offtaker_email_subject_template", None),
+            "body_t": getattr(t, "offtaker_email_body_template", None),
+            "signoff_t": getattr(t, "email_signoff", None),
+            "tenant_name": (t.company_name or t.operator_name or t.name),
+            "tenant_email": (t.contact_email or ""),
+            "signoff_name": (t.send_from_name or t.operator_name),
+        }
+
+
+def _attachments_line(has_gmp: bool, has_summary: bool) -> str:
+    """The {{attachments_line}} prose — only ever claims files that are there."""
+    extras = []
+    if has_gmp:
+        extras.append("the GMP source bill behind it (so you can see exactly "
+                      "how the amount was calculated)")
+    if has_summary:
+        extras.append("a production summary")
+    return ("Your full invoice is attached"
+            + (", along with " + " and ".join(extras) if extras else "") + ".")
+
+
 def _email_html(match: BillingMatch, sub, is_test: bool,
-                note: Optional[str] = None) -> tuple[str, str, str]:
+                note: Optional[str] = None,
+                attachment_names: Optional[list[str]] = None) -> tuple[str, str, str]:
+    from ..email_templates import (
+        DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
+        build_offtaker_context, render_merge, html_to_text,
+    )
     inv = match.computed_invoice or {}
     cust = match.customer.get("name") or sub.customer_name or "your array"
     period = ""
@@ -1548,7 +1587,42 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         '<p style="background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.35);'
         'color:#ffb454;padding:10px 14px;border-radius:8px;margin:0 0 16px;font-size:13px;">'
         'Test send — this went to you, not the customer.</p>' if is_test else "")
-    subject = f"Your solar credit invoice — {cust}" + (f" ({inv.get('invoice_number')})" if inv.get("invoice_number") else "")
+
+    # ── The LETTER: the tenant's mass template, rendered per offtaker ────────
+    # (Ford, 2026-07-03: "the email should automatically say hi <offtaker name>
+    # and be a little longer" — the letter is now merge-tag templated, editable
+    # in the AO email studio, with the same engine as the NEPOOL customizer.)
+    fields = _offtaker_email_fields(getattr(sub, "tenant_id", None))
+    operator = fields.get("tenant_name") or "your solar provider"
+    if attachment_names is not None:
+        # Real send: derive from the actual files going out — never overclaim.
+        _names = [n.lower() for n in attachment_names]
+        has_gmp_att = any("gmp" in n for n in _names)
+        has_summary_att = any("summary" in n for n in _names)
+    else:
+        # Preview path (no file list yet): mirror the sub's settings, same as
+        # the dashboard's draft preview does.
+        has_gmp_att = (getattr(sub, "auto_attach_gmp", True) is not False
+                       or bool(getattr(sub, "gmp_invoice_pdf", None)))
+        has_summary_att = getattr(sub, "include_summary", False) is True
+    ctx = build_offtaker_context(
+        offtaker_name=cust,
+        tenant_name=operator,
+        tenant_email=fields.get("tenant_email", ""),
+        period=(period or "the latest period"),
+        period_start=(inv.get("period_start") or ""),
+        period_end=(inv.get("period_end") or ""),
+        kwh=f"{kwh:,.0f} kWh",
+        amount=amount_str,
+        invoice_number=str(inv.get("invoice_number") or ""),
+        attachments_line=_attachments_line(has_gmp_att, has_summary_att),
+        signoff_template=fields.get("signoff_t"),
+        tenant_signoff_name=fields.get("signoff_name"),
+    )
+    subj_t = (fields.get("subject_t") or "").strip() or DEFAULT_OFFTAKER_SUBJECT_TEMPLATE
+    subject = render_merge(subj_t, ctx)
+    if not ctx["invoice_number"]:
+        subject = subject.replace(" ()", "")   # default template's empty-number parens
 
     def _row(label, val, strong=False):
         pad = "10px" if strong else "6px"
@@ -1569,9 +1643,12 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
                      f'{safe}</div>')
         note_text = note.strip() + "\n\n"
 
-    intro_para = ("" if note_html
-                  else f'<p>Here is the solar credit invoice for <strong>{cust}</strong>'
-                       f'{f" — {period}" if period else ""}.</p>')
+    # No per-draft note → the tenant's mass template letter (default: a warm
+    # personalized "Hi <first name>" letter). A note REPLACES the letter for
+    # that one send — the operator's explicit words always win.
+    letter_html = ("" if note_html
+                   else render_merge((fields.get("body_t") or "").strip()
+                                     or DEFAULT_OFFTAKER_BODY_TEMPLATE, ctx))
     # Budget billing shows TWO distinct figures — the calculated solar credit value
     # AND the fixed budgeted amount actually billed; otherwise just the one amount due.
     budget_override = bool(inv.get("budget_override"))
@@ -1586,20 +1663,42 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     else:
         amount_rows_html = _row("Solar credit value due", amount_str, strong=True)
         amount_rows_text = f"Solar credit value due: {amount_str}\n"
-    body_html = (
-        f"{test_banner}"
-        f"{note_html}"
-        f"{intro_para}"
+    figures_table = (
         f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
         f'{_row("Billing period", period or "—")}'
         f'{_row("Your production", f"{kwh:,.0f} kWh")}'
         f'{amount_rows_html}'
         f"</table>"
-        f'<p style="margin-top:18px;">The full invoice'
-        f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
     )
+    if note_html:
+        # Per-draft note: the operator wrote this send's letter — keep the
+        # legacy composition (note + figures + attachment line) exactly.
+        body_html = (
+            f"{test_banner}{note_html}{figures_table}"
+            f'<p style="margin-top:18px;">The full invoice'
+            f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
+        )
+        body_text = (
+            f"{note_text}"
+            f"Solar credit invoice for {cust}\n\n"
+            f"Billing period: {period or '—'}\n"
+            f"Your production: {kwh:,.0f} kWh\n"
+            f"{amount_rows_text}\n"
+            f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
+            f"Questions? Just reply to this email."
+        )
+    else:
+        # Mass-template letter (already carries greeting, attachments prose and
+        # the sign-off) + the figures table as the receipt beneath it.
+        body_html = f"{test_banner}{letter_html}{figures_table}"
+        body_text = (
+            f"{html_to_text(letter_html)}\n\n"
+            f"Billing period: {period or '—'}\n"
+            f"Your production: {kwh:,.0f} kWh\n"
+            f"{amount_rows_text}\n"
+            f"Questions? Just reply to this email."
+        )
     # White-label: the offtaker should see THEIR operator, never Array Operator.
-    operator = _operator_company_name(getattr(sub, "tenant_id", None)) or "your solar provider"
     html = render_email_skin(
         preheader=f"Your solar credit invoice for {cust} is attached.",
         headline="Your solar credit invoice",
@@ -1612,15 +1711,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     text = render_email_skin_text(
         headline="Your solar credit invoice",
         intro_line=(period or cust),
-        body_text=(
-            f"{note_text}"
-            f"Solar credit invoice for {cust}\n\n"
-            f"Billing period: {period or '—'}\n"
-            f"Your production: {kwh:,.0f} kWh\n"
-            f"{amount_rows_text}\n"
-            f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
-            f"Questions? Just reply to this email."
-        ),
+        body_text=body_text,
         wordmark=operator,
         product="array_operator",
     )
@@ -1776,7 +1867,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             logger.exception("billing render failed")
             return {"ok": False, "error": f"render failed: {e}"}
         attachments = [_b64(p) for p in paths]
-        subject, html, text = _email_html(match, sub, is_test, note=note)
+        subject, html, text = _email_html(match, sub, is_test, note=note,
+                                          attachment_names=[p.name for p in paths])
 
         # White-label the sender: the offtaker sees the OPERATOR, not Array
         # Operator. Send under the operator's name — from their own verified
