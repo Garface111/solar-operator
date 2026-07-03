@@ -1,17 +1,24 @@
 """
-SmartHub server-side daily generation pull.
+SmartHub server-side daily generation pull — ⚠️ DEAD END, NOT SCHEDULED.
 
-Pulls daily generation data from the SmartHub JSON API for arrays whose
-utility accounts have a stored authorizationToken (captured by the extension
-during login). Upserts into the DailyGeneration table.
+HISTORY (so nobody resurrects this): the v1.9.25 design assumed the extension-
+captured authorizationToken could drive server-side pulls. A live VEC HAR proved
+it can't — SmartHub's usage API authenticates with the owner's httpOnly session
+COOKIE, which the backend can never replay (see smarthub_content.js v1.9.26).
+In practice prod sessions don't even carry a token (api_token empty on every
+co-op row, audited 2026-07-02), and the nightly job produced ZERO
+DailyGeneration rows in its entire life before being unscheduled (2026-07-02).
 
-Requires that the extension has already:
-  1. Captured the authorizationToken from the SmartHub login response
-  2. Stored it in UtilitySession.api_token via /v1/sync
+THE REAL PIPELINE: the extension pulls daily generation CLIENT-side, same-origin
+(smarthub_content.js → utility-meter-capture endpoint → source='utility_meter'),
+triggered on portal visits and nudged by the capture-debt system; staleness is
+alarmed by scheduler.coop_session_death_warnings.
+
+This module is retained ONLY for dev tooling (scripts/provision_customer_zero,
+scripts/verify_smarthub_generation) and its upsert-shape tests. Do not schedule
+it; do not present it as a data source.
 
 Entry point: pull_daily_generation_for_account()
-
-If no valid session exists, the function skips silently — no error, no data.
 Re-running the same date range is safe (upsert by array_id + day).
 """
 from __future__ import annotations

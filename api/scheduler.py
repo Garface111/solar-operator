@@ -1215,18 +1215,15 @@ def start():
         CronTrigger(hour=3, minute=0),
         id="inverter_daily_pull", replace_existing=True,
     )
-    # Daily at 03:05 UTC: pull daily generation for every SmartHub (VEC/WEC/
-    # Stowe/…) array that has a captured session token. SmartHub bills carry NO
-    # generation kWh — a net-metering solar account's production lives only in
-    # the usage API — so this server-side pull is what feeds DailyGeneration
-    # (and therefore Trends + NEPOOL reports) for those accounts. Skips arrays
-    # without a stored token (extension must capture the authorizationToken).
-    scheduler.add_job(
-        _run_smarthub_pull,
-        CronTrigger(hour=3, minute=5),
-        id="smarthub_daily_pull", replace_existing=True,
-        max_instances=1, coalesce=True,
-    )
+    # NOTE — there is deliberately NO server-side SmartHub pull job. The v1.9.25
+    # design (jobs/smarthub_pull.py riding a stored authorizationToken) was proven
+    # wrong on a live VEC HAR: SmartHub's usage API authenticates with the owner's
+    # httpOnly session COOKIE, which the backend can never replay. The job ran
+    # nightly for weeks and produced ZERO rows ever (audited 2026-07-02). Co-op
+    # daily generation arrives via the extension's CLIENT-side pull
+    # (smarthub_content.js v1.9.26 → utility-meter-capture → source='utility_meter'),
+    # nudged by the capture-debt system when stale, and its death is alarmed by
+    # coop_session_death_warnings. Do not re-add this job.
     # Daily at 04:15 UTC: SELF-HEALING deep-history backfill. The 03:00 pull only
     # reaches ~90 days, so a newly-connected inverter shows just the current year
     # in Trends. This heals any connection whose full multi-year history hasn't
@@ -1548,28 +1545,6 @@ def _run_inverter_pull() -> None:
         send_internal_alert(
             "Inverter daily pull: unhandled exception",
             f"The inverter daily pull job raised an unexpected error:\n{exc}",
-        )
-
-
-def _run_smarthub_pull() -> None:
-    """Pull daily generation for every SmartHub (VEC/WEC/Stowe/…) array that has
-    a captured session token. SmartHub bills carry no generation kWh, so this
-    server-side usage-API pull is the authoritative DailyGeneration source for
-    those net-metering accounts."""
-    try:
-        from .jobs.smarthub_pull import pull_all_smarthub
-        result = pull_all_smarthub()
-        logger.info(
-            "smarthub_daily_pull: processed=%d with_data=%d inserted=%d "
-            "updated=%d skipped=%d errors=%d",
-            result.get("arrays_processed", 0), result.get("arrays_with_data", 0),
-            result.get("inserted", 0), result.get("updated", 0),
-            result.get("skipped", 0), result.get("errors", 0),
-        )
-    except Exception as exc:
-        send_internal_alert(
-            "SmartHub daily pull: unhandled exception",
-            f"The SmartHub daily generation pull job raised an unexpected error:\n{exc}",
         )
 
 
