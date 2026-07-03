@@ -1844,6 +1844,21 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
                           or "waiting on the utility bill for this period"),
                 "triggered_by": triggered_by}
 
+    # ── exactly-once for DRAFTS too (caught at 800-offtaker scale) ───────────
+    # deliver_subscription refuses to re-SEND an already-sent period, but until
+    # a NEW bill lands the freshly-built invoice is still for that same period —
+    # without this mirror every scheduler tick after an approval re-drafts a
+    # phantom "ready to review" (at Anna scale: hundreds on the 1st of every
+    # month) whose approval the send guard would then refuse anyway. Skip
+    # WITHOUT stamping next_send_at so the real draft appears the moment the
+    # next bill lands (same retry semantics as the bill-hold above).
+    _pe_key = ci.get("period_end")
+    if _pe_key and getattr(sub, "last_sent_period_end", None) == _pe_key:
+        return {"ok": False, "skipped": True, "already_sent": True,
+                "error": (f"The invoice for {_pe_key} was already sent — waiting "
+                          "on the next utility bill before drafting again."),
+                "triggered_by": triggered_by}
+
     inv_no = ci.get("invoice_number")
     period_label = None
     if ci.get("period_start") or ci.get("period_end"):

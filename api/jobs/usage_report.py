@@ -96,6 +96,9 @@ def report_usage_for_all_owners() -> dict:
                 Tenant.product == "array_operator",
                 Tenant.subscription_status == "active",
                 Tenant.stripe_subscription_id.isnot(None),
+                # Belt-and-suspenders: a demo tenant must NEVER reach a live
+                # meter, even if someone hand-attaches a Stripe sub to one.
+                Tenant.is_demo.is_(False),
             )
         ).scalars().all()
         targets = [(t.id, t.contact_email, t.stripe_subscription_id) for t in owners]

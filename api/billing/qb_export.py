@@ -104,7 +104,8 @@ def build_invoice_register(
     subs = db.execute(
         select(BillingReportSubscription).where(
             BillingReportSubscription.tenant_id == tenant_id,
-            BillingReportSubscription.deleted_at.is_(None))
+            BillingReportSubscription.deleted_at.is_(None),
+            BillingReportSubscription.enabled == True)  # noqa: E712
         .order_by(BillingReportSubscription.customer_name)
     ).scalars().all()
 
@@ -122,6 +123,16 @@ def build_invoice_register(
         try:
             match = build_match(sub)
             if not match.matched or not match.latest_period:
+                continue
+            # Mirror the send gate (delivery.deliver_subscription): a manual
+            # (non-workbook) offtaker with no settled utility bill would be
+            # REFUSED a send — its telemetry-derived figure must not land in
+            # the operator's accounting export as a receivable either. Caught
+            # at 800-offtaker scale: unbound/held offtakers exported non-zero
+            # fabricated rows.
+            ci = match.computed_invoice or {}
+            if (not getattr(sub, "source_workbook", None)
+                    and ci.get("has_utility_bill") is not True):
                 continue
             inv = invoice_for_period(match, match.latest_period, invoice_date)
             f = _invoice_fields(inv, sub)
