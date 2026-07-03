@@ -323,6 +323,59 @@
     return out;   // possibly empty — caller retries next poll (SPA may still load)
   }
 
+  // Pick the right series out of a /measurements/search response.
+  // PROD BUG (C9 — Bruce's "Timberworks made 180 kWh" Analysis spotlight,
+  // 2026-07-03): querying the PLANT componentId can come back with MULTIPLE
+  // TotWhOut.Pv series (per device), and blindly taking the FIRST one shipped
+  // inverter #1's ~180 kWh/day history as the whole 150 kW site's daily series
+  // (true site day ≈ 1,276 kWh) — a 7× understatement that read as a fake
+  // catastrophic deficit. Prefer the series whose componentId matches the one
+  // we asked for; only then fall back to channel-match / any-values (the
+  // single-series response shapes).
+  function pickHistorySeries(res, componentId) {
+    if (!Array.isArray(res)) return null;
+    const CH = "Measurement.Metering.TotWhOut.Pv";
+    const want = String(componentId);
+    return (
+      res.find((s) => s && String(s.componentId) === want && s.channelId === CH)
+      || res.find((s) => s && String(s.componentId) === want && Array.isArray(s.values))
+      || res.find((s) => s && s.channelId === CH)
+      || res.find((s) => s && Array.isArray(s.values))
+      || null
+    );
+  }
+
+  // SITE-DAILY HONESTY GUARD (pure; unit-tested). A site's daily total can
+  // never be LESS than the sum of its own inverters' readings for the same
+  // date. Prod ground truth (2026-07-03, Timberworks 150kW / plant 8296660):
+  // the plant-level history series carried ONE inverter's days (179.59 kWh on
+  // 2026-06-29) while the per-inverter histories for the same date summed to
+  // 1,111+ kWh — the backend stored the single-inverter number as the ARRAY's
+  // day and the Analysis tab showed "made 180 kWh vs 930 expected — 19%".
+  // Reconcile: per date, take max(site series, Σ per-inverter series); dates
+  // only the inverter histories know about are included (real measured days).
+  function reconcileSiteDaily(daily, inverters) {
+    const byDate = {};
+    for (const p of (daily || [])) {
+      if (p && p.date && typeof p.kwh === "number" && isFinite(p.kwh) && p.kwh >= 0) {
+        byDate[p.date] = p.kwh;
+      }
+    }
+    const invSum = {};
+    for (const iv of (inverters || [])) {
+      for (const p of ((iv && iv.daily) || [])) {
+        if (p && p.date && typeof p.kwh === "number" && isFinite(p.kwh) && p.kwh >= 0) {
+          invSum[p.date] = (invSum[p.date] || 0) + p.kwh;
+        }
+      }
+    }
+    for (const d of Object.keys(invSum)) {
+      const s = Math.round(invSum[d] * 100) / 100;
+      if (!(d in byDate) || byDate[d] < s) byDate[d] = s;
+    }
+    return Object.keys(byDate).sort().map((d) => ({ date: d, kwh: byDate[d] }));
+  }
+
   // Daily-kWh HISTORY for any component (plant OR device) for instant graph
   // backfill on connect. SMA exposes historical daily energy via POST
   // /measurements/search with the metering channel at OneDay + Dif (Wh/day).
@@ -349,10 +402,7 @@
     let res;
     try { res = await postJson(UIAPI + "/api/v1/measurements/search", body); }
     catch (e) { LOG("history search failed (skipped):", componentId, e && e.message || e); return []; }
-    const series = Array.isArray(res)
-      ? (res.find((s) => s && s.channelId === "Measurement.Metering.TotWhOut.Pv")
-          || res.find((s) => s && Array.isArray(s.values)))
-      : null;
+    const series = pickHistorySeries(res, componentId);
     const values = (series && Array.isArray(series.values)) ? series.values : [];
     const out = [];
     for (const v of values) {
@@ -481,6 +531,9 @@
       }
       delete iv._componentId;                         // strip temp field before send
     }
+    // Never ship a site-daily below the sum of its own inverters' days (the C9
+    // single-inverter-series bug) — see reconcileSiteDaily above.
+    daily = reconcileSiteDaily(daily, inverters);
     LOG("SMA history:", plantId, daily.length, "site-day(s);",
         inverters.filter((iv) => (iv.daily || []).length).length, "inv w/ history");
 
@@ -594,7 +647,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       _soCoerceNum, _soValidLatLng, _soExtractAddress, findLocation, applyLocation,
-      nameplateKw, deriveStatus,
+      nameplateKw, deriveStatus, pickHistorySeries, reconcileSiteDaily,
     };
   }
 

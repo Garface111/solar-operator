@@ -4360,11 +4360,37 @@ def _set_array_location(db, arr, *, lat=None, lng=None, address=None,
     return False
 
 
+# An array-day reading is CONTRADICTED by its own inverters when it falls below
+# this fraction of the same day's per-inverter telemetry sum. A site total can
+# never truly be less than the sum of its parts; the margin only absorbs
+# capture-timing skew between the site-level and per-inverter reads.
+_INV_SUM_AGREE_FRACTION = 0.85
+
+
 def _clean_actual_by_day(db, arr, start: date, end: date) -> dict:
     """{iso_day: kwh} of REAL measured single-day generation in [start,end].
     Excludes bill_prorate + utility_meter (monthly-bill smears) so a daily
     predicted-vs-actual isn't distorted by a 2000-kWh monthly meter total landing
-    on one day. See forecasting.MEASURED_DAILY_SOURCES."""
+    on one day. See forecasting.MEASURED_DAILY_SOURCES.
+
+    DATA-HONESTY CROSS-CHECK (C9 — Bruce's "Timberworks made 180 kWh vs 930
+    expected — 19%" clearest-day spotlight, 2026-07-03). Each array-day value is
+    cross-checked against the SUM of the array's own per-inverter InverterDaily
+    rows for that day: a site total can never be LESS than the sum of its own
+    inverters' measured readings. Prod ground truth: an SMA capture glitch stored
+    ONE inverter's daily series (179.59 kWh) as the whole 150 kW array's day while
+    the same day's 7 InverterDaily rows summed to 1,111.4 (true site day 1,275.9,
+    confirmed by Bruce's GMP + SMA statements) — the spotlight then presented a
+    false catastrophic deficit and inflated "energy at risk". Resolution per day:
+      * streams agree (DailyGeneration ≥ 85% of the inverter sum) → keep the
+        LARGER reading (the most-complete measured source);
+      * DailyGeneration contradicted + EVERY live inverter reported that day →
+        use the inverter sum (complete sibling telemetry beats a provably-partial
+        array row);
+      * DailyGeneration contradicted + only SOME inverters reported → the sum is
+        just a lower bound; DROP the day entirely — fewer correct datapoints beat
+        a wrong scary one (never present knowingly-partial data as truth).
+    Days with no InverterDaily siblings keep today's behavior unchanged."""
     from . import forecasting
     rows = db.execute(
         select(DailyGeneration).where(
@@ -4381,6 +4407,61 @@ def _clean_actual_by_day(db, arr, start: date, end: date) -> dict:
             continue
         # last-writer-wins per day (upsert means at most one row anyway)
         out[r.day.isoformat()] = float(r.kwh)
+    if not out:
+        return out
+
+    # Per-inverter telemetry cross-check (measured sources only, live inverters).
+    inv_ids = db.execute(
+        select(Inverter.id).where(
+            Inverter.array_id == arr.id,
+            Inverter.deleted_at.is_(None),
+        )
+    ).scalars().all()
+    if not inv_ids:
+        return out
+    inv_rows = db.execute(
+        select(InverterDaily).where(
+            InverterDaily.inverter_id.in_(inv_ids),
+            InverterDaily.day >= start,
+            InverterDaily.day <= end,
+        )
+    ).scalars().all()
+    inv_sum: dict[str, float] = {}
+    inv_count: dict[str, int] = {}
+    for r in inv_rows:
+        if (r.source or "").lower() not in forecasting.MEASURED_DAILY_SOURCES:
+            continue
+        if r.kwh is None or r.kwh < 0:
+            continue
+        iso = r.day.isoformat()
+        inv_sum[iso] = inv_sum.get(iso, 0.0) + float(r.kwh)
+        inv_count[iso] = inv_count.get(iso, 0) + 1
+
+    for iso, dg in list(out.items()):
+        sib = inv_sum.get(iso)
+        if sib is None or sib <= 0:
+            continue                       # nothing to cross-check against
+        if dg >= sib * _INV_SUM_AGREE_FRACTION:
+            out[iso] = max(dg, sib)        # consistent — most-complete wins
+        elif inv_count.get(iso, 0) >= len(inv_ids):
+            # Array row provably partial; COMPLETE sibling telemetry replaces it.
+            log.warning(
+                "forecast actual: array %s day %s DailyGeneration %.1f kWh contradicted "
+                "by its own %d-inverter sum %.1f kWh — using the inverter sum "
+                "(single-inverter/partial array row, see C9 Timberworks)",
+                arr.id, iso, dg, inv_count.get(iso, 0), sib,
+            )
+            out[iso] = sib
+        else:
+            # Contradicted AND the sibling sum itself is incomplete — no honest
+            # number exists for this day; drop it from the comparison.
+            log.warning(
+                "forecast actual: array %s day %s DailyGeneration %.1f kWh contradicted "
+                "by a PARTIAL inverter sum %.1f kWh (%d/%d inverters) — day excluded "
+                "from predicted-vs-actual rather than shown as a false deficit",
+                arr.id, iso, dg, sib, inv_count.get(iso, 0), len(inv_ids),
+            )
+            del out[iso]
     return out
 
 
