@@ -255,36 +255,45 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
                 UtilityAccount.deleted_at.is_(None),
             ).order_by(UtilityAccount.nickname, UtilityAccount.account_number)
         ).scalars().all()
+        # Batched bill summary — the per-account latest-bill + count pair was
+        # ~2,500 queries at 828 accounts (5.3s of the Reports tab's list-bundle;
+        # caught at Anna scale). Two grouped queries + one arrays map instead.
+        acct_ids = [a.id for a in accts]
+        counts: dict[int, int] = {}
+        latest_by_acct: dict[int, tuple] = {}   # account_id -> (period_end, kwh)
+        if acct_ids:
+            for aid, n in db.execute(
+                    select(Bill.account_id, func.count(Bill.id))
+                    .where(Bill.account_id.in_(acct_ids),
+                           Bill.kwh_generated.isnot(None))
+                    .group_by(Bill.account_id)):
+                counts[aid] = int(n or 0)
+            for aid, pe, kwh in db.execute(
+                    select(Bill.account_id, Bill.period_end, Bill.kwh_generated)
+                    .where(Bill.account_id.in_(acct_ids),
+                           Bill.kwh_generated.isnot(None),
+                           Bill.period_end.isnot(None))
+                    .order_by(Bill.account_id, Bill.period_end.desc())):
+                if aid not in latest_by_acct:
+                    latest_by_acct[aid] = (pe, kwh)
+        arr_ids = {a.array_id for a in accts if a.array_id}
+        arr_names = ({aid: nm for aid, nm in db.execute(
+                          select(Array.id, Array.name).where(Array.id.in_(arr_ids)))}
+                     if arr_ids else {})
         for a in accts:
-            # Latest bill that actually carries generation for this account.
-            latest = db.execute(
-                select(Bill)
-                .where(Bill.account_id == a.id,
-                       Bill.kwh_generated.isnot(None),
-                       Bill.period_end.isnot(None))
-                .order_by(Bill.period_end.desc())
-            ).scalars().first()
-            bill_count = db.execute(
-                select(func.count(Bill.id)).where(
-                    Bill.account_id == a.id,
-                    Bill.kwh_generated.isnot(None))
-            ).scalar() or 0
-            arr = db.get(Array, a.array_id) if a.array_id else None
+            pe, kwh = latest_by_acct.get(a.id, (None, None))
             out.append({
                 "utility_account_id": a.id,
                 "account_number": a.account_number,
                 "nickname": a.nickname,
                 "provider": a.provider,
                 "array_id": a.array_id,
-                "array_name": arr.name if arr else None,
-                "bill_count": int(bill_count),
-                "has_bill": latest is not None,
-                "latest_period_end": latest.period_end.date().isoformat()
-                    if latest and latest.period_end else None,
-                "latest_period_label": latest.period_end.strftime("%Y-%m")
-                    if latest and latest.period_end else None,
-                "latest_kwh_generated": (int(latest.kwh_generated)
-                    if latest and latest.kwh_generated is not None else None),
+                "array_name": arr_names.get(a.array_id),
+                "bill_count": counts.get(a.id, 0),
+                "has_bill": pe is not None,
+                "latest_period_end": pe.date().isoformat() if pe else None,
+                "latest_period_label": pe.strftime("%Y-%m") if pe else None,
+                "latest_kwh_generated": (int(kwh) if kwh is not None else None),
             })
     return {"ok": True, "utility_accounts": out}
 
