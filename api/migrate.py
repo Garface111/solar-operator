@@ -330,6 +330,15 @@ def main():
         if _fc_added:
             print(f"  + arrays forecast geo/geometry cols: {_fc_added}")
 
+        # 2026-07-03 Analysis leads with kWh/kW (Bruce): operator-entered expected
+        # specific yield, kWh per kW PER DAY. NULLable → existing arrays untouched;
+        # NULL means "use the weather back-calculation" (unchanged behavior).
+        if not column_exists(conn, "arrays", "expected_kwh_per_kw_day"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN expected_kwh_per_kw_day DOUBLE PRECISION"
+            ))
+            print("  + arrays.expected_kwh_per_kw_day")
+
         # 2026-06-04 VEC auto-populate: mirror of GMP triple for VEC provider.
         vec_cols = [
             ("clients", "vec_email",

@@ -290,7 +290,7 @@ def expected_kwh_from_poa(nameplate_kw: float, poa_kwh_m2: float, pr: float = DE
 @dataclass
 class DayForecast:
     day: str
-    poa_kwh_m2: float
+    poa_kwh_m2: Optional[float]   # None = irradiance not used/known for this day
     expected_kwh: float
     actual_kwh: Optional[float]   # None = no clean measured row that day
     sunny: bool = False
@@ -342,7 +342,7 @@ class Forecast:
             "days": [
                 {
                     "day": d.day,
-                    "poa_kwh_m2": round(d.poa_kwh_m2, 2),
+                    "poa_kwh_m2": (round(d.poa_kwh_m2, 2) if d.poa_kwh_m2 is not None else None),
                     "expected_kwh": round(d.expected_kwh, 1),
                     "actual_kwh": (round(d.actual_kwh, 1) if d.actual_kwh is not None else None),
                     "ratio_pct": (round(d.ratio * 100) if d.ratio is not None else None),
@@ -354,19 +354,30 @@ class Forecast:
 
 
 def build_forecast(
-    *, nameplate_kw: float, lat: float, lng: float, tilt_deg: float, azimuth_deg: float,
+    *, nameplate_kw: float, lat: Optional[float], lng: Optional[float],
+    tilt_deg: float, azimuth_deg: float,
     tilt_assumed: bool, azimuth_assumed: bool, geocode_source: Optional[str],
     geocoded_address: Optional[str],
     actual_by_day: dict[str, float], window_days: int = DEFAULT_WINDOW_DAYS,
     pr: float = DEFAULT_PR, today: Optional[date] = None,
     _poa_by_day: Optional[dict[str, float]] = None,
+    expected_kwh_per_kw_day: Optional[float] = None,
 ) -> Forecast:
     """Assemble the full predicted-vs-actual forecast for ONE array over the window.
 
     `actual_by_day` is {iso_day: measured_kwh} ALREADY filtered to clean measured
     sources by the caller. Everything needed to display the math transparently is
     packed into Forecast.inputs. `_poa_by_day` lets the fleet endpoint pass a
-    memoized POA (shared by same-location arrays) so we don't refetch per array."""
+    memoized POA (shared by same-location arrays) so we don't refetch per array.
+
+    TWO expected bases (Bruce, 2026-07-03):
+      * weather_model (default) — expected[d] = nameplate × POA[d] × PR (needs a
+        location + irradiance).
+      * operator_ratio — when `expected_kwh_per_kw_day` is set, expected[d] =
+        nameplate × ratio, flat across the window. Deliberately weather-blind:
+        the operator's number already encodes the site's unique derates (panel
+        vintage, orientation, wire runs). Works WITHOUT a location; if a memoized
+        POA is passed anyway, days still carry poa/sunny for context."""
     today = today or datetime.utcnow().date()
     # Window excludes today (partial) — compare full days only.
     end = today - timedelta(days=1)
@@ -374,14 +385,21 @@ def build_forecast(
 
     if not nameplate_kw or nameplate_kw <= 0:
         return Forecast(False, reason="no_nameplate")
-    if lat is None or lng is None:
-        return Forecast(False, reason="no_location")
 
-    poa_by_day = _poa_by_day if _poa_by_day is not None else fetch_poa_daily(
-        lat, lng, tilt_deg, azimuth_deg, start, end)
-    if not poa_by_day:
-        return Forecast(False, reason="irradiance_unavailable",
-                        inputs={"lat": lat, "lng": lng})
+    ratio_mode = expected_kwh_per_kw_day is not None and expected_kwh_per_kw_day > 0
+    poa_by_day: dict[str, float] = {}
+    if ratio_mode:
+        # Expected needs no irradiance. Use a caller-provided memoized POA purely
+        # for per-day context (sunny flags) — never fetch just for that.
+        poa_by_day = _poa_by_day or {}
+    else:
+        if lat is None or lng is None:
+            return Forecast(False, reason="no_location")
+        poa_by_day = _poa_by_day if _poa_by_day is not None else fetch_poa_daily(
+            lat, lng, tilt_deg, azimuth_deg, start, end)
+        if not poa_by_day:
+            return Forecast(False, reason="irradiance_unavailable",
+                            inputs={"lat": lat, "lng": lng})
 
     best_poa = max(poa_by_day.values()) if poa_by_day else 0.0
     days: list[DayForecast] = []
@@ -392,10 +410,14 @@ def build_forecast(
     while cur <= end:
         iso = cur.isoformat()
         poa = poa_by_day.get(iso)
-        if poa is not None:
+        exp = None
+        if ratio_mode:
+            exp = nameplate_kw * float(expected_kwh_per_kw_day)
+        elif poa is not None:
             exp = expected_kwh_from_poa(nameplate_kw, poa, pr)
+        if exp is not None:
             act = actual_by_day.get(iso)
-            sunny = best_poa > 0 and poa >= SUNNY_DAY_POA_FRACTION * best_poa
+            sunny = poa is not None and best_poa > 0 and poa >= SUNNY_DAY_POA_FRACTION * best_poa
             days.append(DayForecast(iso, poa, exp, act, sunny))
             exp_total += exp
             if act is not None:
@@ -421,26 +443,40 @@ def build_forecast(
 
     inputs = {
         "nameplate_kw": round(nameplate_kw, 2),
-        "location": {
-            "lat": round(lat, 4), "lng": round(lng, 4),
-            "geocode_source": geocode_source, "address": geocoded_address,
-        },
-        "geometry": {
-            "tilt_deg": round(tilt_deg, 1), "azimuth_deg": round(azimuth_deg, 1),
-            "tilt_assumed": tilt_assumed, "azimuth_assumed": azimuth_assumed,
-            "azimuth_label": _azimuth_label(azimuth_deg),
-        },
-        "performance_ratio": pr,
-        "irradiance": {
-            "source": "Open-Meteo global_tilted_irradiance (hourly, integrated)",
-            "stc_reference_kwh_m2": STC_IRRADIANCE_KWH_M2,
-            "window_start": start.isoformat(), "window_end": end.isoformat(),
-            "best_day_poa_kwh_m2": round(best_poa, 2),
-        },
+        # Which "expected" the numbers are built on — named so the UI can label it.
+        "expected_basis": "operator_ratio" if ratio_mode else "weather_model",
+        # UNITS: kWh per kW PER DAY (the operator's entered specific yield).
+        "expected_kwh_per_kw_day": (
+            round(float(expected_kwh_per_kw_day), 2) if ratio_mode else None
+        ),
         "window_days": window_days,
         "measured_days": matched_days,
         "measured_sources": sorted(MEASURED_DAILY_SOURCES),
     }
+    if lat is not None and lng is not None:
+        inputs["location"] = {
+            "lat": round(lat, 4), "lng": round(lng, 4),
+            "geocode_source": geocode_source, "address": geocoded_address,
+        }
+    if ratio_mode:
+        inputs["note"] = (
+            "Expected = your entered kWh/kW/day × nameplate, flat across the "
+            "window (weather-blind by design — the ratio encodes this site's "
+            "own derates)."
+        )
+    else:
+        inputs["geometry"] = {
+            "tilt_deg": round(tilt_deg, 1), "azimuth_deg": round(azimuth_deg, 1),
+            "tilt_assumed": tilt_assumed, "azimuth_assumed": azimuth_assumed,
+            "azimuth_label": _azimuth_label(azimuth_deg),
+        }
+        inputs["performance_ratio"] = pr
+        inputs["irradiance"] = {
+            "source": "Open-Meteo global_tilted_irradiance (hourly, integrated)",
+            "stc_reference_kwh_m2": STC_IRRADIANCE_KWH_M2,
+            "window_start": start.isoformat(), "window_end": end.isoformat(),
+            "best_day_poa_kwh_m2": round(best_poa, 2),
+        }
 
     return Forecast(
         available=True, inputs=inputs, days=days,
