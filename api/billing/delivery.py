@@ -151,7 +151,7 @@ DEFAULT_DISCOUNT = 0.10
 
 
 def resolve_discount_pricing(sub, *, period_end=None, region=None,
-                             first_connect_date=None) -> dict:
+                             first_connect_date=None, ctx=None) -> dict:
     """Resolve the discount-model pricing for a customer.
 
     invoice = produced kWh × net_rate × (1 − discount).
@@ -166,6 +166,11 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     period_end/region/first_connect_date feed the auto schedule lookup; when not
     passed they're best-effort derived from the sub's array.
 
+    `ctx` (see build_pricing_ctx) batches the per-sub DB work for LIST callers:
+    without it each call opens its own session + 3 queries, which turned the
+    800-offtaker subscriptions list into a 17-second N+1 (caught at Anna scale).
+    Semantics are identical with or without ctx.
+
     Returns {net_rate, discount_pct, effective_rate, net_source, discount_source,
     net_rate_note} where effective_rate = net_rate × (1 − discount).
     """
@@ -179,47 +184,71 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
 
     g_net = g_disc = g_flat = None
     net_note = None
-    with SessionLocal() as db:
-        t = db.get(Tenant, sub.tenant_id)
-        if t:
-            g_net = getattr(t, "default_net_rate_per_kwh", None)
-            g_disc = getattr(t, "default_discount_pct", None)
-            g_flat = getattr(t, "default_billing_rate_per_kwh", None)
+
+    def _resolve_with(db, tenant, array_fields, rate_memo):
+        nonlocal g_net, g_disc, g_flat, net_note
+        if tenant:
+            g_net = getattr(tenant, "default_net_rate_per_kwh", None)
+            g_disc = getattr(tenant, "default_discount_pct", None)
+            g_flat = getattr(tenant, "default_billing_rate_per_kwh", None)
 
         # Best-effort derive the array's utility/region/age for the auto lookup
         # when the caller didn't supply them.
         _region, _fc, _provider = region, first_connect_date, None
         arr_id = getattr(sub, "array_id", None)
         if arr_id is not None:
-            arr = db.get(Array, arr_id)
-            if arr is not None:
-                if _region is None:
-                    _region = arr.region
-                if _fc is None:
-                    _fc = arr.first_connect_date
-                acct = db.execute(
-                    select(UtilityAccount).where(UtilityAccount.array_id == arr_id)
-                ).scalars().first()
-                if acct is not None:
-                    _provider = acct.provider
+            if array_fields is not None:
+                af = array_fields.get(arr_id)
+                if af:
+                    if _region is None:
+                        _region = af[0]
+                    if _fc is None:
+                        _fc = af[1]
+                    _provider = af[2]
+            else:
+                arr = db.get(Array, arr_id)
+                if arr is not None:
+                    if _region is None:
+                        _region = arr.region
+                    if _fc is None:
+                        _fc = arr.first_connect_date
+                    acct = db.execute(
+                        select(UtilityAccount).where(UtilityAccount.array_id == arr_id)
+                    ).scalars().first()
+                    if acct is not None:
+                        _provider = acct.provider
 
         # ── net rate ──  (customer → global → AUTO schedule → legacy flat → VT default)
         if sub_net is not None and sub_net > 0:
-            net_rate, net_source = float(sub_net), "customer"
-        elif g_net is not None and g_net > 0:
-            net_rate, net_source = float(g_net), "global"
-        else:
+            return float(sub_net), "customer"
+        if g_net is not None and g_net > 0:
+            return float(g_net), "global"
+        memo_key = (_provider, _region, _fc, period_end)
+        auto = rate_memo.get(memo_key) if rate_memo is not None else None
+        if auto is None:
             auto = resolve_net_rate(db, provider=_provider, region=_region,
                                     first_connect_date=_fc, period_end=period_end)
-            if auto.source in ("schedule", "schedule_provisional"):
-                net_rate, net_source, net_note = auto.rate, "auto_" + auto.source, auto.note
-            elif sub_flat is not None and sub_flat > 0:
-                net_rate, net_source = float(sub_flat), "legacy_flat_customer"
-            elif g_flat is not None and g_flat > 0:
-                net_rate, net_source = float(g_flat), "legacy_flat_global"
-            else:
-                # auto returned the VT default — use it and keep its provenance.
-                net_rate, net_source, net_note = auto.rate, "vt_default", auto.note
+            if rate_memo is not None:
+                rate_memo[memo_key] = auto
+        if auto.source in ("schedule", "schedule_provisional"):
+            net_note = auto.note
+            return auto.rate, "auto_" + auto.source
+        if sub_flat is not None and sub_flat > 0:
+            return float(sub_flat), "legacy_flat_customer"
+        if g_flat is not None and g_flat > 0:
+            return float(g_flat), "legacy_flat_global"
+        # auto returned the VT default — use it and keep its provenance.
+        net_note = auto.note
+        return auto.rate, "vt_default"
+
+    if ctx is not None:
+        net_rate, net_source = _resolve_with(
+            ctx["db"], ctx.get("tenant"), ctx.get("array_fields"),
+            ctx.get("rate_memo"))
+    else:
+        with SessionLocal() as db:
+            net_rate, net_source = _resolve_with(
+                db, db.get(Tenant, sub.tenant_id), None, None)
 
     # ── discount ──
     if sub_disc is not None and 0 <= sub_disc < 1:
@@ -241,6 +270,30 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
         "discount_source": discount_source,
         "net_rate_note": net_note,
     }
+
+
+def build_pricing_ctx(db, tenant) -> dict:
+    """Batched context for resolve_discount_pricing over a LIST of subs: the
+    tenant's pricing defaults, every array's (region, first_connect_date,
+    provider) via two bulk queries, and a memo for the schedule lookups —
+    replaces a per-sub session + 3 queries (the 17s N+1 the 800-offtaker list
+    exposed). Build it inside an open session and use it before that session
+    closes (helpers never outlive their session — the reconcile pool-leak
+    lesson)."""
+    from ..models import Array, UtilityAccount
+    provider_by_array: dict[int, str] = {}
+    for aid, prov in db.execute(
+            select(UtilityAccount.array_id, UtilityAccount.provider)
+            .where(UtilityAccount.tenant_id == tenant.id,
+                   UtilityAccount.array_id.isnot(None))
+            .order_by(UtilityAccount.id)):
+        provider_by_array.setdefault(aid, prov)
+    fields: dict[int, tuple] = {}
+    for arr_id, reg, fc in db.execute(
+            select(Array.id, Array.region, Array.first_connect_date)
+            .where(Array.tenant_id == tenant.id)):
+        fields[arr_id] = (reg, fc, provider_by_array.get(arr_id))
+    return {"db": db, "tenant": tenant, "array_fields": fields, "rate_memo": {}}
 
 
 def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:

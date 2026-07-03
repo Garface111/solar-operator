@@ -67,12 +67,15 @@ _MAGIC_XLSX = b"PK\x03\x04"   # ZIP / OpenXML (.xlsx, .xlsm, .docx, …)
 _MAGIC_XLS  = b"\xd0\xcf\x11\xe0"  # OLE2 compound doc (.xls, .doc, …)
 
 
-def _resolved_pricing_fields(s) -> dict:
+def _resolved_pricing_fields(s, pricing_ctx=None) -> dict:
     """The pricing actually applied to this customer (auto-resolved net rate +
-    discount + provenance), for the UI card. Best-effort; never raises."""
+    discount + provenance), for the UI card. Best-effort; never raises.
+    pricing_ctx (delivery.build_pricing_ctx) batches the DB work for list
+    callers — without it each row costs its own session + queries (17s at 800
+    offtakers)."""
     try:
         from .delivery import resolve_discount_pricing
-        p = resolve_discount_pricing(s)
+        p = resolve_discount_pricing(s, ctx=pricing_ctx)
         return {
             "resolved_net_rate": round(p["net_rate"], 5),
             "resolved_discount_pct": round(p["discount_pct"], 5),
@@ -84,7 +87,7 @@ def _resolved_pricing_fields(s) -> dict:
         return {}
 
 
-def _sub_dict(s: BillingReportSubscription) -> dict:
+def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
     return {
         "id": s.id,
         "customer_name": s.customer_name,
@@ -103,7 +106,7 @@ def _sub_dict(s: BillingReportSubscription) -> dict:
         "net_rate_per_kwh": getattr(s, "net_rate_per_kwh", None),
         # The pricing actually applied (auto-resolved net rate + discount, with
         # provenance) so the card can SHOW the auto rate instead of a blank box.
-        **_resolved_pricing_fields(s),
+        **_resolved_pricing_fields(s, pricing_ctx),
         "auto_attach_gmp": getattr(s, "auto_attach_gmp", False),
         "cadence": s.cadence,
         "annual_trueup": s.annual_trueup,
@@ -325,7 +328,8 @@ async def upload_vec_bill(utility_account_id: int,
 
 @router.get("/subscriptions")
 def list_subscriptions(authorization: Optional[str] = Header(default=None)):
-    from ..models import UtilityAccount
+    from ..models import Tenant, UtilityAccount
+    from .delivery import build_pricing_ctx
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         rows = db.execute(
@@ -334,7 +338,10 @@ def list_subscriptions(authorization: Optional[str] = Header(default=None)):
                    BillingReportSubscription.deleted_at.is_(None))
             .order_by(BillingReportSubscription.created_at.desc())
         ).scalars().all()
-        subs = [_sub_dict(s) for s in rows]
+        # One batched pricing context instead of a session + 3 queries per row
+        # (at 800 offtakers the per-row form took 17s of the tab's first paint).
+        ctx = build_pricing_ctx(db, db.get(Tenant, t.id))
+        subs = [_sub_dict(s, ctx) for s in rows]
         # Enrich each sub with the LINKED utility account's display name so the
         # card can say which GMP bill feeds the offtaker (the UI only had the id).
         ua_ids = {d["utility_account_id"] for d in subs if d.get("utility_account_id")}
