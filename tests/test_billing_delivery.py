@@ -470,6 +470,73 @@ def test_share_percents_round_trip_at_three_decimals(client):
     assert s2["array_share_pct"] == 0.10057
 
 
+def test_manual_offtaker_with_unlinked_account_heals_the_link(client):
+    """Bruce (2026-07-03): a freshly captured GMP account has array_id = NULL
+    until it's matched to an array, so the add-offtaker bill picker (which
+    filtered on array_id) rendered EMPTY even though every bill was downloaded.
+    The UI now falls back to the tenant's full account list and passes the pick
+    explicitly alongside array_id. The backend must:
+      (a) accept utility_account_id for an account not yet linked to any array,
+      (b) record the account -> array link so the next add resolves silently, and
+      (c) keep the sub bound to the named array for list views (pre-fix it
+          copied acct.array_id = NULL and the sub lost its group binding)."""
+    from api.models import UtilityAccount
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid)
+    with SessionLocal() as db:
+        acct = UtilityAccount(tenant_id=tid, array_id=None, provider="gmp",
+                              account_number="GMP-" + secrets.token_hex(2),
+                              nickname="Fresh Capture")
+        db.add(acct); db.flush()
+        acct_id = acct.id
+        db.commit()
+
+    # The list the picker's fallback reads MUST include the unlinked account.
+    lst = client.get("/v1/array-operator/billing/utility-accounts",
+                     headers={"Authorization": auth}).json()
+    row = next(u for u in lst["utility_accounts"]
+               if u["utility_account_id"] == acct_id)
+    assert row["array_id"] is None
+
+    r = _create_manual(client, auth, customer_name="Fresh Link Co",
+                       array_id=aid, utility_account_id=str(acct_id),
+                       allocation_pct="0.25", client_email="fresh@example.test")
+    assert r.status_code == 200, r.text
+    sub = r.json()["subscription"]
+    assert sub["utility_account_id"] == acct_id      # (a)
+    assert sub["array_id"] == aid                    # (c)
+    with SessionLocal() as db:
+        assert db.get(UtilityAccount, acct_id).array_id == aid   # (b)
+
+
+def test_manual_offtaker_never_relinks_an_account_bound_elsewhere(client):
+    """Companion guard to the self-heal: an account EXPLICITLY linked to array Y
+    stays linked to Y even when an offtaker is created naming array X with that
+    account — the account's own binding wins (it also becomes the sub's
+    array_id, matching how delivery resolves the bill)."""
+    from api.models import UtilityAccount
+    tid, auth = _make_tenant()
+    aid_x = _make_array_with_generation(tid)
+    with SessionLocal() as db:
+        arr_y = Array(tenant_id=tid, name="Other Array", region="VT")
+        db.add(arr_y); db.flush()
+        aid_y = arr_y.id
+        acct = UtilityAccount(tenant_id=tid, array_id=aid_y, provider="gmp",
+                              account_number="GMP-" + secrets.token_hex(2),
+                              nickname="Bound Elsewhere")
+        db.add(acct); db.flush()
+        acct_id = acct.id
+        db.commit()
+
+    r = _create_manual(client, auth, customer_name="No Relink Co",
+                       array_id=aid_x, utility_account_id=str(acct_id),
+                       allocation_pct="0.5", client_email="norelink@example.test")
+    assert r.status_code == 200, r.text
+    assert r.json()["subscription"]["array_id"] == aid_y
+    with SessionLocal() as db:
+        assert db.get(UtilityAccount, acct_id).array_id == aid_y
+
+
 def test_patch_subscription_with_utility_account_id_succeeds(client):
     """REGRESSION: the edit-offtaker form re-sends utility_account_id on every save
     (the GMP bill picker is pre-selected to the current bill). patch_subscription
