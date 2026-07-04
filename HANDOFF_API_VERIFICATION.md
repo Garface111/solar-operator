@@ -170,6 +170,34 @@ registration decision (pricing: ~€12/system/yr base + €0.09/kWac — e.g.
   take over from extension scraping per array, and the freshness ceiling for
   those vendors is gone.
 
+## Automated reply watcher (built 2026-07-04, LOCAL)
+
+`scripts/watch_inverter_api_replies.py` + `.sh` wrapper, on WSL cron every 2h
+(`0 */2 * * *` → `/root/inverter_api_watch.log`). Each run it checks Ford's Gmail
+for a reply from Fronius (pv-support-usa@fronius.com) or SMA (*.sma.de) and
+advances the linking automatically as far as is safe:
+  • SMA reply → extract sandbox client creds → RUN `verify_inverter_apis --vendor
+    sma` → email Ford the PASS/FAIL verdict (creds redacted). Adapter verified;
+    production registration (terms) is left to Ford.
+  • Fronius reply → email Ford a heads-up with the pricing/availability read and
+    the reply text. Signing the order form (paid) is left to Ford/Bruce.
+It only reads the two vendor senders, only emails Ford himself, never sends
+outward, and keeps a processed-id state file (`~/.hermes/state/
+inverter_api_watch.json`) so it never double-notifies.
+
+**ACTIVATION — the one manual step (Gmail read access):** the watcher no-ops
+until a Gmail App Password exists. Ford: at https://myaccount.google.com/apppasswords
+(needs 2FA on) create an app password named "EnergyAgent watcher", then in WSL:
+`printf '%s' 'THE16CHARPASSWORD' > ~/.hermes/secrets/gmail_app_password && chmod 600 ~/.hermes/secrets/gmail_app_password`
+(so the value never passes through chat). Verify: `cd /root/solar-operator &&
+.venv/bin/python -m scripts.watch_inverter_api_replies --dry-run`. Deactivate
+anytime by deleting that file. Offline wiring test: `--self-test`.
+
+Limitation: it's a LOCAL cron, so it runs only when this machine/WSL is up — a
+vendor reply is picked up on the next tick after the machine is on (fine; the
+replies aren't time-critical). No cloud option: the cloud sandbox can't reach
+Ford's Gmail (the same network policy that forced this whole handoff).
+
 ## Reporting back
 
 Append a dated entry to the **Status log** below on every run (commit it), and
