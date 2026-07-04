@@ -1893,15 +1893,15 @@ def audit_by_array_route(authorization: Optional[str] = Header(default=None)):
     should-be vs GMP-credited math underneath, flagged where GMP got it wrong.
     Read-only; reuses the same allocation cross-check as /reconcile-bills.
 
-    Answers from the background sweep cache; {ok:false, pending:true} while the
-    sweep is computing — poll again in a few seconds."""
+    Served DIRECTLY (no background sweep): audit_by_array now computes the
+    allocation-only cross-check (no per-offtaker invoice rebuild), so it returns
+    in a few seconds even at 800 offtakers — fast enough to answer inline
+    without the poll gap the sweep imposes (Ford 2026-07-04: "make it load
+    faster")."""
     from .reconcile_bills import audit_by_array
     t = tenant_from_session(authorization)
-    tid = t.id
-    s = _sweep_result(tid, "audit", lambda db: audit_by_array(db, tid))
-    if not s["ready"]:
-        return {"ok": False, "pending": True}
-    return s["result"]
+    with SessionLocal() as db:
+        return audit_by_array(db, t.id)
 
 
 @router.get("/invoice-export.csv")
@@ -4278,3 +4278,84 @@ def bulk_delivery_mode(body: _BulkModeBody,
         auto = sum(1 for s in subs if (s.delivery_mode or "approval") == "auto")
         return {"ok": True, "mode": mode, "changed": changed,
                 "auto": auto, "approval": len(subs) - auto}
+
+
+# ─── Draft all (Ford 2026-07-04: "it should automatically draft the latest for
+# each offtaker") — the pipeline's "Draft all" doesn't just flip a setting, it
+# GENERATES each enabled offtaker's latest-period invoice into the review inbox.
+# Runs in a background thread (a draft per offtaker rebuilds the invoice, ~60s
+# at 800) with live progress; draft_subscription is idempotent per period and
+# honestly HOLDS an offtaker whose bill hasn't settled (never a fabricated
+# draft). ────────────────────────────────────────────────────────────────────
+_bulk_draft_lock = _threading.Lock()
+_bulk_draft: dict[str, dict] = {}   # tenant_id -> {total, done, drafted, held, running}
+
+
+@router.post("/subscriptions/bulk-draft")
+def bulk_draft(authorization: Optional[str] = Header(default=None)):
+    from .delivery import draft_subscription
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    tid = t.id
+    with _bulk_draft_lock:
+        cur = _bulk_draft.get(tid)
+        if cur and cur.get("running"):
+            return {"ok": True, "already_running": True, **cur}
+    # Put everyone in review mode + collect the ids to draft (one cheap UPDATE).
+    with SessionLocal() as db:
+        subs = db.execute(
+            select(BillingReportSubscription)
+            .where(BillingReportSubscription.tenant_id == tid,
+                   BillingReportSubscription.deleted_at.is_(None),
+                   BillingReportSubscription.enabled == True)  # noqa: E712
+        ).scalars().all()
+        ids = []
+        for s in subs:
+            if (s.delivery_mode or "approval") != "approval":
+                s.delivery_mode = "approval"
+            ids.append(s.id)
+        db.commit()
+    with _bulk_draft_lock:
+        _bulk_draft[tid] = {"total": len(ids), "done": 0, "drafted": 0,
+                            "held": 0, "running": True}
+
+    def _run():
+        drafted = held = done = 0
+        try:
+            for sid in ids:
+                try:
+                    with SessionLocal() as db:
+                        sub = db.get(BillingReportSubscription, sid)
+                        tenant = db.get(Tenant, tid)
+                        if sub and tenant:
+                            r = draft_subscription(db, sub, tenant,
+                                                   triggered_by="bulk-draft")
+                            if r.get("ok"):
+                                drafted += 1
+                            elif r.get("skipped"):
+                                held += 1
+                except Exception:  # noqa: BLE001
+                    logger.exception("bulk-draft sub %s failed", sid)
+                done += 1
+                with _bulk_draft_lock:
+                    p = _bulk_draft.get(tid)
+                    if p:
+                        p["done"], p["drafted"], p["held"] = done, drafted, held
+        finally:
+            with _bulk_draft_lock:
+                p = _bulk_draft.get(tid)
+                if p:
+                    p["running"] = False
+
+    _threading.Thread(target=_run, daemon=True, name="bulk-draft").start()
+    return {"ok": True, "started": True, "total": len(ids)}
+
+
+@router.get("/subscriptions/bulk-draft-status")
+def bulk_draft_status(authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    with _bulk_draft_lock:
+        p = _bulk_draft.get(t.id)
+        return {"ok": True, **(p or {"total": 0, "done": 0, "drafted": 0,
+                                     "held": 0, "running": False})}

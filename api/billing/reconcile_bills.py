@@ -602,6 +602,21 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
     arrays: dict[int, dict] = {}
     total_flagged = 0
     total_dollars = 0.0
+
+    # The audit surfaces ONLY the allocation cross-check, so skip the full
+    # invoice rebuild (build_match — the ~60s-at-800-offtakers cost that made
+    # the Bill audit tab load slowly, Ford 2026-07-04). Call the SAME
+    # _allocation_check directly with cheap bill lookups; the array's host bill
+    # is cached (every offtaker on an array reads the same one → one query per
+    # array, not per offtaker). Math is identical, so the flagged set never
+    # drifts from the invoice cross-check.
+    host_bill_cache: dict[int, Optional[Bill]] = {}
+
+    def _host_bill(aid: int) -> Optional[Bill]:
+        if aid not in host_bill_cache:
+            host_bill_cache[aid] = _bill_for_array_period(db, aid, None, None)
+        return host_bill_cache[aid]
+
     for sub in subs:
         aid = getattr(sub, "array_id", None)
         allocs = _normalized_allocations(sub)
@@ -609,8 +624,20 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
             aid = allocs[0]["array_id"]
         if aid is None:
             continue
-        rep = reconcile_subscription(db, sub)
-        a = rep.get("allocation") or {}
+        aids = ([x["array_id"] for x in allocs] if allocs
+                else ([sub.array_id] if getattr(sub, "array_id", None) is not None else []))
+        _single_share = getattr(sub, "array_share_pct", None) or sub.allocation_pct
+        share_by_array = (
+            {x["array_id"]: x["allocation_pct"] for x in allocs} if allocs
+            else ({sub.array_id: _single_share}
+                  if (getattr(sub, "array_id", None) is not None and _single_share)
+                  else {}))
+        array_bill_by_aid = {x: _host_bill(x) for x in aids}
+        try:
+            a = _allocation_check(db, sub, aids, share_by_array,
+                                  array_bill_by_aid, None) or {}
+        except Exception:  # never let one offtaker break the audit
+            a = {}
         entry = arrays.get(aid)
         if entry is None:
             arr = db.get(Array, aid)
