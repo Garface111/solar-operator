@@ -217,6 +217,24 @@ def _yesterday_iso() -> str:
         return (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
 
 
+def _fleet_all_stale(cols: list[dict]) -> bool:
+    """True when the digest would be built ENTIRELY from stale data — every
+    array's latest complete day is behind yesterday (or the array has no data
+    at all). Ford, 2026-07-04: never send a report on stale data — a digest
+    whose every number is old isn't a fleet report, it's a false one. A MIXED
+    fleet (at least one array current) still sends, with the stale arrays
+    flagged by the existing staleness note. Empty fleets return False (nothing
+    stale to misreport; the empty-fleet rendering handles that case)."""
+    if not cols:
+        return False
+    yiso = _yesterday_iso()
+    for c in cols:
+        d = _recent_day(c)
+        if d and d >= yiso:
+            return False   # at least one array is current — digest is real
+    return True
+
+
 def _fleet_reference_day(cols: list[dict]) -> tuple[str | None, str | None, bool]:
     """(iso, label, is_stale) for the freshest COMPLETE day across the fleet — the
     day the digest actually summarizes, READ FROM THE DATA, never a hardcoded
@@ -764,6 +782,29 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
     # dawn day) + cohort-relative "gone quiet", so morning fog/cloud variability
     # never produces a false "needs attention" digest (Bruce's noon-prior-day fix).
     tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
+    cols = tree.get("columns", [])
+
+    # ── Freshness hold (Ford, 2026-07-04: never send a report on stale data) ──
+    # When EVERY array is behind, the digest would be a report about days ago
+    # dressed up as today. Hold it: send ONE plain "digest held — data
+    # connection needs attention" note, then stay silent until data resumes.
+    if _fleet_all_stale(cols):
+        if getattr(tenant, "digest_hold_notified_at", None) is not None:
+            log.info("morning_digest: tenant %s still stale — digest held silently", tenant.id)
+            return False
+        _, last_label, _ = _fleet_reference_day(cols)
+        sent = _send_hold_notice(tenant, to, last_label)
+        if sent:
+            tenant.digest_hold_notified_at = datetime.utcnow()
+            db.commit()
+        return sent
+
+    # Fresh data flowing again → clear the hold so a future stale episode
+    # re-notifies exactly once.
+    if getattr(tenant, "digest_hold_notified_at", None) is not None:
+        tenant.digest_hold_notified_at = None
+        db.commit()
+
     html = build_digest_html(tenant, tree)
     text = build_digest_text(tenant, tree)
     subject = _subject(tenant, tree)
@@ -779,6 +820,41 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
         from_addr=branding.from_address("array_operator"),
         product="array_operator",
     )
+
+
+def _send_hold_notice(tenant: Tenant, to: str, last_label: str | None) -> bool:
+    """The one email a stale episode gets: plain, honest, actionable. No fleet
+    numbers (we don't have fresh ones) — just what's wrong and how to fix it."""
+    since = f" The last complete day we received was {last_label}." if last_label else ""
+    subject = "Fleet digest held — we're not receiving fresh data"
+    text = (
+        "Your morning fleet digest is on hold because we haven't received fresh "
+        f"data from any of your arrays.{since}\n\n"
+        "Rather than send you a report built on old numbers, we'll hold the "
+        "digest until data is flowing again — it resumes automatically.\n\n"
+        "Usual fix: open Chrome (with the EnergyAgent extension) on the machine "
+        "that captures your portals, or check your inverter API connections in "
+        "Array Operator.\n"
+    )
+    html = (
+        '<div style="font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a">'
+        "<p><strong>Your morning fleet digest is on hold</strong> because we "
+        f"haven&rsquo;t received fresh data from any of your arrays.{_html.escape(since)}</p>"
+        "<p>Rather than send a report built on old numbers, we&rsquo;ll hold the "
+        "digest until data is flowing again &mdash; it resumes automatically.</p>"
+        "<p><strong>Usual fix:</strong> open Chrome (with the EnergyAgent "
+        "extension) on the machine that captures your portals, or check your "
+        "inverter API connections in Array Operator.</p></div>"
+    )
+    try:
+        return notify._send_via_resend(
+            to=to, subject=subject, html=html, text=text,
+            from_addr=branding.from_address("array_operator"),
+            product="array_operator",
+        )
+    except Exception:
+        log.exception("morning_digest: hold notice failed for %s", tenant.id)
+        return False
 
 
 def run_morning_digest() -> dict:

@@ -194,6 +194,12 @@ class Tenant(Base):
     # from "extension installed but not seen recently."
     extension_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Morning-digest freshness hold (Ford, 2026-07-04: never send a report on
+    # stale data). Set when the daily fleet digest was HELD because every array
+    # was behind — we email one "digest held, fix your data connection" notice
+    # and then stay silent until fresh data resumes (which clears this).
+    digest_hold_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Deferred billing (June 2026). trial_ends_at is set when the operator
     # completes setup-mode checkout; the cron job creates the real subscription
     # at trial end. trial_extended tracks whether we've already done the 3-day

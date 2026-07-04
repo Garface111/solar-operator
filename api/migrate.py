@@ -1211,6 +1211,16 @@ def main():
         print(f"  {'✓' if inspect(conn).has_table('portal_login_status') else '✗ MISSING'} "
               f"table portal_login_status")
 
+        # 2026-07-04 Digest freshness hold (Ford: never send a report on stale
+        # data). Stamped when the morning fleet digest was held because every
+        # array was behind; cleared automatically when fresh data resumes.
+        if not column_exists(conn, "tenants", "digest_hold_notified_at"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN digest_hold_notified_at TIMESTAMP"
+            ))
+            added.append("digest_hold_notified_at")
+            print("  + tenants.digest_hold_notified_at")
+
     print("=== Migration complete ===")
 
 
