@@ -398,6 +398,7 @@ export default function NepoolReportsTab() {
                       status={rep.status}
                       arrayCount={rep.array_count}
                       lastDeliveredAt={rep.last_delivered_at}
+                      lastGeneratedAt={rep.last_generated_at}
                       mwhTotal={rep.mwh_total}
                       clients={activeClients}
                       expanded={activeExpandedSet.has(rep.quarter)}

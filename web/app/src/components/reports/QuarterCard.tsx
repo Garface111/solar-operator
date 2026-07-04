@@ -5,6 +5,7 @@ import { Spinner } from "../../ui/Spinner";
 import { useToast } from "../../ui/Toast";
 import type { ClientRow } from "../../lib/api";
 import { resendClientReport, downloadClientReport, updateClient } from "../../lib/api";
+import { timeAgo } from "../settings/utils";
 
 type Status = "draft" | "ready" | "sent" | "empty";
 
@@ -14,6 +15,8 @@ export interface QuarterCardProps {
   status: Status;
   arrayCount: number;
   lastDeliveredAt: string | null;
+  /** When the workbook figures were last computed — "figures as of {date}". */
+  lastGeneratedAt?: string | null;
   mwhTotal: number;
   clients: ClientRow[];
   /** Fully controlled from ReportsTab (expand-all / collapse-all live there). */
@@ -241,7 +244,8 @@ export function QuarterCard({
   quarter,
   status,
   arrayCount,
-  lastDeliveredAt: _lastDeliveredAt,
+  lastDeliveredAt,
+  lastGeneratedAt = null,
   mwhTotal,
   clients,
   expanded,
@@ -284,6 +288,9 @@ export function QuarterCard({
     mwhTotal > 0 ? `${Math.floor(mwhTotal)} RECs` : "",
     status === "draft" && mwhTotal === 0 ? "generating…" : "",
     sentCount > 0 ? `✓ ${sentCount} sent` : "",
+    // Freshness: when the figures were last computed, so a stale workbook is
+    // never mistaken for current numbers.
+    lastGeneratedAt ? `figures as of ${shortDate(lastGeneratedAt)}` : "",
   ].filter(Boolean);
 
   // Filter clients for the expanded table.
@@ -301,7 +308,14 @@ export function QuarterCard({
       {/* Header */}
       <div className="flex items-center justify-between px-4 pb-1.5 pt-3">
         <span className="text-sm font-semibold text-zinc-900">{label}</span>
-        <Chip variant={chipVariant}>{statusLabel}</Chip>
+        <span className="flex items-center gap-2">
+          {lastDeliveredAt && (
+            <span className="text-[11px] text-zinc-400">
+              last sent {timeAgo(new Date(lastDeliveredAt))}
+            </span>
+          )}
+          <Chip variant={chipVariant}>{statusLabel}</Chip>
+        </span>
       </div>
 
       {/* Stat line */}

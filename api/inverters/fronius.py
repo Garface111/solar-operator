@@ -83,6 +83,58 @@ def validate(config: dict) -> dict:
     return {"site_name": body.get("name"), "peak_power": body.get("peakPower")}
 
 
+def discover_systems(config: dict) -> list[dict]:
+    """List every PV system this AccessKey can read (GET /pvsystems, paginated).
+
+    Needs only access_key_id + access_key_value — the "paste one credential,
+    attach every array" cascade, mirroring solaredge.discover_sites /
+    locus.discover_sites. Returns [{pv_system_id, name, peak_power_kw,
+    address}] with pv_system_id as a STRING (Fronius uses UUIDs, not ints).
+
+    peakPower unit note: Solar.web metadata documents peakPower in Wp; we
+    convert to kW for display parity with the other vendors. Display-only in
+    the site picker — never used for billing. Confirm the magnitude against
+    the first real account (the /pvsystems listing itself is grounded:
+    exercised live 2026-07-04 via scripts/verify_inverter_apis).
+    """
+    require_fields(config, "access_key_id", "access_key_value")
+    out: list[dict] = []
+    offset = 0
+    limit = 50
+    for _page in range(40):                       # hard cap — never walk forever
+        body = _get(config, "/pvsystems", params={"offset": offset, "limit": limit})
+        systems = body.get("pvSystems") or []
+        for s in systems:
+            sid = s.get("pvSystemId") or s.get("id")
+            if not sid:
+                continue
+            peak = s.get("peakPower")
+            peak_kw = None
+            if peak not in (None, ""):
+                try:
+                    peak_kw = round(float(peak) / 1000.0, 2)
+                except (TypeError, ValueError):
+                    peak_kw = None
+            addr = s.get("address")
+            if isinstance(addr, dict):
+                addr_str = ", ".join(
+                    str(p) for p in (addr.get("street"), addr.get("city"),
+                                     addr.get("state"), addr.get("country")) if p
+                ) or None
+            else:
+                addr_str = str(addr) if addr else None
+            out.append({
+                "pv_system_id": str(sid),
+                "name": (s.get("name") or "").strip() or f"PV system {sid}",
+                "peak_power_kw": peak_kw,
+                "address": addr_str,
+            })
+        if len(systems) < limit:
+            break
+        offset += limit
+    return out
+
+
 def _channels(body: dict) -> list[dict]:
     # flowdata nests channels under "data"; tolerate a flat shape too.
     data = body.get("data") if isinstance(body.get("data"), dict) else body

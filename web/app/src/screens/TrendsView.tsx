@@ -8,6 +8,7 @@ import {
 } from "../components/reports/trends/MultiYearLineChart";
 import { SeasonalYoYRow } from "../components/reports/trends/SeasonalYoYRow";
 import {
+  MONTH_ABBR,
   formatDeltaPct,
   formatKwh,
   formatUsd,
@@ -230,6 +231,14 @@ export default function TrendsView() {
               />
             )}
           </div>
+
+          {/* Freshness: the last month with data, so TTM/lifetime totals are
+              never mistaken for figures through today. */}
+          {latestMonth !== null && (
+            <p className="text-[11px] text-zinc-400">
+              Figures through {MONTH_ABBR[latestMonth - 1]} {latestYear}
+            </p>
+          )}
 
           {/* Multi-year monthly trend lines. */}
           <Section
