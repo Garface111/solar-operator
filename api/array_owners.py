@@ -3458,6 +3458,65 @@ _ABS_ARRAY_DAILY_KWH_CEILING = 100_000.0
 _ABS_INVERTER_DAILY_KWH_CEILING = 10_000.0
 
 
+# ── race-safe daily upserts (2026-07-04, Anna's uq_daily_array_day 500) ────────
+# The capture handler reads existing (array, day) rows and then inserts the
+# missing ones — safe within one request, but TWO CONCURRENT captures for the
+# same array (the 6-min live loop overlapping a manual sync, or two open tabs)
+# can both pass that read before either commits: the loser's INSERT then hits
+# uq_daily_array_day and 500s the whole capture (seen live: tenant ten_anna_800,
+# array 2416). These helpers make the insert race-safe: try the INSERT inside a
+# SAVEPOINT; if a concurrent request won, roll back to the savepoint, re-read
+# the row the winner wrote, and apply the same max-wins update the fresh-read
+# path would have applied. Dialect-agnostic (savepoints work on PG + sqlite).
+
+def _insert_daily_generation_race_safe(db, *, tenant_id: str, array_id: int,
+                                       day: date, kwh: float) -> bool:
+    """Insert an array-day generation row the caller believes is missing.
+    Returns True when the value landed (insert OR losing-the-race update)."""
+    try:
+        with db.begin_nested():
+            db.add(DailyGeneration(tenant_id=tenant_id, array_id=array_id,
+                                   day=day, kwh=kwh, source="extension_pull"))
+            db.flush()
+        return True
+    except IntegrityError:
+        row = db.execute(
+            select(DailyGeneration).where(
+                DailyGeneration.array_id == array_id,
+                DailyGeneration.day == day,
+            )
+        ).scalar_one_or_none()
+        if row is not None and kwh > (row.kwh or 0):
+            row.kwh = kwh
+            row.source = "extension_pull"
+            row.uploaded_at = now()
+            return True
+        return False
+
+
+def _insert_inverter_daily_race_safe(db, *, tenant_id: str, inverter_id: int,
+                                     day: date, kwh: float) -> bool:
+    """Same race-safe insert for per-inverter days (uq_inverter_daily_inv_day)."""
+    try:
+        with db.begin_nested():
+            db.add(InverterDaily(tenant_id=tenant_id, inverter_id=inverter_id,
+                                 day=day, kwh=kwh, source="extension_pull"))
+            db.flush()
+        return True
+    except IntegrityError:
+        row = db.execute(
+            select(InverterDaily).where(
+                InverterDaily.inverter_id == inverter_id,
+                InverterDaily.day == day,
+            )
+        ).scalar_one_or_none()
+        if row is not None and kwh > (row.kwh or 0):
+            row.kwh = kwh
+            row.uploaded_at = now()
+            return True
+        return False
+
+
 @router.post("/v1/array-owners/inverter-capture")
 def inverter_capture(
     body: InverterCaptureBody,
@@ -3721,11 +3780,14 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                 for d, v in want_arr.items():
                     drow = existing_d.get(d)
                     if drow is None:
-                        db.add(DailyGeneration(
-                            tenant_id=tenant.id, array_id=arr.id, day=d,
-                            kwh=v, source="extension_pull",
-                        ))
-                        backfilled_days += 1
+                        # Race-safe: a CONCURRENT capture may insert this
+                        # (array, day) between our read and this insert — the
+                        # helper falls back to the winner's row with the same
+                        # max-wins update instead of 500ing the whole capture.
+                        if _insert_daily_generation_race_safe(
+                                db, tenant_id=tenant.id, array_id=arr.id,
+                                day=d, kwh=v):
+                            backfilled_days += 1
                     elif v > (drow.kwh or 0):   # climbs through the day / never regresses
                         drow.kwh = v
                         drow.source = "extension_pull"
@@ -3928,10 +3990,9 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                     for dd, v in want.items():
                         row = existing.get(dd)
                         if row is None:
-                            db.add(InverterDaily(
-                                tenant_id=tenant.id, inverter_id=iv.id, day=dd,
-                                kwh=v, source="extension_pull",
-                            ))
+                            _insert_inverter_daily_race_safe(
+                                db, tenant_id=tenant.id, inverter_id=iv.id,
+                                day=dd, kwh=v)
                         elif v > (row.kwh or 0):         # climbs through the day / never regresses
                             row.kwh = v
                             row.uploaded_at = now()
