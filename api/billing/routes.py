@@ -121,6 +121,9 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         "source_filename": s.source_filename,
         "last_sent_at": s.last_sent_at.isoformat() if s.last_sent_at else None,
         "next_send_at": s.next_send_at.isoformat() if s.next_send_at else None,
+        # The exactly-once period stamp — the redesign's provider progress bars
+        # compare it against the pipeline's last period for an exact sent count.
+        "last_sent_period_end": getattr(s, "last_sent_period_end", None),
         "last_invoice_number": s.last_invoice_number,
         "invoice_number_start": getattr(s, "invoice_number_start", None),
         "invoice_number_next": getattr(s, "invoice_number_next", None),
