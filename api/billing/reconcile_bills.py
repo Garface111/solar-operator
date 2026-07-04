@@ -633,9 +633,18 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
                   if (getattr(sub, "array_id", None) is not None and _single_share)
                   else {}))
         array_bill_by_aid = {x: _host_bill(x) for x in aids}
+        # Match the invoice-cross-check (reconcile) EXACTLY so audit and the KPI
+        # chip never disagree: a MONTHLY offtaker is checked against their latest
+        # settled bill (target_label=None → latest); a QUARTERLY offtaker's
+        # invoice period is a quarter, which the per-bill credit resolver can't
+        # match to a single month — reconcile leaves it "no_offtaker_bill", so
+        # we pass a non-matching monthly label to reproduce that (a quarterly
+        # allocation is cross-checked at quarter close, not per month).
+        _lbl = ("1900-01"
+                if (getattr(sub, "cadence", "monthly") == "quarterly") else None)
         try:
             a = _allocation_check(db, sub, aids, share_by_array,
-                                  array_bill_by_aid, None) or {}
+                                  array_bill_by_aid, _lbl) or {}
         except Exception:  # never let one offtaker break the audit
             a = {}
         entry = arrays.get(aid)
