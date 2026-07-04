@@ -1922,10 +1922,18 @@ def invoice_export_csv(authorization: Optional[str] = Header(default=None),
     from .qb_export import build_invoice_register, normalize_format
     t = tenant_from_session(authorization)
     fmt = normalize_format(format)
-    with SessionLocal() as db:
-        csv_text, count = build_invoice_register(
-            db, t.id, account_code=account_code, fmt=fmt,
-            tax_type=tax_type, item_name=item_name)
+    # build_invoice_register rebuilds every offtaker's invoice (~52s at 800),
+    # which 504'd at the Railway edge during the CSV download (caught live on
+    # ten_anna_800). Compute it in the background sweep + cache; while it runs,
+    # answer 202 {pending:true} — the frontend polls, then downloads the CSV.
+    kind = f"register:{fmt}:{account_code}:{tax_type}:{item_name}"
+    s = _sweep_result(t.id, kind, lambda db: build_invoice_register(
+        db, t.id, account_code=account_code, fmt=fmt,
+        tax_type=tax_type, item_name=item_name))
+    if not s["ready"]:
+        return Response(content='{"ok":false,"pending":true}',
+                        media_type="application/json", status_code=202)
+    csv_text, count = s["result"]
     label = "quickbooks" if fmt == "quickbooks" else "xero"
     fname = f"offtaker-invoices-{label}-{date.today().isoformat()}.csv"
     return Response(
@@ -1938,11 +1946,18 @@ def invoice_export_csv(authorization: Optional[str] = Header(default=None),
 def invoice_archive_manifest(authorization: Optional[str] = Header(default=None)):
     """Browsable invoice-archive manifest (Anna/Bruce's ask #2): months → arrays →
     offtakers, with what's available for each (invoice / offtaker bill / array
-    bill). Read-only; built on demand from the same source the live invoices use."""
+    bill). Read-only; built on demand from the same source the live invoices use.
+
+    Same background-sweep pattern as reconcile/audit — list_archive rebuilds a
+    match per offtaker (~60s at 800), which 504'd at the edge. {ok:false,
+    pending:true} while the sweep runs; the frontend polls."""
     from .invoice_archive import list_archive
     t = tenant_from_session(authorization)
-    with SessionLocal() as db:
-        return list_archive(db, t.id)
+    tid = t.id
+    s = _sweep_result(tid, "archive", lambda db: list_archive(db, tid))
+    if not s["ready"]:
+        return {"ok": False, "pending": True}
+    return s["result"]
 
 
 @router.get("/invoice-archive.zip")
