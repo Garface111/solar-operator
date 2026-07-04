@@ -2439,3 +2439,42 @@ export async function connectSolarEdgeAccount(
     },
   );
 }
+
+// ─── portal access roster (v1.9.112 multi-login vault) ─────────────────────
+
+/** One (client, portal-identity) row from GET /v1/portal-access. */
+export interface PortalAccessRow {
+  client_id: number;
+  client: string;
+  provider: string | null;
+  login_username: string | null;
+  /** automated | saved_pending | failing | disabled | login_missing | no_portal_identity */
+  status: string;
+  last_ok_at: string | null;
+  last_sync_at: string | null;
+  enabled: boolean | null;
+  fails: number;
+}
+
+export interface PortalAccessUnassigned {
+  provider: string;
+  username: string;
+  status: string;
+  last_ok_at: string | null;
+  enabled: boolean;
+  fails: number;
+}
+
+export interface PortalAccess {
+  extension_alive: boolean;
+  extension_last_seen: string | null;
+  clients: PortalAccessRow[];
+  unassigned_logins: PortalAccessUnassigned[];
+}
+
+/** Per-client portal automation roster: which client logins are saved in the
+ *  extension vault (hands-off), failing (password changed), or still to be
+ *  collected. Status metadata only — passwords never leave the extension. */
+export async function getPortalAccess(): Promise<PortalAccess> {
+  return request<PortalAccess>("/v1/portal-access");
+}

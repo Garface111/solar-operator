@@ -1573,3 +1573,38 @@ class AlertEvent(Base):
         UniqueConstraint("tenant_id", "array_id", "inverter_ref", "title",
                          name="uq_alert_event_dedup"),
     )
+
+
+class PortalLoginStatus(Base):
+    """Which UTILITY PORTAL logins the operator's extension vault holds — v1.9.112.
+
+    Reported by the extension heartbeat as METADATA ONLY (provider + username +
+    health). The passwords themselves NEVER reach this server — they live
+    AES-encrypted in the browser extension by deliberate design (see
+    extension/vault.js "SECURITY POSTURE"). This table only lets the dashboard's
+    "Portal access" tab answer: which client logins are automated, which are
+    failing (password changed), and which still need to be collected.
+
+    Upsert-keyed (tenant_id, provider, username_lc). The heartbeat report is a
+    full per-provider snapshot from one machine, so ingest uses per-provider
+    REPLACE semantics: usernames absent from the report are deleted for that
+    provider. (Two machines holding DIFFERENT logins for the same provider would
+    alternate their sets every re-send — visible in reported_at, harmless, and
+    not a real deployment today: the vault is per-device and operators run one.)
+    """
+    __tablename__ = "portal_login_status"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))              # gmp | vec | wec | sh_* …
+    username: Mapped[str] = mapped_column(String(200))             # as typed (display)
+    username_lc: Mapped[str] = mapped_column(String(200))          # lowercased (match key)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)   # auto-login toggle in the popup
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)   # auto-login gave up (bad password)
+    fails: Mapped[int] = mapped_column(Integer, default=0)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reported_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "username_lc",
+                         name="uq_portal_login_status"),
+    )
