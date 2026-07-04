@@ -79,6 +79,24 @@ const SoVault = (() => {
   // The gate every vault op uses: an inverter vendor OR a utility code.
   function accepts(code) { return VENDORS.includes(code) || isUtilityCode(code); }
 
+  // ── Multi-login slots (v1.9.112) ──────────────────────────────────────────
+  // A NEPOOL-agent operator holds a SEPARATE portal login per client, so a
+  // utility code can now own several credential slots. Slot key format:
+  //   "<code>"                 — legacy/default slot (Bruce's install: untouched)
+  //   "<code>::<lc username>"  — each additional login for that utility
+  // Multi-slot is UTILITY-ONLY: inverter vendors keep exactly one slot (their
+  // live loops are single-account by design). All existing per-key ops
+  // (get/clear/isEnabled) already read arbitrary keys, so slots ride free.
+  const SLOT_SEP = "::";
+  function slotCode(slotKey) {
+    const s = String(slotKey || "");
+    const i = s.indexOf(SLOT_SEP);
+    return i === -1 ? s : s.slice(0, i);
+  }
+  function slotKeyFor(code, username) {
+    return String(code) + SLOT_SEP + String(username || "").trim().toLowerCase();
+  }
+
   function b64(buf) {
     const bytes = new Uint8Array(buf);
     let s = "";
@@ -108,16 +126,30 @@ const SoVault = (() => {
   // (gmp / a SmartHub co-op code). get/clear/isEnabled/setOptOut are keyed the
   // same way and never gate (read/toggle/delete an arbitrary key is harmless);
   // only set() validates the key so we never persist creds under a junk code.
+  //
+  // Utility codes are MULTI-SLOT: the same username overwrites its own slot;
+  // a NEW username gets its own "<code>::<username>" slot. The first login
+  // ever saved for a code lands on the plain "<code>" key, byte-identical to
+  // pre-multi-slot behavior, so existing installs and callers see no change.
   async function set(vendor, username, password) {
     if (!accepts(vendor)) return false;
     try {
+      let slot = vendor;
+      if (isUtilityCode(vendor)) {
+        const existing = await list(vendor);
+        const uLc = String(username || "").trim().toLowerCase();
+        const match = existing.find((e) => String(e.username || "").trim().toLowerCase() === uLc);
+        if (match) slot = match.slot;                       // same login → overwrite its slot
+        else if (existing.length > 0) slot = slotKeyFor(vendor, username);  // additional login → own slot
+        // else: first login for this code → plain "<code>" slot (legacy behavior)
+      }
       const key = await getKey();
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const plain = new TextEncoder().encode(JSON.stringify({ u: username, p: password }));
       const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain);
       const s = await chrome.storage.local.get(CRED_STORE);
       const m = s[CRED_STORE] || {};
-      m[vendor] = { iv: b64(iv), ct: b64(ct), at: Date.now() };
+      m[slot] = { iv: b64(iv), ct: b64(ct), at: Date.now() };
       await chrome.storage.local.set({ [CRED_STORE]: m });
       return true;
     } catch (e) {
@@ -126,11 +158,21 @@ const SoVault = (() => {
     }
   }
 
-  // Return {username, password} for a vendor, or null if none / decrypt fails.
+  // Return {username, password} for a vendor/slot key, or null if none.
+  // For a UTILITY code whose plain slot is gone but that still has "::" slots
+  // (e.g. the first-saved login was removed), falls back to the oldest slot so
+  // "is there a usable login?" callers keep working.
   async function get(vendor) {
     try {
       const s = await chrome.storage.local.get(CRED_STORE);
-      const rec = (s[CRED_STORE] || {})[vendor];
+      const m = s[CRED_STORE] || {};
+      let rec = m[vendor];
+      if ((!rec || !rec.iv || !rec.ct) && isUtilityCode(vendor) && String(vendor).indexOf(SLOT_SEP) === -1) {
+        const pfx = vendor + SLOT_SEP;
+        const alt = Object.keys(m).filter((k) => k.startsWith(pfx))
+          .sort((a, b) => (m[a].at || 0) - (m[b].at || 0))[0];
+        if (alt) rec = m[alt];
+      }
       if (!rec || !rec.iv || !rec.ct) return null;
       const key = await getKey();
       const plain = await crypto.subtle.decrypt(
@@ -141,6 +183,34 @@ const SoVault = (() => {
       try { console.warn("[SoVault] get failed", vendor, e && e.message); } catch (_) {}
       return null;
     }
+  }
+
+  // Every saved login for a code, oldest-first: [{slot, username, at}].
+  // Decrypts each slot to read the username (usernames are never stored in the
+  // clear in the cred store). For an inverter vendor this is just 0 or 1 rows.
+  async function list(code) {
+    const out = [];
+    try {
+      const s = await chrome.storage.local.get(CRED_STORE);
+      const m = s[CRED_STORE] || {};
+      const pfx = code + SLOT_SEP;
+      const slots = Object.keys(m).filter((k) => k === code || k.startsWith(pfx))
+        .sort((a, b) => (m[a].at || 0) - (m[b].at || 0));
+      for (const slot of slots) {
+        const rec = m[slot];
+        if (!rec || !rec.iv || !rec.ct) continue;
+        try {
+          const key = await getKey();
+          const plain = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: unb64(rec.iv) }, key, unb64(rec.ct));
+          const obj = JSON.parse(new TextDecoder().decode(plain));
+          out.push({ slot, username: obj.u || "", at: rec.at || 0 });
+        } catch (_) { /* undecryptable slot — skip, never throw the whole list away */ }
+      }
+    } catch (e) {
+      try { console.warn("[SoVault] list failed", code, e && e.message); } catch (_) {}
+    }
+    return out;
   }
 
   async function has(vendor) { return !!(await get(vendor)); }
@@ -228,7 +298,11 @@ const SoVault = (() => {
     } catch (_) { return false; }
   }
 
-  // Auto-login is OPT-OUT: enabled unless explicitly disabled for that vendor.
+  // Auto-login is OPT-OUT: enabled unless explicitly disabled for that key.
+  // Multi-slot note: each login's opt-out is ITS OWN — the plain "<code>" slot's
+  // toggle governs only that login, never the sibling "<code>::" slots (a master
+  // switch keyed on the code would make the first login's "off" silently disable
+  // every other client's login, since the plain slot key IS the code).
   async function isEnabled(vendor) {
     const s = await chrome.storage.local.get(OPT_OUT_STORE);
     return !((s[OPT_OUT_STORE] || {})[vendor] === true);
@@ -241,10 +315,11 @@ const SoVault = (() => {
   }
 
   // Lightweight status for the popup UI (never returns the actual secrets).
-  // Reports the inverter vendors AND every utility code that currently has creds
+  // Reports the inverter vendors AND every utility SLOT that currently has creds
   // saved (so the popup can render the "Utility logins" group with live state —
-  // including a discovered sh_* co-op the popup wouldn't otherwise list). The
-  // popup keys utility rows it offers by code; here we surface whatever is stored.
+  // including a discovered sh_* co-op the popup wouldn't otherwise list). Utility
+  // entries are keyed by SLOT key and carry {code, username} so the popup can
+  // group several logins under one utility.
   async function status() {
     const out = {};
     for (const v of VENDORS) {
@@ -253,16 +328,24 @@ const SoVault = (() => {
     try {
       const s = await chrome.storage.local.get(CRED_STORE);
       const m = s[CRED_STORE] || {};
-      for (const code of Object.keys(m)) {
-        if (out[code]) continue;                 // already reported (inverter vendor)
+      for (const slot of Object.keys(m)) {
+        if (out[slot]) continue;                 // already reported (inverter vendor)
+        const code = slotCode(slot);
         if (!isUtilityCode(code)) continue;      // ignore anything that isn't a utility code
-        out[code] = { hasCreds: await has(code), enabled: await isEnabled(code), utility: true };
+        let username = "";
+        try { const rec = await get(slot); username = (rec && rec.username) || ""; } catch (_) {}
+        out[slot] = {
+          hasCreds: !!(m[slot] && m[slot].iv && m[slot].ct),
+          enabled: await isEnabled(slot),
+          utility: true, code, username,
+        };
       }
     } catch (_) {}
     return out;
   }
 
-  return { set, get, has, clear, isEnabled, setOptOut, status, VENDORS, UTILITIES, isUtilityCode, accepts,
+  return { set, get, has, clear, isEnabled, setOptOut, status, list, slotCode, slotKeyFor,
+           VENDORS, UTILITIES, isUtilityCode, accepts,
            stashPending, listPending, takePending, dismissPending };
 })();
 

@@ -5,6 +5,7 @@ import { ScreenLayout } from "../ui/ScreenLayout";
 import { useDashboardContext } from "./DashboardLayout";
 import { AccountProfileCard } from "../components/settings/AccountProfileCard";
 import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
+import { PortalAccessCard } from "../components/settings/PortalAccessCard";
 import { SpongeProgressCard } from "../components/settings/SpongeProgressCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
 import { DangerZoneCard } from "../components/settings/DangerZoneCard";
@@ -59,6 +60,10 @@ export default function AccountTab() {
           don't surface it on their master account. */}
       {account.product === "array_operator" && <SpongeProgressCard />}
       <UtilityConnectionsCard account={account} />
+      {/* Per-client portal automation roster (v1.9.112 multi-login vault):
+          which client logins are hands-off, failing, or still to collect.
+          NEPOOL-agent feature — status only, passwords live in the extension. */}
+      <PortalAccessCard />
       <PlanBillingCard account={account} />
       {account.subscription_status === "trialing" && (
         <DangerZoneCard onCancelled={() => setCancelled(true)} />

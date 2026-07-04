@@ -397,6 +397,9 @@ app.include_router(funnel_router)
 from .feature_suggestions import router as feature_suggestions_router
 app.include_router(feature_suggestions_router)
 
+from .portal_access import router as portal_access_router
+app.include_router(portal_access_router)
+
 # Auto-adapter engine: self-improving declarative adapters (synth -> validate -> registry)
 from .auto_adapters import router as auto_adapters_router
 app.include_router(auto_adapters_router)
@@ -513,18 +516,36 @@ async def client_error(request: Request):
 
 
 @app.post("/v1/extension/heartbeat")
-def extension_heartbeat(authorization: str | None = Header(default=None)):
+async def extension_heartbeat(request: Request,
+                              authorization: str | None = Header(default=None)):
     """Lightweight periodic ping from the Chrome extension so the onboarding
     screen can distinguish 'extension installed and active' from 'not detected.'
     Called by background.js every 60s when on a GMP tab. Returns the server
-    timestamp so the extension can show clock-skew warnings if needed."""
+    timestamp so the extension can show clock-skew warnings if needed.
+
+    v1.9.112: the ping MAY carry a vault report — {"vault": [{code, username,
+    enabled, last_ok_at, fails, paused}, …]} — listing which utility portal
+    logins are saved in the extension's client-side vault. Usernames + health
+    ONLY; passwords never leave the operator's machine by design. Persisted to
+    PortalLoginStatus (per-provider replace) for the dashboard "Portal access"
+    tab. Body-less pings (the normal case, 59 of 60) skip all of this."""
     tenant = tenant_from_bearer(authorization)
     require_not_demo(tenant)
+    vault_report: list[dict] | None = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("vault"), list):
+            vault_report = body["vault"]
+    except Exception:
+        vault_report = None   # body-less / non-JSON ping — the common case
     with SessionLocal() as db:
         t = db.get(Tenant, tenant.id)
         if t:
             t.extension_heartbeat_at = now()
-            db.commit()
+        if vault_report is not None:
+            from .portal_access import ingest_vault_report
+            ingest_vault_report(db, tenant.id, vault_report)
+        db.commit()
         # Capture debt rides the heartbeat: if this tenant's extension-captured
         # vendors/utilities have gone stale (machine was asleep, session lapsed),
         # tell WHICHEVER browser pinged us what to re-capture. Any signed-in

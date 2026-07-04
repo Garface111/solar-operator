@@ -1188,6 +1188,17 @@ async function soVaultSetAndArm(vendor, username, password) {
     // the login_required → recapTryAutoLogin → soFillLoginForm path fires on the
     // same-origin Chint login page, so Chint is hands-off like SMA/Fronius.
     try { if (typeof self.__soAutoLoginResetFails === "function") self.__soAutoLoginResetFails(vendor); } catch (_) {}
+    try {
+      // v1.9.112 multi-slot: the save may have landed on a "<code>::<username>"
+      // slot — clear THAT slot's auto-login pause too so the new password gets
+      // a fresh try on the next rotation pass.
+      if (typeof SoVault.list === "function" && typeof self.__soAutoLoginResetFails === "function") {
+        const uLc = String(username || "").trim().toLowerCase();
+        for (const l of await SoVault.list(vendor)) {
+          if (String(l.username || "").trim().toLowerCase() === uLc && l.slot !== vendor) self.__soAutoLoginResetFails(l.slot);
+        }
+      }
+    } catch (_) {}
     try { if (typeof self.__soKeepwarmResetFails === "function") self.__soKeepwarmResetFails(vendor); } catch (_) {}
     try { if ((vendor === "fronius" || vendor === "sma") && typeof self.__soArmLive === "function") await self.__soArmLive(vendor); } catch (_) {}
     try { if (vendor === "chint" && typeof self.__soArmChintLive === "function") await self.__soArmChintLive(); } catch (_) {}
@@ -1276,9 +1287,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await SoVault.clear(msg.vendor);
         // v1.9.97 — clearing a utility credential disarms its daily background
         // refresh (no creds → we can't silently re-auth, so stop re-opening it).
+        // v1.9.112 multi-slot: msg.vendor may be a "<code>::<username>" slot key;
+        // disarm the CODE's refresh only when its LAST login is gone — removing
+        // one client's login must not stop the other clients' pulls.
         try {
-          const isUtil = (typeof SoVault.isUtilityCode === "function") ? SoVault.isUtilityCode(msg.vendor) : false;
-          if (isUtil && typeof self.__soDisarmUtilityLive === "function") await self.__soDisarmUtilityLive(msg.vendor, "creds-cleared");
+          const code = (typeof SoVault.slotCode === "function") ? SoVault.slotCode(msg.vendor) : msg.vendor;
+          const isUtil = (typeof SoVault.isUtilityCode === "function") ? SoVault.isUtilityCode(code) : false;
+          if (isUtil && typeof self.__soDisarmUtilityLive === "function") {
+            const remaining = (typeof SoVault.list === "function") ? await SoVault.list(code) : [];
+            if (remaining.length === 0) await self.__soDisarmUtilityLive(code, "creds-cleared");
+          }
         } catch (_) {}
         sendResponse({ ok: true });
       } else if (msg.type === "SO_VAULT_OPTOUT") {
@@ -1300,16 +1318,76 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 const HEARTBEAT_ENDPOINT_PATH = "/v1/extension/heartbeat";
 chrome.alarms.create("heartbeat", { periodInMinutes: 1 });
 
+// ── Heartbeat vault report (v1.9.112) ────────────────────────────────────────
+// The dashboard's "Portal access" tab needs to know WHICH utility logins are
+// saved on this machine (so the operator sees per-client automation status).
+// We report METADATA ONLY — code + username + enabled/paused/last-ok — never a
+// password; the credentials themselves never leave this machine (vault.js).
+// Throttled: ride the 60s heartbeat only when the report changed or 6h passed.
+const HB_VAULT_SENT_KEY = "so_hb_vault_sent";   // { hash, at }
+const HB_VAULT_RESEND_MS = 6 * 60 * 60 * 1000;
+async function buildVaultReport() {
+  try {
+    if (typeof SoVault === "undefined" || typeof SoVault.status !== "function") return null;
+    const st = await SoVault.status();
+    const s = await chrome.storage.local.get(["so_util_login_status", "so_autologin_fails", "so_recap_last"]);
+    const perLogin = s.so_util_login_status || {};
+    const fails = s.so_autologin_fails || {};
+    const last = s.so_recap_last || {};
+    const out = [];
+    for (const key of Object.keys(st)) {
+      const e = st[key];
+      if (!e || !e.utility || !e.hasCreds) continue;
+      const ls = perLogin[key] || {};
+      // Last-ok: prefer the per-login record; a single-login utility may only
+      // have the per-code capture record (pre-rotation installs) — use that.
+      let lastOk = (ls.ok && ls.at) ? new Date(ls.at).toISOString() : null;
+      if (!lastOk && key === e.code && last[e.code] && last[e.code].ok) lastOk = last[e.code].at || null;
+      const f = Number(fails[key] || 0);
+      out.push({
+        code: e.code,
+        username: String(e.username || ""),
+        enabled: !!e.enabled,
+        last_ok_at: lastOk,
+        fails: Math.max(f, Number(ls.fails || 0)),
+        paused: f >= 3,   // AUTOLOGIN_MAX_VENDOR_FAILS (engine-scoped const)
+      });
+    }
+    return out;
+  } catch (_) { return null; }
+}
+
 async function sendHeartbeat() {
   const { tenantKey, endpoint } = await getSettings();
   if (!tenantKey) return;
   // Derive the base URL from the sync endpoint (same origin).
   const base = endpoint.replace(/\/v1\/sync$/, "");
+  // Attach the vault report only when it changed (or the 6h re-send is due) so
+  // 59 of 60 pings stay the same body-less POST they've always been.
+  let body = null;
+  let vaultHash = null;
+  try {
+    const report = await buildVaultReport();
+    if (report) {
+      const hash = JSON.stringify(report);
+      const sent = ((await chrome.storage.local.get(HB_VAULT_SENT_KEY))[HB_VAULT_SENT_KEY]) || {};
+      if (sent.hash !== hash || (Date.now() - (sent.at || 0)) > HB_VAULT_RESEND_MS) {
+        body = JSON.stringify({ vault: report });
+        vaultHash = hash;   // stamped only AFTER the POST lands, so a failed ping retries next minute
+      }
+    }
+  } catch (_) {}
   try {
     const resp = await fetch(`${base}${HEARTBEAT_ENDPOINT_PATH}`, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${tenantKey}` },
+      headers: body
+        ? { "Authorization": `Bearer ${tenantKey}`, "Content-Type": "application/json" }
+        : { "Authorization": `Bearer ${tenantKey}` },
+      ...(body ? { body } : {}),
     });
+    if (body && resp && resp.ok && vaultHash) {
+      try { await chrome.storage.local.set({ [HB_VAULT_SENT_KEY]: { hash: vaultHash, at: Date.now() } }); } catch (_) {}
+    }
     // v1.9.110 — CAPTURE DEBT rides the heartbeat reply: when the server says a
     // vendor/utility has gone stale (this or any machine was asleep, a session
     // lapsed), whichever browser heartbeats first drains it. This is the fix for
@@ -1771,26 +1849,152 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
   self.__soArmUtilityLive = armUtilityLive;
   self.__soDisarmUtilityLive = disarmUtilityLive;
+
+  // ── MULTI-LOGIN ROTATION (v1.9.112) ────────────────────────────────────────
+  // A NEPOOL-agent operator holds a separate portal login PER CLIENT, so one
+  // utility code can own several vault slots (see vault.js). The refresh tick
+  // walks them serially: log out the portal (deliberate cookie clear), open it,
+  // and let the nav auto-login fill the TARGETED slot's credential. State:
+  //   so_util_login_target  { <code>: {slot, at} }  — which slot the in-flight
+  //     capture must sign in as. PERSISTED (not a Map) so an MV3 worker restart
+  //     mid-capture still fills the right login. Stale after 10min = ignored.
+  //   so_util_login_status  { <slot>: {ok, at, fails} } — per-login outcome for
+  //     the popup roster + the heartbeat report the dashboard tab reads.
+  const UTIL_LOGIN_TARGET_KEY = "so_util_login_target";
+  const UTIL_LOGIN_STATUS_KEY = "so_util_login_status";
+  const UTIL_TARGET_STALE_MS = 10 * 60 * 1000;
+  async function utilTargetSet(code, slot) {
+    try {
+      const s = await chrome.storage.local.get(UTIL_LOGIN_TARGET_KEY);
+      const m = s[UTIL_LOGIN_TARGET_KEY] || {};
+      m[code] = { slot, at: Date.now() };
+      await chrome.storage.local.set({ [UTIL_LOGIN_TARGET_KEY]: m });
+    } catch (_) {}
+  }
+  async function utilTargetClear(code) {
+    try {
+      const s = await chrome.storage.local.get(UTIL_LOGIN_TARGET_KEY);
+      const m = s[UTIL_LOGIN_TARGET_KEY] || {};
+      delete m[code];
+      await chrome.storage.local.set({ [UTIL_LOGIN_TARGET_KEY]: m });
+    } catch (_) {}
+  }
+  async function utilTargetGet(code) {
+    try {
+      const s = await chrome.storage.local.get(UTIL_LOGIN_TARGET_KEY);
+      const rec = (s[UTIL_LOGIN_TARGET_KEY] || {})[code];
+      if (!rec || !rec.slot) return null;
+      if ((Date.now() - (rec.at || 0)) > UTIL_TARGET_STALE_MS) return null;   // stale = a dead worker's leftovers
+      return rec;
+    } catch (_) { return null; }
+  }
+  self.__soUtilTargetGet = utilTargetGet;
+  async function utilLoginStatusPatch(slot, patch) {
+    try {
+      const s = await chrome.storage.local.get(UTIL_LOGIN_STATUS_KEY);
+      const m = s[UTIL_LOGIN_STATUS_KEY] || {};
+      m[slot] = { ...(m[slot] || {}), ...patch };
+      await chrome.storage.local.set({ [UTIL_LOGIN_STATUS_KEY]: m });
+    } catch (_) {}
+  }
+  // Deliberate portal logout so the NEXT login's form presents. ONLY the rotation
+  // uses this (2+ saved logins) — a single-login operator's warm session is never
+  // touched. GMP cookies live on greenmountainpower.com; SmartHub's SSO is shared
+  // across *.smarthub.coop, so co-op rotation clears the family (a sibling co-op's
+  // own tick simply re-auths with its own vault credential).
+  async function clearUtilityCookies(code) {
+    const c = String(code || "").toLowerCase();
+    let domains = [];
+    if (c === "gmp") domains = ["greenmountainpower.com"];
+    else {
+      const url = _utilityPortalUrl(c);
+      if (url) { try { domains = [new URL(url).hostname, "smarthub.coop"]; } catch (_) {} }
+    }
+    let n = 0;
+    for (const domain of domains) {
+      try {
+        for (const ck of await chrome.cookies.getAll({ domain })) {
+          const u = (ck.secure ? "https://" : "http://") + String(ck.domain || "").replace(/^\./, "") + (ck.path || "/");
+          try { await chrome.cookies.remove({ url: u, name: ck.name, storeId: ck.storeId }); n++; } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    rlog("util-rotation:", code, "logged out portal (cleared", n, "cookies) so the next login can present");
+  }
+
   // One utility refresh tick: open the portal in a minimized popup via the shared
   // recapture path, then update the fail counter from the recorded outcome.
+  // With 2+ saved logins for the code, rotate through ALL of them serially
+  // (logout → open → targeted auto-login → capture) inside this one tick — the
+  // 12h cadence means every client's bills refresh twice a day regardless of N.
   async function runUtilityLiveTick(code) {
     if (_liveBusy) { rlog("util-live:", code, "engine busy (sync lock) — skip"); return; }
     _liveBusy = true;
     try {
       const live = await utilLiveGet(code);
       if (!live || !live.on) { try { chrome.alarms.clear(_utilLiveAlarm(code), () => void chrome.runtime.lastError); } catch (_) {} return; }  // self-heal zombie alarm
-      if ((await autoLoginFailsGet(code)) >= AUTOLOGIN_MAX_VENDOR_FAILS) { rlog("util-live:", code, "auto-login paused (bad creds) — skip"); return; }
       const { tenantKey } = await recapSettings();
       if (!tenantKey) { rlog("util-live: no tenant key — skip"); return; }
       const st = await recapGetState();
       if (st && st.running && (Date.now() - (st.startedAt || 0)) < TAB_BUDGET_MS) { rlog("util-live: recap busy — skip tick"); return; }
-      const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
-      await recaptureVendor(code, { newWindow: true, budgetMs: 150 * 1000 });   // headroom for a full re-login + bill capture
-      const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
-      const ok = !!(after.ok && after.at && after.at !== before.at);
+
+      const logins = (typeof SoVault !== "undefined" && typeof SoVault.list === "function")
+        ? await SoVault.list(code) : [];
+
+      // ── Single-login (or no-login) path: EXACTLY the pre-rotation behavior —
+      // never log the session out, one capture, code-level fail bookkeeping.
+      if (logins.length <= 1) {
+        if ((await autoLoginFailsGet(code)) >= AUTOLOGIN_MAX_VENDOR_FAILS) { rlog("util-live:", code, "auto-login paused (bad creds) — skip"); return; }
+        const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
+        await recaptureVendor(code, { newWindow: true, budgetMs: 150 * 1000 });   // headroom for a full re-login + bill capture
+        const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
+        const ok = !!(after.ok && after.at && after.at !== before.at);
+        if (logins.length === 1) {   // per-login status feeds the popup roster + dashboard tab
+          const prev = ((await chrome.storage.local.get(UTIL_LOGIN_STATUS_KEY))[UTIL_LOGIN_STATUS_KEY] || {})[logins[0].slot] || {};
+          await utilLoginStatusPatch(logins[0].slot, ok ? { ok: true, at: Date.now(), fails: 0 } : { ok: false, fails: (prev.fails || 0) + 1 });
+        }
+        const cur = (await utilLiveGet(code)) || { on: true, fails: 0 };
+        if (!cur.on) return;
+        if (ok) { await utilLiveSet(code, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
+        const fails = (cur.fails || 0) + 1;
+        await utilLiveSet(code, { ...cur, fails });
+        if (fails >= UTIL_LIVE_MAX_FAILS) {
+          rlog("util-live:", code, fails, "dead cycles — disabling + nudging");
+          await disarmUtilityLive(code, "max-fails");
+          await recapMaybeNudge(code);
+        }
+        return;
+      }
+
+      // ── Rotation path: 2+ saved logins.
+      rlog("util-live:", code, "rotating", logins.length, "saved logins");
+      let anyOk = false;
+      let attempted = 0;
+      for (const login of logins) {
+        const slot = login.slot;
+        if (!(await SoVault.isEnabled(slot))) { rlog("util-rotation:", slot, "opted out — skip"); continue; }
+        if ((await autoLoginFailsGet(slot)) >= AUTOLOGIN_MAX_VENDOR_FAILS) { rlog("util-rotation:", slot, "auto-login paused (bad creds) — skip"); continue; }
+        const st2 = await recapGetState();
+        if (st2 && st2.running && (Date.now() - (st2.startedAt || 0)) < TAB_BUDGET_MS) { rlog("util-rotation: engine grabbed elsewhere — stop rotation"); break; }
+        attempted++;
+        await clearUtilityCookies(code);
+        await utilTargetSet(code, slot);
+        const before = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
+        try {
+          await recaptureVendor(code, { newWindow: true, budgetMs: 150 * 1000 });
+        } finally {
+          await utilTargetClear(code);
+        }
+        const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[code] || {};
+        const ok = !!(after.ok && after.at && after.at !== before.at);
+        const prev = ((await chrome.storage.local.get(UTIL_LOGIN_STATUS_KEY))[UTIL_LOGIN_STATUS_KEY] || {})[slot] || {};
+        await utilLoginStatusPatch(slot, ok ? { ok: true, at: Date.now(), fails: 0 } : { ok: false, fails: (prev.fails || 0) + 1 });
+        if (ok) anyOk = true;
+      }
       const cur = (await utilLiveGet(code)) || { on: true, fails: 0 };
       if (!cur.on) return;
-      if (ok) { await utilLiveSet(code, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
+      if (anyOk) { await utilLiveSet(code, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
+      if (attempted === 0) { rlog("util-live:", code, "every login paused/opted out — not counting a dead cycle"); return; }
       const fails = (cur.fails || 0) + 1;
       await utilLiveSet(code, { ...cur, fails });
       if (fails >= UTIL_LIVE_MAX_FAILS) {
@@ -2077,7 +2281,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   async function recapRecordLast(vendor, ok, sites) {
     try {
-      if (ok && vendor) { await autoLoginFailsSet(vendor, 0); await keepwarmFailsSet(vendor, 0); }   // a capture landed → clear the auto-login pause + keep-warm give-up counters
+      if (ok && vendor) {
+        await autoLoginFailsSet(vendor, 0); await keepwarmFailsSet(vendor, 0);   // a capture landed → clear the auto-login pause + keep-warm give-up counters
+        // Rotation in flight: the success belongs to the TARGETED login slot.
+        const t = await utilTargetGet(vendor);
+        if (t && t.slot) { await autoLoginFailsSet(t.slot, 0); await utilLoginStatusPatch(t.slot, { ok: true, at: Date.now(), fails: 0 }); }
+      }
       const s = await chrome.storage.local.get(LAST_KEY);
       const m = s[LAST_KEY] || {};
       m[vendor] = { at: new Date().toISOString(), ok, sites: Array.isArray(sites) ? sites.length : 0 };
@@ -2531,26 +2740,32 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       if (typeof tabId !== "number") return;
       // v1.9.97: accept inverter vendors AND utility codes (gmp / SmartHub co-op).
       if (typeof SoVault === "undefined" || !_vaultAccepts(vendor)) return;
+      // v1.9.112: when the rotation registered a TARGET login for this utility,
+      // fill (and do all fail bookkeeping for) THAT vault slot — not the default.
+      // No target (interactive tabs, single-login operators): credKey === vendor,
+      // byte-identical to the old behavior.
+      const _target = await utilTargetGet(vendor);
+      const credKey = (_target && _target.slot) || vendor;
       if (_autoLoginSubmittedTab.has(tabId)) {
         // We already submitted on this tab and it's BACK on a login page — the saved
         // password didn't take. Count the fail NOW (only on this confirmed re-presentation),
         // not optimistically at submit time, so a slow-but-successful sign-in (whose capture
         // lands a beat later) never pauses good creds. A real success redirects AWAY from the
         // login host, so this handler never fires for it; the capture then resets fails to 0.
-        await autoLoginFailsSet(vendor, (await autoLoginFailsGet(vendor)) + 1);
-        rlog("auto-login: login re-presented after submit for", vendor, "— counted a real fail");
+        await autoLoginFailsSet(credKey, (await autoLoginFailsGet(credKey)) + 1);
+        rlog("auto-login: login re-presented after submit for", credKey, "— counted a real fail");
         return;
       }
-      const fails = await autoLoginFailsGet(vendor);
+      const fails = await autoLoginFailsGet(credKey);
       if (fails >= AUTOLOGIN_MAX_VENDOR_FAILS) {
-        rlog("auto-login: PAUSED for", vendor, "after", fails, "failed attempts — re-save the password (or sign in once) to retry");
+        rlog("auto-login: PAUSED for", credKey, "after", fails, "failed attempts — re-save the password (or sign in once) to retry");
         broadcastToSoTabs({ type: "SO_LOGIN_STATE", provider: vendor, state: "login_required", reason: "auto-login-paused" });
         return;
       }
       const attempts = _autoLoginAttemptsTab.get(tabId) || 0;
       if (attempts >= AUTOLOGIN_MAX_TAB_ATTEMPTS) { rlog("auto-login: max attempts on tab", tabId, "for", vendor); return; }
-      if (!(await SoVault.isEnabled(vendor))) { rlog("auto-login: opted out for", vendor); return; }
-      const creds = await SoVault.get(vendor);
+      if (!(await SoVault.isEnabled(credKey))) { rlog("auto-login: opted out for", credKey); return; }
+      const creds = await SoVault.get(credKey);
       if (!creds) {
         rlog("auto-login: no stored creds for", vendor, "(one-click recovery will nudge)");
         // No saved password → we can't sign in silently. Tell the AO page so it surfaces a

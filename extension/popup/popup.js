@@ -401,12 +401,17 @@
   // `rerender` on any change. Shared by the inverter auto-login group and the
   // utility-logins group so they stay pixel-identical.
   function buildCredRow(container, item, status, rerender) {
-    const st = status[item.id] || { hasCreds: false, enabled: true };
+    // Multi-login slots (v1.9.112): a row may represent one SAVED login (item.slot
+    // + item.username, username fixed — remove & re-add to change it) or an
+    // add/first row (no slot — saving writes via the code, and a new username
+    // becomes its own slot instead of overwriting another client's login).
+    const stateKey = item.slot || item.id;
+    const st = (item.addRow ? null : status[stateKey]) || { hasCreds: false, enabled: true };
     const node = alTpl.content.cloneNode(true);
     const row = node.querySelector(".al-row");
     row.querySelector(".al-vendor").textContent = item.label;
     const stateEl = row.querySelector(".al-state");
-    stateEl.textContent = st.hasCreds ? (st.enabled ? "● saved · on" : "● saved · off") : "not set";
+    stateEl.textContent = item.addRow ? "" : (st.hasCreds ? (st.enabled ? "● saved · on" : "● saved · off") : "not set");
     stateEl.className = "al-state " + (st.hasCreds && st.enabled ? "on" : st.hasCreds ? "off" : "");
     const userEl = row.querySelector(".al-user");
     const passEl = row.querySelector(".al-pass");
@@ -414,10 +419,11 @@
     const clearBtn = row.querySelector(".al-clear");
     const optCb = row.querySelector(".al-optout-cb");
     if (item.userPlaceholder) userEl.placeholder = item.userPlaceholder;
+    if (item.username) { userEl.value = item.username; userEl.readOnly = true; userEl.title = "To change the username, remove this login and add it again."; }
     if (st.hasCreds) { passEl.placeholder = "•••••••• (saved — type to replace)"; clearBtn.classList.remove("hidden"); }
     optCb.checked = !st.enabled;   // checkbox = "off" (opted out)
     saveBtn.addEventListener("click", async () => {
-      const u = userEl.value.trim(); const p = passEl.value;
+      const u = (item.username || userEl.value).trim(); const p = passEl.value;
       if (!u || !p) { saveBtn.textContent = "enter both"; setTimeout(() => saveBtn.textContent = "Save", 1500); return; }
       saveBtn.textContent = "Saving…";
       const r = await vaultMsg({ type: "SO_VAULT_SET", vendor: item.id, username: u, password: p });
@@ -426,11 +432,11 @@
       setTimeout(rerender, 900);
     });
     clearBtn.addEventListener("click", async () => {
-      await vaultMsg({ type: "SO_VAULT_CLEAR", vendor: item.id });
+      await vaultMsg({ type: "SO_VAULT_CLEAR", vendor: stateKey });
       rerender();
     });
     optCb.addEventListener("change", async () => {
-      await vaultMsg({ type: "SO_VAULT_OPTOUT", vendor: item.id, optedOut: optCb.checked });
+      await vaultMsg({ type: "SO_VAULT_OPTOUT", vendor: stateKey, optedOut: optCb.checked });
       rerender();
     });
     container.appendChild(node);
@@ -476,18 +482,44 @@
     return code.toUpperCase() + " (SmartHub)";
   }
 
+  // v1.9.112 — MULTI-LOGIN ROSTER. A utility can hold one saved login PER CLIENT
+  // (vault slots). Render one row per saved login (username shown, fixed) plus an
+  // "add another client login" row per utility, so a NEPOOL-agent operator can
+  // hand the extension every client's portal login and go fully hands-off.
   async function renderUtilityLogins() {
     const resp = await vaultMsg({ type: "SO_VAULT_STATUS" });
     const status = (resp && resp.status) || {};
     utRows.innerHTML = "";
-    const shown = new Set();
-    for (const v of UT_VENDORS) { buildCredRow(utRows, v, status, renderUtilityLogins); shown.add(v.id); }
-    // Surface any already-saved utility code we didn't pre-list (e.g. a sh_* co-op).
-    for (const code of Object.keys(status)) {
-      if (shown.has(code)) continue;
-      if (!(status[code] && status[code].utility && status[code].hasCreds)) continue;
-      buildCredRow(utRows, { id: code, label: coopLabel(code), userPlaceholder: "SmartHub username / email" }, status, renderUtilityLogins);
-      shown.add(code);
+    // Group saved utility slots by code ("gmp" owns "gmp" + every "gmp::…").
+    const byCode = {};
+    for (const key of Object.keys(status)) {
+      const e = status[key];
+      if (!(e && e.utility && e.hasCreds)) continue;
+      const code = e.code || key;
+      (byCode[code] = byCode[code] || []).push({ slot: key, username: e.username || "" });
+    }
+    const codes = UT_VENDORS.map((v) => v.id);
+    for (const code of Object.keys(byCode)) if (!codes.includes(code)) codes.push(code);
+    for (const code of codes) {
+      const pre = UT_VENDORS.find((v) => v.id === code);
+      const label = pre ? pre.label : coopLabel(code);
+      const placeholder = pre ? pre.userPlaceholder : "SmartHub username / email";
+      const saved = (byCode[code] || []).slice().sort((a, b) => String(a.username).localeCompare(String(b.username)));
+      for (const s of saved) {
+        buildCredRow(utRows, {
+          id: code, slot: s.slot, username: s.username,
+          label: saved.length > 1 || s.username ? label : label,
+          userPlaceholder: placeholder,
+        }, status, renderUtilityLogins);
+      }
+      // The add/first row: empty fields; saving a NEW username adds a slot,
+      // it never overwrites an existing client's login (vault.set semantics).
+      buildCredRow(utRows, {
+        id: code,
+        label: saved.length ? label + " — add another client login" : label,
+        userPlaceholder: placeholder,
+        addRow: saved.length > 0,
+      }, status, renderUtilityLogins);
     }
   }
 })();

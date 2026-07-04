@@ -1187,6 +1187,13 @@ def main():
         except Exception as _e:
             print(f"  (source_last_data_at scrub skipped: {_e})")
 
+        # 2026-07-04 Portal access roster (v1.9.112 multi-login vault). The
+        # portal_login_status table (which client portal logins the extension
+        # vault holds — usernames + health only, NEVER passwords) is created by
+        # init_db()/create_all above; verify it landed for the log.
+        print(f"  {'✓' if inspect(conn).has_table('portal_login_status') else '✗ MISSING'} "
+              f"table portal_login_status")
+
     print("=== Migration complete ===")
 
 
