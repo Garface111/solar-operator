@@ -43,7 +43,7 @@ from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
 from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, UtilitySession, now, local_today
-from .models import Inverter, InverterDaily
+from .models import Inverter, InverterDaily, SmaConsent
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
@@ -5191,3 +5191,260 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
             "sunny_spotlight": spotlight,
             "window": {"start": start.isoformat(), "end": end.isoformat(), "days": window_days},
         }
+
+
+# ── SMA owner-consent connect (v1.9.113) ───────────────────────────────────────
+# SMA's API model is the inverse of key-paste: our ONE registered app + a
+# per-owner backchannel consent the plant owner approves inside their Sunny
+# Portal account. No passwords, no keys for the owner to hunt — one approval
+# click. Flow: POST /sma/consent (send the prompt) → GET /sma/consent/status
+# (poll; state persisted in SmaConsent so it resumes across sessions) →
+# POST /sma/connect-account (list the app-readable plants, attach chosen ones).
+# Inert until SMA approves the app registration (SMA_APP_CLIENT_ID/SECRET env):
+# /sma/available tells the UI which world it's in.
+# ⚠️ SMA endpoint shapes are unverified until the sandbox run — parsing lives in
+# api/inverters/sma.py behind one URL-config block (see its banner).
+
+
+@router.get("/v1/array-owners/sma/available")
+def sma_available(authorization: str | None = Header(default=None)) -> dict:
+    """Is the one-click SMA consent flow live? (True once SMA approves our app
+    registration and the app credentials land in the environment.)"""
+    _tenant_from_bearer(authorization)
+    return {"ok": True, "configured": inverters.sma.is_app_configured()}
+
+
+class SmaConsentBody(BaseModel):
+    owner_email: str
+
+
+@router.post("/v1/array-owners/sma/consent")
+def sma_consent_start(
+    body: SmaConsentBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Send (or re-send) the SMA consent prompt to a plant owner's Sunny Portal
+    account. Persists the request per (tenant, owner email) so the UI can poll
+    and resume. Re-posting for the same owner re-sends after a rejection."""
+    tenant = _tenant_from_bearer(authorization)
+    _guard_vendor_discover(tenant.id, "sma")
+    if not inverters.sma.is_app_configured():
+        raise HTTPException(503, "SMA linking isn't live yet — our SMA app "
+                                 "registration is still in progress.")
+
+    email = (body.owner_email or "").strip()
+    if "@" not in email:
+        raise HTTPException(400, "A valid plant-owner email is required.")
+
+    try:
+        res = inverters.sma.request_consent(email)
+    except InverterAuthError as exc:
+        raise HTTPException(502, f"SMA rejected our app credentials: {exc}")
+    except InverterError as exc:
+        raise HTTPException(502, f"SMA consent request failed: {exc}")
+
+    with SessionLocal() as db:
+        row = db.execute(
+            select(SmaConsent).where(
+                SmaConsent.tenant_id == tenant.id,
+                SmaConsent.owner_email_lc == email.lower(),
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = SmaConsent(tenant_id=tenant.id, owner_email=email,
+                             owner_email_lc=email.lower())
+            db.add(row)
+        row.owner_email = email
+        row.status = "pending"
+        row.auth_req_id = res.get("auth_req_id")
+        row.last_error = None
+        row.requested_at = now()
+        db.commit()
+
+    return {"ok": True, "status": "pending",
+            "message": f"Approval request sent — {email} will see it in their "
+                       "Sunny Portal account. This page updates once they approve."}
+
+
+@router.get("/v1/array-owners/sma/consent/status")
+def sma_consent_status(
+    owner_email: str,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Poll one owner's consent state. Refreshes from SMA (best-effort) and
+    persists; a transient SMA error returns the last KNOWN state, flagged."""
+    tenant = _tenant_from_bearer(authorization)
+    email = (owner_email or "").strip()
+    with SessionLocal() as db:
+        row = db.execute(
+            select(SmaConsent).where(
+                SmaConsent.tenant_id == tenant.id,
+                SmaConsent.owner_email_lc == email.lower(),
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(404, "No consent request on file for that email.")
+        stale = False
+        try:
+            row.status = inverters.sma.consent_status(email)
+            row.last_error = None
+        except InverterError as exc:
+            stale = True
+            row.last_error = str(exc)[:500]
+        db.commit()
+        return {"ok": True, "status": row.status, "stale": stale,
+                "requested_at": row.requested_at.isoformat()}
+
+
+class SmaConnectAccountBody(BaseModel):
+    # Attach a subset of the app-readable plants; omit to attach every plant
+    # SELECTED in the UI — the caller should normally pass explicit ids, since
+    # the app token sees ALL consented owners' plants (cross-tenant listing).
+    system_ids: Optional[list[str]] = None
+
+
+@router.post("/v1/array-owners/sma/connect-account")
+def sma_connect_account(
+    body: SmaConnectAccountBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Attach SMA plants to this tenant's arrays (match by existing connection
+    system_id, then exact name; create otherwise; idempotent — the same
+    cascade as SolarEdge/Fronius/Locus).
+
+    SCOPING NOTE (loud): our app token lists the plants of EVERY consented
+    owner across tenants, and SMA's listing gives us no per-owner filter we
+    can rely on yet. The UI must therefore pass the explicit system_ids the
+    tenant picked from their discover step. Passing none attaches everything
+    the app can see — acceptable only while the app has a single tenant's
+    consents; revisit after the sandbox run pins a per-owner filter."""
+    tenant = _tenant_from_bearer(authorization)
+    _guard_vendor_discover(tenant.id, "sma")
+    if not inverters.sma.is_app_configured():
+        raise HTTPException(503, "SMA linking isn't live yet — our SMA app "
+                                 "registration is still in progress.")
+
+    try:
+        discovered = inverters.sma.discover_systems()
+    except InverterAuthError as exc:
+        raise HTTPException(502, f"SMA rejected our app credentials: {exc}")
+    except InverterError as exc:
+        raise HTTPException(502, f"SMA error: {exc}")
+
+    requested: set[str] | None = None
+    if body.system_ids is not None:
+        requested = {str(s) for s in body.system_ids}
+        discovered = [s for s in discovered if str(s["system_id"]) in requested]
+
+    if not discovered:
+        return {"ok": True, "connected": [], "created": [], "matched": [],
+                "message": "No SMA plants to connect."}
+
+    connected: list[dict] = []
+    created: list[dict] = []
+    matched: list[dict] = []
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        conns = {
+            c.array_id: c for c in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_([a.id for a in arrays] or [0])
+                )
+            ).scalars().all()
+        }
+
+        by_system_id: dict[str, list[int]] = defaultdict(list)
+        by_name: dict[str, list[int]] = defaultdict(list)
+        all_names_lower: set[str] = {
+            n.strip().lower() for (n,) in db.execute(
+                select(Array.name).where(Array.tenant_id == tenant.id)
+            ).all()
+        }
+        arr_by_id = {a.id: a for a in arrays}
+        for a in arrays:
+            by_name[a.name.strip().lower()].append(a.id)
+            c = conns.get(a.id)
+            if c is not None and c.vendor == "sma":
+                sid = (c.config or {}).get("system_id")
+                if sid:
+                    by_system_id[str(sid)].append(a.id)
+
+        used: set[int] = set()
+        for system in discovered:
+            sid = str(system["system_id"])
+            sys_name = (system.get("name") or "").strip() or f"SMA plant {sid}"
+            entry = {"array_id": None, "name": sys_name, "system_id": sid}
+
+            claimants = [aid for aid in by_system_id.get(sid, []) if aid not in used]
+            if len(claimants) > 1:
+                raise HTTPException(
+                    409,
+                    f"Two arrays already claim SMA plant {sid} "
+                    f"(arrays {sorted(claimants)}). Resolve the duplicate first.",
+                )
+
+            target = None
+            if claimants:
+                target = arr_by_id[claimants[0]]
+            else:
+                name_hits = [aid for aid in by_name.get(sys_name.lower(), [])
+                             if aid not in used]
+                if len(name_hits) == 1:
+                    target = arr_by_id[name_hits[0]]
+
+            # Per-connection config carries ONLY the system id — the app-level
+            # credentials resolve from the environment at pull time, so no
+            # secret is duplicated per tenant row.
+            if target is not None:
+                conn = conns.get(target.id)
+                if conn is None:
+                    conn = InverterConnection(array_id=target.id, vendor="sma",
+                                              config={"system_id": sid}, status="ok")
+                    db.add(conn)
+                else:
+                    conn.vendor = "sma"
+                    conn.config = {"system_id": sid}
+                    conn.status = "ok"
+                    conn.last_error = None
+                used.add(target.id)
+                entry["array_id"] = target.id
+                entry["name"] = target.name
+                matched.append(entry)
+            else:
+                name = sys_name
+                if name.lower() in all_names_lower:
+                    name = f"{sys_name} ({sid[:8]})"
+                new_arr = Array(tenant_id=tenant.id, name=name, client_id=None,
+                                fuel_type="solar")
+                db.add(new_arr)
+                db.flush()
+                db.add(InverterConnection(array_id=new_arr.id, vendor="sma",
+                                          config={"system_id": sid}, status="ok"))
+                used.add(new_arr.id)
+                all_names_lower.add(name.lower())
+                arr_by_id[new_arr.id] = new_arr
+                entry["array_id"] = new_arr.id
+                entry["name"] = new_arr.name
+                created.append(entry)
+
+            connected.append(entry)
+
+        db.commit()
+
+        for _e in connected:
+            if _e.get("array_id"):
+                _trigger_history_backfill(db, _e["array_id"])
+
+    return {
+        "ok": True,
+        "connected": connected,
+        "created": created,
+        "matched": matched,
+        "message": (f"{len(connected)} arrays connected — "
+                    f"{len(created)} new, {len(matched)} matched."),
+    }

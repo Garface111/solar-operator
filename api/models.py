@@ -1637,3 +1637,30 @@ class PortalLoginStatus(Base):
         UniqueConstraint("tenant_id", "provider", "username_lc",
                          name="uq_portal_login_status"),
     )
+
+
+class SmaConsent(Base):
+    """One plant-owner consent request to SMA per (tenant, owner email) —
+    v1.9.113 SMA consent flow.
+
+    SMA's API model: our ONE registered app + per-owner backchannel consent
+    (the owner approves inside their Sunny Portal account; no passwords ever
+    touch us — not even client-side). This row tracks where each request
+    stands so the connect UI can poll and resume across sessions.
+
+    status: pending | accepted | rejected | revoked | error | unknown
+    """
+    __tablename__ = "sma_consents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    owner_email: Mapped[str] = mapped_column(String(200))       # as typed (display)
+    owner_email_lc: Mapped[str] = mapped_column(String(200))    # lowercased (key)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    auth_req_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "owner_email_lc", name="uq_sma_consent"),
+    )
