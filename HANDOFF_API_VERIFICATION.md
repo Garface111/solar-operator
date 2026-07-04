@@ -174,13 +174,20 @@ registration decision (pricing: ~€12/system/yr base + €0.09/kWac — e.g.
 
 `scripts/watch_inverter_api_replies.py` + `.sh` wrapper, on WSL cron every 2h
 (`0 */2 * * *` → `/root/inverter_api_watch.log`). Each run it checks Ford's Gmail
-for a reply from Fronius (pv-support-usa@fronius.com) or SMA (*.sma.de) and
-advances the linking automatically as far as is safe:
+for a reply from Fronius (@fronius.com), SMA (*.sma.de) or CPS/Chint (@chint.com)
+and advances the linking automatically as far as is safe. It filters vendor
+auto-acks/OOO AND unrelated vendor mail (only a subject carrying the inquiry's
+topic markers counts as a reply — a "Bruce invited you to access Waterford"
+Solar.web notice does NOT page Ford):
   • SMA reply → extract sandbox client creds → RUN `verify_inverter_apis --vendor
     sma` → email Ford the PASS/FAIL verdict (creds redacted). Adapter verified;
     production registration (terms) is left to Ford.
   • Fronius reply → email Ford a heads-up with the pricing/availability read and
     the reply text. Signing the order form (paid) is left to Ford/Bruce.
+  • CPS/Chint reply → email Ford a heads-up with an API-offered / not-offered read
+    and the reply text. There is NO Chint cloud adapter yet (Chint is extension-
+    scraped today); if CPS offers a fleet/monitoring API or data feed, that's the
+    trigger to scope a server-side Chint adapter. Exploratory — low odds.
 It only reads the two vendor senders, only emails Ford himself, never sends
 outward, and keeps a processed-id state file (`~/.hermes/state/
 inverter_api_watch.json`) so it never double-notifies.
@@ -249,3 +256,19 @@ blocked, say exactly where and why — no silent stalls.
     run `SMA_SANDBOX=1 SMA_CLIENT_ID=… SMA_CLIENT_SECRET=… SMA_SYSTEM_ID=…
     python -m scripts.verify_inverter_apis --vendor sma` to fully verify that
     adapter (see Task 3 rough edges above).
+- 2026-07-04 (LOCAL): **Reply-watcher ACTIVATED + verified live.** Ford created a
+  Gmail App Password (stored `~/.hermes/secrets/gmail_app_password`, chmod 600).
+  First live run authenticated, found Fronius's auto-acknowledgment
+  ("Automatische Antwort — respond in 2-3 days") and correctly filtered it; a
+  later broadened search surfaced an unrelated Solar.web "Waterford" system-share
+  invite, so added a subject-relevance gate too. Net: only genuine replies page
+  Ford. Fronius will reply substantively in ~2-3 days.
+- 2026-07-04 (LOCAL): **Third outreach SENT — CPS America / Chint.** Ford's ask:
+  exploratory partner-API inquiry (low odds; white-label vendors sometimes have
+  undocumented partner endpoints; costs nothing). Email SENT from
+  ford.genereaux@gmail.com → **sales.cps@chint.com** (their only published email;
+  no tech-support address, just a hotline 855-584-7168): "do you offer fleet/
+  partner API access for monitoring integrators?" Watcher extended to catch
+  @chint.com replies (new `cps` vendor branch). NOTE: there is NO Chint cloud
+  adapter in the repo yet — Chint stays extension-scraped; a positive CPS reply is
+  the trigger to scope one. `api/inverters/` has fronius+sma but no chint adapter.

@@ -59,6 +59,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # any sma.de sender and a subject/body sandbox hint.
 FRONIUS_SENDERS = ["pv-support-usa@fronius.com", "@fronius.com"]
 SMA_SENDERS = ["@sma.de", "@sma-service.com", "sunnyportal"]
+CPS_SENDERS = ["@chint.com", "@chintpowersystems.com", "@chintpower.com"]
+# Union of substrings to IMAP-search FROM on (one narrow search per token).
+_SEARCH_TOKENS = ["@fronius.com"] + SMA_SENDERS + CPS_SENDERS
 SEARCH_SINCE_DAYS = 45
 
 
@@ -134,6 +137,8 @@ def _classify(sender: str) -> str | None:
         return "fronius"
     if any(tok in s for tok in SMA_SENDERS):
         return "sma"
+    if any(tok in s for tok in CPS_SENDERS):
+        return "cps"
     return None
 
 
@@ -147,6 +152,22 @@ _AUTO_BODY_HINTS = (
     "due to the high volume", "do not send a follow up", "this is an automated",
     "automatic reply", "out of office", "we will get back to you as soon as possible",
 )
+
+
+# A vendor sends more than replies to us (Solar.web system-share invites, product
+# marketing, etc.). Only treat an email as a reply to OUR outreach when its subject
+# carries a topic marker from the inquiry we sent — otherwise a "Bruce invited you
+# to access Waterford" notice would falsely page Ford as a "Query API reply".
+_RELEVANT_SUBJECT = {
+    "fronius": ("query api", "solar.web query", "swqapi", "api access", "enablement", "us access"),
+    "sma": ("sandbox", "monitoring api", "client credential", "developer", "api ", "oauth"),
+    "cps": ("partner", "api", "integrator", "monitoring api", "data feed", "integration"),
+}
+
+
+def _is_relevant(vendor: str, subject: str) -> bool:
+    subj = subject.lower()
+    return any(k in subj for k in _RELEVANT_SUBJECT.get(vendor, ()))
 
 
 def _is_auto_reply(msg, subject: str, body: str) -> bool:
@@ -315,6 +336,29 @@ def process_message(vendor: str, subject: str, body: str, when: str,
                 "the adapter and wire the server-side pull.")
         send_notification("[EnergyAgent] Fronius replied re: Query API pricing/access",
                          note, app_pw, dry_run)
+    elif vendor == "cps":
+        low = body.lower()
+        # Positive = a concrete API/data-feed offering; check it FIRST so a real
+        # offering trumps boilerplate. Negative = a refusal, matched so the bare
+        # word "api" inside "we don't offer an api" isn't read as a yes.
+        pos = re.search(r"\b(rest api|monitoring api|data feed|developer portal|api key|"
+                        r"api access|api documentation|swagger|oauth|webhook)\b", low)
+        neg = re.search(r"\b(no|not|n['’]?t|cannot|unable)\b[\w\s]{0,24}\b(api|offer|provide|partner)\b", low)
+        if pos:
+            read = "Reads as: they mention a concrete API / data-feed path — worth a real read."
+        elif neg:
+            read = "Reads as: likely NO partner API offered (read the full reply to be sure)."
+        else:
+            read = "No clear API signal in the text — read the full reply."
+        note = (f"CPS America (Chint) replied ({when}) to the partner-API inquiry.\n\n"
+                f"{read}\n\n"
+                f"Full reply:\n{body[:2500]}\n\n"
+                "If they DO offer a fleet/monitoring API or data feed: reply with the "
+                "details and I'll scope a server-side Chint adapter (today Chint is "
+                "extension-scraped — a real API removes that freshness ceiling). No "
+                "commitment made; this was an exploratory inquiry.")
+        send_notification("[EnergyAgent] CPS America (Chint) replied re: partner API",
+                         note, app_pw, dry_run)
 
 
 def run(dry_run: bool = False) -> int:
@@ -338,7 +382,7 @@ def run(dry_run: bool = False) -> int:
     found = 0
     try:
         imap.select("INBOX", readonly=True)
-        for sender in FRONIUS_SENDERS[:1] + SMA_SENDERS:  # narrow, per-sender searches
+        for sender in _SEARCH_TOKENS:  # narrow, per-sender searches
             typ, data = imap.search(None, "SINCE", since, "FROM", f'"{sender}"')
             if typ != "OK" or not data or not data[0]:
                 continue
@@ -363,7 +407,13 @@ def run(dry_run: bool = False) -> int:
                 if _is_auto_reply(msg, subject, body):
                     print(f"[{vendor}] skipped auto-reply — {subject!r}")
                     if not dry_run:
-                        processed.add(mid)  # mark handled so we don't re-check it
+                        processed.add(mid)  # definitively noise — mark handled
+                    continue
+                if not _is_relevant(vendor, subject):
+                    # Unrelated vendor mail (system invite, marketing). Don't notify,
+                    # and DON'T mark processed — keep it re-checkable in case the
+                    # relevance heuristic is later widened.
+                    print(f"[{vendor}] skipped unrelated — {subject!r}")
                     continue
                 print(f"[{vendor}] {when} — {subject!r}")
                 process_message(vendor, subject, body, when, app_pw, dry_run)
