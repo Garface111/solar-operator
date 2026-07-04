@@ -1,0 +1,192 @@
+{
+  "manifest_version": 3,
+  "name": "EnergyAgent",
+  "short_name": "EnergyAgent",
+  "version": "1.9.112",
+  "description": "Captures GMP, VEC & WEC bills + solar production for NEPOOL/Array Operator, and links SolarEdge, Fronius, SMA & Chint inverters.",
+  "author": "EnergyAgent",
+  "homepage_url": "https://nepooloperator.com",
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "cookies",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.greenmountainpower.com/*",
+    "https://api.greenmountainpower.com/*",
+    "https://vermontelectric.smarthub.coop/*",
+    "https://*.smarthub.coop/*",
+    "https://monitoring.solaredge.com/*",
+    "https://www.solarweb.com/*",
+    "https://*.solarweb.com/*",
+    "https://login.online.fronius.com/*",
+    "https://login.fronius.com/*",
+    "https://*.fronius.com/*",
+    "https://ennexos.sunnyportal.com/*",
+    "https://uiapi.sunnyportal.com/*",
+    "https://*.sunnyportal.com/*",
+    "https://login.sma.energy/*",
+    "https://*.sma.energy/*",
+    "https://solar.chintpower.com/*",
+    "https://*.chintpower.com/*",
+    "https://monitor.chintpowersystems.com/*",
+    "https://monitor.chintpowersystems.com:8443/*",
+    "https://*.chintpowersystems.com/*",
+    "https://nepooloperator.com/*",
+    "https://*.nepooloperator.com/*",
+    "https://arrayoperator.com/*",
+    "https://*.arrayoperator.com/*",
+    "https://api.solaroperator.org/*",
+    "https://solaroperator.org/*",
+    "https://*.solaroperator.org/*",
+    "https://web-production-49c83.up.railway.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://greenmountainpower.com/*",
+        "https://*.greenmountainpower.com/*",
+        "https://*.smarthub.coop/*"
+      ],
+      "js": [
+        "portal_cleaner.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://greenmountainpower.com/*",
+        "https://*.greenmountainpower.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://greenmountainpower.com/*",
+        "https://*.greenmountainpower.com/*"
+      ],
+      "js": [
+        "gmp_meter_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.smarthub.coop/*"
+      ],
+      "js": [
+        "smarthub_registry.js",
+        "smarthub_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://monitoring.solaredge.com/*"
+      ],
+      "js": [
+        "solaredge_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.solarweb.com/*",
+        "https://*.solarweb.com/*"
+      ],
+      "js": [
+        "solarweb_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://ennexos.sunnyportal.com/*"
+      ],
+      "js": [
+        "sunnyportal_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://monitor.chintpowersystems.com/*"
+      ],
+      "js": [
+        "chint_inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://monitor.chintpowersystems.com/*"
+      ],
+      "js": [
+        "chint_content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://nepooloperator.com/*",
+        "https://*.nepooloperator.com/*",
+        "https://arrayoperator.com/*",
+        "https://*.arrayoperator.com/*",
+        "https://solaroperator.org/*",
+        "https://*.solaroperator.org/*",
+        "https://web-production-49c83.up.railway.app/*"
+      ],
+      "js": [
+        "so_bridge.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.solarweb.com/*",
+        "https://*.solarweb.com/*"
+      ],
+      "js": [
+        "auto_interpreter.js",
+        "auto_content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "auto_inject.js"
+      ],
+      "matches": [
+        "https://*.solarweb.com/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "EnergyAgent",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "options/options.html"
+}

@@ -1,0 +1,228 @@
+// so_bridge.js — page ↔ extension bridge for the EnergyAgent SPA.
+//
+// Runs on nepooloperator.com (+ solaroperator.org during transition) and the Railway
+// origin. The SPA cannot call
+// chrome.* directly (no chrome.* in page context), so it window.postMessage's
+// intents and we forward via chrome.runtime; broadcasts coming back from
+// background.js are reposted to the page so React effects can react live.
+//
+// ──────────────────────────────────────────────────────────────────────
+// PROTOCOL (see extension/BRIDGE_PROTOCOL.md for the canonical spec)
+// ──────────────────────────────────────────────────────────────────────
+//
+// Page → bridge (request, ack-driven):
+//   SO_OPEN_PORTAL      { url, reqId }              → SO_OPEN_PORTAL_ACK { reqId, ok, error? }
+//   SO_PAIR             { tenantKey, endpoint?, reqId } → SO_PAIR_ACK   { reqId, ok, version, lastSyncAt?, error? }
+//   SO_STATUS_REQUEST   { reqId }                   → SO_STATUS_ACK     { reqId, ok, version, tenantKeySet, lastSyncAt?, lastPayload?, loginState? }
+//
+// Bridge → page (one-shot broadcasts, no reqId):
+//   SO_EXTENSION_PRESENT  { version }
+//   SO_LOGIN_STATE        { provider, state, url, at }
+//   SO_CAPTURE_LANDED     { ok, provider, accountCount, at, error? }
+
+(() => {
+  // SECURITY: the manifest matches WILDCARD subdomains (*.arrayoperator.com, etc.), but
+  // the bridge must only run on the REAL app origins — a rogue/unexpected subdomain (or an
+  // unrelated page on a matched host) must NOT be able to drive the protocol. Be inert
+  // anywhere else, and target every reply at the page's own origin (never "*", which would
+  // also reach a cross-origin embedder).
+  const ALLOWED_ORIGINS = new Set([
+    "https://nepooloperator.com", "https://www.nepooloperator.com",
+    "https://arrayoperator.com", "https://www.arrayoperator.com",
+    "https://solaroperator.org", "https://www.solaroperator.org",
+    "https://web-production-49c83.up.railway.app",
+  ]);
+  if (!ALLOWED_ORIGINS.has(location.origin)) return;
+  const TARGET = location.origin;
+
+  // ── Announce presence so the SPA can detect us synchronously. ───────
+  try {
+    window.postMessage({
+      type: "SO_EXTENSION_PRESENT",
+      version: chrome.runtime.getManifest().version,
+    }, TARGET);
+  } catch (_) { /* manifest unavailable in odd contexts — non-fatal */ }
+
+  // ── Page → bridge → background ──────────────────────────────────────
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || typeof data !== "object") return;
+
+    if (data.type === "SO_OPEN_PORTAL") {
+      const reqId = data.reqId || null;
+      const url = String(data.url || "").trim();
+      const active = data.active === true;
+      // Forward the provider/vendor hint so background.js can arm the matching
+      // capture intent (e.g. vec vs wec on a shared smarthub.coop host).
+      const provider = (data.provider || data.vendor || "") + "";
+      if (!url || !/^https:\/\//i.test(url)) {
+        window.postMessage({ type: "SO_OPEN_PORTAL_ACK", reqId, ok: false, error: "invalid-url" }, TARGET);
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "OPEN_UTILITY_PORTAL", url, active, provider, vendor: provider }, (resp) => {
+        const ok = !chrome.runtime.lastError && resp && resp.ok;
+        window.postMessage({
+          type: "SO_OPEN_PORTAL_ACK",
+          reqId,
+          ok: !!ok,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, TARGET);
+      });
+      return;
+    }
+
+    // Page asks the extension to RE-SCRAPE a vendor portal NOW (the spreadsheet view's
+    // per-vendor Refresh button). Background opens a silent background tab, captures
+    // fresh power, and POSTs it to the backend; we relay the result so the page can
+    // refetch. SO_RECAPTURE { vendor, reqId } → SO_RECAPTURE_DONE { reqId, ok, captured }.
+    if (data.type === "SO_RECAPTURE") {
+      const reqId = data.reqId || null;
+      const vendor = String(data.vendor || "").toLowerCase();
+      if (!vendor) {
+        window.postMessage({ type: "SO_RECAPTURE_DONE", reqId, ok: false, error: "missing-vendor" }, TARGET);
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "TRIGGER_RECAPTURE", vendor }, (resp) => {
+        window.postMessage({
+          type: "SO_RECAPTURE_DONE",
+          reqId,
+          ok: !!(resp && resp.ok),
+          captured: !!(resp && resp.captured),
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, TARGET);
+      });
+      return;
+    }
+
+    // Page asks to SYNC ALL vendors AT ONCE — the extension opens every vendor portal
+    // in a background tab simultaneously, captures, and auto-closes each. Returns fast
+    // once the tabs are open (captures + closes happen in the background).
+    if (data.type === "SO_SYNC_ALL") {
+      const reqId = data.reqId || null;
+      chrome.runtime.sendMessage({ type: "SYNC_ALL_VENDORS", vendors: data.vendors || null }, (resp) => {
+        window.postMessage({
+          type: "SO_SYNC_ALL_DONE", reqId,
+          ok: !!(resp && resp.ok), opened: (resp && resp.opened) || 0,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, TARGET);
+      });
+      return;
+    }
+
+    // Page asks to CLOSE every open vendor portal tab.
+    if (data.type === "SO_CLOSE_VENDOR_TABS") {
+      const reqId = data.reqId || null;
+      chrome.runtime.sendMessage({ type: "CLOSE_ALL_VENDOR_TABS" }, (resp) => {
+        window.postMessage({
+          type: "SO_CLOSE_VENDOR_TABS_DONE", reqId,
+          ok: !!(resp && resp.ok), closed: (resp && resp.closed) || 0,
+          error: chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null,
+        }, TARGET);
+      });
+      return;
+    }
+
+    if (data.type === "SO_PAIR") {
+      const reqId = data.reqId || null;
+      const tenantKey = String(data.tenantKey || "").trim();
+      if (!tenantKey) {
+        window.postMessage({ type: "SO_PAIR_ACK", reqId, ok: false, error: "missing-tenant-key" }, TARGET);
+        return;
+      }
+      // SECURITY: do NOT forward a page-supplied `endpoint` — a malicious in-page script
+      // could repoint sync to an attacker's server. The extension uses its built-in
+      // endpoint; a real dev override goes through the popup, not the page bridge.
+      chrome.runtime.sendMessage({ type: "SO_PAIR", tenantKey }, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_PAIR_ACK",
+          reqId,
+          ok: !!(resp && resp.ok),
+          version: resp ? resp.version : undefined,
+          lastSyncAt: resp ? resp.lastSyncAt : undefined,
+          error: err,
+        }, TARGET);
+      });
+      return;
+    }
+
+    if (data.type === "SO_STATUS_REQUEST") {
+      const reqId = data.reqId || null;
+      chrome.runtime.sendMessage({ type: "SO_STATUS_REQUEST" }, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_STATUS_ACK",
+          reqId,
+          ok: !!(resp && resp.ok),
+          version: resp ? resp.version : undefined,
+          tenantKeySet: resp ? resp.tenantKeySet : undefined,
+          lastSyncAt: resp ? resp.lastSyncAt : undefined,
+          lastPayload: resp ? resp.lastPayload : undefined,
+          loginState: resp ? resp.loginState : undefined,
+          error: err,
+        }, TARGET);
+      });
+      return;
+    }
+
+    // SECURITY (v1.9.109): a page-initiated wipe no longer executes directly — the
+    // background stashes an intent and the owner confirms it in the extension popup.
+    // The ack carries `pending: true` in that case so the SPA can point the owner
+    // at the toolbar icon instead of assuming the session was reset.
+    if (data.type === "SO_WIPE_COOKIES") {
+      const reqId = data.reqId || null;
+      const domain = String(data.domain || "");
+      chrome.runtime.sendMessage({ type: "SO_WIPE_COOKIES", domain }, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_WIPE_COOKIES_ACK",
+          reqId,
+          ok: !!(resp && resp.ok),
+          pending: !!(resp && resp.pending),
+          wiped: resp ? resp.wiped : undefined,
+          error: err,
+        }, TARGET);
+      });
+      return;
+    }
+
+    // v1.9.34: auto-login vault relay. The Master Account tab manages auto-refresh
+    // credentials + opt-out through these; secrets only ever go page → background to
+    // be encrypted at rest, and the status reply NEVER includes a password.
+    // v1.9.109: op:"set" from the page no longer writes the vault directly — the
+    // background stashes an encrypted intent and the owner confirms it with one
+    // click in the extension popup. The ack carries `pending: true` in that case so
+    // the SPA can show "finish in the extension" instead of a false "saved ✓".
+    if (data.type === "SO_VAULT") {
+      const reqId = data.reqId || null;
+      const op = String(data.op || "");                 // status | set | clear | optout
+      const msg = { type: "SO_VAULT_" + op.toUpperCase(), vendor: data.vendor };
+      if (op === "set") { msg.username = data.username; msg.password = data.password; }
+      if (op === "optout") { msg.optedOut = !!data.optedOut; }
+      chrome.runtime.sendMessage(msg, (resp) => {
+        const err = chrome.runtime.lastError ? chrome.runtime.lastError.message : (resp && resp.error) || null;
+        window.postMessage({
+          type: "SO_VAULT_ACK",
+          reqId,
+          op,
+          ok: !!(resp && resp.ok),
+          pending: !!(resp && resp.pending),        // op:"set" awaiting popup confirm
+          status: resp ? resp.status : undefined,   // only for op==="status"
+          error: err,
+        }, TARGET);
+      });
+      return;
+    }
+  });
+
+  // ── Background → bridge → page broadcasts ────────────────────────────
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.type === "SO_LOGIN_STATE" || msg.type === "SO_CAPTURE_LANDED" || msg.type === "SO_CAPTURE_FAILED") {
+      window.postMessage(msg, TARGET);
+    }
+    // We don't need to keep the channel open for an async response —
+    // background broadcasts are fire-and-forget.
+  });
+})();

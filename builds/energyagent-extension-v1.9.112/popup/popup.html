@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EnergyAgent</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- ── Header: octarine brand mark + connection state ───────────────────── -->
+  <div class="header">
+    <span class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">EnergyAgent</span>
+    </span>
+    <span id="status-pill" class="pill pill-loading">
+      <span class="pill-dot" aria-hidden="true"></span>
+      <span class="pill-text">Loading</span>
+    </span>
+  </div>
+
+  <!-- ── Product badges: lit = linked, dim = not ──────────────────────────── -->
+  <div class="badges" id="badges">
+    <span class="badge badge-ao is-dim" id="badge-ao">
+      <span class="badge-dot" aria-hidden="true"></span>Array Operator
+    </span>
+    <span class="badge badge-nepool is-dim" id="badge-nepool">
+      <span class="badge-dot" aria-hidden="true"></span>NEPOOL Operator
+    </span>
+  </div>
+
+  <div class="body">
+    <div id="toast" class="toast hidden">Captured</div>
+    <div id="error-block" class="error-block hidden">
+      <span id="error-msg" class="error-msg"></span>
+      <button id="retry-btn" class="retry-btn">Retry</button>
+    </div>
+
+    <!-- v1.9.109: page-initiated credential saves / session resets wait here for
+         the owner's explicit OK — a web page can never drive those directly. -->
+    <div id="pending-block" class="pending-block hidden"></div>
+
+    <!-- ── Per-product live stats (filled by JS from extension-status) ──────── -->
+    <div id="stat-block" class="stat-block hidden"></div>
+
+    <!-- ── Capture freshness ────────────────────────────────────────────────── -->
+    <div class="meta">
+      <div class="meta-row">
+        <span class="meta-label">Last capture</span>
+        <span id="last-capture" class="meta-value">No captures yet</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-label">Today</span>
+        <span id="count-today" class="meta-value">—</span>
+      </div>
+    </div>
+
+    <button id="open-dashboard" class="btn-primary">Open dashboard</button>
+    <button id="open-secondary" class="btn-secondary hidden"></button>
+
+    <!-- v1.9.33: client-side auto-login for inverter portals. Creds are encrypted
+         and stored ONLY on this device — never sent to EnergyAgent's servers. -->
+    <div class="autol0gin">
+      <button id="al-toggle" class="al-head" type="button"
+              aria-label="Toggle auto-login section"
+              aria-expanded="false" aria-controls="al-body">
+        <span>Auto-login (keeps live power fresh)</span>
+        <span id="al-chev" class="al-chev" aria-hidden="true">▸</span>
+      </button>
+      <div id="al-body" class="al-body hidden">
+        <p class="al-note">Saved <b>only on this device</b>, encrypted. Never sent to our servers. So we can refresh your live numbers without you signing in.</p>
+        <div id="al-rows"></div>
+      </div>
+    </div>
+
+    <!-- v1.9.97: same client-side auto-login, for the UTILITY portals (GMP +
+         SmartHub co-ops). Save your utility login once and your bills stay
+         current hands-off. Reuses the al-row template + the encrypted vault. -->
+    <div class="autol0gin">
+      <button id="ut-toggle" class="al-head" type="button"
+              aria-label="Toggle utility logins section"
+              aria-expanded="false" aria-controls="ut-body">
+        <span>Utility logins (keeps your bills current)</span>
+        <span id="ut-chev" class="al-chev" aria-hidden="true">▸</span>
+      </button>
+      <div id="ut-body" class="al-body hidden">
+        <p class="al-note">Save your <b>GMP</b> or co-op logins once — <b>one per client</b> if you manage several — and we keep every account's bills current without you signing in. Stored <b>only on this device</b>, encrypted, never sent to our servers.</p>
+        <div id="ut-rows"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a href="#" id="open-options">Settings</a>
+    <a href="#" id="open-gmp">Open GMP</a>
+  </div>
+
+  <template id="al-row-tpl">
+    <div class="al-row">
+      <div class="al-row-head">
+        <span class="al-vendor"></span>
+        <span class="al-state"></span>
+      </div>
+      <div class="al-fields">
+        <input class="al-user" type="text" autocomplete="off" placeholder="Portal username / email" aria-label="Portal username or email">
+        <input class="al-pass" type="password" autocomplete="off" placeholder="Portal password" aria-label="Portal password">
+        <div class="al-actions">
+          <button class="al-save" type="button">Save</button>
+          <button class="al-clear hidden" type="button">Remove</button>
+          <label class="al-optout"><input class="al-optout-cb" type="checkbox"> off</label>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- One stat cell, cloned per metric into #stat-block. -->
+  <template id="stat-cell-tpl">
+    <div class="stat-cell">
+      <span class="stat-num"></span>
+      <span class="stat-cap"></span>
+    </div>
+  </template>
+
+  <script src="../smarthub_registry.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
