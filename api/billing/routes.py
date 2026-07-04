@@ -1972,8 +1972,16 @@ def invoice_archive_zip(authorization: Optional[str] = Header(default=None),
     # zip arcnames (#37) — the sibling download endpoints sanitize, this one didn't.
     if month is not None and not _re.match(r"^\d{4}-\d{2}$", month):
         raise HTTPException(400, "month must be in YYYY-MM format")
-    with SessionLocal() as db:
-        data, fname, count = build_archive_zip(db, t.id, month=month)
+    # Rendering a whole month's invoices + bills is the heaviest download here
+    # (hundreds of PDFs at 800 offtakers) — background-compute it via the sweep
+    # so the request returns instantly (202 {pending} to poll) instead of
+    # holding the connection past the edge timeout.
+    s = _sweep_result(t.id, f"zip:{month or 'latest'}",
+                      lambda db: build_archive_zip(db, t.id, month=month))
+    if not s["ready"]:
+        return Response(content='{"ok":false,"pending":true}',
+                        media_type="application/json", status_code=202)
+    data, fname, count = s["result"]
     return Response(
         content=data, media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{fname}"',
