@@ -243,6 +243,18 @@ def main():
                 conn.execute(text(f"ALTER TABLE tenants ADD COLUMN {col} TEXT"))
                 print(f"  + tenants.{col}")
 
+        # 2026-07-03 send-pipeline dashboard: tenant pause switch + the last
+        # sent invoice's dollars (powers the delivered-$ roll-up cheaply).
+        if not column_exists(conn, "tenants", "sending_paused"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN sending_paused BOOLEAN DEFAULT FALSE"))
+            print("  + tenants.sending_paused")
+        if not column_exists(conn, "billing_report_subscriptions", "last_sent_amount_usd"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN last_sent_amount_usd DOUBLE PRECISION"))
+            print("  + billing_report_subscriptions.last_sent_amount_usd")
+
         # 2026-06 W2-6: per-client email delivery health (Resend webhook).
         delivery_health_cols = [
             ("last_delivered_at",

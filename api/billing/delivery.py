@@ -1899,6 +1899,13 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         now = datetime.utcnow()
         sub.last_sent_at = now
         sub.last_invoice_number = result["invoice_number"]
+        # Dollars of the invoice just sent — the send-pipeline dashboard sums
+        # these for the delivered-$ roll-up (never rebuilt per-sub at read time).
+        try:
+            sub.last_sent_amount_usd = (float(result["amount_owed"])
+                                        if result.get("amount_owed") is not None else None)
+        except (TypeError, ValueError):
+            sub.last_sent_amount_usd = None
         # Record the period just sent so the exactly-once guard (#5) can block a
         # duplicate send of the same billing period (late bill / ops re-run).
         if cur_period_key:

@@ -97,6 +97,12 @@ class Tenant(Base):
     # Ignored for NEPOOL (always per-array). Null for every existing tenant so
     # nothing changes until a tenant is explicitly put on the invoicing plan.
     billing_plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Send-pipeline pause switch (Ford 2026-07-03): True → the SCHEDULER's
+    # billing runs skip this tenant entirely (no auto sends, no auto drafts).
+    # Manual sends + draft approvals still work — pause stops the machine,
+    # not the operator.
+    sending_paused: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                 server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -1373,6 +1379,10 @@ class BillingReportSubscription(Base):
     # deliver_subscription refuses to re-send the same period (a late GMP bill or
     # an ops re-run would otherwise duplicate-bill), unless a re-send is forced.
     last_sent_period_end: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # The dollars of the last invoice actually sent (stamped alongside the
+    # exactly-once guard) — powers the send-pipeline dashboard's delivered-$
+    # roll-up without a per-sub invoice rebuild (~60s at 800 offtakers).
+    last_sent_amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     # "Come review your next bill" dedup (Jun 2026, Ford's GMP-update trigger).
     # The latest GMP-bill PERIOD label (YYYY-MM of the bill's period_end) for
     # which api/jobs/new_bill_review already emailed the operator a "your next

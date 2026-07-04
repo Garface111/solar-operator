@@ -377,6 +377,13 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
             if sub is None or tenant is None:
                 continue
+            # Send-pipeline pause switch: the operator halted SCHEDULED runs —
+            # no auto sends, no auto drafts, until they resume. Manual sends
+            # and draft approvals still work (pause stops the machine, not
+            # the operator). Benign skip — never alerts.
+            if getattr(tenant, "sending_paused", False):
+                skipped.append(sid)
+                continue
             # #18: annual true-up has no real banked-vs-cashed reconciliation for
             # utility-bill offtakers — the normal delivery path would send a single
             # MONTH's invoice mislabeled as an annual true-up (and burn an invoice

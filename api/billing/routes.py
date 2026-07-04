@@ -4051,3 +4051,150 @@ def reset_offtaker_email_template(authorization: Optional[str] = Header(default=
         t.offtaker_email_body_template = None
         db.commit()
     return {"ok": True}
+
+
+# ─── Send pipeline (Ford 2026-07-03: "what's in the pipeline, what's gonna
+# fire") — the flow dashboard over the offtaker list. Everything here is a
+# cheap aggregate over columns the send path already stamps; nothing rebuilds
+# an invoice at read time (~60s at 800 offtakers). ──────────────────────────
+
+def _next_month_first(now: datetime) -> datetime:
+    y, m = now.year, now.month
+    return datetime(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1, 9, 0)
+
+
+def _next_quarter_first(now: datetime) -> datetime:
+    for m in (1, 4, 7, 10):
+        cand = datetime(now.year, m, 1, 9, 0)
+        if cand > now:
+            return cand
+    return datetime(now.year + 1, 1, 1, 9, 0)
+
+
+@router.get("/send-pipeline")
+def send_pipeline(authorization: Optional[str] = Header(default=None)):
+    """The month-organized send-pipeline roll-up:
+      last      — the most recent DELIVERED period: count + $ + when it ran;
+      inflight  — pending drafts awaiting approval + subs still waiting (no
+                  send for the period and no draft yet — typically holds
+                  waiting on their utility bill);
+      next_monthly / next_quarterly — when the scheduler fires next and how
+                  many subs it touches, split auto-send vs draft-for-approval;
+      paused    — the tenant's pause switch."""
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        rows = db.execute(
+            select(BillingReportSubscription.cadence,
+                   BillingReportSubscription.delivery_mode,
+                   BillingReportSubscription.last_sent_period_end,
+                   BillingReportSubscription.last_sent_amount_usd,
+                   BillingReportSubscription.last_sent_at)
+            .where(BillingReportSubscription.tenant_id == t.id,
+                   BillingReportSubscription.deleted_at.is_(None),
+                   BillingReportSubscription.enabled == True)  # noqa: E712
+        ).all()
+        pending = db.execute(
+            select(func.count(ReportDraft.id))
+            .join(BillingReportSubscription,
+                  ReportDraft.subscription_id == BillingReportSubscription.id)
+            .where(ReportDraft.tenant_id == t.id,
+                   ReportDraft.status == "pending",
+                   BillingReportSubscription.deleted_at.is_(None),
+                   BillingReportSubscription.enabled == True)  # noqa: E712
+        ).scalar() or 0
+
+    total = len(rows)
+    last_period = max((r.last_sent_period_end for r in rows
+                       if r.last_sent_period_end), default=None)
+    delivered = 0
+    dollars = 0.0
+    last_run_at = None
+    for r in rows:
+        if last_period and r.last_sent_period_end == last_period:
+            delivered += 1
+            if r.last_sent_amount_usd:
+                dollars += float(r.last_sent_amount_usd)
+        if r.last_sent_at and (last_run_at is None or r.last_sent_at > last_run_at):
+            last_run_at = r.last_sent_at
+    waiting = max(0, total - delivered - int(pending))
+
+    now = datetime.utcnow()
+
+    def _split(cadence: str) -> dict:
+        subs = [r for r in rows if (r.cadence or "monthly") == cadence]
+        auto = sum(1 for r in subs if (r.delivery_mode or "approval") == "auto")
+        return {"scheduled": len(subs), "auto": auto,
+                "approval": len(subs) - auto}
+
+    return {
+        "ok": True,
+        "total_enabled": total,
+        "last": {
+            "period_end": last_period,
+            "period_month": (last_period or "")[:7] or None,
+            "delivered": delivered,
+            "dollars": round(dollars, 2),
+            "last_run_at": last_run_at.isoformat() if last_run_at else None,
+        },
+        "inflight": {"pending_drafts": int(pending), "waiting": waiting},
+        "next_monthly": {"fires_at": _next_month_first(now).isoformat(),
+                         **_split("monthly")},
+        "next_quarterly": {"fires_at": _next_quarter_first(now).isoformat(),
+                           **_split("quarterly")},
+        "paused": bool(getattr(tenant, "sending_paused", False)),
+    }
+
+
+class _PauseBody(BaseModel):
+    paused: bool
+
+
+@router.patch("/sending-paused")
+def set_sending_paused(body: _PauseBody,
+                       authorization: Optional[str] = Header(default=None)):
+    """The pipeline pause switch: True halts the SCHEDULER's billing runs for
+    this tenant (no auto sends, no auto drafts). Manual sends and draft
+    approvals still work — pause stops the machine, not the operator."""
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        t = db.get(Tenant, t.id)
+        t.sending_paused = bool(body.paused)
+        db.commit()
+        return {"ok": True, "paused": t.sending_paused}
+
+
+class _BulkModeBody(BaseModel):
+    mode: str
+
+
+@router.post("/subscriptions/bulk-delivery-mode")
+def bulk_delivery_mode(body: _BulkModeBody,
+                       authorization: Optional[str] = Header(default=None)):
+    """Flip EVERY enabled offtaker's delivery mode at once (the pipeline's
+    'Auto-send all' / 'Draft all' controls). Per-offtaker edits afterwards
+    still override — this is a bulk starting point, not a lock."""
+    mode = (body.mode or "").strip()
+    if mode not in VALID_DELIVERY:
+        raise HTTPException(422, f"mode must be one of {sorted(VALID_DELIVERY)}")
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        subs = db.execute(
+            select(BillingReportSubscription)
+            .where(BillingReportSubscription.tenant_id == t.id,
+                   BillingReportSubscription.deleted_at.is_(None),
+                   BillingReportSubscription.enabled == True)  # noqa: E712
+        ).scalars().all()
+        changed = 0
+        for s in subs:
+            if (s.delivery_mode or "approval") != mode:
+                s.delivery_mode = mode
+                changed += 1
+        db.commit()
+        auto = sum(1 for s in subs if (s.delivery_mode or "approval") == "auto")
+        return {"ok": True, "mode": mode, "changed": changed,
+                "auto": auto, "approval": len(subs) - auto}
