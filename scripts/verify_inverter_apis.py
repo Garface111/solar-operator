@@ -42,12 +42,21 @@ from datetime import date, timedelta
 from api.inverters import fronius, sma
 from api.inverters.base import InverterAuthError, InverterError
 
-# Fronius's PUBLIC demo system — published by Fronius in its own API docs for
-# exactly this kind of evaluation. Not a secret.
+# Fronius demo AccessKey. NOTE (verified live 2026-07-04): the key+system this
+# harness originally shipped were RETIRED by Fronius — that key now returns
+# 401 {"responseError":1102,"responseMessage":"AccessKey not found."}. Fronius
+# no longer publishes a self-serve public demo *system*; a bare demo key
+# authenticates (200) but has zero PV systems attached, so the data endpoints
+# can't be exercised without a real system. This key (a published community
+# demo key, github.com/drc38/Fronius_solarweb) still AUTHENTICATES and is kept
+# only to prove the adapter's live auth + request path. To verify data parsing
+# (fetch_live/fetch_daily), set FRONIUS_ACCESS_KEY_ID / FRONIUS_ACCESS_KEY_VALUE
+# / FRONIUS_PV_SYSTEM_ID to a real Solar.web account that has the Query API
+# enabled and a producing system.
 FRONIUS_DEMO = {
-    "access_key_id": "FKIAFEF58CFEFA94486F9C804CF6077A01AB",
-    "access_key_value": "47c076bc-23e5-4949-37a6-4bcfcf8d21d6",
-    "pv_system_id": "20bb600e-019b-4e03-9df3-a0a900cda689",
+    "access_key_id": "FKIAB4CDA71C0763413DA942DC756742318B",
+    "access_key_value": "67315e19-6805-479e-994d-7193ee5f6125",
+    "pv_system_id": "",  # community demo key has no system attached — resolved at runtime
 }
 
 GREEN, RED, YELLOW, END = "\033[92m", "\033[91m", "\033[93m", "\033[0m"
@@ -123,6 +132,33 @@ def _sma_config() -> dict | None:
     return cfg
 
 
+def _fronius_resolve_system(cfg: dict) -> tuple[str | None, str]:
+    """Return (pv_system_id, human_note). An explicit FRONIUS_PV_SYSTEM_ID wins.
+    Otherwise list the account's systems (which also confirms auth against the
+    LIVE API) and take the first — Fronius retired the old baked-in demo system,
+    so a bare demo key authenticates but has no systems attached."""
+    import httpx
+    if cfg.get("pv_system_id"):
+        return cfg["pv_system_id"], f"system {cfg['pv_system_id']}"
+    try:
+        resp = httpx.get(f"{fronius.BASE}/pvsystems", headers=fronius._headers(cfg),
+                         params={"offset": 0, "limit": 1}, timeout=30)
+    except httpx.RequestError as exc:
+        return None, f"network error listing systems: {exc}"
+    if resp.status_code in (401, 403):
+        return None, (f"AUTH FAILED ({resp.status_code}) — the demo key is dead; set "
+                      "FRONIUS_ACCESS_KEY_ID / FRONIUS_ACCESS_KEY_VALUE to real creds")
+    if not resp.is_success:
+        return None, f"listing systems returned {resp.status_code}: {resp.text[:160]}"
+    systems = (resp.json() or {}).get("pvSystems") or []
+    if systems:
+        sid = systems[0].get("pvSystemId") or systems[0].get("id")
+        return sid, f"account system {sid}"
+    return None, ("auth OK (200) but this key has NO PV systems — Fronius retired the "
+                  "public demo system. Set FRONIUS_PV_SYSTEM_ID (+ real key) to a "
+                  "producing system to verify fetch_live/fetch_daily parsing.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vendor", choices=["fronius", "sma", "all"], default="all")
@@ -132,9 +168,19 @@ def main() -> int:
 
     if args.vendor in ("fronius", "all"):
         cfg = _fronius_config()
-        using_demo = cfg["pv_system_id"] == FRONIUS_DEMO["pv_system_id"]
-        print(f"Fronius target: {'PUBLIC DEMO system' if using_demo else cfg['pv_system_id']}")
-        results["fronius"] = _drive("Fronius (Solar.web Query API)", fronius, cfg)
+        sysid, note = _fronius_resolve_system(cfg)
+        if sysid:
+            cfg["pv_system_id"] = sysid
+            print(f"Fronius target: {note}")
+            results["fronius"] = _drive("Fronius (Solar.web Query API)", fronius, cfg)
+        else:
+            # Reached the live API and confirmed the auth/request path, but there's
+            # no system to verify the flowdata/aggrdata PARSING against. Honest
+            # partial: not a code failure, but not a full data verification either.
+            print(f"\n== Fronius (Solar.web Query API) ==")
+            _warn(f"partial: {note}")
+            print("  (adapter auth + request path reach the live API; data-shape "
+                  "parsing still needs a live system — see HANDOFF_API_VERIFICATION.md)")
 
     if args.vendor in ("sma", "all"):
         cfg = _sma_config()

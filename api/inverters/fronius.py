@@ -1,14 +1,22 @@
 """Fronius inverter source — Solar.web Query API.
 
 ╔════════════════════════════════════════════════════════════════════════════╗
-║ LOUD CAVEAT — READ BEFORE RELYING ON THIS IN THE USA.                       ║
+║ STATUS — partially verified against the LIVE API (2026-07-04).              ║
 ║                                                                            ║
-║ The Solar.web Query API (api.solarweb.com/swqapi) is a CHARGEABLE business ║
-║ API, and per Fronius's published country list it is NOT currently offered  ║
-║ in the United States. This adapter is built and unit-tested against the    ║
-║ DOCUMENTED response shapes — it has not been exercised against a live US    ║
-║ account. US customers will likely need the local Solar API (LAN) path       ║
-║ instead; that is tracked as future work, not wired here.                    ║
+║ Confirmed live via scripts/verify_inverter_apis: the auth + request path   ║
+║ reach api.solarweb.com/swqapi correctly (a valid AccessKey → 200; a bad    ║
+║ one → clean 401 responseError 1102). What is STILL unverified against a    ║
+║ live system is the response PARSING (flowdata PowerPV / aggrdata           ║
+║ EnergyProductionTotal in _channels/fetch_daily) — Fronius RETIRED its      ║
+║ public demo system, so a demo key now authenticates but has no PV system   ║
+║ to pull data from. Verifying the shapes needs a real Solar.web account     ║
+║ with the Query API enabled (see HANDOFF_API_VERIFICATION.md).              ║
+║                                                                            ║
+║ The Query API is a CHARGEABLE business API (pay-per-data-point) and per    ║
+║ Fronius's public country list is NOT self-serve in the USA. Per-account    ║
+║ US enablement via pv-support-usa@fronius.com is claimed but UNVERIFIED —   ║
+║ do not assert US availability until Fronius confirms it in writing. US     ║
+║ arrays may instead need the local Solar API (LAN) path (future work).      ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
 Auth: every request carries AccessKeyId + AccessKeyValue headers.

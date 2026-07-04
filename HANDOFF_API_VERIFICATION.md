@@ -181,3 +181,29 @@ blocked, say exactly where and why — no silent stalls.
 - 2026-07-04 (cloud session): Harness shipped (#26). Fronius/SMA unreachable
   from the cloud sandbox (network policy 403) — everything above is pending
   first local run.
+- 2026-07-04 (LOCAL session, Ford's machine): First live run. **Fronius = PARTIAL
+  PASS (adapter is NOT broken).** The auth + request path reach the live API
+  correctly, but Task 1 as written is impossible now — Fronius RETIRED the public
+  demo system.
+  - The harness's baked-in demo key returned `401 {"responseError":1102,
+    "responseMessage":"AccessKey not found."}` (rotated/deleted, not a network
+    block — we reached Fronius fine).
+  - Chased the fallback: Fronius no longer publishes a self-serve public demo
+    *system*. A currently-working community demo key
+    (`FKIAB4CDA71C…`, github.com/drc38/Fronius_solarweb) AUTHENTICATES (200 on
+    `/pvsystems`) but has ZERO systems attached (`totalItemsCount:0`), and it's
+    403 `responseError 1013 "User not authorized"` for the old demo system id.
+    So: auth + request shape VERIFIED live; response PARSING (flowdata/aggrdata
+    channels) still only doc-verified — needs a real producing system.
+  - Updated the harness (`scripts/verify_inverter_apis.py`): swapped the dead key
+    for the working community key, added a `/pvsystems` preflight that resolves a
+    real system when creds have one and otherwise reports an honest "auth OK, no
+    system — set FRONIUS_PV_SYSTEM_ID" partial instead of a confusing 403.
+  - Corrected `api/inverters/fronius.py` banner to the real dated status. NOTE:
+    the FAQ/country-list still shows the Query API is NOT self-serve in the USA —
+    the "US access exists now" claim in Task 1 is UNVERIFIED, so I did NOT assert
+    it. Confirming it is exactly what Task 2's email is for.
+  - **Not done, gated on Ford (surfaced in chat):** Tasks 2 & 3 send email from
+    Ford's personal Gmail — need (a) his Solar.web account email and (b) an
+    explicit per-session go-ahead to send from his account before I drive Chrome.
+    SMA (Task 3) also can't be run until sandbox credentials arrive.
