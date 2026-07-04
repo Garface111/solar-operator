@@ -1822,6 +1822,49 @@ class GlobalRatePatch(BaseModel):
     default_discount_pct: Optional[float] = None
 
 
+# ── Long-sweep executor ──────────────────────────────────────────────────────
+# reconcile/audit rebuild every offtaker's invoice figures — ~63s at 800
+# offtakers, which CROSSES the Railway edge gateway timeout (504 in the
+# browser; caught live on ten_anna_800, 2026-07-03). Each sweep now computes
+# ONCE per tenant in a background thread; the route answers instantly from
+# the cache, or {pending:true} while computing (the frontend polls). Also
+# collapses concurrent identical sweeps — which were piling up on the DB —
+# into a single run. Math untouched: the thread calls the same functions.
+import threading as _threading
+import time as _time
+
+_SWEEP_TTL_S = 600            # a computed sweep stays fresh for 10 minutes
+_sweeps: dict = {}            # (tenant_id, kind) -> {status, result, at}
+_sweeps_lock = _threading.Lock()
+
+
+def _sweep_result(tenant_id: str, kind: str, compute) -> dict:
+    key = (tenant_id, kind)
+    now = _time.time()
+    with _sweeps_lock:
+        ent = _sweeps.get(key)
+        if ent:
+            if ent["status"] == "done" and now - ent["at"] <= _SWEEP_TTL_S:
+                return {"ready": True, "result": ent["result"]}
+            if ent["status"] == "running":
+                return {"ready": False}
+        _sweeps[key] = {"status": "running", "result": None, "at": now}
+
+    def _run():
+        try:
+            with SessionLocal() as db:   # the thread OWNS its session (pool-leak rule)
+                res = compute(db)
+            with _sweeps_lock:
+                _sweeps[key] = {"status": "done", "result": res, "at": _time.time()}
+        except Exception:  # noqa: BLE001
+            logger.exception("background %s sweep failed for %s", kind, tenant_id)
+            with _sweeps_lock:
+                _sweeps.pop(key, None)   # next request retries fresh
+
+    _threading.Thread(target=_run, daemon=True, name=f"sweep-{kind}").start()
+    return {"ready": False}
+
+
 @router.get("/reconcile-bills")
 def reconcile_bills_route(authorization: Optional[str] = Header(default=None)):
     """Compare each offtaker invoice's produced-kWh against the captured GMP bill
@@ -1831,11 +1874,16 @@ def reconcile_bills_route(authorization: Optional[str] = Header(default=None)):
     generation), with a match|mismatch|no_bill verdict. 'no_bill' = no GMP bill
     is linked to that array yet (awaiting capture) — reported honestly, never
     fabricated.
-    """
+
+    Answers from the background sweep cache; {ok:false, pending:true} while the
+    sweep is computing — poll again in a few seconds."""
     from .reconcile_bills import reconcile_tenant
     t = tenant_from_session(authorization)
-    with SessionLocal() as db:
-        return reconcile_tenant(db, t.id)
+    tid = t.id
+    s = _sweep_result(tid, "reconcile", lambda db: reconcile_tenant(db, tid))
+    if not s["ready"]:
+        return {"ok": False, "pending": True}
+    return s["result"]
 
 
 @router.get("/audit-by-array")
@@ -1843,11 +1891,17 @@ def audit_by_array_route(authorization: Optional[str] = Header(default=None)):
     """The bill-audit sandbox (Anna/Bruce): the fleet organized as GMP allocates
     it — per utility, each array's master bill on top with its offtakers'
     should-be vs GMP-credited math underneath, flagged where GMP got it wrong.
-    Read-only; reuses the same allocation cross-check as /reconcile-bills."""
+    Read-only; reuses the same allocation cross-check as /reconcile-bills.
+
+    Answers from the background sweep cache; {ok:false, pending:true} while the
+    sweep is computing — poll again in a few seconds."""
     from .reconcile_bills import audit_by_array
     t = tenant_from_session(authorization)
-    with SessionLocal() as db:
-        return audit_by_array(db, t.id)
+    tid = t.id
+    s = _sweep_result(tid, "audit", lambda db: audit_by_array(db, tid))
+    if not s["ready"]:
+        return {"ok": False, "pending": True}
+    return s["result"]
 
 
 @router.get("/invoice-export.csv")
