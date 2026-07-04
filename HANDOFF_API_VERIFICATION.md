@@ -272,3 +272,21 @@ blocked, say exactly where and why — no silent stalls.
   @chint.com replies (new `cps` vendor branch). NOTE: there is NO Chint cloud
   adapter in the repo yet — Chint stays extension-scraped; a positive CPS reply is
   the trigger to scope one. `api/inverters/` has fronius+sma but no chint adapter.
+- 2026-07-04 (cloud): **SMA CONSENT FLOW PRE-BUILT** (feat/sma-consent-flow →
+  main). The whole owner-approval pipeline now exists server-side, inert until
+  SMA approves the app: set `SMA_APP_CLIENT_ID`/`SMA_APP_CLIENT_SECRET` and it
+  goes live. Pieces: `sma.py` app-creds-from-env (`_resolve_creds` — per-
+  connection configs now need only `{system_id}`), `request_consent(email)` +
+  `consent_status(email)` (bc-authorize, shapes ⚠️ UNVERIFIED — pin them in the
+  sandbox run and adjust the `BC_BASE`/parse block in sma.py), and
+  `discover_systems()` (GET /plants paginated). Endpoints:
+  `/v1/array-owners/sma/{available,consent,consent/status,connect-account}`;
+  consent state persists in the new `sma_consents` table (migration auto-runs).
+  SANDBOX TASKS ADDED for you: (1) pin bc-authorize request/response + status
+  shapes (the sandbox simulates approval via PUT …/apiTestUser@apiSandbox.com/
+  status=accepted); (2) confirm the /plants listing shape + whether a per-owner
+  filter exists — connect-account currently requires explicit system_ids
+  because the app token lists ALL consented owners' plants (see the SCOPING
+  NOTE in array_owners.py::sma_connect_account); (3) UI wiring for the consent
+  flow (dashboard connect + onboarding) is NOT built yet — backend-first by
+  design; scope it once shapes are pinned so we don't build UI against guesses.

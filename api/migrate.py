@@ -1221,6 +1221,13 @@ def main():
             added.append("digest_hold_notified_at")
             print("  + tenants.digest_hold_notified_at")
 
+        # 2026-07-04 SMA owner-consent flow (v1.9.113). The sma_consents table
+        # (per tenant+owner-email backchannel consent state; no credentials —
+        # SMA's model needs none) is created by init_db()/create_all above;
+        # verify it landed for the log.
+        print(f"  {'✓' if inspect(conn).has_table('sma_consents') else '✗ MISSING'} "
+              f"table sma_consents")
+
     print("=== Migration complete ===")
 
 
