@@ -203,7 +203,21 @@ blocked, say exactly where and why — no silent stalls.
     the FAQ/country-list still shows the Query API is NOT self-serve in the USA —
     the "US access exists now" claim in Task 1 is UNVERIFIED, so I did NOT assert
     it. Confirming it is exactly what Task 2's email is for.
-  - **Not done, gated on Ford (surfaced in chat):** Tasks 2 & 3 send email from
-    Ford's personal Gmail — need (a) his Solar.web account email and (b) an
-    explicit per-session go-ahead to send from his account before I drive Chrome.
-    SMA (Task 3) also can't be run until sandbox credentials arrive.
+  - **Tasks 2 & 3 SENT (Ford authorized + confirmed live, 2026-07-04):**
+    - Task 2 — Fronius email SENT from ford.genereaux@gmail.com →
+      pv-support-usa@fronius.com ("Message sent" confirmed). Key correction:
+      Ford has no Solar.web account of his own — the Fronius systems live in his
+      DAD's account, **bruce.genereaux@gmail.com** (Green Mountain Community
+      Solar). The email names that account and asks (1) whether US Query API
+      access is possible + what's required to enable it on that account, and (2)
+      the order form + pricing tier for ~20-50 systems. Commits to nothing.
+    - Task 3 — SMA sandbox-credentials request SUBMITTED via the developer-
+      portal contact FORM (developer.sma.de/contact — there's no support email;
+      "Thank you for your message" success page confirmed). Selected "SMA
+      Monitoring API"; company Dyson Swarm Technologies LLC; contact Ford.
+  - **Now waiting on vendor replies (check on later runs, both land in Ford's
+    Gmail):** Fronius → summarize pricing/US-availability to Ford, do NOT sign
+    the order form (commitment = Ford/Bruce). SMA → when sandbox creds arrive,
+    run `SMA_SANDBOX=1 SMA_CLIENT_ID=… SMA_CLIENT_SECRET=… SMA_SYSTEM_ID=…
+    python -m scripts.verify_inverter_apis --vendor sma` to fully verify that
+    adapter (see Task 3 rough edges above).
