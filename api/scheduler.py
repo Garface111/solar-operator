@@ -1137,6 +1137,16 @@ def start():
         CronTrigger(day_of_week="mon", hour=9, minute=0),
         id="deliver_weekly", replace_existing=True,
     )
+    # Weekly Mondays 12:00 UTC (morning ET): FRESHNESS SCORECARD to the internal
+    # alert address — the measured "was the data there when the product needed
+    # it" number (7-day DailyGeneration coverage + live-source freshness +
+    # utility-login health + digest holds). Ford 2026-07-04: replace the vibe
+    # with a number. Pure read; see api/jobs/freshness_scorecard.py.
+    scheduler.add_job(
+        _run_freshness_scorecard,
+        CronTrigger(day_of_week="mon", hour=12, minute=0),
+        id="freshness_scorecard", replace_existing=True,
+    )
     # Weekly settlement-audit digest DECOMMISSIONED 2026-06-21 (Ford: "audit is
     # dead"): the Array Operator Audit tab was removed (the #audit route is gone, and
     # audit.js/audit.css were dropped from the SPA), so this email linked owners to a
@@ -1347,6 +1357,22 @@ def _run_bill_to_daily() -> None:
         send_internal_alert(
             "Bill→daily transform: unhandled exception",
             f"The bill-to-daily transformer raised an error:\n{exc}",
+        )
+
+
+def _run_freshness_scorecard() -> None:
+    """Weekly measured-freshness scorecard to the internal alert address.
+    Wrapper so import/build errors can't crash the scheduler."""
+    try:
+        from .jobs.freshness_scorecard import run_weekly_scorecard
+        sc = run_weekly_scorecard()
+        logger.info("freshness_scorecard: coverage=%s%% arrays=%s",
+                    sc.get("headline_coverage_pct"), sc.get("arrays_total"))
+    except Exception as exc:
+        logger.exception("freshness_scorecard failed")
+        send_internal_alert(
+            "Freshness scorecard: unhandled exception",
+            f"The weekly freshness scorecard raised an error:\n{exc}",
         )
 
 
