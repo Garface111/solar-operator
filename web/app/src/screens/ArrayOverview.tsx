@@ -21,13 +21,34 @@ import {
 } from "../lib/api";
 import type {
   ArrayHealthStatus,
+  ArrayLive,
   ArrayOwnerArray,
   ArrayOwnersOverview,
   ConnectAccountResult,
   SolarEdgeDiscoveredSite,
 } from "../lib/arrayOwners";
+import { timeAgo } from "../components/settings/utils";
 
 const POLL_MS = 60_000;
+
+/** A reading older than this is stale — never rendered as "live". */
+const LIVE_FRESH_MS = 15 * 60_000;
+
+/**
+ * Freshness gate for the "live" visual state: source must be solaredge AND the
+ * reading's as_of must be within the last 15 minutes. Payloads without as_of
+ * fall back to trusting the source flag (backward compat).
+ */
+function liveFreshness(live: ArrayLive | null): {
+  isLive: boolean;
+  asOf: Date | null;
+} {
+  if (live?.source !== "solaredge") return { isLive: false, asOf: null };
+  if (!live.as_of) return { isLive: true, asOf: null };
+  const asOf = new Date(live.as_of);
+  if (Number.isNaN(asOf.getTime())) return { isLive: true, asOf: null };
+  return { isLive: Date.now() - asOf.getTime() <= LIVE_FRESH_MS, asOf };
+}
 
 // ─── animation ──────────────────────────────────────────────────────────────
 
@@ -114,7 +135,10 @@ interface PowerGaugeProps {
   watts: number;
   /** Scale reference — the arc fills to watts/peak. */
   peakWatts: number;
+  /** True only when the reading is fresh (see liveFreshness). */
   live: boolean;
+  /** When the reading was taken; shown so stale data is never mistaken for live. */
+  asOf: Date | null;
 }
 
 /**
@@ -122,7 +146,7 @@ interface PowerGaugeProps {
  * to current output against `peakWatts` (the largest output we've seen for this
  * array this session, since the contract doesn't expose nameplate capacity).
  */
-function PowerGauge({ watts, peakWatts, live }: PowerGaugeProps) {
+function PowerGauge({ watts, peakWatts, live, asOf }: PowerGaugeProps) {
   const frac = peakWatts > 0 ? Math.min(1, Math.max(0, watts / peakWatts)) : 0;
   const animFrac = useCountUp(frac);
   // pathLength is normalised to 100, so offset is just (1 - fraction) * 100.
@@ -157,11 +181,17 @@ function PowerGauge({ watts, peakWatts, live }: PowerGaugeProps) {
         <AnimatedNumber
           value={watts}
           format={formatPower}
-          className="text-xl font-semibold tabular-nums text-zinc-900"
+          className={[
+            "text-xl font-semibold tabular-nums",
+            live ? "text-zinc-900" : "text-zinc-400",
+          ].join(" ")}
         />
         <span className="text-[10px] uppercase tracking-wide text-zinc-400">
-          {live ? "live output" : "no live data"}
+          {live ? "live output" : asOf ? `as of ${timeAgo(asOf)}` : "no live data"}
         </span>
+        {live && asOf && (
+          <span className="text-[10px] text-zinc-400">as of {timeAgo(asOf)}</span>
+        )}
       </div>
     </div>
   );
@@ -612,6 +642,10 @@ function TotalsBand({
   anyLive: boolean;
 }) {
   const t = overview.totals;
+  // "Updated X ago" — the payload's own generation time, so the user can tell
+  // a fresh screen from one served out of a stalled backend.
+  const generatedDate = new Date(overview.generated_at);
+  const generatedAt = Number.isNaN(generatedDate.getTime()) ? null : generatedDate;
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-6 shadow-sm sm:p-8">
       {/* Hero: lifetime value — the largest type on the screen. */}
@@ -649,6 +683,12 @@ function TotalsBand({
         <TotalStat label="This month" value={t.month_kwh} format={formatKwh} />
         <TotalStat label="Lifetime" value={t.lifetime_kwh} format={formatKwh} />
       </div>
+
+      {generatedAt && (
+        <p className="mt-4 text-xs text-zinc-400">
+          Updated {timeAgo(generatedAt)}
+        </p>
+      )}
     </div>
   );
 }
@@ -674,9 +714,10 @@ function ArrayCard({
   onConnect: (a: ArrayOwnerArray) => void;
 }) {
   const live = array.live;
-  const isLive = live?.source === "solaredge";
+  const { isLive, asOf } = liveFreshness(live);
   const b = array.value.breakdown;
   const noSource = array.health.status === "no_source";
+  const staleDays = array.health.days_since_data;
 
   return (
     <div className="flex flex-col rounded-xl border border-zinc-200 bg-white p-6 shadow-sm">
@@ -707,6 +748,7 @@ function ArrayCard({
             watts={live?.current_power_w ?? 0}
             peakWatts={peakWatts}
             live={isLive}
+            asOf={asOf}
           />
         )}
       </div>
@@ -724,6 +766,11 @@ function ArrayCard({
           label="Lifetime"
           value={array.lifetime ? formatKwh(array.lifetime.kwh) : "—"}
         />
+        {staleDays != null && staleDays >= 2 && array.health.last_data_day && (
+          <p className="text-xs text-zinc-400">
+            data through {array.health.last_data_day}
+          </p>
+        )}
       </div>
 
       <div className="mt-4 rounded-xl bg-primary-50/60 px-4 py-3">
@@ -816,8 +863,7 @@ export default function ArrayOverview() {
   }, [load]);
 
   const anyLive = useMemo(
-    () =>
-      overview?.arrays.some((a) => a.live?.source === "solaredge") ?? false,
+    () => overview?.arrays.some((a) => liveFreshness(a.live).isLive) ?? false,
     [overview],
   );
 

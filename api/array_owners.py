@@ -2351,7 +2351,8 @@ class PublicPreviewBody(BaseModel):
 _PREVIEW_AUTH_MSG = {
     "solaredge": "That key didn't work — make sure it's an active account-level API key.",
     "locus": "Those Locus credentials didn't work — double-check the client ID/secret and your SolarNOC login.",
-    "fronius": "Those Solar.web keys didn't work — check the Access Key ID/Value and PV System ID.",
+    "fronius": "Those Solar.web keys didn't work — check the Access Key ID and "
+               "Access Key Value (Solar.web → Settings → REST API → CREATE NEW KEY).",
     "sma": "Those SMA credentials didn't work — check the client ID/secret and Plant/System ID.",
 }
 _PREVIEW_SCOPE_MSG = {
@@ -2414,7 +2415,18 @@ def _preview_sites_for_vendor(vendor: str, config: dict) -> list[dict]:
             return [_normalize_preview_site(vendor, s) for s in raw]
         return [_normalize_preview_site(vendor, mod.validate(config))]
 
-    # Fronius / SMA: single-system validate.
+    if vendor == "fronius":
+        # Full-account cascade: the Solar.web AccessKey lists EVERY system on
+        # the account (discover_systems, grounded live 2026-07-04) — same
+        # "paste one credential, see all your arrays" as SolarEdge. A named
+        # pv_system_id still previews just that system.
+        if str(config.get("pv_system_id") or "").strip():
+            return [_normalize_preview_site(vendor, mod.validate(config))]
+        raw = mod.discover_systems(config)
+        return [_normalize_preview_site(vendor, {**s, "site_id": s["pv_system_id"]})
+                for s in raw]
+
+    # SMA: single-system validate (account cascade arrives with the OAuth app).
     return [_normalize_preview_site(vendor, mod.validate(config))]
 
 
@@ -2448,7 +2460,8 @@ def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
     needs = {
         "solaredge": ["api_key"],
         "locus": ["client_id", "client_secret", "username", "password"],
-        "fronius": ["access_key_id", "access_key_value", "pv_system_id"],
+        # pv_system_id optional: without it we list the whole account.
+        "fronius": ["access_key_id", "access_key_value"],
         "sma": ["client_id", "client_secret", "system_id"],
     }.get(vendor, [])
     missing = [n for n in needs if not str(config.get(n) or "").strip()]
@@ -2979,11 +2992,273 @@ def locus_connect_account(
     }
 
 
+# ── account-level Fronius discovery ("paste one key, attach all") ──────────────
+# The Solar.web Query API's /pvsystems lists EVERY system the AccessKey can
+# read (grounded live 2026-07-04 via scripts/verify_inverter_apis), so Fronius
+# gets the same one-credential cascade as SolarEdge/Locus. pv_system_id is a
+# STRING (UUID) — never coerce to int.
+
+def _attach_fronius(db, arr: Array, keys: dict, pv_system_id: str) -> InverterConnection:
+    """Upsert a fronius InverterConnection on `arr` WITHOUT a per-system
+    validate call — the account key was already proven by discover_systems().
+    No legacy-column mirroring (solaredge_* columns are SolarEdge-only)."""
+    config = {
+        "access_key_id": keys["access_key_id"],
+        "access_key_value": keys["access_key_value"],
+        "pv_system_id": str(pv_system_id),
+    }
+    conn = db.execute(
+        select(InverterConnection).where(InverterConnection.array_id == arr.id)
+    ).scalar_one_or_none()
+    if conn is None:
+        conn = InverterConnection(
+            array_id=arr.id, vendor="fronius", config=config, status="ok"
+        )
+        db.add(conn)
+    else:
+        conn.vendor = "fronius"
+        conn.config = config
+        conn.status = "ok"
+        conn.last_error = None
+    return conn
+
+
+class FroniusDiscoverBody(BaseModel):
+    access_key_id: str
+    access_key_value: str
+
+
+@router.post("/v1/array-owners/fronius/discover")
+def fronius_discover(
+    body: FroniusDiscoverBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Preview step: list every PV system this Solar.web AccessKey can read.
+
+    Saves NOTHING — the dashboard shows the systems as checkboxes before the
+    owner commits. A bad key (401/403) comes back as a 400 with a clear
+    message; a Solar.web 5xx comes back as a 502.
+    """
+    _tenant = _tenant_from_bearer(authorization)
+    _guard_vendor_discover(_tenant.id, "fronius")
+
+    keys = {
+        "access_key_id": (body.access_key_id or "").strip(),
+        "access_key_value": (body.access_key_value or "").strip(),
+    }
+    if not (keys["access_key_id"] and keys["access_key_value"]):
+        raise HTTPException(400, "access_key_id and access_key_value are required")
+
+    try:
+        systems = inverters.fronius.discover_systems(keys)
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"Solar.web error: {exc}")
+
+    return {
+        "ok": True,
+        "systems": systems,
+        "message": None if systems else (
+            "This AccessKey authenticates but has no PV systems attached. "
+            "Generate the key from the Solar.web account that owns your "
+            "systems (Settings → REST API → CREATE NEW KEY)."
+        ),
+    }
+
+
+class FroniusConnectAccountBody(BaseModel):
+    access_key_id: str
+    access_key_value: str
+    # When omitted, every discovered system is connected. STRING ids (UUIDs).
+    pv_system_ids: Optional[list[str]] = None
+
+
+@router.post("/v1/array-owners/fronius/connect-account")
+def fronius_connect_account(
+    body: FroniusConnectAccountBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Attach every (or a chosen subset of) Solar.web PV system on an
+    AccessKey to the tenant's arrays in one shot.
+
+    Per system: match an existing array by (1) its fronius InverterConnection
+    pv_system_id, or (2) an EXACT case-insensitive name match — otherwise
+    create a fresh Array (solar, no client). Idempotent: re-running updates
+    the same arrays instead of duplicating them.
+
+    Returns {connected, created, matched} so the UI can celebrate specifics.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    keys = {
+        "access_key_id": (body.access_key_id or "").strip(),
+        "access_key_value": (body.access_key_value or "").strip(),
+    }
+    if not (keys["access_key_id"] and keys["access_key_value"]):
+        raise HTTPException(400, "access_key_id and access_key_value are required")
+
+    requested: set[str] | None = None
+    if body.pv_system_ids is not None:
+        requested = {str(s) for s in body.pv_system_ids}
+
+    # 1. Discover the key's systems.
+    try:
+        discovered = inverters.fronius.discover_systems(keys)
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"Solar.web error: {exc}")
+
+    # 2. Narrow to the requested subset.
+    if requested is not None:
+        discovered = [s for s in discovered if str(s["pv_system_id"]) in requested]
+
+    if not discovered:
+        return {
+            "ok": True,
+            "connected": [], "created": [], "matched": [],
+            "message": "No Fronius PV systems to connect.",
+        }
+
+    # 3. Attach each system to an array (match existing or create new).
+    connected: list[dict] = []
+    created: list[dict] = []
+    matched: list[dict] = []
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        conns = {
+            c.array_id: c for c in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_([a.id for a in arrays] or [0])
+                )
+            ).scalars().all()
+        }
+
+        by_system_id: dict[str, list[int]] = defaultdict(list)
+        by_name: dict[str, list[int]] = defaultdict(list)
+        names_lower: set[str] = set()
+        # uq_array_per_tenant spans soft-deleted rows — the new-array collision
+        # guard must check ALL names (live + soft-deleted) or a system colliding
+        # with a deleted array's name slips through → INSERT → UniqueViolation.
+        all_names_lower: set[str] = {
+            n.strip().lower() for (n,) in db.execute(
+                select(Array.name).where(Array.tenant_id == tenant.id)
+            ).all()
+        }
+        arr_by_id = {a.id: a for a in arrays}
+        for a in arrays:
+            key = a.name.strip().lower()
+            names_lower.add(key)
+            by_name[key].append(a.id)
+            c = conns.get(a.id)
+            if c is not None and c.vendor == "fronius":
+                sid = (c.config or {}).get("pv_system_id")
+                if sid:
+                    by_system_id[str(sid)].append(a.id)
+
+        used: set[int] = set()
+
+        for system in discovered:
+            sid = str(system["pv_system_id"])
+            sys_name = (system.get("name") or "").strip() or f"PV system {sid}"
+            entry = {
+                "array_id": None,
+                "name": sys_name,
+                "pv_system_id": sid,
+                "peak_power_kw": system.get("peak_power_kw"),
+            }
+
+            claimants = [aid for aid in by_system_id.get(sid, []) if aid not in used]
+            if len(claimants) > 1:
+                # Pre-existing data integrity problem — don't silently pick one.
+                raise HTTPException(
+                    409,
+                    f"Two arrays already claim Fronius system {sid} "
+                    f"(arrays {sorted(claimants)}). Resolve the duplicate before "
+                    "connecting this account.",
+                )
+
+            target = None
+            if claimants:
+                target = arr_by_id[claimants[0]]
+            else:
+                name_hits = [
+                    aid for aid in by_name.get(sys_name.lower(), [])
+                    if aid not in used
+                ]
+                # Exact, unambiguous name match only — never guess fuzzily.
+                if len(name_hits) == 1:
+                    target = arr_by_id[name_hits[0]]
+
+            if target is not None:
+                _attach_fronius(db, target, keys, sid)
+                used.add(target.id)
+                entry["array_id"] = target.id
+                entry["name"] = target.name
+                matched.append(entry)
+            else:
+                name = sys_name
+                if name.lower() in all_names_lower:
+                    # Disambiguate so uq_array_per_tenant holds (includes
+                    # soft-deleted arrays, whose names still reserve the slot).
+                    name = f"{sys_name} ({sid[:8]})"
+                new_arr = Array(
+                    tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
+                )
+                db.add(new_arr)
+                db.flush()
+                _attach_fronius(db, new_arr, keys, sid)
+                used.add(new_arr.id)
+                names_lower.add(name.lower())
+                all_names_lower.add(name.lower())
+                arr_by_id[new_arr.id] = new_arr
+                entry["array_id"] = new_arr.id
+                entry["name"] = new_arr.name
+                created.append(entry)
+
+            connected.append(entry)
+
+            # Geocode the Solar.web address onto the array so the weather model
+            # can run. Fills only when the array has no location yet.
+            _tgt = arr_by_id.get(entry["array_id"])
+            if _tgt is not None and system.get("address"):
+                _set_array_location(db, _tgt, address=system.get("address"),
+                                    source_label="vendor:fronius")
+
+        db.commit()
+
+        # Self-healing: deep multi-year history backfill for every array we just
+        # attached so past years populate in Trends within minutes. Best-effort;
+        # the scheduled healer covers any that don't stamp.
+        for _e in connected:
+            if _e.get("array_id"):
+                _trigger_history_backfill(db, _e["array_id"])
+
+    return {
+        "ok": True,
+        "connected": connected,
+        "created": created,
+        "matched": matched,
+        "message": (
+            f"{len(connected)} arrays connected — "
+            f"{len(created)} new, {len(matched)} matched."
+        ),
+    }
+
+
 # ── single-system connect (Fronius / SMA / any one-system vendor) ──────────────
-# Fronius and SMA have no account-level discovery (one credential = one system),
-# so "attach all" doesn't apply. This endpoint validates the one named system
-# and attaches it to a matched-or-created array — the one-click post-signup
-# attach for those vendors, mirroring connect-account's match/create behavior.
+# SMA has no account-level discovery here yet (per-system creds + owner consent);
+# Fronius NOW HAS the full cascade above (/fronius/discover + connect-account) —
+# this endpoint remains as the manual one-system path for SMA and for a Fronius
+# key the owner wants attached to a single named system. It validates the one
+# named system and attaches it to a matched-or-created array, mirroring
+# connect-account's match/create behavior.
 
 class ConnectSingleBody(BaseModel):
     vendor: str

@@ -1202,6 +1202,12 @@ export default function BillingReportsTab() {
                   draft?.array_total_kwh == null;
                 const arr = arrayName(sub);
                 const showArr = arr && arr !== "—" && arr !== "Workbook customer";
+                // The billing window behind these numbers — rendered per row so
+                // a generation figure is never read as the current month when
+                // the underlying bill period is older.
+                const genPeriod = preview?.period_end
+                  ? monthYearFromISO(preview.period_end)
+                  : null;
                 return (
                   <tr
                     key={sub.id}
@@ -1264,6 +1270,11 @@ export default function BillingReportsTab() {
                         <span className="text-zinc-400">No generation data yet</span>
                       ) : (
                         <span className="text-zinc-400">Computing share…</span>
+                      )}
+                      {hasMath && genPeriod && (
+                        <span className="block text-[11px] text-zinc-400">
+                          generation for {genPeriod}
+                        </span>
                       )}
                     </td>
                     {/* Customer share $ */}

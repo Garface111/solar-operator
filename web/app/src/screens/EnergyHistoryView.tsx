@@ -328,6 +328,22 @@ export default function EnergyHistoryView() {
   );
   const earnedCredit = lifetimeNet < 0;
 
+  // Freshness: the most recent absorbed bill (periods are sorted most-recent
+  // first), so lifetime totals are never mistaken for figures through today.
+  const latestBillEnd = periods.length
+    ? periods[0].period_end || periods[0].bill_date
+    : null;
+  const latestBillDate = latestBillEnd ? new Date(latestBillEnd) : null;
+  const latestBillLabel =
+    latestBillDate && !Number.isNaN(latestBillDate.getTime())
+      ? latestBillDate.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+          timeZone: "UTC",
+        })
+      : null;
+
   return (
     <ScreenLayout>
       <div className="space-y-1">
@@ -382,6 +398,12 @@ export default function EnergyHistoryView() {
               tone={earnedCredit ? "up" : "neutral"}
             />
           </div>
+
+          {latestBillLabel && (
+            <p className="text-[11px] text-zinc-400">
+              latest bill: {latestBillLabel}
+            </p>
+          )}
 
           {/* All-time fleet report export — the absorbed history as a
               downloadable Excel/PDF, generated live so it's always current. */}
