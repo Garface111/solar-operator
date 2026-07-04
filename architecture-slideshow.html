@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solar Operator — Architecture Slideshow</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#11161d; --panel2:#161d26; --line:#232c38;
+    --text:#e6edf3; --dim:#8b98a9;
+    --cap:#22d3ee;   /* capture / extension */
+    --api:#a78bfa;   /* backend API */
+    --state:#f5b02c; /* state / persistence */
+    --jobs:#34d399;  /* background jobs */
+    --ext:#fb7185;   /* external services */
+    --out:#e2e8f0;   /* people / deliverables */
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{background:var(--bg); color:var(--text);
+    font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:1280px; margin:0 auto; padding:14px 18px 26px}
+
+  header{display:flex; align-items:center; gap:18px; flex-wrap:wrap; padding:4px 2px 12px}
+  header h1{font-size:17px; font-weight:650; letter-spacing:.2px; white-space:nowrap}
+  header h1 span{color:var(--dim); font-weight:450}
+  #chapName{font-size:14px; color:var(--dim); flex:1; min-width:160px}
+  #chapName b{color:var(--text); font-weight:600}
+  .legend{display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--dim)}
+  .legend i{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:-1px}
+
+  .stage{position:relative; background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; overflow:hidden; cursor:pointer}
+  .stage svg{display:block; width:100%; height:auto}
+
+  /* ── diagram element states ─────────────────────────────── */
+  .el{opacity:0; transition:opacity .45s ease, transform .45s ease; transform:translateY(7px)}
+  .el.on{opacity:1; transform:none}
+  .ghostable .el{opacity:.14; transform:none; transition:opacity .45s ease}
+  .ghostable .el.on{opacity:1}
+  .el.hot .box{filter:drop-shadow(0 0 7px currentColor); stroke-width:2.4}
+  .el.hot .edge{filter:drop-shadow(0 0 5px currentColor); stroke-width:2.6}
+  .el.hot text.t{fill:#fff}
+
+  .node .box{rx:10; stroke-width:1.6}
+  .cap  {color:var(--cap)}   .cap  .box{stroke:var(--cap);   fill:rgba(34,211,238,.09)}
+  .api  {color:var(--api)}   .api  .box{stroke:var(--api);   fill:rgba(167,139,250,.10)}
+  .state{color:var(--state)} .state.node .box{stroke:var(--state); fill:rgba(245,176,44,.09)}
+  .jobs {color:var(--jobs)}  .jobs .box{stroke:var(--jobs);  fill:rgba(52,211,153,.09)}
+  .ext  {color:var(--ext)}   .ext  .box{stroke:var(--ext);   fill:rgba(251,113,133,.09)}
+  .out  {color:var(--out)}   .out  .box{stroke:var(--out);   fill:rgba(226,232,240,.07)}
+
+  text{user-select:none}
+  text.t{fill:var(--text); font-size:15px; font-weight:640;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  text.t.sm{font-size:12px; font-weight:560;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  text.s{fill:var(--dim); font-size:11.4px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  text.elabel{fill:var(--dim); font-size:11px; paint-order:stroke; stroke:var(--panel);
+    stroke-width:6px; stroke-linejoin:round;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .edge{fill:none; stroke:currentColor; stroke-width:1.7; opacity:.92}
+  .dash .edge{stroke-dasharray:6 5}
+  .frame-box{fill:none; stroke:var(--line); stroke-width:1.4; stroke-dasharray:8 6; rx:14}
+  text.frame-label{fill:var(--dim); font-size:12px; font-weight:600; letter-spacing:.6px}
+  text.note-big{fill:var(--text); font-size:38px; font-weight:700; text-anchor:middle}
+  text.note-sub{fill:var(--dim); font-size:16px; text-anchor:middle}
+
+  /* ── caption + controls ─────────────────────────────────── */
+  .caption{min-height:46px; display:flex; align-items:center; justify-content:center;
+    text-align:center; padding:10px 20px 2px; font-size:15.5px; color:var(--text)}
+  .caption b{color:var(--state)}
+  .controls{display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:10px 14px; margin-top:8px}
+  .controls button{background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:7px 13px; font-size:14px; cursor:pointer}
+  .controls button:hover{border-color:var(--dim)}
+  .controls button.play{min-width:86px; font-weight:600}
+  .speed{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--dim)}
+  .speed input{accent-color:var(--jobs); width:130px}
+  select{background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:7px 9px; font-size:13.5px; max-width:280px}
+  .count{font-size:12.5px; color:var(--dim); font-variant-numeric:tabular-nums; margin-left:auto}
+  .bar{height:4px; background:var(--line); border-radius:2px; overflow:hidden; margin-top:10px}
+  .bar i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--cap),var(--jobs));
+    transition:width .3s ease}
+  .hint{font-size:11.5px; color:var(--dim); text-align:center; margin-top:8px}
+  kbd{background:var(--panel2); border:1px solid var(--line); border-radius:4px;
+    padding:0 5px; font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Solar Operator <span>· architecture</span></h1>
+    <div id="chapName"></div>
+    <div class="legend">
+      <span><i style="background:var(--cap)"></i>capture / extension</span>
+      <span><i style="background:var(--api)"></i>backend API</span>
+      <span><i style="background:var(--state)"></i>state / persistence</span>
+      <span><i style="background:var(--jobs)"></i>background jobs</span>
+      <span><i style="background:var(--ext)"></i>external services</span>
+      <span><i style="background:var(--out)"></i>people / deliverables</span>
+    </div>
+  </header>
+
+  <div class="stage" id="stage">
+    <svg viewBox="0 0 1200 680" id="svg" aria-label="architecture diagram">
+      <defs id="defs"></defs>
+    </svg>
+  </div>
+  <div class="bar"><i id="prog"></i></div>
+  <div class="caption" id="cap"></div>
+
+  <div class="controls">
+    <button id="prev" title="previous frame (←)">⏮ back</button>
+    <button id="play" class="play" title="play / pause (space)">▶ play</button>
+    <button id="next" title="next frame (→)">next ⏭</button>
+    <div class="speed">
+      <span>speed</span>
+      <input type="range" id="speed" min="500" max="5000" step="100" value="1800">
+      <span id="speedLabel">1.8s / frame</span>
+    </div>
+    <select id="chapSel" title="jump to chapter"></select>
+    <div class="count" id="count"></div>
+  </div>
+  <div class="hint"><kbd>←</kbd> <kbd>→</kbd> step · <kbd>space</kbd> play/pause · click the right/left half of the diagram to step · every label is a real file, function, or table in this repo</div>
+</div>
+
+<script>
+"use strict";
+/* ════════════════════════════════════════════════════════════════
+   SCENES — every node/edge is grounded in the repo.
+   node: {id,x,y,w,h,cls,t,s[],small}   edge: {id,from,to,cls,label,dash,both}
+   note: {id,x,y,text,big|sub}          frame: {id,x,y,w,h,label}
+   ════════════════════════════════════════════════════════════════ */
+const SCENES = {
+
+ov: { nodes: [
+  {id:'ov_op',    x:40,  y:70,  w:200, h:70,  cls:'out',   t:'Solar operator', s:['the human — Ford / Bruce']},
+  {id:'ov_ext',   x:40,  y:300, w:230, h:100, cls:'cap',   t:'EnergyAgent extension', s:['extension/ · Chrome MV3','v1.9.110 · rides utility logins']},
+  {id:'ov_api',   x:450, y:250, w:300, h:150, cls:'api',   t:'FastAPI backend', s:['api/app.py · Railway + uvicorn']},
+  {id:'ov_inproc',x:472, y:346, w:256, h:44,  cls:'jobs',  small:1, t:'APScheduler + worker threads'},
+  {id:'ov_db',    x:480, y:520, w:240, h:104, cls:'state', t:'Postgres', s:['api/models.py · 33 tables','api/db.py · SessionLocal']},
+  {id:'ov_gmp',   x:950, y:60,  w:220, h:70,  cls:'ext',   t:'GMP utility API', s:['api.greenmountainpower.com']},
+  {id:'ov_inv',   x:950, y:160, w:220, h:70,  cls:'ext',   t:'Inverter clouds', s:['SolarEdge · Fronius · SMA · …']},
+  {id:'ov_stripe',x:950, y:260, w:220, h:70,  cls:'ext',   t:'Stripe (LIVE)', s:['subscriptions · webhooks']},
+  {id:'ov_resend',x:950, y:360, w:220, h:70,  cls:'ext',   t:'Resend', s:['all email · api/notify.py']},
+  {id:'ov_rec',   x:950, y:520, w:220, h:90,  cls:'out',   t:'REC agent / client', s:['GMCS .xlsx in the inbox']},
+], edges: [
+  {id:'ov_e_login', from:'ov_op',    to:'ov_ext',   cls:'out', label:'logs into utility portals'},
+  {id:'ov_e_sync',  from:'ov_ext',   to:'ov_api',   cls:'cap', label:'POST /v1/sync'},
+  {id:'ov_e_db',    from:'ov_api',   to:'ov_db',    cls:'state', label:'SQLAlchemy', both:1},
+  {id:'ov_e_gmp',   from:'ov_api',   to:'ov_gmp',   cls:'ext', label:'bill pulls'},
+  {id:'ov_e_inv',   from:'ov_api',   to:'ov_inv',   cls:'ext', label:'daily kWh'},
+  {id:'ov_e_stripe',from:'ov_api',   to:'ov_stripe',cls:'ext', label:'billing', both:1},
+  {id:'ov_e_resend',from:'ov_api',   to:'ov_resend',cls:'ext', label:'email'},
+  {id:'ov_e_rec',   from:'ov_resend',to:'ov_rec',   cls:'out', label:'report attached'},
+], notes: [
+  {id:'ov_title', x:560, y:130, text:'Solar Operator', big:1},
+  {id:'ov_sub',   x:560, y:168, text:'quarterly NEPOOL-GIS net-metering reports for VT community solar — automated', sub:1},
+]},
+
+web: { nodes: [
+  {id:'web_core', x:430, y:70,  w:340, h:100, cls:'api', t:"FastAPI('NEPOOL Operator API')", s:['api/app.py:234','one app object · two products']},
+  {id:'web_mw1',  x:40,  y:70,  w:340, h:50,  cls:'api', small:1, t:'CORSMiddleware — chrome-extension:// allowed'},
+  {id:'web_mw2',  x:40,  y:132, w:340, h:50,  cls:'api', small:1, t:'_security_headers — CSP · HSTS · XFO'},
+  {id:'web_r1', x:236, y:230, w:170, h:48, cls:'api', small:1, t:'ingest.py'},
+  {id:'web_r2', x:422, y:230, w:170, h:48, cls:'api', small:1, t:'account.py'},
+  {id:'web_r3', x:608, y:230, w:170, h:48, cls:'api', small:1, t:'onboarding.py'},
+  {id:'web_r4', x:794, y:230, w:170, h:48, cls:'api', small:1, t:'billing/routes.py'},
+  {id:'web_r5', x:236, y:288, w:170, h:48, cls:'api', small:1, t:'array_owners.py'},
+  {id:'web_r6', x:422, y:288, w:170, h:48, cls:'api', small:1, t:'stripe_webhook.py'},
+  {id:'web_r7', x:608, y:288, w:170, h:48, cls:'api', small:1, t:'solaredge.py'},
+  {id:'web_r8', x:794, y:288, w:170, h:48, cls:'api', small:1, t:'verification.py'},
+  {id:'web_auth1',x:40,  y:420, w:310, h:90, cls:'api', t:'tenant_from_bearer()', s:['app.py:597 · Bearer sol_live_…','extension + tenant API routes']},
+  {id:'web_auth2',x:40,  y:534, w:310, h:90, cls:'api', t:'_sign_session / _verify_session', s:['account.py:150 · HMAC + SESSION_SECRET','magic-link login → 30-day token']},
+  {id:'web_spa',  x:850, y:420, w:310, h:90, cls:'api', t:'SPAStaticFiles', s:['/onboarding · /app · /accounts','prebuilt React dists in api/*_dist']},
+  {id:'web_start',x:430, y:534, w:340, h:90, cls:'jobs', t:'startup: init_db() + scheduler.start()', s:['app.py:410 — boots the whole','background engine in-process']},
+], edges: [
+  {id:'web_e_start',from:'web_core', to:'web_start',cls:'jobs'},
+], notes: [
+  {id:'web_rnote', x:600, y:368, text:'app.include_router(…) · app.py:361-402', sub:1},
+]},
+
+cap: { nodes: [
+  {id:'cap_portal', x:60, y:100, w:280, h:88, cls:'ext', t:'greenmountainpower.com', s:['signed-in portal tab']},
+  {id:'cap_vault',  x:390, y:100, w:250, h:88, cls:'cap', t:'vault.js', s:['AES-GCM credential vault','chrome.storage.local — never sent']},
+  {id:'cap_content',x:60, y:242, w:280, h:88, cls:'cap', t:'content.js', s:['reads gmp-vue localStorage','→ JWT + account list']},
+  {id:'cap_bg',     x:390, y:242, w:250, h:96, cls:'cap', t:'background.js', s:['service worker hub','postSync() · background.js:195']},
+  {id:'cap_p1', x:60, y:376, w:310, h:46, cls:'cap', small:1, t:'smarthub_content.js — all *.smarthub.coop'},
+  {id:'cap_p2', x:60, y:430, w:310, h:46, cls:'cap', small:1, t:'gmp_meter_content.js — daily meter reads'},
+  {id:'cap_p3', x:60, y:484, w:310, h:46, cls:'cap', small:1, t:'solaredge/solarweb/sunnyportal scripts'},
+  {id:'cap_p4', x:60, y:538, w:310, h:46, cls:'cap', small:1, t:'chint_content.js — passive XHR observe'},
+  {id:'cap_bridge', x:390, y:392, w:250, h:78, cls:'cap', t:'so_bridge.js', s:['window.postMessage bridge']},
+  {id:'cap_spa',    x:390, y:520, w:250, h:78, cls:'api', t:'dashboard SPA', s:['solaroperator.org wizard']},
+  {id:'cap_sync',   x:760, y:200, w:280, h:96, cls:'api', t:'sync()', s:['POST /v1/sync · app.py:610','tenant_from_bearer() auth']},
+  {id:'cap_adapter',x:760, y:346, w:280, h:82, cls:'api', t:'adapters/gmp.py', s:['parse_extension_payload()','raw capture → normalized']},
+  {id:'cap_rows',   x:760, y:482, w:310, h:110, cls:'state', t:'DB writes', s:['UtilitySession · UtilityAccount','Array autopop · CaptureEvent']},
+], edges: [
+  {id:'cap_e1', from:'cap_portal', to:'cap_content', cls:'cap', label:'DOM + localStorage'},
+  {id:'cap_e2', from:'cap_content',to:'cap_bg',      cls:'cap', label:'GMP_TOKEN_CAPTURED'},
+  {id:'cap_e3', from:'cap_bg',     to:'cap_sync',    cls:'cap', label:'Bearer tenant_key'},
+  {id:'cap_e4', from:'cap_p1',     to:'cap_bg',      cls:'cap', label:'*_CAPTURED messages'},
+  {id:'cap_e5', from:'cap_bridge', to:'cap_spa',     cls:'cap', label:'SO_PAIR · SO_CAPTURE_LANDED', both:1},
+  {id:'cap_e6', from:'cap_bg',     to:'cap_bridge',  cls:'cap'},
+  {id:'cap_e7', from:'cap_sync',   to:'cap_adapter', cls:'api'},
+  {id:'cap_e8', from:'cap_adapter',to:'cap_rows',    cls:'state'},
+], frames: [
+  {id:'cap_browser', x:30, y:50, w:640, h:590, label:"OPERATOR'S BROWSER"},
+]},
+
+db: { nodes: [
+  {id:'db_tenant',x:460, y:50,  w:280, h:88, cls:'state', t:'Tenant', s:['ten_… · tenant_key · product','send_mode · report_frequency']},
+  {id:'db_client',x:460, y:184, w:280, h:84, cls:'state', t:'Client', s:['contact_email · cc_emails','report_frequency (override)']},
+  {id:'db_array', x:460, y:314, w:280, h:92, cls:'state', t:'Array', s:['nepool_gis_id · excluded','bill_offset_months · fuel_type']},
+  {id:'db_ua',    x:460, y:452, w:280, h:78, cls:'state', t:'UtilityAccount', s:['provider · account_number']},
+  {id:'db_bill',  x:100, y:436, w:290, h:100, cls:'state', t:'Bill', s:['kwh_generated · period_start/end','raw_json · pdf_bytes — data sponge']},
+  {id:'db_us',    x:100, y:572, w:310, h:64, cls:'state', small:1, t:'UtilitySession — captured JWT · captured_at'},
+  {id:'db_dg',    x:830, y:314, w:330, h:96, cls:'state', t:'DailyGeneration', s:['(array_id, day) · kwh · source','csv · extension_pull · bill_prorate …']},
+  {id:'db_gs',    x:830, y:450, w:330, h:78, cls:'api',   t:'generation_sources.py', s:['is_measured(): measured > estimate']},
+  {id:'db_misc',  x:830, y:566, w:330, h:88, cls:'state', t:'…and 25 more tables', s:['Job · StripeEvent · ReportDelivery','LoginToken · InverterDaily · …']},
+], edges: [
+  {id:'db_e1', from:'db_tenant', to:'db_client', cls:'state', label:'FK tenant_id'},
+  {id:'db_e2', from:'db_client', to:'db_array',  cls:'state', label:'FK client_id'},
+  {id:'db_e3', from:'db_array',  to:'db_ua',     cls:'state', label:'FK array_id'},
+  {id:'db_e4', from:'db_ua',     to:'db_bill',   cls:'state', label:'FK account_id'},
+  {id:'db_e5', from:'db_array',  to:'db_dg',     cls:'state', label:'FK array_id'},
+  {id:'db_e6', from:'db_us',     to:'db_ua',     cls:'state', dash:1, label:'token_for_account()'},
+  {id:'db_e7', from:'db_gs',     to:'db_dg',     cls:'api',   dash:1, label:'classifies source'},
+]},
+
+eng: { nodes: [
+  {id:'eng_sched',x:410, y:50,  w:380, h:88, cls:'jobs', t:"BackgroundScheduler(timezone='UTC')", s:['scheduler.py:36 — threads inside','the one web process (no worker dyno)']},
+  {id:'eng_enq',  x:70,  y:220, w:300, h:80, cls:'jobs', t:'enqueue_pull_for_all_tenants', s:['every 6 h · one Job per active tenant']},
+  {id:'eng_jobq', x:70,  y:344, w:300, h:78, cls:'state',t:'Job table', s:["kind='pull_bills' · queued→running→…"]},
+  {id:'eng_drain',x:70,  y:466, w:300, h:78, cls:'jobs', t:'run_pending_jobs', s:['every 1 min · worker.py:463']},
+  {id:'eng_pull', x:440, y:466, w:300, h:92, cls:'jobs', t:'pull_bills_for_tenant', s:['worker.py:311 · JSON-first','token_for_account() picks the JWT']},
+  {id:'eng_gmp',  x:820, y:330, w:310, h:82, cls:'ext',  t:'GMP API', s:['/api/v2/accounts/{n}/bills']},
+  {id:'eng_pdf',  x:440, y:590, w:300, h:52, cls:'jobs', small:1, t:'_pull_via_pdf — currentBillUrl fallback'},
+  {id:'eng_bills',x:820, y:466, w:310, h:82, cls:'state',t:'Bill rows', s:['_upsert_bill — full-history sponge']},
+  {id:'eng_n1', x:444, y:190, w:136, h:68, cls:'jobs', t:'03:00', s:['inverter_pull']},
+  {id:'eng_n2', x:588, y:190, w:136, h:68, cls:'jobs', t:'03:30', s:['history snapshot']},
+  {id:'eng_n3', x:732, y:190, w:150, h:68, cls:'jobs', t:'03:45', s:['generation_watchdog']},
+  {id:'eng_n4', x:890, y:190, w:144, h:68, cls:'jobs', t:'05:00', s:['gmp_daily_backfill']},
+  {id:'eng_n5', x:1042,y:190, w:130, h:68, cls:'jobs', t:'05:30', s:['bill_to_daily']},
+  {id:'eng_dg', x:820, y:590, w:310, h:52, cls:'state', small:1, t:"DailyGeneration(source='bill_prorate')"},
+], edges: [
+  {id:'eng_e1', from:'eng_sched', to:'eng_enq',  cls:'jobs'},
+  {id:'eng_e2', from:'eng_enq',   to:'eng_jobq', cls:'state', label:'INSERT'},
+  {id:'eng_e3', from:'eng_jobq',  to:'eng_drain',cls:'jobs',  label:'polled'},
+  {id:'eng_e4', from:'eng_drain', to:'eng_pull', cls:'jobs',  label:'run_job()'},
+  {id:'eng_e5', from:'eng_pull',  to:'eng_gmp',  cls:'ext',   label:'JSON w/ stored JWT'},
+  {id:'eng_e6', from:'eng_pull',  to:'eng_bills',cls:'state', label:'_upsert_bill'},
+  {id:'eng_e7', from:'eng_pull',  to:'eng_pdf',  cls:'jobs',  dash:1, label:'on JSON failure'},
+  {id:'eng_e8', from:'eng_sched', to:'eng_n1',   cls:'jobs',  label:'nightly cron'},
+  {id:'eng_e9',  from:'eng_n1', to:'eng_n2', cls:'jobs'},
+  {id:'eng_e10', from:'eng_n2', to:'eng_n3', cls:'jobs'},
+  {id:'eng_e11', from:'eng_n3', to:'eng_n4', cls:'jobs'},
+  {id:'eng_e12', from:'eng_n4', to:'eng_n5', cls:'jobs'},
+  {id:'eng_e13', from:'eng_bills', to:'eng_dg', cls:'state', label:'bill_to_daily prorates'},
+]},
+
+rep: { nodes: [
+  {id:'rep_cron', x:50,  y:60,  w:310, h:92, cls:'jobs', t:'Quarterly cron', s:['CronTrigger m=1,4,7,10 d=1 09:00 UTC','deliver_quarterly_reports']},
+  {id:'rep_fan',  x:50,  y:204, w:310, h:88, cls:'jobs', t:'_deliver_clients_with_frequency', s:['scheduler.py:249 · per-client fan-out','cadence: Client → Tenant fallback']},
+  {id:'rep_dfc',  x:50,  y:344, w:310, h:84, cls:'api',  t:'deliver_for_client', s:['delivery.py:61 · one email per client']},
+  {id:'rep_guard',x:50,  y:480, w:310, h:78, cls:'api',  t:'report_has_data', s:['skip_if_empty — never mail a blank']},
+  {id:'rep_reg',  x:430, y:344, w:300, h:84, cls:'api',  t:'writers/registry.py', s:['build_workbook — dispatch on fuel_type']},
+  {id:'rep_gmcs', x:430, y:480, w:300, h:92, cls:'api',  t:'gmcs_writer.build_workbook', s:['solar default · gmcs_writer.py:188']},
+  {id:'rep_recw', x:430, y:604, w:300, h:48, cls:'api',  small:1, t:'rec_writer: wind·hydro·digester·storage'},
+  {id:'rep_q',    x:810, y:60,  w:340, h:78, cls:'api',  t:'_rolling_quarters(ref, 6)', s:['6 complete quarters — skip in-progress']},
+  {id:'rep_merge',x:810, y:184, w:340, h:96, cls:'state',t:'Per-month merge', s:['bills → distribute_kwh_by_calendar_day','DailyGeneration wins its months']},
+  {id:'rep_sheet',x:810, y:326, w:340, h:104, cls:'out', t:'One sheet per producing array', s:["A1 = 'Name (nepool_gis_id)'",'RECs = int(mwh) · footnote row 31']},
+  {id:'rep_email',x:810, y:478, w:340, h:92, cls:'ext',  t:'Resend — send_workbook_email', s:['notify.py:96 · xlsx attached','send_mode: to_client · to_me · to_both']},
+  {id:'rep_audit',x:810, y:604, w:340, h:48, cls:'jobs', small:1, t:'ReportDelivery → receipts 11:00 · reviews 14:00'},
+], edges: [
+  {id:'rep_e1', from:'rep_cron', to:'rep_fan',  cls:'jobs'},
+  {id:'rep_e2', from:'rep_fan',  to:'rep_dfc',  cls:'api'},
+  {id:'rep_e3', from:'rep_dfc',  to:'rep_guard',cls:'api', dash:1, label:'checks first'},
+  {id:'rep_e4', from:'rep_dfc',  to:'rep_reg',  cls:'api'},
+  {id:'rep_e5', from:'rep_reg',  to:'rep_recw', cls:'api', dash:1},
+  {id:'rep_e6', from:'rep_reg',  to:'rep_gmcs', cls:'api'},
+  {id:'rep_e7', from:'rep_q',    to:'rep_merge',cls:'state'},
+  {id:'rep_e8', from:'rep_gmcs', to:'rep_sheet',cls:'out', label:'renders'},
+  {id:'rep_e9', from:'rep_merge',to:'rep_sheet',cls:'out'},
+  {id:'rep_e10',from:'rep_sheet',to:'rep_email',cls:'ext'},
+  {id:'rep_e11',from:'rep_email',to:'rep_audit',cls:'jobs'},
+]},
+
+mon: { nodes: [
+  {id:'mon_onb',  x:60,  y:70,  w:330, h:96, cls:'api', t:'onboarding.py', s:['POST /v1/onboarding/start','trial tenant — no upfront charge']},
+  {id:'mon_stripe',x:480, y:70,  w:290, h:96, cls:'ext', t:'Stripe (LIVE)', s:['checkout · setup_intent','subscriptions']},
+  {id:'mon_hook', x:480, y:240, w:290, h:96, cls:'api', t:'stripe_webhook.py', s:['POST /v1/stripe/webhook · :422','signature-verified · StripeEvent']},
+  {id:'mon_price',x:60,  y:240, w:330, h:96, cls:'api', t:'pricing.py', s:['graduated tiers $15 → $10.50 / array','nameplate_sync · usage_report daily']},
+  {id:'mon_inv',  x:60,  y:430, w:330, h:104, cls:'ext', t:'Inverter vendor clouds', s:['api/inverters.VENDORS — 9 vendors','solaredge · enphase · fronius · sma · …']},
+  {id:'mon_poll', x:480, y:430, w:290, h:96, cls:'jobs', t:'poll_all_sources_job', s:['every 5 min · daylight-gated','InverterReading · InverterDaily']},
+  {id:'mon_two',  x:840, y:240, w:320, h:130, cls:'out', t:'Two products, one backend', s:['Tenant.product: nepool | array_operator','branding.from_address() per product','energyagent-site is the umbrella door']},
+], edges: [
+  {id:'mon_e1', from:'mon_onb',  to:'mon_stripe', cls:'ext', label:'Checkout'},
+  {id:'mon_e2', from:'mon_stripe',to:'mon_hook',  cls:'ext', label:'webhooks'},
+  {id:'mon_e3', from:'mon_price',to:'mon_stripe', cls:'ext', label:'tiers · quantities'},
+  {id:'mon_e4', from:'mon_poll', to:'mon_inv',    cls:'ext', label:'fetch_daily()'},
+]},
+
+tr: { ghost:1, nodes: [
+  {id:'tr_op',     x:30,  y:60,  w:150, h:76, cls:'out',  t:'Operator', s:['logs in']},
+  {id:'tr_portal', x:210, y:60,  w:190, h:76, cls:'ext',  t:'GMP portal', s:['signed-in tab']},
+  {id:'tr_content',x:430, y:60,  w:180, h:76, cls:'cap',  t:'content.js', s:['JWT + 9 accounts']},
+  {id:'tr_bg',     x:640, y:60,  w:180, h:76, cls:'cap',  t:'background.js', s:['postSync()']},
+  {id:'tr_sync',   x:850, y:60,  w:160, h:76, cls:'api',  t:'sync()', s:['POST /v1/sync']},
+  {id:'tr_rows',   x:1040,y:60,  w:150, h:76, cls:'state',t:'UtilitySession', s:['UtilityAccount']},
+  {id:'tr_sched',  x:1000,y:280, w:180, h:84, cls:'jobs', t:'+6 h cron', s:['Job(pull_bills)']},
+  {id:'tr_pull',   x:760, y:280, w:200, h:84, cls:'jobs', t:'pull_bills_for_tenant', s:['run_pending_jobs']},
+  {id:'tr_gmp',    x:520, y:280, w:200, h:84, cls:'ext',  t:'GMP API', s:['/api/v2/…/bills']},
+  {id:'tr_bill',   x:280, y:280, w:200, h:84, cls:'state',t:'Bill rows', s:['_upsert_bill sponge']},
+  {id:'tr_dg',     x:40,  y:280, w:200, h:84, cls:'state',t:'DailyGeneration', s:["source='bill_prorate'"]},
+  {id:'tr_cron',   x:40,  y:500, w:190, h:84, cls:'jobs', t:'Oct 1 · 09:00 UTC', s:['quarterly CronTrigger']},
+  {id:'tr_dfc',    x:270, y:500, w:200, h:84, cls:'api',  t:'deliver_for_client', s:['delivery.py:61']},
+  {id:'tr_wb',     x:510, y:500, w:210, h:84, cls:'api',  t:'build_workbook', s:['client_id · 6 quarters']},
+  {id:'tr_sheet',  x:760, y:500, w:190, h:84, cls:'out',  t:'Starlake (GIS id)', s:['RECs = int(mwh)']},
+  {id:'tr_resend', x:990, y:500, w:190, h:84, cls:'ext',  t:'Resend', s:['xlsx attached']},
+  {id:'tr_rec',    x:990, y:614, w:190, h:52, cls:'out',  small:1, t:'REC agent inbox ✓'},
+  {id:'tr_audit',  x:700, y:614, w:250, h:52, cls:'jobs', small:1, t:'ReportDelivery + delivery receipt'},
+], edges: [
+  {id:'tr_f1',  from:'tr_op',    to:'tr_portal', cls:'out'},
+  {id:'tr_f2',  from:'tr_portal',to:'tr_content',cls:'cap'},
+  {id:'tr_f3',  from:'tr_content',to:'tr_bg',    cls:'cap'},
+  {id:'tr_f4',  from:'tr_bg',    to:'tr_sync',   cls:'cap'},
+  {id:'tr_f5',  from:'tr_sync',  to:'tr_rows',   cls:'state'},
+  {id:'tr_f6',  from:'tr_rows',  to:'tr_sched',  cls:'jobs'},
+  {id:'tr_f7',  from:'tr_sched', to:'tr_pull',   cls:'jobs'},
+  {id:'tr_f8',  from:'tr_pull',  to:'tr_gmp',    cls:'ext'},
+  {id:'tr_f9',  from:'tr_gmp',   to:'tr_bill',   cls:'state'},
+  {id:'tr_f10', from:'tr_bill',  to:'tr_dg',     cls:'state'},
+  {id:'tr_f11', from:'tr_dg',    to:'tr_cron',   cls:'jobs'},
+  {id:'tr_f12', from:'tr_cron',  to:'tr_dfc',    cls:'api'},
+  {id:'tr_f13', from:'tr_dfc',   to:'tr_wb',     cls:'api'},
+  {id:'tr_f14', from:'tr_wb',    to:'tr_sheet',  cls:'out'},
+  {id:'tr_f15', from:'tr_sheet', to:'tr_resend', cls:'ext'},
+  {id:'tr_f16', from:'tr_resend',to:'tr_rec',    cls:'out'},
+  {id:'tr_f17', from:'tr_resend',to:'tr_audit',  cls:'jobs', dash:1},
+]},
+};
+
+/* ════════════════════════════════════════════════════════════════
+   CHAPTERS + FRAMES — one conceptual increment per frame
+   ════════════════════════════════════════════════════════════════ */
+const CHAPTERS = [
+  {name:'1 · The big picture',              start:0},
+  {name:'2 · The web app — api/app.py',     start:7},
+  {name:'3 · The capture layer — extension/', start:14},
+  {name:'4 · State — the Postgres model',   start:22},
+  {name:'5 · The background engine',        start:29},
+  {name:'6 · The report pipeline',          start:36},
+  {name:'7 · Money & integrations',         start:45},
+  {name:'8 · Full trace — one bill → one REC', start:50},
+];
+
+const F = [
+// ── ch1: big picture ──
+{sc:'ov', add:['ov_title','ov_sub'], cap:'Solar Operator: quarterly NEPOOL-GIS credit reports for VT community solar — automated.'},
+{sc:'ov', add:['ov_op','ov_ext','ov_e_login'], cap:'Layer 1: a Chrome extension (EnergyAgent) rides the operator’s own utility logins.'},
+{sc:'ov', add:['ov_api','ov_e_sync'], cap:'Layer 2: captures land in one FastAPI backend — POST /v1/sync.'},
+{sc:'ov', add:['ov_db','ov_e_db'], cap:'Everything durable lives in Postgres on Railway (SQLite for dev).'},
+{sc:'ov', add:['ov_gmp','ov_inv','ov_stripe','ov_resend','ov_e_gmp','ov_e_inv','ov_e_stripe','ov_e_resend'], cap:'The backend talks out: utility APIs, inverter clouds, Stripe, Resend.'},
+{sc:'ov', add:['ov_rec','ov_e_rec'], cap:'The product: a NEPOOL-GIS-ready GMCS workbook, emailed to the right inbox.'},
+{sc:'ov', add:['ov_inproc'], cap:'Key fact: web, scheduler, and worker are ONE Railway process (railway.toml startCommand).'},
+// ── ch2: web app ──
+{sc:'web', add:['web_core'], cap:'app = FastAPI("NEPOOL Operator API") — one app object serves two products (app.py:234).'},
+{sc:'web', add:['web_r1','web_r2','web_r3','web_r4','web_r5','web_r6','web_r7','web_r8','web_rnote'], cap:'Features are routers, included at app.py:361-402 — ingest, account, onboarding, billing, and more.'},
+{sc:'web', add:['web_mw1','web_mw2'], cap:'Middleware: CORS allows chrome-extension:// origins; every response gets hardened headers.'},
+{sc:'web', add:['web_auth1'], cap:'Auth path 1: extension routes send Bearer sol_live_… → tenant_from_bearer() (app.py:597).'},
+{sc:'web', add:['web_auth2'], cap:'Auth path 2: dashboard sessions are self-signed HMAC tokens — no session table (account.py:150).'},
+{sc:'web', add:['web_spa'], cap:'The same process serves the prebuilt React SPAs: /onboarding, /app, /accounts.'},
+{sc:'web', add:['web_start','web_e_start'], cap:'Startup wires the DB (init_db) and boots the entire background engine (scheduler.start).'},
+// ── ch3: capture layer ──
+{sc:'cap', add:['cap_browser','cap_portal'], cap:'Capture happens where the credentials already are: the operator’s own browser.'},
+{sc:'cap', add:['cap_content','cap_e1'], cap:'content.js lifts GMP’s own API token from gmp-vue localStorage — no password ever touched.'},
+{sc:'cap', add:['cap_bg','cap_e2','cap_sync','cap_e3'], cap:'background.js is the hub: postSync() alone POSTs to /v1/sync with the tenant key.'},
+{sc:'cap', add:['cap_p1','cap_p2','cap_p3','cap_p4','cap_e4'], cap:'Portal fan-in: one universal SmartHub script covers every co-op; inverter portals get their own.'},
+{sc:'cap', add:['cap_bridge','cap_spa','cap_e5','cap_e6'], cap:'so_bridge.js pairs extension and SPA — SO_CAPTURE_LANDED auto-advances the wizard.'},
+{sc:'cap', add:['cap_vault'], cap:'vault.js: AES-GCM credential vault in chrome.storage.local — credentials never leave the browser.'},
+{sc:'cap', add:['cap_adapter','cap_e7'], cap:'Each provider’s adapter normalizes the raw capture: adapters/gmp.py parse_extension_payload().'},
+{sc:'cap', add:['cap_rows','cap_e8'], cap:'One login click becomes durable state: sessions, accounts, auto-created arrays, a capture timeline.'},
+// ── ch4: data model ──
+{sc:'db', add:['db_tenant'], cap:'The spine starts at Tenant — the paying operator; everything hangs off ten_… ids.'},
+{sc:'db', add:['db_client','db_e1'], cap:'Client: reports are generated per client, not per tenant (Phase-1 expansion).'},
+{sc:'db', add:['db_array','db_e2'], cap:'Array is the REC-minting unit — nepool_gis_id is canonical; excluded hides it from reports.'},
+{sc:'db', add:['db_ua','db_us','db_e3','db_e6'], cap:'UtilityAccount maps meters to arrays; UtilitySession holds captured JWTs, picked per account.'},
+{sc:'db', add:['db_bill','db_e4'], cap:'Bill is a data sponge: every field GMP exposes is kept — raw_json and pdf_bytes included.'},
+{sc:'db', add:['db_dg','db_gs','db_e5','db_e7'], cap:'All generation converges into DailyGeneration(array_id, day); is_measured() ranks real over estimate.'},
+{sc:'db', add:['db_misc'], cap:'33 tables total — jobs, Stripe idempotency, delivery records, magic links, inverter series…'},
+// ── ch5: background engine ──
+{sc:'eng', add:['eng_sched'], cap:'No worker dyno: APScheduler runs cron + queue-drain as threads inside the web process.'},
+{sc:'eng', add:['eng_enq','eng_jobq','eng_e1','eng_e2'], cap:'Every 6 h, enqueue_pull_for_all_tenants inserts one Job(kind="pull_bills") per active tenant.'},
+{sc:'eng', add:['eng_drain','eng_e3'], cap:'A one-minute drainer, run_pending_jobs, walks the Job table — the queue is just Postgres.'},
+{sc:'eng', add:['eng_pull','eng_e4','eng_gmp','eng_e5','eng_bills','eng_e6'], cap:'JSON-first: the stored JWT pulls the FULL bill history in one authenticated pass.'},
+{sc:'eng', add:['eng_pdf','eng_e7'], cap:'PDF fallback only when JSON fails — expired JWT, GMP downtime, schema change.'},
+{sc:'eng', add:['eng_n1','eng_n2','eng_n3','eng_n4','eng_n5','eng_e8','eng_e9','eng_e10','eng_e11','eng_e12'], cap:'A deliberately ordered nightly pipeline: pull → snapshot → watchdog → backfill → transform.'},
+{sc:'eng', add:['eng_dg','eng_e13'], cap:'bill_to_daily prorates bills into DailyGeneration(source="bill_prorate") — real readings always win.'},
+// ── ch6: report pipeline ──
+{sc:'rep', add:['rep_cron'], cap:'Quarter-start, 09:00 UTC: the cron this company exists for — deliver_quarterly_reports.'},
+{sc:'rep', add:['rep_fan','rep_e1'], cap:'Fan-out per client: cadence resolves Client.report_frequency, falling back to the tenant’s.'},
+{sc:'rep', add:['rep_dfc','rep_guard','rep_e2','rep_e3'], cap:'deliver_for_client checks report_has_data first — a blank workbook is never mailed.'},
+{sc:'rep', add:['rep_reg','rep_recw','rep_e4','rep_e5'], cap:'writers/registry.py dispatches on Array.fuel_type — solar stays byte-identical GMCS.'},
+{sc:'rep', add:['rep_gmcs','rep_e6','rep_q'], cap:'gmcs_writer builds a rolling window: the 6 most recent COMPLETE quarters — never the in-progress one.'},
+{sc:'rep', add:['rep_merge','rep_e7'], cap:'Two sources per month, one rule: DailyGeneration wins its months; bills fill the rest. No double counting.'},
+{sc:'rep', add:['rep_sheet','rep_e8','rep_e9'], cap:'One sheet per PRODUCING array, in Bruce’s exact format — RECs = int(mwh), footnote verbatim on row 31.'},
+{sc:'rep', add:['rep_email','rep_e10'], cap:'send_workbook_email attaches the xlsx via Resend; send_mode picks to_client / to_me / to_both.'},
+{sc:'rep', add:['rep_audit','rep_e11'], cap:'The pipeline audits itself: ReportDelivery rows + Resend webhooks → receipts and pre-send reviews.'},
+// ── ch7: money & integrations ──
+{sc:'mon', add:['mon_onb'], cap:'Onboarding mints a trial tenant with tenant_key + onboarding_token — no upfront charge.'},
+{sc:'mon', add:['mon_stripe','mon_hook','mon_e1','mon_e2'], cap:'stripe_webhook.py: signature-verified, StripeEvent-idempotent — subscription state syncs to Tenant.'},
+{sc:'mon', add:['mon_price','mon_e3'], cap:'pricing.py owns the graduated tiers; daily nameplate_sync + usage_report keep Stripe quantities honest.'},
+{sc:'mon', add:['mon_inv','mon_poll','mon_e4'], cap:'Nine inverter vendors behind one interface (validate / fetch_live / fetch_daily), polled every 5 min.'},
+{sc:'mon', add:['mon_two'], cap:'Two products, one backend: Tenant.product switches branding — everything below the email is shared.'},
+// ── ch8: full trace ──
+{sc:'tr', add:['tr_op'], cap:'Full trace — follow one real path: Bruce’s GMP login all the way to a REC report.'},
+{sc:'tr', add:['tr_portal','tr_f1','tr_content','tr_f2'], cap:'The extension notices a signed-in GMP tab; content.js reads the JWT + 9 accounts.'},
+{sc:'tr', add:['tr_bg','tr_f3'], cap:'GMP_TOKEN_CAPTURED → background.js takes over.'},
+{sc:'tr', add:['tr_sync','tr_f4'], cap:'postSync() crosses into the backend: POST /v1/sync, Bearer sol_live_… .'},
+{sc:'tr', add:['tr_rows','tr_f5'], cap:'adapters/gmp.py normalizes; UtilitySession + UtilityAccount rows land; the wizard auto-advances.'},
+{sc:'tr', add:['tr_sched','tr_f6'], cap:'Within 6 hours the scheduler sweeps and queues Job(kind="pull_bills") for the tenant.'},
+{sc:'tr', add:['tr_pull','tr_f7','tr_gmp','tr_f8'], cap:'run_pending_jobs → pull_bills_for_tenant: the stored JWT pulls the full history, JSON-first.'},
+{sc:'tr', add:['tr_bill','tr_f9'], cap:'_upsert_bill sponges every bill in — kWh, costs, raw_json, the current PDF’s bytes.'},
+{sc:'tr', add:['tr_dg','tr_f10'], cap:'bill_to_daily prorates the bills into the daily stream — dashboards light up immediately.'},
+{sc:'tr', add:['tr_cron','tr_f11'], cap:'October 1st, 09:00 UTC: the quarterly CronTrigger fires.'},
+{sc:'tr', add:['tr_dfc','tr_f12','tr_wb','tr_f13'], cap:'deliver_for_client → build_workbook(client_id=…): 6 complete quarters, daily data beating proration.'},
+{sc:'tr', add:['tr_sheet','tr_f14'], cap:'One sheet per producing array — "Starlake (NEPOOL-GIS id)", monthly MWh, RECs = int(mwh).'},
+{sc:'tr', add:['tr_resend','tr_f15','tr_rec','tr_f16','tr_audit','tr_f17'], cap:'Resend delivers the workbook; ReportDelivery + the webhook confirm it. ~$135/array/quarter, automated.'},
+];
+
+/* ════════════════════════════════════════════════════════════════
+   RENDER ENGINE
+   ════════════════════════════════════════════════════════════════ */
+const NS='http://www.w3.org/2000/svg';
+const svg=document.getElementById('svg');
+const defs=document.getElementById('defs');
+const el=(n,at)=>{const e=document.createElementNS(NS,n);for(const k in at)e.setAttribute(k,at[k]);return e;};
+
+['cap','api','state','jobs','ext','out'].forEach(c=>{
+  const col=getComputedStyle(document.documentElement).getPropertyValue('--'+c).trim();
+  const m=el('marker',{id:'arr-'+c,viewBox:'0 0 10 10',refX:'8.5',refY:'5',
+    markerWidth:'7',markerHeight:'7',orient:'auto-start-reverse'});
+  m.appendChild(el('path',{d:'M0,0 L10,5 L0,10 z',fill:col}));
+  defs.appendChild(m);
+});
+
+const nodeIndex={};   // id -> rect geometry, for edges
+const domIndex={};    // id -> <g> element
+
+function drawNode(g,n){
+  const grp=el('g',{class:`el node ${n.cls}`,id:'el-'+n.id});
+  grp.appendChild(el('rect',{class:'box',x:n.x,y:n.y,width:n.w,height:n.h,rx:10}));
+  if(n.small){
+    const t=el('text',{class:'t sm',x:n.x+n.w/2,y:n.y+n.h/2+4.5,'text-anchor':'middle'});
+    t.textContent=n.t; grp.appendChild(t);
+  }else{
+    const t=el('text',{class:'t',x:n.x+16,y:n.y+27}); t.textContent=n.t; grp.appendChild(t);
+    (n.s||[]).forEach((line,i)=>{
+      const s=el('text',{class:'s',x:n.x+16,y:n.y+47+i*15.5}); s.textContent=line; grp.appendChild(s);
+    });
+  }
+  g.appendChild(grp); nodeIndex[n.id]=n; domIndex[n.id]=grp;
+}
+
+function anchor(a,b){ // point on a's border toward b's center
+  const ax=a.x+a.w/2, ay=a.y+a.h/2, bx=b.x+b.w/2, by=b.y+b.h/2;
+  const dx=bx-ax, dy=by-ay;
+  if(!dx&&!dy) return [ax,ay];
+  const sx=dx?(a.w/2)/Math.abs(dx):Infinity, sy=dy?(a.h/2)/Math.abs(dy):Infinity;
+  const s=Math.min(sx,sy);
+  return [ax+dx*s, ay+dy*s];
+}
+
+function drawEdge(g,e){
+  const a=nodeIndex[e.from], b=nodeIndex[e.to];
+  const [x1,y1]=anchor(a,b), [x2r,y2r]=anchor(b,a);
+  // pull back the tip a touch so the arrowhead sits on the border
+  const dx=x2r-x1, dy=y2r-y1, len=Math.hypot(dx,dy)||1;
+  const x2=x2r-dx/len*3, y2=y2r-dy/len*3;
+  const grp=el('g',{class:`el ${e.cls}${e.dash?' dash':''}`,id:'el-'+e.id});
+  const ln=el('line',{class:'edge',x1,y1,x2,y2,'marker-end':`url(#arr-${e.cls})`});
+  if(e.both) ln.setAttribute('marker-start',`url(#arr-${e.cls})`);
+  grp.appendChild(ln);
+  if(e.label){
+    const t=el('text',{class:'elabel',x:(x1+x2)/2,y:(y1+y2)/2-7,'text-anchor':'middle'});
+    t.textContent=e.label; grp.appendChild(t);
+  }
+  g.appendChild(grp); domIndex[e.id]=grp;
+}
+
+const sceneGroups={};
+for(const sc in SCENES){
+  const S=SCENES[sc];
+  const g=el('g',{id:'scene-'+sc,class:S.ghost?'ghostable':''});
+  g.style.display='none';
+  (S.frames||[]).forEach(f=>{
+    const grp=el('g',{class:'el',id:'el-'+f.id});
+    grp.appendChild(el('rect',{class:'frame-box',x:f.x,y:f.y,width:f.w,height:f.h,rx:14}));
+    const t=el('text',{class:'frame-label',x:f.x+16,y:f.y+24}); t.textContent=f.label;
+    grp.appendChild(t); g.appendChild(grp); domIndex[f.id]=grp;
+  });
+  (S.nodes||[]).forEach(n=>drawNode(g,n));
+  (S.edges||[]).forEach(e=>drawEdge(g,e));
+  (S.notes||[]).forEach(n=>{
+    const grp=el('g',{class:'el',id:'el-'+n.id});
+    const t=el('text',{class:n.big?'note-big':'note-sub',x:n.x,y:n.y});
+    t.textContent=n.text; grp.appendChild(t); g.appendChild(grp); domIndex[n.id]=grp;
+  });
+  svg.appendChild(g); sceneGroups[sc]=g;
+}
+
+/* ── playback state ─────────────────────────────────────── */
+let idx=0, playing=false, timer=null;
+const capEl=document.getElementById('cap'), prog=document.getElementById('prog'),
+      count=document.getElementById('count'), chapName=document.getElementById('chapName'),
+      playBtn=document.getElementById('play'), speed=document.getElementById('speed'),
+      speedLabel=document.getElementById('speedLabel'), chapSel=document.getElementById('chapSel');
+
+CHAPTERS.forEach((c,i)=>{
+  const o=document.createElement('option'); o.value=c.start; o.textContent=c.name;
+  chapSel.appendChild(o);
+});
+
+function chapterOf(i){
+  let c=0; CHAPTERS.forEach((ch,k)=>{ if(i>=ch.start) c=k; }); return c;
+}
+
+function render(){
+  const f=F[idx], sc=f.sc, ghost=!!SCENES[sc].ghost;
+  for(const s in sceneGroups) sceneGroups[s].style.display=(s===sc)?'':'none';
+  // visible = union of add-lists for frames of this scene up to idx
+  const on=new Set(), hot=new Set(f.add);
+  for(let j=0;j<=idx;j++) if(F[j].sc===sc) F[j].add.forEach(id=>on.add(id));
+  const S=SCENES[sc];
+  const all=[...(S.nodes||[]),...(S.edges||[]),...(S.notes||[]),...(S.frames||[])];
+  all.forEach(it=>{
+    const d=domIndex[it.id];
+    d.classList.toggle('on', ghost ? on.has(it.id) : on.has(it.id));
+    if(ghost) d.classList.add('ghost');
+    d.classList.toggle('hot', hot.has(it.id));
+  });
+  capEl.textContent=f.cap;
+  const c=chapterOf(idx);
+  chapName.innerHTML=`<b>${CHAPTERS[c].name}</b>`;
+  chapSel.value=CHAPTERS[c].start;
+  count.textContent=`frame ${idx+1} / ${F.length}`;
+  prog.style.width=((idx+1)/F.length*100)+'%';
+}
+
+function step(d){ idx=Math.max(0,Math.min(F.length-1,idx+d)); render(); if(idx===F.length-1) pause(); }
+function goTo(i){ idx=Math.max(0,Math.min(F.length-1,i)); render(); }
+
+function tick(){ if(!playing) return;
+  if(idx>=F.length-1){ pause(); return; }
+  step(1); timer=setTimeout(tick, +speed.value);
+}
+function play(){ if(playing) return; playing=true; playBtn.textContent='⏸ pause';
+  if(idx>=F.length-1) idx=-1;   // replay from start when at the end
+  timer=setTimeout(tick, +speed.value); if(idx===-1){ idx=0; render(); } }
+function pause(){ playing=false; playBtn.textContent='▶ play'; clearTimeout(timer); }
+
+playBtn.onclick=()=>playing?pause():play();
+document.getElementById('prev').onclick=()=>{pause();step(-1);};
+document.getElementById('next').onclick=()=>{pause();step(1);};
+speed.oninput=()=>{ speedLabel.textContent=(speed.value/1000).toFixed(1)+'s / frame'; };
+chapSel.onchange=()=>{ pause(); goTo(+chapSel.value); };
+document.getElementById('stage').onclick=(e)=>{
+  pause();
+  const r=e.currentTarget.getBoundingClientRect();
+  step(e.clientX-r.left > r.width/2 ? 1 : -1);
+};
+document.addEventListener('keydown',(e)=>{
+  if(e.key==='ArrowRight'){ pause(); step(1); e.preventDefault(); }
+  else if(e.key==='ArrowLeft'){ pause(); step(-1); e.preventDefault(); }
+  else if(e.key===' '){ playing?pause():play(); e.preventDefault(); }
+  else if(e.key==='Home'){ pause(); goTo(0); }
+  else if(e.key==='End'){ pause(); goTo(F.length-1); }
+});
+
+render();
+</script>
+</body>
+</html>
