@@ -137,6 +137,40 @@ def _classify(sender: str) -> str | None:
     return None
 
 
+_AUTO_SUBJECT_HINTS = (
+    "automatische antwort", "automatic reply", "auto-reply", "autoreply",
+    "auto reply", "automatic response", "out of office", "abwesenheit",
+    "delivery status notification", "undeliverable", "read receipt",
+)
+_AUTO_BODY_HINTS = (
+    "we have received your email", "will respond as quickly as possible",
+    "due to the high volume", "do not send a follow up", "this is an automated",
+    "automatic reply", "out of office", "we will get back to you as soon as possible",
+)
+
+
+def _is_auto_reply(msg, subject: str, body: str) -> bool:
+    """Filter vendor auto-acknowledgments / out-of-office / bounces so we only
+    notify Ford on a REAL reply. The first Fronius contact returns an
+    "Automatische Antwort — we'll respond in 2-3 days" that must not page him."""
+    autosub = (msg.get("Auto-Submitted", "") or "").lower()
+    if "auto" in autosub and autosub != "no":
+        return True
+    for h in ("X-Autoreply", "X-Autorespond"):
+        if (msg.get(h, "") or "").lower() in ("yes", "true"):
+            return True
+    if (msg.get("Precedence", "") or "").lower() == "auto_reply":
+        return True
+    subj = subject.lower()
+    if any(h in subj for h in _AUTO_SUBJECT_HINTS):
+        return True
+    low = body.lower()
+    # body language alone is a weak signal — require two independent hints
+    if sum(1 for h in _AUTO_BODY_HINTS if h in low) >= 2:
+        return True
+    return False
+
+
 # ── SMA credential extraction ────────────────────────────────────────────────
 
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -326,8 +360,10 @@ def run(dry_run: bool = False) -> int:
                 subject = _hdr(msg, "Subject")
                 when = _hdr(msg, "Date")
                 body = _body_text(msg)
-                # skip our own outbound copies that Gmail threads under the sender search
-                if GMAIL_USER.split("@")[0] in frm.lower() and vendor is None:
+                if _is_auto_reply(msg, subject, body):
+                    print(f"[{vendor}] skipped auto-reply — {subject!r}")
+                    if not dry_run:
+                        processed.add(mid)  # mark handled so we don't re-check it
                     continue
                 print(f"[{vendor}] {when} — {subject!r}")
                 process_message(vendor, subject, body, when, app_pw, dry_run)
