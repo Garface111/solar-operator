@@ -1,6 +1,6 @@
 # Terms of Service — Solar Operator
 
-*Last updated: June 4, 2026*
+*Last updated: July 4, 2026*
 
 ## Quick summary
 
@@ -9,6 +9,8 @@
 - **Cancel anytime:** no penalty. Your data stays accessible for 30 days after cancellation.
 - **You own your data.** We use it only to run the service. We never sell it.
 - **You are responsible for entering correct NEPOOL-GIS IDs.** We don't verify them — an incorrect ID could cause a wrong report.
+- **Review every report before you rely on it.** The Service automates the work, but the numbers come from utility data and what you enter, so they can be wrong or late — check each report before sending it to a client or regulator.
+- **Utility logins stay on your device.** If you save client utility logins for automated bill pulls, they're encrypted inside the browser extension on your own computer — never sent to our servers. Keeping that device secure, and having your clients' permission to use their logins, is your responsibility.
 - **This service supports hundreds of utilities across the United States.** Many co-ops, municipals, and Green Mountain Power are fully automated today; additional utilities are added on an ongoing basis. Where an automated connection isn't yet available for your utility, you can upload bills manually or request that we add it.
 
 ---
@@ -100,6 +102,13 @@ how you use the Service, including:
 - **Permission to access utility data.** You confirm that you have the
   right to access the utility accounts you connect to the Service,
   including consent from your clients where their accounts are involved.
+- **Utility credentials and automated sign-in.** If you save utility-portal
+  logins so the Service can retrieve bills automatically, those credentials
+  are stored in encrypted form within the browser extension on your own
+  device and are not transmitted to or stored on our servers. You are
+  responsible for the security of the device and browser profile where they
+  are stored, for having authorization — including your clients' consent —
+  to use each login, and for the results of any automated sign-in.
 - **Report review.** The Service automates report preparation, but you
   are responsible for reviewing each report for accuracy before relying
   on it or sending it to clients or regulators.
@@ -121,6 +130,17 @@ that any NEPOOL-GIS ID or net-metering credit figure derived from utility
 data is correct.
 
 ## 9. Limit of our liability
+
+You are responsible for reviewing and verifying every report before relying
+on it or submitting it to any client, offtaker, or regulator. To the fullest
+extent permitted by law, we are not liable for any loss arising from your
+reliance on — or any error, omission, delay, or non-delivery of — a report,
+including lost or misvalued renewable-energy credits, lost revenue, missed
+filing deadlines, or regulatory penalties. We do not guarantee that automated
+bill retrieval or sign-in will succeed, and we are not liable for missed or
+delayed captures, utility-portal lockouts, or exposure of credentials you
+have stored, arising from your device, your browser, or a change made by a
+utility.
 
 To the fullest extent allowed by law, we will not be liable for indirect,
 incidental, or consequential damages arising from the Service. Our total
