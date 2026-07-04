@@ -316,6 +316,11 @@ def poll_all_sources(*, force_daylight: bool | None = None) -> dict:
                 iv.last_power_w = pw
                 iv.last_power_at = ts
                 iv.last_seen_at = ts
+                # Server-polled every ~5 min; the site total is split across ALL
+                # units the same way each poll, so there's no partial-capture
+                # mismatch — trusted for live anomaly detection (unlike the
+                # extension per-device fallback fill). See inverter_alert_sweep.
+                iv.last_power_estimated = False
                 db.add(InverterReading(
                     tenant_id=iv.tenant_id, inverter_id=iv.id, ts=ts,
                     power_w=pw, energy_today_kwh=None,

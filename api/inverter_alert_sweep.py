@@ -84,6 +84,35 @@ def _meaningfully_producing(inv: dict) -> bool:
     return True  # no nameplate to judge against — fall back to the idle floor above
 
 
+def _has_fresh_real_reading(inv: dict) -> bool:
+    """True when this inverter's live power is a GENUINE per-device reading we
+    captured recently — the only basis on which "dark right now" or "producing
+    peer" can be trusted.
+
+    Two ways a reading is untrustworthy, both of which fabricated Bruce's Chester
+    false alert (Jul-03, 6 healthy Fronius inverters paged as "dark"):
+      • ESTIMATED — the value is a split of the site total filled in because this
+        device gave no per-unit reading this capture (power_estimated). Extension
+        captures are partial: a varying subset of inverters reports per-device
+        each cycle, the rest get a fill. A fill must never count as a producing
+        peer (fake evidence a sibling is faulted) nor be judged dark itself.
+      • STALE — our capture of THIS device's power (power_age_hours) is older than
+        the live window, so we don't actually know its state right now, even if a
+        SIBLING captured fresh and made the ARRAY-level source look current. The
+        array-level freshness gate keys off the FRESHEST inverter, so one fresh
+        sibling was enough to open the gate on 6 stale ones — this closes that.
+
+    Backward-compatible: when a tree carries no per-inverter provenance
+    (power_age_hours absent — older callers/tests), fall through to True and let
+    the array-level source_status gate decide, preserving prior behavior."""
+    if inv.get("power_estimated"):
+        return False
+    age = inv.get("power_age_hours")
+    if age is None:
+        return True
+    return age <= LIVE_DARK_MAX_AGE_HOURS
+
+
 def _real_source_outage(col: dict) -> bool:
     """True when a comm_gap on this array is a REAL stop in reporting, not just
     our extension capture cadence. Extension-captured vendors (Fronius/SMA/Chint)
@@ -119,8 +148,8 @@ def _live_dark_inverters(tree: dict) -> list[dict]:
     """Inverters that 14-day health calls 'ok' but are dark RIGHT NOW while their
     peers produce — caught from current telemetry so a fresh midday outage pages
     within ~1h instead of waiting for the slow window to call it dead. Mirrors the
-    dashboard's isLiveAnomaly; gated on genuinely-fresh data so we never page on a
-    stale captured snapshot."""
+    dashboard's isLiveAnomaly; gated on genuinely-fresh PER-DEVICE data so we never
+    page on a stale snapshot or a partial capture's fill (see _has_fresh_real_reading)."""
     out = []
     for col in tree.get("columns", []):
         if col.get("is_daylight") is False:
@@ -132,10 +161,15 @@ def _live_dark_inverters(tree: dict) -> list[dict]:
         # within the window. Stale data → we don't actually know it's dark now.
         if src.get("state") in (None, "none") or age is None or age > LIVE_DARK_MAX_AGE_HOURS:
             continue
-        invs = col.get("inverters", [])
-        if sum(1 for i in invs if _meaningfully_producing(i)) < 2:
+        # Only compare inverters we ACTUALLY read per-device this cycle. A partial
+        # Fronius capture reports some units per-device and fills the rest (stale
+        # or site-split) — the fills are neither valid producing-peer evidence nor
+        # judgeable as dark. Restricting to fresh real readings is what stops a
+        # healthy-but-uncaptured inverter from being paged "dark" (Bruce, Jul-03).
+        real = [i for i in col.get("inverters", []) if _has_fresh_real_reading(i)]
+        if sum(1 for i in real if _meaningfully_producing(i)) < 2:
             continue  # array isn't genuinely up yet (dawn/fog) — don't call anything dark
-        for inv in invs:
+        for inv in real:
             if (inv.get("status") == "ok"
                     and inv.get("current_power_w") is not None
                     and not _is_producing(inv)):
@@ -169,8 +203,9 @@ def _pct_of_max(inv: dict):
 def _live_low_inverters(tree: dict) -> list[dict]:
     """Inverters that 14-day health calls 'ok' and ARE producing, but sit >15%
     below their siblings' output-per-nameplate right now. Mirrors the dashboard's
-    liveVerdict 'low'; same freshness + genuinely-producing guards as live_dark so
-    a dawn/fog reading never pages."""
+    liveVerdict 'low'; same freshness + genuinely-producing guards as live_dark
+    (including per-device fresh/real gating) so a dawn/fog reading or a partial
+    capture's fill never pages."""
     out = []
     for col in tree.get("columns", []):
         if col.get("is_daylight") is False:
@@ -179,7 +214,10 @@ def _live_low_inverters(tree: dict) -> list[dict]:
         age = src.get("age_hours")
         if src.get("state") in (None, "none") or age is None or age > LIVE_DARK_MAX_AGE_HOURS:
             continue
-        invs = col.get("inverters", [])
+        # Only judge inverters we actually read per-device this cycle (see
+        # _has_fresh_real_reading) — a site-split fill or a stale value is not a
+        # trustworthy "low vs peers" signal and must not be a peer either.
+        invs = [i for i in col.get("inverters", []) if _has_fresh_real_reading(i)]
         producers = [i for i in invs if _meaningfully_producing(i)]
         if len(producers) < 2:
             continue  # array not genuinely up (dawn/fog) — nothing to compare against

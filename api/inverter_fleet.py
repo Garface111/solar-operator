@@ -1134,6 +1134,18 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
                 "last_mode": m.get("last_mode"),
                 "current_power_w": _live_power_w(iv, m, daylight=arr_daylight, borrow=borrow_live),
+                # Per-inverter live-power provenance, for the live-anomaly detectors
+                # (inverter_alert_sweep). power_age_hours = how long ago WE captured
+                # THIS device's power (last_power_at); power_estimated = the value is
+                # a site-total split fill, not a real per-device reading. A "dark
+                # right now" verdict must rest on a fresh, real per-device reading —
+                # never a stale one and never a fill — else a partial Fronius capture
+                # fabricates dark alerts on healthy inverters (Bruce's Chester, Jul-03).
+                "power_age_hours": (
+                    round((now() - _sane_dt(iv.last_power_at)).total_seconds() / 3600.0, 2)
+                    if _sane_dt(iv.last_power_at) else None
+                ),
+                "power_estimated": bool(getattr(iv, "last_power_estimated", False)),
                 # Freshness basis. For extension vendors prefer the SOURCE's own
                 # last-data time (source_last_data_at) — the real "is this current?"
                 # signal (Fronius LastImport / SMA reading ts) — falling back to OUR

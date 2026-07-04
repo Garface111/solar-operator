@@ -1041,6 +1041,19 @@ class Inverter(Base):
     # "—" instead of implying the panels are producing hours later / at night.
     last_power_w: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_power_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # True when last_power_w is a SITE-TOTAL SPLIT filled in because this device
+    # exposed no per-unit reading this capture — NOT a genuine per-device
+    # measurement. Extension captures (Fronius) return per-inverter power for
+    # only a SUBSET of units each cycle; the rest get an allocation of the site
+    # total by nameplate/energy share. Comparing those fills against the units
+    # that DID report per-device is what fabricated "dark right now" alerts on
+    # perfectly healthy inverters — so the live-anomaly detectors must never
+    # treat an estimated value as evidence (neither a dark candidate nor a
+    # producing peer). Real per-device readings (Fronius devwork point, Chint
+    # commDevice, SolarEdge poll) stay False. See inverter_alert_sweep.
+    last_power_estimated: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     # The SOURCE's own last-data timestamp (Fronius LastImport, SMA reading ts) — when
     # the inverter last reported to ITS vendor portal. Distinct from last_power_at (when
     # WE captured): a stale source_last_data_at means the data is frozen even if we keep

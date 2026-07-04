@@ -981,6 +981,11 @@ def main():
             # Lets the fleet flag a source that stopped reporting even while we keep
             # re-scraping its frozen value (the West Chester "producing when stopped" bug).
             ("source_last_data_at", "ALTER TABLE inverters ADD COLUMN source_last_data_at TIMESTAMP"),
+            # True when last_power_w is a site-total split fill (this device gave no
+            # per-unit reading this capture), not a genuine per-device measurement.
+            # The live-anomaly detectors ignore estimated values so a partial Fronius
+            # capture can't fabricate a "dark right now" alert on a healthy inverter.
+            ("last_power_estimated", "ALTER TABLE inverters ADD COLUMN last_power_estimated BOOLEAN DEFAULT FALSE NOT NULL"),
         ]:
             if not column_exists(conn, "inverters", col):
                 conn.execute(text(sql))

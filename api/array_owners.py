@@ -3565,6 +3565,9 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                 if ci.current_power_w is not None and ci.current_power_w >= 0:
                     iv.last_power_w = round(float(ci.current_power_w), 1)
                     iv.last_power_at = now()
+                    # A genuine per-device reading — trustworthy for live anomaly
+                    # detection (this device really reported this wattage).
+                    iv.last_power_estimated = False
                 elif site_power_w is not None and _site_invs:
                     if _energy_sum > 0:
                         e = float(ci.energy_today_kwh) if (ci.energy_today_kwh and ci.energy_today_kwh > 0) else 0.0
@@ -3583,6 +3586,12 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                     if allocated >= _inv_floor:
                         iv.last_power_w = allocated
                         iv.last_power_at = now()
+                        # This device exposed no per-unit reading — the value is a
+                        # split of the site total, NOT a measurement of THIS inverter.
+                        # Mark it so the live-anomaly detectors never treat it as
+                        # evidence (a partial Fronius capture that fills some units
+                        # this way must not fabricate a "dark" verdict on the rest).
+                        iv.last_power_estimated = True
 
                 # Per-inverter daily kWh → InverterDaily, driving BOTH today's
                 # reading and the per-inverter SPARKLINE history (needs >=2 days,

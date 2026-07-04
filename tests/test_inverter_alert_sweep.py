@@ -16,7 +16,11 @@ from api import inverter_alert_sweep as sweep
 from api.stripe_helpers import ao_gets_vendor_emails
 
 
-def _inv(name, status, *, power=None, nameplate=20.0, peer_index=None, inverter_id=None):
+def _inv(name, status, *, power=None, nameplate=20.0, peer_index=None, inverter_id=None,
+         power_age_hours=0.1, power_estimated=False):
+    # Defaults model a fresh, real per-device reading (the normal case). Override
+    # power_age_hours (stale) or power_estimated (site-split fill) to exercise the
+    # partial-capture gating that stopped Bruce's Chester false alert.
     return {
         "inverter_id": inverter_id or name,
         "name": name,
@@ -24,6 +28,8 @@ def _inv(name, status, *, power=None, nameplate=20.0, peer_index=None, inverter_
         "current_power_w": power,
         "nameplate_kw": nameplate,
         "peer_index": peer_index,
+        "power_age_hours": power_age_hours,
+        "power_estimated": power_estimated,
     }
 
 
@@ -103,6 +109,60 @@ def test_live_dark_respects_nameplate_floor():
         _inv("C", "ok", power=1500, nameplate=200.0),
     ])
     assert [f["inv"]["name"] for f in sweep._live_dark_inverters(_tree(col))] == ["C"]
+
+
+# ── partial-capture gating (Bruce's Chester false alert, 2026-07-03) ───────────
+
+def test_live_dark_skips_inverter_with_stale_own_reading():
+    # The exact false-positive shape: the ARRAY looks fresh (source age 0.1h, off
+    # the units that DID capture), two peers produce, and C reads 0 — but C's OWN
+    # per-device reading is 6h old (it just wasn't captured this cycle). We don't
+    # actually know C is dark now, so it must NOT be paged. Pre-fix this alerted
+    # 6 healthy Fronius inverters as "dark right now".
+    col = _col("Chester", [
+        _inv("A", "ok", power=6500),
+        _inv("B", "ok", power=6500),
+        _inv("C", "ok", power=0, power_age_hours=6.0),   # stale own reading
+    ])
+    assert sweep._live_dark_inverters(_tree(col)) == []
+
+
+def test_live_dark_ignores_estimated_fill_as_producing_peer():
+    # A site-total split fill (power_estimated) is fabricated per-inverter power —
+    # it must not count as evidence a sibling is faulted. Here only A is a real
+    # producer; B is an estimated fill; C reads a real fresh 0. One real peer < 2,
+    # so nothing is called dark.
+    col = _col("Partial", [
+        _inv("A", "ok", power=6500),
+        _inv("B", "ok", power=6500, power_estimated=True),  # fill, not real
+        _inv("C", "ok", power=0),
+    ])
+    assert sweep._live_dark_inverters(_tree(col)) == []
+
+
+def test_live_dark_still_flags_genuine_dark_on_complete_capture():
+    # When every unit has a fresh, real per-device reading (a complete capture),
+    # a genuinely dark inverter is still caught fast — the fix narrows to
+    # trustworthy data, it doesn't disable the feature.
+    col = _col("Complete", [
+        _inv("A", "ok", power=6500),
+        _inv("B", "ok", power=6400),
+        _inv("C", "ok", power=6500),
+        _inv("D", "ok", power=0),   # real fresh 0 while three real peers produce
+    ])
+    assert [f["inv"]["name"] for f in sweep._live_dark_inverters(_tree(col))] == ["D"]
+
+
+def test_live_low_ignores_estimated_fill_as_peer():
+    # live_low shares the gate: an estimated fill is neither judged nor used as a
+    # peer. B (real, low) has only one real peer (A) after the fill C is dropped →
+    # not enough to call B low.
+    col = _col("LowPartial", [
+        _inv("A", "ok", power=6500),
+        _inv("B", "ok", power=2500),                        # real, low vs A
+        _inv("C", "ok", power=6500, power_estimated=True),  # fill — dropped
+    ])
+    assert sweep._live_low_inverters(_tree(col)) == []
 
 
 # ── comm_gap gate (the thing that makes on-by-default safe) ────────────────────
