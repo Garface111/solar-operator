@@ -362,3 +362,103 @@ def test_stopped_reporting_flagged():
              "daily": _series(d, [300, 300, 300, 200, 200])}]
     flags = digest._nonreporting_inverters(cols)
     assert any(f["name"] == "C" and "stopped reporting" in f["phrase"] for f in flags)
+
+
+# ── Freshness hold: never send a digest built entirely on stale data ──────────
+# (Ford, 2026-07-04: no digest goes out unless the data is fresh. One "digest
+# held" notice per stale episode, silence after, automatic resume when fresh.)
+
+def _col_with_days(name, days_ago: list[int], kwh: float = 100.0) -> dict:
+    d = [_iso_days_ago(i) for i in sorted(days_ago, reverse=True)]
+    return {
+        "array_id": name, "array_name": name, "inverter_count": 1,
+        "alert": {"level": "ok", "count": 0},
+        "inverters": [{"inverter_id": name + "-1", "name": name + "-1", "status": "ok"}],
+        "daily": _series(d, [kwh] * len(d)),
+        "is_daylight": True,
+    }
+
+
+def test_fleet_all_stale_detection():
+    fresh = _col_with_days("Fresh", [3, 2, 1])          # last complete day = yesterday
+    old = _col_with_days("Old", [6, 5, 4])              # days behind
+    nodata = _col_with_days("NoData", [])               # nothing at all
+    assert digest._fleet_all_stale([old, nodata]) is True
+    assert digest._fleet_all_stale([old, fresh]) is False   # one current array → real digest
+    assert digest._fleet_all_stale([]) is False             # empty fleet: nothing to misreport
+
+
+def _hold_tenant():
+    return SimpleNamespace(
+        id="ten_hold", name="Hold Co", company_name="Hold Co",
+        operator_name="Pat", contact_email="owner@example.test",
+        product="array_operator", billing_plan=None,
+        digest_hold_notified_at=None,
+    )
+
+
+class _FakeDb:
+    def __init__(self):
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+
+
+def _run_digest(monkeypatch, tenant, cols):
+    """Drive send_digest_for_tenant with a synthetic tree + captured emails."""
+    sent: list[dict] = []
+    monkeypatch.setattr(digest.inverter_fleet, "build_fleet_tree",
+                        lambda db, t, stable_verdicts=True: {
+                            "generated_at": "2026-07-04T11:00:00Z",
+                            "columns": cols,
+                            "summary": {"arrays_total": len(cols),
+                                        "inverters_total": len(cols),
+                                        "attention": 0, "is_daylight": True},
+                        })
+    monkeypatch.setattr(digest.notify, "_send_via_resend",
+                        lambda **kw: sent.append(kw) or True)
+    result = digest.send_digest_for_tenant(_FakeDb(), tenant)
+    return result, sent
+
+
+def test_all_stale_fleet_holds_digest_and_notifies_once(monkeypatch):
+    t = _hold_tenant()
+    stale_cols = [_col_with_days("A", [6, 5, 4]), _col_with_days("B", [8, 7])]
+
+    # First stale morning: ONE hold notice, no fleet numbers, flag stamped.
+    ok, sent = _run_digest(monkeypatch, t, stale_cols)
+    assert ok is True
+    assert len(sent) == 1
+    assert "held" in sent[0]["subject"].lower()
+    assert "fresh data" in sent[0]["text"]
+    assert t.digest_hold_notified_at is not None
+
+    # Second stale morning: total silence — no repeat nag, no stale digest.
+    ok, sent = _run_digest(monkeypatch, t, stale_cols)
+    assert ok is False
+    assert sent == []
+
+
+def test_fresh_data_resumes_digest_and_clears_hold(monkeypatch):
+    t = _hold_tenant()
+    t.digest_hold_notified_at = digest.datetime(2026, 7, 3, 11, 0, 0)
+    fresh_cols = [_col_with_days("A", [3, 2, 1])]
+
+    ok, sent = _run_digest(monkeypatch, t, fresh_cols)
+    assert ok is True
+    assert len(sent) == 1
+    assert "held" not in sent[0]["subject"].lower()      # a REAL digest went out
+    assert t.digest_hold_notified_at is None             # next stale episode re-notifies
+
+
+def test_mixed_fleet_still_sends_with_stale_note(monkeypatch):
+    # One current array + one behind: the digest is real (current array) and the
+    # existing staleness note covers the laggard — do NOT hold the whole fleet.
+    t = _hold_tenant()
+    mixed = [_col_with_days("Fresh", [3, 2, 1]), _col_with_days("Old", [9, 8, 7])]
+    ok, sent = _run_digest(monkeypatch, t, mixed)
+    assert ok is True
+    assert len(sent) == 1
+    assert "held" not in sent[0]["subject"].lower()
+    assert t.digest_hold_notified_at is None

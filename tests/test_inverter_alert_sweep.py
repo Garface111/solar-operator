@@ -182,11 +182,23 @@ def test_comm_gap_kept_for_real_source_outage():
     assert [f["reason"] for f in flagged] == ["comm_gap"]
 
 
-def test_dead_and_fault_always_flagged():
+def test_dead_and_fault_flagged_on_real_source_signal():
+    # A genuinely reporting (or genuinely source-side-silent) array: dead/fault
+    # verdicts are backed by real evidence → page.
+    for state in ("ok", "stale"):
+        col = _col("Down", [_inv("A", "dead"), _inv("B", "fault")],
+                   src_state=state, age_hours=1.0)
+        reasons = sorted(f["reason"] for f in sweep._flagged_inverters(_tree(col), 50))
+        assert reasons == ["dead", "fault"], state
+
+
+def test_dead_and_fault_suppressed_on_capture_gap():
+    # Ford 2026-07-04: never send a false report. On an 'unpolled' array the
+    # dead/fault verdicts are frozen on an old capture — the inverter may have
+    # been fixed days ago. No email until data flows again.
     col = _col("Down", [_inv("A", "dead"), _inv("B", "fault")],
                src_state="unpolled", age_hours=30.0)
-    reasons = sorted(f["reason"] for f in sweep._flagged_inverters(_tree(col), 50))
-    assert reasons == ["dead", "fault"]
+    assert sweep._flagged_inverters(_tree(col), 50) == []
 
 
 def test_underperforming_respects_threshold():
@@ -196,6 +208,16 @@ def test_underperforming_respects_threshold():
     ])
     flagged = sweep._flagged_inverters(_tree(col), 50)
     assert [f["inv"]["name"] for f in flagged] == ["A"]
+
+
+def test_underperforming_needs_fresh_data():
+    # "Lagging its peers" is a claim about NOW — without fresh data (state 'ok')
+    # it must not page, even on a real source-side outage ('stale': the source
+    # stopped reporting, so there is no current output to compare).
+    for state in ("stale", "unpolled", "none"):
+        col = _col("Under", [_inv("A", "underperforming", peer_index=0.40)],
+                   src_state=state, age_hours=30.0)
+        assert sweep._flagged_inverters(_tree(col), 50) == [], state
 
 
 # ── invoicing-only accounts don't get vendor-data emails ──────────────────────

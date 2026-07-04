@@ -125,19 +125,29 @@ def _real_source_outage(col: dict) -> bool:
 
 
 def _flagged_inverters(tree: dict, threshold_pct: int) -> list[dict]:
-    """Return the inverters worth alerting on: any DOWN inverter (comm_gap only
-    when it's a real source outage, not an extension capture gap), plus
-    underperformers whose peer_index is below threshold_pct/100."""
+    """Return the inverters worth alerting on — but ONLY when the claim is
+    backed by data we actually hold (Ford, 2026-07-04: never send a false
+    report; no inverter-out email unless the data is fresh):
+
+      • dead / fault / comm_gap — require a REAL source signal
+        (source_status.state ok/stale). On an 'unpolled'/'none' array the
+        status is frozen on an old capture: a "dead" inverter may have been
+        fixed days ago, a "fault" may have cleared. Suppress until data flows.
+      • underperforming — a claim about CURRENT relative output, so it needs
+        genuinely fresh data: source_status.state == "ok" only.
+    """
     thr = max(0.0, min(1.0, threshold_pct / 100.0))
     out = []
     for col in tree.get("columns", []):
         for inv in col.get("inverters", []):
             st = inv.get("status")
             if st in _DOWN:
-                if st == "comm_gap" and not _real_source_outage(col):
-                    continue  # capture-cadence gap, not a real outage — don't spam
+                if not _real_source_outage(col):
+                    continue  # capture-cadence gap: stale verdict, not fresh evidence
                 out.append({"col": col, "inv": inv, "reason": st})
             elif st == "underperforming":
+                if (col.get("source_status") or {}).get("state") != "ok":
+                    continue  # no fresh data — can't honestly claim it lags NOW
                 pi = inv.get("peer_index")
                 if pi is not None and pi < thr:
                     out.append({"col": col, "inv": inv, "reason": "underperforming"})
