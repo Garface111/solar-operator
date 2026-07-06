@@ -647,6 +647,20 @@ async def sync(request: Request, authorization: str | None = Header(default=None
     )
 
     with SessionLocal() as db:
+        # ── Extension liveness: any authenticated /v1/sync is proof the
+        # extension is alive and paired for this tenant, so refresh the
+        # heartbeat here — NOT just on /v1/extension/heartbeat, which only
+        # fires while a GMP tab is open. Background captures (util-live portal
+        # rotation, recaptures, VEC/other portals) reach /v1/sync without any
+        # GMP tab, so without this the dashboard's "Last seen" and the "hasn't
+        # checked in for 48+ hours" banner rot to stale while data is actually
+        # flowing. Stamp+commit up front so liveness is recorded even if the
+        # payload below turns out to be unparseable — reaching us at all counts.
+        _hb_tenant = db.get(Tenant, tenant.id)
+        if _hb_tenant is not None:
+            _hb_tenant.extension_heartbeat_at = now()
+            db.commit()
+
         # ── Fleet-learning: record sightings of SmartHub deployments ────
         # Any *.smarthub.coop capture updates the sighting row for its host;
         # hosts not yet in the CSV catalog (discovered=True) trigger a
