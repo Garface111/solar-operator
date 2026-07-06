@@ -27,6 +27,7 @@ SaaS that automates quarterly net-metering credit reports for VT community solar
 - A1:C1 merged, value = `"<Array Name> (<NEPOOL-GIS ID>)"`
 - Row 5 = header row, font size 14
 - Rolling 6 quarters, each quarter is 3 month rows + 1 gap row
+- **Reporting-quarter lag (MISSION CRITICAL, Bruce's ask 2026-07-06):** the default window ends on the quarter the NEPOOL-GIS agent is *currently minting*, NOT the last complete quarter. NEPOOL-GIS issues RECs ~2 quarters after generation (Q1 gen uploaded the following July), so the automated report mirrors what the REC agent (Crown) submits — e.g. a report generated in July 2026 ends on **Q1 2026**, not Q2. Logic lives in `default_reporting_reference_date()` (two quarters back from the in-progress quarter). Only the *automatic* default lags; an explicit quarter/`reference_date` still ends on the named quarter. All three writers (gmcs/rec/demo) + `report_has_data` share this default so skip-if-empty and generation always agree.
 - MWh format = Excel "General" (e.g., 25.720 displays as 25.72)
 - RECs = `int(mwh)` per month (floor — only safe because MWh is always ≥ 0)
 - Footnote text is VERBATIM — never paraphrase. Pinned to row 31 unless data extends past it (`foot_row = 31 if row <= 31 else row`)

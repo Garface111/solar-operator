@@ -31,6 +31,7 @@ from .gmcs_writer import (
     FOOTNOTE_TEXT,
     _quarter_months,
     _rolling_quarters,
+    default_reporting_reference_date,
 )
 
 # (sheet title, NEPOOL-GIS id, generation seed). The seed shifts the seasonal
@@ -67,14 +68,16 @@ def build_demo_workbook(out_path: pathlib.Path,
                         *, reference_date: Optional[date] = None) -> pathlib.Path:
     """Build the generic demo workbook and save it to ``out_path``.
 
-    Mirrors gmcs_writer's formatting exactly. Shows 6 complete quarters ending
-    at the prior complete quarter relative to ``reference_date`` (defaults to
-    today), so the file always feels current.
+    Mirrors gmcs_writer's formatting exactly, including its reporting window:
+    6 complete quarters ending at the quarter the NEPOOL-GIS agent is currently
+    minting (two quarters before the in-progress quarter), so the demo looks like
+    a real current report. An explicit ``reference_date`` overrides the default.
     """
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ref = reference_date or date.today()
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
     qlist = _rolling_quarters(ref, count=6)
 
     wb = Workbook()

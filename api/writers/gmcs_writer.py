@@ -15,8 +15,12 @@ carry arrays with reportable generation):
       - one blank row between quarters
   Row 31 — footnote: "† NEPOOL-GIS will award 1 REC per whole MWh of generation."
 
-Default window: most recent 6 complete quarters ending at the prior quarter
-relative to the report-generation date (no in-progress quarters).
+Default window: most recent 6 complete quarters ending at the quarter the
+NEPOOL-GIS agent is currently minting — TWO quarters before the in-progress
+quarter (NEPOOL-GIS issues RECs ~2 quarters after generation, so Q1 gen is
+uploaded the following July). This mirrors what the REC agent submits, rather
+than the most recently completed quarter. See default_reporting_reference_date.
+An explicit reference_date / chosen quarter overrides this default.
 """
 from __future__ import annotations
 import pathlib
@@ -83,6 +87,38 @@ def _rolling_quarters(ref: date, count: int = 6) -> list[tuple[int, int]]:
     return out
 
 
+def default_reporting_reference_date(today: date) -> date:
+    """Reference date whose 'last complete quarter' is the generation quarter the
+    NEPOOL-GIS agent is currently minting — so our automated reports mirror what
+    the REC agent (e.g. Crown) actually submits.
+
+    NEPOOL-GIS issues RECs roughly TWO quarters after the generation quarter ends:
+    Q1 (Jan–Mar) generation is uploaded the following July, Q2 in October, and so
+    on. So the quarter a REC report must mirror is two quarters before the
+    in-progress quarter — i.e. ONE quarter before the last *complete* quarter, not
+    the last complete quarter itself. On 2026-07-06 (Q3 in progress) this resolves
+    to Q1 2026, exactly what Crown uploads in July.
+
+    Returns the first day of the quarter AFTER the minting quarter, so passing it
+    through ``_rolling_quarters`` terminates the window on the minting quarter.
+
+    Only used as the DEFAULT when no explicit reporting quarter is requested; an
+    explicit ``reference_date`` (e.g. from a chosen quarter) bypasses this entirely.
+    """
+    cy, cq = today.year, _quarter_of(today.month)
+    # minting quarter = two quarters back from the in-progress quarter
+    y, q = cy, cq
+    for _ in range(2):
+        q -= 1
+        if q == 0:
+            y, q = y - 1, 4
+    # first day of the quarter AFTER (y, q) makes (y, q) the last complete quarter
+    nxt_month = q * 3 + 1
+    if nxt_month > 12:
+        return date(y + 1, 1, 1)
+    return date(y, nxt_month, 1)
+
+
 def _sheet_name_for_array(name: str, used: set[str]) -> str:
     """Excel sheet names: max 31 chars, no /\\?*[]"""
     bad = '/\\?*[]:'
@@ -134,7 +170,8 @@ def report_has_data(client_id: int, *, quarters: int = 6,
 
     Read-only. Cheap relative to building the whole workbook.
     """
-    ref = reference_date or date.today()
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
     qlist = _rolling_quarters(ref, count=quarters)
     qmonths = set()
     for (qy, qq) in qlist:
@@ -212,7 +249,8 @@ def build_workbook(tenant_id: Optional[str] = None,
     if client_id is None and tenant_id is None:
         raise ValueError("build_workbook requires client_id or tenant_id")
 
-    ref = reference_date or date.today()
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
     qlist = _rolling_quarters(ref, count=quarters)
     last_y, last_q = qlist[-1]
     if year is None:
