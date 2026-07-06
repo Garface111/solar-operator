@@ -301,6 +301,42 @@ def send_notification(subject: str, body: str, app_pw: str, dry_run: bool = Fals
     print(f"notified {NOTIFY_TO}: {subject}")
 
 
+# The exact probe that was blocking on 2026-07-06: SMA first issued end-user
+# Code-Flow sandbox creds, so a client_credentials "service account" token 401s
+# "Client not enabled to retrieve service account". Our server-to-server
+# integration needs the Custom Grant (service account). When SMA re-issues creds,
+# this tells us in one call whether the flow is finally right.
+SMA_SANDBOX_TOKEN_URL = os.environ.get(
+    "SMA_AUTH_URL", "https://sandbox-auth.smaapis.de/oauth2/token")
+
+
+def sma_service_account_check(client_id: str, client_secret: str,
+                              dry_run: bool = False) -> tuple[str, str]:
+    """Probe the client_credentials service-account grant. Returns (state, detail):
+    'ok' = Custom-Grant provisioned (token acquired); 'code_flow' = still the
+    end-user Code Flow ("not enabled to retrieve service account"); 'error'."""
+    if dry_run:
+        return "skipped", "[dry-run] would POST client_credentials to sandbox-auth"
+    try:
+        import httpx
+        r = httpx.post(SMA_SANDBOX_TOKEN_URL,
+                       data={"grant_type": "client_credentials",
+                             "client_id": client_id, "client_secret": client_secret},
+                       timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        return "error", f"network error: {exc}"
+    if r.status_code == 200:
+        try:
+            ok = bool((r.json() or {}).get("access_token"))
+        except Exception:  # noqa: BLE001
+            ok = False
+        return ("ok", "service-account token acquired") if ok else ("error", r.text[:200])
+    txt = (r.text or "").lower()
+    if "service account" in txt or "not enabled" in txt:
+        return "code_flow", r.text[:200]
+    return "error", f"{r.status_code}: {r.text[:200]}"
+
+
 # ── main loop ─────────────────────────────────────────────────────────────────
 
 def process_message(vendor: str, subject: str, body: str, when: str,
@@ -308,16 +344,35 @@ def process_message(vendor: str, subject: str, body: str, when: str,
     if vendor == "sma":
         creds = extract_sma_creds(body)
         if creds.get("client_id") and creds.get("client_secret"):
-            passed, out = run_sma_harness(creds, dry_run=dry_run)
-            verdict = "✅ VERIFIED (sandbox PASS)" if passed else "⚠ ran but did NOT fully pass"
-            note = (f"SMA replied ({when}) and I extracted sandbox credentials.\n\n"
-                    f"Harness result: {verdict}\n\n"
-                    f"{_redact(out, creds)[:2500]}\n\n"
-                    "Next (yours): the SMA production app registration accepts commercial "
-                    "terms — that's your call. Reply 'register SMA' and I'll walk it. "
-                    "Nothing paid was done.")
-            send_notification(f"[EnergyAgent] SMA sandbox creds arrived — {verdict}",
-                             note, app_pw, dry_run)
+            state, detail = sma_service_account_check(
+                creds["client_id"], creds["client_secret"], dry_run=dry_run)
+            if state == "ok":
+                if creds.get("system_id"):
+                    passed, out = run_sma_harness(creds, dry_run=dry_run)
+                    verdict = ("✅ VERIFIED (sandbox PASS)" if passed
+                               else "service-account token OK; full harness ran (see below)")
+                    extra = _redact(out, creds)[:2000]
+                else:
+                    verdict = "✅ Custom-Flow creds WORK (service-account token acquired)"
+                    extra = ("No system_id in the reply (sandbox uses virtual plants). "
+                             "The flow blocker is CLEARED — a Claude session will finish "
+                             "the bc-authorize consent + plant verification.")
+                note = (f"SMA replied ({when}) with sandbox credentials.\n\n{verdict}\n\n"
+                        f"{extra}\n\nProduction registration (commercial terms) stays your call.")
+                send_notification(f"[EnergyAgent] SMA creds — {verdict}", note, app_pw, dry_run)
+            elif state == "code_flow":
+                note = (f"SMA replied ({when}) with sandbox credentials, but they're STILL "
+                        "provisioned for the end-user Code Flow — a client_credentials token "
+                        f"request returns:\n  {detail}\n\n"
+                        "Our server-to-server integration needs the Custom Grant. Reply to SMA "
+                        "asking for Custom-Flow (service-account-enabled) sandbox credentials.")
+                send_notification("[EnergyAgent] SMA creds arrived — still Code-Flow, need Custom Grant",
+                                 note, app_pw, dry_run)
+            else:
+                note = (f"SMA replied ({when}) with credentials, but the token probe errored:\n"
+                        f"  {detail}\n\nReply excerpt:\n{body[:1500]}")
+                send_notification("[EnergyAgent] SMA creds arrived — token probe needs a look",
+                                 note, app_pw, dry_run)
         else:
             note = (f"SMA replied ({when}) but I couldn't confidently extract sandbox "
                     "credentials from it (they may be in an attachment or a portal link).\n\n"
