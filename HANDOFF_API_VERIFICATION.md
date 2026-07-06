@@ -205,6 +205,26 @@ vendor reply is picked up on the next tick after the machine is on (fine; the
 replies aren't time-critical). No cloud option: the cloud sandbox can't reach
 Ford's Gmail (the same network policy that forced this whole handoff).
 
+- 2026-07-06 (LOCAL): **SMA sandbox creds arrived + tested live — verification
+  BLOCKED on the credential FLOW, not our code.** api-developer-support@sma.de
+  (Laurenz Schleif) sent sandbox creds (clientId `DysonSwarmTechnologies_sbx`;
+  secret read EXACTLY from the email via IMAP — the screenshot OCR'd `I`→`l`, a
+  reminder to pull secrets from the raw mail). Findings against the LIVE sandbox:
+  (1) token host is **sandbox-auth.smaapis.de/oauth2/token**, NOT
+  sandbox.smaapis.de — harness default corrected (`4ef1dd3`). (2) client_id +
+  secret authenticate. (3) BLOCKER: `grant_type=client_credentials` → 401
+  `"Client not enabled to retrieve service account"`. The creds were provisioned
+  for the end-user **Authorization-Code Flow**; our server-to-server fleet
+  integration needs the **SMA Custom Grant** (client_credentials service-account
+  token + the bc-authorize backchannel this adapter already implements). SMA's
+  own email offered Custom-Flow creds if we prefer. Sandbox creds stored at
+  `~/.hermes/secrets/sma_sandbox.env` (NOT in repo). Next: reply to SMA →
+  request Custom-Flow (service-account-enabled) sandbox creds; answer their two
+  questions (auth method = Custom Grant for sandbox+prod; APIs = Monitoring
+  only). Then re-run `SMA_SANDBOX=1 SMA_SYSTEM_ID=… scripts.verify_inverter_apis
+  --vendor sma`. Production contract (zip: `Monitoring-API Contract_Infos.zip`,
+  extracted to /root/sma_contract) = the money/terms gate = Ford's.
+
 ## Reporting back
 
 Append a dated entry to the **Status log** below on every run (commit it), and
