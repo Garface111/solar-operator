@@ -190,12 +190,16 @@ def main() -> int:
                   "https://developer.sma.de/sma-sandbox-apis)")
         else:
             if os.environ.get("SMA_SANDBOX"):
-                # Best-effort sandbox layout per SMA's docs; adjust here if the
-                # first sandbox run 404s and note the real paths in sma.py.
+                # Sandbox URL layout — CONFIRMED against SMA's live docs +
+                # endpoints 2026-07-06: the token host is sandbox-AUTH.smaapis.de
+                # (NOT sandbox.smaapis.de, which 401s the wrong way); monitoring +
+                # backchannel-consent live under sandbox.smaapis.de.
                 sma.AUTH_URL = os.environ.get(
-                    "SMA_AUTH_URL", "https://sandbox.smaapis.de/oauth2/token")
+                    "SMA_AUTH_URL", "https://sandbox-auth.smaapis.de/oauth2/token")
                 sma.MON_BASE = os.environ.get(
                     "SMA_MON_BASE", "https://sandbox.smaapis.de/monitoring/v1")
+                sma.BC_BASE = os.environ.get(
+                    "SMA_BC_BASE", "https://sandbox.smaapis.de")
                 print(f"SMA target: SANDBOX ({sma.MON_BASE})")
             else:
                 print("SMA target: PRODUCTION")

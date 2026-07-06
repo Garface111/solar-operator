@@ -1,13 +1,20 @@
 """SMA inverter source — Monitoring API (ennexOS / smaapis.de).
 
 ╔════════════════════════════════════════════════════════════════════════════╗
-║ LOUD CAVEAT — UNVERIFIED AGAINST A LIVE SMA ACCOUNT.                        ║
+║ STATUS — auth path reached the LIVE sandbox (2026-07-06); blocked on the    ║
+║ credential FLOW, not on our code.                                           ║
 ║                                                                            ║
-║ This adapter requires an app registration with SMA (client_id / client_    ║
-║ secret issued by the SMA developer portal) AND a plant-owner consent flow. ║
-║ The endpoints below follow SMA's PUBLISHED docs but have NOT been run       ║
-║ against a real account/token — treat the response parsing as best-effort    ║
-║ until a live SMA system confirms the exact JSON shapes.                     ║
+║ Confirmed live via scripts/verify_inverter_apis (sandbox): the token host  ║
+║ is sandbox-auth.smaapis.de/oauth2/token (NOT sandbox.smaapis.de); the       ║
+║ client_id + client_secret authenticate; and SMA's "Custom Grant" = a        ║
+║ client_credentials service-account token + the bc-authorize backchannel     ║
+║ consent this module already implements. BUT the sandbox creds SMA first     ║
+║ issued were provisioned for the end-user Authorization-Code Flow, so        ║
+║ client_credentials returns 401 "Client not enabled to retrieve service      ║
+║ account". Verification is blocked until SMA issues CUSTOM-FLOW (service-     ║
+║ account-enabled) sandbox creds (requested 2026-07-06). Response PARSING      ║
+║ (measurements/plants JSON shapes) stays best-effort until a token with      ║
+║ plant access confirms them. See HANDOFF_API_VERIFICATION.md.                ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
 OAuth2. Config: {"client_id", "client_secret", "system_id", "refresh_token"?}.
