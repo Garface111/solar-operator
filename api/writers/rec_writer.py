@@ -43,6 +43,7 @@ from .gmcs_writer import (
     _quarter_months,
     _sheet_name_for_array,
     _daily_generation_by_month,
+    default_reporting_reference_date,
 )
 
 REPORTS_DIR = DATA_DIR / "reports"
@@ -124,7 +125,8 @@ def build_workbook(tenant_id: Optional[str] = None,
     if client_id is None and tenant_id is None:
         raise ValueError("build_workbook requires client_id or tenant_id")
 
-    ref = reference_date or date.today()
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
     qlist = _rolling_quarters(ref, count=quarters)
     last_y, last_q = qlist[-1]
     if year is None:
