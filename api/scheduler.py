@@ -900,6 +900,12 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
                                   "days_left": round(days_left, 1)})
             if dry_run:
                 continue
+            # Persist the dedup state FIRST so a send failure can't re-fire hourly.
+            if state is None:
+                state = InverterAlertState(tenant_id=tid, incident_key=key)
+                db.add(state)
+            state.last_alerted_at = datetime.utcnow()
+            db.commit()
             try:
                 send_gmp_reauth_needed_email(
                     to=tenant.contact_email,
@@ -907,18 +913,16 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
                 )
             except Exception:
                 logger.exception("final-warning email failed for %s", tid)
-            send_internal_alert(
-                f"GMP token FINAL WARNING: {tid} dies in {days_left:.1f}d, no keep-alive has run",
-                f"Tenant: {tid} ({tenant.contact_email})\nSession: {sid}\n"
-                f"Expires: {exp}\nThe extension keep-alive window opened at T-8d and "
-                f"never succeeded — no browser has been open (or the portal session "
-                f"lapsed). Bills stop when this JWT dies. Operator emailed to re-login.",
-            )
-            if state is None:
-                state = InverterAlertState(tenant_id=tid, incident_key=key)
-                db.add(state)
-            state.last_alerted_at = datetime.utcnow()
-            db.commit()
+            try:
+                send_internal_alert(
+                    f"GMP token FINAL WARNING: {tid} dies in {days_left:.1f}d, no keep-alive has run",
+                    f"Tenant: {tid} ({tenant.contact_email})\nSession: {sid}\n"
+                    f"Expires: {exp}\nThe extension keep-alive window opened at T-8d and "
+                    f"never succeeded — no browser has been open (or the portal session "
+                    f"lapsed). Bills stop when this JWT dies. Operator emailed to re-login.",
+                )
+            except Exception:
+                logger.exception("final-warning internal alert failed for %s", tid)
     logger.info("gmp_final_expiry_warnings: warned=%d dedup=%d rescued=%d dry=%s",
                 len(out["warned"]), out["skipped_dedup"], out["rescued_cleared"], dry_run)
     return out
@@ -1001,8 +1005,10 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
             if last_cap is not None and now_ - last_cap < timedelta(days=days_stale):
                 continue
 
-            if state is not None and state.last_alerted_at is not None and \
-                    now_ - state.last_alerted_at < timedelta(days=_COOP_REALERT_DAYS):
+            # Alert ONCE per death incident. A persistently-dead session must NOT
+            # re-alert on a loop (that flooded the operator ~100x). It re-alerts
+            # only if it recovered (state deleted on the fresh path) then re-died.
+            if state is not None and state.last_alerted_at is not None:
                 out["skipped_dedup"] += 1
                 continue
             tenant = db.get(Tenant, tid)
@@ -1016,6 +1022,13 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                                   "email": tenant.contact_email, "days_dark": days_dark})
             if dry_run:
                 continue
+            # Persist the dedup state FIRST and commit, so a failure in either send
+            # below can never leave the incident un-stamped and re-fire next tick.
+            if state is None:
+                state = InverterAlertState(tenant_id=tid, incident_key=key)
+                db.add(state)
+            state.last_alerted_at = now_
+            db.commit()
             try:
                 send_coop_reauth_needed_email(
                     to=tenant.contact_email,
@@ -1024,19 +1037,17 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                 )
             except Exception:
                 logger.exception("co-op reauth email failed for %s/%s", tid, prov)
-            send_internal_alert(
-                f"Co-op session DEAD: {tid} {prov} — no generation for {days_dark}d",
-                f"Tenant: {tid} ({tenant.contact_email})\nProvider: {prov} ({util_name})\n"
-                f"Newest smarthub generation day: {newest_day} ({days_dark}d ago)\n"
-                f"Last session capture: {last_cap}\nServer-side pulls are failing "
-                f"silently — no expiry field exists for co-op tokens, so this "
-                f"data-staleness alert is the death signal. Operator emailed.",
-            )
-            if state is None:
-                state = InverterAlertState(tenant_id=tid, incident_key=key)
-                db.add(state)
-            state.last_alerted_at = now_
-            db.commit()
+            try:
+                send_internal_alert(
+                    f"Co-op session DEAD: {tid} {prov} — no generation for {days_dark}d",
+                    f"Tenant: {tid} ({tenant.contact_email})\nProvider: {prov} ({util_name})\n"
+                    f"Newest smarthub generation day: {newest_day} ({days_dark}d ago)\n"
+                    f"Last session capture: {last_cap}\nServer-side pulls are failing "
+                    f"silently — no expiry field exists for co-op tokens, so this "
+                    f"data-staleness alert is the death signal. Operator emailed.",
+                )
+            except Exception:
+                logger.exception("co-op internal alert failed for %s/%s", tid, prov)
     logger.info("coop_session_death_warnings: warned=%d dedup=%d recovered=%d dry=%s",
                 len(out["warned"]), out["skipped_dedup"], out["recovered_cleared"], dry_run)
     return out
