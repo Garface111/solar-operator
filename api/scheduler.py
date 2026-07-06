@@ -38,7 +38,14 @@ scheduler = BackgroundScheduler(timezone="UTC")
 
 def enqueue_pull_for_all_tenants():
     with SessionLocal() as db:
-        tenants = db.execute(select(Tenant).where(Tenant.active == True)).scalars().all()
+        # Never enqueue a real-utility pull for the public demo tenant — its
+        # ~828 fabricated GMP accounts only ever 403, and the sweep saturates
+        # the web workers so no request can be served (took prod down
+        # 2026-07-05). Mirrors usage_report / freshness_scorecard, which
+        # already exclude is_demo.
+        tenants = db.execute(
+            select(Tenant).where(Tenant.active == True, Tenant.is_demo.is_(False))
+        ).scalars().all()
         for t in tenants:
             db.add(Job(tenant_id=t.id, kind="pull_bills", payload={}, status="queued"))
         db.commit()

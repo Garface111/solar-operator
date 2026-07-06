@@ -316,6 +316,13 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
         tenant = db.get(Tenant, tenant_id)
         if not tenant:
             return {"error": f"unknown tenant {tenant_id}"}
+        # Demo tenants (e.g. the 800-offtaker Anna demo) carry fabricated utility
+        # accounts that never authenticate; a real-utility pull just floods the
+        # provider with 403s and pegs the web workers (prod outage 2026-07-05).
+        # Their bills are seeded, never pulled — hard no-op on EVERY call path
+        # (scheduled drain AND on-demand refresh), so a stale queued job is safe.
+        if getattr(tenant, "is_demo", False):
+            return {"skipped": "demo tenant", "tenant_id": tenant_id, "accounts": 0}
 
         accounts = db.execute(
             select(UtilityAccount).where(
