@@ -896,6 +896,13 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
             tenant = db.get(Tenant, tid)
             if tenant is None:
                 continue
+            # A paused / inactive tenant (trial ended, no card, read-only) is not
+            # running bills, so a dying GMP token is not actionable — skip it so an
+            # abandoned account can't page the operator (seen: ten_3c50bd000f638ed4,
+            # active=False, spammed hourly). Active operators still get warned.
+            if not getattr(tenant, "active", True):
+                out["skipped_dedup"] += 1
+                continue
             out["warned"].append({"tenant": tid, "email": tenant.contact_email,
                                   "days_left": round(days_left, 1)})
             if dry_run:
@@ -1013,6 +1020,11 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                 continue
             tenant = db.get(Tenant, tid)
             if tenant is None:
+                continue
+            # Inactive / paused tenants aren't invoicing off this feed, so a dead
+            # co-op session isn't actionable — don't page on it.
+            if not getattr(tenant, "active", True):
+                out["skipped_dedup"] += 1
                 continue
             info = PROVIDER_TO_UTILITY.get(prov) or {}
             util_name = info.get("name") or prov.upper()
