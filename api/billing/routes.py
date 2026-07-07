@@ -4544,15 +4544,25 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
                    BillingReportSubscription.deleted_at.is_(None),
                    BillingReportSubscription.enabled == True)  # noqa: E712
         ).all()
-        pending = db.execute(
-            select(func.count(ReportDraft.id))
+        # Split the pending drafts by delivery_mode — an auto-send offtaker's draft
+        # is NOT "awaiting approval" (it sends itself on the run); only an approval
+        # offtaker's draft needs the operator. Counting them together mislabeled the
+        # whole set "awaiting your approval" (Ford 2026-07-07: "why does it say 805
+        # to approve").
+        pend_rows = db.execute(
+            select(BillingReportSubscription.delivery_mode,
+                   func.count(ReportDraft.id))
             .join(BillingReportSubscription,
                   ReportDraft.subscription_id == BillingReportSubscription.id)
             .where(ReportDraft.tenant_id == t.id,
                    ReportDraft.status == "pending",
                    BillingReportSubscription.deleted_at.is_(None),
                    BillingReportSubscription.enabled == True)  # noqa: E712
-        ).scalar() or 0
+            .group_by(BillingReportSubscription.delivery_mode)
+        ).all()
+        pending_auto = sum(int(c) for m, c in pend_rows if (m or "approval") == "auto")
+        pending_approval = sum(int(c) for m, c in pend_rows if (m or "approval") != "auto")
+        pending = pending_auto + pending_approval
 
     total = len(rows)
     last_period = max((r.last_sent_period_end for r in rows
@@ -4568,6 +4578,12 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
         if r.last_sent_at and (last_run_at is None or r.last_sent_at > last_run_at):
             last_run_at = r.last_sent_at
     waiting = max(0, total - delivered - int(pending))
+
+    # The tenant's dominant posture — drives the "Approve to send ⟷ Auto-send" mode
+    # slider (Ford 2026-07-07). Per-offtaker overrides still count in the split.
+    auto_all = sum(1 for r in rows if (r.delivery_mode or "approval") == "auto")
+    approval_all = total - auto_all
+    default_mode = "auto" if auto_all > approval_all else "approval"
 
     now = datetime.utcnow()
 
@@ -4587,7 +4603,12 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
             "dollars": round(dollars, 2),
             "last_run_at": last_run_at.isoformat() if last_run_at else None,
         },
-        "inflight": {"pending_drafts": int(pending), "waiting": waiting},
+        "inflight": {"pending_drafts": int(pending),
+                     "pending_auto": int(pending_auto),
+                     "pending_approval": int(pending_approval),
+                     "waiting": waiting},
+        "default_delivery_mode": default_mode,
+        "mode_split": {"auto": auto_all, "approval": approval_all},
         "next_monthly": {"fires_at": _next_month_first(now).isoformat(),
                          **_split("monthly")},
         "next_quarterly": {"fires_at": _next_quarter_first(now).isoformat(),
