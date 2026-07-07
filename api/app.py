@@ -23,6 +23,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select, func, or_
 from .db import init_db, SessionLocal
@@ -274,6 +275,12 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+# Gzip every response the browser accepts it for (Ford 2026-07-07: the 800-offtaker
+# Reports tab shipped ~1MB uncompressed for /list-bundle + /drafts, and neither the
+# app nor Railway's edge was compressing). JSON compresses ~7-8× → the payload
+# transfer drops from ~1MB to ~120KB. Transparent (the browser decompresses);
+# responses under 500 bytes skip it.
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 # ── Security headers (CSP + clickjacking / MIME / referrer hardening) ─────────
