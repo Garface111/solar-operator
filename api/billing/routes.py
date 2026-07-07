@@ -342,6 +342,47 @@ async def upload_vec_bill(utility_account_id: int,
 
 # ─── subscriptions CRUD ─────────────────────────────────────────────────────
 
+def _attach_template_fit_warnings(db, tenant_id, rows, sub_dicts) -> None:
+    """Set d["template_fit_warning"] on each serialized offtaker whose EFFECTIVE
+    invoice template mismatches its billing model. Cheap: one query for per-offtaker
+    templates + one for the tenant default; the xlsx budget-cell check is cached by
+    content hash, so a shared tenant template is parsed once for the whole list."""
+    from ..models import OfftakerInvoiceTemplate, OfftakerSubscriptionTemplate
+    from .repro.template_repro import template_has_budget_cell
+    tenant_tpl = db.execute(select(OfftakerInvoiceTemplate).where(
+        OfftakerInvoiceTemplate.tenant_id == tenant_id)).scalars().first()
+    tenant_bytes = (bytes(tenant_tpl.file_bytes) if tenant_tpl and tenant_tpl.enabled
+                    and tenant_tpl.file_bytes else None)
+    sub_ids = [r.id for r in rows]
+    per = {}
+    if sub_ids:
+        for st in db.execute(select(OfftakerSubscriptionTemplate).where(
+                OfftakerSubscriptionTemplate.subscription_id.in_(sub_ids))).scalars():
+            per[st.subscription_id] = st
+    by_id = {r.id: r for r in rows}
+    for d in sub_dicts:
+        sub = by_id.get(d.get("id"))
+        if sub is None:
+            continue
+        st = per.get(sub.id)
+        eff_bytes = (bytes(st.file_bytes) if st and st.enabled and st.file_bytes
+                     else tenant_bytes)
+        if not eff_bytes:
+            continue                       # no enabled template → standard invoice for all
+        on_budget = getattr(sub, "budget_amount_usd", None) is not None
+        has_budget = template_has_budget_cell(eff_bytes)
+        if has_budget and not on_budget:
+            d["template_fit_warning"] = (
+                "This offtaker isn\u2019t on a fixed budget, but the assigned template "
+                "has a \u201cFixed Monthly Budget Payment\u201d line \u2014 the invoice "
+                "can\u2019t render in it and falls back to the standard format. Use a "
+                "template without a budget line, or set a fixed budget for this offtaker.")
+        elif on_budget and not has_budget:
+            d["template_fit_warning"] = (
+                "This offtaker is on a fixed budget, but the assigned template has no "
+                "budget line \u2014 the budget amount won\u2019t show on their invoice.")
+
+
 @router.get("/subscriptions")
 def list_subscriptions(authorization: Optional[str] = Header(default=None)):
     from ..models import Tenant, UtilityAccount
@@ -372,6 +413,14 @@ def list_subscriptions(authorization: Optional[str] = Header(default=None)):
         # setup/edit form shows "flags beyond X%" from this when the per-offtaker
         # override is blank. Lazy import keeps reconcile_bills out of the module
         # import cycle (it imports delivery lazily itself).
+        # Template ↔ billing-model fit: flag offtakers whose EFFECTIVE invoice
+        # template doesn't match their budget setting, so a silent fall-back to the
+        # standard invoice (a non-budget offtaker on a fixed-budget template) is
+        # visible up front instead of a mysterious "wrong-looking invoice".
+        try:
+            _attach_template_fit_warnings(db, t.id, rows, subs)
+        except Exception:  # noqa: BLE001 — a warning must never break the list
+            logger.exception("template-fit warning enrichment failed")
         from .reconcile_bills import SHARE_VARIANCE_THRESHOLD_PCT
         return {"ok": True, "subscriptions": subs,
                 "crosscheck_threshold_default_pct": SHARE_VARIANCE_THRESHOLD_PCT}
