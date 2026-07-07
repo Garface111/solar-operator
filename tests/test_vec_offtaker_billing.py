@@ -157,3 +157,32 @@ def test_vec_offtaker_waits_when_no_generation_yet():
         res = delivery.deliver_subscription(db, sub, tenant, is_test=True)
     assert res.get("skipped") is True
     assert res.get("ok") is False
+
+
+def test_vec_bill_pdf_download_reader_is_provider_aware():
+    """The draft bill-download route (get_draft_gmp_bill) must resolve a VEC
+    offtaker's captured bill via the SmartHub reader: get_bill_pdf_for_account
+    REJECTS a non-GMP account, so the route's GMP-then-VEC fallback is REQUIRED to
+    serve a VEC bill (Ford 2026-07-07: Glover's captured VEC bill 404'd from that
+    route as 'pending' though its bytes were on file)."""
+    from datetime import datetime
+    from api.models import Bill
+    from api.reports.gmp_bill_pdf_read import (
+        get_bill_pdf_for_account, get_vec_bill_pdf_for_account,
+    )
+
+    tid, _aid, acct_id = _seed(with_generation=False, provider="vec")
+    pdf = b"%PDF-1.4\n" + b"x" * 2000 + b"\n%%EOF"
+    with SessionLocal() as db:
+        db.add(Bill(tenant_id=tid, account_id=acct_id,
+                    period_start=datetime(2026, 5, 21), period_end=datetime(2026, 6, 21),
+                    document_number="vec-uuid-download", pdf_bytes=pdf))
+        db.commit()
+
+    # The GMP reader rejects a VEC account outright — this is WHY the route needs
+    # the VEC fallback; without it the captured bill is invisible (the 404 bug).
+    assert get_bill_pdf_for_account(acct_id) is None
+    # The SmartHub sibling surfaces the same durable bytes + a VEC-labelled filename.
+    found = get_vec_bill_pdf_for_account(acct_id)
+    assert found and found.get("bytes") == pdf
+    assert (found.get("filename") or "").lower().startswith("vec_bill")

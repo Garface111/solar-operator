@@ -3374,16 +3374,24 @@ def get_draft_gmp_bill(draft_id: int, authorization: Optional[str] = Header(defa
             found = None
             try:
                 if uaid is not None:
-                    found = gbp.get_bill_pdf_for_account(uaid, ps, pe, db=db)
+                    # Provider-aware: get_bill_pdf_for_account returns None for a
+                    # non-GMP account, so fall back to the SmartHub/VEC sibling — a VEC
+                    # offtaker's auto-captured bill lives in the same Bill.pdf_bytes but
+                    # only the VEC reader surfaces it (Ford 2026-07-07: Glover VEC bill
+                    # 404'd from this route as "pending" though it was captured).
+                    found = (gbp.get_bill_pdf_for_account(uaid, ps, pe, db=db)
+                             or gbp.get_vec_bill_pdf_for_account(uaid, ps, pe, db=db))
                 elif getattr(sub, "array_id", None):
                     found = gbp.get_bill_pdf_for_period(sub.array_id, ps, pe, db=db)
             except Exception:
                 found = None
             if found and found.get("bytes"):
+                _fn = "".join(c for c in (found.get("filename") or "utility_bill.pdf")
+                              if c.isalnum() or c in "._- ") or "utility_bill.pdf"
                 return StreamingResponse(io.BytesIO(found["bytes"]),
                     media_type=found.get("content_type") or "application/pdf",
-                    headers={"Content-Disposition": "inline; filename=gmp_bill.pdf"})
-        raise HTTPException(404, "No GMP bill captured for this period yet")
+                    headers={"Content-Disposition": "inline; filename=" + _fn})
+        raise HTTPException(404, "No utility bill captured for this period yet")
 
 
 class DraftPatch(BaseModel):
