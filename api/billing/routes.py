@@ -3164,53 +3164,69 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
     }
 
 
-def _resolve_gmp_auto_status(db, sub) -> Optional[str]:
+def _resolve_gmp_auto_status(db, sub, _prov_cache=None, _status_cache=None) -> Optional[str]:
     """Honest auto-attach status for the draft card (never implies a PDF exists
     when it doesn't). Provider-aware: a VEC/SmartHub-bound offtaker's status reflects
     its VEC bill (persisted Bill.pdf_bytes), a GMP-bound one its GMP bill. Kept named
     `gmp_auto_status` on the wire for back-compat; the frontend labels it by
-    attach_provider. Statuses: ready | pending | no_gmp | None (toggle off)."""
+    attach_provider. Statuses: ready | pending | no_gmp | None (toggle off).
+
+    `_prov_cache`/`_status_cache` (Ford 2026-07-07 perf): the status is identical for
+    every draft on the SAME account, so the draft-inbox loop (805 drafts on ~27
+    accounts) passes these dicts to memoize the per-account provider + bill-PDF lookup
+    — collapsing the per-draft query N+1 (~3s → ~0.3s). Omitted → queries as before."""
     if sub is None or not getattr(sub, "auto_attach_gmp", False):
         return None
+    uaid = getattr(sub, "utility_account_id", None)
+    array_id = getattr(sub, "array_id", None)
+    ckey = uaid if uaid is not None else (("arr", array_id) if array_id is not None else "none")
+    if _status_cache is not None and ckey in _status_cache:
+        return _status_cache[ckey]
+    result = "pending"
     try:
         from ..reports import gmp_bill_pdf_read as gbp
-        uaid = getattr(sub, "utility_account_id", None)
-        # VEC/SmartHub-bound → check the persisted VEC bill PDF for that account.
-        if uaid is not None and _bound_provider(db, sub) and \
-                _is_smarthub_provider_code(_bound_provider(db, sub)):
+        prov = _bound_provider(db, sub, _prov_cache)
+        if uaid is not None and prov and _is_smarthub_provider_code(prov):
+            # VEC/SmartHub-bound → check the persisted VEC bill PDF for that account.
             found = gbp.get_vec_bill_pdf_for_account(uaid, db=db)
-            return "ready" if (found and found.get("bytes")) else "pending"
-        # Prefer the offtaker's BOUND utility account — the exact bill the invoice is
-        # computed from, so the attached PDF matches the invoice's source. (The old
-        # array-keyed path returned whichever of the array's sibling accounts had the
-        # newest captured PDF, which can be the wrong bill.) Fall back to the array's
-        # GMP accounts for legacy array-based subscriptions with no bound account.
-        if uaid is not None:
+            result = "ready" if (found and found.get("bytes")) else "pending"
+        elif uaid is not None:
+            # Prefer the offtaker's BOUND utility account — the exact bill the invoice
+            # is computed from, so the attached PDF matches the invoice's source.
             found = gbp.get_bill_pdf_for_account(uaid, db=db)
-            return "ready" if (found and found.get("bytes")) else "pending"
-        array_id = getattr(sub, "array_id", None)
-        if array_id is None:
-            return "no_gmp"
-        if not gbp.has_capturable_gmp_account(array_id, db=db):
-            return "no_gmp"
-        found = gbp.get_bill_pdf_for_period(array_id, db=db)
-        return "ready" if (found and found.get("bytes")) else "pending"
+            result = "ready" if (found and found.get("bytes")) else "pending"
+        elif array_id is None:
+            result = "no_gmp"
+        elif not gbp.has_capturable_gmp_account(array_id, db=db):
+            result = "no_gmp"
+        else:
+            found = gbp.get_bill_pdf_for_period(array_id, db=db)
+            result = "ready" if (found and found.get("bytes")) else "pending"
     except Exception:  # noqa: BLE001
-        return "pending"
+        result = "pending"
+    if _status_cache is not None:
+        _status_cache[ckey] = result
+    return result
 
 
-def _bound_provider(db, sub) -> Optional[str]:
+def _bound_provider(db, sub, _cache=None) -> Optional[str]:
     """Lowercase provider code of the subscription's bound utility account, or None.
-    Drives provider-aware auto-attach label + status. Best-effort/fail-safe."""
+    Drives provider-aware auto-attach label + status. Best-effort/fail-safe.
+    `_cache` (uaid→provider) memoizes the lookup across a draft-inbox loop."""
     uaid = getattr(sub, "utility_account_id", None) if sub else None
     if uaid is None:
         return None
+    if _cache is not None and uaid in _cache:
+        return _cache[uaid]
     try:
         from ..models import UtilityAccount
         ua = db.get(UtilityAccount, uaid)
-        return (ua.provider or "").lower() or None if ua else None
+        val = (ua.provider or "").lower() or None if ua else None
     except Exception:  # noqa: BLE001
-        return None
+        val = None
+    if _cache is not None:
+        _cache[uaid] = val
+    return val
 
 
 def _is_smarthub_provider_code(code: Optional[str]) -> bool:
@@ -3245,14 +3261,28 @@ def list_drafts(status: str = Query(default="pending"),
         # in the loop (per-draft fetches would be the next 800-scale N+1).
         from .delivery import _offtaker_email_fields
         email_fields = _offtaker_email_fields(t.id)
+        # Batch the per-draft lookups (Ford 2026-07-07: /drafts was ~3s at 805 drafts,
+        # an N+1 of sub-fetch + provider + bill-PDF-status PER draft). One query for
+        # all the subs, and per-ACCOUNT provider/status caches shared across the loop
+        # (805 drafts sit on ~27 accounts) → ~3s to ~0.3s. Same output, fewer queries.
+        _sub_ids = [d.subscription_id for d in rows if d.subscription_id]
+        subs_by_id = {}
+        if _sub_ids:
+            subs_by_id = {s.id: s for s in db.execute(
+                select(BillingReportSubscription).where(
+                    BillingReportSubscription.id.in_(set(_sub_ids)))
+            ).scalars().all()}
+        _prov_cache: dict = {}
+        _status_cache: dict = {}
+        operator_name = getattr(t, "name", None)
         out = []
         for d in rows:
-            sub = db.get(BillingReportSubscription, d.subscription_id) if d.subscription_id else None
+            sub = subs_by_id.get(d.subscription_id) if d.subscription_id else None
             out.append(_draft_dict(d, sub=sub,
-                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub),
-                                   operator_name=getattr(t, "name", None),
+                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub, _prov_cache, _status_cache),
+                                   operator_name=operator_name,
                                    email_fields=email_fields,
-                                   attach_provider=_bound_provider(db, sub)))
+                                   attach_provider=_bound_provider(db, sub, _prov_cache)))
         return {"drafts": out}
 
 
