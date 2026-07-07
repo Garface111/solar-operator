@@ -123,10 +123,15 @@ def run(*, dry_run: bool = False) -> dict[str, Any]:
     refresh_token = os.environ.get("SYNTHETIC_GMP_REFRESH_TOKEN", "")
     account_number = os.environ.get("SYNTHETIC_GMP_ACCOUNT_NUMBER", "")
 
-    if not refresh_token:
-        raise RuntimeError("SYNTHETIC_GMP_REFRESH_TOKEN env var not set")
-    if not account_number:
-        raise RuntimeError("SYNTHETIC_GMP_ACCOUNT_NUMBER env var not set")
+    if not refresh_token or not account_number:
+        # The synthetic GMP canary is OPTIONAL and only runs where its test-account
+        # creds are configured. When absent, skip cleanly (return, do NOT raise) so
+        # the scheduler doesn't page a daily "unhandled exception". Enable it by
+        # setting SYNTHETIC_GMP_REFRESH_TOKEN + SYNTHETIC_GMP_ACCOUNT_NUMBER.
+        missing = ("SYNTHETIC_GMP_REFRESH_TOKEN" if not refresh_token
+                   else "SYNTHETIC_GMP_ACCOUNT_NUMBER")
+        return {"success": None, "skipped": True,
+                "error": f"{missing} not set \u2014 synthetic GMP monitor disabled"}
 
     last_run = _load_last_run()
     previous_hash = (last_run or {}).get("response_hash")

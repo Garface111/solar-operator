@@ -2330,6 +2330,23 @@ def send_now(sub_id: int, test: bool = Query(default=True),
         return {"ok": True, "result": result}
 
 
+def _content_disposition_attachment(filename: str) -> str:
+    """Content-Disposition value safe for latin-1 HTTP-header encoding.
+
+    HTTP header values are latin-1; a non-latin-1 char in the filename (an em-dash
+    from a customer name, smart quotes, an emoji) raises UnicodeEncodeError in the
+    ASGI layer and 500s the whole download (seen live on subscription previews).
+    Emit an ASCII-only ``filename=`` (RFC 6266) plus an RFC 5987 ``filename*`` that
+    carries the real UTF-8 name for modern clients.
+    """
+    from urllib.parse import quote
+    safe = filename or "download"
+    ascii_name = safe.encode("ascii", "replace").decode("ascii")
+    for ch in ('"', "\\", "\r", "\n", "?"):
+        ascii_name = ascii_name.replace(ch, "_")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe, safe='')}"
+
+
 @router.get("/subscriptions/{sub_id}/preview")
 def preview(sub_id: int, kind: str = Query(default="invoice"),
             fmt: str = Query(default="pdf"),
@@ -2370,7 +2387,7 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
                     fname = f"{sub.customer_name.replace(' ', '_')}_invoice.xlsx"
                     return StreamingResponse(
                         io.BytesIO(blob), media_type=media,
-                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                        headers={"Content-Disposition": _content_disposition_attachment(fname)})
                 from . import invoice as inv
                 p = None
                 if fmt == "pdf":
@@ -2405,7 +2422,7 @@ def preview(sub_id: int, kind: str = Query(default="invoice"),
              else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     fname = f"{sub.customer_name.replace(' ', '_')}_{kind}.{fmt}"
     return StreamingResponse(io.BytesIO(blob), media_type=media,
-                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                             headers={"Content-Disposition": _content_disposition_attachment(fname)})
 
 
 # ─── Bring-your-own generation spreadsheet tracker ───────────────────────────

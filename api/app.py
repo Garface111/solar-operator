@@ -331,6 +331,14 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, (HTTPException, StarletteHTTPException)):
         raise exc
     path = request.url.path
+    # A client that hung up mid-request (Starlette ClientDisconnect) is not a
+    # server fault — the socket is already gone, so returning a body is moot and
+    # Sentry-capturing / paging on it is pure noise (seen: POST /v1/sync). Ack
+    # quietly with 499 (client closed request) and skip the alert.
+    if type(exc).__name__ == "ClientDisconnect":
+        log.info("client disconnected mid-request on %s", path)
+        return JSONResponse(status_code=499,
+                            content={"ok": False, "error": "client disconnected"})
     log.exception("Unhandled error on %s", path)
     try:
         capture_exception(exc)
