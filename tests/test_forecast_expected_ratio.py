@@ -300,3 +300,50 @@ def test_single_array_forecast_honors_override_without_location(client):
     assert d["expected_kwh"] == 3000.0            # 3.0 × 100 kW × 10 days
     assert d["expected_matched_kwh"] == 300.0
     assert d["ratio_pct"] == round(250 / 300 * 100)
+
+
+# ── the instant-load snapshot cache ───────────────────────────────────────────
+
+def test_forecast_fleet_snapshot_caches_and_invalidates(client, monkeypatch):
+    """The fleet forecast is cached in a snapshot (instant repeat loads), and a
+    model-changing mutation drops it so the next load recomputes fresh."""
+    from api.models import FleetForecastSnapshot
+    tid, key = _make_tenant()
+    end = _window_end()
+    poa = {(end - timedelta(days=i)).isoformat(): 5.0 for i in range(0, 10)}
+    monkeypatch.setattr(forecasting, "fetch_poa_daily", lambda *a, **k: dict(poa))
+    monkeypatch.setattr(forecasting, "fetch_current_weather_code", lambda *a, **k: 0)
+
+    a = _make_array(tid, "Cache Array", nameplate_kw=10, lat=44.2, lng=-72.5)
+    _add_daily(tid, a, [(end, 30.0), (end - timedelta(days=1), 30.0)])
+
+    # 1) First load computes AND stores exactly one snapshot for the window.
+    r1 = client.get("/v1/array-owners/forecast-fleet?window_days=10", headers=_auth(key))
+    assert r1.status_code == 200, r1.text
+    body1 = r1.json()
+    with SessionLocal() as db:
+        snaps = db.execute(select(FleetForecastSnapshot).where(
+            FleetForecastSnapshot.tenant_id == tid)).scalars().all()
+    assert len(snaps) == 1 and snaps[0].window_days == 10
+
+    # 2) A repeat load is served from the snapshot — no recompute. Prove it by
+    # making the POA fetch explode: if the endpoint recomputed, it would raise.
+    def _explode(*a, **k):
+        raise AssertionError("served from snapshot should NOT recompute")
+    monkeypatch.setattr(forecasting, "fetch_poa_daily", _explode)
+    r2 = client.get("/v1/array-owners/forecast-fleet?window_days=10", headers=_auth(key))
+    assert r2.status_code == 200
+    assert r2.json()["expected_kwh"] == body1["expected_kwh"]
+
+    # 3) A location change invalidates the snapshot (the mutation POST geocodes,
+    # it doesn't touch POA, so _explode is safe here).
+    monkeypatch.setattr(forecasting, "geocode_oneline",
+                        lambda *a, **k: {"lat": 45.0, "lng": -71.0,
+                                         "source": "census", "matched": "Montpelier, VT"})
+    rp = client.post(f"/v1/array-owners/arrays/{a}/location",
+                     json={"place": "Montpelier, VT"}, headers=_auth(key))
+    assert rp.status_code == 200, rp.text
+    with SessionLocal() as db:
+        remaining = db.execute(select(FleetForecastSnapshot).where(
+            FleetForecastSnapshot.tenant_id == tid)).scalars().all()
+    assert remaining == []            # snapshot dropped → next load recomputes fresh
