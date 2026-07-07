@@ -419,6 +419,10 @@ def list_bundle(authorization: Optional[str] = Header(default=None)):
     return {
         "ok": True,
         "subscriptions": subs.get("subscriptions", []),
+        # Fleet-default cross-check variance threshold (Bruce 2026-07-07): the
+        # setup/edit form shows "flags beyond X%" when the per-offtaker override
+        # is blank. Passed through from list_subscriptions so both load paths have it.
+        "crosscheck_threshold_default_pct": subs.get("crosscheck_threshold_default_pct"),
         "arrays": arrays,
         "utility_accounts": uacc.get("utility_accounts", []),
     }
@@ -2541,22 +2545,28 @@ def tracker_download(sub_id: int, authorization: Optional[str] = Header(default=
 
 
 @router.get("/subscriptions/{sub_id}/preview-math")
-def preview_math(sub_id: int, authorization: Optional[str] = Header(default=None)):
+def preview_math(sub_id: int, period: Optional[str] = Query(default=None),
+                 authorization: Optional[str] = Header(default=None)):
     """Compute (without persisting a draft) the auditable billing math for a
-    subscription's latest period: the array's period generation, the customer's
+    subscription's billing period: the array's period generation, the customer's
     allocation %, the resulting customer-share kWh, the $/kWh rate, and the
     dollar amount. Powers the run-table rows so every customer shows real
     numbers eagerly — no draft required.
+
+    `period` (Bruce 2026-07-07, C4) previews a SPECIFIC settled bill period
+    ('YYYY-MM' | 'YYYY-Qn') so the preview matches the period the operator will
+    draft; omit it for the latest bill (the default).
 
     Never fabricates: when the array has no generation for the period yet,
     `has_data` is false and the kWh/amount fields are null so the UI can show a
     muted 'No generation data yet' instead of a bogus number.
     """
     t = tenant_from_session(authorization)
+    target_period = (period or "").strip() or None
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
     try:
-        match = build_match(sub)
+        match = build_match(sub, period_label=target_period)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(422, f"workbook unreadable: {e}")
     if not match.matched or not match.latest_period:
