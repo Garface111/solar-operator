@@ -140,3 +140,24 @@ def test_patch_rebind_to_submeter_enforces_invariant(client: TestClient):
     ci = delivery.build_manual_match(s).computed_invoice
     assert ci["billing_basis"] == "real_math"
     assert abs(ci["kwh"] - 1000.0) < 0.5
+
+
+def test_patch_share_edit_on_submeter_updates_group_share(client: TestClient):
+    '''Editing a sub-metered offtaker's share (the single share field, sent as
+    allocation_pct) routes to array_share_pct EVERY time — not just on first set —
+    so the operator can actually change it. 20% -> 30% must re-bill 30% x 5000.'''
+    tid, aid, host_id, sub_id = _seed()
+    r = client.post(_BASE, headers=_auth(tid), data={
+        'customer_name': 'Editable Sub', 'array_id': aid,
+        'utility_account_id': sub_id, 'allocation_pct': 0.20})
+    oid = r.json()['subscription']['id']
+    # bump the share to 30% via the (single) share field
+    r2 = client.patch(f'{_BASE}/{oid}', headers=_auth(tid),
+                      json={'allocation_pct': 0.30})
+    assert r2.status_code == 200, r2.text
+    s = _fetch(tid, oid)
+    assert s.allocation_pct == 1.0
+    assert abs(s.array_share_pct - 0.30) < 1e-9      # was 0.20, now 0.30 (not lost)
+    ci = delivery.build_manual_match(s).computed_invoice
+    assert ci['billing_basis'] == 'real_math'
+    assert abs(ci['kwh'] - 1500.0) < 0.5             # 0.30 x 5000

@@ -1321,10 +1321,14 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                         UtilityAccount.deleted_at.is_(None))
                     .order_by(UtilityAccount.id)).scalars().first()
             if _hid is not None and _hid != sub.utility_account_id:
-                if (sub.allocation_pct is not None and sub.allocation_pct != 1.0
-                        and "array_share_pct" not in body.model_fields_set
-                        and not sub.array_share_pct):
-                    sub.array_share_pct = sub.allocation_pct
+                # A sub-metered offtaker's ONE share edit arrives as allocation_pct;
+                # it IS the group share, so route it to array_share_pct (real_math)
+                # every time -- unless the operator set array_share_pct explicitly in
+                # this same patch. allocation_pct is pinned to 1.0 (100%% of the
+                # sub-meter) so it can never re-multiply the sub-account excess.
+                if (body.allocation_pct is not None
+                        and "array_share_pct" not in body.model_fields_set):
+                    sub.array_share_pct = _validate_array_share(float(body.allocation_pct))
                 sub.allocation_pct = 1.0
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
