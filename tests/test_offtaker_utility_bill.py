@@ -232,3 +232,108 @@ def test_offtaker_banked_month_bills_at_reference_rate():
     assert ci["excess_kwh"] == 56320.0                       # bills the excess
     assert abs(ci["net_rate_per_kwh"] - DEFAULT_CREDIT_RATE) < 1e-6
     assert m.latest_period.customer_kwh == 56320.0           # 100% of excess
+
+
+# ── Editable Solar-credit-rate override + honest default (Ford 2026-07-07) ─────
+# The rate field DEFAULTS to the bill's rate but the operator can OVERRIDE it. The
+# computed invoice must always carry the bill-derived DEFAULT (value + honest
+# source) so the UI can show "default: $X — <bill | banked reference>" even while
+# an override is in force. See rateFieldHTML / paintRateField in array-operator.
+
+def test_default_net_rate_exposes_bill_rate_when_cashed():
+    """A cashed month with NO override: the invoice prices at the bill rate AND
+    exposes default_net_rate_* == the bill's own rate/source, so the editable
+    field can label it 'from your GMP bill' honestly."""
+    tid, aid, acct_id = _seed(with_bill=True, bill_excess=1800.0,
+                              bill_credit_rate=0.2576, vendor_kwh=9999.0)
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="No Override Co",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=0.5, billing_model="percent_of_array",
+    )
+    ci = delivery.build_manual_match(sub).computed_invoice
+    assert ci["net_rate_source"] == "gmp_bill_credit"
+    assert abs(ci["net_rate_per_kwh"] - 0.2576) < 1e-6
+    # The honest DEFAULT mirrors the bill's own rate + source (no override set).
+    assert ci["default_net_rate_source"] == "gmp_bill_credit"
+    assert abs(ci["default_net_rate_per_kwh"] - 0.2576) < 1e-6
+    assert "GMP bill" in (ci["default_net_rate_note"] or "") \
+        or "net-metering credit" in (ci["default_net_rate_note"] or "")
+
+
+def test_override_wins_but_default_still_reports_the_bill_rate():
+    """Override set: the invoice AMOUNT recomputes at the override rate and
+    net_rate_source flips to 'customer' — but default_net_rate_* STILL reports
+    the underlying bill rate so the UI shows 'default: $0.2576 — from your GMP
+    bill' as the fallback beneath the operator's override."""
+    tid, aid, acct_id = _seed(with_bill=True, bill_excess=1800.0,
+                              bill_credit_rate=0.2576, vendor_kwh=9999.0)
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Override Co",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=0.5, billing_model="percent_of_array",
+        net_rate_per_kwh=0.30,          # operator override, ABOVE the bill rate
+        discount_pct=0.0,               # isolate the rate
+    )
+    ci = delivery.build_manual_match(sub).computed_invoice
+    # Override wins for the actual invoice.
+    assert ci["net_rate_source"] == "customer"
+    assert abs(ci["net_rate_per_kwh"] - 0.30) < 1e-6
+    # Amount recomputed at the override: 900 kWh × 0.30 = 270.00.
+    assert abs(ci["amount_owed"] - 270.0) < 1e-6
+    # …but the DEFAULT still honestly reports the bill's own rate/source.
+    assert ci["default_net_rate_source"] == "gmp_bill_credit"
+    assert abs(ci["default_net_rate_per_kwh"] - 0.2576) < 1e-6
+
+
+def test_default_net_rate_reports_reference_when_banked():
+    """A BANKED month (solar_credit_usd None): default_net_rate_source must be
+    'gmp_credit_reference' — so the UI labels it a comparable-months reference,
+    NOT 'from your GMP bill'. This is the Town of Fairlee prod case."""
+    from api.rate_schedule import DEFAULT_CREDIT_RATE
+    tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=9999.0,
+                              provider="zzz_banked_def")     # unique → no fleet
+    with SessionLocal() as db:
+        db.add(Bill(tenant_id=tid, account_id=acct_id,
+                    period_start=datetime(2026, 5, 1),
+                    period_end=datetime(2026, 5, 31),
+                    kwh_generated=56400, kwh_sent_to_grid=56320.0,
+                    solar_credit_usd=None))                  # banked
+        db.commit()
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Town of Fairlee",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=1.0, billing_model="percent_of_array",
+    )
+    ci = delivery.build_manual_match(sub).computed_invoice
+    assert ci["net_rate_source"] == "gmp_credit_reference"
+    # The DEFAULT honestly reflects the banked-reference source (NOT the bill).
+    assert ci["default_net_rate_source"] == "gmp_credit_reference"
+    assert abs(ci["default_net_rate_per_kwh"] - DEFAULT_CREDIT_RATE) < 1e-6
+    assert "banked" in (ci["default_net_rate_note"] or "")
+
+
+def test_override_on_banked_month_prices_at_override():
+    """Town of Fairlee's real need: a BANKED month whose reference rate the
+    operator wants to correct. Setting net_rate_per_kwh prices the excess at the
+    override, and the default still reports the banked reference underneath."""
+    tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=9999.0,
+                              provider="zzz_banked_ovr")
+    with SessionLocal() as db:
+        db.add(Bill(tenant_id=tid, account_id=acct_id,
+                    period_start=datetime(2026, 5, 1),
+                    period_end=datetime(2026, 5, 31),
+                    kwh_generated=1000, kwh_sent_to_grid=1000.0,
+                    solar_credit_usd=None))                  # banked
+        db.commit()
+    sub = BillingReportSubscription(
+        tenant_id=tid, customer_name="Town of Fairlee",
+        utility_account_id=acct_id, array_id=aid,
+        allocation_pct=1.0, billing_model="percent_of_array",
+        net_rate_per_kwh=0.18, discount_pct=0.0,
+    )
+    ci = delivery.build_manual_match(sub).computed_invoice
+    assert ci["net_rate_source"] == "customer"
+    assert abs(ci["net_rate_per_kwh"] - 0.18) < 1e-6
+    assert abs(ci["amount_owed"] - 180.0) < 1e-6            # 1000 × 0.18
+    assert ci["default_net_rate_source"] == "gmp_credit_reference"
