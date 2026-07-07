@@ -1105,6 +1105,36 @@ class InverterDaily(Base):
     )
 
 
+class FleetForecastSnapshot(Base):
+    """Precomputed /forecast-fleet payload per (tenant, window) — the cache that
+    makes the Analysis tab load INSTANTLY.
+
+    WHY: the fleet forecast is expensive — it geocodes each site, pulls Open-Meteo
+    plane-of-array irradiance + current sky, and rolls per-array expected-vs-actual
+    over the window. Computing that on the request path meant the Analysis tab sat
+    on empty "needs your weather-modeled data" states for seconds every cold load
+    (a fresh browser, or a just-restarted worker with cold in-process caches).
+
+    A scheduler job (refresh_fleet_forecasts) recomputes this off the request path
+    and stores the JSON here; the endpoint serves the stored snapshot immediately,
+    so a cold load is one indexed SELECT, not a fan-out of external HTTP. First-ever
+    load for a tenant still computes once inline, then writes the snapshot. Mutations
+    that change the model (set-location, set expected-ratio) delete the tenant's
+    snapshots so the next fetch recomputes fresh — the cache is never a lie.
+
+    Keyed by (tenant_id, window_days) so each window is upserted in place."""
+    __tablename__ = "fleet_forecast_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    window_days: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict] = mapped_column(JSON)          # the full forecast-fleet dict
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "window_days", name="uq_fleet_forecast_tenant_window"),
+    )
+
+
 class InverterReading(Base):
     """High-frequency instantaneous power time-series — the data-hub's live memory.
 

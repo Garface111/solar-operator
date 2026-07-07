@@ -43,7 +43,7 @@ from .db import SessionLocal
 from .inverters import VENDORS, InverterAuthError, InverterError, InverterScopeError
 from .inverters import peer_analysis
 from .models import Array, Bill, DailyGeneration, InverterConnection, Tenant, UtilityAccount, UtilitySession, now, local_today
-from .models import Inverter, InverterDaily, SmaConsent
+from .models import Inverter, InverterDaily, SmaConsent, FleetForecastSnapshot
 from .rates import REC_PRICE_USD_PER_MWH, get_energy_rate
 
 log = logging.getLogger(__name__)
@@ -4968,9 +4968,10 @@ def set_array_expected_ratio_ep(array_id: int, body: ArrayExpectedRatioBody,
             raise HTTPException(404, "Array not found")
         arr.expected_kwh_per_kw_day = (round(float(v), 2) if v is not None else None)
         db.commit()
-        return {"ok": True, "array_id": arr.id,
-                "expected_kwh_per_kw_day": arr.expected_kwh_per_kw_day,
-                "units": "kWh per kW per day"}
+    invalidate_fleet_forecast(tenant.id)   # target changed → next fetch recomputes fresh
+    return {"ok": True, "array_id": array_id,
+            "expected_kwh_per_kw_day": (round(float(v), 2) if v is not None else None),
+            "units": "kWh per kW per day"}
 
 
 class ArrayLocationBody(BaseModel):
@@ -5034,20 +5035,96 @@ def set_array_location_ep(array_id: int, body: ArrayLocationBody,
         arr.geocoded_address = (matched or "")[:500] if matched else None
         arr.geocoded_at = now()
         db.commit()
-        return {"ok": True, "array_id": arr.id, "latitude": arr.latitude,
-                "longitude": arr.longitude, "geocode_source": arr.geocode_source,
-                "geocoded_address": arr.geocoded_address, "modeled": True}
+        result = {"ok": True, "array_id": arr.id, "latitude": arr.latitude,
+                  "longitude": arr.longitude, "geocode_source": arr.geocode_source,
+                  "geocoded_address": arr.geocoded_address, "modeled": True}
+    invalidate_fleet_forecast(tenant.id)   # new location → next fetch recomputes fresh
+    return result
+
+
+# ── fleet-forecast snapshot cache (makes the Analysis tab load instantly) ─────
+# The forecast is expensive (geocode + Open-Meteo POA/sky + per-array roll-up over
+# the window). Computing it on the request path left the Analysis tab sitting on
+# empty "needs your weather-modeled data" states for seconds on every cold load.
+# We precompute it OFF the request path (refresh_fleet_forecasts scheduler job)
+# and store the JSON; the endpoint serves the stored snapshot immediately.
+_FLEET_SNAPSHOT_MAX_SERVE_S = 6 * 3600   # serve a stored snapshot up to 6h old
+_FLEET_SNAPSHOT_WINDOWS = (10, 14)       # windows the scheduler precomputes (UI uses 10)
+
+
+def _store_fleet_snapshot(db, tenant_id: str, window_days: int, payload: dict) -> None:
+    """Upsert the computed forecast for (tenant, window). Best-effort — a failed
+    cache write must never break the request or the scheduler tick."""
+    snap = db.execute(
+        select(FleetForecastSnapshot).where(
+            FleetForecastSnapshot.tenant_id == tenant_id,
+            FleetForecastSnapshot.window_days == window_days,
+        )
+    ).scalar_one_or_none()
+    if snap is None:
+        db.add(FleetForecastSnapshot(tenant_id=tenant_id, window_days=window_days,
+                                     payload=payload, computed_at=now()))
+    else:
+        snap.payload = payload
+        snap.computed_at = now()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("fleet forecast snapshot write failed t=%s w=%s",
+                    tenant_id, window_days, exc_info=True)
+
+
+def invalidate_fleet_forecast(tenant_id: str) -> None:
+    """Drop a tenant's precomputed snapshots so the next fetch recomputes fresh.
+    Call after any mutation that changes the model (set-location, set target) so
+    the instant-cache is never a stale lie."""
+    try:
+        with SessionLocal() as db:
+            db.query(FleetForecastSnapshot).filter(
+                FleetForecastSnapshot.tenant_id == tenant_id).delete()
+            db.commit()
+    except Exception:
+        log.warning("fleet forecast snapshot invalidate failed t=%s", tenant_id, exc_info=True)
 
 
 @router.get("/v1/array-owners/forecast-fleet")
 def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
                       authorization: str | None = Header(default=None)) -> dict:
     """Predicted-vs-actual for the WHOLE fleet in ONE call — the data behind the
-    dashboard "Production vs expected" card.
+    Analysis tab's "Production vs expected" + "Fleet health · kWh/kW" cards.
+
+    INSTANT by default: returns a precomputed snapshot (kept warm off the request
+    path by the refresh_fleet_forecasts scheduler job) when one is fresh enough, so
+    a cold Analysis tab is one indexed SELECT — not a fan-out of geocode + Open-
+    Meteo calls. Falls through to an inline compute (then stores it) only when no
+    fresh snapshot exists: first-ever load, or right after a set-location / target
+    change invalidated it."""
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        snap = db.execute(
+            select(FleetForecastSnapshot).where(
+                FleetForecastSnapshot.tenant_id == tenant.id,
+                FleetForecastSnapshot.window_days == window_days,
+            )
+        ).scalar_one_or_none()
+        if snap is not None and (
+            (now() - snap.computed_at).total_seconds() < _FLEET_SNAPSHOT_MAX_SERVE_S
+        ):
+            return snap.payload
+    payload = compute_fleet_forecast(tenant, window_days)
+    with SessionLocal() as db:
+        _store_fleet_snapshot(db, tenant.id, window_days, payload)
+    return payload
+
+
+def compute_fleet_forecast(tenant, window_days: int) -> dict:
+    """Compute the fleet forecast for ONE tenant (the body behind forecast-fleet,
+    factored out so the scheduler can precompute it off the request path).
 
     Loops the tenant's arrays, geocodes each lazily (cached), and rolls the
     per-array expected/actual kWh into a fleet total + a weather-aware ratio. Per
-    request it MEMOIZES the Open-Meteo POA per (rounded lat,lng,tilt) so the many
+    call it MEMOIZES the Open-Meteo POA per (rounded lat,lng,tilt) so the many
     arrays that share an address/geometry (e.g. several 150 kW units at the same
     site) cost one irradiance fetch, not N. Returns the same transparent `inputs`
     as the per-array endpoint (from a representative array) so the card can show
@@ -5058,7 +5135,6 @@ def fleet_forecast_ep(window_days: int = Query(14, ge=3, le=30),
     the ratio — never silently counted as 0 or guessed.
     """
     from . import forecasting
-    tenant = _tenant_from_bearer(authorization)
     today = now().date()
     end = today - timedelta(days=1)
     start = end - timedelta(days=window_days - 1)

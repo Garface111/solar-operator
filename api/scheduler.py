@@ -1160,6 +1160,42 @@ def _prewarm_reconcile() -> None:
         logger.exception("prewarm_reconcile job crashed")
 
 
+def refresh_fleet_forecasts() -> dict:
+    """Precompute the /forecast-fleet payload for every fleeted tenant, off the
+    request path, so the Analysis tab loads INSTANTLY (the endpoint serves the
+    stored snapshot instead of geocoding + calling Open-Meteo per site). Cheap on
+    repeat ticks: forecasting's own POA/sky caches mean re-computation mostly
+    reuses the last fetch. One bad tenant never stops the rest."""
+    from .array_owners import (compute_fleet_forecast, _store_fleet_snapshot,
+                               _FLEET_SNAPSHOT_WINDOWS)
+    from .models import Array
+    from sqlalchemy import select
+    built = 0
+    try:
+        with SessionLocal() as db:
+            tenants = db.execute(select(Tenant).where(Tenant.active.is_(True))).scalars().all()
+        for t in tenants:
+            with SessionLocal() as db:
+                has_array = db.execute(
+                    select(Array.id).where(Array.tenant_id == t.id,
+                                           Array.deleted_at.is_(None)).limit(1)
+                ).first()
+            if not has_array:
+                continue
+            for w in _FLEET_SNAPSHOT_WINDOWS:
+                try:
+                    payload = compute_fleet_forecast(t, w)
+                    with SessionLocal() as db:
+                        _store_fleet_snapshot(db, t.id, w, payload)
+                    built += 1
+                except Exception:
+                    logger.warning("refresh_fleet_forecasts: tenant=%s window=%s failed",
+                                   t.id, w, exc_info=True)
+    except Exception:
+        logger.exception("refresh_fleet_forecasts crashed")
+    return {"snapshots_built": built}
+
+
 def start():
     # Every 6 hours, enqueue pull-bills jobs for each active tenant
     scheduler.add_job(
@@ -1218,6 +1254,14 @@ def start():
         prune_inverter_readings_job,
         CronTrigger(hour=4, minute=10),
         id="prune_inverter_readings", replace_existing=True,
+    )
+    # Every 30 min: precompute the fleet forecast per tenant so the Analysis tab
+    # serves an instant snapshot instead of computing (geocode + Open-Meteo) on the
+    # request path. coalesce + single instance so a slow tick never stacks up.
+    scheduler.add_job(
+        refresh_fleet_forecasts,
+        "interval", minutes=30, id="refresh_fleet_forecasts", replace_existing=True,
+        max_instances=1, coalesce=True,
     )
     # Weekly: Mondays at 09:00 UTC
     scheduler.add_job(
