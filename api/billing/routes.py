@@ -3164,17 +3164,23 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
     }
 
 
-def _resolve_gmp_auto_status(db, sub, _prov_cache=None, _status_cache=None) -> Optional[str]:
+def _resolve_gmp_auto_status(db, sub, _prov_cache=None, _status_cache=None,
+                             _pdf_ready=None) -> Optional[str]:
     """Honest auto-attach status for the draft card (never implies a PDF exists
     when it doesn't). Provider-aware: a VEC/SmartHub-bound offtaker's status reflects
     its VEC bill (persisted Bill.pdf_bytes), a GMP-bound one its GMP bill. Kept named
     `gmp_auto_status` on the wire for back-compat; the frontend labels it by
     attach_provider. Statuses: ready | pending | no_gmp | None (toggle off).
 
-    `_prov_cache`/`_status_cache` (Ford 2026-07-07 perf): the status is identical for
-    every draft on the SAME account, so the draft-inbox loop (805 drafts on ~27
-    accounts) passes these dicts to memoize the per-account provider + bill-PDF lookup
-    — collapsing the per-draft query N+1 (~3s → ~0.3s). Omitted → queries as before."""
+    Perf (Ford 2026-07-07): the draft inbox (805 drafts, ~800 DISTINCT accounts) passes
+    caches so the loop makes 2 batched queries instead of ~3/draft. `_prov_cache`
+    (uaid→provider, prefilled) makes _bound_provider a lookup; `_pdf_ready` (set of
+    accounts that HAVE a captured bill PDF) makes the ready/pending signal a set-test —
+    the per-account bill-PDF query per draft disappears. Both come from list_drafts'
+    non-deleted UtilityAccount + `Bill.pdf_bytes IS NOT NULL` group queries, which
+    reproduce the per-account readers exactly (the ready signal is 'the account has a
+    bill with pdf_bytes'; a non-gmp/non-smarthub or deleted account → no reader →
+    pending). Omit the caches → queries per-account as before (single-draft callers)."""
     if sub is None or not getattr(sub, "auto_attach_gmp", False):
         return None
     uaid = getattr(sub, "utility_account_id", None)
@@ -3185,23 +3191,35 @@ def _resolve_gmp_auto_status(db, sub, _prov_cache=None, _status_cache=None) -> O
     result = "pending"
     try:
         from ..reports import gmp_bill_pdf_read as gbp
-        prov = _bound_provider(db, sub, _prov_cache)
-        if uaid is not None and prov and _is_smarthub_provider_code(prov):
-            # VEC/SmartHub-bound → check the persisted VEC bill PDF for that account.
-            found = gbp.get_vec_bill_pdf_for_account(uaid, db=db)
-            result = "ready" if (found and found.get("bytes")) else "pending"
-        elif uaid is not None:
-            # Prefer the offtaker's BOUND utility account — the exact bill the invoice
-            # is computed from, so the attached PDF matches the invoice's source.
-            found = gbp.get_bill_pdf_for_account(uaid, db=db)
-            result = "ready" if (found and found.get("bytes")) else "pending"
-        elif array_id is None:
-            result = "no_gmp"
-        elif not gbp.has_capturable_gmp_account(array_id, db=db):
-            result = "no_gmp"
+        if uaid is not None and _pdf_ready is not None:
+            # Batched path: read the provider from the PREFILLED (non-deleted) cache
+            # ONLY — a deleted account isn't in it → None → pending, matching the
+            # readers' deleted-account gate (do NOT call _bound_provider here: its db
+            # fallback would resurrect a deleted account's provider). Only a GMP or
+            # SmartHub account has a reader that can attach; anything else → pending.
+            bprov = _prov_cache.get(uaid) if _prov_cache is not None else None
+            if bprov and (bprov == "gmp" or _is_smarthub_provider_code(bprov)):
+                result = "ready" if uaid in _pdf_ready else "pending"
+            else:
+                result = "pending"
         else:
-            found = gbp.get_bill_pdf_for_period(array_id, db=db)
-            result = "ready" if (found and found.get("bytes")) else "pending"
+            prov = _bound_provider(db, sub, _prov_cache)
+            if uaid is not None and prov and _is_smarthub_provider_code(prov):
+                # VEC/SmartHub-bound → check the persisted VEC bill PDF for the account.
+                found = gbp.get_vec_bill_pdf_for_account(uaid, db=db)
+                result = "ready" if (found and found.get("bytes")) else "pending"
+            elif uaid is not None:
+                # The offtaker's BOUND utility account — the exact bill the invoice is
+                # computed from, so the attached PDF matches the invoice's source.
+                found = gbp.get_bill_pdf_for_account(uaid, db=db)
+                result = "ready" if (found and found.get("bytes")) else "pending"
+            elif array_id is None:
+                result = "no_gmp"
+            elif not gbp.has_capturable_gmp_account(array_id, db=db):
+                result = "no_gmp"
+            else:
+                found = gbp.get_bill_pdf_for_period(array_id, db=db)
+                result = "ready" if (found and found.get("bytes")) else "pending"
     except Exception:  # noqa: BLE001
         result = "pending"
     if _status_cache is not None:
@@ -3261,10 +3279,13 @@ def list_drafts(status: str = Query(default="pending"),
         # in the loop (per-draft fetches would be the next 800-scale N+1).
         from .delivery import _offtaker_email_fields
         email_fields = _offtaker_email_fields(t.id)
-        # Batch the per-draft lookups (Ford 2026-07-07: /drafts was ~3s at 805 drafts,
-        # an N+1 of sub-fetch + provider + bill-PDF-status PER draft). One query for
-        # all the subs, and per-ACCOUNT provider/status caches shared across the loop
-        # (805 drafts sit on ~27 accounts) → ~3s to ~0.3s. Same output, fewer queries.
+        # Batch the per-draft N+1 (Ford 2026-07-07: /drafts was ~3s at 805 drafts —
+        # a sub-fetch + provider(×2) + bill-PDF-status query PER draft, and the drafts
+        # sit on ~800 DISTINCT accounts so per-account memoization alone didn't help).
+        # Three batched queries instead: (1) all the subs; (2) all the bound accounts'
+        # providers (non-deleted, matching the readers' deleted-account gate); (3) the
+        # set of accounts that actually HAVE a captured bill PDF (Bill.pdf_bytes) — the
+        # exact ready/pending signal. The status then computes with NO per-draft query.
         _sub_ids = [d.subscription_id for d in rows if d.subscription_id]
         subs_by_id = {}
         if _sub_ids:
@@ -3272,17 +3293,39 @@ def list_drafts(status: str = Query(default="pending"),
                 select(BillingReportSubscription).where(
                     BillingReportSubscription.id.in_(set(_sub_ids)))
             ).scalars().all()}
-        _prov_cache: dict = {}
+        _uaids = {getattr(s, "utility_account_id", None) for s in subs_by_id.values()}
+        _uaids.discard(None)
+        # Two provider views from ONE query: `_prov_all` (regardless of deleted — what
+        # attach_provider labels with, matching _bound_provider's db.get) and
+        # `_prov_live` (non-deleted only — what the auto-attach STATUS gates on, matching
+        # the readers). Separate so the status never sees a deleted account as attachable.
+        _prov_all: dict = {}
+        _prov_live: dict = {}
+        _pdf_ready: set = set()
+        if _uaids:
+            from ..models import UtilityAccount, Bill
+            for uid, prov, deleted in db.execute(
+                    select(UtilityAccount.id, UtilityAccount.provider, UtilityAccount.deleted_at)
+                    .where(UtilityAccount.id.in_(_uaids))):
+                p = (prov or "").lower() or None
+                _prov_all[uid] = p
+                if deleted is None:
+                    _prov_live[uid] = p
+            for (uid,) in db.execute(
+                    select(Bill.account_id)
+                    .where(Bill.account_id.in_(_uaids), Bill.pdf_bytes.isnot(None))
+                    .group_by(Bill.account_id)):
+                _pdf_ready.add(uid)
         _status_cache: dict = {}
         operator_name = getattr(t, "name", None)
         out = []
         for d in rows:
             sub = subs_by_id.get(d.subscription_id) if d.subscription_id else None
             out.append(_draft_dict(d, sub=sub,
-                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub, _prov_cache, _status_cache),
+                                   gmp_auto_status=_resolve_gmp_auto_status(db, sub, _prov_live, _status_cache, _pdf_ready),
                                    operator_name=operator_name,
                                    email_fields=email_fields,
-                                   attach_provider=_bound_provider(db, sub, _prov_cache)))
+                                   attach_provider=_bound_provider(db, sub, _prov_all)))
         return {"drafts": out}
 
 
