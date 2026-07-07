@@ -4592,7 +4592,15 @@ _bulk_draft: dict[str, dict] = {}   # tenant_id -> {total, done, drafted, held, 
 
 
 @router.post("/subscriptions/bulk-draft")
-def bulk_draft(authorization: Optional[str] = Header(default=None)):
+def bulk_draft(keep_mode: bool = Query(default=False),
+               authorization: Optional[str] = Header(default=None)):
+    """Draft the latest invoice for every enabled offtaker into the review inbox.
+
+    `keep_mode` (the CONTINUOUS auto-draft path, Ford 2026-07-07: "all offtaker
+    invoices automatically draft ... and continuously poll") leaves each offtaker's
+    delivery_mode ALONE — so a poll that runs every few minutes never silently flips
+    an auto-send offtaker back to approval. The default (False) keeps the legacy
+    "Draft all for review" semantics (everyone → approval)."""
     from .delivery import draft_subscription
     from ..models import Tenant
     t = tenant_from_session(authorization)
@@ -4602,7 +4610,8 @@ def bulk_draft(authorization: Optional[str] = Header(default=None)):
         cur = _bulk_draft.get(tid)
         if cur and cur.get("running"):
             return {"ok": True, "already_running": True, **cur}
-    # Put everyone in review mode + collect the ids to draft (one cheap UPDATE).
+    # Collect the ids to draft (one cheap query). Only the legacy manual path also
+    # forces review mode; the auto path preserves each offtaker's send mode.
     with SessionLocal() as db:
         subs = db.execute(
             select(BillingReportSubscription)
@@ -4612,7 +4621,7 @@ def bulk_draft(authorization: Optional[str] = Header(default=None)):
         ).scalars().all()
         ids = []
         for s in subs:
-            if (s.delivery_mode or "approval") != "approval":
+            if not keep_mode and (s.delivery_mode or "approval") != "approval":
                 s.delivery_mode = "approval"
             ids.append(s.id)
         db.commit()
