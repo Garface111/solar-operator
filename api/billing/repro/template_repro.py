@@ -107,6 +107,32 @@ def build_template_cell_map(template_bytes: bytes) -> Optional[dict]:
     return {"sheet": ws.title, "cells": cells, "sample_name": sample_name}
 
 
+_BUDGET_CELL_CACHE: dict = {}
+
+
+def template_has_budget_cell(template_bytes) -> bool:
+    """True iff this xlsx operator template has a per-offtaker "Fixed Monthly
+    Budget Payment" cell (tokenized {{ budget }}). Used to warn on a template ↔
+    billing-model mismatch: a NON-budget offtaker assigned such a template gets a
+    blanked budget line (and usually falls back to the standard invoice), while a
+    budget offtaker assigned a template WITHOUT one won't see their budget.
+    Cached by content hash — templates rarely change, offtaker lists can be large."""
+    if not template_bytes or template_bytes[:4] != b"PK\x03\x04":
+        return False
+    import hashlib
+    key = hashlib.sha1(template_bytes).hexdigest()
+    cached = _BUDGET_CELL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        cm = build_template_cell_map(template_bytes)
+        has = bool(cm) and "budget" in set((cm.get("cells") or {}).values())
+    except Exception:  # noqa: BLE001
+        has = False
+    _BUDGET_CELL_CACHE[key] = has
+    return has
+
+
 def _fill_template_cells(template_bytes: bytes, cell_map: dict, values: dict,
                          customer_name: str) -> Optional[bytes]:
     """Write `values` into the mapped display cells of the template's invoice sheet
