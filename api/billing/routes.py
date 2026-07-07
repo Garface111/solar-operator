@@ -912,6 +912,28 @@ async def _create_manual_subscription(
                 if (_heal_arr is not None and _heal_arr.tenant_id == t.id
                         and _heal_arr.deleted_at is None):
                     acct.array_id = array_id
+            # ── Sub-meter auto-routing (Ford 2026-07-07) ─────────────────────
+            # If this offtaker bills off its OWN sub-account (distinct from the
+            # array's HOST meter), that sub-account's excess ALREADY reflects the
+            # offtaker's metered share of the net-meter group. So the operator's
+            # ONE entered share is the GROUP share (array_share_pct, which real_math
+            # bills as share x group excess), and allocation_pct is pinned to 1.0
+            # (bill 100% of the sub-meter). We must NEVER also multiply the
+            # sub-account's own excess by the share again -- that double-count is
+            # the wrong-bill-audit bug. Percent-of-array offtakers (account IS the
+            # host) are untouched: allocation_pct stays their share of the host.
+            _host_id = None
+            if acct.array_id is not None:
+                _host_id = db.execute(
+                    select(UtilityAccount.id).where(
+                        UtilityAccount.array_id == acct.array_id,
+                        UtilityAccount.deleted_at.is_(None))
+                    .order_by(UtilityAccount.id)).scalars().first()
+            _is_submeter = _host_id is not None and _host_id != utility_account_id
+            if _is_submeter:
+                if share_val is None:
+                    share_val = pct          # the ONE entered share = the group share
+                pct = 1.0                    # always bill 100% of the sub-meter
             # Quarterly cadence for a GMP (bill-priced) offtaker aggregates the
             # FULL quarter — delivery sums all three monthly bills and HOLDS the
             # invoice until every month's bill has landed (never bills short).
@@ -1279,6 +1301,31 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                 if amt < 0:
                     raise HTTPException(400, "budget_amount_usd can't be negative")
                 sub.budget_amount_usd = amt
+        # ── Sub-meter invariant (Ford 2026-07-07) ────────────────────────────
+        # An offtaker on its OWN sub-account (distinct from the array HOST meter)
+        # bills 100% of that meter -> allocation_pct == 1.0; its share of the
+        # net-meter GROUP lives in array_share_pct (which real_math bills as
+        # share x group excess). Enforce whenever the share/account/array was
+        # touched, so the entered share is never ALSO multiplied by allocation_pct
+        # (the double-count that made the bill audit wrong). Percent-of-array
+        # offtakers (account IS the host) are untouched.
+        if (body.allocation_pct is not None
+                or body.utility_account_id is not None
+                or body.array_id is not None):
+            _hid = None
+            if sub.utility_account_id is not None and sub.array_id is not None:
+                from ..models import UtilityAccount
+                _hid = db.execute(
+                    select(UtilityAccount.id).where(
+                        UtilityAccount.array_id == sub.array_id,
+                        UtilityAccount.deleted_at.is_(None))
+                    .order_by(UtilityAccount.id)).scalars().first()
+            if _hid is not None and _hid != sub.utility_account_id:
+                if (sub.allocation_pct is not None and sub.allocation_pct != 1.0
+                        and "array_share_pct" not in body.model_fields_set
+                        and not sub.array_share_pct):
+                    sub.array_share_pct = sub.allocation_pct
+                sub.allocation_pct = 1.0
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
