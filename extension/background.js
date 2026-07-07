@@ -2563,7 +2563,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       // head start. If MFA/CAPTCHA is present the fill can't bypass it and the
       // existing fail-pause guard applies (we never hammer).
       gmp: { user: "input[type=\"email\"], #username, input[name=\"username\" i], input[name=\"email\" i]", pass: "#password, input[name=\"password\" i]", btn: "button[type=\"submit\"], button[id*=\"login\" i], button[id*=\"signin\" i]" },
-      smarthub: { user: "#LoginUsernameTextBox, input[name=\"username\" i], input[name=\"userId\" i], input[type=\"email\"]", pass: "#LoginPasswordTextBox, input[name=\"password\" i], input[type=\"password\"]", btn: "#LoginSubmitButton, button[type=\"submit\"], input[type=\"submit\"], button[id*=\"login\" i]" },
+      // SmartHub spans two skins: legacy ASP.NET (#Login*TextBox) and the modern
+      // NISC Angular SPA (VEC = vermontelectric.smarthub.coop: an Email + Password +
+      // "Sign In" form, button has NO type=submit, inputs often NOT in a <form>).
+      // Cover both skins here; the generic findUser + the findBtn TEXT scan are the
+      // real safety net for the Angular skin. Grounded on VEC's live login page
+      // 2026-07-07; runtime-confirm via the operator sign-out test.
+      smarthub: { user: "#LoginUsernameTextBox, input[name=\"username\" i], input[name=\"userId\" i], input[formcontrolname*=\"email\" i], input[formcontrolname*=\"user\" i], input[autocomplete=\"username\"], input[type=\"email\"]", pass: "#LoginPasswordTextBox, input[name=\"password\" i], input[formcontrolname*=\"pass\" i], input[type=\"password\"]", btn: "#LoginSubmitButton, button[type=\"submit\"], input[type=\"submit\"], button[id*=\"login\" i]" },
     };
     // This function is INJECTED into the page (MAIN world) — it can't call the
     // service-worker helpers, so derive the hint key from the code shape alone:
@@ -2588,9 +2594,20 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const findBtn = (scope) => {
       const root = scope || document;
       if (hint && hint.btn) { const b = root.querySelector(hint.btn); if (vis(b)) return b; }
-      return root.querySelector(
+      const byAttr = root.querySelector(
         'button[type="submit"], input[type="submit"], button[name*="login" i], button[id*="login" i], button[id*="signin" i], button[id*="next" i], button[id*="continue" i]'
       );
+      if (vis(byAttr)) return byAttr;
+      // Angular/React logins (the modern SmartHub/VEC "Sign In" form — verified
+      // 2026-07-07 against vermontelectric.smarthub.coop) use a PLAIN <button> with
+      // no type=submit / id / name, and the inputs are often NOT in a real <form> —
+      // so the attribute selectors + form.requestSubmit() both whiff and the fill
+      // never submits (the exact VEC auto-login failure). CSS can't match text, so
+      // scan visible buttons for a login-ish label and take the first (a login page
+      // has one primary action).
+      const RX = /\b(sign\s*in|log\s*in|log\s*on|login|continue|submit|next)\b/i;
+      const btns = Array.from(root.querySelectorAll('button, input[type="button"], [role="button"]'));
+      return btns.find((b) => vis(b) && RX.test(((b.textContent || b.value || "") + "").trim())) || null;
     };
     const setVal = (el, val) => {
       const proto = el.tagName === "TEXTAREA"
