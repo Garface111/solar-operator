@@ -292,6 +292,50 @@ def test_array_daily_split_empty_side_flags_false():
         print("PASS empty-side flags")
 
 
+def _row(sn, *, window=None, peak=None, daily=None, power=None):
+    return {"sn": sn, "name": sn, "window_kwh": window, "peak_kwh": peak,
+            "daily": daily or [], "current_power_w": power, "status": "ok"}
+
+
+def test_no_energy_register_flags_dead_metering_unit():
+    """Tannery #7: live power but no cumulative energy, beside producing siblings."""
+    sibs = [_row(f"s{i}", window=1680.0, peak=140.0,
+                 daily=[{"date": "2026-07-06", "kwh": 120.0}], power=12000)
+            for i in range(6)]
+    dead = _row("191213319", window=0.0, peak=None, daily=[], power=5752)  # #7
+    rows = sibs + [dead]
+    IF._flag_no_energy_register(rows)
+    assert rows[-1]["no_energy_register"] is True, "the dead-register unit must be flagged"
+    assert all(r.get("no_energy_register") in (False, None) for r in rows[:-1]), \
+        "producing siblings must NOT be flagged"
+    print("PASS no-energy-register flags the dead unit only")
+
+
+def test_no_energy_register_not_flagged_on_whole_array_gap():
+    """A whole-array capture gap (no unit producing) must flag NObody — the
+    staleness banner already owns that story; we must not paint every unit."""
+    rows = [_row(f"s{i}", window=0.0, peak=None, daily=[], power=None) for i in range(7)]
+    IF._flag_no_energy_register(rows)
+    assert all(not r.get("no_energy_register") for r in rows), \
+        "an array-wide gap must not flag any single unit"
+    print("PASS whole-array gap flags nobody")
+
+
+def test_no_energy_register_ignores_unit_with_history():
+    """A unit that HAS produced (has energy history) is gradeable — never flagged,
+    even if it's momentarily quiet."""
+    sibs = [_row(f"s{i}", window=1680.0, peak=140.0,
+                 daily=[{"date": "2026-07-06", "kwh": 120.0}], power=12000)
+            for i in range(6)]
+    quiet = _row("q1", window=800.0, peak=90.0,
+                 daily=[{"date": "2026-07-05", "kwh": 90.0}], power=0)
+    rows = sibs + [quiet]
+    IF._flag_no_energy_register(rows)
+    assert not rows[-1].get("no_energy_register"), \
+        "a unit with real energy history must never be flagged no-energy-register"
+    print("PASS unit-with-history not flagged")
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()
@@ -300,4 +344,7 @@ if __name__ == "__main__":
     test_origin_links_deep_link_to_vendor_portal()
     test_array_daily_split_separates_vendor_and_utility_streams()
     test_array_daily_split_empty_side_flags_false()
+    test_no_energy_register_flags_dead_metering_unit()
+    test_no_energy_register_not_flagged_on_whole_array_gap()
+    test_no_energy_register_ignores_unit_with_history()
     print("ALL PASS")

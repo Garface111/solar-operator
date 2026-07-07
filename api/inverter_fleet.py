@@ -648,6 +648,46 @@ def _sync_recency(invs) -> dict:
     return {"synced_at": freshest.isoformat(), "age_min": age_min}
 
 
+def _flag_no_energy_register(inv_rows: list[dict]) -> None:
+    """Stamp inv_rows[*]["no_energy_register"] in place for a unit whose vendor
+    reports (or could report) LIVE POWER but has NO cumulative-energy history at
+    all — the classic dead-metering case Bruce's Tannery #7 (S/N 191213319)
+    exposed: SMA streams its live watts but its TotWhOut register is dead, so it
+    has an empty daily series, window_kwh 0, peak None, and peer_index None. The
+    14-day peer verdict can't grade it (defaults 'ok'), and because per-inverter
+    power is split by TODAY'S energy share, a zero-energy unit gets a bogus 0/low
+    live allocation — so grading its live power against peers is meaningless too.
+
+    We mark it so EVERY surface can render an honest, distinct "no energy data /
+    metering issue" state instead of the harsh Error/Offline it otherwise falls
+    into (a producing inverter must never read as dead). This mirrors the digest's
+    _nonreporting_inverters predicate exactly (api/jobs/morning_fleet_digest.py)
+    so the email and the dashboard agree.
+
+    Predicate (same as the digest): the unit has NO production data at all while a
+    producing MAJORITY of its array cohort IS reporting — so an array-wide capture
+    gap (every unit dark, already surfaced by the staleness banner) never flags
+    every inverter. Requires >=2 inverters and >=2 producers, majority producing.
+    """
+    if len(inv_rows) < 2:
+        return
+
+    def _produced(r: dict) -> bool:
+        return bool((r.get("window_kwh") or 0) > 0 or (r.get("peak_kwh") or 0) > 0)
+
+    def _has_history(r: dict) -> bool:
+        return any(p.get("kwh") is not None for p in (r.get("daily") or []))
+
+    producing = sum(1 for r in inv_rows if _produced(r))
+    # Only judge when a producing majority reports; else it's a whole-array gap.
+    if producing < 2 or producing * 2 < len(inv_rows):
+        return
+    for r in inv_rows:
+        # No cumulative energy anywhere in the window (empty series + no window/peak)
+        # while its siblings produce → its energy register isn't reporting.
+        r["no_energy_register"] = bool(not _produced(r) and not _has_history(r))
+
+
 def _array_alert(inv_rows: list[dict]) -> dict:
     worst, worst_rank, bad = "ok", 0, 0
     for inv in inv_rows:
@@ -1127,6 +1167,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "nameplate_kw": _eff_nameplate_kw(iv, m),
                 "peer_index": u.get("peer_index"),
                 "status": u.get("status", "ok"),
+                # Dead-energy-register flag (default off; set by _flag_no_energy_register
+                # below once the whole cohort is known). True = live power but no
+                # cumulative-energy history, so it can't be peer-graded — surfaces
+                # render an honest "no energy data" state, never Error/Offline.
+                "no_energy_register": False,
                 "diagnosis": u.get("diagnosis"),
                 "window_kwh": u.get("window_kwh"),
                 "daily": daily,                       # ascending [{date,kwh}] for the sparkline
@@ -1169,6 +1214,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "origin_label": _VENDOR_LABEL.get((iv.vendor or "").lower()) or (iv.vendor or None),
             })
         inv_total += len(inv_rows)
+
+        # Flag any dead-energy-register unit (live power but no cumulative energy,
+        # e.g. Tannery #7) so every surface renders an honest "no energy data"
+        # state instead of a harsh Error/Offline. Mirrors the digest predicate.
+        _flag_no_energy_register(inv_rows)
 
         # vendor mix for the array chip
         vendors = sorted({iv.vendor for iv in ivs})
