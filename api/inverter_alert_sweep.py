@@ -387,6 +387,15 @@ def sweep_tenant(db, tenant: Tenant) -> int:
 
     # Clear incidents that have recovered (no longer flagged).
     for key, st in list(states.items()):
+        # This sweep ONLY owns inverter incidents, whose key is
+        # "<array_id>|<inverter_id-or-name>" and always contains a "|". The same
+        # table is shared by other alert jobs (coop_session_dead:<tenant>:<prov>,
+        # gmp_token_final:<tenant>) whose keys have NO "|". Deleting those here as
+        # "recovered" wiped their dedup every sweep, so the co-op-DEAD and
+        # GMP-token FINAL WARNING alerts re-fired on a loop (operator spammed
+        # hourly/daily). Never reconcile another job's rows.
+        if "|" not in key:
+            continue
         if key not in flagged_keys:
             db.delete(st)
 
