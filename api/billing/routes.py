@@ -100,6 +100,10 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         # allocation_pct (the billing multiplier). Surfaced so the setup/edit form
         # can pre-fill it. NULL → the check falls back to allocation_pct.
         "array_share_pct": getattr(s, "array_share_pct", None),
+        # Per-offtaker cross-check variance threshold (percentage points, Bruce
+        # 2026-07-07). NULL → the fleet default SHARE_VARIANCE_THRESHOLD_PCT; the
+        # setup/edit form pre-fills this and shows the effective default when blank.
+        "crosscheck_threshold_pct": getattr(s, "crosscheck_threshold_pct", None),
         "billing_model": s.billing_model,
         "rate_per_kwh": getattr(s, "rate_per_kwh", None),
         "discount_pct": getattr(s, "discount_pct", None),
@@ -364,7 +368,13 @@ def list_subscriptions(authorization: Optional[str] = Header(default=None)):
                     ).scalars().all()}
             for d in subs:
                 d["utility_account_name"] = amap.get(d.get("utility_account_id"))
-        return {"ok": True, "subscriptions": subs}
+        # The fleet-default cross-check variance threshold (Bruce 2026-07-07): the
+        # setup/edit form shows "flags beyond X%" from this when the per-offtaker
+        # override is blank. Lazy import keeps reconcile_bills out of the module
+        # import cycle (it imports delivery lazily itself).
+        from .reconcile_bills import SHARE_VARIANCE_THRESHOLD_PCT
+        return {"ok": True, "subscriptions": subs,
+                "crosscheck_threshold_default_pct": SHARE_VARIANCE_THRESHOLD_PCT}
 
 
 @router.get("/list-bundle")
@@ -540,6 +550,23 @@ def _validate_array_share(pct):
     return p
 
 
+def _validate_crosscheck_threshold(pct):
+    """Validate the optional crosscheck_threshold_pct — the per-offtaker variance
+    threshold (PERCENTAGE POINTS) the bill-accuracy cross-check flags beyond
+    (Bruce 2026-07-07, the knob that replaced the manual cross-check-share entry).
+    A positive number; None passes through (the check uses the fleet default).
+    Mirrors the PATCH-path rule."""
+    if pct is None:
+        return None
+    try:
+        p = float(pct)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "crosscheck_threshold_pct must be a positive number")
+    if not (0.0 < p <= 100.0):
+        raise HTTPException(400, "crosscheck_threshold_pct must be a percentage-point value in (0, 100] — e.g. 0.1")
+    return p
+
+
 def _validate_invoice_start(v):
     """Validate the optional invoice_number_start (a whole number seed for
     sequential invoice numbering). None passes through. Mirrors the PATCH rule."""
@@ -575,6 +602,7 @@ async def create_subscription(
     allocation_pct: Optional[float] = Form(default=None),
     array_allocations: Optional[str] = Form(default=None),
     array_share_pct: Optional[float] = Form(default=None),
+    crosscheck_threshold_pct: Optional[float] = Form(default=None),
     invoice_number_start: Optional[int] = Form(default=None),
     rate_per_kwh: Optional[float] = Form(default=None),
     discount_pct: Optional[float] = Form(default=None),
@@ -612,6 +640,7 @@ async def create_subscription(
     # array_share_pct + invoice_number_start are optional on create (they were
     # PATCH-only until now); validate here so a bad value fails before any write.
     array_share_val = _validate_array_share(array_share_pct)
+    threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
     invoice_start_val = _validate_invoice_start(invoice_number_start)
 
     if file is None:
@@ -619,7 +648,9 @@ async def create_subscription(
             t, customer_name=customer_name, array_id=array_id,
             utility_account_id=utility_account_id,
             allocation_pct=allocation_pct, array_allocations=array_allocations,
-            array_share_pct=array_share_val, invoice_number_start=invoice_start_val,
+            array_share_pct=array_share_val,
+            crosscheck_threshold_pct=threshold_val,
+            invoice_number_start=invoice_start_val,
             rate_per_kwh=rate_per_kwh,
             discount_pct=discount_pct, net_rate_per_kwh=net_rate_per_kwh,
             cadence=cadence, send_mode=send_mode,
@@ -662,6 +693,7 @@ async def create_subscription(
             discount_pct=_validate_discount(discount_pct),
             net_rate_per_kwh=_validate_rate(net_rate_per_kwh),
             array_share_pct=array_share_val,
+            crosscheck_threshold_pct=threshold_val,
             invoice_number_start=invoice_start_val,
             invoice_number_next=invoice_start_val,
             cadence=cadence,
@@ -684,7 +716,8 @@ async def create_subscription(
 
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
-    utility_account_id=None, array_share_pct=None, invoice_number_start=None,
+    utility_account_id=None, array_share_pct=None, crosscheck_threshold_pct=None,
+    invoice_number_start=None,
     rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
@@ -784,6 +817,7 @@ async def _create_manual_subscription(
         disc_val = _validate_discount(discount_pct)
         net_val = _validate_rate(net_rate_per_kwh)
         share_val = _validate_array_share(array_share_pct)
+        threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
         inv_start_val = _validate_invoice_start(invoice_number_start)
         with SessionLocal() as db:
             acct = db.get(UtilityAccount, utility_account_id)
@@ -863,6 +897,7 @@ async def _create_manual_subscription(
                 allocation_pct=pct,
                 array_allocations=None,
                 array_share_pct=share_val,
+                crosscheck_threshold_pct=threshold_val,
                 invoice_number_start=inv_start_val,
                 invoice_number_next=inv_start_val,
                 rate_per_kwh=rate_val,
@@ -935,6 +970,7 @@ async def _create_manual_subscription(
     disc_val = _validate_discount(discount_pct)
     net_val = _validate_rate(net_rate_per_kwh)
     share_val = _validate_array_share(array_share_pct)
+    threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
     inv_start_val = _validate_invoice_start(invoice_number_start)
 
     with SessionLocal() as db:
@@ -966,6 +1002,7 @@ async def _create_manual_subscription(
             allocation_pct=(allocs[0]["allocation_pct"] if allocs else pct),
             array_allocations=(allocs or None),
             array_share_pct=share_val,
+            crosscheck_threshold_pct=threshold_val,
             invoice_number_start=inv_start_val,
             invoice_number_next=inv_start_val,
             rate_per_kwh=rate_val,
@@ -1014,6 +1051,12 @@ class SubscriptionPatch(BaseModel):
     # Distinct from allocation_pct. Explicit null clears it (check falls back to
     # allocation_pct). Uses model_fields_set to tell "clear" from "omitted".
     array_share_pct: Optional[float] = None
+    # Per-offtaker cross-check VARIANCE THRESHOLD (percentage points, Bruce
+    # 2026-07-07): how far GMP's implied share may drift from the entered billing
+    # share before the check flags. Explicit null clears it (falls back to the
+    # fleet default SHARE_VARIANCE_THRESHOLD_PCT). model_fields_set tells
+    # "clear" from "omitted".
+    crosscheck_threshold_pct: Optional[float] = None
     # Re-bind the offtaker to a different GMP utility bill (the billing source).
     # Validated to a GMP account the operator owns; array_id is refreshed from it.
     utility_account_id: Optional[int] = None
@@ -1102,6 +1145,9 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
         if "array_share_pct" in body.model_fields_set:
             # null clears it (check falls back to allocation_pct); a number validates.
             sub.array_share_pct = _validate_array_share(body.array_share_pct)
+        if "crosscheck_threshold_pct" in body.model_fields_set:
+            # null clears it (check falls back to the fleet default); a number validates.
+            sub.crosscheck_threshold_pct = _validate_crosscheck_threshold(body.crosscheck_threshold_pct)
         if body.array_id is not None:
             from ..models import Array
             arr = db.get(Array, body.array_id)
@@ -2955,14 +3001,41 @@ def draft_versions(sub_id: int, authorization: Optional[str] = Header(default=No
         return {"versions": [_draft_dict(d, sub) for d in out]}
 
 
+@router.get("/subscriptions/{sub_id}/bill-periods")
+def subscription_bill_periods(sub_id: int,
+                              authorization: Optional[str] = Header(default=None)):
+    """The billable periods the operator can DRAFT for this offtaker (Bruce
+    2026-07-07, Comment 4) — every settled utility bill with excess, newest
+    first, plus which one is the implicit latest default. Feeds the period
+    selector on the draft flow. Read-only; empty `periods` = keep the implicit
+    latest-bill default (nothing to choose between)."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        cadence = getattr(sub, "cadence", None) or "monthly"
+        from .delivery import settled_periods_for_sub
+        periods = settled_periods_for_sub(sub)
+        return {"ok": True, "cadence": cadence, "periods": periods}
+
+
 @router.post("/subscriptions/{sub_id}/draft")
-def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=None)):
-    """Build a pending draft for this subscription's latest billing period, from
-    its stored workbook. This is what the (operator-built) GMP-detection backend
-    will call when a new GMP invoice lands; the operator can also trigger it
-    manually. Reuses an existing pending draft for the same period (idempotent)."""
+def generate_draft(sub_id: int, period: Optional[str] = Query(default=None),
+                   authorization: Optional[str] = Header(default=None)):
+    """Build a pending draft for this subscription's billing period, from its
+    stored workbook. This is what the (operator-built) GMP-detection backend will
+    call when a new GMP invoice lands; the operator can also trigger it manually.
+    Reuses an existing pending draft for the same period (idempotent).
+
+    `period` (Bruce 2026-07-07, Comment 4) targets a SPECIFIC settled bill period
+    instead of the implicit latest — 'YYYY-MM' (monthly) or 'YYYY-Qn' (quarterly),
+    from GET /subscriptions/{id}/bill-periods. Omit it to draft the latest bill
+    (the long-standing default). A chosen historical period NEVER supersedes the
+    other pending drafts (only a latest/default draft does), so the operator can
+    hold several periods side by side in the approval inbox."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    # An explicit period pins a specific historical bill; None = the latest bill.
+    target_period = (period or "").strip() or None
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
         # ALWAYS pull the freshest GMP bill for this offtaker's bound account first, so
@@ -2978,10 +3051,14 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
             except Exception:  # noqa: BLE001
                 pass
         try:
-            match = build_match(sub)
+            match = build_match(sub, period_label=target_period)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(422, f"workbook unreadable: {e}")
         if not match.matched or not match.latest_period:
+            if target_period:
+                raise HTTPException(
+                    422, f"no settled bill for {target_period} on this offtaker's "
+                         "account — pick another billing period.")
             raise HTTPException(422, "no current billing period in the stored workbook")
 
         ci = match.computed_invoice or {}
@@ -3022,14 +3099,17 @@ def generate_draft(sub_id: int, authorization: Optional[str] = Header(default=No
         for dup in matches[1:]:        # collapse pre-existing duplicates
             dup.status = "dismissed"
             dup.dismissed_at = datetime.utcnow()
-        # SUPERSEDE older-period drafts: build_match always uses the LATEST bill, so any
-        # OTHER pending draft is from an earlier period and must not linger — otherwise the
-        # approval inbox can surface a stale bill (Paul Bozuwa: a May $3,167 draft sat in
-        # front of the new June one). Keep exactly ONE pending draft per offtaker: this one.
-        for dr in pendings:
-            if dr not in matches:
-                dr.status = "dismissed"
-                dr.dismissed_at = datetime.utcnow()
+        # SUPERSEDE older-period drafts — ONLY when drafting the implicit latest bill.
+        # The default draft uses the LATEST bill, so any OTHER pending draft is a stale
+        # earlier period that must not linger in front of it (Paul Bozuwa: a May $3,167
+        # draft sat in front of the new June one). But when the operator EXPLICITLY picks
+        # a historical period (Bruce, Comment 4), leave the others alone — they may be
+        # deliberately holding several periods for review side by side.
+        if not target_period:
+            for dr in pendings:
+                if dr not in matches:
+                    dr.status = "dismissed"
+                    dr.dismissed_at = datetime.utcnow()
 
         d = existing or ReportDraft(
             tenant_id=t.id, subscription_id=sub.id,

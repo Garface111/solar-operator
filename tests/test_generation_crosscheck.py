@@ -19,7 +19,7 @@ from api.db import SessionLocal
 from api.models import (Tenant, Array, UtilityAccount, Bill, Client,
                         BillingReportSubscription)
 from api.billing.reconcile_bills import (SHARE_VARIANCE_THRESHOLD_PCT,
-                                         generation_crosscheck)
+                                         _ALLOC_TOL_KWH, generation_crosscheck)
 
 FIX = pathlib.Path(__file__).parent / "fixtures" / "billing"
 BASE = "/v1/array-operator/billing"
@@ -128,6 +128,61 @@ def test_crosscheck_flags_bruces_real_case_via_kwh_tolerance():
     assert xc["flagged"] is True                                   # kWh tolerance: caught
     assert abs(xc["kwh_offtaker_expected"] - 7345.5) < 0.3
     assert xc["kwh_offtaker_credited"] == 7343.0
+
+
+def _seed_small_pool_tenant() -> tuple[str, str, int]:
+    """A tenant whose host bill states a SMALL group excess (300 kWh), so a
+    sub-1-point share variance stays inside the 2 kWh allocation tolerance — this
+    ISOLATES the share-variance branch the per-offtaker threshold governs (the kWh
+    tolerance is a separate, deliberately-independent audit-strength catch)."""
+    tid = "ten_smpool_" + secrets.token_hex(4)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key="sol_live_" + secrets.token_urlsafe(12),
+                      name="Small Pool Operator", contact_email=f"{tid}@operator.test",
+                      active=True, product="array_operator"))
+        db.flush()
+        arr = Array(tenant_id=tid, name="Small Array", region="VT")
+        db.add(arr); db.flush()
+        host = UtilityAccount(tenant_id=tid, provider="gmp",
+                              account_number="HOSTS", array_id=arr.id)
+        db.add(host); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=host.id,
+                    period_start=datetime(2026, 6, 1), period_end=datetime(2026, 6, 30),
+                    kwh_generated=320, kwh_sent_to_grid=300.0, is_net_metered=True))
+        db.commit()
+        return tid, f"Bearer {mint_session_for_tenant(tid)}", arr.id
+
+
+def test_crosscheck_per_offtaker_threshold_override(client):
+    """Bruce 2026-07-07 (Comment 3): the per-offtaker variance THRESHOLD is the
+    knob. On a 300 kWh pool, an entered 30.0% share vs GMP's implied ~30.5%
+    (credited 91.5) is a ~0.5-point share variance with only a ~1.5 kWh delta
+    (inside the 2 kWh audit tolerance) — so the SHARE branch alone decides:
+    flagged at the 0.1-point default, quiet under a 1.0-point per-offtaker
+    threshold, and the response reports the override threshold."""
+    tid, auth, aid = _seed_small_pool_tenant()
+    sub_id = _seed_offtaker(tid, aid, "Small Offtaker", 0.30, 91.5)
+    # default threshold (0.1) → the 0.5-point variance flags
+    r0 = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth))
+    xc0 = r0.json()["crosscheck"]
+    assert xc0["flagged"] is True and abs(xc0["variance_pct"]) > SHARE_VARIANCE_THRESHOLD_PCT
+    assert abs(xc0["delta_kwh"]) <= _ALLOC_TOL_KWH, xc0   # kWh branch is clean
+    # widen the per-offtaker threshold to 1.0 point → the same variance is tolerated
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+        sub.crosscheck_threshold_pct = 1.0
+        db.commit()
+    xc1 = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth)).json()["crosscheck"]
+    assert xc1["threshold_pct"] == 1.0
+    assert xc1["flagged"] is False, xc1
+    # a non-positive/garbage override falls back to the fleet default (never disables)
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+        sub.crosscheck_threshold_pct = 0.0
+        db.commit()
+    xc2 = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth)).json()["crosscheck"]
+    assert xc2["threshold_pct"] == SHARE_VARIANCE_THRESHOLD_PCT
+    assert xc2["flagged"] is True
 
 
 def test_crosscheck_null_when_it_cannot_run_draft_still_generates(client):
