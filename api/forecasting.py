@@ -84,6 +84,7 @@ Network + DB at the edges; the math core (`expected_kwh_from_poa`,
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -91,6 +92,43 @@ from typing import Any, Optional
 import httpx
 
 log = logging.getLogger("forecasting")
+
+# ── cross-request cache for the Open-Meteo calls ──────────────────────────────
+# WHY: the fleet-forecast endpoint hits Open-Meteo for every distinct site
+# location on EVERY request (POA irradiance + current sky). Within one request
+# those are memoized, but nothing survived across requests — so re-opening the
+# Analysis tab re-paid a fistful of external HTTP round-trips (each up to 20s
+# timeout), which is exactly why the tab "took a while" to fill its Expected/Sky
+# columns. These process-level TTL caches make a repeat load instant:
+#   * POA is archive/reanalysis irradiance for a FIXED past window (start,end in
+#     the key) — it never changes once the day is over, so a long TTL is safe;
+#     the date in the key rotates it daily on its own.
+#   * Current weather changes slowly — a short TTL keeps the Sky icon fresh
+#     enough while still collapsing bursts.
+# Only SUCCESSFUL results are cached (never {} / None) so a transient Open-Meteo
+# blip can't stick. Keyed by rounded coords so co-located arrays share an entry.
+_POA_TTL_S = 6 * 3600            # archive POA for a past window is immutable-enough
+_WX_TTL_S = 20 * 60             # current sky: fresh within ~20 min
+_CACHE_MAX = 2048              # hard cap so the dicts can't grow unbounded
+_poa_cache: dict[tuple, tuple[float, dict]] = {}   # key -> (expires_at, poa_by_day)
+_wx_cache: dict[tuple, tuple[float, int]] = {}     # key -> (expires_at, weather_code)
+
+
+def _cache_get(store: dict, key: tuple):
+    hit = store.get(key)
+    if hit is None:
+        return None
+    expires_at, value = hit
+    if time.monotonic() >= expires_at:
+        store.pop(key, None)
+        return None
+    return value
+
+
+def _cache_put(store: dict, key: tuple, value, ttl_s: float) -> None:
+    if len(store) >= _CACHE_MAX:
+        store.clear()   # cheap bounded-memory guard; caches re-warm in one request
+    store[key] = (time.monotonic() + ttl_s, value)
 
 # ── Model constants (all labeled, all surfaced to the UI) ─────────────────────
 STC_IRRADIANCE_KWH_M2 = 1.0     # Standard Test Conditions reference (1000 W/m²)
@@ -246,6 +284,13 @@ def fetch_poa_daily(
         "timezone": _OPEN_METEO_TZ,
         "start_date": start.isoformat(), "end_date": end.isoformat(),
     }
+    # Cross-request cache: the window (start,end) is in the key, so a past-window
+    # POA — which never changes — is served instantly on every repeat load.
+    ckey = (round(lat, 4), round(lng, 4), round(tilt_deg, 1), round(azimuth_deg, 1),
+            start.isoformat(), end.isoformat(), bool(forecast))
+    cached = _cache_get(_poa_cache, ckey)
+    if cached is not None:
+        return cached
     try:
         r = httpx.get(base, params=params, timeout=_OPEN_METEO_TIMEOUT)
         if r.status_code != 200:
@@ -256,7 +301,10 @@ def fetch_poa_daily(
         vals = h.get("global_tilted_irradiance") or []
         if not times or not vals:
             return {}
-        return _sum_hourly_to_daily(times, vals)
+        daily = _sum_hourly_to_daily(times, vals)
+        if daily:                       # cache successes only — never a transient blank
+            _cache_put(_poa_cache, ckey, daily, _POA_TTL_S)
+        return daily
     except Exception as exc:
         log.warning("open-meteo POA fetch failed (%s): %s", base, exc)
         return {}
@@ -266,6 +314,10 @@ def fetch_current_weather_code(lat: float, lng: float) -> Optional[int]:
     """Current Open-Meteo WMO weathercode at a location (for the Analysis Sites
     'Sky' column). Returns None on any failure — the UI simply shows no icon, never
     a guess. Cheap single call; callers should memoize per rounded lat/lng."""
+    ckey = (round(lat, 3), round(lng, 3))
+    cached = _cache_get(_wx_cache, ckey)
+    if cached is not None:
+        return cached
     try:
         r = httpx.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -276,7 +328,11 @@ def fetch_current_weather_code(lat: float, lng: float) -> Optional[int]:
         if r.status_code != 200:
             return None
         code = ((r.json() or {}).get("current_weather") or {}).get("weathercode")
-        return int(code) if code is not None else None
+        if code is None:
+            return None
+        wcode = int(code)
+        _cache_put(_wx_cache, ckey, wcode, _WX_TTL_S)
+        return wcode
     except Exception:
         return None
 

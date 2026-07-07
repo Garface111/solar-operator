@@ -76,11 +76,39 @@ def _get(config: dict, path: str, params: dict | None = None) -> dict:
         raise InverterError(f"Solar.web returned non-JSON response: {exc}") from exc
 
 
+def _addr_str(addr: object) -> str | None:
+    """Flatten Solar.web's polymorphic pvsystem `address` into one geocodable line.
+    The API returns a dict {street,city,state,zip,country}; tolerate a bare string
+    or None. Returns None when there's nothing usable."""
+    if isinstance(addr, dict):
+        return ", ".join(
+            str(p) for p in (addr.get("street"), addr.get("city"),
+                             addr.get("state"), addr.get("zip"), addr.get("country"))
+            if p
+        ) or None
+    return (str(addr).strip() or None) if addr else None
+
+
 def validate(config: dict) -> dict:
     require_fields(config, "access_key_id", "access_key_value", "pv_system_id")
     pid = config["pv_system_id"]
     body = _get(config, f"/pvsystems/{pid}")
     return {"site_name": body.get("name"), "peak_power": body.get("peakPower")}
+
+
+def fetch_details(config: dict) -> dict:
+    """One system's display metadata + its geocodable address (GET /pvsystems/{id}).
+    Mirrors solaredge.site_details so the daily-pull location backfill can self-heal
+    a Fronius array that was attached before/without a resolved address. Address is a
+    single line ready for the geocoder, or None when Solar.web has none on file."""
+    require_fields(config, "access_key_id", "access_key_value", "pv_system_id")
+    pid = config["pv_system_id"]
+    body = _get(config, f"/pvsystems/{pid}")
+    return {
+        "site_name": body.get("name"),
+        "peak_power": body.get("peakPower"),
+        "address": _addr_str(body.get("address")),
+    }
 
 
 def discover_systems(config: dict) -> list[dict]:
@@ -115,19 +143,11 @@ def discover_systems(config: dict) -> list[dict]:
                     peak_kw = round(float(peak) / 1000.0, 2)
                 except (TypeError, ValueError):
                     peak_kw = None
-            addr = s.get("address")
-            if isinstance(addr, dict):
-                addr_str = ", ".join(
-                    str(p) for p in (addr.get("street"), addr.get("city"),
-                                     addr.get("state"), addr.get("country")) if p
-                ) or None
-            else:
-                addr_str = str(addr) if addr else None
             out.append({
                 "pv_system_id": str(sid),
                 "name": (s.get("name") or "").strip() or f"PV system {sid}",
                 "peak_power_kw": peak_kw,
-                "address": addr_str,
+                "address": _addr_str(s.get("address")),
             })
         if len(systems) < limit:
             break
