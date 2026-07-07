@@ -440,6 +440,11 @@ _TOKEN_LABELS = [
     ("amount due", "{{ amount_due }}"), ("amount owed", "{{ amount_due }}"),
     ("final amount", "{{ amount_due }}"),
     ("billing at the estimated", "{{ amount_due }}"),   # flat-rate "billed this period" cell
+    # A "Fixed Monthly Budget Payment" cell is a per-offtaker budget, NOT a static
+    # template constant — tokenize it so the replicator fills each offtaker's own
+    # budget (and BLANKS it for offtakers with no budget, instead of leaking the
+    # template author's budget onto them). See offtaker_values_from_match["budget"].
+    ("fixed monthly budget", "{{ budget }}"),
     ("invoice number", "{{ invoice_number }}"), ("invoice no", "{{ invoice_number }}"),
     ("invoice date", "{{ invoice_date }}"),
     ("due date", "{{ due_date }}"),

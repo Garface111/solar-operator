@@ -35,7 +35,8 @@ log = logging.getLogger(__name__)
 
 # Token (from matcher._build_token_map) → key in the offtaker values dict.
 _TOKEN_KEYS = ("amount_due", "kwh", "solar_value", "billed_value", "solar_savings",
-               "period_start", "period_end", "invoice_number", "invoice_date", "due_date")
+               "period_start", "period_end", "invoice_number", "invoice_date", "due_date",
+               "budget")
 
 
 def offtaker_values_from_match(match, *, invoice_date: Optional[_dt.date] = None,
@@ -56,6 +57,13 @@ def offtaker_values_from_match(match, *, invoice_date: Optional[_dt.date] = None
         "invoice_number": ci.get("invoice_number"),
         "invoice_date": inv_d,
         "due_date": inv_d + _dt.timedelta(days=due_days),
+        # Fixed Monthly Budget Payment: the per-offtaker budget total, present ONLY
+        # when this offtaker is actually on a budget (budget_override). Left out
+        # otherwise so a "Fixed Monthly Budget Payment" cell BLANKS for non-budget
+        # offtakers instead of showing the template author's budget (the Norwich
+        # fall-to-generic bug: Fairlee's $1,250 leaked onto Norwich and tripped the
+        # sample-leak guard).
+        "budget": (ci.get("amount_owed") if ci.get("budget_override") else None),
     }
     return {k: v for k, v in vals.items() if v is not None}
 
