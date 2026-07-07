@@ -96,7 +96,7 @@ def test_zip_layout_month_array_invoice_and_bills(monkeypatch):
     names = zipfile.ZipFile(io.BytesIO(data)).namelist()
     assert "2026-06/Timberworks/St-J-Muni_invoice.pdf" in names, names
     assert "2026-06/Timberworks/St-J-Muni_offtaker-bill.pdf" in names, names
-    assert "2026-06/Timberworks/_array-bill_Timberworks.pdf" in names, names
+    assert "2026-06/Timberworks/_Master-Array-Bill_Timberworks_2026-06.pdf" in names, names
     assert count == 3
 
 

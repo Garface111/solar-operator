@@ -225,8 +225,11 @@ def build_archive_zip(db: Session, tenant_id: str,
                 if aid is not None and aid not in added_array_bill:
                     arr_pdf, _ = _latest_bill_pdf(db, a["account_id"], r["period_end"])
                     if arr_pdf:
-                        zf.writestr(f"{adir}/_array-bill_{_slug(a['array_name'])}.pdf",
-                                    arr_pdf)
+                        # Leading "_" keeps this at the top of the folder, above every
+                        # offtaker's invoice/bill. Labeled "Master Array Bill" + month.
+                        zf.writestr(
+                            f"{adir}/_Master-Array-Bill_{_slug(a['array_name'])}_{month_dir}.pdf",
+                            arr_pdf)
                         file_count += 1
                     added_array_bill.add(aid)
         if file_count == 0:
