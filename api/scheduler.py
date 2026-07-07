@@ -1112,11 +1112,69 @@ def prune_inverter_readings_job() -> dict:
         return {"pruned": 0, "error": "exception"}
 
 
+def _prewarm_reconcile() -> None:
+    """Keep the bill-audit reconcile sweep cache HOT so the offtaker-invoicing
+    "Doesn't match GMP" KPI + Bill-audit view load INSTANTLY instead of waiting
+    ~9-11s on the N+1 compute (Ford 2026-07-07). `build_match` dominates that
+    compute (~82%) AND is the math-critical cross-check, so we move the cost OFF the
+    request path rather than change the math: recompute reconcile_tenant on an 8-min
+    cadence (< the 10-min `_sweeps` TTL, so a warmed entry never goes stale mid-window)
+    and store it into the SAME in-process cache /reconcile-bills reads. Warms only AO
+    tenants that are actually active — already viewed this process-life, or with a
+    draft created in the last 3 days (auto-draft runs on every load, so a recent draft
+    == recently used). Bounded to 15 tenants/cycle; each compute owns its session."""
+    try:
+        import time as _time
+        from .billing.routes import _sweeps, _sweeps_lock
+        from .billing.reconcile_bills import reconcile_tenant
+        from .models import ReportDraft
+        tids: list[str] = []
+        with _sweeps_lock:
+            tids += [k[0] for k in _sweeps.keys() if k[1] == "reconcile"]
+        cutoff = datetime.utcnow() - timedelta(days=3)
+        with SessionLocal() as db:
+            rows = db.execute(
+                select(ReportDraft.tenant_id)
+                .where(ReportDraft.created_at >= cutoff)
+                .group_by(ReportDraft.tenant_id)
+            ).all()
+        tids += [r[0] for r in rows]
+        seen: set[str] = set()
+        warmed = 0
+        for tid in tids:
+            if tid in seen:
+                continue
+            seen.add(tid)
+            if warmed >= 15:
+                break
+            try:
+                with SessionLocal() as db2:   # each compute OWNS its session (pool-leak rule)
+                    res = reconcile_tenant(db2, tid)
+                with _sweeps_lock:
+                    _sweeps[(tid, "reconcile")] = {"status": "done", "result": res, "at": _time.time()}
+                warmed += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("prewarm reconcile failed for %s", tid, exc_info=True)
+        logger.info("prewarm_reconcile: warmed %d tenant sweep(s)", warmed)
+    except Exception:  # noqa: BLE001
+        logger.exception("prewarm_reconcile job crashed")
+
+
 def start():
     # Every 6 hours, enqueue pull-bills jobs for each active tenant
     scheduler.add_job(
         enqueue_pull_for_all_tenants,
         "interval", hours=6, id="enqueue_pull_bills", replace_existing=True,
+    )
+    # Every 8 min: keep the bill-audit reconcile sweep HOT for active AO tenants so
+    # the "Doesn't match GMP" KPI + Bill audit load instantly (Ford 2026-07-07). 8 min
+    # < the 10-min sweep TTL, so a warmed tenant never goes cold mid-window. First run
+    # ~90s after startup so a fresh deploy warms quickly.
+    scheduler.add_job(
+        _prewarm_reconcile,
+        "interval", minutes=8, id="prewarm_reconcile", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=90),
     )
     # Hourly: finalize expired trials (charge or extend)
     scheduler.add_job(
