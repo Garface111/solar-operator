@@ -139,7 +139,26 @@ def _sheet_name_for_array(name: str, used: set[str]) -> str:
 def _daily_generation_by_month(
     db, array_id: int, start: date, end: date
 ) -> dict[tuple[int, int], float]:
-    """Return {(year, month): kwh_sum} from DailyGeneration rows in [start, end]."""
+    """Return {(year, month): kwh_sum} of the BEST available daily generation for
+    an array in [start, end].
+
+    Base source is DailyGeneration (extension/CSV/inverter real readings, or the
+    coarse ``bill_prorate`` estimate that smears a monthly utility bill flat
+    across its days). Real GMP 15-minute meter data (``GmpDailyGeneration`` via
+    the reports read-contract) is the utility revenue meter Crown REC reports from
+    to NEPOOL-GIS, so it WINS for any month it covers nearly fully — that is what
+    makes our monthly numbers reconcile with Crown line-by-line instead of the
+    flattened bill-proration estimate (bill proration keeps the quarter total but
+    flattens the within-quarter monthly peaks, shifting per-month REC floors).
+
+    Coverage guard: the GMP total only overrides a month when it has near-full
+    daily coverage (>= days_in_month - 2), so a partial or stale-meter fragment
+    (e.g. an account whose interval feed stopped years ago) can never undercount a
+    month by silently replacing a full bill estimate with a few days of intervals.
+    """
+    import calendar as _cal
+    from ..reports import gmp_daily_read
+
     rows = db.execute(
         select(DailyGeneration.day, DailyGeneration.kwh)
         .where(
@@ -152,6 +171,13 @@ def _daily_generation_by_month(
     for day, kwh in rows:
         key = (day.year, day.month)
         buckets[key] = buckets.get(key, 0.0) + float(kwh)
+
+    # Overlay authoritative GMP meter data where a month is (nearly) fully covered.
+    for r in gmp_daily_read.get_monthly_totals(array_id, start=start, end=end, db=db):
+        days_in_month = _cal.monthrange(r["year"], r["month"])[1]
+        if r["days"] >= days_in_month - 2:
+            buckets[(r["year"], r["month"])] = r["kwh"]
+
     return buckets
 
 
