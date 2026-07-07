@@ -1086,6 +1086,29 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             net_note = ("the quarter's blended EXCESS + SOLCRED net-metering credit"
                         if _blend else
                         "the bill's EXCESS + SOLCRED net-metering credit")
+        # The DEFAULT rate this offtaker would price at with NO per-customer
+        # override — always the bill's own rate when the excess CASHED, or the
+        # comparable-months REFERENCE rate when it was BANKED. Surfaced (below,
+        # onto `computed`) so the editable Solar-credit-rate field can honestly
+        # show "default: $X — <source>" beneath an operator override, and label
+        # a banked period as a reference (NOT "from your GMP bill"). Independent
+        # of net_source: when a "customer" override wins, this still reports what
+        # the underlying bill/reference rate is. None when no bill has settled.
+        default_net_rate = credit_rate
+        if rate_source == "reference":
+            default_net_source = "gmp_credit_reference"
+            default_net_note = ("the solar credit rate for comparable months — this "
+                                "period's excess was banked (not cashed), trued up annually")
+            if _blend:
+                default_net_note += " (blended across the quarter's bills)"
+        elif credit_rate is not None:
+            default_net_source = "gmp_bill_credit"
+            default_net_note = ("the quarter's blended EXCESS + SOLCRED net-metering credit"
+                                if _blend else
+                                "the bill's EXCESS + SOLCRED net-metering credit")
+        else:
+            default_net_source = None
+            default_net_note = None
         period = Period(
             month=label, start=start, end=end,
             array_kwh=(_base_kwh or 0.0), customer_kwh=customer_kwh,
@@ -1110,6 +1133,14 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["effective_rate_per_kwh"] = round(net_rate * billing_rate, 6)
         computed["net_rate_source"] = net_source
         computed["net_rate_note"] = net_note
+        # The bill-derived DEFAULT (what the rate is WITHOUT a per-customer
+        # override) + its honest source — so the editable rate field can show it
+        # as the default beneath an override, and never mislabels a banked
+        # reference rate as "from your GMP bill".
+        computed["default_net_rate_per_kwh"] = (round(default_net_rate, 6)
+                                                if default_net_rate is not None else None)
+        computed["default_net_rate_source"] = default_net_source
+        computed["default_net_rate_note"] = default_net_note
         computed["discount_source"] = pricing["discount_source"]
         computed["rate_per_kwh"] = round(net_rate * billing_rate, 6)
         computed["rate_source"] = pricing["discount_source"]

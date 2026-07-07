@@ -2950,10 +2950,29 @@ def _draft_letter_default(d: ReportDraft, sub, email_fields: dict) -> Optional[d
         return None
 
 
+def _rate_meta_from_ci(ci: Optional[dict]) -> dict:
+    """The Solar-credit-rate provenance the editable rate field needs, pulled
+    from a draft's computed invoice: the bill-derived DEFAULT (value + honest
+    source/note, banked-reference vs the bill's own rate) and the rate the
+    invoice ACTUALLY resolved to (source 'customer' when a per-offtaker override
+    won). Empty for non-bill offtakers / no settled bill. Cheap dict reads — the
+    caller already computed `ci`, so this adds no DB work."""
+    ci = ci or {}
+    return {
+        "default_net_rate_per_kwh": ci.get("default_net_rate_per_kwh"),
+        "default_net_rate_source": ci.get("default_net_rate_source"),
+        "default_net_rate_note": ci.get("default_net_rate_note"),
+        "resolved_net_rate_per_kwh": ci.get("net_rate_per_kwh"),
+        "resolved_net_rate_source": ci.get("net_rate_source"),
+    }
+
+
 def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=None,
-                email_fields: Optional[dict] = None, attach_provider=None) -> dict:
+                email_fields: Optional[dict] = None, attach_provider=None,
+                rate_meta: Optional[dict] = None) -> dict:
     _letter = (_draft_letter_default(d, sub, email_fields)
                if email_fields else None) or {}
+    rate_meta = rate_meta or {}
     return {
         # The mass-template letter + subject rendered for this draft — the
         # operator's per-draft note overrides the letter; None when
@@ -3001,7 +3020,21 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         "cadence": (getattr(sub, "cadence", None) if sub else None),
         "cc_emails": (getattr(sub, "cc_emails", None) if sub else None),
         "discount_pct": (getattr(sub, "discount_pct", None) if sub else None),
+        # The operator's per-customer OVERRIDE ($/kWh) — None when they haven't set
+        # one (blank field = use the default). Distinct from the default below.
         "net_rate_per_kwh": (getattr(sub, "net_rate_per_kwh", None) if sub else None),
+        # The bill-derived DEFAULT rate + its HONEST source/note (from this draft's
+        # computed invoice), so the editable Solar-credit-rate field can show
+        # "default: $X — from your GMP bill | comparable-months reference (banked)".
+        # None in the list payload (computed only on the single-draft endpoints the
+        # editor calls, to avoid an N+1 across the whole inbox).
+        "default_net_rate_per_kwh": rate_meta.get("default_net_rate_per_kwh"),
+        "default_net_rate_source": rate_meta.get("default_net_rate_source"),
+        "default_net_rate_note": rate_meta.get("default_net_rate_note"),
+        # The rate the invoice ACTUALLY used + its source ("customer" when the
+        # override won) — lets the editor confirm an override is in force.
+        "resolved_net_rate_per_kwh": rate_meta.get("resolved_net_rate_per_kwh"),
+        "resolved_net_rate_source": rate_meta.get("resolved_net_rate_source"),
         "utility_account_id": (getattr(sub, "utility_account_id", None) if sub else None),
         "budget_amount_usd": (getattr(sub, "budget_amount_usd", None) if sub else None),
         # Calculated solar credit value (pre-budget-override). When a budget is set the
@@ -3282,7 +3315,8 @@ def generate_draft(sub_id: int, period: Optional[str] = Query(default=None),
             gmp_auto_status=_resolve_gmp_auto_status(db, sub),
             operator_name=getattr(t, "name", None),
             email_fields=_offtaker_email_fields(t.id),
-            attach_provider=_bound_provider(db, sub)),
+            attach_provider=_bound_provider(db, sub),
+            rate_meta=_rate_meta_from_ci(ci)),
             "crosscheck": crosscheck}
 
 
