@@ -3849,8 +3849,28 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                         vendor=provider, serial=serial,
                         source_site_id=site.site_id, source_array_id=arr.id,
                     )
-                    db.add(iv)
-                    db.flush()
+                    try:
+                        with db.begin_nested():   # SAVEPOINT around just this insert
+                            db.add(iv)
+                            db.flush()
+                    except IntegrityError:
+                        # A concurrent capture (the 6-min live loop overlapping a
+                        # manual sync, or two open tabs) inserted this
+                        # (tenant, vendor, serial) first, hitting
+                        # uq_inverter_tenant_vendor_serial and 500-ing the whole
+                        # capture. Roll back to the savepoint, re-read the winner's
+                        # row and keep going — mirrors _insert_daily_generation_race_safe.
+                        iv = db.execute(
+                            select(Inverter).where(
+                                Inverter.tenant_id == tenant.id,
+                                Inverter.vendor == provider,
+                                Inverter.serial == serial,
+                            )
+                        ).scalar_one()
+                        if iv.deleted_at is not None:
+                            iv.deleted_at = None
+                        if iv.source_array_id is None:
+                            iv.source_array_id = arr.id
                 else:
                     # Refresh source pointer; NEVER clobber a VALID owner grouping.
                     iv.source_site_id = site.site_id
