@@ -20,6 +20,7 @@ from sqlalchemy import select
 from ..adapters import solaredge as _se
 from ..db import SessionLocal
 from ..inverters import VENDORS, InverterError
+from ..inverters import fronius as _fronius
 from ..models import Array, DailyGeneration, InverterConnection, now
 
 log = logging.getLogger(__name__)
@@ -88,6 +89,30 @@ def _backfill_solaredge_location(db, arr: Array, config: dict) -> None:
         log.info("solaredge location backfill failed for array=%s", arr.id, exc_info=True)
 
 
+def _backfill_fronius_location(db, arr: Array, config: dict) -> None:
+    """Same self-heal as SolarEdge, for Fronius. A Fronius array is inverter-
+    onboarded (no linked utility service address), so its ONLY location source is
+    the address Solar.web reports for the PV system — captured once at connect
+    (_attach_fronius). An array connected before that harvest existed, or whose
+    Solar.web record had no address then, is otherwise stuck on "set location"
+    forever with no second chance (the exact gap Ford saw on Chester/Waterford:
+    Fronius sites with no Sky/Expected). Piggyback the daily pull — it runs for
+    every connected array regardless of connect date — so it self-heals. Cheap:
+    no-ops the instant the array already has a location; never blocks the energy
+    pull. If Solar.web truly has no address on file, this stays a no-op and the
+    one-click "set location" remains the fallback."""
+    if arr.latitude is not None:
+        return
+    try:
+        details = _fronius.fetch_details(config)
+        if details.get("address"):
+            from .. import array_owners as _ao
+            _ao._set_array_location(db, arr, address=details["address"],
+                                    source_label="vendor:fronius")
+    except Exception:  # noqa: BLE001 — best-effort only, never break the daily pull
+        log.info("fronius location backfill failed for array=%s", arr.id, exc_info=True)
+
+
 def _upsert_daily(db, tenant_id: str, array_id: int, vendor: str, entries: list[dict]) -> int:
     """Upsert [{day, kwh}] into DailyGeneration with source=vendor. Returns count."""
     if not entries:
@@ -153,6 +178,8 @@ def pull_all_inverters(days_back: int = 90) -> dict:
                     c.row.last_sync_at = now()
                 if c.vendor == "solaredge":
                     _backfill_solaredge_location(db, arr, c.config)
+                elif c.vendor == "fronius":
+                    _backfill_fronius_location(db, arr, c.config)
                 db.commit()
                 results.append({"array_id": arr.id, "vendor": c.vendor, "days_pulled": n})
             except InverterError as exc:
