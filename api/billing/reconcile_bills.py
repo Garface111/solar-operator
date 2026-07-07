@@ -473,6 +473,22 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
 SHARE_VARIANCE_THRESHOLD_PCT = 0.1
 
 
+def crosscheck_threshold_for(sub) -> float:
+    """The variance threshold (percentage points) THIS offtaker's cross-check
+    flags beyond. Bruce (2026-07-07) repurposed the old manual "cross-check
+    share" data entry into this single knob: the operator sets how far GMP's
+    implied share may drift from their entered billing share before the check
+    trips. A per-offtaker override on `crosscheck_threshold_pct`; NULL, zero, or
+    a non-positive/garbage value falls back to the fleet default so the check is
+    never silently disabled."""
+    raw = getattr(sub, "crosscheck_threshold_pct", None)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return SHARE_VARIANCE_THRESHOLD_PCT
+    return v if v > 0 else SHARE_VARIANCE_THRESHOLD_PCT
+
+
 def generation_crosscheck(db: Session, sub: BillingReportSubscription) -> Optional[dict]:
     """Bruce's automatic invoice-time cross-check: runs in the background when an
     invoice draft is generated and surfaces WITH it — no button, no extra tab.
@@ -517,7 +533,10 @@ def generation_crosscheck(db: Session, sub: BillingReportSubscription) -> Option
         # Multi-array: the effective blended share the entered values imply.
         entered_share = float(expected) / float(master) * 100.0
     variance = computed_share - entered_share
-    flagged = (abs(variance) > SHARE_VARIANCE_THRESHOLD_PCT
+    # Per-offtaker variance threshold (Bruce 2026-07-07): the operator's own knob
+    # overrides the fleet default. NULL / invalid → the fleet SHARE_VARIANCE_THRESHOLD_PCT.
+    threshold = crosscheck_threshold_for(sub)
+    flagged = (abs(variance) > threshold
                or alloc.get("status") == "mismatch")
     return {
         "computed_share_pct": round(computed_share, 4),
@@ -529,7 +548,7 @@ def generation_crosscheck(db: Session, sub: BillingReportSubscription) -> Option
         "delta_kwh": alloc.get("delta_kwh"),
         "delta_dollars": alloc.get("delta_dollars"),
         "flagged": flagged,
-        "threshold_pct": SHARE_VARIANCE_THRESHOLD_PCT,
+        "threshold_pct": threshold,
     }
 
 

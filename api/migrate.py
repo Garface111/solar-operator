@@ -890,6 +890,16 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_share_pct")
 
+        # 2026-07-07 Per-offtaker cross-check variance THRESHOLD (Bruce): the knob
+        # that replaced the manual "cross-check share" data entry. Percentage
+        # points; NULL = the fleet default SHARE_VARIANCE_THRESHOLD_PCT (0.1).
+        if not column_exists(conn, "billing_report_subscriptions", "crosscheck_threshold_pct"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN crosscheck_threshold_pct DOUBLE PRECISION"
+            ))
+            print("  + billing_report_subscriptions.crosscheck_threshold_pct")
+
         # 2026-06-22 Sequential invoice numbering: operator sets a starting number,
         # Array Operator adds 1 per real send. start = seed entered; next = running
         # counter. NULL on both = legacy period-date invoice number.

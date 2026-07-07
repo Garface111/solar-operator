@@ -1299,6 +1299,14 @@ class BillingReportSubscription(Base):
     # offtaker billed off their OWN already-allocated bill has allocation_pct≈1.0
     # yet a real array share <1.0. NULL → the check falls back to allocation_pct.
     array_share_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1
+    # Per-offtaker VARIANCE THRESHOLD for the bill-accuracy cross-check, in
+    # PERCENTAGE POINTS (Bruce, 2026-07-07): the cross-check auto-derives GMP's
+    # implied share (credited ÷ the array bill's group excess) and compares it to
+    # the operator's ENTERED billing share — no separate "cross-check share" data
+    # entry. This field is the ONLY knob: how far the two may drift before the
+    # "DOESN'T MATCH GMP" flag trips. NULL → the fleet default
+    # SHARE_VARIANCE_THRESHOLD_PCT (0.1). e.g. 0.5 = flag beyond half a point.
+    crosscheck_threshold_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     array_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("arrays.id"), nullable=True, index=True)
 

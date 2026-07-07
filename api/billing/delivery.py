@@ -561,6 +561,66 @@ def _utility_bill_credit(
     return r
 
 
+def settled_periods_for_sub(sub) -> list[dict]:
+    """The billable periods an operator can DRAFT for this offtaker (Bruce
+    2026-07-07, Comment 4): every settled utility bill with billable excess on
+    the offtaker's bound account, newest first, each as a pickable option.
+
+    Returns [{label, pretty, is_latest}] where `label` is the exact string
+    build_match(sub, period_label=label) accepts:
+      • monthly cadence → 'YYYY-MM' month labels;
+      • quarterly cadence → 'YYYY-Qn' quarter labels (deduped from the covered
+        months), so the selector mirrors how the invoice is actually built.
+    Empty list when the offtaker isn't utility-bill bound or nothing is settled
+    yet (the UI then keeps the implicit 'latest bill' default). Owns its own
+    session — safe to call from any request/caller lifecycle."""
+    from ..db import SessionLocal
+    from ..models import Bill
+
+    uaid = getattr(sub, "utility_account_id", None)
+    if uaid is None:
+        return []
+    quarterly = (getattr(sub, "cadence", None) or "monthly") == "quarterly"
+    with SessionLocal() as db:
+        bills = db.execute(
+            select(Bill)
+            .where(Bill.account_id == uaid, Bill.period_end.isnot(None))
+            .order_by(Bill.period_end.desc())
+        ).scalars().all()
+    # A billable month = a settled bill that sent real excess to the grid. (A
+    # zero-excess/banked month can't be invoiced on its own, so it isn't offered.)
+    month_labels: list[str] = []
+    seen: set[str] = set()
+    for b in bills:
+        pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
+        if pe is None:
+            continue
+        if b.kwh_sent_to_grid is None or float(b.kwh_sent_to_grid) <= 0:
+            continue
+        lbl = pe.strftime("%Y-%m")
+        if lbl in seen:
+            continue
+        seen.add(lbl)
+        month_labels.append(lbl)          # already newest-first (query DESC)
+    if not month_labels:
+        return []
+    if quarterly:
+        q_seen: set[str] = set()
+        out: list[dict] = []
+        for ml in month_labels:           # newest-first → newest quarter first
+            y, q = _quarter_of_month_label(ml)
+            qlbl = f"{y:04d}-Q{q}"
+            if qlbl in q_seen:
+                continue
+            q_seen.add(qlbl)
+            out.append({"label": qlbl, "pretty": f"Q{q} {y}"})
+    else:
+        out = [{"label": ml, "pretty": _month_label_pretty(ml)} for ml in month_labels]
+    if out:
+        out[0]["is_latest"] = True        # the implicit default
+    return out
+
+
 def _utility_bill_credit_quarter(db, utility_account_id: int,
                                  target_label: Optional[str] = None) -> Optional[dict]:
     """QUARTERLY offtaker billing basis: sum the FULL quarter's settled utility
