@@ -184,6 +184,48 @@ def get_bill_pdf_for_account(
             db.close()
 
 
+def get_vec_bill_pdf_for_account(
+    utility_account_id: int,
+    period_start: Optional[date] = None,
+    period_end: Optional[date] = None,
+    *,
+    db: Optional[Session] = None,
+) -> Optional[dict[str, Any]]:
+    """The captured VEC/SmartHub bill PDF for ONE bound utility account, or None.
+
+    The SmartHub sibling of get_bill_pdf_for_account(). A VEC offtaker's invoice is
+    priced from the bill of the account it's BOUND to, so the auto-attached PDF must
+    come from that SAME account. The durable bytes are persisted by the ingest/sync
+    paths (adapters.vec_bill._upsert_vec_bill + app._sync's SmartHub bill loop) into
+    Bill.pdf_bytes — this reads them back. Same return shape as the GMP entry points;
+    None when the account isn't a live SmartHub account or has no durable PDF for the
+    window (the honest "none yet" state until a bill with bytes lands).
+    """
+    from ..adapters.smarthub import is_smarthub_provider
+
+    _own = db is None
+    if _own:
+        db = SessionLocal()
+    try:
+        ua = db.get(UtilityAccount, utility_account_id)
+        if (ua is None or ua.deleted_at is not None
+                or not is_smarthub_provider((ua.provider or "").lower())):
+            return None
+        found = _pick_bill_pdf(db, [utility_account_id], period_start, period_end)
+        if found:
+            # Re-label to the bound provider (not "GMP_bill_…").
+            label = (found.get("period_end") or found.get("period_start"))
+            lbl = label.strftime("%Y-%m") if label else "period"
+            found["filename"] = f"{(ua.provider or 'vec').upper()}_bill_{lbl}.pdf"
+        return found
+    except Exception:  # noqa: BLE001 — provisional ingestion side / missing column
+        logger.warning("VEC bill-PDF read failed for account %s", utility_account_id, exc_info=True)
+        return None
+    finally:
+        if _own:
+            db.close()
+
+
 def has_capturable_gmp_account(array_id: int, *, db: Optional[Session] = None) -> bool:
     """True if the array has at least one GMP account (so auto-attach is
     MEANINGFUL even before any PDF is captured — lets the UI say 'will attach

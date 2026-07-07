@@ -1472,6 +1472,9 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
                          (match.customer.get("name") or "offtaker").lower()).strip("_")
                  or "offtaker")
     gmp_name = f"gmp_utility_bill_{_gmp_slug}_{inv_no}.pdf"
+    # VEC/SmartHub-bound offtakers ride their OWN utility bill under a parallel,
+    # self-describing name (mirrors gmp_name / reports.js gmpBillFilename).
+    vec_name = f"vec_utility_bill_{_gmp_slug}_{inv_no}.pdf"
     paths: list[pathlib.Path] = []
     fmts = [f.lower() for f in (formats or ["pdf"])]
     if "pdf" in fmts:
@@ -1498,11 +1501,15 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
         elif "xlsx" in fmts:
             paths.append(summary_mod.render_summary_xlsx(
                 match, out_dir / f"{stem}_summary.xlsx", peer=peer))
-    # GMP utility-bill PDF attachment. Two sources, manual takes precedence:
-    #   1. sub.gmp_invoice_pdf — a manually uploaded PDF (Paul's fallback).
-    #   2. auto-attach — when sub.auto_attach_gmp is on AND no manual PDF, look
-    #      up the captured bill PDF for this array+period via the read seam.
-    #      Returns nothing until ingestion persists durable bytes (never fabricated).
+    # Utility-bill PDF attachment (the auto_attach_gmp toggle — conceptually
+    # "attach the offtaker's bound utility bill", provider-aware). Two sources,
+    # manual takes precedence:
+    #   1. sub.gmp_invoice_pdf — a manually uploaded PDF (Paul's GMP fallback).
+    #   2. auto-attach — when sub.auto_attach_gmp is on AND no manual PDF, look up
+    #      the captured bill PDF for the bound account + period via the read seam.
+    #      For a GMP-bound offtaker that's the GMP bill; for a VEC/SmartHub-bound
+    #      one it's the VEC bill (persisted PDF bytes on Bill.pdf_bytes). Returns
+    #      nothing until ingestion persists durable bytes (never fabricated).
     _manual_pdf = gmp_pdf_override
     if _manual_pdf is None and sub is not None and getattr(sub, "gmp_invoice_pdf", None):
         _manual_pdf = bytes(sub.gmp_invoice_pdf)
@@ -1516,24 +1523,50 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
             ci = match.computed_invoice or {}
             ps = _parse_iso_date(ci.get("period_start"))
             pe = _parse_iso_date(ci.get("period_end"))
-            # Prefer the offtaker's BOUND utility account (the invoice's actual
-            # source bill); fall back to the array's GMP accounts for legacy
-            # array-based subscriptions with no bound account.
             uaid = getattr(sub, "utility_account_id", None)
-            if uaid is not None:
+            found = None
+            out_name = gmp_name
+            # Provider-aware: a VEC/SmartHub-bound offtaker attaches its VEC bill
+            # (the invoice's actual source), not the GMP read seam (which finds
+            # nothing for a SmartHub account). Resolve the bound account's provider.
+            if uaid is not None and _is_smarthub_bound(sub):
+                found = gbp.get_vec_bill_pdf_for_account(uaid, ps, pe)
+                out_name = vec_name
+            elif uaid is not None:
+                # GMP-bound (or legacy) offtaker → the GMP bill for this account.
                 found = gbp.get_bill_pdf_for_account(uaid, ps, pe)
             elif getattr(sub, "array_id", None) is not None:
+                # Legacy array-based subscription with no bound account → GMP.
                 found = gbp.get_bill_pdf_for_period(sub.array_id, ps, pe)
-            else:
-                found = None
             if found and found.get("bytes"):
-                gmp_path = out_dir / gmp_name
-                gmp_path.write_bytes(found["bytes"])
-                paths.append(gmp_path)
+                bill_path = out_dir / out_name
+                bill_path.write_bytes(found["bytes"])
+                paths.append(bill_path)
         except Exception:  # noqa: BLE001 — provisional seam must never break send
-            logger.warning("auto-attach GMP bill lookup failed for sub %s",
+            logger.warning("auto-attach utility bill lookup failed for sub %s",
                            getattr(sub, "id", "?"), exc_info=True)
     return paths
+
+
+def _is_smarthub_bound(sub) -> bool:
+    """True if the subscription's bound utility account is a VEC/SmartHub co-op.
+
+    Reads the bound UtilityAccount's provider. Best-effort + fail-safe: any error
+    (no account, missing column) returns False so the caller falls back to the GMP
+    path — never breaks a send.
+    """
+    uaid = getattr(sub, "utility_account_id", None)
+    if uaid is None:
+        return False
+    try:
+        from ..db import SessionLocal
+        from ..models import UtilityAccount
+        from ..adapters.smarthub import is_smarthub_provider
+        with SessionLocal() as db:
+            ua = db.get(UtilityAccount, uaid)
+            return bool(ua and is_smarthub_provider((ua.provider or "").lower()))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _parse_iso_date(s) -> Optional[date]:

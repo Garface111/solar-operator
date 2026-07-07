@@ -2951,7 +2951,7 @@ def _draft_letter_default(d: ReportDraft, sub, email_fields: dict) -> Optional[d
 
 
 def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=None,
-                email_fields: Optional[dict] = None) -> dict:
+                email_fields: Optional[dict] = None, attach_provider=None) -> dict:
     _letter = (_draft_letter_default(d, sub, email_fields)
                if email_fields else None) or {}
     return {
@@ -2990,6 +2990,10 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         #                       | None (toggle off / not resolvable)
         "auto_attach_gmp": (getattr(sub, "auto_attach_gmp", False) if sub else None),
         "gmp_auto_status": gmp_auto_status,
+        # The bound utility account's provider code (gmp/vec/wec/…), so the UI
+        # labels the auto-attach checkbox + status by provider ("Auto-attach the
+        # VEC bill" vs "…GMP bill") instead of hardcoding GMP. None when unbound.
+        "attach_provider": attach_provider,
         # Editable offtaker details, surfaced so the approval inbox can edit the
         # offtaker inline (live-update) without leaving the draft. These mirror the
         # SubscriptionPatch fields; the money-affecting ones (allocation/discount/
@@ -3011,17 +3015,25 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
 
 def _resolve_gmp_auto_status(db, sub) -> Optional[str]:
     """Honest auto-attach status for the draft card (never implies a PDF exists
-    when it doesn't)."""
+    when it doesn't). Provider-aware: a VEC/SmartHub-bound offtaker's status reflects
+    its VEC bill (persisted Bill.pdf_bytes), a GMP-bound one its GMP bill. Kept named
+    `gmp_auto_status` on the wire for back-compat; the frontend labels it by
+    attach_provider. Statuses: ready | pending | no_gmp | None (toggle off)."""
     if sub is None or not getattr(sub, "auto_attach_gmp", False):
         return None
     try:
         from ..reports import gmp_bill_pdf_read as gbp
+        uaid = getattr(sub, "utility_account_id", None)
+        # VEC/SmartHub-bound → check the persisted VEC bill PDF for that account.
+        if uaid is not None and _bound_provider(db, sub) and \
+                _is_smarthub_provider_code(_bound_provider(db, sub)):
+            found = gbp.get_vec_bill_pdf_for_account(uaid, db=db)
+            return "ready" if (found and found.get("bytes")) else "pending"
         # Prefer the offtaker's BOUND utility account — the exact bill the invoice is
         # computed from, so the attached PDF matches the invoice's source. (The old
         # array-keyed path returned whichever of the array's sibling accounts had the
         # newest captured PDF, which can be the wrong bill.) Fall back to the array's
         # GMP accounts for legacy array-based subscriptions with no bound account.
-        uaid = getattr(sub, "utility_account_id", None)
         if uaid is not None:
             found = gbp.get_bill_pdf_for_account(uaid, db=db)
             return "ready" if (found and found.get("bytes")) else "pending"
@@ -3034,6 +3046,30 @@ def _resolve_gmp_auto_status(db, sub) -> Optional[str]:
         return "ready" if (found and found.get("bytes")) else "pending"
     except Exception:  # noqa: BLE001
         return "pending"
+
+
+def _bound_provider(db, sub) -> Optional[str]:
+    """Lowercase provider code of the subscription's bound utility account, or None.
+    Drives provider-aware auto-attach label + status. Best-effort/fail-safe."""
+    uaid = getattr(sub, "utility_account_id", None) if sub else None
+    if uaid is None:
+        return None
+    try:
+        from ..models import UtilityAccount
+        ua = db.get(UtilityAccount, uaid)
+        return (ua.provider or "").lower() or None if ua else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_smarthub_provider_code(code: Optional[str]) -> bool:
+    if not code:
+        return False
+    try:
+        from ..adapters.smarthub import is_smarthub_provider
+        return is_smarthub_provider(code)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _get_owned_draft(db, tenant_id: str, draft_id: int) -> ReportDraft:
@@ -3064,7 +3100,8 @@ def list_drafts(status: str = Query(default="pending"),
             out.append(_draft_dict(d, sub=sub,
                                    gmp_auto_status=_resolve_gmp_auto_status(db, sub),
                                    operator_name=getattr(t, "name", None),
-                                   email_fields=email_fields))
+                                   email_fields=email_fields,
+                                   attach_provider=_bound_provider(db, sub)))
         return {"drafts": out}
 
 
@@ -3244,7 +3281,8 @@ def generate_draft(sub_id: int, period: Optional[str] = Query(default=None),
             d, sub=sub,
             gmp_auto_status=_resolve_gmp_auto_status(db, sub),
             operator_name=getattr(t, "name", None),
-            email_fields=_offtaker_email_fields(t.id)),
+            email_fields=_offtaker_email_fields(t.id),
+            attach_provider=_bound_provider(db, sub)),
             "crosscheck": crosscheck}
 
 

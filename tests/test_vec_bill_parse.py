@@ -270,3 +270,64 @@ def test_vec_offtaker_prices_from_parsed_bill():
     assert m.latest_period.customer_kwh == round(10200.0 * pct, 2)
     expected = round(round(10200.0 * pct, 2) * rate * (1.0 - disc), 2)
     assert ci["amount_owed"] == expected
+
+
+# ── 6. PDF bytes are persisted for auto-attach ────────────────────────────────
+def test_upsert_vec_bill_persists_pdf_bytes_and_keeps_latest():
+    """The auto-attach crux: _upsert_vec_bill stores the verbatim PDF bytes on the
+    Bill (create branch), and a later re-pull refreshes them (update branch). Without
+    this there is nothing for delivery to attach."""
+    from api.db import SessionLocal
+    from api.models import UtilityAccount, Bill
+
+    tid, aid, acct_id = _seed_account()
+
+    # (a) Create with PDF bytes → persisted + content type stamped.
+    with SessionLocal() as db:
+        ua = db.get(UtilityAccount, acct_id)
+        bill = _upsert_vec_bill(db, ua, _parsed(), pdf_bytes=b"%PDF-1.4\nVEC v1\n")
+        db.commit()
+        bid = bill.id
+    with SessionLocal() as db:
+        b = db.get(Bill, bid)
+        assert bytes(b.pdf_bytes) == b"%PDF-1.4\nVEC v1\n"
+        assert b.pdf_content_type == "application/pdf"
+
+    # (b) A re-pull of the SAME period refreshes the PDF (latest kept), even though
+    #     kwh/credit are climb-only.
+    with SessionLocal() as db:
+        ua = db.get(UtilityAccount, acct_id)
+        _upsert_vec_bill(db, ua, _parsed(), pdf_bytes=b"%PDF-1.4\nVEC v2 fresh\n")
+        db.commit()
+    with SessionLocal() as db:
+        b = db.get(Bill, bid)
+        assert bytes(b.pdf_bytes) == b"%PDF-1.4\nVEC v2 fresh\n"
+
+    # (c) A parse with NO bytes (rate-only path) must NOT wipe a stored PDF.
+    with SessionLocal() as db:
+        ua = db.get(UtilityAccount, acct_id)
+        _upsert_vec_bill(db, ua, _parsed(), pdf_bytes=None)
+        db.commit()
+    with SessionLocal() as db:
+        b = db.get(Bill, bid)
+        assert bytes(b.pdf_bytes) == b"%PDF-1.4\nVEC v2 fresh\n"
+
+
+def test_ingest_vec_bill_pdf_persists_pdf_bytes():
+    """ingest_vec_bill_pdf (the manual-upload path) stores the raw PDF bytes so the
+    offtaker's invoice can auto-attach the VEC bill it was priced from."""
+    pdf = _build_vec_pdf_bytes()
+    if pdf is None:
+        pytest.skip("reportlab not available — PDF round-trip skipped")
+    from api.db import SessionLocal
+    from api.models import Bill
+
+    tid, aid, acct_id = _seed_account()
+    with SessionLocal() as db:
+        res = ingest_vec_bill_pdf(db, tid, acct_id, pdf)
+        db.commit()
+    assert res["ok"] is True, res
+    with SessionLocal() as db:
+        b = db.get(Bill, res["bill_id"])
+        assert b.pdf_bytes is not None and bytes(b.pdf_bytes) == pdf
+        assert b.pdf_content_type == "application/pdf"

@@ -90,12 +90,19 @@ def _dt(d: date | None) -> datetime | None:
     return datetime.combine(d, time.min) if d is not None else None
 
 
-def _upsert_vec_bill(db, ua, parsed: dict):
+def _upsert_vec_bill(db, ua, parsed: dict, pdf_bytes: bytes | None = None):
     """Idempotent climb-only upsert of a settled VEC Bill for utility-account ``ua``
     from a ``parse_vec_bill_text`` dict. Keyed on (account_id, period_end) so one
     Bill exists per billing period; a new period creates a new Bill. Mirrors the GMP
     climb-only convention in array_owners._persist_meter_accounts — never LOWERS an
     existing kwh_generated / solar_credit_usd. ``db.add``-only; the caller commits.
+
+    ``pdf_bytes`` (when given) is the verbatim bill PDF — persisted in-row so the
+    provider-aware auto-attach path (delivery.generate_files) has durable bytes to
+    ride the offtaker's invoice email. The parse path READS the rate off the PDF but
+    historically dropped the bytes; keeping them here is what makes VEC auto-attach
+    real. Always kept latest (a re-pull of the same period refreshes the PDF), which
+    is safe: a bill's PDF for a fixed period doesn't change meaningfully.
 
     Returns the Bill instance (added or updated)."""
     from ..models import Bill
@@ -141,6 +148,9 @@ def _upsert_vec_bill(db, ua, parsed: dict):
             is_net_metered=True,
             parse_status="parsed",
         )
+        if pdf_bytes:
+            bill.pdf_bytes = bytes(pdf_bytes)
+            bill.pdf_content_type = "application/pdf"
         db.add(bill)
     else:
         # Climb-only: never lower a captured generation / credit figure.
@@ -164,6 +174,11 @@ def _upsert_vec_bill(db, ua, parsed: dict):
             bill.billing_days = bdays
         bill.is_net_metered = True
         bill.parse_status = "parsed"
+        # Always keep the latest PDF for this period so auto-attach has durable
+        # bytes even for a bill first seen (rate-parsed) before this landed.
+        if pdf_bytes:
+            bill.pdf_bytes = bytes(pdf_bytes)
+            bill.pdf_content_type = "application/pdf"
         db.add(bill)
     return bill
 
@@ -194,7 +209,9 @@ def ingest_vec_bill_pdf(db, tenant_id: str, utility_account_id: int,
     if not is_smarthub_provider((ua.provider or "").lower()):
         return {"ok": False, "reason": "not a VEC/SmartHub account"}
 
-    bill = _upsert_vec_bill(db, ua, parsed)
+    # Persist the verbatim PDF bytes so the provider-aware auto-attach path can
+    # ride this bill onto the offtaker's invoice email (not just read its rate).
+    bill = _upsert_vec_bill(db, ua, parsed, pdf_bytes=pdf_bytes)
     db.flush()  # populate bill.id without committing (the caller commits)
 
     return {

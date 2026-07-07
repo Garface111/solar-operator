@@ -973,3 +973,71 @@ def test_auto_attach_gmp_bill_when_captured_else_nothing(client, monkeypatch):
                                             pathlib.Path(tmp), sub=sub)
             assert any(p.name.startswith("gmp_utility_bill_") and p.name.endswith(".pdf")
                        for p in paths), [p.name for p in paths]
+
+
+def test_auto_attach_vec_bill_for_smarthub_bound_offtaker(client):
+    """Provider-aware auto-attach: a VEC/SmartHub-bound offtaker rides its VEC bill
+    (persisted Bill.pdf_bytes) — named vec_utility_bill_… — NOT the GMP read seam.
+    Without stored bytes, nothing attaches (honest 'none yet')."""
+    import pathlib, tempfile
+    from datetime import date as _date, datetime as _dt
+    from api.billing import delivery
+    from api.models import (Client as ClientM, Array, UtilityAccount, Bill,
+                            BillingReportSubscription)
+    from api.billing.matcher import BillingMatch, Period
+
+    tid, auth = _make_tenant()
+    with SessionLocal() as db:
+        c = ClientM(tenant_id=tid, name="VEC Co", active=True); db.add(c); db.flush()
+        arr = Array(tenant_id=tid, name="Glover", client_id=c.id, fuel_type="solar")
+        db.add(arr); db.flush()
+        ua = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="vec",
+                            account_number="6578300", nickname="Glover VEC")
+        db.add(ua); db.flush()
+        sub = BillingReportSubscription(
+            tenant_id=tid, client_id=c.id, customer_name="Glover Cust",
+            array_id=arr.id, utility_account_id=ua.id, allocation_pct=0.5,
+            billing_model="percent_of_array", auto_attach_gmp=True,
+            cadence="monthly", send_mode="to_me")
+        db.add(sub); db.commit()
+        sub_id, ua_id = sub.id, ua.id
+
+    period = Period(month="2026-06", start=_date(2026, 6, 1), end=_date(2026, 6, 30),
+                    array_kwh=1000.0, customer_kwh=500.0)
+    match = BillingMatch(
+        matched=True, confidence=1.0, source="manual",
+        customer={"name": "Glover Cust"}, billing_model="percent_of_array",
+        periods=[period], latest_period=period,
+        computed_invoice={"invoice_number": "2026-06", "period_start": "2026-06-01",
+                          "period_end": "2026-06-30", "amount_owed": 100.0, "kwh": 500})
+
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+
+        # 1) No stored PDF bytes yet → VEC read seam finds nothing → nothing attached,
+        #    and (crucially) it does NOT attach a GMP-named file either.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = delivery.generate_files(match, [], False,
+                                            pathlib.Path(tmp), sub=sub)
+            assert not any("utility_bill" in p.name for p in paths), [p.name for p in paths]
+
+        # 2) Land a settled VEC Bill WITH durable pdf_bytes for the period.
+        with SessionLocal() as db2:
+            db2.add(Bill(
+                tenant_id=tid, account_id=ua_id,
+                period_start=_dt(2026, 6, 1), period_end=_dt(2026, 6, 30),
+                bill_date=_dt(2026, 6, 30), kwh_sent_to_grid=10200.0,
+                solar_credit_usd=1847.83, is_net_metered=True,
+                pdf_bytes=b"%PDF-1.4\nVEC Glover bill\n",
+                pdf_content_type="application/pdf", parse_status="parsed"))
+            db2.commit()
+
+        # 3) Now it attaches the VEC bill under the vec_utility_bill_ name (NOT gmp_).
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = delivery.generate_files(match, [], False,
+                                            pathlib.Path(tmp), sub=sub)
+            vec = [p for p in paths if p.name.startswith("vec_utility_bill_")
+                   and p.name.endswith(".pdf")]
+            assert vec, [p.name for p in paths]
+            assert not any(p.name.startswith("gmp_utility_bill_") for p in paths)
+            assert vec[0].read_bytes() == b"%PDF-1.4\nVEC Glover bill\n"

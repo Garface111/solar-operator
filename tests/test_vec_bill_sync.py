@@ -147,6 +147,10 @@ def test_vec_sync_pdf_lands_settled_net_meter_bill(client):
         assert b.period_end is not None
         assert b.period_end.date().isoformat() == "2026-06-21"
         assert b.parse_status == "parsed"
+        # The verbatim PDF bytes are persisted so auto-attach has something to send.
+        import base64 as _b64
+        assert b.pdf_bytes is not None and bytes(b.pdf_bytes) == _b64.b64decode(pdf_b64)
+        assert b.pdf_content_type == "application/pdf"
 
 
 def test_vec_sync_without_pdf_is_consumption_only(client):
@@ -185,3 +189,5 @@ def test_vec_sync_without_pdf_is_consumption_only(client):
         assert b.kwh_sent_to_grid is None
         assert b.solar_credit_usd is None
         assert b.is_net_metered is None
+        # No PDF sent → no bytes persisted (nothing to auto-attach; honest).
+        assert b.pdf_bytes is None

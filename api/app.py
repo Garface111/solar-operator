@@ -1256,13 +1256,16 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 # an AUTHORITATIVE settled net-meter Bill (the GMP offtaker-credit
                 # path then auto-prices the invoice from the bill's own rate).
                 _nm = None
+                _pdf_raw = None   # decoded PDF bytes → persisted to Bill.pdf_bytes
                 _pdf_b64 = b_raw.get("pdf_b64") if isinstance(b_raw, dict) else None
                 if _pdf_b64:
                     try:
                         import base64 as _b64
                         from .adapters.vec_bill import parse_vec_bill_pdf as _parse_vec_pdf
-                        _nm = _parse_vec_pdf(_b64.b64decode(_pdf_b64))
+                        _pdf_raw = _b64.b64decode(_pdf_b64)
+                        _nm = _parse_vec_pdf(_pdf_raw)
                     except Exception:
+                        _pdf_raw = None
                         _nm = None
                 doc_no = b.get("bill_uuid") or b.get("pdf_url") or b["billing_date"].strftime("VEC-%Y-%m-%d")
                 # Attach usage from the same billing month, if available.
@@ -1337,6 +1340,12 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             exists.period_start = _ps
                         if _pe and not exists.period_end:
                             exists.period_end = _pe
+                    # Persist the verbatim bill PDF bytes so the provider-aware
+                    # auto-attach path (delivery.generate_files) can ride this bill
+                    # onto the offtaker's invoice. Always keep the latest capture.
+                    if _pdf_raw:
+                        exists.pdf_bytes = _pdf_raw
+                        exists.pdf_content_type = "application/pdf"
                     continue
                 db.add(Bill(
                     tenant_id=tenant.id,
@@ -1363,6 +1372,11 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     kwh_consumed=int(_consumed) if _consumed is not None else None,
                     document_number=doc_no,
                     pdf_path=b.get("pdf_url"),
+                    # Verbatim bill PDF bytes → durable source for provider-aware
+                    # auto-attach (rides the offtaker invoice). None when the
+                    # extension didn't send a PDF for this bill.
+                    pdf_bytes=_pdf_raw,
+                    pdf_content_type=("application/pdf" if _pdf_raw else None),
                     parse_status=("parsed"
                                   if (_nm is not None or _consumed is not None)
                                   else "partial"),
