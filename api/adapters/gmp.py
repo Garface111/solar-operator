@@ -47,6 +47,27 @@ class GmpUsageTimeout(Exception):
     """GMP 503/timeout — the requested window is too large; caller should shrink."""
 
 
+def _gmp_usage_date(d) -> str:
+    """Format a date/datetime for GMP's /usage/{acct}/download endpoint.
+
+    GMP's parser REJECTS a bare 'YYYY-MM-DD' with HTTP 400 INVALID_DATE — it
+    requires a full ISO-8601 timestamp with milliseconds and a 'Z' suffix.
+    Verified live (2026-07-06): 'YYYY-MM-DD' -> 400 {"errorCode":"INVALID_DATE"};
+    'YYYY-MM-DDT00:00:00.000Z' -> 200 with the interval CSV. This one-line format
+    bug is why the daily-generation sponge captured NOTHING since inception
+    (GmpUsageRaw/GmpDailyGeneration stayed empty on every tenant) and every GMCS
+    report silently fell back to flat bill-proration — which flattens the monthly
+    generation peaks Crown REC reports from the SAME GMP meter data. With real
+    intervals flowing, monthly totals match Crown's meter reads (verified: Chester
+    June-2025 NGEN interval sum = 26,744.80 kWh vs Crown 26.745 MWh).
+    """
+    if isinstance(d, datetime):
+        return d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    if hasattr(d, "strftime"):  # date
+        return d.strftime("%Y-%m-%dT00:00:00.000Z")
+    return str(d)
+
+
 def fetch_usage_csv(account_number: str, jwt: str, start, end, timeout: float = 60.0) -> str:
     """Fetch the 15-minute interval generation CSV for one GMP meter over
     [start, end). `start`/`end` are date or datetime.
@@ -66,8 +87,8 @@ def fetch_usage_csv(account_number: str, jwt: str, start, end, timeout: float = 
         "GMP-Source": "web",
         "User-Agent": "Mozilla/5.0 (Solar Operator)",
     }
-    sd = start.strftime("%Y-%m-%d") if hasattr(start, "strftime") else str(start)
-    ed = end.strftime("%Y-%m-%d") if hasattr(end, "strftime") else str(end)
+    sd = _gmp_usage_date(start)
+    ed = _gmp_usage_date(end)
     url = f"{GMP_API_BASE}/api/v2/usage/{account_number}/download"
     params = {"startDate": sd, "endDate": ed, "format": "csv"}
     try:
