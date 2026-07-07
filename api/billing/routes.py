@@ -634,6 +634,20 @@ def _validate_invoice_start(v):
     return n
 
 
+def _validate_budget(v):
+    """Validate the optional budget_amount_usd (a fixed dollar total that overrides
+    the calculated amount). None/blank passes through. Mirrors the PATCH rule."""
+    if v is None or v == "":
+        return None
+    try:
+        amt = float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "budget_amount_usd must be a number")
+    if amt < 0:
+        raise HTTPException(400, "budget_amount_usd can't be negative")
+    return amt
+
+
 def _sync_invoicing_quantity(tenant_id: str) -> None:
     """After an offtaker (BillingReportSubscription) is added or removed, keep the
     AO invoicing Stripe quantity in sync with the offtaker count. No-op unless the
@@ -657,6 +671,7 @@ async def create_subscription(
     array_share_pct: Optional[float] = Form(default=None),
     crosscheck_threshold_pct: Optional[float] = Form(default=None),
     invoice_number_start: Optional[int] = Form(default=None),
+    budget_amount_usd: Optional[float] = Form(default=None),
     rate_per_kwh: Optional[float] = Form(default=None),
     discount_pct: Optional[float] = Form(default=None),
     net_rate_per_kwh: Optional[float] = Form(default=None),
@@ -710,7 +725,7 @@ async def create_subscription(
             delivery_mode=delivery_mode, client_email=client_email,
             cc_emails=cc_emails, operator_email=operator_email, formats=formats,
             include_summary=include_summary, annual_trueup=annual_trueup,
-            enabled=enabled)
+            budget_amount_usd=budget_amount_usd, enabled=enabled)
 
     data = await _read_upload(file)
     match = match_billing_workbook(data)
@@ -770,7 +785,7 @@ async def create_subscription(
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
     utility_account_id=None, array_share_pct=None, crosscheck_threshold_pct=None,
-    invoice_number_start=None,
+    invoice_number_start=None, budget_amount_usd=None,
     rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
@@ -795,6 +810,7 @@ async def _create_manual_subscription(
     name = (customer_name or "").strip()
     if not name:
         raise HTTPException(400, "customer_name is required for a manual customer")
+    budget_val = _validate_budget(budget_amount_usd)
 
     # ── ARRAY-FIRST resolution (Ford, 2026-07-01) ────────────────────────────
     # The offtaker binding model is ARRAY-FIRST with a utility-bill override: the
@@ -953,6 +969,7 @@ async def _create_manual_subscription(
                 crosscheck_threshold_pct=threshold_val,
                 invoice_number_start=inv_start_val,
                 invoice_number_next=inv_start_val,
+                budget_amount_usd=budget_val,
                 rate_per_kwh=rate_val,
                 discount_pct=disc_val,
                 net_rate_per_kwh=net_val,
@@ -1058,6 +1075,7 @@ async def _create_manual_subscription(
             crosscheck_threshold_pct=threshold_val,
             invoice_number_start=inv_start_val,
             invoice_number_next=inv_start_val,
+            budget_amount_usd=budget_val,
             rate_per_kwh=rate_val,
             discount_pct=disc_val,
             net_rate_per_kwh=net_val,
