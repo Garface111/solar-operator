@@ -1954,40 +1954,104 @@ def audit_by_array_route(authorization: Optional[str] = Header(default=None)):
         return audit_by_array(db, t.id)
 
 
+@router.get("/export-periods")
+def invoice_export_periods(authorization: Optional[str] = Header(default=None)):
+    """The settled billing periods the operator can target for a FLEET-WIDE
+    invoice export (Bruce 2026-07-07) — the union of every enabled offtaker's
+    billable periods, newest first. Feeds the billing-cycle picker on the export
+    popover. Read-only; empty `periods` = keep the implicit 'latest bill per
+    offtaker' default (nothing to choose between). Each entry
+    {label, pretty, count} where `count` is how many offtakers have a settled
+    bill for that period, so the operator sees how much a chosen cycle covers."""
+    from .delivery import settled_periods_for_sub
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        subs = db.execute(
+            select(BillingReportSubscription).where(
+                BillingReportSubscription.tenant_id == t.id,
+                BillingReportSubscription.deleted_at.is_(None),
+                BillingReportSubscription.enabled == True)  # noqa: E712
+        ).scalars().all()
+        agg: dict[str, dict] = {}
+        for sub in subs:
+            try:
+                for p in settled_periods_for_sub(sub):
+                    lbl = p.get("label")
+                    if not lbl:
+                        continue
+                    row = agg.setdefault(lbl, {"label": lbl, "pretty": p.get("pretty") or lbl, "count": 0})
+                    row["count"] += 1
+            except Exception:  # noqa: BLE001
+                continue        # one unreadable offtaker never sinks the list
+    # Newest-first by label (YYYY-MM / YYYY-Qn both sort correctly as strings).
+    periods = sorted(agg.values(), key=lambda r: r["label"], reverse=True)
+    return {"ok": True, "periods": periods}
+
+
 @router.get("/invoice-export.csv")
 def invoice_export_csv(authorization: Optional[str] = Header(default=None),
                        account_code: str = Query(default=""),
                        format: str = Query(default="xero"),
                        tax_type: str = Query(default=""),
-                       item_name: str = Query(default="Solar Credit")):
-    """Batch invoice-export for QuickBooks OR Xero (Anna/Bruce's ask #3).
+                       item_name: str = Query(default="Solar Credit"),
+                       invoice_date: Optional[str] = Query(default=None),
+                       period: Optional[str] = Query(default=None),
+                       memo: str = Query(default="")):
+    """Batch invoice-export for QuickBooks Online (CSV), QuickBooks Desktop (IIF),
+    or Xero (CSV) — Anna/Bruce's ask #3 (IIF + period + memo added 2026-07-07).
 
     `format=xero` emits Xero's Sales-Invoice import columns; `format=quickbooks`
-    emits QuickBooks Online's invoice-import columns — the two platforms need
-    different layouts. Only offtakers with a real billable invoice are included —
-    never a fabricated $0 row. `account_code` (Xero AccountCode), `tax_type`
-    (Xero TaxType), and `item_name` (QuickBooks Product/Service) are operator-set
-    since they depend on the operator's own chart of accounts.
+    emits QuickBooks Online's invoice-import columns; `format=iif` (aka
+    quickbooks-desktop/qbd) emits QuickBooks Desktop's native .IIF transaction
+    file. Only offtakers with a real billable invoice are included — never a
+    fabricated $0 row. `account_code` feeds Xero's AccountCode AND the IIF income
+    account; `tax_type` (Xero TaxType) and `item_name` (QuickBooks Online
+    Product/Service) are operator-set per their chart of accounts.
+
+    `invoice_date` (YYYY-MM-DD) sets every invoice's date (default today);
+    `period` (YYYY-MM or YYYY-Qn) targets that settled bill period per offtaker
+    instead of each one's latest (offtakers without a settled bill for it are
+    skipped, never fabricated); `memo` overrides the per-line description.
     """
     from .qb_export import build_invoice_register, normalize_format
     t = tenant_from_session(authorization)
     fmt = normalize_format(format)
+    # Parse the operator-entered invoice date (fall back to today on anything
+    # unparseable so a stray value never 500s the export).
+    inv_dt: Optional[date] = None
+    if invoice_date:
+        try:
+            inv_dt = date.fromisoformat(invoice_date[:10])
+        except ValueError:
+            inv_dt = None
+    target_period = (period or "").strip() or None
     # build_invoice_register rebuilds every offtaker's invoice (~52s at 800),
     # which 504'd at the Railway edge during the CSV download (caught live on
     # ten_anna_800). Compute it in the background sweep + cache; while it runs,
-    # answer 202 {pending:true} — the frontend polls, then downloads the CSV.
-    kind = f"register:{fmt}:{account_code}:{tax_type}:{item_name}"
+    # answer 202 {pending:true} — the frontend polls, then downloads the file.
+    # The cache key includes every input so a different date/period/memo/format
+    # never serves a stale file.
+    kind = (f"register:{fmt}:{account_code}:{tax_type}:{item_name}:"
+            f"{inv_dt.isoformat() if inv_dt else ''}:{target_period or ''}:{memo}")
     s = _sweep_result(t.id, kind, lambda db: build_invoice_register(
         db, t.id, account_code=account_code, fmt=fmt,
-        tax_type=tax_type, item_name=item_name))
+        tax_type=tax_type, item_name=item_name, invoice_date=inv_dt,
+        period=target_period, memo=memo))
     if not s["ready"]:
         return Response(content='{"ok":false,"pending":true}',
                         media_type="application/json", status_code=202)
-    csv_text, count = s["result"]
-    label = "quickbooks" if fmt == "quickbooks" else "xero"
-    fname = f"offtaker-invoices-{label}-{date.today().isoformat()}.csv"
+    text, count = s["result"]
+    label = {"quickbooks": "quickbooks", "iif": "quickbooks-desktop"}.get(fmt, "xero")
+    # IIF is a tab-delimited plain-text file (not CSV) with a .iif extension so
+    # QuickBooks Desktop's File → Utilities → Import recognizes it.
+    if fmt == "iif":
+        ext, media = "iif", "text/plain"
+    else:
+        ext, media = "csv", "text/csv"
+    stamp = target_period or date.today().isoformat()
+    fname = f"offtaker-invoices-{label}-{stamp}.{ext}"
     return Response(
-        content=csv_text, media_type="text/csv",
+        content=text, media_type=media,
         headers={"Content-Disposition": f'attachment; filename="{fname}"',
                  "X-Invoice-Count": str(count), "X-Export-Format": label})
 

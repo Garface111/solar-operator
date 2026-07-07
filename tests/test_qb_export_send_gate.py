@@ -21,9 +21,10 @@ from api.models import (Tenant, Array, UtilityAccount, Bill,
 from api.billing.qb_export import build_invoice_register
 
 
-def _mk_bill(db, tid, acct_id, excess, credit):
+def _mk_bill(db, tid, acct_id, excess, credit,
+             period_start=datetime(2026, 6, 1), period_end=datetime(2026, 6, 30)):
     db.add(Bill(tenant_id=tid, account_id=acct_id,
-                period_start=datetime(2026, 6, 1), period_end=datetime(2026, 6, 30),
+                period_start=period_start, period_end=period_end,
                 kwh_generated=int(excess), kwh_sent_to_grid=float(excess),
                 solar_credit_usd=credit, is_net_metered=True,
                 parse_status="parsed"))
@@ -93,6 +94,90 @@ def test_register_excludes_unsendable_and_disabled():
     assert "Billable Offtaker" in csv_text
     assert "Unbound Offtaker" not in csv_text
     assert "Disabled Offtaker" not in csv_text
+
+
+def test_register_targets_chosen_period_and_memo_and_iif():
+    """The fleet export can target a SPECIFIC settled period (Bruce 2026-07-07):
+    with two settled bills (May + June), `period='2026-05'` must draft the MAY
+    invoice (May's credit rate × the offtaker's share), not June's latest. Also
+    exercises the operator-entered invoice_date, the memo override, and the IIF
+    layout end-to-end from a seeded invoice."""
+    init_db()
+    from datetime import date as _date
+    with SessionLocal() as db:
+        tid = "ten_" + secrets.token_hex(4)
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="PT",
+                      contact_email=f"{tid}@e.com", active=True,
+                      product="array_operator"))
+        db.flush()
+        arr = Array(tenant_id=tid, name="Period Array", region="VT")
+        db.add(arr)
+        db.flush()
+        host = UtilityAccount(tenant_id=tid, provider="gmp", array_id=arr.id,
+                              account_number="HOST-PT")
+        db.add(host)
+        db.flush()
+        # Host/group bills for May and June — DIFFERENT credit rates so the
+        # targeted period's dollars are distinguishable (May 0.10, June 0.20).
+        _mk_bill(db, tid, host.id, 10000, 1000.0,
+                 datetime(2026, 5, 1), datetime(2026, 5, 31))   # May rate 0.10
+        _mk_bill(db, tid, host.id, 10000, 2000.0,
+                 datetime(2026, 6, 1), datetime(2026, 6, 30))   # June rate 0.20
+        own = UtilityAccount(tenant_id=tid, provider="gmp",
+                             account_number="OWN-PT")
+        db.add(own)
+        db.flush()
+        _mk_bill(db, tid, own.id, 500, 50.0,
+                 datetime(2026, 5, 1), datetime(2026, 5, 31))
+        _mk_bill(db, tid, own.id, 500, 100.0,
+                 datetime(2026, 6, 1), datetime(2026, 6, 30))
+        sub = BillingReportSubscription(
+            tenant_id=tid, customer_name="Period Offtaker", array_id=arr.id,
+            allocation_pct=1.0, array_share_pct=0.05, utility_account_id=own.id,
+            billing_model="percent_of_array", cadence="monthly", enabled=True)
+        db.add(sub)
+        db.commit()
+
+        try:
+            # kWh = 0.05 × 10000 = 500 for both months; May credit rate 0.10,
+            # June 0.20, 10% default discount → May $45.00, June $90.00.
+            # Latest (June) default:
+            june_csv, june_n = build_invoice_register(db, tid, fmt="quickbooks")
+            assert june_n == 1, june_csv
+            assert "90.0" in june_csv or "90.00" in june_csv, june_csv
+            # Target MAY explicitly → the May figure ($45), not June's.
+            may_csv, may_n = build_invoice_register(
+                db, tid, fmt="quickbooks", period="2026-05")
+            assert may_n == 1, may_csv
+            assert "45.0" in may_csv or "45.00" in may_csv, may_csv
+            assert "90.0" not in may_csv and "90.00" not in may_csv, may_csv
+            # Operator-entered invoice date lands in the InvoiceDate column (M/D/YYYY).
+            dated_csv, _ = build_invoice_register(
+                db, tid, fmt="quickbooks", period="2026-05",
+                invoice_date=_date(2026, 7, 7))
+            assert "7/7/2026" in dated_csv, dated_csv
+            # A period with NO settled bill emits nothing (never fabricated).
+            empty_csv, empty_n = build_invoice_register(
+                db, tid, fmt="quickbooks", period="2026-01")
+            assert empty_n == 0, empty_csv
+            # Memo override + IIF layout end-to-end from the seeded May invoice.
+            iif_text, iif_n = build_invoice_register(
+                db, tid, fmt="iif", period="2026-05",
+                invoice_date=_date(2026, 7, 7), memo="May solar credit",
+                account_code="4200 Solar Income")
+            assert iif_n == 1, iif_text
+            lines = [ln for ln in iif_text.replace("\r\n", "\n").split("\n") if ln]
+            assert lines[0].startswith("!TRNS\t")            # header block
+            body = lines[3:]
+            assert body[0].startswith("TRNS\tINVOICE\t7/7/2026\tAccounts Receivable\t")
+            assert "4200 Solar Income" in body[1]            # income acct = account_code
+            trns_amt = float(body[0].split("\t")[5])
+            spl_amt = float(body[1].split("\t")[5])
+            assert round(trns_amt + spl_amt, 2) == 0.0       # balances
+            assert abs(trns_amt - 45.0) < 0.011, trns_amt    # MAY amount
+            assert body[0].split("\t")[7] == "May solar credit"   # memo
+        finally:
+            _cleanup(db, tid)
 
 
 def test_bill_bound_legacy_flat_rate_is_the_price():
