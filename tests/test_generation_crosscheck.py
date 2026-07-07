@@ -14,14 +14,46 @@ import pathlib
 import secrets
 from datetime import datetime
 
+import pytest
+
 from api.account import mint_session_for_tenant
-from api.db import SessionLocal
-from api.models import (Tenant, Array, UtilityAccount, Bill, Client,
+from api.db import SessionLocal, engine
+from api.models import (Base, Tenant, Array, UtilityAccount, Bill, Client,
                         BillingReportSubscription)
 from api.billing.reconcile_bills import (SHARE_VARIANCE_THRESHOLD_PCT,
                                          _ALLOC_TOL_KWH, generation_crosscheck)
 
 FIX = pathlib.Path(__file__).parent / "fixtures" / "billing"
+
+
+@pytest.fixture(autouse=True)
+def _purge_new_tenants():
+    """The conftest DB is shared for the whole session (no per-test reset) and a
+    sibling asserts the subscriptions table is empty. Purge every tenant THIS test
+    created so its rows never leak into that order-dependent assertion. Snapshots
+    tenant ids before the test and drops any new ones (FK enforcement off)."""
+    from sqlalchemy import inspect as _inspect, select as _select
+    with SessionLocal() as db:
+        before = {t for (t,) in db.execute(_select(Tenant.id)).all()}
+    yield
+    with SessionLocal() as db:
+        after = {t for (t,) in db.execute(_select(Tenant.id)).all()}
+    new = list(after - before)
+    if not new:
+        return
+    try:
+        existing = set(_inspect(engine).get_table_names())
+        with engine.begin() as conn:
+            try:
+                conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            except Exception:
+                pass
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name in existing and "tenant_id" in table.columns:
+                    conn.execute(table.delete().where(table.c.tenant_id.in_(new)))
+            conn.execute(Tenant.__table__.delete().where(Tenant.id.in_(new)))
+    except Exception:
+        pass
 BASE = "/v1/array-operator/billing"
 RATE = 0.16
 GROUP = 28772.0            # the array's group excess on its own (host) bill

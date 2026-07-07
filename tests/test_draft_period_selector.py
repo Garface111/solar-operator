@@ -11,6 +11,8 @@ from __future__ import annotations
 import secrets
 from datetime import datetime
 
+import pytest
+
 from api.account import mint_session_for_tenant
 from api.db import SessionLocal
 from api.models import (Tenant, Array, UtilityAccount, Bill, Client,
@@ -18,6 +20,44 @@ from api.models import (Tenant, Array, UtilityAccount, Bill, Client,
 
 BASE = "/v1/array-operator/billing"
 RATE = 0.16
+
+# The conftest DB is shared across the whole session (schema created once, never
+# reset between tests), and a sibling test asserts the subscriptions table is
+# empty. Clean up every tenant/subscription this module seeds so it never leaks
+# rows into that order-dependent assertion.
+_SEEDED_TENANTS: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_seeded():
+    yield
+    tids = list(_SEEDED_TENANTS)
+    _SEEDED_TENANTS.clear()
+    if not tids:
+        return
+    # Best-effort hygiene: purge every row this module seeded so it never leaks
+    # into a sibling's order-dependent assertion (test_match_preview_saves_nothing
+    # asserts the subscriptions table is empty). Ordering the full FK graph is
+    # brittle, so drop FK enforcement for this teardown-only connection (SQLite)
+    # and delete each tenant's rows across every tenant-scoped table + tenants.
+    from sqlalchemy import inspect as _inspect
+    from api.db import engine
+    from api.models import Base, Tenant
+    try:
+        existing = set(_inspect(engine).get_table_names())
+        with engine.begin() as conn:
+            try:
+                conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            except Exception:
+                pass
+            for table in reversed(Base.metadata.sorted_tables):
+                # Only touch tables the test schema actually created (the model
+                # declares more than a minimal test DB materializes).
+                if table.name in existing and "tenant_id" in table.columns:
+                    conn.execute(table.delete().where(table.c.tenant_id.in_(tids)))
+            conn.execute(Tenant.__table__.delete().where(Tenant.id.in_(tids)))
+    except Exception:
+        pass
 
 
 def _auth(a):
@@ -28,6 +68,7 @@ def _seed_multi_period_offtaker(cadence: str = "monthly") -> tuple[str, str, int
     """A GMP-bound offtaker whose account has THREE settled monthly bills with
     excess (Oct/Nov/Dec 2025), plus a zero-excess month that must NOT be offered."""
     tid = "ten_period_" + secrets.token_hex(4)
+    _SEEDED_TENANTS.append(tid)
     with SessionLocal() as db:
         db.add(Tenant(id=tid, tenant_key="sol_live_" + secrets.token_urlsafe(12),
                       name="Period Operator", contact_email=f"{tid}@operator.test",
@@ -118,6 +159,7 @@ def test_bill_periods_empty_for_workbook_offtaker(client):
     """No bound utility account → nothing to choose; empty list keeps the
     implicit latest-bill default."""
     tid = "ten_" + secrets.token_hex(6)
+    _SEEDED_TENANTS.append(tid)
     with SessionLocal() as db:
         db.add(Tenant(id=tid, tenant_key="sol_live_" + secrets.token_urlsafe(12),
                       name="WB Operator", contact_email=f"{tid}@operator.test",
