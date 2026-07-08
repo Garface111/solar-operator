@@ -5478,12 +5478,15 @@ def sma_connect_account(
     system_id, then exact name; create otherwise; idempotent — the same
     cascade as SolarEdge/Fronius/Locus).
 
-    SCOPING NOTE (loud): our app token lists the plants of EVERY consented
-    owner across tenants, and SMA's listing gives us no per-owner filter we
-    can rely on yet. The UI must therefore pass the explicit system_ids the
-    tenant picked from their discover step. Passing none attaches everything
-    the app can see — acceptable only while the app has a single tenant's
-    consents; revisit after the sandbox run pins a per-owner filter."""
+    CROSS-TENANT GUARD: our app token lists the plants of EVERY consented
+    owner across ALL tenants (SMA's /plants has no per-owner filter), so a
+    naive "attach everything discovered" would hand tenant B a plant that
+    tenant A's owner already consented to and connected. We close that using
+    OUR OWN data instead of SMA's: any system_id already attached to another
+    tenant's array is excluded before the create/match cascade runs, whether
+    it came from an explicit system_ids list or the "attach everything"
+    default. A tenant re-running discover/connect for plants it already owns
+    is unaffected (those match this tenant's own InverterConnection rows)."""
     tenant = _tenant_from_bearer(authorization)
     _guard_vendor_discover(tenant.id, "sma")
     if not inverters.sma.is_app_configured():
@@ -5501,6 +5504,30 @@ def sma_connect_account(
     if body.system_ids is not None:
         requested = {str(s) for s in body.system_ids}
         discovered = [s for s in discovered if str(s["system_id"]) in requested]
+
+    with SessionLocal() as _guard_db:
+        other_tenant_ids: set[str] = {
+            str((conn_config or {}).get("system_id"))
+            for (conn_config, owner_tenant_id) in _guard_db.execute(
+                select(InverterConnection.config, Array.tenant_id)
+                .join(Array, Array.id == InverterConnection.array_id)
+                .where(InverterConnection.vendor == "sma",
+                       Array.tenant_id != tenant.id,
+                       Array.deleted_at.is_(None))
+            ).all()
+            if (conn_config or {}).get("system_id")
+        }
+    if other_tenant_ids:
+        claimed_elsewhere = [s for s in discovered if str(s["system_id"]) in other_tenant_ids]
+        discovered = [s for s in discovered if str(s["system_id"]) not in other_tenant_ids]
+        if claimed_elsewhere and requested is not None:
+            # The tenant explicitly asked for a plant another tenant already owns —
+            # say so plainly instead of silently dropping it.
+            names = ", ".join(s.get("name") or s["system_id"] for s in claimed_elsewhere)
+            raise HTTPException(
+                409, f"Plant already connected to a different EnergyAgent account: {names}. "
+                     "If this is your plant, contact support."
+            )
 
     if not discovered:
         return {"ok": True, "connected": [], "created": [], "matched": [],

@@ -180,6 +180,43 @@ def test_connect_account_attaches_with_env_creds_only(client, monkeypatch):
     assert r2.json()["created"] == []
 
 
+def test_connect_account_never_leaks_another_tenants_plant(client, monkeypatch):
+    """SMA's /plants has no per-owner filter — the app token lists every
+    consented owner's plants across ALL tenants. Tenant A connects PL-1; when
+    tenant B later connects (with no system_ids, i.e. "attach everything"),
+    PL-1 must NOT be re-attached to B even though SMA's listing includes it."""
+    tid_a = _make_tenant()
+    tid_b = _make_tenant()
+    suffix = secrets.token_hex(4)          # avoid colliding with other tests' rows
+    id_a, id_b = f"PLA-{suffix}", f"PLB-{suffix}"
+    plants = [{"plantId": id_a, "name": "Owner A's Farm"},
+              {"plantId": id_b, "name": "Owner B's Barn"}]
+    _wire_sma(monkeypatch, plants=plants)
+
+    r = client.post("/v1/array-owners/sma/connect-account", headers=_auth(tid_a),
+                    json={"system_ids": [id_a]})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["connected"]) == 1
+
+    # Tenant B connects with NO explicit system_ids — the "attach everything
+    # discovered" default must exclude id_a (already tenant A's).
+    r2 = client.post("/v1/array-owners/sma/connect-account", headers=_auth(tid_b), json={})
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert {e["system_id"] for e in body2["connected"]} == {id_b}
+
+    with SessionLocal() as db:
+        b_arrays = db.execute(select(Array).where(
+            Array.tenant_id == tid_b, Array.deleted_at.is_(None))).scalars().all()
+        assert {a.name for a in b_arrays} == {"Owner B's Barn"}
+
+    # Explicitly requesting another tenant's plant is a loud 409, not a silent drop.
+    r3 = client.post("/v1/array-owners/sma/connect-account", headers=_auth(tid_b),
+                     json={"system_ids": [id_a]})
+    assert r3.status_code == 409
+    assert "already connected to a different" in r3.json()["detail"].lower()
+
+
 # ── Adapter-level shape tests (verified against the sandbox 2026-07-08) ─────────
 
 def test_pv_generation_parses_verified_set_envelope():
