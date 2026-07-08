@@ -127,3 +127,25 @@ test("reconcileSiteDaily ignores junk points", () => {
   assert.deepEqual(S.reconcileSiteDaily(site, inverters),
     [{ date: "2026-06-29", kwh: 42 }]);
 });
+
+// ── decodeJwtEmail: the zero-typing bridge to the official SMA consent flow ──
+// (the owner's email is read off their OWN Keycloak Bearer token, never typed).
+function fakeJwt(payload) {
+  const b64url = (obj) => Buffer.from(JSON.stringify(obj))
+    .toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${b64url({ alg: "RS256" })}.${b64url(payload)}.fakesig`;
+}
+
+test("decodeJwtEmail reads the email claim off a real-shaped Keycloak token", () => {
+  const tok = fakeJwt({ sub: "abc123", email: "owner@example.com", exp: 9999999999 });
+  assert.equal(S.decodeJwtEmail(tok), "owner@example.com");
+});
+
+test("decodeJwtEmail never throws on garbage input", () => {
+  assert.equal(S.decodeJwtEmail(null), null);
+  assert.equal(S.decodeJwtEmail(""), null);
+  assert.equal(S.decodeJwtEmail("not-a-jwt"), null);
+  assert.equal(S.decodeJwtEmail("a.b"), null);                         // payload isn't valid base64 JSON
+  assert.equal(S.decodeJwtEmail(fakeJwt({ sub: "no-email-claim" })), null);
+  assert.equal(S.decodeJwtEmail(fakeJwt({ email: "not-an-email" })), null); // rejects a malformed claim
+});

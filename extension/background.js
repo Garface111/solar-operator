@@ -470,9 +470,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return; // synchronous response
   }
   // v1.9.2: SMA (ennexOS / Sunny Portal) per-inverter capture for Array Operator.
-  // SMA's official API needs developer-app registration + owner consent, so we
-  // read the owner's per-inverter readings from the logged-in portal instead and
-  // hand them to the AO page via SO_CAPTURE_LANDED (same shape as Fronius).
+  // Reads the owner's per-inverter readings from the logged-in portal and hands
+  // them to the AO page via SO_CAPTURE_LANDED (same shape as Fronius) for an
+  // INSTANT connect. ownerEmail (v1.9.114, read off the owner's own Bearer token
+  // by sunnyportal_content.js — never typed) rides along so the AO page can ALSO
+  // silently kick off the official SMA cloud API's owner-consent in the
+  // background, migrating this connection to 24/7 server-side polling over time.
   if (msg.type === "SMA_CAPTURED") {
     const p = msg.payload || {};
     const landed = {
@@ -481,6 +484,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       provider: "sma",
       sites: Array.isArray(p.sites) ? p.sites : [],
       accountCount: Array.isArray(p.sites) ? p.sites.length : 0,
+      ownerEmail: typeof p.owner_email === "string" ? p.owner_email : null,
       at: new Date().toISOString(),
     };
     broadcastToSoTabs(landed, sender && sender.tab);

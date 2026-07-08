@@ -149,6 +149,27 @@
   function getAccessToken() {
     try { return localStorage.getItem("access_token"); } catch (_) { return null; }
   }
+  // The Bearer token is a Keycloak-issued JWT; its payload carries the signed-in
+  // owner's `email` claim (standard OIDC "email" scope) — no extra network call
+  // needed to learn WHO just logged in. Used to auto-arm the official SMA cloud
+  // API's owner-consent (bc-authorize) without ever asking the owner to type
+  // their email into Array Operator. Pure + fail-soft: any malformed token/claim
+  // yields null, never a throw — capture proceeds exactly as before regardless.
+  function decodeJwtEmail(token) {
+    try {
+      const parts = String(token || "").split(".");
+      if (parts.length < 2) return null;
+      const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const pad = b64.length % 4 ? "=".repeat(4 - (b64.length % 4)) : "";
+      const json = decodeURIComponent(
+        atob(b64 + pad).split("").map((c) =>
+          "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("")
+      );
+      const claims = JSON.parse(json);
+      const email = claims && claims.email;
+      return (typeof email === "string" && /\S+@\S+\.\S+/.test(email)) ? email : null;
+    } catch (_) { return null; }
+  }
   async function getJson(url) {
     const tok = getAccessToken();
     if (!tok) throw new Error("no access_token in localStorage (not logged in?)");
@@ -570,7 +591,13 @@
       } catch (_) { /* skip a plant that errored; others still ship */ }
     }
     if (!sites.length) throw new Error("no producing inverters");
-    return { provider: "sma", capturedAt: new Date().toISOString(), sites };
+    // Zero-typing bridge to the official SMA cloud API: the owner's email (read
+    // off their OWN Bearer token, never asked for) rides along so Array Operator
+    // can silently kick off owner-consent (bc-authorize) in the background — the
+    // one-click portal login that already captures live readings ALSO arms
+    // 24/7 server-side polling, no separate step.
+    const owner_email = decodeJwtEmail(getAccessToken());
+    return { provider: "sma", capturedAt: new Date().toISOString(), owner_email, sites };
   }
 
   function hasIntent() {
@@ -647,7 +674,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       _soCoerceNum, _soValidLatLng, _soExtractAddress, findLocation, applyLocation,
-      nameplateKw, deriveStatus, pickHistorySeries, reconcileSiteDaily,
+      nameplateKw, deriveStatus, pickHistorySeries, reconcileSiteDaily, decodeJwtEmail,
     };
   }
 
