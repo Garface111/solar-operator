@@ -1,10 +1,16 @@
-"""SMA owner-consent connect flow (v1.9.113).
+"""SMA owner-consent connect flow.
 
 SMA's model: our ONE registered app (env creds) + per-owner backchannel
 consent — the owner approves inside Sunny Portal; no passwords or keys ever
 touch us. These tests pin the whole lifecycle with mocked httpx: availability
 gating, consent request persistence, status polling, and the attach cascade
 storing ONLY {system_id} per connection (app creds stay in the environment).
+
+The mocked httpx shapes MIRROR the shapes VERIFIED against the live SMA sandbox
+on 2026-07-08 (see the banner in api/inverters/sma.py):
+  • POST bc-authorize (Bearer + JSON {"loginHint"}) → 201 {"state": "Pending"|
+    "Accepted"|"Revoked", ...}. Re-POSTing reads the current state (no GET).
+  • GET /plants → {"plants": [{"plantId","name","timezone"}]}.
 """
 from __future__ import annotations
 
@@ -48,23 +54,27 @@ def _auth(tid: str) -> dict:
     return {"Authorization": f"Bearer {_sign_session(tid)}"}
 
 
-def _wire_sma(monkeypatch, *, plants=None, consent="pending"):
-    """Mock the SMA app env + every httpx call the adapter makes."""
+def _wire_sma(monkeypatch, *, plants=None, consent="Pending"):
+    """Mock the SMA app env + every httpx call the adapter makes, using the
+    VERIFIED sandbox shapes. `consent` is SMA's capitalized enum (Pending|
+    Accepted|Revoked); bc-authorize returns it on every POST."""
     import api.inverters.sma as sma
     cid = "app-" + secrets.token_hex(4)          # unique per test — token cache is module-level
     monkeypatch.setenv("SMA_APP_CLIENT_ID", cid)
     monkeypatch.setenv("SMA_APP_CLIENT_SECRET", "app-secret")
 
-    def fake_post(url, data=None, timeout=None):
+    def fake_post(url, data=None, json=None, headers=None, timeout=None):
         if url == sma.AUTH_URL:
             return _FakeResp(200, {"access_token": "tok", "expires_in": 3600})
         if url.endswith("/oauth2/v2/bc-authorize"):
-            return _FakeResp(200, {"auth_req_id": "req-123"})
+            # Verified: Bearer + JSON {"loginHint": ...} → 201 {state, ...}
+            assert json and "loginHint" in json, "bc-authorize must send JSON loginHint"
+            return _FakeResp(201, {"loginHint": json["loginHint"], "state": consent,
+                                   "expirationDate": "2026-07-15T00:00:00Z",
+                                   "interval": 1800})
         return _FakeResp(404, {"error": f"unexpected POST {url}"})
 
     def fake_get(url, headers=None, params=None, timeout=None):
-        if "/bc-authorize/" in url and url.endswith("/status"):
-            return _FakeResp(200, {"status": consent})
         if url.endswith("/plants"):
             params = params or {}
             off, lim = int(params.get("offset", 0)), int(params.get("limit", 50))
@@ -101,7 +111,7 @@ def test_consent_unconfigured_is_503_and_saves_nothing(client, monkeypatch):
 
 def test_consent_lifecycle_pending_to_accepted(client, monkeypatch):
     tid = _make_tenant()
-    _wire_sma(monkeypatch, consent="pending")
+    _wire_sma(monkeypatch, consent="Pending")
     r = client.post("/v1/array-owners/sma/consent", headers=_auth(tid),
                     json={"owner_email": "Owner@Farm.com"})
     assert r.status_code == 200, r.text
@@ -110,13 +120,14 @@ def test_consent_lifecycle_pending_to_accepted(client, monkeypatch):
         row = db.execute(select(SmaConsent).where(
             SmaConsent.tenant_id == tid)).scalar_one()
         assert row.owner_email_lc == "owner@farm.com"
-        assert row.auth_req_id == "req-123"
+        assert row.status == "pending"
 
-    # Poll while pending, then after the owner approves.
+    # Poll while pending, then after the owner approves (status re-POSTs
+    # bc-authorize; SMA's capitalized state normalizes to lowercase).
     r = client.get("/v1/array-owners/sma/consent/status",
                    params={"owner_email": "owner@farm.com"}, headers=_auth(tid))
     assert r.json()["status"] == "pending"
-    _wire_sma(monkeypatch, consent="accepted")
+    _wire_sma(monkeypatch, consent="Accepted")
     r = client.get("/v1/array-owners/sma/consent/status",
                    params={"owner_email": "owner@farm.com"}, headers=_auth(tid))
     assert r.json()["status"] == "accepted"
@@ -124,6 +135,18 @@ def test_consent_lifecycle_pending_to_accepted(client, monkeypatch):
     r = client.get("/v1/array-owners/sma/consent/status",
                    params={"owner_email": "nobody@x.com"}, headers=_auth(tid))
     assert r.status_code == 404
+
+
+def test_consent_already_accepted_short_circuits(client, monkeypatch):
+    """A returning owner who already approved comes back "accepted" on the very
+    first bc-authorize POST — the UI can skip the waiting screen."""
+    tid = _make_tenant()
+    _wire_sma(monkeypatch, consent="Accepted")
+    r = client.post("/v1/array-owners/sma/consent", headers=_auth(tid),
+                    json={"owner_email": "back@again.com"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "accepted"
+    assert "Already connected" in r.json()["message"]
 
 
 def test_connect_account_attaches_with_env_creds_only(client, monkeypatch):
@@ -155,3 +178,75 @@ def test_connect_account_attaches_with_env_creds_only(client, monkeypatch):
                      json={"system_ids": ["PL-1"]})
     assert r2.status_code == 200
     assert r2.json()["created"] == []
+
+
+# ── Adapter-level shape tests (verified against the sandbox 2026-07-08) ─────────
+
+def test_pv_generation_parses_verified_set_envelope():
+    """VERIFIED envelope: {plant, setType, resolution, set:[{time, pvGeneration}]}.
+    We take the last non-null pvGeneration in the set."""
+    import api.inverters.sma as sma
+    body = {
+        "plant": {"plantId": "13"},
+        "setType": "EnergyAndPowerPv",
+        "resolution": "OneDay",
+        "set": [
+            {"time": "2026-07-01T00:00:00", "pvGeneration": 12000.0},
+            {"time": "2026-07-01T00:00:00", "pvGeneration": 15250.5},
+        ],
+    }
+    val, ts = sma._pv_generation(body)
+    assert val == 15250.5
+    assert ts == "2026-07-01T00:00:00"
+    # Empty set (sandbox test plants) → no value, never a crash.
+    assert sma._pv_generation({"set": []}) == (None, None)
+    # Legacy/top-level fallbacks still tolerated.
+    assert sma._pv_generation({"pvGeneration": 42.0}) == (42.0, None)
+    assert sma._pv_generation({"pvGeneration": {"value": 9.0, "time": "t"}}) == (9.0, "t")
+
+
+def test_request_consent_sends_bearer_json_loginhint(monkeypatch):
+    """bc-authorize must POST JSON {"loginHint": ...} with a Bearer token — the
+    shape the sandbox accepted (form + client-creds-in-body were 401/415)."""
+    import api.inverters.sma as sma
+    monkeypatch.setenv("SMA_APP_CLIENT_ID", "app-x")
+    monkeypatch.setenv("SMA_APP_CLIENT_SECRET", "app-y")
+    captured = {}
+
+    def fake_post(url, data=None, json=None, headers=None, timeout=None):
+        if url == sma.AUTH_URL:
+            return _FakeResp(200, {"access_token": "TOK", "expires_in": 3600})
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers or {}
+        return _FakeResp(201, {"loginHint": json["loginHint"], "state": "Pending"})
+
+    monkeypatch.setattr(sma.httpx, "post", fake_post)
+    out = sma.request_consent("owner@farm.com")
+    assert out["state"] == "pending"
+    assert captured["url"].endswith("/oauth2/v2/bc-authorize")
+    assert captured["json"] == {"loginHint": "owner@farm.com", "scope": "monitoringApi:read"}
+    assert captured["headers"].get("Authorization") == "Bearer TOK"
+
+
+def test_discover_systems_parses_plantid_shape(monkeypatch):
+    """VERIFIED /plants shape: {"plants":[{plantId,name,timezone}]}."""
+    import api.inverters.sma as sma
+    monkeypatch.setenv("SMA_APP_CLIENT_ID", "app-x")
+    monkeypatch.setenv("SMA_APP_CLIENT_SECRET", "app-y")
+
+    def fake_post(url, data=None, json=None, headers=None, timeout=None):
+        return _FakeResp(200, {"access_token": "TOK", "expires_in": 3600})
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        return _FakeResp(200, {"plants": [
+            {"plantId": "13", "name": "Testplant 1", "timezone": "Europe/Berlin"},
+            {"plantId": "24", "name": "", "timezone": "Europe/Berlin"},
+        ]})
+
+    monkeypatch.setattr(sma.httpx, "post", fake_post)
+    monkeypatch.setattr(sma.httpx, "get", fake_get)
+    out = sma.discover_systems()
+    assert {s["system_id"] for s in out} == {"13", "24"}
+    # Blank name falls back to a stable label, never empty.
+    assert any(s["name"] == "SMA plant 24" for s in out)

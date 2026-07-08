@@ -61,7 +61,15 @@ def fetch_daily(vendor: str, config: dict, start: date, end: date) -> list[dict]
 
 
 def vendor_catalog() -> list[dict]:
-    """The connect-form spec the frontend renders: one entry per vendor."""
+    """The connect-form spec the frontend renders: one entry per vendor.
+
+    `connect_mode` tells the UI which connect surface to render:
+      • "key"      → the field form (paste API key / credentials) — default.
+      • "account"  → one credential, then discover the whole account (SolarEdge).
+      • "consent"  → owner enters only their email, approves in their portal, we
+                     discover + attach (SMA). `consent_email_label` labels the
+                     single input in that flow.
+    """
     out: list[dict] = []
     for code, module in VENDORS.items():
         out.append({
@@ -70,5 +78,7 @@ def vendor_catalog() -> list[dict]:
             "fields": module.FIELDS,
             "available": getattr(module, "AVAILABLE", True),
             "note": getattr(module, "NOTE", None),
+            "connect_mode": getattr(module, "CONNECT_MODE", "key"),
+            "consent_email_label": getattr(module, "CONSENT_EMAIL_LABEL", None),
         })
     return out

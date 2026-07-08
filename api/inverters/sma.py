@@ -1,25 +1,37 @@
 """SMA inverter source — Monitoring API (ennexOS / smaapis.de).
 
 ╔════════════════════════════════════════════════════════════════════════════╗
-║ STATUS — auth path reached the LIVE sandbox (2026-07-06); blocked on the    ║
-║ credential FLOW, not on our code.                                           ║
+║ STATUS — auth + consent + discovery VERIFIED against the LIVE sandbox        ║
+║ (2026-07-08, Custom-Flow / service-account creds). Blocked only on a real   ║
+║ consented plant WITH generation data + the signed contract.                 ║
 ║                                                                            ║
-║ Confirmed live via scripts/verify_inverter_apis (sandbox): the token host  ║
-║ is sandbox-auth.smaapis.de/oauth2/token (NOT sandbox.smaapis.de); the       ║
-║ client_id + client_secret authenticate; and SMA's "Custom Grant" = a        ║
-║ client_credentials service-account token + the bc-authorize backchannel     ║
-║ consent this module already implements. BUT the sandbox creds SMA first     ║
-║ issued were provisioned for the end-user Authorization-Code Flow, so        ║
-║ client_credentials returns 401 "Client not enabled to retrieve service      ║
-║ account". Verification is blocked until SMA issues CUSTOM-FLOW (service-     ║
-║ account-enabled) sandbox creds (requested 2026-07-06). Response PARSING      ║
-║ (measurements/plants JSON shapes) stays best-effort until a token with      ║
-║ plant access confirms them. See HANDOFF_API_VERIFICATION.md.                ║
+║ VERIFIED against sandbox-auth.smaapis.de / sandbox.smaapis.de:              ║
+║  • token: POST {AUTH_URL} grant_type=client_credentials → Bearer,           ║
+║    scope monitoringApi:read, expires_in 300.                                ║
+║  • consent: POST {BC_BASE}/oauth2/v2/bc-authorize  (Bearer + JSON           ║
+║    {"loginHint": <email>}) → 201 {loginHint, state, expirationDate,          ║
+║    interval}. Re-POSTing is how you READ current state (there is NO GET      ║
+║    status endpoint — the {email}/status resource is PUT-only, used by the   ║
+║    sandbox to SIMULATE the owner's approval). state ∈ Pending|Accepted|      ║
+║    Revoked (SMA's async-auth enum; no explicit Rejected/Denied).            ║
+║  • discovery: GET {MON_BASE}/plants → {"plants":[{plantId,name,timezone}]}. ║
+║    Empty until an owner consents; after approval the owner's plants appear. ║
+║    NO per-owner filter exists on /plants (loginHint/owner params ignored) — ║
+║    the app token lists EVERY consented owner's plants, so connect-account    ║
+║    must scope by explicit system_ids (see array_owners.sma_connect_account).║
+║                                                                            ║
+║ UNVERIFIED — pending a real plant with generation:                          ║
+║  • the measurement VALUES. The envelope is confirmed                        ║
+║    {plant, setType, resolution, set:[{time, pvGeneration}]} but sandbox      ║
+║    test plants carry zero generation (`set` is always []), so the inner      ║
+║    value units (W for Recent, Wh for Day) are parsed per SMA's OpenAPI       ║
+║    schema, not observed. See HANDOFF_API_VERIFICATION.md.                   ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-OAuth2. Config: {"client_id", "client_secret", "system_id", "refresh_token"?}.
-client_credentials grant when no refresh_token is supplied, else refresh_token
-grant. Tokens are cached per client_id with their expiry.
+OAuth2. Owner-facing config carries only {"system_id"}; the app-level
+client_id/client_secret merge in from the environment at call time
+(_resolve_creds). Legacy per-connection {client_id, client_secret,
+refresh_token} still work as a fallback.
 """
 from __future__ import annotations
 
@@ -33,28 +45,43 @@ from .base import TIMEOUT, InverterAuthError, InverterError, require_fields
 CODE = "sma"
 LABEL = "SMA (Sunny Portal / ennexOS)"
 AVAILABLE = True
-NOTE = "Requires SMA developer app registration + owner consent. Endpoints unverified."
+NOTE = "Connect by approving a one-time request in your SMA / Sunny Portal account — no keys."
 SUPPORTS_LIVE = True
 SUPPORTS_DAILY = True
+# Owner-facing connect is the consent flow (owner enters only their email); the
+# server discovers plants and stores {system_id} per connection. These FIELDS
+# describe the LEGACY manual fallback (a plant owner who already holds their own
+# SMA app credentials) — the default AO connect path is the email-consent flow
+# in array_owners.sma_* and does not use them.
+CONNECT_MODE = "consent"          # UI hint: render the email→approve flow, not a key form
+CONSENT_EMAIL_LABEL = "Your SMA / Sunny Portal email"
 FIELDS = [
-    {"name": "client_id", "label": "Client ID", "secret": False},
-    {"name": "client_secret", "label": "Client Secret", "secret": True},
     {"name": "system_id", "label": "Plant / System ID", "secret": False},
-    {"name": "refresh_token", "label": "Refresh token (optional)", "secret": True},
+    {"name": "client_id", "label": "Client ID (advanced / legacy)", "secret": False,
+     "optional": True},
+    {"name": "client_secret", "label": "Client Secret (advanced / legacy)", "secret": True,
+     "optional": True},
+    {"name": "refresh_token", "label": "Refresh token (optional)", "secret": True,
+     "optional": True},
 ]
 
-# ── URL layout (single adjust-point for the sandbox verification run) ─────────
-# Production defaults per SMA's published docs; every one env-overridable so
-# the sandbox run (SMA_SANDBOX=1 in scripts/verify_inverter_apis) or a docs
-# correction never needs a code change.
+# ── URL layout (single adjust-point; every host env-overridable) ──────────────
+# ⚠️ PROD hosts are set via env on Railway (SMA_AUTH_URL / SMA_MON_BASE /
+# SMA_BC_BASE) — these code defaults are only a fallback and follow SMA's
+# published production hostnames. The VERIFIED sandbox values (proven 2026-07-08)
+# were: AUTH=https://sandbox-auth.smaapis.de/oauth2/token,
+# MON=https://sandbox.smaapis.de/monitoring/v1, BC=https://sandbox.smaapis.de.
+# Sandbox puts the monitoring API under a "/monitoring" path on the shared host;
+# production uses a dedicated monitoring.smaapis.de host with a "/v1" prefix.
 AUTH_URL = os.environ.get("SMA_AUTH_URL", "https://auth.smaapis.de/oauth2/token")
 MON_BASE = os.environ.get("SMA_MON_BASE", "https://monitoring.smaapis.de/v1")
-# Backchannel (CIBA-style) consent endpoints: our ONE registered app asks SMA to
-# prompt a plant OWNER (their Sunny Portal email) for consent; the owner
-# approves inside their SMA account; then our app token can read their plants.
-# ⚠️ SHAPES UNVERIFIED until the sandbox run — paths follow SMA's published docs
-# (POST …/oauth2/v2/bc-authorize, status at …/bc-authorize/{email}/status).
-BC_BASE = os.environ.get("SMA_BC_BASE", "https://auth.smaapis.de")
+# Backchannel (CIBA-style) consent: our ONE registered app asks SMA to prompt a
+# plant OWNER (their Sunny Portal email) for consent; the owner approves inside
+# their SMA account; then our app token can read their plants. VERIFIED shape:
+# POST {BC_BASE}/oauth2/v2/bc-authorize with Bearer + JSON {"loginHint": email}.
+# The consent gateway lives on the monitoring host (NOT the auth host) — sandbox
+# proved bc-authorize 404s on the auth host and responds on the monitoring host.
+BC_BASE = os.environ.get("SMA_BC_BASE", "https://monitoring.smaapis.de")
 
 # ── App-level credentials (the ONE registered EnergyAgent app) ────────────────
 # SMA's model is per-app registration + per-owner consent, so client_id/secret
@@ -192,11 +219,32 @@ def _get(config: dict, path: str, params: dict | None = None) -> dict:
 
 
 def _pv_generation(body: dict) -> tuple[float | None, str | None]:
-    """Pull the pvGeneration measurement value (+ time) from a measurement set.
+    """Pull the pvGeneration value (+ time) from a measurement-set response.
 
-    Tolerates {"pvGeneration": {"value", "time"}} and {"pvGeneration": value}.
+    VERIFIED envelope (SMA Monitoring API, sandbox 2026-07-08 + OpenAPI schema):
+        {"plant": {...}, "setType": "EnergyAndPowerPv", "resolution": "...",
+         "set": [ {"time": "2020-03-23T12:40:00", "pvGeneration": 7732.648}, … ]}
+    For period=Recent the `set` holds the latest sample (pvGeneration in W);
+    for period=Day it holds daily aggregates (pvGeneration in Wh). We take the
+    LAST non-null pvGeneration in the set (the freshest / the requested day).
+
+    ⚠️ The `set` ITEM values are unverified against live generation — sandbox
+    test plants return `set: []`. Parsing follows the OpenAPI schema. Two
+    legacy/top-level shapes are tolerated too so a docs shift can't hard-fail.
     """
-    pv = (body or {}).get("pvGeneration")
+    body = body or {}
+    rows = body.get("set")
+    if isinstance(rows, list):
+        val, ts = None, None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pv = row.get("pvGeneration")
+            if pv is not None:
+                val, ts = pv, row.get("time") or row.get("timestamp")
+        return val, ts
+    # Tolerated fallbacks: {"pvGeneration": {"value","time"}} / {"pvGeneration": v}
+    pv = body.get("pvGeneration")
     if isinstance(pv, dict):
         return pv.get("value"), pv.get("time") or pv.get("timestamp")
     return pv, None
@@ -243,32 +291,36 @@ def fetch_daily(config: dict, start: date, end: date) -> list[dict]:
 
 
 # ── Owner consent (backchannel authorize) + plant discovery ────────────────────
-# The production connect flow: tenant enters the plant OWNER's Sunny Portal
-# email → request_consent() → SMA prompts the owner inside their account →
-# consent_status() flips to "accepted" → discover_systems() lists the plants our
-# app can now read → the connect-account cascade attaches them.
-# ⚠️ Request/response SHAPES UNVERIFIED until the sandbox run (see BC_BASE note).
-# Everything here parses defensively and normalizes to small stable dicts so a
-# field-name correction after the sandbox run stays inside this module.
+# Production connect flow: tenant enters the plant OWNER's Sunny Portal email →
+# request_consent() (POST bc-authorize) → SMA prompts the owner inside their
+# account → consent_status() (re-POST bc-authorize, reads current state) flips to
+# "accepted" → discover_systems() (GET /plants) lists the plants our app can now
+# read → the connect-account cascade attaches them.
+#
+# VERIFIED against the live sandbox 2026-07-08:
+#   POST {BC_BASE}/oauth2/v2/bc-authorize
+#     auth:  Bearer <service-account token>          (NOT client creds in body)
+#     body:  JSON {"loginHint": "<email>"}           (NOT form; field is loginHint)
+#     resp:  201 {"loginHint", "state", "expirationDate", "interval"}
+#            state ∈ Pending | Accepted | Revoked
+#   Re-POSTing the SAME loginHint returns the CURRENT state — that is how we
+#   poll (there is no GET status endpoint; {email}/status is PUT-only and used
+#   by the sandbox to simulate the owner's approval, see _sandbox_simulate_*).
 
-def request_consent(owner_email: str) -> dict:
-    """Ask SMA to prompt `owner_email` for data-sharing consent with our app.
+_BC_URL = f"{BC_BASE}/oauth2/v2/bc-authorize"
 
-    Returns {"requested": True, "auth_req_id": str|None}. Raises
-    InverterAuthError when the app credentials are missing/rejected."""
+
+def _bc_authorize(email: str) -> dict:
+    """POST bc-authorize for `email`; returns the parsed body. Used by BOTH
+    request_consent (kick off) and consent_status (re-POST to read state) —
+    SMA's backchannel endpoint is idempotent-per-email and returns the current
+    state each time."""
     creds = _resolve_creds({})
-    email = (owner_email or "").strip()
-    if not email or "@" not in email:
-        raise InverterError("A valid plant-owner email is required.")
     try:
         resp = httpx.post(
-            f"{BC_BASE}/oauth2/v2/bc-authorize",
-            data={
-                "client_id": creds["client_id"],
-                "client_secret": creds["client_secret"],
-                "login_hint": email,
-                "scope": "monitoringApi:read",
-            },
+            _BC_URL,
+            json={"loginHint": email, "scope": "monitoringApi:read"},
+            headers={"Authorization": f"Bearer {_get_token(creds)}"},
             timeout=TIMEOUT,
         )
     except httpx.RequestError as exc:
@@ -280,38 +332,63 @@ def request_consent(owner_email: str) -> dict:
             f"SMA bc-authorize returned {resp.status_code}: {resp.text[:200]}"
         )
     try:
-        body = resp.json()
+        return resp.json() or {}
     except Exception:  # noqa: BLE001 — some 2xx responses may be body-less
-        body = {}
-    return {"requested": True, "auth_req_id": body.get("auth_req_id")}
+        return {}
+
+
+def _normalize_state(raw: str | None) -> str:
+    """SMA's async-auth enum (Pending|Accepted|Revoked, capitalized) → our
+    lowercase vocabulary. Unknown values map to 'unknown', never a crash."""
+    s = str(raw or "").strip().lower()
+    return s if s in ("pending", "accepted", "revoked", "rejected") else "unknown"
+
+
+def request_consent(owner_email: str) -> dict:
+    """Ask SMA to prompt `owner_email` for data-sharing consent with our app.
+
+    Returns {"requested": True, "state": pending|accepted|revoked|unknown,
+    "expiration": str|None}. Raises InverterAuthError when the app credentials
+    are missing/rejected."""
+    email = (owner_email or "").strip()
+    if not email or "@" not in email:
+        raise InverterError("A valid plant-owner email is required.")
+    body = _bc_authorize(email)
+    return {
+        "requested": True,
+        "state": _normalize_state(body.get("state")),
+        "expiration": body.get("expirationDate"),
+    }
 
 
 def consent_status(owner_email: str) -> str:
-    """The owner's consent state, normalized to one of:
-    pending | accepted | rejected | revoked | unknown."""
+    """The owner's current consent state, normalized to one of:
+    pending | accepted | revoked | rejected | unknown.
+
+    Reads state by RE-POSTing bc-authorize (SMA has no GET status endpoint);
+    the response carries the live state. Re-posting does not spam the owner —
+    once Accepted, SMA returns Accepted without re-prompting."""
+    email = (owner_email or "").strip()
+    if not email:
+        return "unknown"
+    body = _bc_authorize(email)
+    return _normalize_state(body.get("state"))
+
+
+def _sandbox_simulate_approval(owner_email: str, state: str = "Accepted") -> int:
+    """SANDBOX-ONLY: simulate the owner approving/revoking via the PUT status
+    resource (there is no such control in production — the owner approves inside
+    Sunny Portal). Returns the HTTP status. Used by the verify harness/tests
+    only; never called by the app flow."""
     creds = _resolve_creds({})
     email = (owner_email or "").strip()
-    try:
-        resp = httpx.get(
-            f"{BC_BASE}/oauth2/v2/bc-authorize/{email}/status",
-            headers={"Authorization": f"Bearer {_get_token(creds)}"},
-            timeout=TIMEOUT,
-        )
-    except httpx.RequestError as exc:
-        raise InverterError(f"Network error contacting SMA consent API: {exc}") from exc
-    if resp.status_code in (401, 403):
-        raise InverterAuthError("SMA rejected the app credentials (401/403).")
-    if resp.status_code == 404:
-        return "unknown"                      # no request on file for this email
-    if not resp.is_success:
-        raise InverterError(
-            f"SMA consent status returned {resp.status_code}: {resp.text[:200]}"
-        )
-    try:
-        raw = str((resp.json() or {}).get("status") or "").strip().lower()
-    except Exception:  # noqa: BLE001
-        raw = ""
-    return raw if raw in ("pending", "accepted", "rejected", "revoked") else "unknown"
+    resp = httpx.put(
+        f"{_BC_URL}/{email}/status",
+        json={"state": state},
+        headers={"Authorization": f"Bearer {_get_token(creds)}"},
+        timeout=TIMEOUT,
+    )
+    return resp.status_code
 
 
 def discover_systems(config: dict | None = None) -> list[dict]:

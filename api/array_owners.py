@@ -5350,17 +5350,19 @@ def compute_fleet_forecast(tenant, window_days: int) -> dict:
         }
 
 
-# ── SMA owner-consent connect (v1.9.113) ───────────────────────────────────────
+# ── SMA owner-consent connect ──────────────────────────────────────────────────
 # SMA's API model is the inverse of key-paste: our ONE registered app + a
 # per-owner backchannel consent the plant owner approves inside their Sunny
 # Portal account. No passwords, no keys for the owner to hunt — one approval
 # click. Flow: POST /sma/consent (send the prompt) → GET /sma/consent/status
-# (poll; state persisted in SmaConsent so it resumes across sessions) →
-# POST /sma/connect-account (list the app-readable plants, attach chosen ones).
-# Inert until SMA approves the app registration (SMA_APP_CLIENT_ID/SECRET env):
-# /sma/available tells the UI which world it's in.
-# ⚠️ SMA endpoint shapes are unverified until the sandbox run — parsing lives in
-# api/inverters/sma.py behind one URL-config block (see its banner).
+# (poll; re-POSTs bc-authorize under the hood, state persisted in SmaConsent so
+# it resumes across sessions) → POST /sma/connect-account (list the app-readable
+# plants, attach the chosen ones — same discover→attach cascade as SolarEdge).
+# The app credentials stay in the environment (SMA_APP_CLIENT_ID/SECRET); per-
+# connection config carries only {system_id}. /sma/available tells the UI whether
+# the flow is live (creds present) so it can show a graceful "coming soon" else.
+# Consent + discovery shapes VERIFIED against the sandbox 2026-07-08 (see the
+# banner in api/inverters/sma.py); the measurement VALUES await a real plant.
 
 
 @router.get("/v1/array-owners/sma/available")
@@ -5400,6 +5402,11 @@ def sma_consent_start(
     except InverterError as exc:
         raise HTTPException(502, f"SMA consent request failed: {exc}")
 
+    # SMA returns the CURRENT state on the bc-authorize call — if this owner had
+    # already approved (e.g. re-connecting), it comes back "accepted" straight
+    # away and the UI can skip the waiting screen.
+    state = res.get("state") or "pending"
+
     with SessionLocal() as db:
         row = db.execute(
             select(SmaConsent).where(
@@ -5412,15 +5419,17 @@ def sma_consent_start(
                              owner_email_lc=email.lower())
             db.add(row)
         row.owner_email = email
-        row.status = "pending"
-        row.auth_req_id = res.get("auth_req_id")
+        row.status = state
+        row.auth_req_id = res.get("expiration")   # store the consent expiry for reference
         row.last_error = None
         row.requested_at = now()
         db.commit()
 
-    return {"ok": True, "status": "pending",
-            "message": f"Approval request sent — {email} will see it in their "
-                       "Sunny Portal account. This page updates once they approve."}
+    msg = (f"Already connected — {email} approved data sharing."
+           if state == "accepted" else
+           f"Approval request sent — {email} will see it in their Sunny Portal "
+           "account. This page updates once they approve.")
+    return {"ok": True, "status": state, "message": msg}
 
 
 @router.get("/v1/array-owners/sma/consent/status")
