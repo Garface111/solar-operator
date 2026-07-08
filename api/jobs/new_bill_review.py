@@ -42,13 +42,18 @@ logger = logging.getLogger(__name__)
 _TEST_TO = "ford.genereaux@gmail.com"
 
 
-def _reports_url(tenant) -> str:
-    """Product-aware Reports-tab deep link the operator lands on to review."""
+def _reports_url(tenant, sub_id=None) -> str:
+    """Product-aware Reports-tab deep link the operator lands on to review.
+
+    With sub_id, deep-links straight to THAT offtaker's draft: the ?draft param
+    sits before the #hash so the SPA's hash routing still resolves to #reports,
+    and reports.js reads it to open + scroll to + flash that exact review card."""
     try:
         from ..branding import app_url
-        return app_url(getattr(tenant, "product", "array_operator")).rstrip("/") + "/#reports"
+        base = app_url(getattr(tenant, "product", "array_operator")).rstrip("/")
     except Exception:  # noqa: BLE001
-        return "https://arrayoperator.com/#reports"
+        base = "https://arrayoperator.com"
+    return f"{base}/?draft={sub_id}#reports" if sub_id is not None else f"{base}/#reports"
 
 
 def _period_pretty(label: str | None, draft) -> str:
@@ -127,7 +132,7 @@ def _build_review_email(sub, tenant, draft, bill_label: str | None) -> tuple[str
     amt_str = f"${amt:,.2f}" if isinstance(amt, (int, float)) else "—"
     kwh = draft.customer_kwh
     kwh_str = f"{kwh:,.0f} kWh" if isinstance(kwh, (int, float)) else "—"
-    url = _reports_url(tenant)
+    url = _reports_url(tenant, sub.id)   # deep-link straight to THIS offtaker's draft
 
     subject = f"Your next solar invoice is ready to review — {cust}"
     preheader = (f"A new utility bill landed for {cust}. We've prepared their "
