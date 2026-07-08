@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 _TEST_TO = "ford.genereaux@gmail.com"
 
 
-def _reports_url(tenant, sub_id=None) -> str:
+def _reports_url(tenant, sub_id=None, review_queue=False) -> str:
     """Product-aware Reports-tab deep link the operator lands on to review.
 
     With sub_id, deep-links straight to THAT offtaker's draft: the ?draft param
@@ -53,7 +53,11 @@ def _reports_url(tenant, sub_id=None) -> str:
         base = app_url(getattr(tenant, "product", "array_operator")).rstrip("/")
     except Exception:  # noqa: BLE001
         base = "https://arrayoperator.com"
-    return f"{base}/?draft={sub_id}#reports" if sub_id is not None else f"{base}/#reports"
+    if sub_id is not None:
+        return f"{base}/?draft={sub_id}#reports"      # one offtaker → open that card
+    if review_queue:
+        return f"{base}/?review=1#reports"            # a batch → land on the review queue
+    return f"{base}/#reports"
 
 
 def _period_pretty(label: str | None, draft) -> str:
@@ -184,7 +188,6 @@ def _build_review_digest_email(tenant, items) -> tuple[str, str, str]:
     from ..email_skin import render_email_skin, render_email_skin_text
 
     n = len(items)
-    url = _reports_url(tenant)
 
     def _amt(v):
         return f"${v:,.2f}" if isinstance(v, (int, float)) else "—"
@@ -192,6 +195,7 @@ def _build_review_digest_email(tenant, items) -> tuple[str, str, str]:
 
     if n == 1:
         i = items[0]
+        url = _reports_url(tenant, i.get("subscription_id"))   # → open THIS offtaker's draft
         cust = i.get("customer") or "your customer"
         cust_e = _html.escape(cust)
         period_e = _html.escape(str(i.get("period") or "the latest period"))
@@ -218,6 +222,7 @@ def _build_review_digest_email(tenant, items) -> tuple[str, str, str]:
                      f"Their production: {kwh_str}\nAmount due: {_amt(i.get('amount_usd'))}\n\n"
                      f"Come review, edit anything, then approve & send. Nothing goes to {cust} until you do.\n")
     else:
+        url = _reports_url(tenant, review_queue=True)   # → land on the review queue
         subject = f"{n} solar invoices are ready to review"
         preheader = (f"New utility bills landed for {n} offtakers. We've prepared their "
                      f"invoices — come review them all, then approve & send.")
