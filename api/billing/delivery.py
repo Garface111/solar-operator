@@ -2055,9 +2055,9 @@ def _operator_review_email(sub, tenant, draft) -> tuple[str, str, str]:
     amt = draft.amount_usd
     amt_str = f"${amt:,.2f}" if isinstance(amt, (int, float)) else "—"
     try:
-        url = app_url(getattr(tenant, "product", "array_operator")).rstrip("/") + "/#reports"
+        url = app_url(getattr(tenant, "product", "array_operator")).rstrip("/") + f"/?draft={sub.id}#reports"
     except Exception:  # noqa: BLE001
-        url = "https://arrayoperator.com/#reports"
+        url = f"https://arrayoperator.com/?draft={sub.id}#reports"
     subject = f"Ready to review — {cust} solar report"
     body_html = (
         f"<p>A new solar report for <strong>{cust}</strong> is drafted and waiting "
