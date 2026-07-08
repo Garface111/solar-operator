@@ -3,7 +3,7 @@
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
   "version": "1.9.115",
-  "description": "Captures GMP + SmartHub co-op (VEC, WEC & 500+ more) bills + solar production for NEPOOL/Array Operator, and links SolarEdge, Fronius, SMA & Chint inverters.",
+  "description": "Captures GMP + SmartHub co-op bills and solar production for NEPOOL/Array Operator; links SolarEdge, Fronius, SMA & Chint.",
   "author": "EnergyAgent",
   "homepage_url": "https://nepooloperator.com",
   "permissions": [
