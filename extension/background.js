@@ -15,6 +15,13 @@ try { importScripts("vault.js"); } catch (e) { console.warn("[EnergyAgent] vault
 // falls back to GMP-only + the vault's grounded co-op fallback set.
 try { importScripts("smarthub_registry.js"); } catch (e) { console.warn("[EnergyAgent] smarthub registry load failed", e); }
 
+// v1.9.115: learned SmartHub co-op host map. Lets background refresh reach
+// DISCOVERED co-ops (sh_<sub>, not in the curated registry) by remembering the
+// real host from their own capture — so "every utility we support" stays fresh,
+// not just the curated catalog. Best-effort: if it fails to load, discovered
+// co-ops simply keep the old (foreground-capture-only) behavior.
+try { importScripts("coop_hosts.js"); } catch (e) { console.warn("[EnergyAgent] coop_hosts load failed", e); }
+
 // v1.3.0: SO_PAIR / SO_STATUS_REQUEST handlers + SO_CAPTURE_LANDED +
 //         SO_LOGIN_STATE broadcasts to every solaroperator.org tab so the
 //         onboarding wizard can mirror live state without polling.
@@ -414,7 +421,42 @@ async function soReloadTabsOnDomain(domain) {
   } catch (_) {}
 }
 
+// ── Learned co-op hosts (v1.9.115) ───────────────────────────────────────────
+// Persist the code→host map SoCoopHosts learns so it survives service-worker
+// restarts. Hydrated once at load; rewritten whenever a capture teaches us a new
+// host. Keyed separately from the curated registry so it only ever ADDS reach.
+const COOP_HOSTS_KEY = "so_coop_hosts";
+try {
+  chrome.storage.local.get(COOP_HOSTS_KEY, (s) => {
+    try { if (self.SoCoopHosts) self.SoCoopHosts.load((s && s[COOP_HOSTS_KEY]) || {}); } catch (_) {}
+  });
+} catch (_) {}
+// Learn a co-op's real host from a capture / connect. Only persists on a real
+// change. Silent no-op if the module didn't load or the host isn't *.smarthub.coop.
+function recordCoopHost(code, host) {
+  try {
+    if (!self.SoCoopHosts) return;
+    if (self.SoCoopHosts.record(code, host)) {
+      chrome.storage.local.set({ [COOP_HOSTS_KEY]: self.SoCoopHosts.all() },
+        () => void chrome.runtime.lastError);
+    }
+  } catch (_) { /* non-fatal */ }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Learn the co-op's real host from its OWN capture (the content script runs on
+  // that host), so a discovered co-op can be background-refreshed later. Covers a
+  // capture the owner triggered by navigating to their portal directly, not just
+  // via our connect click. (v1.9.115)
+  try {
+    if (msg && (msg.type === "SMARTHUB_DATA_CAPTURED" || msg.type === "SMARTHUB_METER_GEN_CAPTURED")
+        && sender && sender.tab && sender.tab.url) {
+      const prov = msg.type === "SMARTHUB_DATA_CAPTURED"
+        ? (msg.payload && msg.payload.provider) : msg.provider;
+      recordCoopHost(prov, new URL(sender.tab.url).hostname);
+    }
+  } catch (_) { /* non-fatal */ }
+
   if (
     msg.type === "GMP_TOKEN_CAPTURED" ||
     msg.type === "VEC_DATA_CAPTURED" ||
@@ -991,6 +1033,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 so_capture_intent: { vendor: shVendor, ts: Date.now() },
               });
             } catch (_) { /* non-fatal */ }
+            // Learn this co-op's host from the URL we're opening BEFORE arming, so a
+            // DISCOVERED co-op (sh_*, not in the registry) resolves a portal URL and
+            // its daily refresh actually arms on the first connect. (v1.9.115)
+            recordCoopHost(shVendor, host);
             // Arm this co-op's DAILY background bill refresh on the explicit connect.
             try { if (typeof self.__soArmUtilityLive === "function") await self.__soArmUtilityLive(shVendor); } catch (_) { /* non-fatal */ }
           }
@@ -1634,8 +1680,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const reg = self.SMARTHUB_REGISTRY;
       if (reg) { for (const host of Object.keys(reg)) { if (reg[host] && reg[host].provider === c) return "https://" + host + "/"; } }
     } catch (_) {}
-    if (c.startsWith("sh_")) return null;   // discovered co-op with no known host yet — can't background-open
-    return null;
+    // Discovered co-op (sh_*, not in the curated registry): fall back to the host
+    // we LEARNED from its own capture/connect, so the long tail still gets
+    // background refresh instead of going stale after one foreground capture. (v1.9.115)
+    try { if (self.SoCoopHosts) { const learned = self.SoCoopHosts.urlFor(c); if (learned) return learned; } } catch (_) {}
+    return null;   // truly unknown host → can't background-open (yet)
   }
   // Portal URL for ANY code we background-open: inverter vendor OR utility.
   function _recapUrlFor(code) {
