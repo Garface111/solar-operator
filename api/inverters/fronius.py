@@ -1,22 +1,41 @@
 """Fronius inverter source — Solar.web Query API.
 
 ╔════════════════════════════════════════════════════════════════════════════╗
-║ STATUS — partially verified against the LIVE API (2026-07-04).              ║
+║ STATUS — VERIFIED LIVE 2026-07-08 against a real Solar.web account (Ford   ║
+║ got Beta API Management Portal access + minted a real key). US AVAILABILITY║
+║ IS CONFIRMED — this key reads Bruce's real VT systems in production.       ║
 ║                                                                            ║
-║ Confirmed live via scripts/verify_inverter_apis: the auth + request path   ║
-║ reach api.solarweb.com/swqapi correctly (a valid AccessKey → 200; a bad    ║
-║ one → clean 401 responseError 1102). What is STILL unverified against a    ║
-║ live system is the response PARSING (flowdata PowerPV / aggrdata           ║
-║ EnergyProductionTotal in _channels/fetch_daily) — Fronius RETIRED its      ║
-║ public demo system, so a demo key now authenticates but has no PV system   ║
-║ to pull data from. Verifying the shapes needs a real Solar.web account     ║
-║ with the Query API enabled (see HANDOFF_API_VERIFICATION.md).              ║
+║ TWO real bugs were fixed vs the 2026-07-04 version (found by reading the   ║
+║ Solar.web Query API manual v52.0 before assuming the earlier guess was     ║
+║ right) and BOTH are now live-confirmed:                                    ║
+║  1. HOST: swqapi.solarweb.com (no /swqapi path) is the documented-current  ║
+║     host per the manual's own "Endpoint cleanup" changelog note — VERIFIED ║
+║     200 OK against real pvsystems/flowdata/aggrdata calls. (The old         ║
+║     api.solarweb.com/swqapi host also still answered when tested — likely  ║
+║     a compat alias — but this is the documented-current one.)              ║
+║  2. SMART-METER FALLBACK CHANNELS: PowerPV/EnergyProductionTotal need a     ║
+║     Smart Meter; without one they're null forever and Solar.web returns    ║
+║     PowerOutput/EnergyOutput instead — a system with no Smart Meter would  ║
+║     have silently reported zero production forever without this fallback. ║
+║     Bruce's two real systems (Waterford 150kW, Chester 150kW) happen to    ║
+║     carry BOTH channels populated identically, so the fallback wasn't      ║
+║     exercised by this test, but it's a correct, harmless no-op when the    ║
+║     primary channel IS present, and a real fix for whichever future        ║
+║     system doesn't have one.                                               ║
 ║                                                                            ║
-║ The Query API is a CHARGEABLE business API (pay-per-data-point) and per    ║
-║ Fronius's public country list is NOT self-serve in the USA. Per-account    ║
-║ US enablement via pv-support-usa@fronius.com is claimed but UNVERIFIED —   ║
-║ do not assert US availability until Fronius confirms it in writing. US     ║
-║ arrays may instead need the local Solar API (LAN) path (future work).      ║
+║ CROSS-VALIDATED against a fully independent source: this adapter's         ║
+║ fetch_daily for Waterford 150kW matched the SAME array's existing          ║
+║ extension-scraped DailyGeneration rows (source=extension_pull) to within   ║
+║ ~0.05% across 7 consecutive real days (2026-07-01..07). Wired live:         ║
+║ Bruce's real key is connected to his real Waterford 150kW (array 2025) and ║
+║ Chester 150kW (array 2024) via the existing discover/connect-account       ║
+║ cascade — poller.py now pulls these server-side, no browser needed.        ║
+║                                                                            ║
+║ Note (2026-07-08, out of scope, flagged to backlog): Chester's live        ║
+║ PowerPV (~88.6kW) exceeds its Solar.web-listed peakPower (60.8kW) — almost  ║
+║ certainly stale nameplate metadata in Solar.web, not an adapter bug        ║
+║ (confirmed via both raw API + our own discover endpoint returning the same ║
+║ mismatched peak).                                                          ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
 Auth: every request carries AccessKeyId + AccessKeyValue headers.
@@ -24,6 +43,7 @@ Config: {"access_key_id", "access_key_value", "pv_system_id"}.
 """
 from __future__ import annotations
 
+import os
 from datetime import date
 
 import httpx
@@ -34,8 +54,9 @@ CODE = "fronius"
 LABEL = "Fronius (Solar.web)"
 AVAILABLE = True
 NOTE = (
-    "Solar.web Query API is a paid business API and is not currently offered "
-    "in the USA — US arrays may need the local LAN path."
+    "Solar.web Query API is a paid business API — contact your Fronius sales "
+    "rep for API Management Portal access to create a key (verified working "
+    "for US arrays 2026-07-08)."
 )
 SUPPORTS_LIVE = True
 SUPPORTS_DAILY = True
@@ -45,7 +66,11 @@ FIELDS = [
     {"name": "pv_system_id", "label": "PV System ID", "secret": False},
 ]
 
-BASE = "https://api.solarweb.com/swqapi"
+# Manual's own version-52 changelog: "Endpoint cleanup (swqapi.solarweb.com vs.
+# the older api.solarweb.com/swqapi)" — every current example uses this host
+# directly, no /swqapi path. Env-overridable in case the old host is retired
+# on a different timeline than the docs suggest.
+BASE = os.environ.get("FRONIUS_API_BASE", "https://swqapi.solarweb.com")
 
 
 def _headers(config: dict) -> dict:
@@ -161,17 +186,29 @@ def _channels(body: dict) -> list[dict]:
     return data.get("channels") or []
 
 
+def _channel_value(channels: list[dict], *names: str) -> float | None:
+    """First non-null value among `names`, in priority order. Per the Solar.web
+    manual, several channels are mutually exclusive depending on whether the
+    system has a Smart Meter (e.g. PowerPV/EnergyProductionTotal need one;
+    PowerOutput/EnergyOutput are what's returned INSTEAD when there isn't one)
+    — a system without a Smart Meter would authenticate fine and return 200s
+    forever with the primary channel stuck at null, silently reporting zero
+    production for a healthy array. Trying the fallback closes that gap."""
+    by_name = {ch.get("channelName"): ch.get("value") for ch in channels}
+    for name in names:
+        value = by_name.get(name)
+        if value is not None:
+            return float(value)
+    return None
+
+
 def fetch_live(config: dict) -> dict | None:
     require_fields(config, "access_key_id", "access_key_value", "pv_system_id")
     pid = config["pv_system_id"]
     body = _get(config, f"/pvsystems/{pid}/flowdata")
     data = body.get("data") if isinstance(body.get("data"), dict) else body
-    power_w = None
-    for ch in _channels(body):
-        if ch.get("channelName") == "PowerPV":
-            value = ch.get("value")
-            power_w = float(value) if value is not None else None
-            break
+    # PowerPV needs a Smart Meter; without one Solar.web returns PowerOutput instead.
+    power_w = _channel_value(_channels(body), "PowerPV", "PowerOutput")
     return {"current_power_w": power_w, "as_of": data.get("logDateTime")}
 
 
@@ -190,12 +227,10 @@ def fetch_daily(config: dict, start: date, end: date) -> list[dict]:
             day = date.fromisoformat(raw_date[:10])
         except (ValueError, TypeError):
             continue
-        wh = None
-        for ch in entry.get("channels") or []:
-            if ch.get("channelName") == "EnergyProductionTotal":
-                wh = ch.get("value")
-                break
+        # EnergyProductionTotal needs a Smart Meter; without one Solar.web
+        # returns EnergyOutput instead (same fallback pairing as flowdata).
+        wh = _channel_value(entry.get("channels") or [], "EnergyProductionTotal", "EnergyOutput")
         if wh is None:
             continue
-        out.append({"day": day, "kwh": float(wh) / 1000.0})
+        out.append({"day": day, "kwh": wh / 1000.0})
     return out

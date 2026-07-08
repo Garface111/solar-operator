@@ -1220,8 +1220,20 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         # state instead of a harsh Error/Offline. Mirrors the digest predicate.
         _flag_no_energy_register(inv_rows)
 
-        # vendor mix for the array chip
+        # vendor mix for the array chip. Derived from actual Inverter rows when
+        # any exist — but a FRESHLY-connected array (discover/connect-account
+        # just ran; the poller hasn't created its first Inverter row yet) has
+        # none, and would otherwise report vendor=None. That's not "unknown" —
+        # we know the vendor from InverterConnection — so fall back to it.
+        # Found 2026-07-08 verifying the Fronius account-connect flow live: the
+        # frontend was masking this gap with a hardcoded "solaredge" default
+        # (now removed as its own honesty bug), which showed "Open in
+        # SolarEdge" for a brand-new Fronius connection.
         vendors = sorted({iv.vendor for iv in ivs})
+        if not vendors:
+            _conn = _conn_by_array.get(arr.id)
+            if _conn is not None:
+                vendors = [_conn.vendor]
 
         # Distinct origin-site deep links among this array's inverters.
         seen: dict[tuple, dict] = {}

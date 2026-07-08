@@ -3,7 +3,7 @@ import os, tempfile
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + tempfile.mktemp(suffix=".db"))
 import pytest
 from api.db import SessionLocal, init_db
-from api.models import Tenant, Array, Inverter
+from api.models import Tenant, Array, Inverter, InverterConnection
 from api import inverter_fleet as IF
 
 
@@ -336,6 +336,30 @@ def test_no_energy_register_ignores_unit_with_history():
     print("PASS unit-with-history not flagged")
 
 
+def test_fleet_tree_reports_vendor_from_connection_before_first_poll():
+    """A freshly account-connected array (discover/connect-account just ran)
+    has an InverterConnection but ZERO Inverter rows until the next poll —
+    build_fleet_tree must still report the real vendor from the connection,
+    not None. Found 2026-07-08 verifying the Fronius account-connect flow
+    live: a None vendor here made the frontend's (now-removed) "|| solaredge"
+    default mislabel a brand-new Fronius array as SolarEdge, and separately
+    made the Vendor-data/Utility-data split misclassify it as utility data."""
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Waterford 150kW", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        db.add(InverterConnection(array_id=a.id, vendor="fronius",
+                                  config={"access_key_id": "id", "access_key_value": "val",
+                                          "pv_system_id": "uuid-1"}, status="ok"))
+        db.commit()
+        tree = IF.build_fleet_tree(db, t)
+    col = next(c for c in tree["columns"] if c["array_name"] == "Waterford 150kW")
+    assert col["inverter_count"] == 0                # no poll has run yet
+    assert col["vendor"] == "fronius"                 # NOT None, NOT solaredge
+    assert col["vendors"] == ["fronius"]
+    print("PASS vendor reported from InverterConnection pre-first-poll")
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()
@@ -347,4 +371,5 @@ if __name__ == "__main__":
     test_no_energy_register_flags_dead_metering_unit()
     test_no_energy_register_not_flagged_on_whole_array_gap()
     test_no_energy_register_ignores_unit_with_history()
+    test_fleet_tree_reports_vendor_from_connection_before_first_poll()
     print("ALL PASS")

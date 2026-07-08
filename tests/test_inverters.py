@@ -193,6 +193,58 @@ def test_fronius_fetch_daily_parsing(monkeypatch):
     ]
 
 
+# ── Smart-Meter fallback (Solar.web manual: PowerPV/EnergyProductionTotal need a
+# Smart Meter; without one, Solar.web returns PowerOutput/EnergyOutput INSTEAD —
+# a system without one would authenticate fine and silently report zero forever
+# without this fallback) ──────────────────────────────────────────────────────
+
+def test_fronius_fetch_live_falls_back_to_power_output_with_no_smart_meter(monkeypatch):
+    body = {
+        "data": {
+            "logDateTime": "2026-06-12T21:00:00Z",
+            "channels": [
+                {"channelName": "PowerPV", "value": None},       # null: no Smart Meter
+                {"channelName": "PowerOutput", "value": 4200.0}, # this is what actually carries the reading
+            ],
+        }
+    }
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, body))
+    live = fronius.fetch_live(
+        {"access_key_id": "id", "access_key_value": "val", "pv_system_id": "abc"}
+    )
+    assert live == {"current_power_w": 4200.0, "as_of": "2026-06-12T21:00:00Z"}
+
+
+def test_fronius_fetch_live_prefers_power_pv_when_both_present(monkeypatch):
+    # Smart-Meter systems get PowerPV; PowerOutput is null in that case — but if
+    # a payload somehow carries both, the Smart-Meter channel wins (it's the
+    # more precise reading per the manual).
+    body = {"data": {"logDateTime": "t", "channels": [
+        {"channelName": "PowerOutput", "value": 999.0},
+        {"channelName": "PowerPV", "value": 4200.0},
+    ]}}
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, body))
+    live = fronius.fetch_live(
+        {"access_key_id": "id", "access_key_value": "val", "pv_system_id": "abc"}
+    )
+    assert live["current_power_w"] == 4200.0
+
+
+def test_fronius_fetch_daily_falls_back_to_energy_output_with_no_smart_meter(monkeypatch):
+    body = {"data": [
+        {"logDateTime": "2026-06-10", "channels": [
+            {"channelName": "EnergyProductionTotal", "value": None},  # null: no Smart Meter
+            {"channelName": "EnergyOutput", "value": 25720.0},
+        ]},
+    ]}
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, body))
+    rows = fronius.fetch_daily(
+        {"access_key_id": "id", "access_key_value": "val", "pv_system_id": "abc"},
+        date(2026, 6, 10), date(2026, 6, 10),
+    )
+    assert rows == [{"day": date(2026, 6, 10), "kwh": 25.72}]
+
+
 # ── sma (monitoring API, OAuth2) ──────────────────────────────────────────────
 
 def _sma_token_ok(*a, **k):
