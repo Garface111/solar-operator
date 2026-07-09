@@ -1,10 +1,13 @@
-"""VIP watch — the tight (minutes, not days) staleness override for a hand-
-picked "babied account" tenant (Ford, 2026-07-08).
+"""VIP watch — the tight (minutes, not days) self-heal staleness bar applies
+to EVERY tenant (Ford, 2026-07-08: "all accounts should be babied like
+this"); the Ford-alert half is tiered so it doesn't flood his inbox.
 
-Two things pinned: (1) vip_stale_vendors only fires during DAYLIGHT (a normal
-overnight gap must never count), and only past VIP_STALE_MINUTES; (2)
-vip_watch_sweep alerts Ford ONCE per (tenant, array) incident, clears on
-recovery, and never touches a non-vip_watch tenant.
+Pinned: (1) vip_stale_vendors only fires during DAYLIGHT (a normal overnight
+gap must never count), and only past VIP_STALE_MINUTES, for ANY tenant; (2)
+vip_watch_sweep alerts Ford ONCE per (tenant, array) incident and clears on
+recovery, for EVERY active tenant — but a plain tenant only alerts past the
+much wider ALERT_AFTER_MINUTES_DEFAULT bar, while vip_watch=True gets the
+fast ALERT_AFTER_MINUTES_VIP one.
 """
 from __future__ import annotations
 
@@ -13,10 +16,13 @@ from datetime import datetime, timedelta
 
 from api.db import SessionLocal
 from api.models import Array, Inverter, InverterAlertState, Tenant
-from api.vip_watch import VIP_ALERT_AFTER_MINUTES, VIP_STALE_MINUTES, vip_stale_vendors, vip_watch_sweep
+from api.vip_watch import (
+    ALERT_AFTER_MINUTES_DEFAULT, ALERT_AFTER_MINUTES_VIP, VIP_STALE_MINUTES,
+    vip_stale_vendors, vip_watch_sweep,
+)
 
 
-def _mk_tenant(*, vip_watch: bool = True) -> str:
+def _mk_tenant(*, vip_watch: bool = False) -> str:
     tid = "ten_" + secrets.token_hex(6)
     with SessionLocal() as db:
         db.add(Tenant(
@@ -71,18 +77,18 @@ def test_vip_stale_vendors_never_fires_at_night(monkeypatch):
 
 
 def test_sweep_alerts_once_then_dedups_then_clears_on_recovery(monkeypatch):
-    # vip_watch_sweep scans ALL vip_watch tenants, and this suite's other tests
-    # leave their own vip_watch tenants sitting in the SAME database (no per-
-    # test rollback) — some flagged, force-daylight'd True here, would ALSO
-    # read as stale. Scope every assertion to THIS test's tenant so the
-    # suite's shared-DB reality can't make this test flaky.
+    # vip_watch_sweep scans EVERY active tenant, and this suite's other tests
+    # leave their own tenants sitting in the SAME database (no per-test
+    # rollback) — some flagged, force-daylight'd True here, would ALSO read as
+    # stale. Scope every assertion to THIS test's tenant so the suite's
+    # shared-DB reality can't make this test flaky.
     sent = []
     monkeypatch.setattr("api.notify.send_internal_alert",
                         lambda subject, body: sent.append((subject, body)) or True)
     monkeypatch.setattr("api.inverter_fleet._daylight_for", lambda arr, default, _cache=None: True)
-    tid = _mk_tenant()
+    tid = _mk_tenant(vip_watch=True)   # the fast tier this test pins
     now_ = datetime.utcnow()
-    stale_at = now_ - timedelta(minutes=VIP_ALERT_AFTER_MINUTES + 10)
+    stale_at = now_ - timedelta(minutes=ALERT_AFTER_MINUTES_VIP + 10)
     array_id = _mk_array_with_inverter(tid, "sma", stale_at)
 
     def _mine(out):
@@ -118,14 +124,37 @@ def test_sweep_alerts_once_then_dedups_then_clears_on_recovery(monkeypatch):
             InverterAlertState.tenant_id == tid)).scalar_one_or_none() is None
 
 
-def test_sweep_ignores_non_watched_tenants(monkeypatch):
+def test_sweep_holds_off_a_plain_tenant_past_the_fast_bar_but_under_the_wide_one(monkeypatch):
+    """A plain (non-vip_watch) tenant is now IN the sweep, not skipped — but it
+    gets the wide ALERT_AFTER_MINUTES_DEFAULT bar, not the fast VIP one. Stale
+    past the fast bar alone must not alert someone who's just closed their
+    laptop for lunch."""
     sent = []
     monkeypatch.setattr("api.notify.send_internal_alert",
                         lambda subject, body: sent.append((subject, body)) or True)
     monkeypatch.setattr("api.inverter_fleet._daylight_for", lambda arr, default, _cache=None: True)
     tid = _mk_tenant(vip_watch=False)
     now_ = datetime.utcnow()
-    _mk_array_with_inverter(tid, "sma", now_ - timedelta(minutes=VIP_ALERT_AFTER_MINUTES + 30))
+    _mk_array_with_inverter(tid, "sma", now_ - timedelta(minutes=ALERT_AFTER_MINUTES_VIP + 30))
     out = vip_watch_sweep()
     assert [s for s in sent if tid in s[1]] == []
     assert [a for a in out["alerted"] if a["tenant_id"] == tid] == []
+
+
+def test_sweep_eventually_alerts_a_plain_tenant_past_the_wide_bar(monkeypatch):
+    """Proves universal coverage: a plain tenant left stale for most of a
+    working day DOES eventually alert Ford, just on the wider bar than a
+    vip_watch tenant would."""
+    sent = []
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda subject, body: sent.append((subject, body)) or True)
+    monkeypatch.setattr("api.inverter_fleet._daylight_for", lambda arr, default, _cache=None: True)
+    tid = _mk_tenant(vip_watch=False)
+    now_ = datetime.utcnow()
+    array_id = _mk_array_with_inverter(tid, "sma", now_ - timedelta(minutes=ALERT_AFTER_MINUTES_DEFAULT + 15))
+    out = vip_watch_sweep()
+    mine = [a for a in out["alerted"] if a["tenant_id"] == tid]
+    assert mine == [{"tenant_id": tid, "array_id": array_id, "vendors": ["sma"]}]
+    mine_sent = [s for s in sent if tid in s[1]]
+    assert len(mine_sent) == 1
+    assert "VIP watch" in mine_sent[0][0]

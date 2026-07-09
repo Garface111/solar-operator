@@ -1,26 +1,34 @@
-"""VIP watch — a tight-SLA staleness override for a hand-picked "babied account".
+"""VIP watch — every account gets a tight self-heal SLA; a hand-picked few also
+get Ford alerted fast if it doesn't work.
 
-Ford, 2026-07-08: "set up an agent that monitors [an operator]'s account for
-anomalies. if the data gets stale, more than 15 min, his extension triggers."
+Ford, 2026-07-08 (re: Lester/Brattleboro Solar): "set up an agent that monitors
+his account for anomalies. if the data gets stale, more than 15 min, his
+extension triggers." Then, 2026-07-08 (later): "I think all accounts should be
+babied like this."
 
-Two halves, each reusing an EXISTING mechanism rather than inventing a parallel
-one (capture_debt.py already solves "nudge a browser to recapture"; the feature-
-suggestion pipeline already emails Ford on every submission via notify.py):
+Two halves, deliberately NOT scaled the same way:
 
   1. `vip_stale_vendors()` — called from capture_debt.compute_capture_debt for
-     any vip_watch tenant. Every extension heartbeat (every 60s, from whichever
-     browser is open) already carries a "debt" instruction telling the
-     extension what to recapture — this just makes that check MUCH tighter
-     (minutes, not the normal multi-day bar) for a watched tenant, gated on
-     DAYLIGHT so a normal overnight gap is never mistaken for staleness. No new
-     extension-side code needed: the drain mechanism already exists.
+     EVERY tenant. Every extension heartbeat (every 60s, from whichever browser
+     is open) already carries a "debt" instruction telling the extension what
+     to recapture — this makes that check MUCH tighter (minutes, not the
+     normal multi-day bar) universally, gated on DAYLIGHT so a normal
+     overnight gap is never mistaken for staleness. No new extension-side code
+     needed: the drain mechanism already exists. Pure win, zero downside —
+     applies to everyone.
 
-  2. `vip_watch_sweep()` — a scheduler job, independent of any heartbeat, since
-     a genuinely-closed browser never heartbeats at all and #1 can only help
-     while SOME browser is open. This catches "stayed stale anyway" — evidence
-     the owner's browser probably isn't open (exactly what the in-app toast
-     explains to them) — and emails Ford ONCE per incident via the same
-     send_internal_alert used for signups/feature-suggestions.
+  2. `vip_watch_sweep()` — a scheduler job, independent of any heartbeat (a
+     genuinely-closed browser never heartbeats at all, so #1 can only help
+     while SOME browser is open). This is the one half that CANNOT scale to
+     "alert Ford for every tenant" without flooding his inbox — most casual
+     owners don't leave Chrome open all day, so a universal 90-minute bar
+     would email him about nearly everyone, nearly every day. So it runs for
+     every active tenant, but with a TIERED bar: `Tenant.vip_watch=True`
+     tenants (hand-picked, rare) alert fast (ALERT_AFTER_MINUTES_VIP); everyone
+     else alerts only after staying stale most of a working day
+     (ALERT_AFTER_MINUTES_DEFAULT) — still catches a truly-abandoned account,
+     without turning into daily noise for the common case of "closed their
+     laptop for lunch." Dedup + one-email-per-incident either way.
 """
 from __future__ import annotations
 
@@ -31,24 +39,25 @@ from sqlalchemy import select
 
 log = logging.getLogger("vip_watch")
 
-# Minute-granularity bar for a watched tenant — deliberately far tighter than
-# capture_debt's VENDOR_STALE_DAYS=2. Only ever applied to vip_watch tenants;
-# applying this to everyone would false-positive on any normal overnight gap
-# capture_debt's daylight-agnostic day bar is built to tolerate.
+# Minute-granularity self-heal bar — applies to EVERY tenant (see #1 above).
+# Deliberately far tighter than capture_debt's VENDOR_STALE_DAYS=2; safe only
+# because it's daylight-gated, so a normal overnight gap never counts.
 VIP_STALE_MINUTES = 15
-# How long past that self-heal window before it's worth waking Ford up: the
-# heartbeat-driven nudge above only works if a browser IS open and pinging;
-# staying stale past this means it probably isn't.
-VIP_ALERT_AFTER_MINUTES = 90
+# Alert-Ford bar: fast for hand-picked vip_watch tenants, much wider for
+# everyone else so the sweep doesn't flood Ford's inbox with "so-and-so's
+# Chrome isn't open" — true of most casual owners most afternoons.
+ALERT_AFTER_MINUTES_VIP = 90
+ALERT_AFTER_MINUTES_DEFAULT = 6 * 60   # a stale-all-workday signal, not a lunch break
 _EXT_VENDORS = ("fronius", "sma", "chint")
 
 
 def vip_stale_vendors(db, tenant_id: str, *, now_: datetime | None = None) -> set[str]:
     """Extension vendors with at least one DAYTIME array whose newest live
     capture (Inverter.last_power_at) is older than VIP_STALE_MINUTES. Cheap,
-    read-only. Merge the result into a capture-debt "drain" list so the next
-    heartbeat (within ~60s, if a browser is open) nudges a recapture — far
-    faster than the normal day-granularity bar everyone else rides."""
+    read-only, called for every tenant on every heartbeat. Merge the result
+    into a capture-debt "drain" list so the next heartbeat (within ~60s, if a
+    browser is open) nudges a recapture — far faster than the normal
+    day-granularity bar."""
     from .inverter_fleet import _daylight_for
     from .models import Array, Inverter
 
@@ -86,14 +95,18 @@ def vip_stale_vendors(db, tenant_id: str, *, now_: datetime | None = None) -> se
 
 
 def vip_watch_sweep(dry_run: bool = False) -> dict:
-    """Scheduler job: for every vip_watch tenant, flag any DAYTIME array whose
-    extension-vendor data has been stale past VIP_ALERT_AFTER_MINUTES — long
-    enough that the heartbeat-driven nudge (vip_stale_vendors, above) hasn't
-    been able to fix it, meaning the owner's browser is probably not open.
-    Alerts Ford ONCE per incident (InverterAlertState dedup, namespaced
-    'vip_stale:' — this table is SHARED across alert jobs, never touch a key
-    outside your own namespace); the incident clears itself, and can re-fire
-    later, once the array reports fresh again."""
+    """Scheduler job: for every ACTIVE tenant, flag any DAYTIME array whose
+    extension-vendor data has been stale past its alert bar — long enough
+    that the universal self-heal nudge (vip_stale_vendors, above) hasn't been
+    able to fix it, meaning the owner's browser is probably not open.
+    `Tenant.vip_watch=True` gets the fast bar (ALERT_AFTER_MINUTES_VIP);
+    everyone else gets the wide one (ALERT_AFTER_MINUTES_DEFAULT), so this
+    scales to the whole customer base without flooding Ford's inbox with
+    "browser closed for lunch" noise. Alerts Ford ONCE per incident
+    (InverterAlertState dedup, namespaced 'vip_stale:' — this table is SHARED
+    across alert jobs, never touch a key outside your own namespace); the
+    incident clears itself, and can re-fire later, once the array reports
+    fresh again."""
     from .db import SessionLocal
     from .inverter_fleet import _daylight_for
     from .models import Array, Inverter, InverterAlertState, Tenant
@@ -101,11 +114,13 @@ def vip_watch_sweep(dry_run: bool = False) -> dict:
 
     out = {"alerted": [], "recovered_cleared": 0, "skipped_dedup": 0, "dry_run": dry_run}
     now_ = datetime.utcnow()
-    alert_cutoff = now_ - timedelta(minutes=VIP_ALERT_AFTER_MINUTES)
 
     with SessionLocal() as db:
-        tenants = db.execute(select(Tenant).where(Tenant.vip_watch.is_(True))).scalars().all()
+        tenants = db.execute(select(Tenant).where(Tenant.active.is_(True))).scalars().all()
         for t in tenants:
+            alert_after = ALERT_AFTER_MINUTES_VIP if t.vip_watch else ALERT_AFTER_MINUTES_DEFAULT
+            alert_cutoff = now_ - timedelta(minutes=alert_after)
+
             arrays = db.execute(
                 select(Array).where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
             ).scalars().all()
@@ -120,6 +135,8 @@ def vip_watch_sweep(dry_run: bool = False) -> dict:
                     Inverter.deleted_at.is_(None),
                 )
             ).scalars().all()
+            if not invs:
+                continue
             by_array: dict[int, list] = {}
             for iv in invs:
                 by_array.setdefault(iv.array_id, []).append(iv)
@@ -155,14 +172,14 @@ def vip_watch_sweep(dry_run: bool = False) -> dict:
                     send_internal_alert(
                         subject=f"[VIP watch] {t.name} — {arr.name} data is stale",
                         body=(
-                            f"Tenant: {t.name} ({t.id})\n"
+                            f"Tenant: {t.name} ({t.id}){' [vip_watch]' if t.vip_watch else ''}\n"
                             f"Array: {arr.name} (id {array_id})\n"
                             f"Vendor(s): {', '.join(vendors)}\n"
                             f"Last live capture: {'never' if age_min is None else f'{age_min} min ago'}\n\n"
-                            f"This array has been stale for over {VIP_ALERT_AFTER_MINUTES} minutes "
-                            "during daylight, despite the tight self-heal nudge this tenant gets on "
-                            "every extension heartbeat. That combination almost always means their "
-                            "browser isn't open right now — Fronius/SMA only refresh while a signed-in "
+                            f"This array has been stale for over {alert_after} minutes during "
+                            "daylight, despite the tight self-heal nudge every tenant gets on every "
+                            "extension heartbeat. That combination almost always means their browser "
+                            "isn't open right now — Fronius/SMA only refresh while a signed-in "
                             "browser is running. Worth a nudge to the customer."
                         ),
                     )
