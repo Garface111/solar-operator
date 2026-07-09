@@ -33,28 +33,43 @@ fully published** (draft or unlisted). So:
 
 ---
 
-## ⚠️ ONE BLOCKER before you can pass review — privacy policy
+## Privacy policy URL — the field that got v1.9.115 rejected (RESOLVED)
 
-The Web Store reviewer compares the extension's permissions against the privacy
-policy. The **live policy at https://nepooloperator.com/privacy is stale** — it's
-branded "NEPOOL Operator Sync" and only describes reading Green Mountain Power.
-The extension now also reads SmartHub utilities + four inverter portals
-(SolarEdge, Fronius, SMA, Chint/CPS) and stores portal logins encrypted
-on-device. **Submitting against the stale policy risks rejection AND misstates
-to users what we do.**
+Chrome rejected v1.9.115 for **User Data Privacy** (ref "Purple Nickel"):
+> "Privacy policy link does not lead to a valid privacy policy. How to rectify:
+> Ensure the link leads directly to a privacy policy page. (Owner sites are not
+> considered valid privacy policies)."
 
-→ The accurate replacement is in **`PRIVACY.md`** (this folder) and is ALREADY
-publicly readable (the repo is public):
-**https://github.com/Garface111/solar-operator/blob/main/extension/store-listing/PRIVACY.md**
-That URL works as the listing's privacy-policy field right now — no deploy needed.
+**Cause:** an earlier version of this doc told you to paste the **GitHub repo URL**
+(`github.com/.../PRIVACY.md`) as the privacy-policy field. Chrome does **not** accept
+a code-repo / general "owner site" link — the field must point **directly at a
+dedicated privacy-policy PAGE**. That advice was wrong and is removed.
 
-Two ways to satisfy the reviewer (Ford's call — it's outward-facing):
-- **Now / zero-friction:** paste the GitHub URL above into the privacy-policy
-  field. Accepted by Chrome Web Store; accurate; nothing to deploy.
-- **Proper / on-domain (follow-up):** replace the live `nepooloperator.com/privacy`
-  text — but it's BAKED INTO Lane A's compiled onboarding SPA bundle
-  (`api/onboarding_dist/assets/index-*.js`), so it needs a Lane A SPA-source edit
-  + rebuild, not a markdown swap. Coordination hand-off.
+**USE THIS URL** (verified live, HTTP 200, dedicated, EnergyAgent-branded, and
+accurate to every permission the extension declares):
+
+```
+https://arrayoperator.com/privacy
+```
+
+**Do NOT use:**
+- `github.com/.../PRIVACY.md` — a repo page, not a privacy-policy page → the exact
+  rejection above.
+- `https://nepooloperator.com/privacy` — branded **"NEPOOL Operator Sync"** (a
+  different product name than the **"EnergyAgent"** item) and stale; a reviewer can
+  read a mismatched-brand page as "not a valid privacy policy for this item."
+
+`arrayoperator.com/privacy` (source: `array-operator/public/privacy.html`) IS the
+canonical EnergyAgent policy: it names the extension, lists exactly what each utility
++ inverter portal reads, states auto-login creds are encrypted **on-device and never
+sent to our servers**, names subprocessors, and gives a 24-hour deletion path — so it
+also passes the permissions-vs-policy cross-check. `PRIVACY.md` in this folder is the
+same text in markdown, for reference only (not a submit URL).
+
+**Follow-up (NOT a blocker):** `nepooloperator.com/privacy` is baked into Lane A's
+compiled onboarding SPA bundle and still shows the old "NEPOOL Operator Sync" text.
+Bring it in line with `arrayoperator.com/privacy` when convenient so every EnergyAgent
+umbrella link matches — but the listing only needs the arrayoperator URL above.
 
 ---
 
@@ -159,8 +174,9 @@ EnergyAgent app endpoint the captured data is sent to:
 **Remotely hosted code:** No — all code ships in the package (verified: no
 `eval`, no `new Function`, no external `<script src>`).
 
-**Privacy policy URL:** `https://nepooloperator.com/privacy`
-(must serve the updated `PRIVACY.md` text first — see blocker above).
+**Privacy policy URL:** `https://arrayoperator.com/privacy`
+(live, dedicated, EnergyAgent-branded — the field that must be exact; see the
+privacy-policy section above for why the GitHub / nepooloperator URLs get rejected).
 
 ---
 
@@ -189,8 +205,9 @@ Tip: 1280×800 browser window, OS screenshot, crop to exactly 1280×800.
 
 1. Pay the one-time **$5** Chrome Web Store developer registration (if not already
    a registered developer).
-2. Confirm `https://nepooloperator.com/privacy` serves the **updated** policy
-   (PRIVACY.md). ← a real blocker.
+2. Set the **Privacy policy URL** to exactly `https://arrayoperator.com/privacy`
+   (NOT the GitHub URL, NOT nepooloperator.com/privacy — those are what got
+   v1.9.115 rejected). It's already live + valid; nothing to deploy.
 3. **Open the EXISTING item `ocohbimolfpnkjcjhiodopjjlhclinpl`** (see critical note
    above) → upload `energyagent-extension-v1.9.48.zip` as a new package version.
    (Only create a new item if that one is truly inaccessible — then also update
