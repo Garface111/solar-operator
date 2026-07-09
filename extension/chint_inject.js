@@ -122,7 +122,18 @@
       var d = e.data;
       if (!d || d.type !== "SO_CHINT_WALK_SITES" || !Array.isArray(d.ids)) return;
       if (window.__soChintWalking) return;                 // don't stack walks
-      var ids = d.ids.slice(0, 50);                        // sane cap
+      // Walk EVERY site the owner has. This used to be `.slice(0, 50)` ("sane cap"),
+      // which silently dropped all inverters/production for sites 51+ (and left the
+      // content script's _walkExpected at the untruncated count) -- a Chint operator
+      // with >50 sites lost that data with no signal, and the capture self-reported
+      // "complete". The walk only bounces the app's OWN hash router (the same fetch a
+      // human clicking a site triggers) -- there is no vendor rate limit here, so a
+      // larger fleet just takes longer, not unbounded compute (Ford, 2026-07-09:
+      // completeness over thrift). A ceiling far above any real fleet backstops a bug.
+      var ids = d.ids.slice(0, 2000);
+      if (d.ids.length > 2000) {
+        L("walk: WARNING truncating an implausible", d.ids.length, "site list to 2000");
+      }
       if (!ids.length) return;
       window.__soChintWalking = true;
       var MIN_MS = 500, MAX_MS = 7000, POLL_MS = 250;

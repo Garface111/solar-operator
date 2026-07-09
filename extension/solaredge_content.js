@@ -160,14 +160,19 @@
     } catch (_) {}
   }
 
+  // Track give-up conditions so we can emit a TERMINAL failure (below), matching SMA/Chint.
+  let reachedSignedIn = false;
+  let lastCaptureErr = null;
+
   async function tick() {
     if (done) return;
     polls++;
     if (!(await hasIntent())) return;            // no explicit AO click → never touch the key
     if (!(await isSignedIn())) { broadcastLoginState("login_required"); return; }
+    reachedSignedIn = true;
     broadcastLoginState("signed_in");
     let payload;
-    try { payload = await captureFlow(); } catch (_) { return; }   // retry on next tick
+    try { payload = await captureFlow(); } catch (e) { lastCaptureErr = (e && e.message) || String(e); return; }   // retry on next tick
     if (!payload.apiKey && !(payload.sites || []).length) return;  // nothing usable yet
     const h = await hashString((payload.apiKey || "") + "|" + (payload.accountUuid || ""));
     if (h === lastHash) return;
@@ -185,7 +190,20 @@
   if (_SO_BROWSER) {
     tick();
     const iv = setInterval(() => {
-      if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+      if (done || polls >= MAX_POLLS) {
+        clearInterval(iv);
+        // Budget exhausted with no capture while SIGNED IN -> tell the AO page WHY
+        // instead of hanging its connect spinner forever (the SMA/Chint terminal-
+        // failure path SolarEdge was missing; Ford, 2026-07-09).
+        if (!done && reachedSignedIn) {
+          try {
+            chrome.runtime.sendMessage(
+              { type: "SOLAREDGE_CAPTURE_FAILED", reason: lastCaptureErr || "no API key or sites found after retrying" },
+              () => void chrome.runtime.lastError);
+          } catch (_) {}
+        }
+        return;
+      }
       tick();
     }, POLL_INTERVAL_MS);
   }

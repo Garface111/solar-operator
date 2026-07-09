@@ -549,6 +549,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return; // synchronous
   }
+  // v1.9.117: Fronius / SolarEdge capture gave up — same terminal-failure relay as
+  // SMA/Chint above. These were missing (only the happy path + login-required nudge
+  // were wired), so a signed-in owner whose capture failed every tick watched the AO
+  // connect spinner hang FOREVER with no error — while SMA/Chint owners got a real
+  // message (Ford, 2026-07-09: never leave the product silent on a real failure).
+  if (msg.type === "FRONIUS_CAPTURE_FAILED" || msg.type === "SOLAREDGE_CAPTURE_FAILED") {
+    const provider = msg.type === "FRONIUS_CAPTURE_FAILED" ? "fronius" : "solaredge";
+    const failed = {
+      type: "SO_CAPTURE_FAILED",
+      ok: false,
+      provider,
+      reason: String(msg.reason || "unknown"),
+      at: new Date().toISOString(),
+    };
+    broadcastToSoTabs(failed);
+    chrome.runtime.sendMessage(failed, () => { void chrome.runtime.lastError; });
+    sendResponse({ ok: true });
+    return; // synchronous
+  }
   // v1.9.11: Chint / CPS (solar.chintpower.com, a Fomware white-label) per-inverter
   // capture for Array Operator. CHINT publishes no owner API key, so chint_content.js
   // reads the owner's live readings from the logged-in portal and we hand them to the
@@ -3159,8 +3178,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // page-driven flow still works untouched — we only act when STATE_KEY is set.
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || !msg.type) return;
-    const okMap = { FRONIUS_CAPTURED: "fronius", SMA_CAPTURED: "sma", CHINT_CAPTURED: "chint" };
-    const failMap = { FRONIUS_CAPTURE_FAILED: "fronius", SMA_CAPTURE_FAILED: "sma", CHINT_CAPTURE_FAILED: "chint" };
+    const okMap = { FRONIUS_CAPTURED: "fronius", SMA_CAPTURED: "sma", CHINT_CAPTURED: "chint", SOLAREDGE_CAPTURED: "solaredge" };
+    const failMap = { FRONIUS_CAPTURE_FAILED: "fronius", SMA_CAPTURE_FAILED: "sma", CHINT_CAPTURE_FAILED: "chint", SOLAREDGE_CAPTURE_FAILED: "solaredge" };
     (async () => {
       const st = await recapGetState();
       if (!st || !st.running) return;            // no silent recap in flight → ignore

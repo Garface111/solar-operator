@@ -600,6 +600,11 @@
     } catch (_) {}
   }
 
+  // Tracks the give-up conditions so we can emit a TERMINAL failure (below) instead
+  // of leaving the AO onboarding spinner hanging forever — matching SMA/Chint.
+  let reachedSignedIn = false;
+  let lastCaptureErr = null;
+
   async function tick() {
     if (done) return;
     polls++;
@@ -609,12 +614,14 @@
     const signedIn = await isSignedIn();
     LOG("signed in to Solar.web:", signedIn ? "yes" : "NO (sign in at solarweb.com, then it retries automatically)");
     if (!signedIn) { broadcastLoginState("login_required"); return; }
+    reachedSignedIn = true;
     broadcastLoginState("signed_in");
     let payload;
     try {
       payload = await captureFlow();
     } catch (e) {
-      LOG("capture failed this tick (will retry):", (e && e.message) || e);
+      lastCaptureErr = (e && e.message) || String(e);
+      LOG("capture failed this tick (will retry):", lastCaptureErr);
       return;   // retry on next tick
     }
     LOG("captured systems:", (payload.sites || []).length,
@@ -644,7 +651,21 @@
   if (_SO_BROWSER) {
     tick();
     const iv = setInterval(() => {
-      if (done || polls >= MAX_POLLS) { clearInterval(iv); return; }
+      if (done || polls >= MAX_POLLS) {
+        clearInterval(iv);
+        // Budget exhausted with no capture. If the owner was actually SIGNED IN the
+        // whole time (so it's not just "go log in"), tell the AO page WHY instead of
+        // leaving its connect spinner hanging forever — the SMA/Chint terminal-failure
+        // path that Fronius was missing (Ford, 2026-07-09).
+        if (!done && reachedSignedIn) {
+          try {
+            chrome.runtime.sendMessage(
+              { type: "FRONIUS_CAPTURE_FAILED", reason: lastCaptureErr || "no usable systems found after retrying" },
+              () => void chrome.runtime.lastError);
+          } catch (_) {}
+        }
+        return;
+      }
       tick();
     }, POLL_INTERVAL_MS);
   }
