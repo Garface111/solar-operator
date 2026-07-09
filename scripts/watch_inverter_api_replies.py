@@ -51,6 +51,9 @@ GMAIL_USER = os.environ.get("GMAIL_WATCH_USER", "ford.genereaux@gmail.com")
 NOTIFY_TO = os.environ.get("GMAIL_WATCH_NOTIFY_TO", GMAIL_USER)
 SECRET_FILE = Path(os.path.expanduser("~/.hermes/secrets/gmail_app_password"))
 STATE_FILE = Path(os.path.expanduser("~/.hermes/state/inverter_api_watch.json"))
+# Where a PRODUCTION SMA credential reply gets stashed (chmod 600, gitignored dir,
+# never echoed to chat/log/notification). The activation step reads it from here.
+PROD_CREDS_FILE = Path(os.path.expanduser("~/.hermes/secrets/sma_production.env"))
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Purpose-scoped sender matching. FROM is matched as a substring by IMAP; we keep
@@ -231,6 +234,51 @@ def extract_sma_creds(text: str) -> dict:
     return out
 
 
+SMA_PROD_TOKEN_URL = "https://auth.smaapis.de/oauth2/token"
+
+
+def looks_like_production(text: str) -> bool:
+    """True when an SMA reply is delivering PRODUCTION credentials (vs sandbox).
+    The prod-cred email says "credentials for the Production environment"; a
+    sandbox-only reply talks about sandbox and never mentions production."""
+    low = text.lower()
+    return ("production" in low or "productive" in low) and "credential" in low
+
+
+def prod_token_ok(cid: str, sec: str, dry_run: bool = False) -> tuple[bool, str]:
+    """Probe the PRODUCTION client_credentials grant (auth.smaapis.de). Confirms
+    the issued prod creds actually authenticate before we celebrate."""
+    if dry_run:
+        return False, "[dry-run] would POST client_credentials to auth.smaapis.de"
+    try:
+        import httpx
+        r = httpx.post(SMA_PROD_TOKEN_URL,
+                       data={"grant_type": "client_credentials",
+                             "client_id": cid, "client_secret": sec}, timeout=30)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"network error: {exc}"
+    if r.status_code == 200:
+        try:
+            return bool((r.json() or {}).get("access_token")), "service-account token acquired"
+        except Exception:  # noqa: BLE001
+            return False, r.text[:200]
+    return False, f"{r.status_code}: {r.text[:200]}"
+
+
+def save_prod_creds(creds: dict) -> str:
+    """Stash prod creds in the app-level env-var names the adapter reads
+    (SMA_APP_CLIENT_ID / SMA_APP_CLIENT_SECRET), chmod 600. NEVER logged/emailed."""
+    PROD_CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    body = (f"SMA_APP_CLIENT_ID={creds['client_id']}\n"
+            f"SMA_APP_CLIENT_SECRET={creds['client_secret']}\n")
+    PROD_CREDS_FILE.write_text(body, encoding="utf-8")
+    try:
+        os.chmod(PROD_CREDS_FILE, 0o600)
+    except OSError:
+        pass
+    return str(PROD_CREDS_FILE)
+
+
 def run_sma_harness(creds: dict, dry_run: bool = False) -> tuple[bool, str]:
     """Run the real verification harness against the SMA sandbox with the parsed
     creds. Returns (passed, output). Requires client_id+client_secret+system_id."""
@@ -343,6 +391,26 @@ def process_message(vendor: str, subject: str, body: str, when: str,
                     app_pw: str, dry_run: bool) -> None:
     if vendor == "sma":
         creds = extract_sma_creds(body)
+        # PRODUCTION credential delivery (post signed-contract). Verify against the
+        # prod auth host, stash securely, and alert LOUDLY so activation can run.
+        if looks_like_production(body) and creds.get("client_id") and creds.get("client_secret"):
+            ok, detail = prod_token_ok(creds["client_id"], creds["client_secret"], dry_run=dry_run)
+            path = save_prod_creds(creds) if not dry_run else "[dry-run] would save to " + str(PROD_CREDS_FILE)
+            verified = ("✅ VERIFIED — production client_credentials token acquired"
+                        if ok else f"⚠️ token not confirmed yet ({detail}) — creds saved for a manual look")
+            note = (f"SMA sent PRODUCTION credentials ({when}).\n\n{verified}\n\n"
+                    f"Stored securely at {path} (chmod 600 — not in git, chat, or this email).\n\n"
+                    "ACTIVATION (your Claude Code agent, ~minutes):\n"
+                    "  1. Cherry-pick the async-auth BC-host fix (commit 2b12cbf) onto main + deploy.\n"
+                    "  2. Set Railway web SMA_APP_CLIENT_ID/SMA_APP_CLIENT_SECRET from that file;\n"
+                    "     drop the sandbox host overrides (SMA_AUTH_URL/SMA_MON_BASE/SMA_BC_BASE)\n"
+                    "     so the prod code defaults (auth./monitoring./async-auth.smaapis.de) apply.\n"
+                    "  3. Verify is_app_configured()+_get_token()+_get('/plants') via railway ssh.\n"
+                    "  4. Do one real owner's Sunny Portal consent to close it out.\n\n"
+                    "Ping your agent to run it — nothing else is blocking now.")
+            send_notification("[EnergyAgent] 🎉 SMA PRODUCTION credentials arrived — ready to activate",
+                             note, app_pw, dry_run)
+            return
         if creds.get("client_id") and creds.get("client_secret"):
             state, detail = sma_service_account_check(
                 creds["client_id"], creds["client_secret"], dry_run=dry_run)
