@@ -30,7 +30,7 @@ from typing import Optional
 import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.get
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -5157,11 +5157,22 @@ def compute_fleet_forecast(tenant, window_days: int) -> dict:
         return wx_memo[key]
 
     with SessionLocal() as db:
+        # Analysis is a VENDOR/INVERTER-telemetry view — a utility-billing-only
+        # array (a GMP/VEC account with no physical inverter monitoring hooked
+        # up, e.g. Bruce's ~800 REC-agent utility rows) has no kWh/kW, no
+        # forecast, nothing this endpoint can honestly report on. It used to be
+        # included anyway and land in `skipped` as "no nameplate — excluded" —
+        # technically correct math, but hundreds of utility-only rows flooding
+        # the Analysis tab's array list read as GMP data leaking into a surface
+        # that should be vendor-only (Ford 2026-07-08, live on Bruce's account).
+        # Filter to arrays with at least one real Inverter row before this
+        # endpoint (or the scheduler snapshot job) ever sees them.
         arrays = db.execute(
             select(Array).where(
                 Array.tenant_id == tenant.id,
                 Array.deleted_at.is_(None),
                 Array.excluded.is_(False),
+                exists().where(Inverter.array_id == Array.id),
             )
         ).scalars().all()
 
