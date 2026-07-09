@@ -1143,6 +1143,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         an_by_id = {u["id"]: u for u in analyzed["units"]}
 
         inv_rows = []
+        _inv_today_iso = local_today().isoformat()   # per-inverter "today" match key
         for iv in ivs:
             u = an_by_id.get(iv.serial, {})
             m = meta_by_serial.get(iv.serial, {})
@@ -1174,6 +1175,14 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "no_energy_register": False,
                 "diagnosis": u.get("diagnosis"),
                 "window_kwh": u.get("window_kwh"),
+                # This inverter's TODAY kWh (the last daily point IF it's today), so the
+                # spreadsheet's Today column can show per-inverter output, not just the
+                # array total. None when today hasn't been captured yet (no misleading 0).
+                "produced_today_kwh": next(
+                    (d["kwh"] for d in reversed(daily)
+                     if str(d.get("date")) == _inv_today_iso and (d.get("kwh") or 0) > 0),
+                    None,
+                ),
                 "daily": daily,                       # ascending [{date,kwh}] for the sparkline
                 "min_kwh": min_kwh,                   # lowest daily output in the window (real)
                 "peak_kwh": peak_kwh,                 # highest daily output in the window (real)
