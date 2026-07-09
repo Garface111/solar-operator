@@ -1239,16 +1239,18 @@ def start():
         reconcile_warranty_claims,
         "interval", minutes=15, id="reconcile_warranty_claims", replace_existing=True,
     )
-    # Every 10 min: white-glove staleness alert for hand-picked vip_watch
-    # tenants (Ford, 2026-07-08). The tight self-heal nudge itself rides the
-    # existing extension heartbeat (see capture_debt.compute_capture_debt) —
-    # this job only catches "stayed stale anyway", which means the browser
-    # probably isn't open, and emails Ford once per incident.
-    from .vip_watch import vip_watch_sweep
-    scheduler.add_job(
-        vip_watch_sweep,
-        "interval", minutes=10, id="vip_watch_sweep", replace_existing=True,
-    )
+    # PAUSED 2026-07-08 (Ford: "turn off the automatic VIP watch emails") --
+    # too many real (non-demo) tenants are currently stale while the Fronius/
+    # SMA onboarding + data-freshness work is still being sorted out, so this
+    # was flooding Ford's inbox. The silent self-heal nudge is UNAFFECTED (it
+    # rides the extension heartbeat via capture_debt.compute_capture_debt, not
+    # this job) -- only the "email Ford" half is off. Re-enable by uncommenting
+    # once real-account staleness is under control. See [[vip-watch-babied-accounts]].
+    # from .vip_watch import vip_watch_sweep
+    # scheduler.add_job(
+    #     vip_watch_sweep,
+    #     "interval", minutes=10, id="vip_watch_sweep", replace_existing=True,
+    # )
     # DATA HUB: every 5 min, poll every array with a pullable vendor connection
     # (SolarEdge live today; SMA/Fronius/etc. as their API creds come online) and
     # write the time-series. Daylight-gated inside poll_all_sources (no night API
