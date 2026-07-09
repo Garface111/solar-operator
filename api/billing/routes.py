@@ -788,6 +788,53 @@ async def create_subscription(
         return {"ok": True, "subscription": _sub_dict(sub)}
 
 
+# ── Intelligent offtaker ↔ sub-account matching ─────────────────────────────
+# When a net meter group has multiple GMP sub-accounts, bind the offtaker to
+# THEIR OWN sub-account (topology A — GMP already allocated that member's excess,
+# so the invoice and the bill-accuracy audit read one authoritative number)
+# instead of a share of the whole group. The only signal is the operator's own
+# labels: the offtaker name vs each account's nickname / service address. Accept
+# ONLY a unique, unambiguous winner — never a coin-flip on a billing path. Keep
+# this normalization in sync with the frontend `matchSubAccount`
+# (array-operator public/reports.js).
+_MATCH_STOP = {
+    "the", "a", "an", "of", "and", "at", "llc", "inc", "co", "house", "home",
+    "apartments", "apartment", "apt", "unit", "units", "farm", "barn", "solar",
+    "array", "account", "acct", "meter", "net", "group", "st", "street", "rd",
+    "road", "ave", "avenue", "ln", "lane", "dr", "drive", "vt", "usa",
+}
+
+
+def _match_tokens(s) -> set:
+    import re
+    return {w for w in re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+            if len(w) >= 3 and w not in _MATCH_STOP}
+
+
+def _match_offtaker_subaccount(name, accounts):
+    """Return the UNIQUE best-matching UtilityAccount for this offtaker name, or
+    None when there's no non-trivial, unambiguous winner (0/1 accounts, no shared
+    token, or a tie). Reads each account's nickname + one-line service address."""
+    from ..forecasting import address_to_oneline
+    want = _match_tokens(name)
+    if not want or not accounts or len(accounts) < 2:
+        return None
+    best = None
+    best_score = 0
+    tie = False
+    for a in accounts:
+        hay = _match_tokens(getattr(a, "nickname", None)) | _match_tokens(
+            address_to_oneline(getattr(a, "service_address", None)))
+        score = len(want & hay)
+        if score > best_score:
+            best, best_score, tie = a, score, False
+        elif score == best_score and score > 0:
+            tie = True
+    if best is None or best_score < 1 or tie:
+        return None
+    return best
+
+
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
     utility_account_id=None, array_share_pct=None, crosscheck_threshold_pct=None,
@@ -870,10 +917,20 @@ async def _create_manual_subscription(
                 elif len(_billable) == 1:
                     utility_account_id = _billable[0].id
                 else:
-                    raise HTTPException(
-                        400, "This array has multiple connected utility bills — "
-                             "pass utility_account_id to choose which one invoices "
-                             "this offtaker.")
+                    # Multiple billable sub-accounts. Try to bind the offtaker to
+                    # THEIR OWN sub-account by matching their name against each
+                    # account's nickname / service address (the frontend does the
+                    # same live; this covers bulk-import + API). Only a UNIQUE,
+                    # unambiguous match resolves — otherwise still demand an
+                    # explicit choice rather than guess on a billing path.
+                    _matched = _match_offtaker_subaccount(name, _with_bill or _billable)
+                    if _matched is not None:
+                        utility_account_id = _matched.id
+                    else:
+                        raise HTTPException(
+                            400, "This array has multiple connected utility bills — "
+                                 "pass utility_account_id to choose which one invoices "
+                                 "this offtaker.")
             # else: no billable account → fall through to legacy generation path.
 
     # ── OFFTAKER ↔ UTILITY BILL path (highest priority) ──────────────────────
