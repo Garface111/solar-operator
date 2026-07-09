@@ -35,7 +35,7 @@ owensboro,Owensboro Municipal Utilities,KY,in-progress,,https://omu.com,"Owensbo
 frankfort_plant_board,Frankfort Plant Board,KY,in-progress,,https://fewpb.com,"Frankfort Plant Board (Frankfort Electric & Water Plant Board) — Frankfort municipal utility. Bespoke portal, no SmartHub. Manual upload meanwhile."
 princeton_electric,Princeton Electric Plant Board,KY,in-progress,,,"Princeton Electric Plant Board — Princeton municipal. No SmartHub found, limited online presence (Jun 2026). Manual upload meanwhile."
 paducah_power,Paducah Power System,KY,in-progress,,https://paducahpower.com,"Paducah Power System — Paducah municipal utility. Bespoke portal (paducahpower.com), no SmartHub. Manual upload meanwhile."
-murray_electric,Murray Electric System,KY,in-progress,,https://www.murrayky.gov/departments/murray-electric-system,"Murray Electric System (MES) — Murray municipal. Portal via city site, no SmartHub. Manual upload meanwhile."
+murray_electric,Murray Electric System,KY,live,murrayky.smarthub.coop,https://murrayky.smarthub.coop,"Confirmed live SmartHub host via discovery sweep 2026-07-09. Murray Electric System (MES) — Murray municipal. Portal via city site, no SmartHub. Manual upload meanwhile."
 mayfield_electric,Mayfield Electric & Water Systems,KY,in-progress,,,"Mayfield Electric & Water Systems — Mayfield municipal. No SmartHub found, limited online portal (Jun 2026). Manual upload meanwhile."
 barbourville_utilities,Barbourville Utilities Commission,KY,in-progress,,,Barbourville Utilities Commission — Barbourville municipal. No SmartHub found (Jun 2026). Manual upload meanwhile.
 corbin_utilities,Corbin Utilities Commission,KY,in-progress,,,Corbin Utilities Commission — Corbin municipal. No SmartHub found (Jun 2026). Manual upload meanwhile.

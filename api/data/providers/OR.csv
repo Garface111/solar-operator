@@ -22,7 +22,7 @@ oregon_trail,Oregon Trail Electric Cooperative,OR,in-progress,,,"Baker City-base
 umpqua_indian,Umpqua Indian Utility Cooperative,OR,in-progress,,,Canyonville-based tribal utility (serves Cow Creek Band). No SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 wasco_electric,Wasco Electric Cooperative,OR,in-progress,,,The Dalles-based electric co-op. No SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 clatskanie_pud,Clatskanie PUD,OR,live,clatskaniepud.smarthub.coop,https://clatskaniepud.smarthub.coop,People's Utility District. No SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Clatskanie PUD') Jul 2026.
-northern_wasco_pud,Northern Wasco County PUD,OR,in-progress,,,The Dalles-based People's Utility District. No SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
+northern_wasco_pud,Northern Wasco County PUD,OR,live,nwascopud.smarthub.coop,https://nwascopud.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. The Dalles-based People's Utility District. No SmartHub host found (Jun 2026). Manual PDF upload until portal confirmed.
 eweb,Eugene Water & Electric Board (EWEB),OR,in-progress,,https://www.eweb.org,"Municipal utility serving Eugene (~86K customers, electric and water). Bespoke portal, adapter needs live login. Manual PDF upload meanwhile."
 springfield_ub,Springfield Utility Board (SUB),OR,in-progress,,,"Municipal utility serving Springfield (electric and water). No SmartHub, bespoke portal. Manual PDF upload until portal confirmed."
 ashland,City of Ashland,OR,in-progress,,,"Municipal utility (electric, water, wastewater). No SmartHub found. Manual PDF upload until portal confirmed."
@@ -31,6 +31,6 @@ cascade_locks,City of Cascade Locks,OR,in-progress,,,Municipal electric utility.
 drain,City of Drain,OR,in-progress,,,Municipal electric utility. No SmartHub found. Manual PDF upload until portal confirmed.
 forest_grove,Forest Grove Light & Power,OR,in-progress,,,Municipal electric utility (City of Forest Grove). No SmartHub found. Manual PDF upload until portal confirmed.
 hermiston_energy,Hermiston Energy Services,OR,live,hermistonenergy.smarthub.coop,https://hermistonenergy.smarthub.coop,Municipal electric utility. No SmartHub found. Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Hermiston Energy Services') Jul 2026.
-mcminnville_or,McMinnville Water & Light,OR,in-progress,,,Municipal utility (electric and water). No SmartHub found. Manual PDF upload until portal confirmed.
+mcminnville_or,McMinnville Water & Light,OR,live,mcpower.smarthub.coop,https://mcpower.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Municipal utility (electric and water). No SmartHub found. Manual PDF upload until portal confirmed.
 milton_freewater,City of Milton-Freewater,OR,in-progress,,,Municipal electric utility. No SmartHub found. Manual PDF upload until portal confirmed.
 monmouth,Monmouth Power & Light,OR,in-progress,,,Municipal electric utility (City of Monmouth). No SmartHub found. Manual PDF upload until portal confirmed.

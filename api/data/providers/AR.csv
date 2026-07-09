@@ -6,7 +6,7 @@ claycounty_ar,Clay County Electric Cooperative,AR,live,claycountyelectric.smarth
 craighead,Craighead Electric Cooperative,AR,live,craigheadelectric.smarthub.coop,https://craigheadelectric.smarthub.coop,NISC SmartHub portal (craigheadelectric.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter.
 farmers,Farmers Electric Cooperative,AR,live,farmers.smarthub.coop,https://farmers.smarthub.coop,NISC SmartHub portal (farmers.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter.
 firstelectric,First Electric Cooperative,AR,live,firstelectric.smarthub.coop,https://firstelectric.smarthub.coop,NISC SmartHub portal (firstelectric.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter.
-mcec,Mississippi County Electric Cooperative,AR,in-progress,,https://mcec.smarthub.coop,[host unattributed] Mississippi County EC (AR). mcec.smarthub.coop could not be uniquely attributed (Jun 2026); needs verification before going live. Manual upload meanwhile.
+mcec,Mississippi County Electric Cooperative,AR,live,mceci.smarthub.coop,https://mceci.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. [host unattributed] Mississippi County EC (AR). mcec.smarthub.coop could not be uniquely attributed (Jun 2026); needs verification before going live. Manual upload meanwhile.
 ozarks,Ozarks Electric Cooperative,AR,live,ozarksecc.smarthub.coop,https://ozarksecc.smarthub.coop,NISC SmartHub portal (ozarksecc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter.
 pjecc,Petit Jean Electric Cooperative,AR,live,pjecc.smarthub.coop,https://pjecc.smarthub.coop,NISC SmartHub portal (pjecc.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter.
 rmec,Rich Mountain Electric Cooperative,AR,live,rmec.smarthub.coop,https://rmec.smarthub.coop,NISC SmartHub portal (rmec.smarthub.coop verified Jun 2026) — extension scrapes billing + usage. kWh unverified on real generation meter.
@@ -23,12 +23,12 @@ empire,Empire District Electric / Liberty Utilities,AR,in-progress,,https://myac
 jonesboro_cwl,Jonesboro City Water & Light,AR,in-progress,,https://jonesborocwl.org,"Municipal utility. Bespoke customer portal, not SmartHub. Manual PDF upload meanwhile."
 conway_corp,Conway Corporation,AR,in-progress,,https://my.conwaycorp.com/www/Login.aspx,"Municipal utility. Bespoke customer portal, not SmartHub. Manual PDF upload meanwhile."
 bentonville,City of Bentonville Electric,AR,in-progress,,https://www.bentonvillear.com/myaccount,"Municipal utility. Invoice Cloud portal, not SmartHub. Manual PDF upload meanwhile."
-benton,City of Benton Electric,AR,in-progress,,,Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
+benton,City of Benton Electric,AR,live,bentonutilities.smarthub.coop,https://bentonutilities.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
 siloam_springs,City of Siloam Springs Electric,AR,in-progress,,,Municipal utility operating since 1903. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
 osceola,City of Osceola Electric,AR,in-progress,,,Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
 clarksville,Clarksville Connected Utilities,AR,in-progress,,,Municipal utility (formerly Clarksville Light & Water Commission). No customer portal found (Jun 2026). Manual PDF upload until confirmed.
 prescott,City of Prescott Electric,AR,in-progress,,,Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
-hope,City of Hope Electric,AR,in-progress,,,Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
-northlittlerock,North Little Rock Electric,AR,in-progress,,,Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
+hope,City of Hope Electric,AR,live,hopewl.smarthub.coop,https://hopewl.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
+northlittlerock,North Little Rock Electric,AR,live,nlr.smarthub.coop,https://nlr.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
 westmemphis,City of West Memphis Electric,AR,in-progress,,,Municipal utility. No customer portal found (Jun 2026). Manual PDF upload until confirmed.
 paragould_plwc,Paragould Light Water & Cable,AR,in-progress,,,"Municipal utility, also provides cable/broadband. No customer portal found (Jun 2026). Manual PDF upload until confirmed."
