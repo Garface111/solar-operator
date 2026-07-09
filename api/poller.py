@@ -116,11 +116,13 @@ def _reset_budget() -> None:
 
 def _credential_key(vendor: str, cfg: dict) -> str:
     """A stable id for the rate-limited PRINCIPAL behind a connection. SolarEdge
-    limits per api_key; SMA/OAuth vendors per client_id. Sites sharing the same
-    key share one budget."""
+    limits per api_key; Fronius per access_key_id; SMA/OAuth vendors per
+    client_id. Sites sharing the same key share one budget."""
     v = (vendor or "").lower()
     if v == "solaredge":
         return "solaredge:" + str(cfg.get("api_key") or "")
+    if v == "fronius":
+        return "fronius:" + str(cfg.get("access_key_id") or "")
     if cfg.get("client_id"):
         return f"{v}:{cfg.get('client_id')}"
     # last resort: whatever uniquely identifies the creds
@@ -178,6 +180,12 @@ def _pullable_connection(db, arr: Array):
     cfg = conn.config or {}
     # SolarEdge / any api-key+site vendor: directly pullable now.
     if cfg.get("api_key") and cfg.get("site_id"):
+        return conn
+    # Fronius Solar.web Query API: AccessKeyId + AccessKeyValue, scoped to one
+    # pv_system_id (see api/inverters/fronius.py). Was missing here entirely —
+    # every official-API Fronius connection (Bruce's real Waterford/Chester
+    # key) silently never got server-polled despite fetch_live working fine.
+    if cfg.get("access_key_id") and cfg.get("access_key_value"):
         return conn
     # SMA / OAuth vendors: pullable once an app/refresh credential is present.
     if cfg.get("client_id") and cfg.get("client_secret"):

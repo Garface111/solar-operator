@@ -59,6 +59,13 @@ def test_pullable_connection_requires_creds_and_live_support():
     c3 = types.SimpleNamespace(id=3, config={}, vendor="fronius")
     # unknown vendor → not pullable (no live support)
     c4 = types.SimpleNamespace(id=4, config={"api_key": "k", "site_id": 1}, vendor="bogus")
+    # Fronius access-key creds → pullable (regression: this branch was missing
+    # entirely, so every real official-API Fronius connection — e.g. Bruce's
+    # live Waterford/Chester key — was silently invisible to the poller
+    # despite fetch_live working fine).
+    c5 = types.SimpleNamespace(
+        id=5, config={"access_key_id": "aki", "access_key_value": "akv",
+                      "pv_system_id": "sid"}, vendor="fronius")
 
     def fake_resolve(db, arr):
         return arr._conn
@@ -71,8 +78,19 @@ def test_pullable_connection_requires_creds_and_live_support():
         assert poller._pullable_connection(None, types.SimpleNamespace(_conn=c3)) is None
         assert poller._pullable_connection(None, types.SimpleNamespace(_conn=c4)) is None
         assert poller._pullable_connection(None, types.SimpleNamespace(_conn=None)) is None
+        assert poller._pullable_connection(None, types.SimpleNamespace(_conn=c5)) is c5
     finally:
         poller._fleet._resolve_connection = orig
+
+
+def test_credential_key_scopes_fronius_by_access_key_id():
+    """Two different Fronius customers' keys must land in DIFFERENT budget
+    buckets — the old fallback (no fronius-specific branch) hashed every
+    Fronius connection to the same blank "fronius:" bucket, so one customer's
+    polling could throttle another's."""
+    assert poller._credential_key("fronius", {"access_key_id": "AAA", "access_key_value": "x"}) == "fronius:AAA"
+    assert (poller._credential_key("fronius", {"access_key_id": "AAA", "access_key_value": "x"})
+            != poller._credential_key("fronius", {"access_key_id": "BBB", "access_key_value": "y"}))
 
 
 # ── nameplate allocation ──────────────────────────────────────────────────────
