@@ -77,6 +77,7 @@ def ingest_vault_report(db, tenant_id: str, report: list) -> None:
                 username=username, username_lc=username_lc,
             )
             db.add(row)
+        was_failing = bool(row.paused) or (row.fails or 0) >= _PAUSE_FAILS
         row.username = username
         row.enabled = bool(e.get("enabled", True))
         row.paused = bool(e.get("paused", False))
@@ -86,6 +87,24 @@ def ingest_vault_report(db, tenant_id: str, report: list) -> None:
             row.fails = 0
         row.last_ok_at = _parse_iso(e.get("last_ok_at")) or row.last_ok_at
         row.reported_at = now()
+        # Fire the moment a login CROSSES into failing -- the freshness scorecard
+        # only reports this in a Monday-morning aggregate, so a specific account
+        # going permanently dark got zero targeted alert until then (Ford,
+        # 2026-07-08: "find every instance of us intentionally sabotaging our own
+        # reliability"). Only on the transition, so a login stuck failing for
+        # weeks doesn't re-alert every heartbeat.
+        now_failing = bool(row.paused) or (row.fails or 0) >= _PAUSE_FAILS
+        if now_failing and not was_failing:
+            from .notify import send_internal_alert
+            t = db.get(Tenant, tenant_id)
+            send_internal_alert(
+                f"Portal login failing: {provider} ({tenant_id})",
+                f"Tenant: {(t.name if t else tenant_id)} ({tenant_id})\n"
+                f"Provider: {provider}\nUsername: {username}\nFails: {row.fails}\n\n"
+                "Auto-login has given up on this saved password -- it's almost "
+                "certainly wrong/changed. The owner needs to re-save it in the "
+                "extension vault.",
+            )
     for provider, usernames in seen.items():
         stale_rows = db.execute(
             select(PortalLoginStatus).where(

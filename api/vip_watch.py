@@ -1,34 +1,39 @@
-"""VIP watch — every account gets a tight self-heal SLA; a hand-picked few also
-get Ford alerted fast if it doesn't work.
+"""VIP watch — every REAL account gets a tight self-heal SLA AND fast Ford
+alerting if it doesn't work. No tiers, no "protect the inbox" throttle.
 
 Ford, 2026-07-08 (re: Lester/Brattleboro Solar): "set up an agent that monitors
 his account for anomalies. if the data gets stale, more than 15 min, his
-extension triggers." Then, 2026-07-08 (later): "I think all accounts should be
-babied like this."
+extension triggers." Then: "I think all accounts should be babied like this."
+Then, same day, after finding this alert sweep had been tiered (fast for
+hand-picked `vip_watch` tenants, a 6-HOUR bar for everyone else, specifically
+to avoid flooding his inbox): "we are hardcore not babies who try to conserve
+electricity... find every instance of us intentionally sabotaging our own
+reliability and fix it." The 6-hour tier for "everyone else" was exactly that
+kind of sabotage — a self-imposed politeness tradeoff, not a real constraint.
+Fixed: ONE fast bar for every tenant, no exceptions, no tiers.
 
-Two halves, deliberately NOT scaled the same way:
+The inbox-flooding problem this was originally trying to solve was misdiagnosed
+anyway: a real prod census (2026-07-08) found the noise wasn't "too many real
+accounts alerting" — `Tenant.is_demo` was simply never checked here, so most
+of what would have alerted were Ford's OWN test/scratch signups (see
+fronius-real-stale-census memory). The actual fix for noise is filtering
+`is_demo`, not slowing down alerts for real customers.
+
+Two halves:
 
   1. `vip_stale_vendors()` — called from capture_debt.compute_capture_debt for
-     EVERY tenant. Every extension heartbeat (every 60s, from whichever browser
-     is open) already carries a "debt" instruction telling the extension what
-     to recapture — this makes that check MUCH tighter (minutes, not the
-     normal multi-day bar) universally, gated on DAYLIGHT so a normal
+     EVERY non-demo tenant. Every extension heartbeat (every 60s, from
+     whichever browser is open) already carries a "debt" instruction telling
+     the extension what to recapture — this makes that check MUCH tighter
+     (minutes, not the normal multi-day bar), gated on DAYLIGHT so a normal
      overnight gap is never mistaken for staleness. No new extension-side code
-     needed: the drain mechanism already exists. Pure win, zero downside —
-     applies to everyone.
+     needed: the drain mechanism already exists.
 
   2. `vip_watch_sweep()` — a scheduler job, independent of any heartbeat (a
      genuinely-closed browser never heartbeats at all, so #1 can only help
-     while SOME browser is open). This is the one half that CANNOT scale to
-     "alert Ford for every tenant" without flooding his inbox — most casual
-     owners don't leave Chrome open all day, so a universal 90-minute bar
-     would email him about nearly everyone, nearly every day. So it runs for
-     every active tenant, but with a TIERED bar: `Tenant.vip_watch=True`
-     tenants (hand-picked, rare) alert fast (ALERT_AFTER_MINUTES_VIP); everyone
-     else alerts only after staying stale most of a working day
-     (ALERT_AFTER_MINUTES_DEFAULT) — still catches a truly-abandoned account,
-     without turning into daily noise for the common case of "closed their
-     laptop for lunch." Dedup + one-email-per-incident either way.
+     while SOME browser is open). Runs for every ACTIVE, non-demo tenant, one
+     universal fast bar (ALERT_AFTER_MINUTES). Alerts Ford ONCE per incident,
+     clears on recovery, can re-fire later.
 """
 from __future__ import annotations
 
@@ -39,15 +44,12 @@ from sqlalchemy import select
 
 log = logging.getLogger("vip_watch")
 
-# Minute-granularity self-heal bar — applies to EVERY tenant (see #1 above).
+# Minute-granularity self-heal bar — applies to every non-demo tenant (see #1 above).
 # Deliberately far tighter than capture_debt's VENDOR_STALE_DAYS=2; safe only
 # because it's daylight-gated, so a normal overnight gap never counts.
 VIP_STALE_MINUTES = 15
-# Alert-Ford bar: fast for hand-picked vip_watch tenants, much wider for
-# everyone else so the sweep doesn't flood Ford's inbox with "so-and-so's
-# Chrome isn't open" — true of most casual owners most afternoons.
-ALERT_AFTER_MINUTES_VIP = 90
-ALERT_AFTER_MINUTES_DEFAULT = 6 * 60   # a stale-all-workday signal, not a lunch break
+# Alert-Ford bar. ONE tier, universal -- no "protect the inbox" throttle.
+ALERT_AFTER_MINUTES = 90
 _EXT_VENDORS = ("fronius", "sma", "chint")
 
 
@@ -95,18 +97,14 @@ def vip_stale_vendors(db, tenant_id: str, *, now_: datetime | None = None) -> se
 
 
 def vip_watch_sweep(dry_run: bool = False) -> dict:
-    """Scheduler job: for every ACTIVE tenant, flag any DAYTIME array whose
-    extension-vendor data has been stale past its alert bar — long enough
-    that the universal self-heal nudge (vip_stale_vendors, above) hasn't been
-    able to fix it, meaning the owner's browser is probably not open.
-    `Tenant.vip_watch=True` gets the fast bar (ALERT_AFTER_MINUTES_VIP);
-    everyone else gets the wide one (ALERT_AFTER_MINUTES_DEFAULT), so this
-    scales to the whole customer base without flooding Ford's inbox with
-    "browser closed for lunch" noise. Alerts Ford ONCE per incident
-    (InverterAlertState dedup, namespaced 'vip_stale:' — this table is SHARED
-    across alert jobs, never touch a key outside your own namespace); the
-    incident clears itself, and can re-fire later, once the array reports
-    fresh again."""
+    """Scheduler job: for every ACTIVE, non-demo tenant, flag any DAYTIME array
+    whose extension-vendor data has been stale past ALERT_AFTER_MINUTES — long
+    enough that the universal self-heal nudge (vip_stale_vendors, above) hasn't
+    been able to fix it, meaning the owner's browser is probably not open. ONE
+    bar for everyone, no tiers. Alerts Ford ONCE per incident (InverterAlertState
+    dedup, namespaced 'vip_stale:' — this table is SHARED across alert jobs,
+    never touch a key outside your own namespace); the incident clears itself,
+    and can re-fire later, once the array reports fresh again."""
     from .db import SessionLocal
     from .inverter_fleet import _daylight_for
     from .models import Array, Inverter, InverterAlertState, Tenant
@@ -114,13 +112,13 @@ def vip_watch_sweep(dry_run: bool = False) -> dict:
 
     out = {"alerted": [], "recovered_cleared": 0, "skipped_dedup": 0, "dry_run": dry_run}
     now_ = datetime.utcnow()
+    alert_cutoff = now_ - timedelta(minutes=ALERT_AFTER_MINUTES)
 
     with SessionLocal() as db:
-        tenants = db.execute(select(Tenant).where(Tenant.active.is_(True))).scalars().all()
+        tenants = db.execute(
+            select(Tenant).where(Tenant.active.is_(True), Tenant.is_demo.is_(False))
+        ).scalars().all()
         for t in tenants:
-            alert_after = ALERT_AFTER_MINUTES_VIP if t.vip_watch else ALERT_AFTER_MINUTES_DEFAULT
-            alert_cutoff = now_ - timedelta(minutes=alert_after)
-
             arrays = db.execute(
                 select(Array).where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
             ).scalars().all()
@@ -172,11 +170,11 @@ def vip_watch_sweep(dry_run: bool = False) -> dict:
                     send_internal_alert(
                         subject=f"[VIP watch] {t.name} — {arr.name} data is stale",
                         body=(
-                            f"Tenant: {t.name} ({t.id}){' [vip_watch]' if t.vip_watch else ''}\n"
+                            f"Tenant: {t.name} ({t.id})\n"
                             f"Array: {arr.name} (id {array_id})\n"
                             f"Vendor(s): {', '.join(vendors)}\n"
                             f"Last live capture: {'never' if age_min is None else f'{age_min} min ago'}\n\n"
-                            f"This array has been stale for over {alert_after} minutes during "
+                            f"This array has been stale for over {ALERT_AFTER_MINUTES} minutes during "
                             "daylight, despite the tight self-heal nudge every tenant gets on every "
                             "extension heartbeat. That combination almost always means their browser "
                             "isn't open right now — Fronius/SMA only refresh while a signed-in "

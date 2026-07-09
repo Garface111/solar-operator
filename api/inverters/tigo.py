@@ -158,14 +158,14 @@ def fetch_live(config: dict) -> dict | None:
 def fetch_daily(config: dict, start: date, end: date) -> list[dict]:
     require_fields(config, "username", "password", "system_id")
     # Daily aggregate. Shape varies, so parse defensively and skip what doesn't fit.
-    try:
-        body = _get(config, "/data/aggregate", params={
-            "system_id": config["system_id"],
-            "start": start.isoformat(), "end": end.isoformat(),
-            "level": "day", "param": "energy_dc",
-        })
-    except InverterError:
-        return []
+    # A real API failure (auth/5xx/network) propagates as InverterError -- it must
+    # never read as "zero production that day" (Ford, 2026-07-08: "find every
+    # instance of us intentionally sabotaging our own reliability").
+    body = _get(config, "/data/aggregate", params={
+        "system_id": config["system_id"],
+        "start": start.isoformat(), "end": end.isoformat(),
+        "level": "day", "param": "energy_dc",
+    })
     rows = []
     if isinstance(body, dict):
         rows = body.get("results") or body.get("data") or body.get("aggregate") or []

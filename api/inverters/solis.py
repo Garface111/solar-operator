@@ -176,14 +176,14 @@ def fetch_daily(config: dict, start: date, end: date) -> list[dict]:
     require_fields(config, "key_id", "key_secret", "station_id")
     # /v1/api/stationDayEnergyList returns per-day energy for a station over a range.
     # Shapes vary by SolisCloud version, so parse defensively and skip what doesn't fit.
-    try:
-        data = _post(config, "/v1/api/stationDayEnergyList", {
-            "id": config["station_id"],
-            "pageNo": 1, "pageSize": 100,
-            "startTime": start.isoformat(), "endTime": end.isoformat(),
-        })
-    except InverterError:
-        return []
+    # A real API failure (auth/5xx/network) propagates as InverterError -- it must
+    # never read as "zero production that day" (Ford, 2026-07-08: "find every
+    # instance of us intentionally sabotaging our own reliability").
+    data = _post(config, "/v1/api/stationDayEnergyList", {
+        "id": config["station_id"],
+        "pageNo": 1, "pageSize": 100,
+        "startTime": start.isoformat(), "endTime": end.isoformat(),
+    })
     records = []
     if isinstance(data, dict):
         records = (data.get("page") or {}).get("records") or data.get("records") or []

@@ -79,8 +79,12 @@ def _persist_config_if_changed(conn, cfg: dict) -> None:
         if conn.config is not cfg:
             conn.config = cfg
         flag_modified(conn, "config")
-    except Exception:  # never let persistence break the poll
-        pass
+    except Exception:  # never let persistence break the poll, but never go silent either --
+        # losing a rotated refresh_token is literally the bug this function exists to fix
+        # (plant goes dark until a manual reconnect). Ford, 2026-07-08: "find every instance
+        # of us intentionally sabotaging our own reliability."
+        log.warning("failed to persist rotated config for connection %s",
+                    getattr(conn, "id", "?"), exc_info=True)
 
 from . import inverter_fleet as _fleet
 from . import inverters as _vendors

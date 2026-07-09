@@ -37,6 +37,7 @@ ENTRY POINTS
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 from typing import Any, Optional
 
@@ -58,6 +59,12 @@ WINDOW_DAYS = 60          # <=90 (GMP 503s above ~90); 60 gives headroom
 MAX_WINDOWS = 400         # hard stop (~65 years of 60d windows) — safety, never hit
 EMPTY_STREAK_STOP = 2     # consecutive 404/empty windows that mean "below floor"
 MIN_FLOOR_DATE = date(2000, 1, 1)  # absolute sanity floor; never page below this
+# A non-200/non-404 window used to stop the walk immediately and mark the
+# account "ok" anyway -- a transient GMP hiccup silently under-filled history
+# forever. Retry with backoff before giving up (Ford, 2026-07-08: "find every
+# instance of us intentionally sabotaging our own reliability").
+WINDOW_ERROR_RETRIES = 3
+WINDOW_ERROR_BACKOFF_SECONDS = (2, 5, 15)
 
 
 def _usable_session(db: Session, account: UtilityAccount) -> Optional[UtilitySession]:
@@ -252,9 +259,29 @@ def backfill_account(
                 end = start
                 continue
             if status_code != 200:
-                summary["errors"].append(f"{start}..{end}: HTTP {status_code}")
-                # transient — stop walking deeper to avoid hammering; keep what we have
-                break
+                # Retry with backoff before giving up on this window -- a single
+                # GMP hiccup used to permanently stop the walk here AND still
+                # report the account "ok", silently under-filling history with
+                # no way to tell (Ford, 2026-07-08: "find every instance of us
+                # intentionally sabotaging our own reliability").
+                for attempt, backoff in enumerate(WINDOW_ERROR_BACKOFF_SECONDS, start=1):
+                    time.sleep(backoff)
+                    csv_text, parsed, status_code, retried = _fetch_one_window(
+                        db, sess, account, jwt, start, end
+                    )
+                    if retried and sess.api_token != jwt:
+                        jwt = sess.api_token
+                    if status_code == 200:
+                        break
+                    log.warning("gmp backfill: account %s window %s..%s retry %d/%d got HTTP %s",
+                               account_id, start, end, attempt, WINDOW_ERROR_RETRIES, status_code)
+                if status_code != 200:
+                    summary["errors"].append(f"{start}..{end}: HTTP {status_code} (gave up after "
+                                             f"{WINDOW_ERROR_RETRIES} retries)")
+                    # Genuinely stuck -- stop walking deeper, but be HONEST that this
+                    # account's history is incomplete rather than silently "ok".
+                    summary["status"] = "partial"
+                    break
 
             empty_streak = 0
             ins, upd = _persist_window(db, account, start, end, csv_text, parsed, 200)
@@ -380,7 +407,8 @@ def backfill_tenant(
         ).scalars().all()
     results = []
     totals = {"daily_inserted": 0, "daily_updated": 0, "raw_rows_total": 0,
-              "accounts_ok": 0, "accounts_error": 0, "accounts_skipped": 0}
+              "accounts_ok": 0, "accounts_partial": 0, "accounts_error": 0,
+              "accounts_skipped": 0}
     for aid in accts:
         r = backfill_account(None, aid, window_days=window_days, force_refetch=force_refetch)
         results.append(r)
@@ -389,6 +417,11 @@ def backfill_tenant(
         totals["raw_rows_total"] += r["raw_rows_total"]
         if r["status"] == "ok":
             totals["accounts_ok"] += 1
+        elif r["status"] == "partial":
+            # Retried with backoff and still hit a wall -- got SOME real data,
+            # unlike "skipped" (never even tried). Distinct bucket so a
+            # persistently-incomplete account is visible, not folded into "ok".
+            totals["accounts_partial"] += 1
         elif r["status"] == "error":
             totals["accounts_error"] += 1
         else:

@@ -1012,10 +1012,15 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
             if last_cap is not None and now_ - last_cap < timedelta(days=days_stale):
                 continue
 
-            # Alert ONCE per death incident. A persistently-dead session must NOT
-            # re-alert on a loop (that flooded the operator ~100x). It re-alerts
-            # only if it recovered (state deleted on the fresh path) then re-died.
-            if state is not None and state.last_alerted_at is not None:
+            # Alert once, then re-alert at most every _COOP_REALERT_DAYS while it
+            # stays dead -- NOT a tight re-alert loop (that flooded the operator
+            # ~100x, 2026-07-06), but never permanently silent either: a session
+            # dead for weeks deserves more than the one email it got at hour zero
+            # (Ford, 2026-07-08: "find every instance of us intentionally
+            # sabotaging our own reliability"). Same bounded-recurring shape as
+            # gmp_final_expiry_warnings above.
+            if state is not None and state.last_alerted_at is not None and \
+                    now_ - state.last_alerted_at < timedelta(days=_COOP_REALERT_DAYS):
                 out["skipped_dedup"] += 1
                 continue
             tenant = db.get(Tenant, tid)
@@ -1098,8 +1103,13 @@ def poll_all_sources_job() -> dict:
         if summary.get("errors"):
             logger.warning("poller: %d source errors this tick", len(summary["errors"]))
         return summary
-    except Exception:
+    except Exception as e:
         logger.exception("poller: poll_all_sources crashed")
+        # This is the data-hub spine (poller.py's own term) -- a persistent crash here
+        # silently stops ALL live kW updates fleet-wide. Every sibling job wrapper in
+        # this file alerts on crash; this one didn't (Ford, 2026-07-08: "find every
+        # instance of us intentionally sabotaging our own reliability").
+        send_internal_alert("poll_all_sources crashed", f"Error: {e}")
         return {"ran": False, "error": "exception"}
 
 
@@ -1107,8 +1117,9 @@ def prune_inverter_readings_job() -> dict:
     from .poller import prune_old_readings
     try:
         return prune_old_readings()
-    except Exception:
+    except Exception as e:
         logger.exception("poller: prune_old_readings crashed")
+        send_internal_alert("prune_old_readings crashed", f"Error: {e}")
         return {"pruned": 0, "error": "exception"}
 
 
@@ -1239,18 +1250,17 @@ def start():
         reconcile_warranty_claims,
         "interval", minutes=15, id="reconcile_warranty_claims", replace_existing=True,
     )
-    # PAUSED 2026-07-08 (Ford: "turn off the automatic VIP watch emails") --
-    # too many real (non-demo) tenants are currently stale while the Fronius/
-    # SMA onboarding + data-freshness work is still being sorted out, so this
-    # was flooding Ford's inbox. The silent self-heal nudge is UNAFFECTED (it
-    # rides the extension heartbeat via capture_debt.compute_capture_debt, not
-    # this job) -- only the "email Ford" half is off. Re-enable by uncommenting
-    # once real-account staleness is under control. See [[vip-watch-babied-accounts]].
-    # from .vip_watch import vip_watch_sweep
-    # scheduler.add_job(
-    #     vip_watch_sweep,
-    #     "interval", minutes=10, id="vip_watch_sweep", replace_existing=True,
-    # )
+    # RE-ENABLED 2026-07-08 (was briefly paused same day: "too many real accounts
+    # stale" turned out to be Ford's own test tenants, since is_demo was never
+    # filtered here -- see fronius-real-stale-census memory. Now fixed at the
+    # root: vip_watch_sweep filters is_demo AND uses one universal fast bar, no
+    # "protect the inbox" tier -- pausing this permanently would itself be the
+    # exact reliability-sabotage Ford flagged same day).
+    from .vip_watch import vip_watch_sweep
+    scheduler.add_job(
+        vip_watch_sweep,
+        "interval", minutes=10, id="vip_watch_sweep", replace_existing=True,
+    )
     # DATA HUB: every 5 min, poll every array with a pullable vendor connection
     # (SolarEdge live today; SMA/Fronius/etc. as their API creds come online) and
     # write the time-series. Daylight-gated inside poll_all_sources (no night API

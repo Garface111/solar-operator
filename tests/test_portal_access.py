@@ -137,3 +137,33 @@ def test_saved_but_never_pulled_is_saved_pending(client):
     row = [x for x in r.json()["clients"] if x["client"] == "Fresh Save Inc"][0]
     assert row["status"] == "saved_pending"
     assert row["login_username"] == "freshsave"
+
+
+def test_login_crossing_into_failing_alerts_ford_once(client, monkeypatch):
+    """A login going healthy -> failing must alert immediately (not wait for
+    Monday's aggregate scorecard) -- but only on the TRANSITION, so a login
+    stuck failing for weeks doesn't re-alert every heartbeat (Ford, 2026-07-08:
+    "find every instance of us intentionally sabotaging our own reliability")."""
+    sent = []
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda subject, body: sent.append((subject, body)))
+    tid, key, _sess = _mk_tenant()
+    # Healthy first.
+    _hb(client, key, vault=[
+        {"code": "gmp", "username": "watched@x.com", "enabled": True,
+         "last_ok_at": now().isoformat(), "fails": 0, "paused": False},
+    ])
+    assert sent == []
+    # Crosses into failing.
+    _hb(client, key, vault=[
+        {"code": "gmp", "username": "watched@x.com", "enabled": True,
+         "last_ok_at": now().isoformat(), "fails": 3, "paused": True},
+    ])
+    assert len(sent) == 1
+    assert "gmp" in sent[0][0]
+    # Still failing on the next heartbeat -- no repeat alert.
+    _hb(client, key, vault=[
+        {"code": "gmp", "username": "watched@x.com", "enabled": True,
+         "last_ok_at": now().isoformat(), "fails": 4, "paused": True},
+    ])
+    assert len(sent) == 1
