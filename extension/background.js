@@ -1734,7 +1734,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } catch (_) {}
   }
   const AUTOLOGIN_MAX_TAB_ATTEMPTS = 5;
-  const AUTOLOGIN_MAX_VENDOR_FAILS = 3;
+  // The ONE intentional exception in this file to "never give up" (Ford, 2026-07-08):
+  // this pause fires only on a CONFIRMED wrong password (the portal re-presented its
+  // own login page after a submit, not a timeout/network blip) -- retrying the exact
+  // same wrong password forever accomplishes nothing AND risks the vendor's own
+  // account-lockout policy, which would be strictly worse for reliability than pausing.
+  // Widened from 3 -> 5 for safety margin against a slow-loading page being misread as
+  // "re-presented". The pause is NEVER silent (recapMaybeNudge always fires, no gate)
+  // and clears itself the instant the owner re-saves the password (soVaultSetAndArm) --
+  // so this is a real, bounded, always-communicated wait, not a dead end.
+  const AUTOLOGIN_MAX_VENDOR_FAILS = 5;
   // vendor -> consecutive keep-warm refreshes that captured NOTHING (dead session we can't
   // auto-login — e.g. used vendor whose creds were never saved). Persisted (same reason as
   // the auto-login counter) so keep-warm GIVES UP after a few futile tries instead of opening
@@ -1774,7 +1783,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   const CHINT_LIVE_ALARM = "chint-live";
   const CHINT_LIVE_PERIOD_MIN = 10;         // background walk-refresh cadence; ~1.5x margin inside the backend's 15-min fresh window. Calmer than the old 4-min so the background tab opens ~6x/hr, not 15x.
   const CHINT_LIVE_KEY = "so_chint_live";   // { on, armedAt, lastOkAt, fails }
-  const CHINT_LIVE_MAX_FAILS = 3;           // ~30 min of dead cycles (lapsed session — Chint has no silent re-login) → disable + nudge, so a dead session stops churning popups
+  const CHINT_LIVE_MAX_FAILS = 3;           // ~30 min of dead cycles (lapsed session — Chint has no silent re-login) → nudge once (NEVER disarm — see runChintLiveTick)
   async function chintLiveGet() { const s = await chrome.storage.local.get(CHINT_LIVE_KEY); return s[CHINT_LIVE_KEY] || null; }
   async function chintLiveSet(v) { try { await chrome.storage.local.set({ [CHINT_LIVE_KEY]: v }); } catch (_) {} }
   async function armChintLive() {
@@ -1787,7 +1796,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // Guards against the old tab-pileup the v1.9.63 note warned of: the _liveBusy
     // single-flight serializes all background surfaces, the 1-min recap-reaper closes any
     // orphan, recapFinish removes the tab the instant capture lands, and CHINT_LIVE_MAX_FAILS
-    // disarms+nudges a dead session instead of churning tabs forever.
+    // nudges once on a dead session (never disarms — it keeps retrying every tick forever).
     await chintLiveSet({ on: true, armedAt: Date.now(), lastOkAt: 0, fails: 0 });
     try { chrome.alarms.create(CHINT_LIVE_ALARM, { periodInMinutes: CHINT_LIVE_PERIOD_MIN, delayInMinutes: _liveDelayMin("chint") }); } catch (_) {}
     rlog("chint live-mode ARMED — background refresh every", CHINT_LIVE_PERIOD_MIN, "min via a background-tab site walk");
@@ -1825,14 +1834,18 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {}).chint || {};
       const ok = !!(after.ok && after.at && after.at !== before.at);
       const cur = (await chintLiveGet()) || { on: true, fails: 0 };
-      if (!cur.on) return;                       // disarmed mid-tick
+      if (!cur.on) return;                       // explicitly toggled off mid-tick
       if (ok) { await chintLiveSet({ ...cur, fails: 0, lastOkAt: Date.now() }); return; }
       const fails = (cur.fails || 0) + 1;
-      await chintLiveSet({ ...cur, fails });
+      // NEVER disarm on repeated failure -- nudge once, reset the streak, and keep
+      // ticking every CHINT_LIVE_PERIOD_MIN forever. A dead session self-heals the
+      // moment the owner signs back in; giving up here just deletes that chance.
       if (fails >= CHINT_LIVE_MAX_FAILS) {
-        rlog("chint-live:", fails, "dead cycles — disabling + nudging");
-        await disarmChintLive("max-fails");
-        await recapMaybeNudge("chint");          // honest reconnect, not silent stale
+        rlog("chint-live:", fails, "dead cycles — nudging (never disarming; still retrying)");
+        await recapMaybeNudge("chint");
+        await chintLiveSet({ ...cur, fails: 0 });
+      } else {
+        await chintLiveSet({ ...cur, fails });
       }
     } finally { _liveBusy = false; }
   }
@@ -1872,7 +1885,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // so it can never pile up tabs or race the inverter loops. Degrades to one
   // honest reconnect nudge/day after UTIL_LIVE_MAX_FAILS dead cycles.
   const UTIL_LIVE_PERIOD_MIN = 720;          // twice a day (~every 12h). Bills land monthly; this just keeps a fresh one current + the session warm. NEVER the 6-min live cadence.
-  const UTIL_LIVE_MAX_FAILS = 3;             // ~1.5 days of dead cycles → disarm + one nudge (lapsed session we couldn't auto-login)
+  const UTIL_LIVE_MAX_FAILS = 3;             // ~1.5 days of dead cycles → nudge once (NEVER disarm — see runUtilityLiveTick)
   const UTIL_LIVE_ALARM_PREFIX = "util-live-";
   const _utilLiveKey = (c) => "so_util_live_" + c;
   const _utilLiveAlarm = (c) => UTIL_LIVE_ALARM_PREFIX + c;
@@ -2007,14 +2020,18 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           await utilLoginStatusPatch(logins[0].slot, ok ? { ok: true, at: Date.now(), fails: 0 } : { ok: false, fails: (prev.fails || 0) + 1 });
         }
         const cur = (await utilLiveGet(code)) || { on: true, fails: 0 };
-        if (!cur.on) return;
+        if (!cur.on) return;   // explicitly toggled off mid-tick
         if (ok) { await utilLiveSet(code, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
         const fails = (cur.fails || 0) + 1;
-        await utilLiveSet(code, { ...cur, fails });
+        // NEVER disarm on repeated failure -- utility bills are the billing-critical
+        // data path (see CLAUDE.md). Nudge once, reset the streak, keep ticking every
+        // UTIL_LIVE_PERIOD_MIN forever.
         if (fails >= UTIL_LIVE_MAX_FAILS) {
-          rlog("util-live:", code, fails, "dead cycles — disabling + nudging");
-          await disarmUtilityLive(code, "max-fails");
+          rlog("util-live:", code, fails, "dead cycles — nudging (never disarming; still retrying)");
           await recapMaybeNudge(code);
+          await utilLiveSet(code, { ...cur, fails: 0 });
+        } else {
+          await utilLiveSet(code, { ...cur, fails });
         }
         return;
       }
@@ -2045,28 +2062,28 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         if (ok) anyOk = true;
       }
       const cur = (await utilLiveGet(code)) || { on: true, fails: 0 };
-      if (!cur.on) return;
+      if (!cur.on) return;   // explicitly toggled off mid-tick
       if (anyOk) { await utilLiveSet(code, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
       if (attempted === 0) { rlog("util-live:", code, "every login paused/opted out — not counting a dead cycle"); return; }
       const fails = (cur.fails || 0) + 1;
-      await utilLiveSet(code, { ...cur, fails });
+      // NEVER disarm on repeated failure -- same reasoning as the single-login path above.
       if (fails >= UTIL_LIVE_MAX_FAILS) {
-        rlog("util-live:", code, fails, "dead cycles — disabling + nudging");
-        await disarmUtilityLive(code, "max-fails");
+        rlog("util-live:", code, fails, "dead cycles — nudging (never disarming; still retrying)");
         await recapMaybeNudge(code);
+        await utilLiveSet(code, { ...cur, fails: 0 });
+      } else {
+        await utilLiveSet(code, { ...cur, fails });
       }
     } finally { _liveBusy = false; }
   }
   // Re-arm an ALREADY-ON vendor's alarm (after a browser restart / extension update)
-  // WITHOUT resetting the fail counter — so a vendor that legitimately self-disarmed
-  // after MAX_FAILS dead cycles is NOT resurrected, and a still-healthy vendor's
-  // disarm-on-lapse loop is preserved. Only an explicit owner "Connect" (armLive /
+  // WITHOUT resetting the fail counter, purely so a mid-streak count survives a restart
+  // (max-fails never disarms anymore -- see runChintLiveTick/runLiveTick -- so this is
+  // bookkeeping continuity, not gatekeeping). Only an explicit owner "Connect" (armLive /
   // armChintLive) zeroes fails. Idempotent: chrome.alarms.create replaces same-named.
   async function reArmLive(vendor) {
     if (vendor === "chint") {
-      // Re-arm chint's background walk-loop after a browser restart / extension update,
-      // WITHOUT resetting fails (a Chint that self-disarmed after MAX_FAILS stays off until
-      // the owner reopens the portal; autoArmKnownLive only reaches here when on !== false).
+      // Re-arm chint's background walk-loop after a browser restart / extension update.
       // v1.9.81 — see armChintLive (re-enabled).
       const cur = (await chintLiveGet()) || {};
       await chintLiveSet({ on: true, armedAt: cur.armedAt || Date.now(), lastOkAt: cur.lastOkAt || 0, fails: cur.fails || 0 });
@@ -2086,8 +2103,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   //   • vendor has a SUCCESSFUL capture (so_recap_last[v].ok) — NOT mere presence, since
   //     the first hourly cycle probes all 3 and writes failed entries for ones the owner
   //     never connected (which would otherwise spawn spurious reconnect nudges)
-  //   • the vendor has NOT self-disarmed / been toggled off (live.on === false) — respect
-  //     the sticky off until the human reconnects
+  //   • the vendor has NOT been explicitly toggled off (live.on === false) — respect
+  //     the owner's deliberate choice until they turn it back on (max-fails no longer
+  //     sets this; it only ever comes from an explicit toggle now)
   async function autoArmKnownLive() {
     const { tenantKey } = await recapSettings();
     if (!tenantKey) { rlog("auto-arm: no tenant key — skip"); return; }
@@ -2095,15 +2113,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     for (const v of Object.keys(RECAP_VENDORS)) {
       if (!(known[v] && known[v].ok)) continue;                 // owner doesn't (successfully) use it
       const live = (v === "chint") ? await chintLiveGet() : await liveGet(v);
-      if (live && live.on === false) continue;                  // self-disarmed / toggled off — leave off
+      if (live && live.on === false) continue;                  // explicitly toggled off — leave off
       await reArmLive(v);
     }
     // v1.9.97 — re-arm known UTILITY connections (daily cadence). "Known" = the
     // owner saved a utility credential (the explicit "I use this utility" signal,
     // since a utility bill capture may not have written so_recap_last yet). Respect
-    // a sticky off (self-disarmed after MAX_FAILS or toggled off) and skip a
-    // discovered co-op we have no portal URL for. Belt-and-suspenders: also re-arm
-    // any utility that already produced a successful capture.
+    // an explicit toggle-off and skip a discovered co-op we have no portal URL for.
+    // Belt-and-suspenders: also re-arm any utility that already produced a successful capture.
     try {
       const codes = new Set();
       if (typeof SoVault !== "undefined") {
@@ -2128,7 +2145,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // onInstalled disarm stub (removed in v1.9.86) re-forced on:false on every later update, so
   // by v1.9.85 Chint was off again on every install. Bumping the flag re-arms it ONCE more for
   // owners who actually use Chint (a prior successful capture); with the disarm stub gone it now
-  // STICKS. After this, a real disarm (MAX_FAILS / the UI toggle) sticks normally.
+  // STICKS. After this, only an explicit UI toggle-off turns it back off (max-fails no
+  // longer disarms anything — see runChintLiveTick).
   async function migrateChintBackgroundOnce() {
     const FLAG = "so_chint_bg_migrated_v1986";
     try {
@@ -2165,14 +2183,19 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       const after = ((await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {})[vendor] || {};
       const ok = !!(after.ok && after.at && after.at !== before.at);
       const cur = (await liveGet(vendor)) || { on: true, fails: 0 };
-      if (!cur.on) return;
+      if (!cur.on) return;   // explicitly toggled off mid-tick
       if (ok) { await liveSet(vendor, { ...cur, fails: 0, lastOkAt: Date.now() }); return; }
       const fails = (cur.fails || 0) + 1;
-      await liveSet(vendor, { ...cur, fails });
+      // NEVER disarm on repeated failure -- nudge once, reset the streak, keep ticking
+      // every LIVE_PERIOD_MIN[vendor] forever. Permanently giving up here is exactly
+      // the bug Ford flagged: a lapsed session with no saved vault password went dark
+      // for a week+ with zero warning (Paul/HCT Sun Enterprises, fronius, 2026-07-08).
       if (fails >= LIVE_MAX_FAILS) {
-        rlog(vendor + "-live:", fails, "dead cycles -- disabling + nudging");
-        await disarmLive(vendor, "max-fails");
+        rlog(vendor + "-live:", fails, "dead cycles -- nudging (never disarming; still retrying)");
         await recapMaybeNudge(vendor);
+        await liveSet(vendor, { ...cur, fails: 0 });
+      } else {
+        await liveSet(vendor, { ...cur, fails });
       }
     } finally { _liveBusy = false; }
   }
@@ -2347,23 +2370,23 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } catch (_) {}
   }
 
-  // One gentle reconnect nudge per vendor per day, only when a silent recap failed
-  // (almost always an expired portal session the owner must re-auth once).
+  // One reconnect nudge per vendor per day, whenever a background refresh has been
+  // failing (almost always an expired portal session the owner must re-auth once).
+  //
+  // Ford, 2026-07-08: "we are hardcore not babies who try to conserve electricity...
+  // find every instance of us intentionally sabotaging our own reliability." This
+  // function used to STAY SILENT for any vendor without a saved vault password
+  // (reasoning: the in-app dashboard chip is the "honest" signal) -- but a dashboard
+  // chip nobody is looking at is not a signal at all. That silence, combined with the
+  // live-tick/keep-warm loops' old permanent self-disarm, meant an account with no
+  // saved password could go dark for a WEEK+ with zero warning anywhere (confirmed:
+  // Paul/HCT Sun Enterprises' fronius array, dead 2026-07-01 -> 2026-07-08, silent
+  // the whole time). Fixed: always nudge, for every vendor, no gate. The once/day
+  // NUDGE_KEY dedupe below is the only throttle -- that's a UX courtesy, not a
+  // reliability trade-off, since the underlying retry loops NEVER give up anymore
+  // (see runLiveTick/runChintLiveTick/runUtilLiveTick/runKeepWarmTick).
   async function recapMaybeNudge(vendor) {
     try {
-      // Auto-login is the recovery mechanism now, and the Array Operator dashboard's
-      // freshness chip is the honest in-app staleness signal — so the intrusive OS
-      // "one-tap reconnect" toast is just noise (Ford: "these won't be necessary when we
-      // get this working — remove them"). Stay silent for every vault vendor EXCEPT the
-      // one genuinely-actionable case: auto-login tried with a saved password and GAVE UP
-      // (paused after repeated failures = a wrong/stale password the owner must fix).
-      if (typeof SoVault !== "undefined" && _vaultAccepts(vendor)) {
-        const fails = await autoLoginFailsGet(vendor);
-        if (fails < AUTOLOGIN_MAX_VENDOR_FAILS) {
-          rlog("reconnect nudge suppressed for", vendor, "(auto-login era; in-app freshness chip signals staleness; fails=" + fails + ")");
-          return;
-        }
-      }
       const today = new Date().toISOString().slice(0, 10);
       const s = await chrome.storage.local.get(NUDGE_KEY);
       const m = s[NUDGE_KEY] || {};
@@ -3011,7 +3034,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     const last = (await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {};
     for (const v of await usedInverterVendors()) {
       if ((await autoLoginFailsGet(v)) >= AUTOLOGIN_MAX_VENDOR_FAILS) continue;   // auto-login paused: failing creds
-      if ((await keepwarmFailsGet(v)) >= KEEPWARM_MAX_FAILS) continue;            // gave up: dead session we can't refresh (a success or creds-save re-enables)
+      const kwFails = await keepwarmFailsGet(v);
+      if (kwFails >= KEEPWARM_MAX_FAILS) {
+        // NEVER give up -- nudge once, reset the streak, and keep trying below on
+        // this same tick (a dead session self-heals the moment the owner signs in;
+        // permanently skipping a vendor here is exactly the sabotage Ford flagged).
+        rlog("keep-warm:", v, kwFails, "dead cycles — nudging (never giving up; still retrying)");
+        await recapMaybeNudge(v);
+        await keepwarmFailsSet(v, 0);
+      }
       if (!!((await liveGet(v)) || {}).on) continue;                              // live-mode already refreshing
       const rec = last[v];
       const lastAt = (rec && rec.ok && rec.at) ? Date.parse(rec.at) : 0;
