@@ -1436,12 +1436,16 @@ def start():
         CronTrigger(hour=3, minute=45),
         id="generation_watchdog", replace_existing=True,
     )
-    # Weekly (Mon 13:30 UTC): GMP data-freshness watchdog — alert if any active GMP
+    # Daily (13:30 UTC): GMP data-freshness watchdog — alert if any active GMP
     # tenant has stopped capturing (extension dead / GMP login expired), so we never
-    # silently bill or report from frozen data. Weekly cadence avoids alert fatigue.
+    # silently bill or report from frozen data. Runs DAILY now (was weekly, which let
+    # a frozen capture go unseen up to ~14 days on the billing-critical path); the
+    # watchdog's per-tenant InverterAlertState dedup + _REALERT_DAYS bar prevent
+    # alert fatigue without slowing detection (Ford, 2026-07-09: no scarcity-driven
+    # self-sabotage).
     scheduler.add_job(
         _run_gmp_freshness_watchdog,
-        CronTrigger(day_of_week="mon", hour=13, minute=30),
+        CronTrigger(hour=13, minute=30),
         id="gmp_freshness_watchdog", replace_existing=True,
     )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (LEGACY

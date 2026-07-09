@@ -274,8 +274,16 @@ def fetch_daily(config: dict, start: date, end: date) -> list[dict]:
     config = _resolve_creds(config)
     out: list[dict] = []
     day = start
-    # Cap the per-call loop so a wide range can't fan out unbounded.
-    for _ in range(90):
+    # Walk the FULL [start, end] span, one call per day (inclusive of `end`).
+    # This used to be `for _ in range(90)`, which silently truncated any span
+    # wider than 90 days -- the year-chunk backfill (inverter_history calls this
+    # with Jan1..Dec31) then kept only ~Q1 of every year and stamped the
+    # connection "backfilled", permanently hiding ~75% of every SMA array's
+    # history. API calls are not scarce; completeness is the product (Ford,
+    # 2026-07-09: "never build software that sabotages itself in the name of
+    # scarcity"). A hard ceiling far above any real span backstops a bad range.
+    max_days = (end - start).days + 1
+    for _ in range(max(0, max_days) + 5):   # +5 slack; loop's real bound is day > end
         if day > end:
             break
         body = _get(

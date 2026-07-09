@@ -298,6 +298,87 @@ def test_sma_fetch_daily_parsing(monkeypatch):
     ]
 
 
+def test_sma_fetch_daily_covers_full_span_over_90_days(monkeypatch):
+    # Regression: fetch_daily used to hard-cap at `for _ in range(90)`, silently
+    # truncating a year-chunk backfill to ~Q1 and permanently hiding ~75% of every
+    # SMA array's history. A 365-day span must now return all 365 days.
+    monkeypatch.setattr(httpx, "post", _sma_token_ok)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **k: _FakeResp(200, {"pvGeneration": {"value": 1000.0}}),
+    )
+    rows = sma.fetch_daily(
+        {"client_id": "c4", "client_secret": "s", "system_id": "p1"},
+        date(2025, 1, 1), date(2025, 12, 31),
+    )
+    assert len(rows) == 365
+    assert rows[0]["day"] == date(2025, 1, 1)
+    assert rows[-1]["day"] == date(2025, 12, 31)   # end is inclusive; nothing dropped
+
+
+def test_alsoenergy_try_fields_reraises_when_every_candidate_hard_fails(monkeypatch):
+    # Regression: _try_fields used to `except AlsoEnergyError: continue` and return
+    # (None, None) even when EVERY candidate hard-failed (network/429/5xx), making a
+    # real outage indistinguishable from "inverter offline / zero production" -- so
+    # inverter_pull stamped the connection healthy and silently under-billed. A real
+    # failure must now propagate.
+    from api.adapters import alsoenergy as ae
+
+    def always_5xx(*a, **k):
+        raise ae.AlsoEnergyError("BinData 503")
+
+    monkeypatch.setattr(ae, "fetch_bindata", always_5xx)
+    with pytest.raises(ae.AlsoEnergyError):
+        ae._try_fields({}, [1], ["PowerAC", "PowerACApparent"], ["PowerAC"],
+                       "2025-01-01T00:00:00", "2025-01-01T01:00:00", "5min", "Avg")
+
+
+def test_alsoenergy_try_fields_returns_none_on_genuine_empty(monkeypatch):
+    # The OTHER side: calls SUCCEED but return no data for the tried fields (an
+    # inverter that really produced nothing / an invalid field name) must still be
+    # the calm (None, None) "no data" case, NOT an error.
+    from api.adapters import alsoenergy as ae
+
+    monkeypatch.setattr(ae, "fetch_bindata", lambda *a, **k: {"data": []})
+    monkeypatch.setattr(ae, "extract_series", lambda result: {1: []})   # empty series
+    field, result = ae._try_fields({}, [1], ["PowerAC"], ["PowerAC"],
+                                   "2025-01-01T00:00:00", "2025-01-01T01:00:00", "5min", "Avg")
+    assert field is None and result is None
+
+
+def test_solis_fetch_daily_paginates_all_pages(monkeypatch):
+    # Regression: fetch_daily used to fetch only pageNo=1 (100 records), silently
+    # dropping the rest of a year-chunk backfill. It must now walk every page until
+    # a short page ends the range.
+    from api.inverters import solis
+    from datetime import datetime as _dt
+
+    def _day_rec(d):
+        return {"dataTimestamp": _dt(d.year, d.month, d.day).strftime("%Y-%m-%d"), "energy": 5.0}
+
+    span = [date(2025, 1, 1)]
+    # Build 150 consecutive days so page 1 is full (100) and page 2 is short (50).
+    from datetime import timedelta as _td
+    days = [date(2025, 1, 1) + _td(days=i) for i in range(150)]
+    pages = {
+        1: {"page": {"records": [_day_rec(d) for d in days[:100]]}},
+        2: {"page": {"records": [_day_rec(d) for d in days[100:]]}},  # 50 -> short, stops
+    }
+    calls = []
+
+    def fake_post(config, path, body):
+        calls.append(body["pageNo"])
+        return pages.get(body["pageNo"], {"page": {"records": []}})
+
+    monkeypatch.setattr(solis, "_post", fake_post)
+    rows = solis.fetch_daily(
+        {"key_id": "k", "key_secret": "s", "station_id": "st1"},
+        days[0], days[-1],
+    )
+    assert len(rows) == 150            # both pages captured, nothing dropped
+    assert calls == [1, 2]             # stopped after the short page, no wasted page 3
+
+
 def test_sma_token_uses_refresh_grant(monkeypatch):
     captured = {}
 

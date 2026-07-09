@@ -470,17 +470,28 @@ def _try_fields(
     can be incomplete)."""
     ordered = [c for c in candidates if c in available]
     ordered += [c for c in candidates if c not in available]
+    last_err: AlsoEnergyError | None = None
     for field in ordered:
         try:
             result = fetch_bindata(
                 creds, hardware_ids, field, from_local, to_local, bin_size, function
             )
-        except AlsoEnergyError:
+        except AlsoEnergyError as exc:
+            # A HARD failure (network / 429 / 5xx per _request) -- NOT "this field
+            # name is invalid" (that comes back 200 with an empty series and falls
+            # through below). Remember it: if EVERY candidate hard-fails, we must
+            # surface the real error, not pretend "no data" == "inverter offline"
+            # (Ford, 2026-07-09: a swallowed failure that reads as zero production
+            # marks a dead feed "healthy" and silently under-bills). Same fix the
+            # solis/tigo fetch_daily adapters already carry.
+            last_err = exc
             continue
         series = extract_series(result)
         if any(points for points in series.values()):
             return field, result
-    return None, None
+    if last_err is not None:
+        raise last_err            # every candidate hard-failed -> propagate the real error
+    return None, None             # calls succeeded but returned no data -> genuinely empty
 
 
 def _fmt_local(dt: datetime) -> str:

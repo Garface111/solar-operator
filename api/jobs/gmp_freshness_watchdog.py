@@ -18,13 +18,23 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
+from datetime import timedelta
+
 from ..db import SessionLocal
-from ..models import Tenant, UtilityAccount, Array, Bill, DailyGeneration
+from ..models import Tenant, UtilityAccount, Array, Bill, DailyGeneration, InverterAlertState
 from ..notify import send_internal_alert
 
 log = logging.getLogger(__name__)
 
-STALE_DAYS = 7
+STALE_DAYS = 4
+# Re-alert a still-stale tenant at most this often (matches the sibling
+# gmp_final_expiry_warnings / coop_session_death_warnings cadence). This
+# per-tenant dedup is what lets the scan run DAILY instead of weekly without
+# spamming Ford -- the weekly cadence was a false economy that let a frozen GMP
+# capture (the extension stopped, token still valid) go unseen up to ~14 days
+# while invoices generated from stale data (Ford, 2026-07-09: no scarcity-driven
+# self-sabotage; a slow watchdog on the billing-critical path is exactly that).
+_REALERT_DAYS = 3
 # DailyGeneration sources that represent a REAL GMP capture (not the bill_prorate
 # estimate, not a vendor inverter pull).
 _GMP_DAILY_SOURCES = ("utility_meter", "gmp_api", "smarthub")
@@ -73,6 +83,7 @@ def scan_stale_gmp_captures(stale_days: int = STALE_DAYS) -> dict:
             d = f["days_stale"]
             if d is None or d >= stale_days:
                 stale.append({
+                    "tenant_id": tid,
                     "tenant": getattr(t, "contact_email", None) or tid,
                     "product": t.product,
                     "accounts": f["accounts"],
@@ -82,21 +93,64 @@ def scan_stale_gmp_captures(stale_days: int = STALE_DAYS) -> dict:
     return {"stale": stale, "checked": checked, "ok": not stale}
 
 
-def run_gmp_freshness_watchdog(stale_days: int = STALE_DAYS) -> dict:
-    """Alert (once) if any active GMP tenant has gone quiet for >= stale_days.
-    Stays SILENT when every tenant is fresh. Returns the scan result."""
+def run_gmp_freshness_watchdog(stale_days: int = STALE_DAYS, dry_run: bool = False) -> dict:
+    """Alert if any active GMP tenant has gone quiet for >= stale_days. Safe to run
+    DAILY: per-tenant InverterAlertState dedup ('gmp_freshness:<tenant>') means a
+    still-stale tenant re-alerts at most every _REALERT_DAYS, a recovered tenant's
+    incident clears, and one aggregate email covers only the tenants that are newly
+    stale or past their re-alert window. Stays SILENT when nothing is newly
+    actionable. Returns the scan result plus {'alerted','cleared'}."""
     result = scan_stale_gmp_captures(stale_days)
-    if result["ok"]:
-        log.info("gmp_freshness_watchdog: all %d active GMP tenants fresh",
-                 result["checked"])
+    now_ = datetime.utcnow()
+    realert_cutoff = now_ - timedelta(days=_REALERT_DAYS)
+    stale_by_tid = {s["tenant_id"]: s for s in result["stale"]}
+    to_alert: list[dict] = []
+    cleared = 0
+
+    with SessionLocal() as db:
+        # Clear incidents for tenants that RECOVERED (have an open incident but are
+        # no longer in the stale set) so the next freeze is a fresh alert.
+        open_states = db.execute(select(InverterAlertState).where(
+            InverterAlertState.incident_key.startswith("gmp_freshness:"))).scalars().all()
+        for st in open_states:
+            tid = st.incident_key.split("gmp_freshness:", 1)[1]
+            if tid not in stale_by_tid:
+                if not dry_run:
+                    db.delete(st)
+                cleared += 1
+        if not dry_run:
+            db.commit()
+
+        # Decide who to alert: newly stale (no open incident) or past the re-alert bar.
+        for tid, s in stale_by_tid.items():
+            key = f"gmp_freshness:{tid}"
+            st = db.execute(select(InverterAlertState).where(
+                InverterAlertState.incident_key == key)).scalar_one_or_none()
+            if st is not None and st.last_alerted_at is not None and st.last_alerted_at >= realert_cutoff:
+                continue                       # already alerted recently -> dedup
+            to_alert.append(s)
+            if not dry_run:
+                if st is None:
+                    st = InverterAlertState(tenant_id=tid, incident_key=key)
+                    db.add(st)
+                st.last_alerted_at = now_
+        if not dry_run:
+            db.commit()
+
+    result["cleared"] = cleared
+    result["alerted"] = [s["tenant_id"] for s in to_alert]
+
+    if not to_alert:
+        log.info("gmp_freshness_watchdog: %d checked, %d stale, nothing new to alert "
+                 "(cleared %d recovered)", result["checked"], len(result["stale"]), cleared)
         return result
 
-    stale = sorted(result["stale"],
+    stale = sorted(to_alert,
                    key=lambda x: (x["days_stale"] is None, x["days_stale"] or 0),
                    reverse=True)
     lines = [
-        f"⚠️ {len(stale)} of {result['checked']} active GMP tenant(s) have not "
-        f"captured in ≥{stale_days} days.",
+        f"⚠️ {len(stale)} active GMP tenant(s) have not captured in ≥{stale_days} days "
+        f"({result['checked']} checked).",
         "GMP data refreshes ONLY when the extension runs in the owner's logged-in "
         "browser (no server-side refresh). A stale tenant means offtaker invoices "
         "and daily reports are being built from frozen data — check the extension / "
@@ -110,7 +164,9 @@ def run_gmp_freshness_watchdog(stale_days: int = STALE_DAYS) -> dict:
     if len(stale) > 40:
         lines.append(f"  … and {len(stale) - 40} more.")
 
-    send_internal_alert(
-        f"GMP freshness: {len(stale)} stale tenant(s)", "\n".join(lines))
-    log.warning("gmp_freshness_watchdog: %d stale GMP tenants", len(stale))
+    if not dry_run:
+        send_internal_alert(
+            f"GMP freshness: {len(stale)} stale tenant(s)", "\n".join(lines))
+    log.warning("gmp_freshness_watchdog: alerted %d stale GMP tenants (cleared %d)",
+                len(stale), cleared)
     return result

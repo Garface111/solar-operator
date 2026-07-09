@@ -42,9 +42,16 @@ def ai_available() -> bool:
 
 
 def _model() -> str:
-    # Fast + cheap is plenty for column mapping; the operator confirms the result.
-    # Bump via SHEET_TRACKER_AI_MODEL (e.g. claude-sonnet-4-6, claude-opus-4-8).
-    return os.getenv("SHEET_TRACKER_AI_MODEL", "claude-haiku-4-5-20251001")
+    # These tasks decide BILLING correctness on a customer's real spreadsheet:
+    # ai_plan_rows synthesizes the kWh/rate/$ rows the operator bills from, and
+    # ai_derive_recipe derives per-column rules ONCE that a deterministic engine
+    # then applies every month unattended -- so a single confidently-wrong mapping
+    # (a cumulative/YTD column read as monthly generation, the whole-array column
+    # instead of the offtaker's share) gets baked into every future invoice with no
+    # per-run review. Default to the most capable model, matching api/billing/repro/llm.py
+    # (Ford, 2026-07-09: model tier is not scarce; a wrong recurring invoice is the
+    # real cost -- never trade quality for compute thrift). Override: SHEET_TRACKER_AI_MODEL.
+    return os.getenv("SHEET_TRACKER_AI_MODEL", "claude-opus-4-8")
 
 
 def _trunc(v: Any, n: int = 24) -> str:

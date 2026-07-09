@@ -561,6 +561,17 @@ def build_digest_html(tenant, tree: dict) -> str:
                 f'<span style="color:{MUTED};">({_html.escape(fi["array_name"])})</span>'
                 f' — {_html.escape(fi["phrase"])}.</li>'
             )
+        # The header/subject count is the TRUE total; the list is capped at 12. Never
+        # let the extra broken inverters vanish silently -- a "…and N more" line so the
+        # count and the list agree and no flagged unit is invisible (Ford, 2026-07-09:
+        # the digest's whole job is telling the operator EXACTLY which ones). Same honest
+        # overflow pattern as gmp_freshness_watchdog / generation_watchdog.
+        if len(flagged) > 12:
+            highlight_rows.append(
+                f'<li style="margin:6px 0;color:{MUTED};">'
+                f'… and {len(flagged) - 12} more inverter(s) need attention — '
+                f'open Array Operator to see all {len(flagged)}.</li>'
+            )
         highlights_label = "Inverters needing attention"
     else:
         ranked = _ranked_arrays(cols)
@@ -733,6 +744,9 @@ def build_digest_text(tenant, tree: dict) -> str:
         lines.append("Inverters needing attention:")
         for fi in flagged[:12]:
             lines.append(f"  ! {fi['name']} ({fi['array_name']}): {fi['phrase']}")
+        if len(flagged) > 12:
+            lines.append(f"  … and {len(flagged) - 12} more — open Array Operator "
+                         f"to see all {len(flagged)}.")
     else:
         lines.append("Arrays (total production on their last full day):")
         for col in cols:

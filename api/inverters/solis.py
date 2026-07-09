@@ -172,38 +172,58 @@ def fetch_live(config: dict) -> dict | None:
     return {"current_power_w": power_w, "as_of": None}
 
 
+_PAGE_SIZE = 100
+
+
+def _parse_day_record(r: dict, start: date, end: date) -> dict | None:
+    if not isinstance(r, dict):
+        return None
+    raw_day = r.get("dataTimestamp") or r.get("time") or r.get("date")
+    kwh = _energy_to_kwh(r.get("energy") or r.get("dayEnergy"), r.get("energyStr") or r.get("dayEnergyStr"))
+    if raw_day is None or kwh is None:
+        return None
+    try:
+        if isinstance(raw_day, str) and len(raw_day) >= 10 and "-" in raw_day:
+            d = date.fromisoformat(raw_day[:10])
+        else:
+            d = datetime.utcfromtimestamp(int(raw_day) / 1000).date()
+    except (TypeError, ValueError):
+        return None
+    if start <= d <= end:
+        return {"day": d, "kwh": kwh}
+    return None
+
+
 def fetch_daily(config: dict, start: date, end: date) -> list[dict]:
     require_fields(config, "key_id", "key_secret", "station_id")
     # /v1/api/stationDayEnergyList returns per-day energy for a station over a range.
     # Shapes vary by SolisCloud version, so parse defensively and skip what doesn't fit.
     # A real API failure (auth/5xx/network) propagates as InverterError -- it must
-    # never read as "zero production that day" (Ford, 2026-07-08: "find every
-    # instance of us intentionally sabotaging our own reliability").
-    data = _post(config, "/v1/api/stationDayEnergyList", {
-        "id": config["station_id"],
-        "pageNo": 1, "pageSize": 100,
-        "startTime": start.isoformat(), "endTime": end.isoformat(),
-    })
-    records = []
-    if isinstance(data, dict):
-        records = (data.get("page") or {}).get("records") or data.get("records") or []
-    elif isinstance(data, list):
-        records = data
+    # never read as "zero production that day" (Ford, 2026-07-08).
+    #
+    # PAGINATED: this endpoint is paged (pageNo/pageSize + a page.records envelope).
+    # We used to fetch only pageNo=1, silently dropping every day past the first 100
+    # -- so a year-chunk backfill kept ~100 of ~365 days and stamped the connection
+    # "backfilled", permanently hiding most of every Solis array's history. Walk all
+    # pages until one comes back short (Ford, 2026-07-09: completeness over thrift;
+    # API calls are not scarce). A hard page ceiling far above any real span backstops
+    # a misbehaving API that never returns a short page.
     out: list[dict] = []
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        raw_day = r.get("dataTimestamp") or r.get("time") or r.get("date")
-        kwh = _energy_to_kwh(r.get("energy") or r.get("dayEnergy"), r.get("energyStr") or r.get("dayEnergyStr"))
-        if raw_day is None or kwh is None:
-            continue
-        try:
-            if isinstance(raw_day, str) and len(raw_day) >= 10 and "-" in raw_day:
-                d = date.fromisoformat(raw_day[:10])
-            else:
-                d = datetime.utcfromtimestamp(int(raw_day) / 1000).date()
-        except (TypeError, ValueError):
-            continue
-        if start <= d <= end:
-            out.append({"day": d, "kwh": kwh})
+    for page_no in range(1, 400):
+        data = _post(config, "/v1/api/stationDayEnergyList", {
+            "id": config["station_id"],
+            "pageNo": page_no, "pageSize": _PAGE_SIZE,
+            "startTime": start.isoformat(), "endTime": end.isoformat(),
+        })
+        records = []
+        if isinstance(data, dict):
+            records = (data.get("page") or {}).get("records") or data.get("records") or []
+        elif isinstance(data, list):
+            records = data
+        for r in records:
+            parsed = _parse_day_record(r, start, end)
+            if parsed is not None:
+                out.append(parsed)
+        if len(records) < _PAGE_SIZE:
+            break                      # short page => last page, whole range covered
     return out
