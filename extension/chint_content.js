@@ -52,6 +52,7 @@
   let _walkStarted = false;   // v1.9.77: have we kicked the auto site-walk yet?
   let _walkDone = false;      // v1.9.79: chint_inject signalled the walk visited every site
   let _walkExpected = 0;      // v1.9.79: how many sites the walk was asked to visit
+  let _sentWalkComplete = false;  // v1.9.118: have we emitted the FINAL walkComplete=true yet?
 
   // Observed response bodies, relayed by chint_inject.js (MAIN world).
   let siteListJson = null;                     // parsed /api/asset/site/retrieve
@@ -219,6 +220,33 @@
       }
     }
     return Array.from(m.keys()).sort().map((k) => ({ date: k, kwh: m.get(k) }));
+  }
+
+  // ── WALK-COMPLETION decision (pure, exported for regression tests) ────────────
+  // Whether the site-walk snapshot is FINAL — the signal background.js gates the
+  // return-to-Array-Operator on. !walkStarted → a foreground single-site capture with
+  // no walk to wait on (always final). Otherwise final once the walk signalled it
+  // visited every site (walkDone) OR every expected site already has inverters.
+  function computeWalkComplete(s) {
+    s = s || {};
+    if (!s.walkStarted) return true;
+    return !!(s.walkDone || (s.walkExpected > 0 && s.withInv >= s.walkExpected));
+  }
+  // ── EMIT gate (pure, exported for regression tests) ───────────────────────────
+  // Normally we suppress a duplicate (unchanged-signature) tick — no POST storm. BUT
+  // the return-to-AO fires ONLY on a walkComplete=true emit, and a COLD first run
+  // routinely reaches walkComplete on a tick whose signature is unchanged from the
+  // last progressive emit: the walk finishes AFTER the final site's devices already
+  // shipped (or a slow site never loaded, so `withInv < walkExpected` and only the
+  // later walkDone flips it true). The dedup would then swallow the ONLY walkComplete
+  // signal → the owner is stranded on the Chint tab with no return AND no error (the
+  // "went through my arrays then just stopped, never brought me back" bug — first run
+  // only, because retries are warm and hit the inline withInv===walkExpected path). So
+  // a still-unsent FINAL walkComplete always emits, even on a duplicate signature.
+  function shouldEmit(s) {
+    s = s || {};
+    if (!s.dupe) return true;
+    return !!(s.walkComplete && !s.sentWalkComplete);
   }
 
   if (_SO_BROWSER) window.addEventListener("message", (e) => {
@@ -493,9 +521,16 @@
       + "|d" + ((s.daily || []).length)
     ).join("||");
     const h = await hashString(sig);
-    if (h === lastHash) return;             // nothing new since last emit
+    // walkComplete tells a silent recap/sync-all capture (and the onboarding foreground
+    // connect) that the snapshot is FINAL — it's what fires the return-to-AO. Compute it
+    // BEFORE the dedup so a cold first run whose walk finishes on an unchanged-signature
+    // tick still emits the final signal instead of being swallowed (see shouldEmit).
+    const walkComplete = computeWalkComplete({
+      walkStarted: _walkStarted, walkDone: _walkDone, walkExpected: _walkExpected, withInv,
+    });
+    if (!shouldEmit({ dupe: (h === lastHash), walkComplete, sentWalkComplete: _sentWalkComplete })) return;
     lastHash = h;
-    LOG("EMIT payload:", sites.length, "site(s),", withInv, "with inverters,", totalInv, "inverters total");
+    LOG("EMIT payload:", sites.length, "site(s),", withInv, "with inverters,", totalInv, "inverters total", walkComplete ? "(FINAL)" : "");
     // Decisive diagnostic: dump each inverter's serial + live watts + today kWh so
     // the console alone tells us whether per-inverter power is flowing (the field
     // the backend needs for the "Output now" card).
@@ -507,11 +542,8 @@
     // more inverters (a newly-opened site). NEVER set done here — keep listening so
     // later site-opens are captured too. clearIntent stays armed until timeout.
     if (totalInv > 0) emittedAny = true;
-    // walkComplete tells a silent recap/sync-all capture that the snapshot is FINAL (every
-    // walked site visited) so it can close its surface — without it a multi-site owner is
-    // truncated at site 1. True when the walk signalled done OR all expected sites have
-    // inverters; for a non-walk (foreground) capture there's no recap surface to gate.
-    payload.walkComplete = !_walkStarted ? true : (_walkDone || (_walkExpected > 0 && withInv >= _walkExpected));
+    payload.walkComplete = walkComplete;
+    if (walkComplete) _sentWalkComplete = true;   // fire the final return-to-AO signal exactly once
     chrome.runtime.sendMessage({ type: "CHINT_CAPTURED", payload }, () => void chrome.runtime.lastError);
   }
 
@@ -521,6 +553,7 @@
       dailyFromChart, siteIdFromSearch, weekTrendDaily, mergeDaily,
       num, kwFromStr, parsePowerToW, mapStatus, invertersFrom, countInverters,
       findLocation, applyLocation, _soValidLatLng,
+      computeWalkComplete, shouldEmit,
     };
   }
 

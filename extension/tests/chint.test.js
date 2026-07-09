@@ -124,6 +124,53 @@ test("dailyFromChart returns [] on empty/absent series", () => {
   assert.deepEqual(C.dailyFromChart(null, ""), []);
 });
 
+test("computeWalkComplete: foreground single-site (no walk) is always final", () => {
+  assert.equal(C.computeWalkComplete({ walkStarted: false }), true);
+});
+
+test("computeWalkComplete: mid-walk with sites still missing inverters is NOT final", () => {
+  assert.equal(
+    C.computeWalkComplete({ walkStarted: true, walkDone: false, walkExpected: 3, withInv: 1 }),
+    false,
+  );
+});
+
+test("computeWalkComplete: final via inline all-sites-have-inverters (warm path)", () => {
+  assert.equal(
+    C.computeWalkComplete({ walkStarted: true, walkDone: false, walkExpected: 3, withInv: 3 }),
+    true,
+  );
+});
+
+test("computeWalkComplete: final via walkDone even when a slow site never loaded (cold path)", () => {
+  // The exact first-run shape: the walk finished (walkDone) but a cold/slow site never
+  // yielded its inverters, so withInv < walkExpected. This MUST still be final, else the
+  // owner is never returned to Array Operator.
+  assert.equal(
+    C.computeWalkComplete({ walkStarted: true, walkDone: true, walkExpected: 3, withInv: 2 }),
+    true,
+  );
+});
+
+test("shouldEmit: a changed snapshot always emits", () => {
+  assert.equal(C.shouldEmit({ dupe: false, walkComplete: false, sentWalkComplete: false }), true);
+});
+
+test("shouldEmit: a duplicate snapshot with nothing final is suppressed", () => {
+  assert.equal(C.shouldEmit({ dupe: true, walkComplete: false, sentWalkComplete: false }), false);
+});
+
+test("shouldEmit: THE FIX — an unsent final walkComplete emits even on a duplicate signature", () => {
+  // Cold first run: the walk finishes on a tick whose signature is unchanged from the last
+  // progressive emit. Without this, the ONLY walkComplete=true signal is swallowed by the
+  // dedup and the owner is stranded on the Chint tab (no return, no error).
+  assert.equal(C.shouldEmit({ dupe: true, walkComplete: true, sentWalkComplete: false }), true);
+});
+
+test("shouldEmit: the final walkComplete fires exactly once (no re-emit after sent)", () => {
+  assert.equal(C.shouldEmit({ dupe: true, walkComplete: true, sentWalkComplete: true }), false);
+});
+
 test("mergeDaily unions series by date, max-wins, ascending", () => {
   const a = [{ date: "2026-06-11", kwh: 100 }, { date: "2026-06-10", kwh: 90 }];
   const b = [{ date: "2026-06-11", kwh: 105 }, { date: "2026-06-12", kwh: 80 }];
