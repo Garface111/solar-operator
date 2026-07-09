@@ -250,6 +250,7 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
     """
     from ..models import UtilityAccount, Bill, Array
     from ..adapters.smarthub import ALL_SMARTHUB_PROVIDERS
+    from ..forecasting import address_to_oneline
 
     t = tenant_from_session(authorization)
     out = []
@@ -296,6 +297,11 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
                 "provider": a.provider,
                 "array_id": a.array_id,
                 "array_name": arr_names.get(a.array_id),
+                # Utility-side service address (one line), so the offtaker invoice
+                # generator can label a net meter group from UTILITY data — its
+                # nickname or service address — never the vendor/inverter array name
+                # (Ford 2026-07-09: no vendor info in the offtaker invoice generator).
+                "service_address": address_to_oneline(a.service_address),
                 "bill_count": counts.get(a.id, 0),
                 "has_bill": pe is not None,
                 "latest_period_end": pe.date().isoformat() if pe else None,
