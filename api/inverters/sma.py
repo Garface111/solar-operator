@@ -79,9 +79,15 @@ MON_BASE = os.environ.get("SMA_MON_BASE", "https://monitoring.smaapis.de/v1")
 # plant OWNER (their Sunny Portal email) for consent; the owner approves inside
 # their SMA account; then our app token can read their plants. VERIFIED shape:
 # POST {BC_BASE}/oauth2/v2/bc-authorize with Bearer + JSON {"loginHint": email}.
-# The consent gateway lives on the monitoring host (NOT the auth host) — sandbox
-# proved bc-authorize 404s on the auth host and responds on the monitoring host.
-BC_BASE = os.environ.get("SMA_BC_BASE", "https://monitoring.smaapis.de")
+# ⚠️ The consent gateway host DIFFERS between environments (confirmed against
+# SMA's official API Access Control docs, 2026-07-09):
+#   • Sandbox    → https://sandbox.smaapis.de  (bc-authorize sits at the root of
+#     the shared sandbox host; it 404s on sandbox-auth.smaapis.de).
+#   • Production → https://async-auth.smaapis.de  (a DEDICATED backchannel host,
+#     distinct from BOTH auth.smaapis.de and monitoring.smaapis.de).
+# So the production default below is async-auth; Railway overrides BC_BASE to the
+# sandbox host while we're still in sandbox.
+BC_BASE = os.environ.get("SMA_BC_BASE", "https://async-auth.smaapis.de")
 
 # ── App-level credentials (the ONE registered EnergyAgent app) ────────────────
 # SMA's model is per-app registration + per-owner consent, so client_id/secret
