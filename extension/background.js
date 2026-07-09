@@ -3420,8 +3420,60 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   self.__soSyncAllVendors = syncAllVendors;
   self.__soRecaptureVendor = recaptureVendor;
 
+  // ── Runtime SmartHub-host sync (v1.9.118) ──────────────────────────────────
+  // Augment the bundled smarthub_registry.js from the backend at runtime so a
+  // co-op we add to the provider CSVs becomes pullable WITHOUT a Web Store
+  // rebuild. Both _smarthubCodes() (vault.accepts) and _utilityPortalUrl() read
+  // self.SMARTHUB_REGISTRY live, so Object.assign-ing into it is the whole change.
+  // Additive + validated only: we never remove a bundled host, only ever merge
+  // entries whose host matches *.smarthub.coop, and never overwrite good storage
+  // with an empty response -- so a bad/garbled/empty reply can't break credential
+  // gating or point a background open at an arbitrary URL.
+  const SYNCED_HOSTS_KEY = "so_synced_smarthub_hosts";
+  function _validSmarthubHost(h) {
+    return typeof h === "string" && /^[a-z0-9.-]+\.smarthub\.coop$/.test(h);
+  }
+  function _augmentRegistry(hosts) {
+    let n = 0;
+    try {
+      if (!self.SMARTHUB_REGISTRY) self.SMARTHUB_REGISTRY = {};
+      for (const rawHost of Object.keys(hosts || {})) {
+        const host = String(rawHost).toLowerCase();
+        const rec = hosts[rawHost] || {};
+        const provider = rec.provider ? String(rec.provider).toLowerCase() : "";
+        if (!_validSmarthubHost(host) || !provider) continue;
+        if (!self.SMARTHUB_REGISTRY[host]) { self.SMARTHUB_REGISTRY[host] = { provider, name: rec.name || provider }; n++; }
+      }
+    } catch (_) {}
+    return n;
+  }
+  async function hydrateSyncedHosts() {   // instant: from storage on every SW load, before any save can gate
+    try { const s = await chrome.storage.local.get(SYNCED_HOSTS_KEY); if (s[SYNCED_HOSTS_KEY]) _augmentRegistry(s[SYNCED_HOSTS_KEY]); } catch (_) {}
+  }
+  async function syncSmarthubHosts() {    // fresh: from the backend, on wake + daily
+    try {
+      const { base } = await recapSettings();
+      const r = await fetch(`${base}/v1/smarthub-hosts`, { method: "GET" });
+      if (!r || !r.ok) return;
+      const j = await r.json();
+      const hosts = (j && j.hosts) || {};
+      const clean = {};
+      for (const rawHost of Object.keys(hosts)) {
+        const host = String(rawHost).toLowerCase();
+        const rec = hosts[rawHost] || {};
+        if (_validSmarthubHost(host) && rec.provider) clean[host] = { provider: String(rec.provider).toLowerCase(), name: rec.name || "" };
+      }
+      if (!Object.keys(clean).length) return;   // never overwrite good storage with an empty/garbled response
+      await chrome.storage.local.set({ [SYNCED_HOSTS_KEY]: clean });
+      rlog("smarthub-host sync:", Object.keys(clean).length, "hosts (" + _augmentRegistry(clean) + " new to registry)");
+    } catch (e) { rlog("smarthub-host sync failed", e && e.message || e); }
+  }
+  hydrateSyncedHosts();   // run on every SW load so vault gating sees synced co-ops ASAP
+
   async function _onWake() {
     try { await reapTrackedRecapTabs(); } catch (_) {}   // close any recap tab orphaned before this wake
+    try { await syncSmarthubHosts(); } catch (_) {}      // refresh the co-op host map from the backend
+    try { chrome.alarms.create("smarthub-host-sync", { periodInMinutes: 720, delayInMinutes: 3 }); } catch (_) {}
     try { await migrateChintBackgroundOnce(); } catch (_) {}   // v1.9.81: arm Chint bg once for existing Chint users
     try { await autoArmKnownLive(); } catch (_) {}
     setTimeout(() => runRecaptureCycle().catch(() => {}), 8000);

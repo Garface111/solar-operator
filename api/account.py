@@ -3444,6 +3444,22 @@ def list_providers():
     return {"ok": True, "providers": PROVIDERS}
 
 
+@router.get("/v1/smarthub-hosts")
+def list_smarthub_hosts():
+    """Compact host -> {provider, name} map of every LIVE SmartHub co-op, shaped
+    EXACTLY like the extension's bundled smarthub_registry.js so the extension can
+    Object.assign it into self.SMARTHUB_REGISTRY at runtime. This is what lets a
+    co-op we add to the provider CSVs become pullable with NO Web Store rebuild
+    (the extension syncs this on startup + daily). Public — these are public portal
+    hostnames, no secrets.
+    """
+    hosts = {}
+    for p in PROVIDERS:
+        if p.get("scrape_status") == "live" and p.get("smarthub_host"):
+            hosts[p["smarthub_host"]] = {"provider": p["code"], "name": p["label"]}
+    return {"ok": True, "hosts": hosts, "count": len(hosts)}
+
+
 # ─── Arrays under a client ──────────────────────────────────────────────
 
 def _resolve_client_for_tenant(db, tenant_id: str, client_id: int) -> Client:
