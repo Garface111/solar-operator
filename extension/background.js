@@ -307,8 +307,24 @@ async function _handleSync(payload, tokenHash, sendResponse) {
     sendResponse({ ok: true, endpoint: settings.endpoint });
   } catch (e) {
     const at = new Date().toISOString();
+    const errStr = String(e);
+    // SELF-HEAL: a "demo-read-only" 403 means the extension is paired to a demo /
+    // read-only account, which can NEVER accept captures. Un-pair it so the next
+    // visit to a REAL Array Operator / NEPOOL dashboard re-pairs cleanly (the SPAs
+    // auto-pair on load, and now refuse to hand over a demo key). This is the fix
+    // for the "signed into two accounts at once → extension stuck feeding the demo
+    // one → every capture silently 403s" trap that could hit any operator.
+    const isDemoReadOnly = /demo-read-only/.test(errStr);
+    if (isDemoReadOnly) {
+      try { await chrome.storage.local.remove(STORAGE_KEYS.TENANT_KEY); } catch (_) {}
+    }
     await chrome.storage.local.set({
-      [STORAGE_KEYS.LAST_ERROR]: { at, message: String(e) },
+      [STORAGE_KEYS.LAST_ERROR]: {
+        at,
+        message: isDemoReadOnly
+          ? "This extension was paired to a demo account, so captures weren't saved. Open your real Array Operator or NEPOOL Operator dashboard (signed into your own account) and it reconnects automatically."
+          : errStr,
+      },
     });
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#c97a3d" });
@@ -318,7 +334,8 @@ async function _handleSync(payload, tokenHash, sendResponse) {
       provider: (payload && payload.provider) || "gmp",
       accountCount: 0,
       at,
-      error: String(e),
+      error: errStr,
+      demo_read_only: isDemoReadOnly,
     };
     broadcastToSoTabs(failedMsg);
     // v1.4.0: also notify the popup if it is open.

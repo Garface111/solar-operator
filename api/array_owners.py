@@ -224,6 +224,10 @@ def extension_status(authorization: str | None = Header(default=None)) -> dict:
         "company_name": tenant.company_name or tenant.name or "",
         "connected": tenant.active
         or (tenant.subscription_status in _CAPTURE_RECOVERABLE_STATUSES),
+        # Read-only demo/test tenant: the extension must NEVER stay paired to one
+        # (its /v1/sync captures are refused), so the popup surfaces it and the
+        # SPAs refuse to auto-pair it. Real captures can only feed a real account.
+        "is_demo": bool(getattr(tenant, "is_demo", False)),
         "last_capture": None,
     }
 
