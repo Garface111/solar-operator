@@ -12,12 +12,12 @@ cemc,Cumberland Electric Membership Corporation,TN,live,cemc.smarthub.coop,https
 caneyfork,Caney Fork Electric Cooperative,TN,in-progress,,,Caney Fork Electric — no distinct SmartHub host found (cec.smarthub.coop claimed by SC). Manual PDF upload until portal confirmed.
 tcec_tn,Tri-County Electric Membership Corporation,TN,in-progress,,https://billing.tcemc.org/onlineportal,"Tri-County EMC (Lafayette TN; serves TN/KY border — likely same co-op as KY row tri_county_ky). tcec.smarthub.coop attributed Jul 2026 to OK's Tri County EC (own site tcec.coop links it); FL's is tcecfl.smarthub.coop. Real portal is bespoke billing.tcemc.org — no SmartHub link on tcemc.org. CANDIDATE tec.smarthub.coop brands 'Tri-County Electric' — unverified, needs human review before wiring. Manual PDF upload meanwhile."
 pec_tn,Plateau Electric Cooperative,TN,in-progress,,,Plateau Electric (TN) — SmartHub host pec.smarthub.coop resolves but is already claimed by SC's Palmetto Electric. Need to find TN-specific host. Manual PDF upload meanwhile.
-svec_tn,Sequachee Valley Electric Cooperative,TN,in-progress,,,Sequachee Valley Electric (TN) — SmartHub host svec.smarthub.coop resolves but is already claimed by VA's Shenandoah Valley Electric. Need to find TN-specific host. Manual PDF upload meanwhile.
+svec_tn,Sequachee Valley Electric Cooperative,TN,live,svalleyec.smarthub.coop,https://svalleyec.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Sequachee Valley Electric (TN) — SmartHub host svec.smarthub.coop resolves but is already claimed by VA's Shenandoah Valley Electric. Need to find TN-specific host. Manual PDF upload meanwhile.
 dremc,Duck River Electric Membership Corporation,TN,in-progress,,,Duck River EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
 fdemc,Forked Deer Electric Cooperative,TN,in-progress,,,Forked Deer EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
-gemc,Gibson Electric Membership Corporation,TN,in-progress,,,Gibson EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
+gemc,Gibson Electric Membership Corporation,TN,live,gibsonconnect.smarthub.coop,https://gibsonconnect.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Gibson EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
 mlewis,Meriwether Lewis Electric Cooperative,TN,in-progress,,,Meriwether Lewis Electric Cooperative — no SmartHub host found. Manual PDF upload until portal confirmed.
-aemc,Appalachian Electric Cooperative,TN,in-progress,,,Appalachian Electric Cooperative — no SmartHub host found. Manual PDF upload until portal confirmed.
+aemc,Appalachian Electric Cooperative,TN,live,aec.smarthub.coop,https://aec.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Appalachian Electric Cooperative — no SmartHub host found. Manual PDF upload until portal confirmed.
 stemc,Southwest Tennessee Electric Membership Corporation,TN,in-progress,,,Southwest Tennessee EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
 ucec,Upper Cumberland Electric Membership Corporation,TN,in-progress,,,Upper Cumberland EMC — no SmartHub host found. Manual PDF upload until portal confirmed.
 pvec,Powell Valley Electric Cooperative,TN,in-progress,,,Powell Valley Electric Cooperative — no SmartHub host found. Manual PDF upload until portal confirmed.
@@ -27,11 +27,11 @@ hcemc,Hickman County Electric Membership Corporation,TN,in-progress,,,Hickman Co
 pickwick,Pickwick Electric Cooperative,TN,in-progress,,,Pickwick Electric Cooperative — no SmartHub host found. Manual PDF upload until portal confirmed.
 cleveland_util,Cleveland Utilities,TN,in-progress,,https://www.clevelandutilities.com,"Cleveland Utilities — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
 cookeville,Cookeville Electric Department,TN,in-progress,,https://cookeville-tn.gov/departments/electric,"Cookeville Electric — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
-johnson_city,Johnson City Power Board,TN,in-progress,,https://www.jcpb.com,"Johnson City Power Board — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
+johnson_city,Johnson City Power Board,TN,live,brightridge.smarthub.coop,https://brightridge.smarthub.coop,"Confirmed live SmartHub host via discovery sweep 2026-07-09. Johnson City Power Board — municipal, bespoke portal. Adapter needs a live login. Manual PDF upload meanwhile."
 alcoa,Alcoa Utilities,TN,in-progress,,https://www.alcoautilities.com,"Alcoa Utilities (electric, water, gas) — municipal. Manual PDF upload until portal confirmed."
 athens,Athens Utilities Board,TN,in-progress,,https://www.athensutilities.com,Athens Utilities Board — municipal. Manual PDF upload until portal confirmed.
 bolivar,Bolivar Energy Authority,TN,in-progress,,https://www.cityofbolivar.com,Bolivar Energy Authority — municipal. Manual PDF upload until portal confirmed.
-bristol_tn,Bristol Tennessee Essential Services,TN,in-progress,,https://www.bristoltn.org/btes,Bristol Tennessee Essential Services (BTES) — municipal. Manual PDF upload until portal confirmed.
+bristol_tn,Bristol Tennessee Essential Services,TN,live,btes.smarthub.coop,https://btes.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Bristol Tennessee Essential Services (BTES) — municipal. Manual PDF upload until portal confirmed.
 clinton_tn,Clinton Utilities Board,TN,in-progress,,https://www.clintonutilities.com,Clinton Utilities Board — municipal. Manual PDF upload until portal confirmed.
 dickson,Dickson Electric System,TN,in-progress,,https://www.dicksonelectric.com,Dickson Electric System — municipal. Manual PDF upload until portal confirmed.
 elizabethton,Elizabethton Electric System,TN,in-progress,,https://www.elizabethton.org,Elizabethton Electric System — municipal. Manual PDF upload until portal confirmed.
@@ -39,14 +39,14 @@ erwin,Erwin Utilities,TN,live,erwinutilities.smarthub.coop,https://erwinutilitie
 greeneville,Greeneville Light & Power System,TN,live,glps.smarthub.coop,https://glps.smarthub.coop,Greeneville Light & Power System — municipal. Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Greeneville Energy Authority') Jul 2026.
 jackson_ea,Jackson Energy Authority,TN,in-progress,,https://www.jaxenergy.com,Jackson Energy Authority — municipal. Manual PDF upload until portal confirmed.
 lafollette,LaFollette Utilities Board,TN,in-progress,,https://www.cityoflafollette.com,LaFollette Utilities Board — municipal. Manual PDF upload until portal confirmed.
-lawrenceburg,Lawrenceburg Utility Systems,TN,in-progress,,https://lawrenceburgutilities.com,Lawrenceburg Utility Systems — municipal. Manual PDF upload until portal confirmed.
+lawrenceburg,Lawrenceburg Utility Systems,TN,live,lburgus.smarthub.coop,https://lburgus.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Lawrenceburg Utility Systems — municipal. Manual PDF upload until portal confirmed.
 lenoir_city,Lenoir City Utilities Board,TN,in-progress,,https://www.lcub.com,Lenoir City Utilities Board (LCUB) — municipal. Manual PDF upload until portal confirmed.
 lewisburg,Lewisburg Electric System,TN,in-progress,,https://www.lewisburgelectric.com,Lewisburg Electric System — municipal. Manual PDF upload until portal confirmed.
 mcminnville,McMinnville Electric System,TN,in-progress,,https://www.mcminnvilleutilities.com,McMinnville Electric System — municipal. Manual PDF upload until portal confirmed.
 milan,Milan Department of Public Utilities,TN,in-progress,,https://cityofmilan.org,Milan Department of Public Utilities — municipal. Manual PDF upload until portal confirmed.
 morristown,Morristown Utility Commission,TN,in-progress,,https://www.muc-tn.com,Morristown Utility Commission — municipal. Manual PDF upload until portal confirmed.
 newport,Newport Utilities,TN,live,newportutilities.smarthub.coop,https://newportutilities.smarthub.coop,Newport Utilities — municipal. Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Newport Utilities') Jul 2026.
-paris,Paris Board of Public Utilities,TN,in-progress,,https://parisbpu.org,Paris Board of Public Utilities — municipal. Manual PDF upload until portal confirmed.
+paris,Paris Board of Public Utilities,TN,live,parisbpu.smarthub.coop,https://parisbpu.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Paris Board of Public Utilities — municipal. Manual PDF upload until portal confirmed.
 pulaski,Pulaski Electric System,TN,live,pulaskielectric.smarthub.coop,https://pulaskielectric.smarthub.coop,Pulaski Electric System — municipal. Manual PDF upload until portal confirmed. SmartHub host auto-discovered + siteName-verified ('Pulaski Electric System') Jul 2026.
 ripley,Ripley Power & Light,TN,in-progress,,https://www.ripleypowerandlight.com,Ripley Power & Light — municipal. Manual PDF upload until portal confirmed.
 rockwood,Rockwood Electric Utility,TN,in-progress,,https://www.rockwoodtn.com,Rockwood Electric Utility — municipal. Manual PDF upload until portal confirmed.

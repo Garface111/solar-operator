@@ -1,4 +1,4 @@
 code,label,state,scrape_status,smarthub_host,portal_url,notes
 national_grid_ri,National Grid (Narragansett Electric),RI,in-progress,,https://www.nationalgridus.com,"National Grid d/b/a Narragansett Electric Company. Serves ~99% of mainland RI electric customers. Bespoke portal, adapter needs live login. Manual PDF upload meanwhile."
 block_island,Block Island Power Company,RI,live,blockisland.smarthub.coop,https://blockisland.smarthub.coop,"NISC SmartHub portal (blockisland.smarthub.coop, confirmed Jun 2026). Serves Block Island only (~1000 customers). Extension scrapes billing + usage. kWh unverified on a real generation meter; verify before trusting reports."
-pascoag,Pascoag Utility District,RI,manual,,,Very small water & electric district serving ~300 customers in Burrillville. No customer portal found (Jun 2026). Manual PDF upload only.
+pascoag,Pascoag Utility District,RI,live,crewri.smarthub.coop,https://crewri.smarthub.coop,Confirmed live SmartHub host via discovery sweep 2026-07-09. Very small water & electric district serving ~300 customers in Burrillville. No customer portal found (Jun 2026). Manual PDF upload only.
