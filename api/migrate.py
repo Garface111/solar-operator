@@ -67,6 +67,8 @@ def main():
             ("consent_version",        "ALTER TABLE tenants ADD COLUMN consent_version VARCHAR(40)"),
             ("consent_at",             "ALTER TABLE tenants ADD COLUMN consent_at TIMESTAMP"),
             ("consent_ip",             "ALTER TABLE tenants ADD COLUMN consent_ip VARCHAR(64)"),
+            # White-glove per-tenant staleness/alert override (Jul 2026).
+            ("vip_watch",              "ALTER TABLE tenants ADD COLUMN vip_watch BOOLEAN DEFAULT FALSE NOT NULL"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):

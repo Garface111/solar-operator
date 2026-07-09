@@ -1239,6 +1239,16 @@ def start():
         reconcile_warranty_claims,
         "interval", minutes=15, id="reconcile_warranty_claims", replace_existing=True,
     )
+    # Every 10 min: white-glove staleness alert for hand-picked vip_watch
+    # tenants (Ford, 2026-07-08). The tight self-heal nudge itself rides the
+    # existing extension heartbeat (see capture_debt.compute_capture_debt) —
+    # this job only catches "stayed stale anyway", which means the browser
+    # probably isn't open, and emails Ford once per incident.
+    from .vip_watch import vip_watch_sweep
+    scheduler.add_job(
+        vip_watch_sweep,
+        "interval", minutes=10, id="vip_watch_sweep", replace_existing=True,
+    )
     # DATA HUB: every 5 min, poll every array with a pullable vendor connection
     # (SolarEdge live today; SMA/Fronius/etc. as their API creds come online) and
     # write the time-series. Daylight-gated inside poll_all_sources (no night API

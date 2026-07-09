@@ -265,6 +265,15 @@ class Tenant(Base):
     consent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     consent_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # ── White-glove "babied account" flag (Jul 2026) ─────────────────────
+    # A hand-picked tenant gets a MUCH tighter staleness bar (minutes, not the
+    # normal multi-day capture-debt window) so their extension-captured data
+    # self-heals fast whenever their browser is open, plus a direct email to
+    # Ford if it stays stale despite that (their browser probably isn't open
+    # at all). See api/vip_watch.py. False for everyone by default — this is
+    # an explicit, rare opt-in per tenant, not a general product tier.
+    vip_watch: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # ── Cross-product sibling link (Jun 2026) ────────────────────────────
     # A person can own a NEPOOL tenant AND an Array Operator tenant on the same
     # email — two SEPARATE rows with different `product`. When their two tenants

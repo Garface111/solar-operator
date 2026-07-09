@@ -151,6 +151,17 @@ def compute_capture_debt(db, tenant_id: str) -> dict | None:
     for provider, info in _stale_coop_providers(db, tenant_id, today).items():
         debt_utils[provider] = info
 
+    # White-glove override (rare — see api/vip_watch.py): a hand-picked tenant
+    # gets a MUCH tighter (minutes, not days) staleness bar merged in here so
+    # the SAME drain mechanism below fires on their very next heartbeat,
+    # instead of waiting for VENDOR_STALE_DAYS to pass.
+    from .models import Tenant
+    t = db.get(Tenant, tenant_id)
+    if t is not None and t.vip_watch:
+        from .vip_watch import vip_stale_vendors
+        for v in vip_stale_vendors(db, tenant_id):
+            debt_vendors.setdefault(v, {"reason": "vip_watch_stale"})
+
     if not debt_vendors and not debt_utils:
         return None
     return {
