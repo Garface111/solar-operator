@@ -1424,19 +1424,42 @@ _BULK_HEADER_ALIASES = {
               "tenantname", "clientname", "fullname"},
     # ARRAY NAME (bulk-import v2, Ford 2026-07-01) — the array this offtaker draws
     # from. Fuzzy-matched to the tenant's arrays; now a REQUIRED column.
+    # "masterarrayaccount" is the richer-template header for the same thing (the
+    # array/net-meter-group name, not a number).
     "array": {"array", "arrayname", "arrayid", "site", "sitename", "arraysite",
-              "project", "projectname", "solararray", "generator"},
+              "project", "projectname", "solararray", "generator",
+              "masterarrayaccount", "arrayaccount", "masterarray"},
+    # MASTER account number — the array/host GMP account number. Resolves the ARRAY
+    # exactly (overrides the fuzzy name match), distinct from the offtaker's own
+    # sub-account number below.
+    "master_account_number": {"masteraccountnumber", "mastergmpaccountnumber",
+                              "mastergmpaccount", "masteraccountno",
+                              "masterarrayaccountnumber", "hostaccountnumber",
+                              "hostaccount", "arrayaccountnumber", "arraygmpaccount"},
     "email": {"email", "clientemail", "offtakeremail", "customeremail", "contactemail",
               "emailaddress"},
     "percent": {"percent", "pct", "share", "allocation", "allocationpct",
                 "percentage", "offtakerpct", "sharepct"},
+    # OFFTAKER'S OWN account number — binds their sub-account (utility_account_id)
+    # EXACTLY. "yourofftakeraccountnumber" is the richer-template header.
     "account_number": {"accountnumber", "accountno", "account", "acctnumber", "acctno",
                         "gmpaccount", "utilityaccount", "meternumber", "meterno",
-                        "accountnum", "acct"},
+                        "accountnum", "acct", "yourofftakeraccountnumber",
+                        "offtakeraccountnumber", "offtakeraccount", "offtakeracct",
+                        "subaccountnumber", "subaccount", "offtakeraccountno"},
+    # The offtaker's GMP sub-account NAME (a human label, e.g. "Brooks House") — for
+    # the operator's eyes / a soft signal; the number above is the exact binding.
+    "offtaker_account_name": {"gmpaccountofofftaker", "offtakergmpaccount",
+                              "subaccountname", "offtakeraccountname",
+                              "offtakersubaccount"},
     "discount": {"discount", "discountpct", "discountpercent"},
     # Optional per-offtaker net rate ($/kWh) scraped when present.
     "rate": {"rate", "rateperkwh", "creditrate", "netrate", "netrateperkwh",
              "price", "priceperkwh", "usdperkwh"},
+    # Optional fixed monthly budget-bill total ($) — overrides the calculated amount.
+    "budget": {"budget", "budgetmonthly", "budgedmonthly", "monthlybudget",
+               "budgetbill", "fixedamount", "flatamount", "fixedtotal",
+               "budgetamount", "budgetamountusd"},
 }
 
 
@@ -1560,6 +1583,23 @@ def _bulk_rate(raw: str) -> tuple[Optional[float], Optional[str]]:
     return v, None
 
 
+def _bulk_budget(raw: str) -> tuple[Optional[float], Optional[str]]:
+    """Parse an optional fixed monthly budget-bill total ($). None when blank.
+    Accepts "$1,234", "1234", "1,234.00"."""
+    if not raw:
+        return None, None
+    v = raw.replace("$", "").replace(",", "").strip()
+    if not v:
+        return None, None
+    try:
+        amt = float(v)
+    except ValueError:
+        return None, f'"{raw}" isn\'t a valid budget amount ($)'
+    if amt < 0:
+        return None, "budget can't be negative"
+    return amt, None
+
+
 # Maps the format-agnostic detector's field names → this endpoint's internal
 # colmap keys, so a detected mapping (or an operator override) plugs straight in.
 _DETECTOR_FIELD_TO_BULK = {
@@ -1570,6 +1610,9 @@ _DETECTOR_FIELD_TO_BULK = {
     "discount_pct": "discount",
     "net_rate": "rate",
     "account_number": "account_number",
+    "master_account_number": "master_account_number",
+    "offtaker_account_name": "offtaker_account_name",
+    "budget": "budget",
 }
 
 
@@ -1726,6 +1769,10 @@ async def bulk_import_offtakers(
         rate, rate_err = _bulk_rate(_cell(row, "rate"))
         if rate_err:
             errors.append(rate_err)
+        budget, budget_err = _bulk_budget(_cell(row, "budget"))
+        if budget_err:
+            errors.append(budget_err)
+        offtaker_acct_name = _cell(row, "offtaker_account_name") or None
 
         # Preserve unrecognized columns verbatim ("scrape as much as possible").
         extra: dict[str, str] = {}
@@ -1744,13 +1791,34 @@ async def bulk_import_offtakers(
             "alternatives": [], "flags": ["no_match"],
         }
 
-        # An explicit account_number column, when present, OVERRIDES the fuzzy
-        # utility-account choice (the operator was precise; honor it) — but only
-        # to a utility account belonging to this tenant.
-        acct_num = _cell(row, "account_number")
+        matched_array_id = m.get("array_id")
+        matched_array_name = m.get("array_name")
         matched_ua_id = m.get("utility_account_id")
         matched_ua_label = m.get("utility_label")
         provider = m.get("provider")
+
+        # A MASTER (array/host) account number resolves the ARRAY exactly, overriding
+        # the fuzzy name match, and defaults the billing account to that host.
+        master_num = _cell(row, "master_account_number")
+        if master_num:
+            mua = ua_by_number.get(master_num.strip().lower())
+            if mua is None:
+                errors.append(f'no connected utility account matches master account "{master_num}"')
+            else:
+                if mua.get("array_id"):
+                    matched_array_id = mua["array_id"]
+                    matched_array_name = mua.get("array_name") or matched_array_name
+                matched_ua_id = mua["utility_account_id"]
+                matched_ua_label = mua.get("utility_label")
+                provider = mua.get("provider")
+
+        # The OFFTAKER'S OWN account number pins their sub-account (utility_account_id)
+        # EXACTLY — the precise topology-A link, winning over the master default and
+        # the fuzzy choice. Only to a utility account belonging to this tenant.
+        # `utility_locked` tells the frontend this is an EXACT bind so name auto-match
+        # never second-guesses it.
+        acct_num = _cell(row, "account_number")
+        utility_locked = False
         if acct_num:
             ua = ua_by_number.get(acct_num.strip().lower())
             if ua is None:
@@ -1759,6 +1827,7 @@ async def bulk_import_offtakers(
                 matched_ua_id = ua["utility_account_id"]
                 matched_ua_label = ua.get("utility_label")
                 provider = ua.get("provider")
+                utility_locked = True
 
         # Bill availability of the finally-chosen account decides ready-ness.
         chosen_ua = ua_by_id.get(matched_ua_id) if matched_ua_id else None
@@ -1769,8 +1838,8 @@ async def bulk_import_offtakers(
             "row": i,
             "offtaker_name": name or None,
             "array_name_raw": array_raw or None,
-            "matched_array_id": m.get("array_id"),
-            "matched_array_name": m.get("array_name"),
+            "matched_array_id": matched_array_id,
+            "matched_array_name": matched_array_name,
             "matched_utility_account_id": matched_ua_id,
             "matched_utility_label": matched_ua_label,
             "provider": provider,
@@ -1779,6 +1848,9 @@ async def bulk_import_offtakers(
             "allocation_pct": pct,
             "email": email,
             "discount_pct": discount,
+            "budget_amount_usd": budget,
+            "offtaker_account_name": offtaker_acct_name,
+            "utility_locked": utility_locked,
             "extra": extra,
             "missing": missing,
             "errors": errors,
@@ -1872,6 +1944,7 @@ class _BulkCommitRow(BaseModel):
     allocation_pct: float
     email: Optional[str] = None
     discount_pct: Optional[float] = None
+    budget_amount_usd: Optional[float] = None
 
 
 class BulkCommitBody(BaseModel):
@@ -1982,6 +2055,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                 allocation_pct=r.allocation_pct,
                 utility_account_id=r.utility_account_id, rate_per_kwh=None,
                 discount_pct=r.discount_pct, net_rate_per_kwh=None,
+                budget_amount_usd=r.budget_amount_usd,
                 cadence=body.cadence,
                 send_mode=("to_client" if r.email else "to_me"),
                 delivery_mode=body.delivery_mode, client_email=r.email,
@@ -2003,51 +2077,75 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
 def offtaker_template_xlsx():
     """A blank, ready-to-fill offtaker-roster .xlsx for the bulk import.
 
-    Header row: Array | Offtaker | Share % | Email | Discount % — matching the
-    bulk-import v2 column aliases — plus a few realistic example rows and a second
-    "Instructions" sheet. No auth: it's a static blank template (no tenant data).
+    Header row (Ford 2026-07-09 richer format): Master Array Account | Master GMP
+    Account Number | GMP Account of Offtaker | Offtaker | Share % | Email |
+    Discount % | Your Offtaker Account Number | Budget Monthly ($). The two account
+    NUMBER columns pin the exact utility bill — the master resolves the array, the
+    offtaker's own number binds their sub-account — so the importer links each row
+    to the already-connected bill instead of only fuzzy-matching by name. Every
+    column except Array / Offtaker / Share % is optional. No auth: blank template,
+    no tenant data.
     """
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Offtakers"
-    headers = ["Array", "Offtaker", "Share %", "Email", "Discount %"]
+    headers = ["Master Array Account", "Master GMP Account Number",
+               "GMP Account of Offtaker", "Offtaker", "Share %", "Email",
+               "Discount %", "Your Offtaker Account Number", "Budget Monthly ($)"]
     ws.append(headers)
-    # Realistic examples (share as whole-number percents — the importer accepts
-    # "25", "25%" and "0.25" alike).
+    # Realistic examples. The first three show the MINIMUM (array + offtaker + share,
+    # optional columns blank); the last shows the FULL exact-link form with both GMP
+    # account numbers filled so the offtaker binds to their own sub-account. Share as
+    # whole-number percents — the importer accepts "25", "25%" and "0.25" alike; the
+    # account numbers are strings so leading zeros survive.
     examples = [
-        ["Maple Street Solar", "Jane Offtaker", 25, "jane@example.com", 10],
-        ["Maple Street Solar", "Green Grocer LLC", 40, "ap@greengrocer.com", 0],
-        ["Route 7 Community Array", "Town of Elsewhere", 15, "clerk@elsewhere.gov", 5],
+        ["Maple Street Solar", "", "", "Jane Offtaker", 25, "jane@example.com", 10, "", ""],
+        ["Maple Street Solar", "", "", "Green Grocer LLC", 40, "ap@greengrocer.com", 0, "", ""],
+        ["Route 7 Community Array", "", "", "Town of Elsewhere", 15, "clerk@elsewhere.gov", 5, "", ""],
+        ["Londonderry", "12345", "Brooks House", "Brooks House", 50,
+         "bhmanager@example.com", 12, "1234", 250],
     ]
     for row in examples:
         ws.append(row)
     # Widen the columns so the template is legible on open.
-    for col, width in zip("ABCDE", (26, 24, 10, 28, 12)):
+    for col, width in zip("ABCDEFGHI",
+                          (24, 22, 22, 22, 9, 26, 11, 24, 16)):
         ws.column_dimensions[col].width = width
 
     info = wb.create_sheet("Instructions")
     notes = [
         ["How to fill this in"],
+        ["", "Only the first three columns marked (required) are needed — everything "
+             "else is optional but makes the match exact. You'll review + correct "
+             "every row before anything is created."],
         [""],
-        ["Array", "The name of the solar array. We'll fuzzy-match it to your "
-                  "arrays, so it doesn't have to be exact — you can correct any "
-                  "match before importing."],
-        ["Offtaker", "The customer's name (who receives the invoice)."],
-        ["Share %", "This offtaker's share of that array (e.g. 25 for 25%). "
-                    "Accepts 25, 25%, or 0.25."],
-        ["Email", "Optional. The customer's email (leave blank to keep sends to "
-                  "yourself for now)."],
+        ["Master Array Account", "(required) The solar array / net meter group name. "
+             "We fuzzy-match it to your arrays — it doesn't have to be exact."],
+        ["Master GMP Account Number", "Optional. The array's master GMP account "
+             "number. If given, we resolve the array to it EXACTLY (no guessing)."],
+        ["GMP Account of Offtaker", "Optional. The name on this offtaker's own GMP "
+             "sub-account (for your reference on review)."],
+        ["Offtaker", "(required) The customer's name — who receives the invoice."],
+        ["Share %", "(required) This offtaker's share of the array's net meter group "
+             "(e.g. 25 for 25%). Accepts 25, 25%, or 0.25."],
+        ["Email", "Optional. The customer's email (blank keeps sends to yourself)."],
         ["Discount %", "Optional. A discount off the credit rate (e.g. 10 for 10%)."],
+        ["Your Offtaker Account Number", "Optional but recommended. This offtaker's "
+             "OWN GMP account number. When given, we bind them to that exact "
+             "sub-account's bill — the precise link, no name-guessing."],
+        ["Budget Monthly ($)", "Optional. A fixed monthly total this offtaker pays "
+             "— overrides the calculated amount (line items still show)."],
         [""],
-        ["Tip", "You can add extra columns (account number, notes, etc.) — we "
-                "keep them with each row and show them during review."],
+        ["Tip", "No account numbers? That's fine — we auto-match each offtaker to "
+                "their sub-account by name, and you confirm before importing. Any "
+                "extra columns you add are kept and shown during review."],
     ]
     for row in notes:
         info.append(row)
-    info.column_dimensions["A"].width = 16
-    info.column_dimensions["B"].width = 72
+    info.column_dimensions["A"].width = 28
+    info.column_dimensions["B"].width = 76
 
     buf = io.BytesIO()
     wb.save(buf)
