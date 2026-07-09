@@ -1389,9 +1389,22 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                 # every time -- unless the operator set array_share_pct explicitly in
                 # this same patch. allocation_pct is pinned to 1.0 (100%% of the
                 # sub-meter) so it can never re-multiply the sub-account excess.
-                if (body.allocation_pct is not None
-                        and "array_share_pct" not in body.model_fields_set):
-                    sub.array_share_pct = _validate_array_share(float(body.allocation_pct))
+                if "array_share_pct" not in body.model_fields_set:
+                    # The group share moves to array_share_pct. Prefer an explicit
+                    # new allocation_pct from this patch; otherwise PRESERVE the
+                    # share the offtaker already had (their percent-of-group as a
+                    # host offtaker) so a bare account rebind never silently drops
+                    # it to a de-facto 100%. (allocation_pct below is applied before
+                    # this block, so on a no-share rebind it still holds the old share.)
+                    _grp = None
+                    if body.allocation_pct is not None:
+                        _grp = float(body.allocation_pct)
+                    elif sub.array_share_pct is not None:
+                        _grp = float(sub.array_share_pct)
+                    elif sub.allocation_pct is not None:
+                        _grp = float(sub.allocation_pct)
+                    if _grp is not None:
+                        sub.array_share_pct = _validate_array_share(_grp)
                 sub.allocation_pct = 1.0
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
