@@ -332,39 +332,57 @@ def pull_bills_for_tenant(tenant_id: str) -> dict:
         ).scalars().all()
 
         for acc in accounts:
-            adapter = get_adapter(acc.provider)
-            # Pick the token bound to THIS account's login identity, not just
-            # the tenant's latest capture — so every client's login keeps
-            # scraping even after the operator logs in as a different client.
-            jwt = token_for_account(db, acc)
-
-            # Try JSON path first
-            json_attempted = False
-            if jwt and hasattr(adapter, "fetch_bills_json"):
-                json_attempted = True
-                try:
-                    rj = _pull_via_json(db, tenant_id, acc, adapter, jwt)
-                    _tracker_append_for_account(db, tenant_id, acc, rj)
-                    results.append(rj)
-                    continue
-                except Exception as e:
-                    json_err = f"{type(e).__name__}: {e}"
-
-            # Fallback: PDF
+            # Commit each account's writes BEFORE the next account's external API
+            # call. Holding ONE transaction across the whole multi-account pull meant
+            # a single slow/hanging vendor fetch kept row locks on already-updated
+            # bills (e.g. their pulled_at stamp) for the rest of the loop — the
+            # lock pile-up + connection-pool exhaustion that took prod down
+            # 2026-07-09 (blocked UPDATE bills.pulled_at behind a 100s+
+            # idle-in-transaction). Per-account commit bounds any lock hold to that
+            # one account's own work, so a later hang can't freeze earlier bills.
             try:
-                r = _pull_via_pdf(db, tenant_id, acc, adapter)
-                _tracker_append_for_account(db, tenant_id, acc, r)
-                if json_attempted:
-                    r["json_fallback_reason"] = json_err
-                results.append(r)
-            except Exception as e:
-                results.append({
-                    "account": acc.account_number, "nickname": acc.nickname,
-                    "status": "failed",
-                    "json_error": json_err if json_attempted else None,
-                    "pdf_error": f"{type(e).__name__}: {e}",
-                    "trace": traceback.format_exc(limit=2),
-                })
+                adapter = get_adapter(acc.provider)
+                # Pick the token bound to THIS account's login identity, not just
+                # the tenant's latest capture — so every client's login keeps
+                # scraping even after the operator logs in as a different client.
+                jwt = token_for_account(db, acc)
+
+                # Try JSON path first
+                json_attempted = False
+                json_err = None
+                if jwt and hasattr(adapter, "fetch_bills_json"):
+                    json_attempted = True
+                    try:
+                        rj = _pull_via_json(db, tenant_id, acc, adapter, jwt)
+                        _tracker_append_for_account(db, tenant_id, acc, rj)
+                        results.append(rj)
+                        continue
+                    except Exception as e:
+                        json_err = f"{type(e).__name__}: {e}"
+
+                # Fallback: PDF
+                try:
+                    r = _pull_via_pdf(db, tenant_id, acc, adapter)
+                    _tracker_append_for_account(db, tenant_id, acc, r)
+                    if json_attempted:
+                        r["json_fallback_reason"] = json_err
+                    results.append(r)
+                except Exception as e:
+                    results.append({
+                        "account": acc.account_number, "nickname": acc.nickname,
+                        "status": "failed",
+                        "json_error": json_err if json_attempted else None,
+                        "pdf_error": f"{type(e).__name__}: {e}",
+                        "trace": traceback.format_exc(limit=2),
+                    })
+            finally:
+                # Persist this account's work + release its row locks before the
+                # next (possibly slow) external fetch. A commit hiccup must not
+                # abort the whole tenant pull.
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
         # Freshly-pulled bills → daily stream IMMEDIATELY (idempotent; only fills
         # bill_prorate gaps, real metered days always win). Without this a
