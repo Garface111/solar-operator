@@ -33,6 +33,11 @@ except Exception: print("")' 2>/dev/null)"
   if [ -n "$HIT" ]; then
     echo "fs_watch: suggestion #$HIT landed — firing pipeline ($(date))"
     bash "$REPO/scripts/review_feature_suggestions.sh" >> /root/fs_review.log 2>&1 || true
+    # Cooldown: if a build was already in flight, review.sh single-flights and
+    # exits fast while this row stays 'new' — without this pause /wait would
+    # return it again instantly and we would spin. review.sh drains ALL 'new'
+    # rows when it does get the lock, so a fresh submit is never lost.
+    sleep 20
   else
     # timeout / transient error → immediately re-arm; brief backoff on hard error
     printf '%s' "$RESP" | grep -q '"timeout"' || sleep 3
