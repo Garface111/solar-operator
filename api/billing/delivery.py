@@ -443,7 +443,16 @@ def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
             f"bills don't publish one, so the invoice waits for the rate you enter "
             f"(we never bill {PROV} at the GMP/VT default).")
 
-    pct = sub.allocation_pct or 0.0
+    # Use the GROUP share (array_share_pct) for a sub-metered offtaker, mirroring the GMP
+    # real_math path. allocation_pct is pinned to 1.0 there (100% of their OWN sub-meter),
+    # and this VEC path multiplies the ARRAY's measured generation — so allocation_pct=1.0
+    # would bill them the WHOLE array (an over-count / the "double math" class Ford flagged
+    # 2026-07-10). array_share_pct is None for a plain percent-of-array VEC offtaker, so
+    # their allocation_pct share is used unchanged. (No live VEC offtaker is in the
+    # sub-metered state today — all 902 array_share_pct offtakers are GMP — so this is
+    # preventive; it changes no current invoice.)
+    _grp_share = getattr(sub, "array_share_pct", None)
+    pct = _grp_share if _grp_share is not None else (sub.allocation_pct or 0.0)
     if not pct:
         warnings.append("No allocation % set for this offtaker.")
 
