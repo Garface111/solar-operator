@@ -7,6 +7,9 @@ REPO="/root/solar-operator"
 cd "$REPO" || { echo "review: repo missing"; exit 0; }
 # Make gateway-installed railway/claude tools reachable in cron's bare env.
 export PATH="/root/.hermes/node/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
+# Line-buffered progress even when cron/nohup pipes stdout (else the log is
+# silent until exit and a mid-run crash leaves no trace).
+export PYTHONUNBUFFERED=1
 # Kill-switch.
 if [ -f "$REPO/.fs_review_disabled" ]; then echo "review: disabled — skipping"; exit 0; fi
 # Single-flight: auto-ship runs can take a while; never let cron overlap itself
