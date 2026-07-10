@@ -985,11 +985,18 @@ async def _create_manual_subscription(
             # sub-account's own excess by the share again -- that double-count is
             # the wrong-bill-audit bug. Percent-of-array offtakers (account IS the
             # host) are untouched: allocation_pct stays their share of the host.
+            # The MASTER (net-meter group-host) array: an explicit array_id from the
+            # master+sub picker names the group; else fall back to the account's own
+            # array. The group host meter = the lowest account id on that array — when
+            # the offtaker's own account differs, they're billed on their OWN sub-meter
+            # and the GMP allocation cross-check compares the sub's credited excess to
+            # (share x the master array's group excess).
+            group_array_id = array_id if array_id is not None else acct.array_id
             _host_id = None
-            if acct.array_id is not None:
+            if group_array_id is not None:
                 _host_id = db.execute(
                     select(UtilityAccount.id).where(
-                        UtilityAccount.array_id == acct.array_id,
+                        UtilityAccount.array_id == group_array_id,
                         UtilityAccount.deleted_at.is_(None))
                     .order_by(UtilityAccount.id)).scalars().first()
             _is_submeter = _host_id is not None and _host_id != utility_account_id
@@ -1044,10 +1051,12 @@ async def _create_manual_subscription(
                 client_id=client.id,
                 customer_name=name,
                 utility_account_id=utility_account_id,
-                # Keep array_id populated (from the account's array) for list views,
-                # but delivery uses the utility-bill path because utility_account_id
-                # is set — it never reads vendor/array data for this offtaker.
-                array_id=acct.array_id,
+                # The MASTER (net-meter group-host) array — explicit from the master+sub
+                # picker, else the account's own. This is what the allocation audit reads
+                # group-excess from; keeping it distinct from a sub-meter utility_account_id
+                # is what makes the GMP allocation cross-check run. Delivery still uses the
+                # utility-bill path (utility_account_id is set) — never vendor/array data.
+                array_id=group_array_id,
                 allocation_pct=pct,
                 array_allocations=None,
                 array_share_pct=share_val,
@@ -1325,7 +1334,16 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                     400, "Offtaker invoices bind to a GMP or VEC/SmartHub utility "
                          "account.")
             sub.utility_account_id = body.utility_account_id
-            sub.array_id = acct.array_id
+            # Derive array_id from the bound account ONLY when the caller didn't send
+            # an explicit array_id. The master+sub picker sends BOTH: the explicit
+            # array_id is the MASTER (net-meter group-host) array the allocation audit
+            # reads group-excess from, and utility_account_id is the offtaker's OWN
+            # sub-meter. Overwriting array_id with the sub's own array here would
+            # collapse host == sub and silently disable the GMP allocation cross-check
+            # (reconcile_bills reads it as single_meter). The array_id block above has
+            # already applied the explicit master array.
+            if body.array_id is None:
+                sub.array_id = acct.array_id
         if "rate_per_kwh" in body.model_fields_set:
             # null clears the override; a number sets it (validated).
             sub.rate_per_kwh = _validate_rate(body.rate_per_kwh)
