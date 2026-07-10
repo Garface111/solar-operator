@@ -988,7 +988,39 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
                     _utility_bill_credit(db, sub.utility_account_id,
                                          target_label=period_label)
         kwh_source = "utility_bill"
-        if credit_usd is None:
+        _share = getattr(sub, "array_share_pct", None)
+        # ── No-own-bill FALLBACK (Ford 2026-07-10) ───────────────────────────────
+        # An own-meter offtaker whose sub-account has NO settled bill for the
+        # period bills their ENTERED share × the group's HOST (master) bill —
+        # real captured data, never an estimate — and switches to their own bill
+        # automatically once it lands. Monthly only: a quarterly invoice keeps
+        # its hold-until-complete semantics (never billed short).
+        _fb = None
+        if credit_usd is None and not _quarterly and _share:
+            from ..models import UtilityAccount as _UAfb
+            with SessionLocal() as _dbf:
+                _acct2 = _dbf.get(_UAfb, sub.utility_account_id)
+                _hid = None
+                if _acct2 is not None and _acct2.array_id is not None:
+                    _hid = _dbf.execute(
+                        select(_UAfb.id).where(
+                            _UAfb.array_id == _acct2.array_id,
+                            _UAfb.deleted_at.is_(None))
+                        .order_by(_UAfb.id)).scalars().first()
+                if _hid is not None and _hid != sub.utility_account_id:
+                    _h = _utility_bill_credit(_dbf, _hid, target_label=period_label)
+                    if _h[1] is not None:      # host bill settled with excess
+                        _fb = _h
+        if credit_usd is None and _fb is not None:
+            # Host-bill fallback: period, rate, and pool all come from the
+            # MASTER bill; the offtaker has no own bill this period.
+            excess_kwh, credit_usd, credit_rate, start, end, label, rate_source = _fb
+            array_kwh = None                  # no OWN bill — own-bill excess stays None
+            warnings.append(
+                "No settled utility bill on this offtaker's own sub-account yet — "
+                "billed as their entered share × the group's master bill for this "
+                "period; switches to their own bill automatically once it lands.")
+        elif credit_usd is None:
             # No GMP bill with excess generation yet → wait. NEVER substitute gross
             # kWh × a flat rate (that over-charged a banked month $10,659 for ~$2).
             # array_kwh None → delivery skips.
@@ -1024,21 +1056,25 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         if not pct:
             warnings.append("No allocation % set for this offtaker.")
             pct = 0.0
-        # ── "Real math" billing basis (Anna/Bruce, Ford 2026-07-01) ─────────────
-        # Bill the offtaker's SHARE of the array's group excess — the correct
-        # allocation — not whatever GMP happened to credit on THEIR own bill (which
-        # GMP sometimes gets wrong). Guarded: only when array_share_pct AND the
-        # array's group excess are both present and the offtaker has a SEPARATE
-        # account from the array host (so there's a real cross-check); otherwise
-        # fall back to today's GMP-credited × pct so no invoice silently changes
-        # without the data to back it. GMP's credited figure is kept for the
-        # side-by-side + the ⚑, and the operator can still override the final
-        # amount per-customer (budget_amount_usd).
+        # ── Billing basis: THE OFFTAKER'S OWN BILL GOVERNS (Ford 2026-07-10) ────
+        # REVERSAL of the 2026-07-01 real_math-wins rule. The sub-client's own
+        # utility bill IS GMP's allocation of the net-meter group — its excess,
+        # rate, and bill number are billing truth. The operator-entered share
+        # exists for the BILL-ACCURACY AUDIT (entered share vs GMP's derived
+        # share — reconcile_bills), NOT to move the invoice: editing the share
+        # must never change a bill that has its own settled utility bill behind
+        # it. real_math (entered share × the group's host pool) bills ONLY as
+        # the fallback when the offtaker's own sub-account has no settled bill
+        # for the period (the _fb path above put the HOST bill's pool/rate/
+        # period into excess_kwh/credit_* and left array_kwh=None).
+        # Both figures stay on computed_invoice for the side-by-side audit.
         gmp_credited_kwh = round((array_kwh or 0.0) * pct, 2)
-        _share = getattr(sub, "array_share_pct", None)
-        if _share and array_kwh is not None:
-            # Quarterly real-math needs the host pool summed over the SAME months;
-            # the helper returns None unless EVERY covered month has a host bill.
+        if _fb is not None and _share:
+            _group = excess_kwh               # the host pool the fallback fetched
+        elif _share and array_kwh is not None:
+            # Group pool resolved for the AUDIT side-figures + derived share.
+            # Quarterly needs the host pool summed over the SAME months; the
+            # helper returns None unless EVERY covered month has a host bill.
             _group = (_array_group_excess_for_sub(sub, period_labels=q["covered_labels"])
                       if _quarterly and q is not None
                       else _array_group_excess_for_sub(sub, label))
@@ -1047,16 +1083,20 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # ONE consistent displayed pair (base × share = billed kWh) — the bases
         # must never mix (backlog 2026-07-01: allocation_pct=1.0 rendered next to
         # a customer_kwh that was 99.4% of a DIFFERENT total read as an arithmetic
-        # error). real_math bills share × the array's GROUP excess, so THAT pair
-        # is what previews/drafts/invoices display; gmp_credited bills pct × the
-        # offtaker's OWN bill excess. Both figures stay on computed_invoice for
-        # the side-by-side audit.
-        if _share and _group:
+        # error).
+        if array_kwh is not None:
+            # Own bill settled → it governs: pct × own-bill excess (pct is 1.0
+            # for an own-meter offtaker; the entered share for a host-bound one).
+            customer_kwh = gmp_credited_kwh
+            _billing_basis = "gmp_credited"
+            _base_kwh, _base_pct = array_kwh, pct
+        elif _share and _group:
+            # No own bill this period → entered share × the group's host pool.
             customer_kwh = round(_share * _group, 2)
             _billing_basis = "real_math"
             _base_kwh, _base_pct = _group, _share
         else:
-            customer_kwh = gmp_credited_kwh
+            customer_kwh = gmp_credited_kwh   # 0.0; has_utility_bill False → skip
             _billing_basis = "gmp_credited"
             _base_kwh, _base_pct = array_kwh, pct
         pricing = resolve_discount_pricing(sub, period_end=end)
@@ -1156,14 +1196,22 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["kwh_source"] = kwh_source           # always 'utility_bill' here
         # has_data flag the empty-skip path checks (None = nothing billable).
         computed["has_utility_bill"] = credit_usd is not None
-        # Real-math vs GMP-credited provenance so the invoice/UI can show BOTH the
-        # amount we bill and what GMP credited, and flag the gap.
+        # Own-bill vs entered-share provenance so the invoice/UI can show BOTH the
+        # amount we bill and the audit expectation, and flag the gap.
         computed["billing_basis"] = _billing_basis
-        computed["gmp_credited_kwh"] = gmp_credited_kwh
+        # None (not 0) when the offtaker has no own bill this period — a zero here
+        # would read as "GMP credited nothing" instead of "no bill yet".
+        computed["gmp_credited_kwh"] = (gmp_credited_kwh
+                                        if array_kwh is not None else None)
         computed["array_share_pct"] = _share
         computed["array_group_excess_kwh"] = _group
         computed["realmath_kwh"] = (round(_share * _group, 2)
                                     if (_share and _group) else None)
+        # GMP's DERIVED share — own-bill excess ÷ the group's host pool. This is
+        # "the net meter group percentage pulled from the bill" (Ford 2026-07-10):
+        # what the offtaker's own bill says their share actually was this period.
+        computed["derived_share_pct"] = (round(array_kwh / _group, 6)
+                                         if (array_kwh and _group) else None)
         # Quarterly coverage provenance (renderers mark the covered range).
         computed["billing_cadence"] = "quarterly" if _quarterly else "monthly"
         if _quarterly and q is not None:

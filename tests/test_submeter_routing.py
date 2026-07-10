@@ -80,25 +80,31 @@ def _fetch(tid, sub_id):
 
 
 def test_submeter_create_routes_share_and_pins_alloc_to_one(client: TestClient):
-    """Binding to the SUB account with an entered 20% share → stored
-    allocation_pct == 1.0, array_share_pct == 0.20, and the invoice bills
-    real_math (20% × 5000 = 1000 kWh) — NOT the 1000 × 0.20 = 200 double-count."""
+    """Binding to the SUB account with an entered 30% share → stored
+    allocation_pct == 1.0, array_share_pct == 0.30, and the invoice bills the
+    SUB account's OWN bill (1000 kWh — Ford 2026-07-10: the sub-client bill
+    governs) — NOT 0.30 × 5000 = 1500 (entered share is audit-only) and NOT
+    the 1000 × 0.30 = 300 double-count."""
     tid, aid, host_id, sub_id = _seed()
     r = client.post(_BASE, headers=_auth(tid), data={
         "customer_name": "Sub Offtaker",
         "array_id": aid, "utility_account_id": sub_id,
-        "allocation_pct": 0.20,
+        "allocation_pct": 0.30,
     })
     assert r.status_code == 200, r.text
     new_id = r.json()["subscription"]["id"]
     s = _fetch(tid, new_id)
     assert s.allocation_pct == 1.0           # pinned: 100% of the sub-meter
-    assert abs(s.array_share_pct - 0.20) < 1e-9   # the ONE entered share → group share
-    # End-to-end: the invoice is real_math, no double-count.
+    assert abs(s.array_share_pct - 0.30) < 1e-9   # the ONE entered share → audit share
+    # End-to-end: the invoice bills the own bill; share is the audit reference.
     ci = delivery.build_manual_match(s).computed_invoice
-    assert ci["billing_basis"] == "real_math"
-    assert abs(ci["kwh"] - 1000.0) < 0.5     # 0.20 × 5000, NOT 200
-    assert abs(ci["kwh"] - 200.0) > 100      # explicitly not the double-count
+    assert ci["billing_basis"] == "gmp_credited"
+    assert abs(ci["kwh"] - 1000.0) < 0.5     # their own bill's excess
+    assert abs(ci["kwh"] - 1500.0) > 400     # NOT entered share × pool
+    assert abs(ci["kwh"] - 300.0) > 400      # NOT the double-count
+    # The audit side-figures + the bill-derived share are all present.
+    assert abs(ci["realmath_kwh"] - 1500.0) < 0.5
+    assert abs(ci["derived_share_pct"] - 0.20) < 1e-6   # 1000 ÷ 5000, from the bills
 
 
 def test_host_account_offtaker_is_untouched(client: TestClient):
@@ -138,19 +144,21 @@ def test_patch_rebind_to_submeter_enforces_invariant(client: TestClient):
     assert s.allocation_pct == 1.0
     assert abs(s.array_share_pct - 0.20) < 1e-9
     ci = delivery.build_manual_match(s).computed_invoice
-    assert ci["billing_basis"] == "real_math"
+    assert ci["billing_basis"] == "gmp_credited"     # own sub bill governs
     assert abs(ci["kwh"] - 1000.0) < 0.5
 
 
-def test_patch_share_edit_on_submeter_updates_group_share(client: TestClient):
+def test_patch_share_edit_on_submeter_updates_audit_share_not_the_bill(client: TestClient):
     '''Editing a sub-metered offtaker's share (the single share field, sent as
-    allocation_pct) routes to array_share_pct EVERY time — not just on first set —
-    so the operator can actually change it. 20% -> 30% must re-bill 30% x 5000.'''
+    allocation_pct) routes to array_share_pct EVERY time — but it is the AUDIT
+    share now (Ford 2026-07-10): the INVOICE keeps billing the sub account's
+    own settled bill and must NOT move when the share is edited.'''
     tid, aid, host_id, sub_id = _seed()
     r = client.post(_BASE, headers=_auth(tid), data={
         'customer_name': 'Editable Sub', 'array_id': aid,
         'utility_account_id': sub_id, 'allocation_pct': 0.20})
     oid = r.json()['subscription']['id']
+    before = delivery.build_manual_match(_fetch(tid, oid)).computed_invoice
     # bump the share to 30% via the (single) share field
     r2 = client.patch(f'{_BASE}/{oid}', headers=_auth(tid),
                       json={'allocation_pct': 0.30})
@@ -159,5 +167,7 @@ def test_patch_share_edit_on_submeter_updates_group_share(client: TestClient):
     assert s.allocation_pct == 1.0
     assert abs(s.array_share_pct - 0.30) < 1e-9      # was 0.20, now 0.30 (not lost)
     ci = delivery.build_manual_match(s).computed_invoice
-    assert ci['billing_basis'] == 'real_math'
-    assert abs(ci['kwh'] - 1500.0) < 0.5             # 0.30 x 5000
+    assert ci['billing_basis'] == 'gmp_credited'     # own bill still governs
+    assert abs(ci['kwh'] - 1000.0) < 0.5             # UNCHANGED: their bill's excess
+    assert abs(ci['amount_owed'] - before['amount_owed']) < 0.01  # share edit ≠ money edit
+    assert abs(ci['realmath_kwh'] - 1500.0) < 0.5    # audit figure follows the new share

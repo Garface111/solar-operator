@@ -3274,6 +3274,14 @@ def _rate_meta_from_ci(ci: Optional[dict]) -> dict:
         "default_net_rate_note": ci.get("default_net_rate_note"),
         "resolved_net_rate_per_kwh": ci.get("net_rate_per_kwh"),
         "resolved_net_rate_source": ci.get("net_rate_source"),
+        # Billing-basis provenance (Ford 2026-07-10: the own bill governs; the
+        # entered share is the audit's expectation). derived_share_pct is the %
+        # "pulled from the bill" — own-bill excess ÷ the group's host pool — so
+        # the UI can render the honest triple: pool × derived share = billed.
+        "billing_basis": ci.get("billing_basis"),
+        "derived_share_pct": ci.get("derived_share_pct"),
+        "array_group_excess_kwh": ci.get("array_group_excess_kwh"),
+        "own_bill_excess_kwh": ci.get("own_bill_excess_kwh"),
     }
 
 
@@ -3345,6 +3353,18 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         # override won) — lets the editor confirm an override is in force.
         "resolved_net_rate_per_kwh": rate_meta.get("resolved_net_rate_per_kwh"),
         "resolved_net_rate_source": rate_meta.get("resolved_net_rate_source"),
+        # Billing-basis provenance (single-draft payloads only, like the rate
+        # meta): which figure billed + the bill-DERIVED group share, so the UI
+        # renders pool × derived-share = billed and frames the entered share as
+        # the audit input (Ford 2026-07-10).
+        "billing_basis": rate_meta.get("billing_basis"),
+        "derived_share_pct": rate_meta.get("derived_share_pct"),
+        "array_group_excess_kwh": rate_meta.get("array_group_excess_kwh"),
+        "own_bill_excess_kwh": rate_meta.get("own_bill_excess_kwh"),
+        # The offtaker's ENTERED share (the audit expectation) so the editor +
+        # share displays never fall back to the frozen pair share (1.0 on an
+        # own-meter draft would read as a meaningless "100%").
+        "array_share_pct": (getattr(sub, "array_share_pct", None) if sub else None),
         "utility_account_id": (getattr(sub, "utility_account_id", None) if sub else None),
         "budget_amount_usd": (getattr(sub, "budget_amount_usd", None) if sub else None),
         # Calculated solar credit value (pre-budget-override). When a budget is set the

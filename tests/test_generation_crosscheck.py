@@ -187,14 +187,14 @@ def _seed_small_pool_tenant() -> tuple[str, str, int]:
 
 def test_crosscheck_per_offtaker_threshold_override(client):
     """Bruce 2026-07-07 (Comment 3): the per-offtaker variance THRESHOLD is the
-    knob. On a 300 kWh pool, an entered 30.0% share vs GMP's implied ~30.5%
-    (credited 91.5) is a ~0.5-point share variance with only a ~1.5 kWh delta
+    knob. On a 300 kWh pool, an entered 30.0% share vs GMP's implied 30.6%
+    (credited 91.8) is a 0.6-point share variance with only a 1.8 kWh delta
     (inside the 2 kWh audit tolerance) — so the SHARE branch alone decides:
-    flagged at the 0.1-point default, quiet under a 1.0-point per-offtaker
-    threshold, and the response reports the override threshold."""
+    flagged at the 0.5-point fleet default (Ford 2026-07-10), quiet under a
+    1.0-point per-offtaker threshold, and the response reports the override."""
     tid, auth, aid = _seed_small_pool_tenant()
-    sub_id = _seed_offtaker(tid, aid, "Small Offtaker", 0.30, 91.5)
-    # default threshold (0.1) → the 0.5-point variance flags
+    sub_id = _seed_offtaker(tid, aid, "Small Offtaker", 0.30, 91.8)
+    # default threshold (0.5) → the 0.6-point variance flags
     r0 = client.post(f"{BASE}/subscriptions/{sub_id}/draft", headers=_auth(auth))
     xc0 = r0.json()["crosscheck"]
     assert xc0["flagged"] is True and abs(xc0["variance_pct"]) > SHARE_VARIANCE_THRESHOLD_PCT

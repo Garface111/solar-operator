@@ -182,30 +182,32 @@ def test_month_targeted_backfill_stays_single_month():
     assert abs(ci["kwh"] - 0.5 * 1200.0) < 0.01
 
 
-# ─── real math over the quarter ──────────────────────────────────────────────
+# ─── own bill governs over the quarter (Ford 2026-07-10) ────────────────────
 
-def test_quarterly_real_math_sums_host_group_excess():
+def test_quarterly_own_bill_governs_with_audit_pool_alongside():
     host = [(4, 30, 2000.0, 0.16), (5, 31, 2400.0, 0.17), (6, 30, 1600.0, 0.18)]
     tid, sid = _seed(Q2, host_months=host, share=0.2553, pct=1.0)
     m = _match(sid)
     ci = m.computed_invoice
-    assert ci["billing_basis"] == "real_math"
-    assert ci["array_group_excess_kwh"] == 6000.0
-    assert abs(ci["kwh"] - round(0.2553 * 6000.0, 2)) < 0.01
-    # The displayed pair uses the REAL-MATH base (group pool × share) — while
-    # GMP's own-bill figure is kept alongside for the audit.
-    assert m.allocation_pct == 0.2553
-    assert ci["project_total_kwh"] == 6000.0
-    assert ci["gmp_credited_kwh"] == Q2_EXCESS        # 1.0 × own-bill quarter sum
+    # The sub-client's OWN quarterly bills bill; entered share is audit-only.
+    assert ci["billing_basis"] == "gmp_credited"
+    assert abs(ci["kwh"] - Q2_EXCESS) < 0.01          # pct(1.0) × own-bill sum
+    assert m.allocation_pct == 1.0
+    assert ci["project_total_kwh"] == Q2_EXCESS
     assert ci["own_bill_excess_kwh"] == Q2_EXCESS
+    # The audit side-figures still resolve over the SAME covered months.
+    assert ci["array_group_excess_kwh"] == 6000.0
+    assert abs(ci["realmath_kwh"] - round(0.2553 * 6000.0, 2)) < 0.01
+    assert abs(ci["derived_share_pct"] - Q2_EXCESS / 6000.0) < 1e-6
 
 
-def test_quarterly_real_math_falls_back_when_host_pool_incomplete():
+def test_quarterly_own_bill_governs_even_when_host_pool_incomplete():
     host = [(5, 31, 2400.0, 0.17), (6, 30, 1600.0, 0.18)]   # April host bill missing
     tid, sid = _seed(Q2, host_months=host, share=0.2553, pct=1.0)
     ci = _match(sid).computed_invoice
     assert ci["billing_basis"] == "gmp_credited"
     assert abs(ci["kwh"] - Q2_EXCESS) < 0.01          # pct(1.0) × own-bill sum
+    assert ci["array_group_excess_kwh"] is None       # audit pool honestly absent
 
 
 # ─── approval mode: a held quarter must not draft a $0 review ────────────────

@@ -358,4 +358,9 @@ def test_offtaker_template_download(client):
     wb = load_workbook(io.BytesIO(r.content))
     assert "Offtakers" in wb.sheetnames
     ws = wb["Offtakers"]
-    assert [c.value for c in ws[1]] == ["Array", "Offtaker", "Share %", "Email", "Discount %"]
+    # Ford 2026-07-09 richer roster format: the two account-number columns pin the
+    # exact utility bill (master → array; offtaker's own → their sub-account).
+    assert [c.value for c in ws[1]] == [
+        "Master Array Account", "Master GMP Account Number",
+        "GMP Account of Offtaker", "Offtaker", "Share %", "Email",
+        "Discount %", "Your Offtaker Account Number", "Budget Monthly ($)"]
