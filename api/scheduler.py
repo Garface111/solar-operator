@@ -346,6 +346,29 @@ def deliver_quarterly_reports():
     return _deliver_clients_with_frequency("quarterly")
 
 
+def _auto_send_should_hold(db, sub) -> bool:
+    """True when an offtaker's invoice carries a GENUINE "doesn't match GMP"
+    allocation flag — the same reconcile signal the operator sees in the pipeline.
+
+    Used to HOLD an unattended AUTO-send (sim #5b): a scheduled send must never push
+    an invoice whose share-of-excess doesn't reconcile against GMP's own credit under
+    the operator's name. Data-quality artifacts (missing/prorated/unmetered data,
+    period-timing gaps) are already reclassified to non-mismatch statuses upstream, so
+    they never hold — only a real reconciled delta does.
+
+    Fail-OPEN: any error computing the reconcile returns False (don't hold). An
+    inconclusive check must not halt the pipeline — today's auto-send fires with no
+    check at all, so this only ever ADDS a hold for the known-flagged. Manual/approval
+    sends never reach here, so a human "Approve & send" can always override."""
+    try:
+        from .billing.reconcile_bills import reconcile_subscription
+        rec = reconcile_subscription(db, sub)
+    except Exception:  # noqa: BLE001 — never let the safety check break the run
+        return False
+    alloc = rec.get("allocation") or {}
+    return alloc.get("status") == "mismatch"
+
+
 def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     """Array Operator automatic billing reports — deliver every enabled
     BillingReportSubscription whose cadence matches (or, for the annual run,
@@ -362,6 +385,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     failed: list[int] = []
     skipped: list[int] = []   # benign no-ops (waiting on a bill, or already sent
                               # this period) — NOT failures; don't alert on them.
+    held: list[int] = []      # auto-send withheld: the invoice doesn't match GMP's
+                              # bill (reconcile flag) — awaits operator review (sim #5b).
     with SessionLocal() as db:
         q = (
             select(BillingReportSubscription, Tenant)
@@ -406,6 +431,18 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             mode = getattr(sub, "delivery_mode", "approval") or "approval"
             try:
                 if mode == "auto":
+                    # SAFETY (sim #5b): never auto-FIRE an invoice that doesn't reconcile
+                    # against GMP's own bill. The genuine "doesn't match GMP" allocation
+                    # flag the operator sees in the pipeline HOLDS the unattended send until
+                    # they review it — a scheduled send must not push a known-wrong invoice
+                    # under the operator's name. A human "Approve & send" is unaffected. The
+                    # next scheduled run re-checks, so a resolved flag sends automatically.
+                    if _auto_send_should_hold(db, sub):
+                        held.append(sid)
+                        logger.info(
+                            "auto-send HELD for sub %s — invoice doesn't match GMP's bill "
+                            "(allocation mismatch); awaiting operator review", sid)
+                        continue
                     result = deliver_subscription(
                         db, sub, tenant,
                         triggered_by=f"sched-billing-{'trueup' if trueup_only else cadence}")
@@ -440,10 +477,11 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
         send_internal_alert(
             f"Array Operator billing — partial failures ({cadence})",
             f"Sent OK: {sent}\nDrafted: {drafted}\nSkipped (benign): {skipped}\n"
-            f"Failed: {failed}",
+            f"Held (doesn't match GMP — review): {held}\nFailed: {failed}",
         )
     return {"cadence": cadence, "trueup_only": trueup_only,
-            "sent": sent, "drafted": drafted, "failed": failed, "skipped": skipped}
+            "sent": sent, "drafted": drafted, "failed": failed,
+            "skipped": skipped, "held": held}
 
 
 def deliver_monthly_billing_reports() -> dict:
