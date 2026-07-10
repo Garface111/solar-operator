@@ -32,12 +32,39 @@ _pool_kwargs = {} if _is_sqlite else {
     "pool_recycle": int(os.environ.get("DB_POOL_RECYCLE", "1800")),
     "pool_timeout": int(os.environ.get("DB_POOL_TIMEOUT", "30")),
 }
+
+# Postgres session backstops (2026-07-09 whole-API meltdowns). Root class: a
+# job/thread holds a transaction open across a slow external call (vendor HTTP
+# can hang 30s+), its row locks never release, and with lock_timeout=0 every
+# request touching those rows waits FOREVER — each one permanently eating a
+# request-threadpool worker + a pool connection until even /health hangs.
+# These make the whole class self-healing instead of a full outage:
+#   • idle_in_transaction_session_timeout — a zombie "idle in transaction"
+#     session is killed by Postgres itself, releasing its locks (2 min: far
+#     above any legit gap between statements, far below outage territory).
+#   • lock_timeout — a blocked statement errors after 15s instead of queueing
+#     forever; the request 500s (visible, retryable) instead of freezing the app.
+#   • statement_timeout — no single runaway query can wedge a worker (3 min;
+#     migrations/backfills run outside this engine's defaults or re-SET locally).
+# All env-tunable; 0 disables. Applied via PG session GUCs at connect time.
+_pg_options = " ".join(
+    f"-c {k}={v}" for k, v in (
+        ("idle_in_transaction_session_timeout",
+         os.environ.get("DB_IDLE_TXN_TIMEOUT_MS", "120000")),
+        ("lock_timeout", os.environ.get("DB_LOCK_TIMEOUT_MS", "15000")),
+        ("statement_timeout", os.environ.get("DB_STATEMENT_TIMEOUT_MS", "180000")),
+    ) if str(v) != "0"
+)
+_connect_args = (
+    {"check_same_thread": False} if _is_sqlite
+    else ({"options": _pg_options} if _pg_options else {})
+)
 engine = create_engine(
     DB_URL,
     echo=False,
     future=True,
     pool_pre_ping=True,
-    connect_args={"check_same_thread": False} if _is_sqlite else {},
+    connect_args=_connect_args,
     **_pool_kwargs,
 )
 

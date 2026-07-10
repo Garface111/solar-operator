@@ -8,6 +8,14 @@ Idempotent migration for the June 2026 schema changes:
 Run on Railway via: `python -m api.migrate`
 Idempotent: safe to run multiple times.
 """
+import os
+# Migrations run as their OWN process (`python -m api.migrate && uvicorn …`) and
+# may legitimately run long backfill statements. Exempt THIS process from the
+# app engine's statement/lock backstops (db.py) before the engine is created —
+# the env change never reaches the serving process.
+os.environ.setdefault("DB_STATEMENT_TIMEOUT_MS", "0")
+os.environ.setdefault("DB_LOCK_TIMEOUT_MS", "0")
+
 from datetime import datetime, timedelta
 from sqlalchemy import text, inspect
 from .db import engine, init_db

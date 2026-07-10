@@ -285,6 +285,19 @@ def poll_all_sources(*, force_daylight: bool | None = None) -> dict:
                 summary["arrays_throttled"] += 1
                 continue
 
+            # Release the PREVIOUS array's transaction (writes + row locks) before
+            # this array's vendor HTTP call. fetch_live can hang for 30s+ (SMA's
+            # monitoring host measurably does) — holding one open transaction
+            # across the whole fleet loop kept row locks on already-updated
+            # inverters/connections for minutes, and concurrent requests blocking
+            # on those locks wedged the request threadpool: the 2026-07-09
+            # whole-API meltdowns (same class as the bill-puller fix in
+            # worker.py). expire_on_commit=False keeps the ORM rows usable.
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
             try:
                 live = _vendors.fetch_live(conn.vendor, cfg)
             except _vendors.InverterError as exc:  # one bad vendor must not abort
