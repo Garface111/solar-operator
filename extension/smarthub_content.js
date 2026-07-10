@@ -178,6 +178,29 @@
     return r.json();
   }
 
+  // Reliable account discovery via the secured accounts API — the SAME endpoint the
+  // SmartHub SPA itself uses. Verified in Paul's VEC HAR:
+  //   GET /services/secured/accounts?user=<email> → [{account:"6578300", serviceLocations:[…]}, …]
+  // This is what makes capture ROBUST: the old discovery leaned only on the base64
+  // URL-hash (#/home?<b64 …acctNbr=…>) + a specific home-page DOM heading, and when VEC
+  // returned the operator to Array Operator before that hash/DOM rendered, discovery saw
+  // ZERO accounts → 0 bills → 0 PDFs (Ford 2026-07-09 console: "no accounts discoverable
+  // … billPdf: pulled 0 of 0"). Now we ask the API directly, keyed by the resolved login
+  // email (auth-intercept → hash → web-storage). Returns [] on any failure (falls back to
+  // the DOM/hash path + the "will retry next scrape" loop).
+  async function apiDiscoverAccts() {
+    const u = resolveUsername();
+    if (!u) return [];
+    try {
+      const accts = await shGet("/services/secured/accounts?user=" + encodeURIComponent(u), u);
+      const out = [];
+      for (const a of (Array.isArray(accts) ? accts : [])) {
+        if (a && a.account) out.push(String(a.account));
+      }
+      return out;
+    } catch (e) { LOG("accounts API failed", (e && e.message) || e); return []; }
+  }
+
   // How far back to pull daily generation. The NEPOOL/GMCS report renders 6
   // rolling quarters (18 months); we pull ~19 months so a SINGLE owner re-login
   // backfills the entire reporting window — not just the last month (the old
@@ -296,6 +319,10 @@
       const domAccts = acctsFromDom();
       const acctNbrs = new Set(domAccts.keys());
       if (creds && creds.acctNbr) acctNbrs.add(creds.acctNbr);
+      if (acctNbrs.size === 0) {                       // hash/DOM not populated → ask the API
+        for (const a of await apiDiscoverAccts()) acctNbrs.add(a);
+        if (acctNbrs.size) LOG("accounts API →", acctNbrs.size, "account(s)");
+      }
       if (acctNbrs.size === 0) {
         LOG("no accounts discoverable yet — will retry next scrape");
         meterCaptureSent = false;
@@ -596,6 +623,10 @@
     const domAccts = acctsFromDom();
     const acctNbrs = new Set(domAccts.keys());
     if (creds && creds.acctNbr) acctNbrs.add(creds.acctNbr);
+    if (acctNbrs.size === 0) {                         // hash/DOM not populated → ask the API
+      for (const a of await apiDiscoverAccts()) acctNbrs.add(a);
+      if (acctNbrs.size) LOG("accounts API →", acctNbrs.size, "account(s) (bill capture)");
+    }
     if (acctNbrs.size === 0) return false;
 
     apiCaptureInFlight = true;
