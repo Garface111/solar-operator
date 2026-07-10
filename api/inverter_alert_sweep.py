@@ -326,7 +326,10 @@ def sweep_tenant(db, tenant: Tenant) -> int:
     if not ao_gets_vendor_emails(getattr(tenant, "product", None),
                                  getattr(tenant, "billing_plan", None)):
         return 0
-    to = getattr(tenant, "inverter_alert_email", None) or tenant.contact_email
+    # Recipients: inverter_alert_email may hold a comma/semicolon list (team alerts);
+    # _send_via_resend accepts a list. Fall back to the tenant contact email.
+    _raw_to = getattr(tenant, "inverter_alert_email", None) or tenant.contact_email
+    to = [e.strip() for e in str(_raw_to or "").replace(";", ",").split(",") if e.strip()]
     if not to:
         return 0
     grace_h = int(getattr(tenant, "inverter_alert_grace_hours", 12) or 0)

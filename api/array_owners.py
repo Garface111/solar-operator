@@ -1940,10 +1940,13 @@ def put_alert_settings(body: AlertSettingsBody,
     tenant = _tenant_from_bearer(authorization)
     from .account import require_not_demo
     require_not_demo(tenant)
+    # email may be a comma/semicolon-separated list (send alerts to the whole team).
+    _recips = None
     if body.email is not None:
-        e = body.email.strip()
-        if e and ("@" not in e or " " in e or "." not in e.split("@")[-1]):
-            raise HTTPException(400, "email must be a valid email address")
+        _recips = [e.strip() for e in body.email.replace(";", ",").split(",") if e.strip()]
+        for e in _recips:
+            if "@" not in e or " " in e or "." not in e.split("@")[-1]:
+                raise HTTPException(400, f"'{e}' is not a valid email address")
     with SessionLocal() as db:
         t = db.get(type(tenant), tenant.id)
         if t is None:
@@ -1951,7 +1954,7 @@ def put_alert_settings(body: AlertSettingsBody,
         if body.enabled is not None:
             t.inverter_alerts_enabled = bool(body.enabled)
         if body.email is not None:
-            t.inverter_alert_email = body.email.strip() or None
+            t.inverter_alert_email = ", ".join(_recips) or None
         if body.threshold_pct is not None:
             t.inverter_alert_threshold_pct = max(10, min(95, int(body.threshold_pct)))
         if body.grace_hours is not None:
@@ -1959,6 +1962,36 @@ def put_alert_settings(body: AlertSettingsBody,
         db.commit()
         db.refresh(t)
         return _alert_settings_dict(t)
+
+
+@router.post("/v1/array-owners/alert-settings/test")
+def test_alert_settings(authorization: str | None = Header(default=None)) -> dict:
+    """Send a test inverter-alert email to the configured recipient(s) NOW, so the
+    owner can confirm delivery and see the format — independent of the enabled flag."""
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    raw = getattr(tenant, "inverter_alert_email", None) or tenant.contact_email
+    to = [e.strip() for e in str(raw or "").replace(";", ",").split(",") if e.strip()]
+    if not to:
+        raise HTTPException(400, "Add a recipient email first, then send a test.")
+    from . import notify
+    subject = "✅ Test alert — your Array Operator monitoring is set up"
+    html = (
+        "<p>This is a <strong>test alert</strong> from Array Operator.</p>"
+        "<p>Your inverter monitoring is working. When a real inverter goes dark or "
+        "drops below its neighbors — and stays there past your grace window — "
+        "we’ll email you here with the site, the inverter, and what to do.</p>"
+        "<p>No action needed — you can change who gets alerts and how sensitive "
+        "they are from the alerts widget in Array Operator.</p>"
+    )
+    text = ("Test alert from Array Operator. Your inverter monitoring is working — "
+            "we’ll email you here when a real inverter needs attention. No action needed.")
+    ok = notify._send_via_resend(to=to, subject=subject, html=html, text=text,
+                                 product="array_operator")
+    if not ok:
+        raise HTTPException(502, "Couldn't send the test email right now — try again shortly.")
+    return {"ok": True, "sent_to": to}
 
 
 @router.delete("/v1/array-owners/arrays/{array_id}")
