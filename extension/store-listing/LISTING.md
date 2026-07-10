@@ -1,12 +1,15 @@
-# Chrome Web Store — Submission Package (EnergyAgent v1.9.48)
+# Chrome Web Store — Submission Package (EnergyAgent v1.9.119)
 
 Everything needed to publish the extension is here. **Ford does the final two
 steps** (pay the one-time $5 Chrome developer fee + click *Submit for review*);
 this package prepares everything up to that point.
 
-- **Zip to upload:** `C:\Users\fordg\Desktop\energyagent-extension-v1.9.48.zip`
-  (114 KB, manifest at root, MV3, no remotely-hosted code — verified).
+- **Zip to upload:** `C:\Users\fordg\Desktop\energyagent-extension-v1.9.119-STORE.zip`
+  (~190 KB, manifest at root, MV3, no dev docs, no remotely-hosted code — clean-built
+  + verified 2026-07-09). This is the VEC bill-PDF fix (`apiDiscoverAccts`) release;
+  the plain `energyagent-extension-v1.9.119.zip` also works but bundles README/tests.
 - **Dev console:** https://chrome.google.com/webstore/devconsole
+- **Privacy URL (verified live, HTTP 200, 2026-07-09):** `https://arrayoperator.com/privacy`
 
 ---
 
@@ -209,7 +212,7 @@ Tip: 1280×800 browser window, OS screenshot, crop to exactly 1280×800.
    (NOT the GitHub URL, NOT nepooloperator.com/privacy — those are what got
    v1.9.115 rejected). It's already live + valid; nothing to deploy.
 3. **Open the EXISTING item `ocohbimolfpnkjcjhiodopjjlhclinpl`** (see critical note
-   above) → upload `energyagent-extension-v1.9.48.zip` as a new package version.
+   above) → upload `energyagent-extension-v1.9.119-STORE.zip` as a new package version.
    (Only create a new item if that one is truly inaccessible — then also update
    `EXT_STORE_URL` in the SPA.)
 4. Paste the listing fields + privacy-practices answers above.
