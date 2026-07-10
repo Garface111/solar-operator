@@ -910,6 +910,15 @@ def main():
             ))
             print("  + billing_report_subscriptions.crosscheck_threshold_pct")
 
+        # 2026-07-10 Feature-suggestion markup (Ford, MindSpace annotate pattern):
+        # the customer circles/highlights the live UI; the composited PNG rides
+        # with the suggestion so the review agent SEES the intent. Base64, TEXT.
+        if not column_exists(conn, "feature_suggestions", "screenshot_b64"):
+            conn.execute(text(
+                "ALTER TABLE feature_suggestions ADD COLUMN screenshot_b64 TEXT"
+            ))
+            print("  + feature_suggestions.screenshot_b64")
+
         # 2026-06-22 Sequential invoice numbering: operator sets a starting number,
         # Array Operator adds 1 per real send. start = seed entered; next = running
         # counter. NULL on both = legacy period-date invoice number.

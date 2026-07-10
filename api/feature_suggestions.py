@@ -39,11 +39,17 @@ class FeatureSuggestion(Base):
     status: Mapped[str] = mapped_column(String(16), default="new", index=True)  # new | reviewed
     review: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Marked-up screenshot (Ford 2026-07-10, the MindSpace annotate pattern): the
+    # customer circles/highlights the live UI and the PNG rides along so the
+    # review agent SEES the spatial intent, not just the words. Base64 PNG
+    # (no data-URL prefix). Nullable — plain text suggestions unchanged.
+    screenshot_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SuggestionIn(BaseModel):
     text: str
     email: str | None = None
+    screenshot_b64: str | None = None
 
 
 class ReviewIn(BaseModel):
@@ -77,8 +83,25 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
             product = getattr(t, "product", None) or product
         except Exception:
             pass  # anonymous / expired session — still capture the suggestion
+    # Optional marked-up screenshot: accept a data-URL or bare base64 PNG/JPEG,
+    # verify it decodes, cap at ~4MB decoded. Invalid/oversized image → keep the
+    # TEXT (never lose the suggestion) and just drop the image.
+    shot = None
+    raw = (body.screenshot_b64 or "").strip()
+    if raw:
+        if raw.startswith("data:"):
+            raw = raw.split(",", 1)[-1]
+        try:
+            import base64 as _b64
+            decoded = _b64.b64decode(raw, validate=True)
+            if 0 < len(decoded) <= 4_000_000 and (
+                    decoded[:8] == b"\x89PNG\r\n\x1a\n" or decoded[:3] == b"\xff\xd8\xff"):
+                shot = raw
+        except Exception:
+            shot = None
     with SessionLocal() as db:
-        fs = FeatureSuggestion(text=text, email=email, tenant_id=tenant_id, product=product)
+        fs = FeatureSuggestion(text=text, email=email, tenant_id=tenant_id,
+                               product=product, screenshot_b64=shot)
         db.add(fs)
         db.commit()
         db.refresh(fs)
@@ -87,7 +110,10 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
         send_internal_alert(
             subject=f"New {product} feature suggestion (#{sid})",
             body=(f"From: {email or 'anonymous'}\nTenant: {tenant_id or '-'}\n"
-                  f"Product: {product}\n\n{text}\n\n(Queued for Claude Code agent review.)"),
+                  f"Product: {product}\n\n{text}\n"
+                  + ("\n[Includes a marked-up screenshot — the review agent will read it.]\n"
+                     if shot else "")
+                  + "\n(Queued for Claude Code agent review.)"),
         )
     except Exception:
         pass
@@ -109,8 +135,28 @@ def list_suggestions(status: str = Query(default="new"),
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "product": r.product, "email": r.email, "tenant_id": r.tenant_id,
             "text": r.text, "status": r.status, "review": r.review,
+            # Flag only — the PNG is fetched via /screenshot, never inlined here.
+            "has_screenshot": r.screenshot_b64 is not None,
         } for r in rows]
     return JSONResponse({"suggestions": out, "count": len(out)})
+
+
+@router.get("/admin/feature-suggestions/{sid}/screenshot")
+def suggestion_screenshot(sid: int,
+                          x_admin_key: str | None = Header(default=None),
+                          key: str | None = Query(default=None)):
+    """The suggestion's marked-up screenshot as raw image bytes (admin/agent).
+    PNG unless the upload was a JPEG."""
+    _check_admin(x_admin_key, key)
+    import base64 as _b64
+    from fastapi.responses import Response
+    with SessionLocal() as db:
+        fs = db.get(FeatureSuggestion, sid)
+        if not fs or not fs.screenshot_b64:
+            raise HTTPException(404, "No screenshot on this suggestion")
+        data = _b64.b64decode(fs.screenshot_b64)
+    media = "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
+    return Response(content=data, media_type=media)
 
 
 @router.post("/admin/feature-suggestions/{sid}/review")
