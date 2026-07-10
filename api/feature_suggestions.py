@@ -149,6 +149,36 @@ def suggestion_status(sid: int):
     return {"status": status}
 
 
+@router.get("/admin/feature-suggestions/wait")
+async def wait_for_suggestion(after: int = 0, timeout: int = 25,
+                              x_admin_key: str | None = Header(default=None),
+                              key: str | None = Query(default=None)):
+    """LONG-POLL: block until a NEW suggestion with id > `after` exists, then
+    return its id — so the local build machine reacts the INSTANT someone hits
+    Send (Ford 2026-07-10: "the sublime version triggers immediately"). The
+    machine has no public inbound, so it holds this outbound request instead.
+
+    Safe against the 2026-07-09 meltdown class: async (never ties up a sync
+    threadpool worker) and each peek opens+closes its OWN short SessionLocal —
+    no DB connection or transaction is ever held across the await."""
+    import asyncio
+    import time as _time
+    _check_admin(x_admin_key, key)
+    deadline = _time.monotonic() + min(max(int(timeout), 1), 55)
+    while True:
+        with SessionLocal() as db:
+            row = (db.query(FeatureSuggestion)
+                   .filter(FeatureSuggestion.status == "new",
+                           FeatureSuggestion.id > int(after))
+                   .order_by(FeatureSuggestion.id.asc()).first())
+            found = row.id if row else None
+        if found is not None:
+            return {"suggestion_id": found}
+        if _time.monotonic() >= deadline:
+            return {"suggestion_id": None, "timeout": True}
+        await asyncio.sleep(1.5)
+
+
 @router.post("/admin/feature-suggestions/{sid}/status")
 def set_suggestion_status(sid: int, body: StatusIn,
                           x_admin_key: str | None = Header(default=None),
