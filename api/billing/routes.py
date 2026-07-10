@@ -3564,16 +3564,25 @@ def generate_draft(sub_id: int, period: Optional[str] = Query(default=None),
     target_period = (period or "").strip() or None
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
-        # ALWAYS pull the freshest GMP bill for this offtaker's bound account first, so
-        # the invoice reflects the latest statement the moment it's generated — don't wait
-        # for the 6h scheduler. Best-effort: a lapsed session (or a vendor hiccup) just
-        # falls back to the last captured bill, so a refresh failure never blocks a draft.
-        # READ COMMITTED → build_match's fresh bill query below sees the committed pull.
+        # Pull the freshest bill for this offtaker's bound account first, so the invoice
+        # reflects the latest statement the moment it's generated — don't wait for the 6h
+        # scheduler. Best-effort: a lapsed session (or a vendor hiccup) just falls back to
+        # the last captured bill, so a refresh failure never blocks a draft. READ COMMITTED
+        # → build_match's fresh bill query below sees the committed pull.
+        # ONLY for server-pullable providers (GMP). SmartHub/VEC bills are cookie-bound
+        # (browser-only) — the server can't fetch them and the attempt can STALL the draft
+        # request (Ford 2026-07-09: a VEC offtaker's regenerate hung here). Those bills are
+        # captured by the extension; skip the pointless server pull.
         uaid = getattr(sub, "utility_account_id", None)
         if uaid:
             try:
-                from ..worker import pull_account_bills
-                pull_account_bills(t.id, uaid)
+                from ..models import UtilityAccount as _UA
+                from ..adapters import is_smarthub_provider as _is_sh
+                _acc = db.get(_UA, uaid)
+                _prov = ((getattr(_acc, "provider", "") or "").lower()) if _acc else ""
+                if _prov and not _is_sh(_prov):
+                    from ..worker import pull_account_bills
+                    pull_account_bills(t.id, uaid)
             except Exception:  # noqa: BLE001
                 pass
         try:
