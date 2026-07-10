@@ -213,14 +213,23 @@ def _set_status(sid, status):
         return False
 
 
+# Screenshots land in a DEDICATED dir (not /tmp) so we can hand it to claude via
+# --add-dir. Reading a file outside the agent's workspace root otherwise trips
+# Claude Code's access gate, which auto-DENIES in non-interactive -p mode — the
+# "permission denied" that made the review fall back to text-only and lose the
+# whole point of the markup (Ford 2026-07-10).
+SHOT_DIR = os.getenv("FS_SHOT_DIR", "/root/.fs_shots")
+
+
 def _fetch_shot(s):
-    """Download the suggestion's marked-up screenshot to /tmp; '' when none."""
+    """Download the suggestion's marked-up screenshot; '' when none."""
     if not s.get("has_screenshot"):
         return ""
     try:
+        os.makedirs(SHOT_DIR, exist_ok=True)
         data = _get_bytes(f"/admin/feature-suggestions/{s['id']}/screenshot?key={KEY}")
         ext = "jpg" if data[:3] == b"\xff\xd8\xff" else "png"
-        path = f"/tmp/fs_suggestion_{s['id']}.{ext}"
+        path = os.path.join(SHOT_DIR, f"fs_suggestion_{s['id']}.{ext}")
         with open(path, "wb") as f:
             f.write(data)
         return path
@@ -240,6 +249,25 @@ def _claude(prompt, plan=True, timeout=600, cwd=None):
     return (out.stdout or "").strip() or (out.stderr or "").strip() or "(no agent output)"
 
 
+def _shot_in(cwd, shot_path):
+    """Copy the fetched screenshot INTO the agent's workspace (its cwd) so
+    Claude Code can read it — reading OUTSIDE the workspace root auto-denies in
+    non-interactive -p mode ("permission denied"), and this claude has no
+    --add-dir. Returns the in-workspace path, or '' if no shot. Lives under a
+    dot-dir the auto-ship allowlist (public/* only) never commits."""
+    if not shot_path or not cwd:
+        return ""
+    try:
+        import shutil
+        dst_dir = os.path.join(cwd, ".fs_shots")
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, os.path.basename(shot_path))
+        shutil.copyfile(shot_path, dst)
+        return dst
+    except Exception:
+        return ""
+
+
 def _run(args, cwd=None, timeout=300):
     """Deterministic shell step in the frontend repo. Returns (rc, output)."""
     try:
@@ -251,7 +279,8 @@ def _run(args, cwd=None, timeout=300):
 
 
 def review_one(s, shot_path):
-    shot_note = SHOT_NOTE.format(path=shot_path) if shot_path else ""
+    _shot = _shot_in(REPO, shot_path)      # readable from the review agent's cwd
+    shot_note = SHOT_NOTE.format(path=_shot) if _shot else ""
     prompt = PROMPT.format(email=s.get("email") or "anonymous", text=s["text"],
                            shot_note=shot_note)
     try:
@@ -284,7 +313,8 @@ def judge_one(s, review):
 def implement_one(s, review, shot_path):
     """branch tier: implement on a pushed branch, never merge. Returns a report."""
     branch = f"fs/suggestion-{s['id']}"
-    shot_note = SHOT_NOTE.format(path=shot_path) if shot_path else ""
+    _shot = _shot_in(AO_FRONTEND, shot_path)   # readable from the implement agent's cwd
+    shot_note = SHOT_NOTE.format(path=_shot) if _shot else ""
     prompt = IMPLEMENT_PROMPT.format(
         email=s.get("email") or "anonymous", text=s["text"], review=review,
         shot_note=shot_note, branch=branch, ao_frontend=AO_FRONTEND, sid=s["id"])
@@ -337,7 +367,8 @@ def auto_ship_one(s, review, shot_path):
     post-push failures revert the ship commit and redeploy."""
     sid = s["id"]
     branch = f"fs/suggestion-{sid}"
-    shot_note = SHOT_NOTE.format(path=shot_path) if shot_path else ""
+    _shot = _shot_in(AO_FRONTEND, shot_path)   # readable from the auto agent's cwd
+    shot_note = SHOT_NOTE.format(path=_shot) if _shot else ""
     prompt = AUTO_IMPLEMENT_PROMPT.format(
         email=s.get("email") or "anonymous", text=s["text"], review=review,
         shot_note=shot_note, branch=branch, sid=sid)
