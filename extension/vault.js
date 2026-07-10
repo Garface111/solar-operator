@@ -323,7 +323,12 @@ const SoVault = (() => {
   async function status() {
     const out = {};
     for (const v of VENDORS) {
-      out[v] = { hasCreds: await has(v), enabled: await isEnabled(v) };
+      // Include the saved username for inverters too (v1.9.120) — utilities already
+      // report it, and both the popup + the Master Account panel need it to show a
+      // saved login as clearly present (an email in the field), not a blank row.
+      let username = "";
+      try { const rec = await get(v); username = (rec && rec.username) || ""; } catch (_) {}
+      out[v] = { hasCreds: await has(v), enabled: await isEnabled(v), username };
     }
     try {
       const s = await chrome.storage.local.get(CRED_STORE);

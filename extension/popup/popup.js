@@ -446,7 +446,13 @@
     const resp = await vaultMsg({ type: "SO_VAULT_STATUS" });
     const status = (resp && resp.status) || {};
     alRows.innerHTML = "";
-    for (const v of AL_VENDORS) buildCredRow(alRows, v, status, renderAutoLogin);
+    // Prefill the saved username on each inverter row (v1.9.120) so a saved login
+    // shows the email it's saved under — like the utility rows already do — instead
+    // of a blank field that reads as "not set". Remove & re-add to change it.
+    for (const v of AL_VENDORS) {
+      const st = status[v.id] || {};
+      buildCredRow(alRows, Object.assign({}, v, { username: st.username || "" }), status, renderAutoLogin);
+    }
   }
 
   // ── Utility logins (GMP + SmartHub co-ops) ────────────────────────────────
