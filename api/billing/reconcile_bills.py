@@ -469,8 +469,8 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
 # "Their share of the array (%)" the operator entered. Bruce: "You should pick
 # a threshold for the variance flag. Maybe .1%? This would be a good discussion
 # point with Anna." — so it lives here as ONE named constant, ready to retune
-# after that conversation. Ford 2026-07-10: tightened 0.1 → 0.05 pct-points.
-SHARE_VARIANCE_THRESHOLD_PCT = 0.05
+# after that conversation. Ford 2026-07-10: loosened 0.1 → 0.5 pct-points (fewer flags).
+SHARE_VARIANCE_THRESHOLD_PCT = 0.5
 
 
 def crosscheck_threshold_for(sub) -> float:

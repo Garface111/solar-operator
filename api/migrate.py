@@ -894,7 +894,7 @@ def main():
 
         # 2026-07-07 Per-offtaker cross-check variance THRESHOLD (Bruce): the knob
         # that replaced the manual "cross-check share" data entry. Percentage
-        # points; NULL = the fleet default SHARE_VARIANCE_THRESHOLD_PCT (0.05).
+        # points; NULL = the fleet default SHARE_VARIANCE_THRESHOLD_PCT (0.5).
         if not column_exists(conn, "billing_report_subscriptions", "crosscheck_threshold_pct"):
             conn.execute(text(
                 "ALTER TABLE billing_report_subscriptions "
