@@ -23,6 +23,15 @@ from .notify import send_internal_alert
 router = APIRouter()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
+# Suggestion lifecycle (Tier 1 of the self-improving product, Ford 2026-07-10):
+#   new       — just submitted, queued for agent review
+#   reviewed  — agent reviewed it (and possibly pushed a human-gated branch)
+#   building  — judge tiered it AUTO; the implement agent is working on it now
+#   shipped   — auto-shipped: merged, deployed, and verified live
+# The widget polls the PUBLIC status endpoint so the customer watches their own
+# suggestion go "building… → live — refresh the page".
+VALID_STATUSES = ("new", "reviewed", "building", "shipped")
+
 
 def _now() -> datetime:
     return datetime.utcnow()
@@ -36,7 +45,7 @@ class FeatureSuggestion(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tenant_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     text: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(16), default="new", index=True)  # new | reviewed
+    status: Mapped[str] = mapped_column(String(16), default="new", index=True)  # see VALID_STATUSES
     review: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Marked-up screenshot (Ford 2026-07-10, the MindSpace annotate pattern): the
@@ -55,6 +64,10 @@ class SuggestionIn(BaseModel):
 class ReviewIn(BaseModel):
     review: str
     status: str | None = "reviewed"
+
+
+class StatusIn(BaseModel):
+    status: str
 
 
 def _check_admin(key_header: str | None, key_query: str | None) -> None:
@@ -120,6 +133,41 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
     return {"ok": True, "id": sid}
 
 
+@router.get("/v1/feature-suggestion/{sid}/status")
+def suggestion_status(sid: int):
+    """PUBLIC: the suggestion's lifecycle status — and nothing else.
+
+    Powers the widget's "being built… / live — refresh" pill: the submitter
+    holds the id from POST and polls this. Deliberately exposes a single enum
+    string — no text, no email, no tenant, no review, nothing an id-guesser
+    could mine."""
+    with SessionLocal() as db:
+        fs = db.get(FeatureSuggestion, sid)
+        if not fs:
+            raise HTTPException(404, "Unknown suggestion")
+        status = fs.status if fs.status in VALID_STATUSES else "reviewed"
+    return {"status": status}
+
+
+@router.post("/admin/feature-suggestions/{sid}/status")
+def set_suggestion_status(sid: int, body: StatusIn,
+                          x_admin_key: str | None = Header(default=None),
+                          key: str | None = Query(default=None)):
+    """Lifecycle tick from the review/build agent (e.g. 'building' the moment
+    the implement agent starts). No email — the final review post carries that."""
+    _check_admin(x_admin_key, key)
+    status = (body.status or "").strip()
+    if status not in VALID_STATUSES:
+        raise HTTPException(400, f"status must be one of {', '.join(VALID_STATUSES)}")
+    with SessionLocal() as db:
+        fs = db.get(FeatureSuggestion, sid)
+        if not fs:
+            raise HTTPException(404, "Suggestion not found")
+        fs.status = status
+        db.commit()
+    return {"ok": True, "id": sid, "status": status}
+
+
 @router.get("/admin/feature-suggestions")
 def list_suggestions(status: str = Query(default="new"),
                      x_admin_key: str | None = Header(default=None),
@@ -169,13 +217,15 @@ def review_suggestion(sid: int, body: ReviewIn,
         if not fs:
             raise HTTPException(404, "Suggestion not found")
         fs.review = (body.review or "")[:20000]
-        fs.status = body.status or "reviewed"
+        fs.status = body.status if body.status in VALID_STATUSES else "reviewed"
         fs.reviewed_at = _now()
-        text, email = fs.text, fs.email
+        text, email, final_status = fs.text, fs.email, fs.status
         db.commit()
     try:
         send_internal_alert(
-            subject=f"Claude Code review of feature suggestion #{sid}",
+            subject=(f"AUTO-SHIPPED feature suggestion #{sid} — live on arrayoperator.com"
+                     if final_status == "shipped"
+                     else f"Claude Code review of feature suggestion #{sid}"),
             body=f"Suggestion: {text}\nFrom: {email or 'anonymous'}\n\n--- Agent review ---\n{body.review}",
         )
     except Exception:

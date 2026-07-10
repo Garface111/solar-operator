@@ -9,6 +9,10 @@ cd "$REPO" || { echo "review: repo missing"; exit 0; }
 export PATH="/root/.hermes/node/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 # Kill-switch.
 if [ -f "$REPO/.fs_review_disabled" ]; then echo "review: disabled — skipping"; exit 0; fi
+# Single-flight: auto-ship runs can take a while; never let cron overlap itself
+# or a manual run (double-processing a 'new' suggestion = duplicate branches/ships).
+exec 9>/tmp/fs_review.lock
+flock -n 9 || { echo "review: another run holds the lock — skipping"; exit 0; }
 # Resolve ADMIN_API_KEY: prefer env, else pull from Railway (read-only).
 if [ -z "${ADMIN_API_KEY:-}" ]; then
   export ADMIN_API_KEY="$(railway variables --service web --json 2>/dev/null | python3 -c 'import sys,json;
