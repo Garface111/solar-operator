@@ -66,3 +66,21 @@ curl -sI https://web-production-49c83.up.railway.app/docs | head -1   # expect 4
 - Redis rate limits
 - Stripe pk/sk live/test alignment (ops config)
 - Rotate secrets that may have appeared in agent tool logs
+
+## Prod encrypt status (2026-07-11)
+
+Bulk encrypt APPLY completed against prod Postgres via public URL + SO_CONFIG_KEY:
+
+| target | result |
+|--------|--------|
+| inverter_connections.config | 72/72 already encrypted |
+| arrays.solaredge_api_key | 68/68 already encrypted |
+| utility_sessions.api_token | 42 encrypted (0 plain left) |
+| utility_sessions.refresh_token | 20 encrypted |
+| utility_sessions.raw_payload | 41 encrypted |
+| portal_credential.secret_enc | 5/5 already encrypted |
+| portal_credential.session_state_enc | 5/5 already encrypted |
+
+Note: table is `portal_credential` (singular). Encrypt script fixed to match.
+Also: `main()` builds a fresh engine from `DATABASE_URL` so local ops against
+`DATABASE_PUBLIC_URL` actually write (api.db.engine was still on railway.internal).

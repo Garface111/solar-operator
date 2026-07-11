@@ -53,8 +53,9 @@ _TARGETS = [
     ("utility_sessions", "id", "refresh_token"),
     ("utility_sessions", "id", "raw_payload"),
     # Cloud Capture portal passwords + playwright storage_state.
-    ("portal_credentials", "id", "secret_enc"),
-    ("portal_credentials", "id", "session_state_enc"),
+    # Table is singular in models.py (__tablename__ = "portal_credential").
+    ("portal_credential", "id", "secret_enc"),
+    ("portal_credential", "id", "session_state_enc"),
 ]
 
 
@@ -186,7 +187,18 @@ def main(argv=None):
                     help="decrypt every connection and hit its vendor API (read-only live check)")
     args = ap.parse_args(argv)
 
-    from api.db import engine  # imported here so the module is testable with a custom engine
+    # Prefer a fresh engine from the current env so a public DATABASE_URL override
+    # (local ops against prod) is honoured — api.db may have been imported earlier
+    # with the private railway.internal host.
+    from sqlalchemy import create_engine
+    import os
+    db_url = (os.environ.get("DATABASE_URL") or os.environ.get("SOLAR_DB_URL") or "").strip()
+    if db_url.startswith("postgres://"):
+        db_url = "postgresql://" + db_url[len("postgres://"):]
+    if not db_url:
+        from api.db import engine  # noqa: F401 — local sqlite / default
+    else:
+        engine = create_engine(db_url, future=True, pool_pre_ping=True)
 
     if args.verify:
         rep = verify_live(engine)
