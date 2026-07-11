@@ -1,0 +1,26 @@
+# Cloud Capture harvester — a SEPARATE Railway service from the API web service.
+# The Playwright base image ships a matching Chromium + all the system libraries a
+# headless browser needs, so we don't fight apt in a buildpack. The API service
+# keeps its lightweight RAILPACK Python build (no browser) — only THIS service
+# carries the ~1GB browser image.
+#
+# Railway setup: New Service → same repo → set "Dockerfile Path" to
+# Dockerfile.harvester. Share the DATABASE_URL + SO_CONFIG_KEY (required — the
+# harvester refuses to run credential collection without encryption) with the web
+# service, plus the CLOUD_CAPTURE_* flags from api/harvester/config.py.
+FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
+
+WORKDIR /app
+
+# Deps first for layer caching.
+COPY requirements.txt requirements-harvester.txt ./
+RUN pip install --no-cache-dir -r requirements-harvester.txt
+
+# App code (shares api/ models, crypto, ingest with the web service).
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+
+# Default command runs the scheduler loop; it is a safe no-op until
+# CLOUD_CAPTURE_ENABLED is set. Override the command for --once / --selftest.
+CMD ["python", "harvester_main.py"]
