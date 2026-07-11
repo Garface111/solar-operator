@@ -30,9 +30,13 @@ class FroniusVendor:
 
     async def is_logged_in(self, page) -> bool:
         try:
+            # max_redirects=0 is essential: a logged-OUT session 302s this probe to
+            # the WSO2 login page, and following that redirect returns 200 — a false
+            # "logged in" that makes us skip login entirely and scrape an empty
+            # session ("no PV systems"). Not following it: 302 → not ok → re-login.
             r = await page.context.request.get(
                 f"{BASE}/Messages/GetUnreadMessageCountForUser?_=0",
-                headers={"Accept": "application/json"})
+                headers={"Accept": "application/json"}, max_redirects=0)
             return r.ok
         except Exception:
             return False
