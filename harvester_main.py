@@ -161,8 +161,80 @@ def main(argv=None):
         print("CLOUD_CAPTURE_ENABLED is not set — the harvester loop is a no-op. "
               "Set it to run, or use --selftest / --once / --tenant to verify.")
         return
+    _start_health_server()
+    _maybe_seed()
     from api.harvester.scheduler import run_forever
     asyncio.run(run_forever())
+
+
+def _start_health_server():
+    """Serve 200 on / and /health on $PORT in a daemon thread. The harvester runs
+    its Dockerfile CMD (a browser loop, not an HTTP app), but this repo's shared
+    railway.toml applies healthcheckPath=/health to every service — without a
+    responder the harvester deploy never goes healthy. Cheap stdlib server; the
+    loop runs alongside it."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    port = int(os.environ.get("PORT") or 8080)
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *_a):
+            pass
+
+    def _run():
+        try:
+            HTTPServer(("0.0.0.0", port), _H).serve_forever()
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _maybe_seed():
+    """One-time in-container credential bootstrap. If CC_SEED_USERNAME +
+    CC_SEED_PASSWORD are set, resolve the tenant (CC_SEED_TENANT, or by an array
+    name via CC_SEED_ARRAY_LIKE) and upsert an ENABLED Cloud Capture credential,
+    then continue into the loop. Idempotent; NEVER logs the password. Remove the
+    CC_SEED_* env vars after the first boot so the secret does not linger."""
+    import logging
+    log = logging.getLogger("harvester.seed")
+    user = os.environ.get("CC_SEED_USERNAME")
+    pw = os.environ.get("CC_SEED_PASSWORD")
+    if not (user and pw):
+        return
+    provider = (os.environ.get("CC_SEED_PROVIDER") or "").strip().lower()
+    tenant = os.environ.get("CC_SEED_TENANT")
+    array_like = os.environ.get("CC_SEED_ARRAY_LIKE")
+    host = os.environ.get("CC_SEED_HOST")
+    try:
+        from sqlalchemy import select
+        from api.db import SessionLocal
+        from api.models import Array
+        from api.harvester import credentials as cc
+        if not cc.crypto_ready():
+            log.warning("seed skipped — SO_CONFIG_KEY not set (cannot encrypt)")
+            return
+        with SessionLocal() as db:
+            if not tenant and array_like:
+                row = db.execute(
+                    select(Array.tenant_id).where(Array.name.ilike(f"%{array_like}%")).limit(1)
+                ).first()
+                tenant = row[0] if row else None
+            if not tenant:
+                log.warning("seed skipped — could not resolve tenant")
+                return
+            cc.upsert_credential(db, tenant, provider, user, pw, login_host=host, enable=True)
+            db.commit()
+        log.info("seed: cloud-capture cred upserted (tenant=%s provider=%s) — "
+                 "remove CC_SEED_* env now", tenant, provider)
+    except Exception as exc:                          # never let a seed error kill the loop
+        log.warning("seed failed (continuing): %s", exc)
 
 
 if __name__ == "__main__":
