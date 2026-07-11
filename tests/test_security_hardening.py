@@ -171,4 +171,4 @@ def test_encrypt_script_targets_include_utility_sessions():
     cols = {(t, c) for t, _, c in ev._TARGETS}
     assert ("utility_sessions", "api_token") in cols
     assert ("utility_sessions", "refresh_token") in cols
-    assert ("portal_credentials", "secret_enc") in cols
+    assert ("portal_credential", "secret_enc") in cols
