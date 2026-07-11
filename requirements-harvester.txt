@@ -3,3 +3,7 @@
 # Docker image only; the API service never needs Playwright.
 -r requirements.txt
 playwright==1.48.0
+# The Playwright slim image has no system IANA tz database, so
+# zoneinfo.ZoneInfo("America/New_York") (sma.py, models) raises
+# ZoneInfoNotFoundError. This pip package ships the tz data.
+tzdata
