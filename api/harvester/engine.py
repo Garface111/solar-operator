@@ -161,12 +161,20 @@ class BrowserFarm:
                 fresh = True
                 outcome = await login.perform_login(
                     page, creds.username, creds.password, provider)
-                # Give the SPA a moment to land the authenticated view.
+                # Poll for the authenticated view to land — SPA logins (Chint)
+                # transition for a few seconds after submit before the dashboard
+                # renders, so a single immediate check reads as still-logged-out.
                 try:
                     await page.wait_for_load_state("networkidle", timeout=config.nav_timeout_ms())
                 except Exception:
                     pass
-                if not await vendor.is_logged_in(page):
+                _logged = False
+                for _ in range(6):
+                    if await vendor.is_logged_in(page):
+                        _logged = True
+                        break
+                    await asyncio.sleep(2)
+                if not _logged:
                     shot = await self._screenshot(page, tenant_id, provider, "login")
                     storage_state = await context.storage_state()
                     self._persist(tenant_id, provider, username_lc,
