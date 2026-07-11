@@ -4,7 +4,7 @@ builder = "RAILPACK"
 # No buildCommand: Railpack only provisions Python, npm is not on PATH here.
 
 [deploy]
-startCommand = "python -m api.migrate && uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000}"
+startCommand = "sh start.sh"
 healthcheckPath = "/health"
 # The startCommand runs the full migration (create_all + backfills) BEFORE uvicorn
 # binds the port, so /health can't answer until migrate finishes. 30s raced that
