@@ -161,6 +161,7 @@ def main(argv=None):
         print("CLOUD_CAPTURE_ENABLED is not set — the harvester loop is a no-op. "
               "Set it to run, or use --selftest / --once / --tenant to verify.")
         return
+    print("harvester_main: CLOUD_CAPTURE_ENABLED=1 — starting health server, seed, loop", flush=True)
     _start_health_server()
     _maybe_seed()
     from api.harvester.scheduler import run_forever
