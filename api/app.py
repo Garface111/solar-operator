@@ -431,10 +431,61 @@ if _SO_DEV_ENABLED:
     )
 
 
+def _launch_harvester_loop():
+    """Run the Cloud Capture browser loop INSIDE this process. The harvester
+    Railway service runs the same shared start command (uvicorn api.app), so it
+    boots this app; when CLOUD_CAPTURE_ENABLED=1 we launch the loop here instead
+    of the web scheduler. Best-effort + fully isolated — any failure is logged and
+    never crashes the app. NEVER runs on the web service (no CLOUD_CAPTURE_ENABLED).
+    """
+    import logging
+    log = logging.getLogger("harvester.embedded")
+    try:
+        # Chint's SPA only fetches in a VISIBLE tab, so we launch headed and need
+        # a display. The harvester image ships Xvfb; start one if headed + unset.
+        if (os.environ.get("CLOUD_CAPTURE_HEADLESS", "").lower() in ("false", "0", "no")
+                and not os.environ.get("DISPLAY")):
+            import subprocess
+            import time
+            disp = ":99"
+            subprocess.Popen(["Xvfb", disp, "-screen", "0", "1366x900x24"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.environ["DISPLAY"] = disp
+            time.sleep(2)
+        try:
+            import harvester_main
+            harvester_main._maybe_seed()          # optional CC_SEED_* bootstrap
+        except Exception as exc:
+            log.warning("harvester seed skipped: %s", exc)
+        import asyncio
+        import threading
+        from api.harvester.scheduler import run_forever
+
+        def _run():
+            try:
+                asyncio.run(run_forever())
+            except Exception as exc:              # noqa: BLE001
+                log.warning("harvester loop exited: %s", exc)
+
+        threading.Thread(target=_run, daemon=True, name="harvester-loop").start()
+        log.info("embedded Cloud Capture harvester loop launched (DISPLAY=%s)",
+                 os.environ.get("DISPLAY"))
+    except Exception as exc:                       # noqa: BLE001 — never break startup
+        log.warning("failed to launch embedded harvester loop: %s", exc)
+
+
 @app.on_event("startup")
 def _startup():
     init_db()
-    scheduler.start()
+    # This image also backs the Cloud Capture harvester service, which runs the
+    # SAME shared start command (uvicorn api.app), so it boots this app too. When
+    # CLOUD_CAPTURE_ENABLED=1 this process IS the harvester: run the browser loop
+    # instead of the web scheduler so the cron jobs don't double-run. The web
+    # service (no CLOUD_CAPTURE_ENABLED) is unchanged.
+    if os.environ.get("CLOUD_CAPTURE_ENABLED") == "1":
+        _launch_harvester_loop()
+    else:
+        scheduler.start()
     # Raise the threadpool that FastAPI runs sync routes in (default 40). Sign-up
     # and most account routes are sync (blocking DB + Resend calls), so under a
     # burst they queue here; lift the ceiling so more run concurrently. They're
