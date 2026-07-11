@@ -95,6 +95,10 @@ def upsert_credential(
     row.username = username.strip()[:200]
     if password:
         row.secret_enc = password           # column encrypts on the way to the DB
+        # Re-arm the lockout guard: a corrected password clears the fail-pause so
+        # the scheduler will try it again (see scheduler._is_due / MAX_LOGIN_FAILS).
+        row.harvest_fails = 0
+        row.last_harvest_ok = None
     if login_host is not None:
         row.login_host = login_host.strip()[:200] or None
     if enable is not None:

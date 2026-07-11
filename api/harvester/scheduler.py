@@ -50,6 +50,29 @@ def _tenant_allowed(db, tenant_id: str, allow_real: bool, allowlist: set[str]) -
     return bool(t and getattr(t, "is_demo", False))
 
 
+# ── Lockout safety (the hard constraint: never lock a customer out of their own
+# portal). A wrong/changed password or an MFA wall makes every login fail; retrying
+# that on the tight inverter loop is exactly how a utility's own lockout policy
+# trips. So we STOP after MAX_LOGIN_FAILS and, before that, back off hard between
+# attempts instead of hammering. A login only re-arms when the owner re-saves it.
+MAX_LOGIN_FAILS = 3
+FAIL_BACKOFF = timedelta(minutes=int(os.environ.get("CLOUD_CAPTURE_FAIL_BACKOFF_MIN") or 30))
+
+
+def _is_due(c, _now) -> bool:
+    """Whether a credential should be harvested now — with the lockout guard."""
+    fails = c.harvest_fails or 0
+    if fails >= MAX_LOGIN_FAILS:
+        return False                                  # PAUSED — never hammer a bad login
+    last = c.last_harvest_at
+    if last is None:
+        return True                                   # never harvested
+    if c.last_harvest_ok:
+        return last <= _now - _due_after(c.provider)  # refresh on the family cadence
+    # Last attempt FAILED: escalating backoff (30m, 60m, …), never the ~3-min loop.
+    return last <= _now - FAIL_BACKOFF * max(fails, 1)
+
+
 def due_credentials() -> list[tuple[str, str, str]]:
     """(tenant_id, provider, username_lc) for every credential due a harvest."""
     if not config.enabled():
@@ -67,9 +90,8 @@ def due_credentials() -> list[tuple[str, str, str]]:
         for c in rows:
             if not c.secret_enc:
                 continue
-            cutoff = _now - _due_after(c.provider)   # inverters: tight; utilities: 12h
-            if c.last_harvest_at and c.last_harvest_at > cutoff and c.last_harvest_ok:
-                continue                              # fresh & healthy → skip
+            if not _is_due(c, _now):
+                continue
             if not _tenant_allowed(db, c.tenant_id, allow_real, allowlist):
                 continue
             out.append((c.tenant_id, c.provider, c.username_lc))

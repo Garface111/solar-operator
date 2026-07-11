@@ -95,6 +95,35 @@ check("sma -> SMAVendor", module_for("sma").__class__.__name__ == "SMAVendor")
 check("chint -> ChintVendor", module_for("chint").__class__.__name__ == "ChintVendor")
 check("solaredge -> None (server-side API poll)", module_for("solaredge") is None)
 
+print("5) Lockout safety (never hammer a bad login)")
+from types import SimpleNamespace  # noqa: E402
+from datetime import timedelta      # noqa: E402
+from api.harvester.scheduler import _is_due, MAX_LOGIN_FAILS, FAIL_BACKOFF  # noqa: E402
+from api.models import now as _now_fn  # noqa: E402
+_n = _now_fn()
+def cred(fails=0, ok=None, age_min=None, provider="gmp"):
+    last = None if age_min is None else _n - timedelta(minutes=age_min)
+    return SimpleNamespace(harvest_fails=fails, last_harvest_ok=ok,
+                           last_harvest_at=last, provider=provider)
+check("paused after MAX fails (never retried)", not _is_due(cred(fails=MAX_LOGIN_FAILS, ok=False, age_min=999), _n))
+check("just-failed login backs off (not retried immediately)",
+      not _is_due(cred(fails=1, ok=False, age_min=1), _n))
+check("failed login retried only after backoff window",
+      _is_due(cred(fails=1, ok=False, age_min=int(FAIL_BACKOFF.total_seconds()/60)+1), _n))
+check("never-harvested credential is due", _is_due(cred(), _n))
+check("healthy inverter re-harvests on the tight cadence",
+      _is_due(cred(ok=True, age_min=10, provider="fronius"), _n))
+check("fresh healthy inverter is NOT re-harvested", not _is_due(cred(ok=True, age_min=1, provider="fronius"), _n))
+# re-save re-arms the guard
+with SessionLocal() as db:
+    c2 = cc.upsert_credential(db, "ten_verify", "vec", "coop@example.com", "pw1",
+                              login_host="vermontelectric.smarthub.coop", enable=True)
+    c2.harvest_fails = 5; c2.last_harvest_ok = False; db.commit(); cid2 = c2.id
+    cc.upsert_credential(db, "ten_verify", "vec", "coop@example.com", "pw2-corrected")
+    db.commit()
+    re = db.get(PortalCredential, cid2)
+check("re-saving a password clears the fail-pause", re.harvest_fails == 0 and re.last_harvest_ok is None)
+
 print()
 if FAILS:
     print(f"RESULT: {len(FAILS)} FAILED -> {FAILS}")

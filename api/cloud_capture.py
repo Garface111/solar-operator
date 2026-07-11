@@ -31,6 +31,7 @@ class CredentialIn(BaseModel):
     password: Optional[str] = None      # omit to toggle without re-sending
     login_host: Optional[str] = None    # SmartHub co-op subdomain (required for co-ops)
     enable: Optional[bool] = True
+    consent: Optional[bool] = None       # explicit opt-in; REQUIRED to store a password
 
 
 class ToggleIn(BaseModel):
@@ -44,10 +45,11 @@ class DeleteIn(BaseModel):
     username: str
 
 
-def _mirror_roster(db, tenant_id: str, provider: str, username: str) -> None:
+def _mirror_roster(db, tenant_id: str, provider: str, username: str, rearm: bool = False) -> None:
     """Make the login visible in the dashboard's Portal-access roster immediately
     (the same table the extension heartbeat populates), so both capture methods
-    show one unified list."""
+    show one unified list. When `rearm` (a fresh password was saved), clear any
+    fail-pause so the login is retried (mirrors the scheduler's re-arm)."""
     username_lc = username.strip().lower()
     row = db.execute(
         select(PortalLoginStatus).where(
@@ -61,6 +63,10 @@ def _mirror_roster(db, tenant_id: str, provider: str, username: str) -> None:
             tenant_id=tenant_id, provider=provider.lower(),
             username=username.strip(), username_lc=username_lc, reported_at=now(),
         ))
+    elif rearm:
+        row.paused = False
+        row.fails = 0
+        row.reported_at = now()
 
 
 @router.get("/v1/cloud-capture/status")
@@ -99,6 +105,16 @@ def save_credential(body: CredentialIn, authorization: Optional[str] = Header(de
         raise HTTPException(
             409, "Server-side credential storage is not armed (encryption key unset). "
                  "Cloud Capture cannot accept passwords yet.")
+    # Explicit opt-in consent is REQUIRED before we store a password server-side
+    # (the trust-model reversal — see terms.html §3 / privacy.html). A toggle-only
+    # save (no new password) doesn't re-collect consent.
+    if body.password and not body.consent:
+        raise HTTPException(
+            422, "Storing a password with Cloud Capture requires your explicit consent.")
+    if body.password:
+        import logging
+        logging.getLogger("cloud_capture").info(
+            "cloud-capture consent recorded: tenant=%s provider=%s", t.id, body.provider)
     provider = (body.provider or "").strip().lower()
     if not provider or not (body.username or "").strip():
         raise HTTPException(422, "provider and username are required")
@@ -111,7 +127,7 @@ def save_credential(body: CredentialIn, authorization: Optional[str] = Header(de
             db, t.id, provider, body.username, body.password,
             login_host=body.login_host, enable=body.enable,
         )
-        _mirror_roster(db, t.id, provider, body.username)
+        _mirror_roster(db, t.id, provider, body.username, rearm=bool(body.password))
         db.commit()
     return {"ok": True, "provider": provider, "username": body.username.strip(),
             "enabled": bool(body.enable), "encryption_ready": cc.crypto_ready()}
