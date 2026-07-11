@@ -1778,6 +1778,16 @@ class PortalCredential(Base):
     )
 
 
+class KVFlag(Base):
+    """A tiny generic key→value flag store for fire-once / idempotency markers
+    (e.g. "did the one-time Cloud Capture announcement already send?"). Survives
+    restarts (unlike in-memory state or the ephemeral container FS)."""
+    __tablename__ = "kv_flag"
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class HarvestRun(Base):
     """One server-side capture attempt — the audit + observability trail.
 
