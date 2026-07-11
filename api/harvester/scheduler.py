@@ -67,10 +67,12 @@ def _is_due(c, _now) -> bool:
     last = c.last_harvest_at
     if last is None:
         return True                                   # never harvested
-    if c.last_harvest_ok:
-        return last <= _now - _due_after(c.provider)  # refresh on the family cadence
-    # Last attempt FAILED: escalating backoff (30m, 60m, …), never the ~3-min loop.
-    return last <= _now - FAIL_BACKOFF * max(fails, 1)
+    if fails > 0:
+        # LOGIN failures → escalating backoff (30m, 60m, …), the lockout guard.
+        return last <= _now - FAIL_BACKOFF * fails
+    # fails==0: healthy OR a post-login scrape failure (not a lockout risk) →
+    # retry on the normal family cadence, not the login backoff.
+    return last <= _now - _due_after(c.provider)
 
 
 def due_credentials() -> list[tuple[str, str, str]]:

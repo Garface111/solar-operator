@@ -134,9 +134,18 @@ def record_health(
     """Update the credential's health, mirror it into the PortalLoginStatus roster
     (so the dashboard shows one unified view across extension + cloud capture),
     and append a HarvestRun audit row."""
+    # Only a LOGIN failure counts toward the pause/backoff lockout guard — that's
+    # the one that risks the utility/vendor locking the account. A scrape failure
+    # happens AFTER we're authenticated, so it is not a lockout risk: record it as
+    # not-ok but don't bump the fail counter, so it retries on the normal cadence
+    # instead of the 30-min login backoff.
+    login_failure = (status == "login_failed")
     cred.last_harvest_at = now()
     cred.last_harvest_ok = ok
-    cred.harvest_fails = 0 if ok else min((cred.harvest_fails or 0) + 1, 999)
+    if ok:
+        cred.harvest_fails = 0
+    elif login_failure:
+        cred.harvest_fails = min((cred.harvest_fails or 0) + 1, 999)
 
     # Mirror into the roster row the dashboard reads.
     row = db.execute(
@@ -156,7 +165,7 @@ def record_health(
         row.last_ok_at = now()
         row.fails = 0
         row.paused = False
-    else:
+    elif login_failure:
         row.fails = min((row.fails or 0) + 1, 999)
         if row.fails >= PAUSE_FAILS:
             row.paused = True
