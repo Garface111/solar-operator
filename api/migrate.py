@@ -620,6 +620,14 @@ def main():
             ))
             print("  + tenants.password_hash")
 
+        # 2026-07-11 Session invalidation epoch (security hardening).
+        # Bumped on password change / key regen so outstanding HMAC sessions die.
+        if not column_exists(conn, "tenants", "session_epoch"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0"
+            ))
+            print("  + tenants.session_epoch")
+
         # 2026-06-05 Capture timeline (feat/capture-timeline-devpanel).
         # The capture_events table is created by init_db() (create_all) above.
         # Add composite index explicitly in case the table existed before this
@@ -833,6 +841,29 @@ def main():
                     "ALTER COLUMN config TYPE TEXT USING config::text"
                 ))
                 print("  ~ inverter_connections.config JSON -> TEXT (encryption-at-rest)")
+
+        # 2026-07-11 Encrypt utility sessions + cloud-capture session state.
+        # raw_payload / session_state_enc are EncryptedJSON (stored TEXT). On
+        # Postgres a native json column would reject the SOENC1: Fernet envelope.
+        if conn.dialect.name == "postgresql":
+            for table, col, label in (
+                ("utility_sessions", "raw_payload", "utility_sessions.raw_payload"),
+                ("portal_credentials", "session_state_enc", "portal_credentials.session_state_enc"),
+            ):
+                try:
+                    cols = inspect(conn).get_columns(table)
+                except Exception:
+                    continue
+                col_type = next(
+                    (str(c["type"]).lower() for c in cols if c["name"] == col),
+                    "",
+                )
+                if "json" in col_type:
+                    conn.execute(text(
+                        f"ALTER TABLE {table} "
+                        f"ALTER COLUMN {col} TYPE TEXT USING {col}::text"
+                    ))
+                    print(f"  ~ {label} JSON -> TEXT (encryption-at-rest)")
 
         # 2026-06-13 Array Operator automatic billing reports
         # (feat/array-operator-reports). The billing_report_subscriptions table

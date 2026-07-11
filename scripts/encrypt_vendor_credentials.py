@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """One-time migration: encrypt existing vendor credentials at rest.
 
-Wraps the historical PLAINTEXT vendor secrets — `InverterConnection.config`
-(SolarEdge/Fronius/SMA/Chint/Locus keys+tokens) and the legacy
-`Array.solaredge_api_key` — in the Fernet `SOENC1:` envelope keyed on
-SO_CONFIG_KEY. Idempotent and self-classifying: a row already enveloped is
+Wraps PLAINTEXT secrets at rest — vendor API keys
+(`InverterConnection.config`, `Array.solaredge_api_key`), utility portal
+JWTs (`UtilitySession.api_token` / `refresh_token` / `raw_payload`), and
+Cloud Capture passwords (`PortalCredential.secret_enc` / session state) —
+in the Fernet `SOENC1:` envelope keyed on SO_CONFIG_KEY. Idempotent and self-classifying: a row already enveloped is
 skipped, so re-running is a no-op, and a mixed table (some rows migrated, some
 not) converges.
 
@@ -47,6 +48,13 @@ from api import crypto
 _TARGETS = [
     ("inverter_connections", "id", "config"),
     ("arrays", "id", "solaredge_api_key"),
+    # Utility portal JWTs / refresh tokens (highest residual dump risk).
+    ("utility_sessions", "id", "api_token"),
+    ("utility_sessions", "id", "refresh_token"),
+    ("utility_sessions", "id", "raw_payload"),
+    # Cloud Capture portal passwords + playwright storage_state.
+    ("portal_credentials", "id", "secret_enc"),
+    ("portal_credentials", "id", "session_state_enc"),
 ]
 
 
@@ -93,7 +101,16 @@ def process(engine, *, mode: str = "encrypt", apply: bool = False, out=print) ->
 
     with engine.begin() as conn:
         for table, idcol, col in _TARGETS:
-            rows = conn.execute(text(_select_sql(engine, table, col))).fetchall()
+            # Skip tables that do not exist yet (older DBs / partial test schemas).
+            try:
+                rows = conn.execute(text(_select_sql(engine, table, col))).fetchall()
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "no such table" in msg or "does not exist" in msg or "undefinedtable" in msg:
+                    out(f"  ↷ {table}.{col}: table missing — skipped\n")
+                    report[f"{table}.{col}"] = {"changed": 0, "skipped": 0, "total": 0, "missing": True}
+                    continue
+                raise
             changed = skipped = 0
             for rid, val in rows:
                 if val is None:

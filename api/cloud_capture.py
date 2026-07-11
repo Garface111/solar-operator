@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -21,6 +21,7 @@ from .db import SessionLocal
 from .models import PortalCredential, PortalLoginStatus, now
 from .harvester import config
 from .harvester import credentials as cc
+from . import ratelimit
 
 router = APIRouter()
 
@@ -96,9 +97,14 @@ def status(authorization: Optional[str] = Header(default=None)):
 
 
 @router.post("/v1/cloud-capture/credentials")
-def save_credential(body: CredentialIn, authorization: Optional[str] = Header(default=None)):
+def save_credential(body: CredentialIn, request: Request,
+                    authorization: Optional[str] = Header(default=None)):
     """Collect / update a server-side login. Refuses a password without encryption."""
     t = tenant_from_session(authorization)
+    # Bound password-collection abuse (stolen session dumping many portals).
+    ratelimit.enforce(request, "cloud_capture_save", max_hits=20, window_s=3600,
+                      key_extra=t.id,
+                      message="Too many credential saves — try again later.")
     if not config.collection_enabled():
         raise HTTPException(403, "Cloud Capture credential collection is not enabled.")
     if body.password and not cc.crypto_ready():

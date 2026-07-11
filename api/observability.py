@@ -32,7 +32,9 @@ _SENSITIVE_KEYS = {
     "authorization", "cookie", "set-cookie", "x-api-key", "api-key",
     "password", "current_password", "session_token", "access_token",
     "id_token", "refresh_token", "tenant_key", "stripe-signature",
-    "secret", "client_secret",
+    "secret", "client_secret", "api_token", "apitoken", "x-admin-key",
+    "x-seed-token", "x-maint-key", "so_config_key", "secret_enc",
+    "session_state_enc", "raw_payload", "solaredge_api_key",
 }
 
 

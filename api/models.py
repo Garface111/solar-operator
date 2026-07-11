@@ -242,6 +242,13 @@ class Tenant(Base):
     # Password-based login (June 2026). Nullable — null means magic-link only.
     # bcrypt hash (passlib, cost 12). Never expose this field in API responses.
     password_hash: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Session invalidation counter (Jul 2026 security hardening). Bumped on
+    # password change (and similar "log everyone out" events). Session tokens
+    # carry the epoch they were minted under; a mismatch → 401. Default 0 so
+    # pre-existing tokens (no se claim) keep working until the first bump.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
 
     # Onboarding wizard state (added June 2026 for the 5-screen signup flow).
     # onboarding_token is a 32-char random string handed to the SPA + passed as
@@ -615,7 +622,15 @@ class UtilitySession(Base):
     ongoing scraping. Selection is per-account by customer_number (see
     api/sessions.py); a capture re-binds (upserts) its identity's row in place.
     Rows whose customer_number is NULL (legacy captures, or providers that don't
-    expose a customer id) fall back to the latest-per-provider behavior."""
+    expose a customer id) fall back to the latest-per-provider behavior.
+
+    ENCRYPTION AT REST (Jul 2026): api_token / refresh_token / raw_payload hold
+    live utility-portal credentials — historically plaintext, so a DB dump was
+    enough to pull bills as the customer. They now use EncryptedStr /
+    EncryptedJSON (same SO_CONFIG_KEY Fernet scheme as InverterConnection).
+    Pass-through when the key is unset; migrate existing rows with
+    `python -m scripts.encrypt_vendor_credentials --apply` (targets include
+    utility_sessions)."""
     __tablename__ = "utility_sessions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
@@ -624,11 +639,13 @@ class UtilitySession(Base):
     # custNbr), shared by all accounts captured under this login. NULL for
     # legacy rows / providers without a customer id → latest-per-provider.
     customer_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
-    api_token: Mapped[str] = mapped_column(Text)
-    refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_token: Mapped[str] = mapped_column(EncryptedStr)
+    refresh_token: Mapped[str | None] = mapped_column(EncryptedStr, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
-    raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # May embed the same JWT / refresh material as api_token — encrypt the whole
+    # blob so a dump cannot recover secrets from the "debug" column either.
+    raw_payload: Mapped[dict | None] = mapped_column(EncryptedJSON, nullable=True)
     refresh_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

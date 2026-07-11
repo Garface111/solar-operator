@@ -232,7 +232,22 @@ from .adapters.smarthub import SMARTHUB_UTILITIES as _SMARTHUB_UTILITIES
 for _sh_code, _sh_info in _SMARTHUB_UTILITIES.items():
     _PROVIDER_AUTOPOP_FIELDS[_sh_info["provider"]] = _SMARTHUB_AUTOPOP
 
-app = FastAPI(title="NEPOOL Operator API", version="1.0.0")
+# Public OpenAPI/Swagger is an attacker map of every admin + capture route.
+# Keep it available in local/dev; dark it on Railway (and when explicitly set).
+_ON_RAILWAY_FOR_DOCS = bool(
+    os.getenv("RAILWAY_PROJECT_ID")
+    or os.getenv("RAILWAY_SERVICE_ID")
+    or os.getenv("RAILWAY_ENVIRONMENT")
+    or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+)
+_DOCS_OFF = _ON_RAILWAY_FOR_DOCS or (os.getenv("SO_DISABLE_API_DOCS", "").lower() in ("1", "true", "yes", "on"))
+app = FastAPI(
+    title="NEPOOL Operator API",
+    version="1.0.0",
+    docs_url=None if _DOCS_OFF else "/docs",
+    redoc_url=None if _DOCS_OFF else "/redoc",
+    openapi_url=None if _DOCS_OFF else "/openapi.json",
+)
 
 # Error monitoring (launch readiness). Initialized as early as possible so any
 # startup or request error is captured. No-op unless SENTRY_DSN is set, so dev +
@@ -469,6 +484,10 @@ def health():
         "stripe_array_price_set": bool(os.getenv("STRIPE_ARRAY_PRICE_ID")),
         "sentry_configured": bool(os.getenv("SENTRY_DSN")),
         "web_concurrency": int(os.getenv("WEB_CONCURRENCY", "1")),
+        # Non-secret crypto posture: True means SO_CONFIG_KEY is set so vendor /
+        # utility / cloud-capture secrets encrypt at rest. False = plaintext pass-through.
+        "encryption_at_rest": bool(os.getenv("SO_CONFIG_KEY")),
+        "api_docs_public": not _DOCS_OFF,
     }
 
 
@@ -1753,12 +1772,19 @@ def admin_seed_realistic_demo(arrays: int = 12, offtakers_per_array: int = 5,
 def admin_list_tenants(_: None = Depends(_require_admin)):
     with SessionLocal() as db:
         ts = db.execute(select(Tenant).order_by(Tenant.created_at.desc())).scalars().all()
-        return [
-            {"id": t.id, "name": t.name, "email": t.contact_email,
-             "tenant_key": t.tenant_key, "plan": t.plan, "active": t.active,
-             "created_at": t.created_at.isoformat()}
-            for t in ts
-        ]
+        # Never bulk-return full tenant_keys — a compromised admin key must not
+        # become mass extension takeover. last4 is enough for support lookups;
+        # full key is only shown once at create / regen.
+        out = []
+        for t in ts:
+            key = t.tenant_key or ""
+            out.append({
+                "id": t.id, "name": t.name, "email": t.contact_email,
+                "tenant_key_last4": key[-4:] if len(key) >= 4 else key,
+                "plan": t.plan, "active": t.active, "product": t.product,
+                "created_at": t.created_at.isoformat(),
+            })
+        return out
 
 
 @app.post("/admin/tenants/link-by-email")

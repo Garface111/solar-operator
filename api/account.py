@@ -147,9 +147,33 @@ router = APIRouter()
 
 # ─── session token signing (compact HMAC, no JWT lib needed) ─────────────
 
+def _tenant_session_epoch(tenant_id: str) -> int:
+    """Current session_epoch for a tenant (0 if missing / unknown)."""
+    try:
+        with SessionLocal() as db:
+            t = db.get(Tenant, tenant_id)
+            if t is None:
+                return 0
+            return int(getattr(t, "session_epoch", 0) or 0)
+    except Exception:
+        return 0
+
+
 def _sign_session(tenant_id: str, ttl_seconds: int = SESSION_TTL_SECONDS,
-                  is_demo: bool = False) -> str:
-    payload = {"tid": tenant_id, "exp": int(time.time()) + ttl_seconds}
+                  is_demo: bool = False, session_epoch: int | None = None) -> str:
+    """Mint an HMAC session token.
+
+    Tokens carry ``se`` (session_epoch). When the tenant's epoch is later bumped
+    (password change), every older token fails verification — server-side
+    logout-all without a session store.
+    """
+    if session_epoch is None:
+        session_epoch = _tenant_session_epoch(tenant_id)
+    payload = {
+        "tid": tenant_id,
+        "exp": int(time.time()) + ttl_seconds,
+        "se": int(session_epoch or 0),
+    }
     # The demo magic-link carries an is_demo claim so the SPA can render its
     # read-only banner without a second round-trip. Authoritative demo gating
     # still lives on Tenant.is_demo (checked server-side by require_not_demo).
@@ -170,8 +194,8 @@ def mint_session_for_tenant(tenant_id: str) -> str:
     return _sign_session(tenant_id)
 
 
-def _verify_session(token: str) -> Optional[str]:
-    """Return tenant_id if valid, None otherwise."""
+def _session_payload(token: str) -> Optional[dict]:
+    """Parse a verified (HMAC + exp) session token → payload dict, or None."""
     try:
         body, sig = token.split(".", 1)
     except ValueError:
@@ -186,20 +210,41 @@ def _verify_session(token: str) -> Optional[str]:
         return None
     if payload.get("exp", 0) < time.time():
         return None
-    return payload.get("tid")
+    return payload
 
 
-def tenant_from_session(authorization: Optional[str]) -> Tenant:
+def _verify_session(token: str) -> Optional[str]:
+    """Return tenant_id if valid, None otherwise. (Epoch checked in tenant_from_session.)"""
+    payload = _session_payload(token)
+    return payload.get("tid") if payload else None
+
+
+def bump_session_epoch(db, tenant: Tenant) -> int:
+    """Invalidate every outstanding session for this tenant. Returns new epoch."""
+    new_ep = int(getattr(tenant, "session_epoch", 0) or 0) + 1
+    tenant.session_epoch = new_ep
+    return new_ep
+
+
+def tenant_from_session(authorization: str | None) -> Tenant:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Sign in to continue")
     token = authorization.split(" ", 1)[1].strip()
-    tenant_id = _verify_session(token)
-    if not tenant_id:
+    payload = _session_payload(token)
+    if not payload or not payload.get("tid"):
         raise HTTPException(401, "Session expired — sign in again")
+    tenant_id = payload["tid"]
     with SessionLocal() as db:
         t = db.get(Tenant, tenant_id)
         if not t:
             raise HTTPException(404, "Account not found")
+        # Session epoch mismatch = password changed (or force-logout) after mint.
+        # Tokens minted before the se claim (pre-hardening) default se=0 and match
+        # the column default until the first bump.
+        token_se = int(payload.get("se", 0) or 0)
+        current_se = int(getattr(t, "session_epoch", 0) or 0)
+        if token_se != current_se:
+            raise HTTPException(401, "Session expired — sign in again")
         # NOTE: we DO let inactive (canceled) tenants reach /account so they
         # can see their status and (if comped) export their data. Read-only
         # gated downstream where needed.
@@ -700,9 +745,15 @@ def set_password(body: SetPasswordBody,
             if not _verify_password(body.current_password, t.password_hash):
                 raise HTTPException(400, "Current password is incorrect")
         t.password_hash = _hash_password(body.password)
+        # Invalidate every other outstanding session (stolen token / shared browser).
+        # Re-issue a fresh token for THIS client so they stay signed in.
+        new_ep = bump_session_epoch(db, t)
+        tenant_id = t.id
         db.commit()
 
-    return {"ok": True, "has_password": True}
+    session_token = _sign_session(tenant_id, session_epoch=new_ep)
+    return {"ok": True, "has_password": True,
+            "session_token": session_token, "expires_in": SESSION_TTL_SECONDS}
 
 
 # ─── account read ───────────────────────────────────────────────────────
@@ -1132,6 +1183,9 @@ def regen_activation_key(authorization: Optional[str] = Header(default=None)):
     with SessionLocal() as db:
         t = db.get(Tenant, t.id)
         t.tenant_key = new_key
+        # Rotating the extension key is a high-privilege event — also force a
+        # dashboard re-login so a stolen session can't just re-read the new key.
+        bump_session_epoch(db, t)
         db.commit()
     return {"ok": True, "tenant_key": new_key}
 
