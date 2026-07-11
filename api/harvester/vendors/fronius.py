@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from .base import CaptureRequest, ScrapeResult
+
+# Fronius's FormatedDateTimeStamp is the account's LOCAL time (ET for VT arrays).
+_TZ = ZoneInfo("America/New_York")
 
 log = logging.getLogger("harvester.fronius")
 
@@ -191,11 +195,15 @@ class FroniusVendor:
         try:
             stamp = (((r or {}).get("SensorData") or [{}])[0] or {}).get("FormatedDateTimeStamp")
             if stamp:
-                dt = datetime.strptime(stamp, "%m/%d/%Y %I:%M %p")
-                ts = dt.isoformat()
+                # The stamp is account-LOCAL (ET). Treat it as ET and convert to UTC,
+                # else the backend reads it as UTC and the data looks hours stale
+                # (ET is UTC-4/5 → the "Source 4h old" symptom). Clamp a future parse.
+                dt_utc = datetime.strptime(stamp, "%m/%d/%Y %I:%M %p").replace(tzinfo=_TZ).astimezone(timezone.utc)
+                now_utc = datetime.now(timezone.utc)
+                ts = (now_utc if dt_utc > now_utc else dt_utc).isoformat()
         except Exception:
             ts = None
-        return by_name, ts or datetime.utcnow().isoformat()
+        return by_name, ts or datetime.now(timezone.utc).isoformat()
 
 
 def _integrate_kwh(kw_series: list) -> float | None:
