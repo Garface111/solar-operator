@@ -147,6 +147,14 @@ class BrowserFarm:
 
             url = await vendor.login_url(creds)
             await page.goto(url, wait_until="domcontentloaded")
+            # Let the SPA render before probing auth state — otherwise a login
+            # form that hasn't painted yet reads as "already logged in", login is
+            # skipped, and the authenticated scrape then finds nothing.
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
 
             if not await vendor.is_logged_in(page):
                 # Warm session missing/expired → do the human login flow.
