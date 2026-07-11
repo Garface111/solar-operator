@@ -1277,6 +1277,14 @@ def start():
         CronTrigger(hour=8, minute=0),
         id="trial_ending_reminders", replace_existing=True,
     )
+    # Cloud Capture launch announcement — fires ONCE at/after
+    # CLOUD_CAPTURE_ANNOUNCE_AT (KVFlag-guarded, self-no-ops until then). A 15-min
+    # interval means it goes out within 15 min of the scheduled time.
+    from .jobs.cloud_capture_announce import maybe_send_scheduled
+    scheduler.add_job(
+        maybe_send_scheduled,
+        "interval", minutes=15, id="cloud_capture_announce", replace_existing=True,
+    )
     # Drain the queue every minute
     from .worker import run_pending_jobs
     scheduler.add_job(

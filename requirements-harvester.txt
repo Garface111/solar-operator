@@ -1,0 +1,5 @@
+# Cloud Capture harvester service deps = the app's deps (shared models / crypto /
+# ingest) plus Playwright for the headless browser. Installed into the harvester
+# Docker image only; the API service never needs Playwright.
+-r requirements.txt
+playwright==1.48.0

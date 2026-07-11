@@ -1711,3 +1711,108 @@ class SmaConsent(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "owner_email_lc", name="uq_sma_consent"),
     )
+
+
+# ── Cloud Capture (server-side headless harvesting) ────────────────────────────
+# The second, optional capture path alongside the browser extension. Where the
+# extension keeps passwords client-side and drives login in the operator's own
+# browser, Cloud Capture stores the password server-side (opt-in) and drives the
+# login from a fleet of headless browsers in the cloud, so the customer never has
+# to keep a tab open. See api/harvester/ for the engine.
+class PortalCredential(Base):
+    """Server-side portal credential vault — the OPT-IN counterpart to the
+    extension's client-side vault (extension/vault.js), powering Cloud Capture.
+
+    ⚠️ TRUST-MODEL NOTE — READ crypto.py first. Unlike ``PortalLoginStatus``
+    (metadata only, passwords NEVER reach the server), THIS table deliberately
+    holds the actual portal password so a headless server-side browser can log
+    in without the operator present. That is a conscious reversal of the
+    client-side-BYOK posture, made per-login and only when the owner explicitly
+    opts a login into Cloud Capture. Mitigations:
+
+      * ``secret_enc`` is Fernet-encrypted at rest (EncryptedStr, keyed on
+        SO_CONFIG_KEY) — a DB dump yields ciphertext, not passwords. Cloud
+        Capture therefore REQUIRES SO_CONFIG_KEY to be set (the harvester
+        refuses to run credential collection without it).
+      * The plaintext is decrypted just-in-time in the harvester worker only,
+        is NEVER logged, and is NEVER returned by any API (no read endpoint
+        serves ``secret_enc``).
+      * ``session_state_enc`` persists the Playwright storage_state (cookies /
+        localStorage) so the farm logs in RARELY — reusing a warm session like a
+        human who stays signed in — which is both gentler on the portal and the
+        key to surviving bot-detection (a real login flow re-established the
+        cookie, vs. replaying one headlessly, which the NISC/GMP APIs reject).
+
+    Keyed (tenant_id, provider, username_lc) to line up 1:1 with the roster row
+    in ``PortalLoginStatus``, which the harvester keeps updated so the dashboard
+    shows one unified health view across BOTH capture methods.
+    """
+    __tablename__ = "portal_credential"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))              # gmp | vec | wec | sh_* | fronius | sma | chint
+    username: Mapped[str] = mapped_column(String(200))             # as typed (display)
+    username_lc: Mapped[str] = mapped_column(String(200))          # lowercased (match key)
+    # The password, encrypted at rest. Pass-through plaintext ONLY when
+    # SO_CONFIG_KEY is unset — which the harvester treats as "Cloud Capture
+    # disabled" so we never persist a bare password by accident.
+    secret_enc: Mapped[str | None] = mapped_column(EncryptedStr, nullable=True)
+    # Opt-in gate. False = collected but not yet activated for server-side pull.
+    cloud_capture_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Persisted Playwright storage_state ({cookies, origins}), encrypted at rest.
+    session_state_enc: Mapped[dict | None] = mapped_column(EncryptedJSON, nullable=True)
+    session_state_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # For SmartHub co-ops: the specific portal host (e.g. vec.smarthub.coop) so
+    # the harvester navigates to the right co-op without re-deriving it.
+    login_host: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Health, mirrored into PortalLoginStatus for the unified roster.
+    last_harvest_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_harvest_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    harvest_fails: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "username_lc", name="uq_portal_credential"),
+        Index("ix_portal_credential_due", "cloud_capture_enabled", "last_harvest_at"),
+    )
+
+
+class KVFlag(Base):
+    """A tiny generic key→value flag store for fire-once / idempotency markers
+    (e.g. "did the one-time Cloud Capture announcement already send?"). Survives
+    restarts (unlike in-memory state or the ephemeral container FS)."""
+    __tablename__ = "kv_flag"
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class HarvestRun(Base):
+    """One server-side capture attempt — the audit + observability trail.
+
+    Written by the harvester for every job it runs (success or failure) so a
+    frozen/failing Cloud-Capture login is diagnosable without spelunking logs,
+    and so we can prove on real data that a pull happened. Cheap, append-only,
+    pruned by age elsewhere.
+    """
+    __tablename__ = "harvest_run"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    username_lc: Mapped[str] = mapped_column(String(200))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # ok | login_failed | scrape_failed | no_creds | disabled | skipped | error
+    status: Mapped[str] = mapped_column(String(24), default="error")
+    # True when we had to do a full username/password login; False when a warm
+    # persisted session was reused (the healthy steady state).
+    logged_in_fresh: Mapped[bool] = mapped_column(Boolean, default=False)
+    rows_written: Mapped[int] = mapped_column(Integer, default=0)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Path/key to a failure screenshot for debugging a broken selector/flow.
+    screenshot_ref: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+    __table_args__ = (
+        Index("ix_harvest_run_lookup", "tenant_id", "provider", "started_at"),
+    )

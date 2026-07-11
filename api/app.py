@@ -415,6 +415,12 @@ app.include_router(feature_suggestions_router)
 from .portal_access import router as portal_access_router
 app.include_router(portal_access_router)
 
+# Cloud Capture: server-side headless-browser harvesting (the opt-in alternative
+# to the browser extension). Collects/toggles/deletes server-side portal
+# credentials + reports harvest status. See api/harvester/ for the engine.
+from .cloud_capture import router as cloud_capture_router
+app.include_router(cloud_capture_router)
+
 # Auto-adapter engine: self-improving declarative adapters (synth -> validate -> registry)
 from .auto_adapters import router as auto_adapters_router
 app.include_router(auto_adapters_router)
