@@ -21,7 +21,19 @@ from . import config
 
 log = logging.getLogger("harvester.scheduler")
 
-DUE_AFTER = timedelta(hours=int(os.environ.get("CLOUD_CAPTURE_DUE_HOURS") or 12))
+# Per-family cadence. Vendor (inverter) data is LIVE production power — Ford's
+# hard SLA is "never more than 5 minutes old", so inverters re-harvest on a tight
+# loop (warm session ⇒ each cycle is just navigate + read + POST, no re-login).
+# Utility bills are monthly, so ~12h is plenty and keeps us gentle on portals.
+# Both env-tunable; keep INVERTER_DUE + tick_seconds well under 5 min combined.
+INVERTER_CODES = {"fronius", "sma", "chint", "solaredge", "solis", "enphase",
+                  "tigo", "alsoenergy", "locus"}
+INVERTER_DUE = timedelta(seconds=int(os.environ.get("CLOUD_CAPTURE_INVERTER_DUE_SECONDS") or 180))
+UTILITY_DUE = timedelta(hours=int(os.environ.get("CLOUD_CAPTURE_DUE_HOURS") or 12))
+
+
+def _due_after(provider: str) -> timedelta:
+    return INVERTER_DUE if (provider or "").lower() in INVERTER_CODES else UTILITY_DUE
 
 
 def _tenant_allowlist() -> set[str]:
@@ -44,7 +56,7 @@ def due_credentials() -> list[tuple[str, str, str]]:
         return []
     allow_real = config.allow_real_customers()
     allowlist = _tenant_allowlist()
-    cutoff = now() - DUE_AFTER
+    _now = now()
     out: list[tuple[str, str, str]] = []
     with SessionLocal() as db:
         rows = db.execute(
@@ -55,6 +67,7 @@ def due_credentials() -> list[tuple[str, str, str]]:
         for c in rows:
             if not c.secret_enc:
                 continue
+            cutoff = _now - _due_after(c.provider)   # inverters: tight; utilities: 12h
             if c.last_harvest_at and c.last_harvest_at > cutoff and c.last_harvest_ok:
                 continue                              # fresh & healthy → skip
             if not _tenant_allowed(db, c.tenant_id, allow_real, allowlist):

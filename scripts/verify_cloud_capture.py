@@ -90,7 +90,10 @@ from api.harvester.vendors import module_for  # noqa: E402
 check("gmp -> GMPVendor", module_for("gmp").__class__.__name__ == "GMPVendor")
 check("vec -> SmartHubVendor", module_for("vec").__class__.__name__ == "SmartHubVendor")
 check("sh_glover -> SmartHubVendor", module_for("sh_glover").__class__.__name__ == "SmartHubVendor")
-check("fronius -> None (covered by official API)", module_for("fronius") is None)
+check("fronius -> FroniusVendor", module_for("fronius").__class__.__name__ == "FroniusVendor")
+check("sma -> SMAVendor", module_for("sma").__class__.__name__ == "SMAVendor")
+check("chint -> ChintVendor", module_for("chint").__class__.__name__ == "ChintVendor")
+check("solaredge -> None (server-side API poll)", module_for("solaredge") is None)
 
 print()
 if FAILS:

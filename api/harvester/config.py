@@ -63,8 +63,11 @@ def headless() -> bool:
 
 
 def tick_seconds() -> int:
-    """How often the scheduler wakes to enumerate due work."""
-    return max(60, _int("CLOUD_CAPTURE_TICK_SECONDS", 900))
+    """How often the scheduler wakes to enumerate due work. Default 90s so a
+    due inverter (INVERTER_DUE ~180s) is picked up promptly — combined worst-case
+    data age stays under the 5-minute vendor-freshness SLA. Tighten for a harder
+    SLA at the cost of more portal load."""
+    return max(60, _int("CLOUD_CAPTURE_TICK_SECONDS", 90))
 
 
 def nav_timeout_ms() -> int:

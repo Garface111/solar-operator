@@ -170,6 +170,48 @@ async def _submit(page, btn, ref) -> None:
         pass
 
 
+async def _poll_for_form(page, hint):
+    """Poll ~6s for a username/password field (SSO pages lag the load event)."""
+    pw = user = None
+    for _ in range(20):
+        pw = await _find_pass(page, hint)
+        user = await _find_user(page, hint)
+        if pw or user:
+            break
+        await asyncio.sleep(0.3)
+    return pw, user
+
+
+async def _click_login_entry(page) -> bool:
+    """Reach the real form from a landing "Login"/"Sign in" entry. Only called
+    when NO form was found, so this can't be a premature submit. Prefers
+    NAVIGATING to an anchor's href (Fronius: /Account/ExternalLogin) over clicking
+    — a click can be swallowed by a cookie-consent overlay (Cookiebot). Returns
+    True if it navigated/clicked."""
+    try:
+        for el in await page.query_selector_all('a, button, [role="button"]'):
+            try:
+                if not await el.is_visible():
+                    continue
+                label = ((await el.text_content()) or "").strip()
+                if not _BTN_TEXT_RX.search(label):
+                    continue
+                tag = await el.evaluate("e => e.tagName.toLowerCase()")
+                if tag == "a":
+                    href = await el.evaluate("e => e.href || ''")   # absolute
+                    if href and "#" != (await el.get_attribute("href") or "") \
+                            and not href.lower().startswith("javascript"):
+                        await page.goto(href, wait_until="domcontentloaded", timeout=45000)
+                        return True
+                await el.click(timeout=8000)
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 async def perform_login(page, username: str, password: str, provider: str) -> str:
     """Drive the portal's own login form. See module docstring for return values.
     NEVER logs the password."""
@@ -178,13 +220,17 @@ async def perform_login(page, username: str, password: str, provider: str) -> st
     hint = HINTS.get(hint_key_for(provider))
 
     # Poll up to ~6s for a field to appear (SSO pages lag the load event).
-    pw = user = None
-    for _ in range(20):
-        pw = await _find_pass(page, hint)
-        user = await _find_user(page, hint)
-        if pw or user:
-            break
-        await asyncio.sleep(0.3)
+    pw, user = await _poll_for_form(page, hint)
+    if not pw and not user:
+        # Many portals (Fronius/SMA) show a landing page with a "Login" button
+        # that bounces to the real form on a separate SSO origin (WSO2/Keycloak).
+        # No form here yet ⇒ click the login-entry link, then look again.
+        if await _click_login_entry(page):
+            try:
+                await page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            pw, user = await _poll_for_form(page, hint)
     if not pw and not user:
         return "no-form"
 

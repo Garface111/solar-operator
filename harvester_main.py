@@ -73,13 +73,16 @@ async def _selftest(provider: str):
     from playwright.async_api import async_playwright
     from api.harvester import stealth, login as L
 
+    INV = {"fronius": "https://www.solarweb.com/",
+           "sma": "https://ennexos.sunnyportal.com/",
+           "chint": "https://monitor.chintpowersystems.com/"}
     if provider == "gmp":
-        url = "https://greenmountainpower.com/account/login/"
-        hintkey = "gmp"
+        url, hintkey = "https://greenmountainpower.com/account/login/", "gmp"
+    elif provider in INV:
+        url, hintkey = INV[provider], provider
     else:
         host = provider if "." in provider else "vermontelectric.smarthub.coop"
-        url = f"https://{host}/"
-        hintkey = "smarthub"
+        url, hintkey = f"https://{host}/", "smarthub"
     hint = L.HINTS.get(hintkey)
 
     print(f"selftest: {url} (hint={hintkey})")
@@ -98,6 +101,18 @@ async def _selftest(provider: str):
             await asyncio.sleep(3)
             user = await L._find_user(page, hint)
             pw_el = await L._find_pass(page, hint)
+            # SSO-redirect portals (Fronius/SMA) show a landing "Login" button
+            # first — click it to reach the real form, mirroring perform_login.
+            if not user and not pw_el:
+                if await L._click_login_entry(page):
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=20000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+                    print("  (clicked login-entry →", page.url, ")")
+                    user = await L._find_user(page, hint)
+                    pw_el = await L._find_pass(page, hint)
             btn = await L._find_btn(page, hint)
             async def describe(el):
                 if not el:
