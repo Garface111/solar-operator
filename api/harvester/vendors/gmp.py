@@ -86,22 +86,26 @@ class GMPVendor:
                 acct_no = str(acct.get("accountNumber") or acct.get("account_number") or "").strip()
                 if not acct_no:
                     continue
-                nickname = acct.get("nickname") or acct.get("name") or ""
-                summary = await self._get(api, f"/usage/{acct_no}/summary") or {}
-                is_solar = bool(
-                    summary.get("isNetMetered")
-                    or (summary.get("totalGrossGenerated") or 0) > 0
-                    or (summary.get("totalGenerationSentToGrid") or 0) > 0
-                    or (summary.get("totalGenerationUsedByHome") or 0) > 0
-                )
-                daily = await self._daily_backfill(api, acct_no) if is_solar else []
-                solar_days += len(daily)
-                gen_accounts.append({
-                    "account_number": acct_no,
-                    "nickname": nickname,
-                    "summary": summary,
-                    "daily": daily,
-                })
+                try:
+                    nickname = acct.get("nickname") or acct.get("name") or ""
+                    summary = await self._get(api, f"/usage/{acct_no}/summary") or {}
+                    is_solar = bool(
+                        summary.get("isNetMetered")
+                        or (summary.get("totalGrossGenerated") or 0) > 0
+                        or (summary.get("totalGenerationSentToGrid") or 0) > 0
+                        or (summary.get("totalGenerationUsedByHome") or 0) > 0
+                    )
+                    daily = await self._daily_backfill(api, acct_no) if is_solar else []
+                    solar_days += len(daily)
+                    gen_accounts.append({
+                        "account_number": acct_no,
+                        "nickname": nickname,
+                        "summary": summary,
+                        "daily": daily,
+                    })
+                except Exception as exc:                 # one bad account never aborts the rest
+                    log.warning("gmp account %s skipped: %s", acct_no, exc)
+                    continue
 
             if gen_accounts:
                 requests.append(CaptureRequest(
@@ -158,7 +162,10 @@ class GMPVendor:
         r = await api.get(f"{API}{path}")
         if r.status_code == 401:
             raise RuntimeError("gmp API 401 — JWT expired (re-auth needed)")
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # A single account can 404 (closed) or 400 (no data). GMP owners often
+            # have MANY accounts — skip the bad one, never abort the whole capture.
+            return {}
         try:
             return r.json()
         except Exception:
