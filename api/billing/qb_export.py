@@ -80,14 +80,14 @@ def _mdY(v) -> str:
 def _invoice_fields(inv: dict, sub, memo: str = "") -> Optional[dict]:
     """Normalized fields for one billable invoice, or None when there's nothing
     to bill (no amount) — we never emit a fabricated $0 invoice. `memo`, when
-    set, overrides the default "Solar credit — {month}" description across all
+    set, overrides the default "Solar credit ({month})" description across all
     three layouts (Bruce 2026-07-07)."""
     budget_on = bool(inv.get("budget_override")) and inv.get("budgeted_amount") is not None
     amount = inv.get("budgeted_amount") if budget_on else inv.get("amount_owed")
     if amount is None or float(amount) == 0.0:
         return None
     month = inv.get("month") or (inv.get("period_end") or "")[:7]
-    default_desc = f"Solar credit — {month}" if month else "Solar credit"
+    default_desc = f"Solar credit ({month})" if month else "Solar credit"
     return {
         "customer": inv.get("customer_name") or "Customer",
         "email": (getattr(sub, "client_email", None) or ""),

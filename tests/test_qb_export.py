@@ -74,12 +74,12 @@ def test_budget_override_is_the_billed_amount():
 # ── memo passthrough ─────────────────────────────────────────────────────────
 
 def test_memo_overrides_default_description():
-    """An operator-set memo replaces the default 'Solar credit — {month}' in all
+    """An operator-set memo replaces the default 'Solar credit ({month})' in all
     three layouts; a blank memo keeps the default (Bruce 2026-07-07)."""
     default = q._invoice_fields(INV, _Sub())
-    assert default["desc"] == "Solar credit — 2026-06"          # default
+    assert default["desc"] == "Solar credit (2026-06)"          # default
     blank = q._invoice_fields(INV, _Sub(), memo="   ")
-    assert blank["desc"] == "Solar credit — 2026-06"            # blank → default
+    assert blank["desc"] == "Solar credit (2026-06)"            # blank → default
     custom = q._invoice_fields(INV, _Sub(), memo="June 2026 net-metering credit")
     assert custom["desc"] == "June 2026 net-metering credit"
     # It flows into every layout's description/memo column.
@@ -112,10 +112,10 @@ def test_iif_trns_spl_endtrns_per_invoice_and_balances():
     lines = _iif_lines(text)[3:]                     # skip the header block
     assert lines[0].split("\t") == [
         "TRNS", "INVOICE", "6/30/2026", "Accounts Receivable", "St. J Muni",
-        "1351.07", "2026-06", "Solar credit — 2026-06"]
+        "1351.07", "2026-06", "Solar credit (2026-06)"]
     assert lines[1].split("\t") == [
         "SPL", "INVOICE", "6/30/2026", "Solar Credit Income", "St. J Muni",
-        "-1351.07", "2026-06", "Solar credit — 2026-06"]
+        "-1351.07", "2026-06", "Solar credit (2026-06)"]
     assert lines[2] == "ENDTRNS"
     # The AR debit and income credit NET TO ZERO — QuickBooks Desktop rejects an
     # unbalanced transaction.
