@@ -1290,6 +1290,13 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 acct_id = acct_map.get(acct_no)
                 if not acct_id or not b.get("billing_date"):
                     continue
+                # Skip a SHELL bill — no meter-read period AND no stable uuid. The
+                # server-side harvester emits these when a NISC overview row comes back
+                # lean; they carry no billable data and, with a recent bill_date, would
+                # only shadow the real (extension-captured) bills. Never persist one
+                # (Ford 2026-07-11 — the Town of Glover "no bill on file" junk).
+                if not b.get("period_end") and not b.get("bill_uuid"):
+                    continue
                 _tracker_accts.add(acct_id)
                 # AUTOMATIC VEC bill-PDF pull: the extension attaches the bill PDF
                 # (base64) per bill. The generation sent-to-grid + the bill's OWN
