@@ -364,3 +364,55 @@ export async function requestUtility(
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
+
+// ─── Cloud Capture — the "store it with us" onboarding fork ──────────────────
+//
+// DARK-SHIP FLAG: the cloud fork only appears when this is on, so real signups
+// keep the unchanged extension flow until it's tested. Enable in the browser:
+//   localStorage.setItem('so:flag:cloud-capture-ui','on')
+export function cloudCaptureUiEnabled(): boolean {
+  try {
+    return localStorage.getItem("so:flag:cloud-capture-ui") === "on";
+  } catch {
+    return false;
+  }
+}
+
+// The cloud step completes onboarding EARLY (to mint a dashboard session it can
+// store credentials with), so /done must NOT complete a second time and fire a
+// duplicate magic-link/sample email. It checks this flag.
+export const ONBOARDING_COMPLETED_KEY = "so:onboarding:completed";
+
+export interface CloudCredentialInput {
+  provider: string;
+  username: string;
+  password: string;
+  login_host?: string | null;
+}
+
+/** Store a utility login server-side (encrypted at rest). Authed with the
+ *  dashboard session_token minted by completeOnboarding(). Passwords are
+ *  write-only — no endpoint ever returns them. Consent is implied by the fork
+ *  choice + the on-screen consent line, and sent explicitly. */
+export async function saveCloudCredential(
+  sessionToken: string,
+  input: CloudCredentialInput,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetchWithTimeout("/v1/cloud-capture/credentials", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${sessionToken}`,
+    },
+    body: JSON.stringify({ ...input, enable: true, consent: true }),
+  });
+  let detail = `http_${res.status}`;
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") detail = body.detail;
+    else if (typeof body?.error === "string") detail = body.error;
+  } catch {
+    /* non-JSON error body */
+  }
+  return { ok: res.ok, error: res.ok ? undefined : detail };
+}

@@ -5,7 +5,7 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 import { useToast } from "../ui/Toast";
-import { startOnboarding, setToken } from "../lib/onboarding";
+import { startOnboarding, setToken, cloudCaptureUiEnabled } from "../lib/onboarding";
 import { SO_OPERATOR_KEY, SO_OPERATOR_PASSWORD_KEY, type OperatorInfo } from "./Info";
 import {
   monthlyDollars,
@@ -144,7 +144,9 @@ export default function ClientSetup() {
         array_count: count,
       });
       setToken(onboarding_token);
-      navigate("/extension");
+      // Cloud-Capture fork (dark-shipped): with the flag on, offer store-with-us
+      // vs extension. Off (every real signup today) → the unchanged extension flow.
+      navigate(cloudCaptureUiEnabled() ? "/connect" : "/extension");
     } catch (err) {
       toast.error(
         err instanceof Error

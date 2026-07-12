@@ -4,6 +4,8 @@ import GetStarted from "./screens/GetStarted";
 import Welcome from "./screens/Welcome";
 import Info from "./screens/Info";
 import ClientSetup from "./screens/ClientSetup";
+import Connect from "./screens/Connect";
+import CloudConnect from "./screens/CloudConnect";
 import Extension from "./screens/Extension";
 import Clients from "./screens/Clients";
 import Done from "./screens/Done";
@@ -31,6 +33,10 @@ export default function App() {
         <Route path="/client-setup" element={<ClientSetup />} />
         {/* Legacy /plan URL — redirect to /client-setup which now owns checkout */}
         <Route path="/plan" element={<Navigate to="/client-setup" replace />} />
+        {/* Cloud-Capture fork (dark-shipped behind so:flag:cloud-capture-ui):
+            ClientSetup → /connect → either /cloud (store-with-us) or /extension. */}
+        <Route path="/connect" element={<Connect />} />
+        <Route path="/cloud" element={<CloudConnect />} />
         <Route path="/extension" element={<Extension />} />
         <Route path="/clients" element={<Clients />} />
         <Route path="/done" element={<Done />} />

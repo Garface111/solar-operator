@@ -26,7 +26,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { Spinner } from "../ui/Spinner";
-import { getToken, completeOnboarding } from "../lib/onboarding";
+import { getToken, completeOnboarding, ONBOARDING_COMPLETED_KEY } from "../lib/onboarding";
 import { SO_OPERATOR_PASSWORD_KEY } from "./Info";
 
 // Same-origin relative path so the wizard at /onboarding/* and the dashboard
@@ -45,6 +45,21 @@ export default function Done() {
     completedRef.current = true;
 
     async function finish() {
+      // The cloud fork (/cloud) completes onboarding EARLY so it can store logins
+      // with a live session. If it already did, don't complete a second time —
+      // that would fire a duplicate magic-link/sample email. Just land on the
+      // dashboard we're already signed into.
+      let alreadyCompleted = false;
+      try {
+        alreadyCompleted = sessionStorage.getItem(ONBOARDING_COMPLETED_KEY) === "1";
+      } catch {
+        /* sessionStorage locked down — fall through to the normal complete */
+      }
+      if (alreadyCompleted) {
+        try { sessionStorage.removeItem(ONBOARDING_COMPLETED_KEY); } catch { /* ignore */ }
+        window.location.assign(`${DASHBOARD_PATH}&t=${Date.now()}`);
+        return;
+      }
       try {
         // Pull the password the operator chose on /info (if any) so we
         // can hash+store it server-side in the same /complete call that
