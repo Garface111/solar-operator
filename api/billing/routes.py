@@ -270,16 +270,22 @@ def list_utility_accounts(authorization: Optional[str] = Header(default=None)):
         counts: dict[int, int] = {}
         latest_by_acct: dict[int, tuple] = {}   # account_id -> (period_end, kwh)
         if acct_ids:
+            # Key the bill summary on period_end, NOT kwh_generated. kwh_generated is
+            # a GMP-only field — ALWAYS NULL for VEC/SmartHub bills — so the old filter
+            # made every VEC account report has_bill=False / latest_period_end=None,
+            # which drove the offtaker "No VEC bill on file yet" banner even with 40+
+            # real bills captured (Ford 2026-07-11, Town of Glover). period_end is
+            # present on every real bill of either provider and absent on the
+            # harvester's malformed shells, so this both fixes VEC and skips the junk.
             for aid, n in db.execute(
                     select(Bill.account_id, func.count(Bill.id))
                     .where(Bill.account_id.in_(acct_ids),
-                           Bill.kwh_generated.isnot(None))
+                           Bill.period_end.isnot(None))
                     .group_by(Bill.account_id)):
                 counts[aid] = int(n or 0)
             for aid, pe, kwh in db.execute(
                     select(Bill.account_id, Bill.period_end, Bill.kwh_generated)
                     .where(Bill.account_id.in_(acct_ids),
-                           Bill.kwh_generated.isnot(None),
                            Bill.period_end.isnot(None))
                     .order_by(Bill.account_id, Bill.period_end.desc())):
                 if aid not in latest_by_acct:
