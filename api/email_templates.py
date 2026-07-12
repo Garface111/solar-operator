@@ -429,6 +429,10 @@ _TEMPLATE_SYSTEM_PROMPT = (
     '"body": "complete updated HTML body template", '
     '"subject": null}'
     "\nSet subject to null when unchanged, or to the new subject string if you changed it."
+    "\nALWAYS return this JSON object — even when you DECLINE the request or are just "
+    "answering a question. To decline: put your polite explanation in \"reply\", set "
+    "\"body\" to null (leave it unchanged) and \"subject\" to null. NEVER reply with plain "
+    "prose outside the JSON object."
 )
 
 
@@ -519,15 +523,25 @@ def regenerate_template_via_ai(
     raw = content.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw).rstrip("`").strip()
+    result = None
     try:
         result = json.loads(raw)
     except json.JSONDecodeError:
         start = raw.find("{")
         end = raw.rfind("}")
         if start != -1 and end > start:
-            result = json.loads(raw[start : end + 1])
-        else:
-            raise ValueError("LLM response did not contain valid JSON")
+            try:
+                result = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                result = None
+    if not isinstance(result, dict):
+        # The model answered in PROSE, not JSON — the normal shape of a polite DECLINE
+        # ("I can't put a muffin recipe in a solar generation report") or a plain-English
+        # answer. Surface that message to the operator as the assistant's reply and leave
+        # the template UNCHANGED, instead of failing with a scary "invalid JSON" 502.
+        result = {"reply": (raw[:1500].strip()
+                            or "I couldn't apply that — tell me what to change about the greeting, tone, or wording."),
+                  "body": None, "subject": None}
     return {
         "reply": _augment_reply_with_strip_notice(
             str(result.get("reply") or "Updated."),
