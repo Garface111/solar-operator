@@ -10,6 +10,7 @@ api/feature_suggestions.py exactly (same shared Base → create_all, no migratio
 Added by CC 2026-07-11 (Ford: "request a utility → an agent adds it on").
 """
 import hmac
+import logging
 import os
 from datetime import datetime
 
@@ -124,17 +125,25 @@ def submit_requests(body: RequestsIn, authorization: str | None = Header(default
             names.append(name)
     if not ids:
         raise HTTPException(400, "No valid requests")
+    # Email Ford on EVERY request (his explicit ask). Never let a mail hiccup lose the
+    # notification silently — log it loudly so a missed alert is always traceable.
+    notified = False
     try:
-        send_internal_alert(
+        _r = send_internal_alert(
             subject=f"{len(ids)} utility-add request(s) from {product} (#{ids[0]}"
                     + (f"–{ids[-1]}" if len(ids) > 1 else "") + ")",
             body=("From: " + (email or "anonymous") + "\nTenant: " + (tenant_id or "-") + "\n\n"
                   + "Requested utilities:\n" + "\n".join(f"  • {n}" for n in names)
                   + "\n\n(Queued for the utility-request agent — it researches + wires them up.)"),
         )
-    except Exception:
-        pass
-    return {"ok": True, "ids": ids, "count": len(ids)}
+        notified = _r is not False
+        if not notified:
+            logging.getLogger("utility_requests").warning(
+                "utility-request alert NOT sent for #%s (mailer returned falsy)", ids[0])
+    except Exception as e:
+        logging.getLogger("utility_requests").error(
+            "utility-request alert FAILED for #%s: %s", ids[0], e)
+    return {"ok": True, "ids": ids, "count": len(ids), "notified": notified}
 
 
 @router.get("/v1/utility-request/{rid}/status")
