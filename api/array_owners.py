@@ -2758,7 +2758,7 @@ def solaredge_connect_account(
         "created": created,
         "matched": matched,
         "message": (
-            f"{len(connected)} arrays connected — "
+            f"{len(connected)} arrays connected: "
             f"{len(created)} new, {len(matched)} matched."
         ),
     }
@@ -3023,7 +3023,7 @@ def locus_connect_account(
         "created": created,
         "matched": matched,
         "message": (
-            f"{len(connected)} arrays connected — "
+            f"{len(connected)} arrays connected: "
             f"{len(created)} new, {len(matched)} matched."
         ),
     }
@@ -3283,7 +3283,7 @@ def fronius_connect_account(
         "created": created,
         "matched": matched,
         "message": (
-            f"{len(connected)} arrays connected — "
+            f"{len(connected)} arrays connected: "
             f"{len(created)} new, {len(matched)} matched."
         ),
     }
@@ -5686,6 +5686,6 @@ def sma_connect_account(
         "connected": connected,
         "created": created,
         "matched": matched,
-        "message": (f"{len(connected)} arrays connected — "
+        "message": (f"{len(connected)} arrays connected: "
                     f"{len(created)} new, {len(matched)} matched."),
     }
