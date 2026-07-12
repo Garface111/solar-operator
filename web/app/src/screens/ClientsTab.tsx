@@ -23,6 +23,25 @@ export default function ClientsTab() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const toggleFullscreen = useCallback(() => setIsFullscreen((v) => !v), []);
 
+  // Sub-tab: the spatial canvas vs the dense list/spreadsheet — TOGGLED, not stacked,
+  // mirroring Array Operator's Sandbox/Spreadsheet switch (Ford 2026-07-11). Both stay
+  // MOUNTED (hidden, never unmounted) so the canvas keeps its ReactFlow / undo / walkthrough
+  // state across switches. Persisted so the operator's choice sticks.
+  const [subtab, setSubtab] = useState<"sandbox" | "spreadsheet">(() => {
+    try {
+      return localStorage.getItem("so:clients:subtab") === "spreadsheet" ? "spreadsheet" : "sandbox";
+    } catch {
+      return "sandbox";
+    }
+  });
+  const selectSubtab = useCallback((v: "sandbox" | "spreadsheet") => {
+    setSubtab(v);
+    try { localStorage.setItem("so:clients:subtab", v); } catch { /* ignore */ }
+    // The canvas was display:none (zero-size) while hidden — nudge ReactFlow to
+    // remeasure on re-show so it doesn't paint into a collapsed box.
+    if (v === "sandbox") setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+  }, []);
+
   // Lock body scroll while the overlay covers the viewport; restore on exit.
   useEffect(() => {
     if (!isFullscreen) return;
@@ -52,7 +71,35 @@ export default function ClientsTab() {
   }, [isFullscreen]);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-4">
+      {/* Sub-tab toggle — Sandbox (canvas) vs Spreadsheet (list), like AO's vendor
+          sheet. Hidden in fullscreen (the canvas owns the whole viewport there). */}
+      {!isFullscreen && (
+        <div
+          role="tablist"
+          aria-label="Clients view"
+          className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
+        >
+          {(["sandbox", "spreadsheet"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={subtab === v}
+              onClick={() => selectSubtab(v)}
+              className={[
+                "rounded-full px-4 py-1.5 text-sm font-semibold transition-colors",
+                subtab === v
+                  ? "bg-emerald-600 text-white shadow-sm"
+                  : "text-zinc-600 hover:text-zinc-900",
+              ].join(" ")}
+            >
+              {v === "sandbox" ? "Sandbox" : "Spreadsheet"}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Spatial canvas — full 560px on sm+; on mobile an overlay replaces the
           canvas with a gentle notice (the list view below is the mobile UX).
           Fullscreen swaps the rounded inline box for a fixed full-viewport
@@ -64,6 +111,8 @@ export default function ClientsTab() {
           // Tailwind resolves conflicts by stylesheet order (not class order),
           // and `relative` beats `fixed`, collapsing the section to 0 height.
           "overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
+          // Sub-tab: hide (don't unmount) when the Spreadsheet view is active.
+          subtab === "sandbox" || isFullscreen ? "" : "hidden",
           isFullscreen
             ? "fixed inset-0 z-[100]"
             : "relative rounded-2xl h-[220px] sm:h-[560px]",
@@ -107,9 +156,12 @@ export default function ClientsTab() {
         </ReactFlowProvider>
       </section>
 
-      {/* List view — unchanged. Bulk select, table-style scanning,
-          per-row actions. Still the right tool for >50 clients. */}
-      <ClientsSection expandClientId={clientId ? Number(clientId) : undefined} />
+      {/* Spreadsheet / list view — now its own sub-tab. Bulk select, table-style
+          scanning, per-row actions, and the delivery/NEPOOL alert banners. Hidden
+          (not unmounted) while the Sandbox sub-tab is active. */}
+      <div className={subtab === "spreadsheet" ? "" : "hidden"}>
+        <ClientsSection expandClientId={clientId ? Number(clientId) : undefined} />
+      </div>
     </div>
   );
 }
