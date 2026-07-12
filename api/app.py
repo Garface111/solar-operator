@@ -427,6 +427,10 @@ app.include_router(funnel_router)
 from .feature_suggestions import router as feature_suggestions_router
 app.include_router(feature_suggestions_router)
 
+# CC utility-add requests (Master Account picker → agent wires the utility in)
+from .utility_requests import router as utility_requests_router
+app.include_router(utility_requests_router)
+
 from .portal_access import router as portal_access_router
 app.include_router(portal_access_router)
 
