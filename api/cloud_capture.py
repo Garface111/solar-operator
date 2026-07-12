@@ -175,3 +175,29 @@ def delete_credential(body: DeleteIn, authorization: Optional[str] = Header(defa
             db.delete(row)
             db.commit()
     return {"ok": True}
+
+
+@router.post("/v1/cloud-capture/refresh")
+def refresh_now(authorization: Optional[str] = Header(default=None)):
+    """Force a fresh server-side capture of every enabled Cloud Capture login for
+    this tenant NOW — the cloud-mode counterpart of the extension's 'Sync all
+    vendors' (Ford 2026-07-11). It re-arms each credential (clears last_harvest_at
+    + the fail backoff) so the harvester picks it up on its very next tick (≤90s),
+    reusing the warm session — no fresh login, so no 'suspicious sign-in' risk. The
+    client then re-pulls the fleet data to show the updated readings.
+    """
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(PortalCredential).where(
+                PortalCredential.tenant_id == t.id,
+                PortalCredential.cloud_capture_enabled.is_(True),
+                PortalCredential.secret_enc.isnot(None),
+            )
+        ).scalars().all()
+        for r in rows:
+            r.last_harvest_at = None
+            r.harvest_fails = 0
+            r.updated_at = now()
+        db.commit()
+    return {"ok": True, "queued": len(rows)}
