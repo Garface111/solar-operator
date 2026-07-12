@@ -1873,6 +1873,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // path (arms intent, POSTs via recapPost, closes the tab), then update the fail
   // counter from the recorded outcome (so_recap_last).
   async function runChintLiveTick() {
+    // Cloud Capture owns Chint server-side → don't open a tab (see runLiveTick).
+    if (await isCloudCaptured("chint")) { rlog("chint-live: cloud capture owns this vendor server-side — skip"); return; }
     if (_liveBusy) { rlog("chint-live: recapture in flight (sync lock) — skip"); return; }
     _liveBusy = true;
     try {
@@ -2054,6 +2056,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // (logout → open → targeted auto-login → capture) inside this one tick — the
   // 12h cadence means every client's bills refresh twice a day regardless of N.
   async function runUtilityLiveTick(code) {
+    // Cloud Capture owns this utility server-side → don't open a tab (see runLiveTick).
+    if (await isCloudCaptured(code)) { rlog("util-live:", code, "cloud capture owns this utility server-side — skip"); return; }
     if (_liveBusy) { rlog("util-live:", code, "engine busy (sync lock) — skip"); return; }
     _liveBusy = true;
     try {
@@ -2229,6 +2233,13 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   self.__soArmLive = armLive;     // fronius/sma connect-arm calls this
   self.__soDisarmLive = disarmLive;
   async function runLiveTick(vendor) {
+    // Server-side Cloud Capture owns this vendor → the harvester refreshes it 24/7,
+    // so DON'T open a background tab to re-capture it (Ford 2026-07-11: the two paths
+    // must not interfere — a second login to the same portal is the double sign-in
+    // that risks a "suspicious login" alert). Leave the alarm armed: if the owner
+    // later turns Cloud Capture off, the cloud_capture cache clears within a heartbeat
+    // and the extension resumes on the very next tick — no re-arm needed.
+    if (await isCloudCaptured(vendor)) { rlog(vendor + "-live: cloud capture owns this vendor server-side -- skip"); return; }
     if (_liveBusy) { rlog(vendor + "-live: recapture in flight (sync lock) -- skip"); return; }
     _liveBusy = true;
     try {
@@ -3097,6 +3108,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     if (!tenantKey) return;
     const last = (await chrome.storage.local.get(LAST_KEY))[LAST_KEY] || {};
     for (const v of await usedInverterVendors()) {
+      if (await isCloudCaptured(v)) continue;   // server-side Cloud Capture owns this vendor — don't open a keep-warm tab (per-vendor: others still keep-warm)
       if ((await autoLoginFailsGet(v)) >= AUTOLOGIN_MAX_VENDOR_FAILS) continue;   // auto-login paused: failing creds
       const kwFails = await keepwarmFailsGet(v);
       if (kwFails >= KEEPWARM_MAX_FAILS) {
