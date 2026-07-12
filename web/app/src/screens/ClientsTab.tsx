@@ -78,7 +78,7 @@ export default function ClientsTab() {
         <div
           role="tablist"
           aria-label="Clients view"
-          className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
+          className="flex w-full items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
         >
           {(["sandbox", "spreadsheet"] as const).map((v) => (
             <button
@@ -88,13 +88,15 @@ export default function ClientsTab() {
               aria-selected={subtab === v}
               onClick={() => selectSubtab(v)}
               className={[
-                "rounded-full px-4 py-1.5 text-sm font-semibold transition-colors",
+                // Full-width halves so the control spans the view — centered + clean.
+                "flex-1 rounded-full px-4 py-2 text-sm font-semibold transition-colors",
                 subtab === v
-                  ? "bg-emerald-600 text-white shadow-sm"
-                  : "text-zinc-600 hover:text-zinc-900",
+                  // Match the "+ Add Client" button exactly (the theme's solar green).
+                  ? "bg-primary-500 text-white shadow-sm"
+                  : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900",
               ].join(" ")}
             >
-              {v === "sandbox" ? "Sandbox" : "Spreadsheet"}
+              {v === "sandbox" ? "Sandbox" : "Table"}
             </button>
           ))}
         </div>
