@@ -6,6 +6,7 @@ import { useDashboardContext } from "./DashboardLayout";
 import { AccountProfileCard } from "../components/settings/AccountProfileCard";
 import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
 import { PortalAccessCard } from "../components/settings/PortalAccessCard";
+import { CloudCaptureCard } from "../components/settings/CloudCaptureCard";
 import { SpongeProgressCard } from "../components/settings/SpongeProgressCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
 import { DangerZoneCard } from "../components/settings/DangerZoneCard";
@@ -64,6 +65,9 @@ export default function AccountTab() {
           which client logins are hands-off, failing, or still to collect.
           NEPOOL-agent feature — status only, passwords live in the extension. */}
       <PortalAccessCard />
+      {/* Cloud Capture vault — dark-shipped (renders null unless the runtime flag
+          `so:flag:cloud-capture-ui` is on). Not live for real operators yet. */}
+      <CloudCaptureCard />
       <PlanBillingCard account={account} />
       {account.subscription_status === "trialing" && (
         <DangerZoneCard onCancelled={() => setCancelled(true)} />

@@ -449,6 +449,65 @@ export async function getBillingPortalUrl(): Promise<string> {
   return res.url;
 }
 
+// ── Cloud Capture (server-side portal harvesting) ───────────────────────────
+// The backend + harvester are product-agnostic (tenant-scoped); these just wrap
+// the existing /v1/cloud-capture/* endpoints for the NEPOOL vault UI. No secrets
+// are ever returned — passwords are write-only, encrypted at rest.
+export interface CloudCredential {
+  provider: string;
+  username: string;
+  enabled: boolean;
+  login_host: string | null;
+  last_harvest_at: string | null;
+  last_harvest_ok: boolean | null;
+  harvest_fails: number;
+  has_session?: boolean;
+}
+export interface CloudCaptureStatus {
+  ok: boolean;
+  encryption_ready?: boolean;
+  collection_enabled?: boolean;
+  credentials: CloudCredential[];
+}
+export async function getCloudCaptureStatus(): Promise<CloudCaptureStatus> {
+  return request<CloudCaptureStatus>("/v1/cloud-capture/status");
+}
+export interface CloudCredentialInput {
+  provider: string;
+  username: string;
+  password?: string;
+  login_host?: string | null;
+  enable?: boolean;
+  consent?: boolean;
+}
+export async function setCloudCredential(
+  input: CloudCredentialInput,
+): Promise<{ ok: boolean; error?: string }> {
+  return request<{ ok: boolean; error?: string }>("/v1/cloud-capture/credentials", {
+    method: "POST",
+    body: input,
+  });
+}
+export async function deleteCloudCredential(
+  provider: string,
+  username: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/v1/cloud-capture/credentials", {
+    method: "DELETE",
+    body: { provider, username },
+  });
+}
+export async function toggleCloudCredential(
+  provider: string,
+  username: string,
+  enable: boolean,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/v1/cloud-capture/toggle", {
+    method: "POST",
+    body: { provider, username, enable },
+  });
+}
+
 export interface BillingSummary {
   billable_arrays: number;
   price_cents: number;
