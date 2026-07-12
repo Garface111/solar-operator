@@ -26,6 +26,32 @@ PDF_WINDOW_DAYS = 400           # pull PDFs for the last ~13 months (billing-rel
 PDF_MIN, PDF_MAX = 1024, 12 * 1024 * 1024
 
 
+def _mdy(ts) -> str:
+    """NISC epoch-millis → 'M/D/YYYY' (mirrors the extension's fmtDateMDY). The
+    backend bill-date regex AND our own _pdf() both strptime this, and _parse_amount
+    parity aside, billing_date MUST be a date STRING, never the raw number."""
+    if not isinstance(ts, (int, float)):
+        return ""
+    try:
+        d = datetime.utcfromtimestamp(ts / 1000.0 if ts > 1e11 else ts)
+        return f"{d.month}/{d.day}/{d.year}"
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+
+def _iso(ts) -> str | None:
+    """NISC epoch-millis → 'YYYY-MM-DD' (mirrors the extension's isoDay). The bill's
+    meter-read period; the backend parses it with fromisoformat, so a raw epoch would
+    land as NULL — which is exactly what left offtakers with 'no bill on file'."""
+    if not isinstance(ts, (int, float)):
+        return None
+    try:
+        d = datetime.utcfromtimestamp(ts / 1000.0 if ts > 1e11 else ts)
+        return d.strftime("%Y-%m-%d")
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
 class SmartHubVendor:
     provider = "smarthub"       # registry maps any co-op code here
 
@@ -232,20 +258,27 @@ class SmartHubVendor:
     def _bill_row(acct_no: str, row: dict) -> dict:
         servloc = (row.get("servLocs") or [{}])[0]
         addr = servloc.get("address") or {}
+        # NISC serves epoch-millis, not date strings, and amounts as numbers. Mirror
+        # the extension's proven shape EXACTLY (smarthub_content.js): dates → strings,
+        # amounts → strings. Raw values here 500'd the /v1/sync bill batch and left
+        # periods NULL — the "no VEC bill on file" bug (Ford 2026-07-11).
+        bts = row.get("billingDateTimestamp")
+        amt = row.get("adjustedBillAmount")
+        adj = row.get("totalAdjustments")
         return {
             "account_id": row.get("acctNbr") or acct_no,
             "customer_name": row.get("custName") or "",
             "service_address": ", ".join(filter(None, [
                 addr.get("addr1"), addr.get("city"), addr.get("state"), addr.get("zip")])),
-            "billing_date": row.get("billingDate"),
-            "bill_amount": row.get("adjustedBillAmount"),
-            "adjustments": row.get("totalAdjustments"),
-            "total_due": row.get("adjustedBillAmount"),
-            "kwh": row.get("totalUsage"),
-            "period_start": servloc.get("lastBillPrevReadDtTm"),
-            "period_end": servloc.get("lastBillPresReadDtTm"),
+            "billing_date": _mdy(bts) or (row.get("billingDate") or ""),
+            "bill_amount": None if amt is None else str(amt),
+            "adjustments": None if adj is None else str(adj),
+            "total_due": None if amt is None else str(amt),
+            "kwh": row.get("totalUsage") if isinstance(row.get("totalUsage"), (int, float)) else None,
+            "period_start": _iso(servloc.get("lastBillPrevReadDtTm")),
+            "period_end": _iso(servloc.get("lastBillPresReadDtTm")),
             "bill_uuid": row.get("billProcessUuid"),
-            "bill_timestamp": row.get("billingDateTimestamp"),
+            "bill_timestamp": str(bts) if bts else None,
             "system_of_record": row.get("systemOfRecord"),
             "customer_number": row.get("custNbr"),
             "source": "cloud_capture",

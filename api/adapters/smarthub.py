@@ -496,13 +496,20 @@ def parse_usage(aria_label: str) -> dict[str, Any] | None:
     }
 
 
-def _parse_amount(s: str | None) -> float | None:
-    if not s:
+def _parse_amount(s) -> float | None:
+    # Robust to BOTH the extension (sends amounts as strings) and the server-side
+    # harvester (sends the raw NISC number). A bare .strip() on a float used to
+    # raise AttributeError → 500 on the /v1/sync bill batch, so Cloud Capture's VEC
+    # bills never ingested (Ford 2026-07-11: "no VEC bill on file"). Accept numbers
+    # directly; only string-clean strings.
+    if s is None or s == "":
         return None
-    cleaned = s.strip().replace(",", "").replace("$", "")
+    if isinstance(s, (int, float)):
+        return float(s)
     try:
+        cleaned = str(s).strip().replace(",", "").replace("$", "")
         return float(cleaned) if cleaned else None
-    except ValueError:
+    except (ValueError, AttributeError):
         return None
 
 
@@ -514,8 +521,18 @@ def parse_bill(row: dict[str, Any]) -> dict[str, Any]:
         billing_date = datetime(int(dm.group(3)), int(dm.group(1)), int(dm.group(2)))
 
     def _iso_day(s: Any) -> datetime | None:
+        if s is None or s == "":
+            return None
+        # NISC lastBill*ReadDtTm arrive as epoch MILLIS (the extension pre-converts
+        # them with isoDay(); the harvester now does too, but accept the raw number
+        # defensively so a period never silently vanishes to NULL).
+        if isinstance(s, (int, float)):
+            try:
+                return datetime.utcfromtimestamp(s / 1000.0 if s > 1e11 else s)
+            except (ValueError, OSError, OverflowError):
+                return None
         try:
-            return datetime.fromisoformat(str(s)) if s else None
+            return datetime.fromisoformat(str(s))
         except ValueError:
             return None
 
