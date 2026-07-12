@@ -1482,6 +1482,12 @@ async function sendHeartbeat() {
     try {
       const body = await resp.json();
       if (body && body.debt) drainCaptureDebt(body.debt);   // fire-and-forget
+      // Cache which providers are server-side Cloud Captured so the nudge paths can
+      // stand down (Ford 2026-07-11). Sent on every ping (even []), so a DEACTIVATED
+      // login clears the cache and the extension resumes owning that vendor's nudges.
+      if (body && Array.isArray(body.cloud_capture)) {
+        await chrome.storage.local.set({ [CLOUD_CAPTURE_KEY]: body.cloud_capture });
+      }
     } catch (_) { /* older server / non-JSON — heartbeat still counts */ }
   } catch {
     // Non-fatal — heartbeat is best-effort.
@@ -1548,6 +1554,21 @@ const GMP_RECAP_BUDGET_MS = 80 * 1000;   // background-tab lifetime: SPA load + 
 const GMP_RECAP_ATTEMPT_KEY = "so_gmp_recap_attempt";  // YYYY-MM-DD — max 1 silent attempt/day
 const GMP_NUDGE_KEY = "so_gmp_nudge";                  // YYYY-MM-DD — max 1 notification/day
 
+// Providers this tenant has activated for SERVER-SIDE Cloud Capture, cached from
+// the heartbeat reply (app.py sends {cloud_capture:[…]} every ping). Once a login
+// is server-side, the harvester farm refreshes it 24/7 — so the extension must NOT
+// also fire Chrome 'reconnect' nudges for it (Ford 2026-07-11): the app's Credential
+// Vault is the recovery surface, not a notification. The server already drops these
+// providers from capture-debt, so this cache only gates the extension-LOCAL nudges.
+const CLOUD_CAPTURE_KEY = "so_cloud_capture";          // ["fronius","gmp",…] from the server
+async function isCloudCaptured(vendor) {
+  try {
+    const s = await chrome.storage.local.get(CLOUD_CAPTURE_KEY);
+    const list = s[CLOUD_CAPTURE_KEY];
+    return Array.isArray(list) && list.includes(String(vendor || "").trim().toLowerCase());
+  } catch (_) { return false; }
+}
+
 // Open GMP in a background tab and let content.js capture the refreshed token.
 // Resolves true iff a fresher token actually landed (captured expiry advanced).
 async function silentGmpRecapture(prevExpiresMs) {
@@ -1572,6 +1593,9 @@ async function silentGmpRecapture(prevExpiresMs) {
 }
 
 async function gmpKeepAlive() {
+  // Server-side Cloud Capture refreshes GMP 24/7 — skip the whole keepalive (silent
+  // tab-open AND the reconnect nudge); the harvester keeps the JWT warm (Ford 2026-07-11).
+  if (await isCloudCaptured("gmp")) return;
   const s = await chrome.storage.local.get(STORAGE_KEYS.LAST_PAYLOAD);
   const last = s[STORAGE_KEYS.LAST_PAYLOAD];
   if (!last || !last.tokenExpires) return;                 // no GMP session known yet
@@ -2423,6 +2447,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // (see runLiveTick/runChintLiveTick/runUtilLiveTick/runKeepWarmTick).
   async function recapMaybeNudge(vendor) {
     try {
+      // Server-side Cloud Capture owns this vendor → the harvester refreshes it and
+      // the app's Credential Vault is where a failing login gets fixed. Stay silent;
+      // a Chrome nudge here would double up on the server (Ford 2026-07-11).
+      if (await isCloudCaptured(vendor)) return;
       const today = new Date().toISOString().slice(0, 10);
       const s = await chrome.storage.local.get(NUDGE_KEY);
       const m = s[NUDGE_KEY] || {};

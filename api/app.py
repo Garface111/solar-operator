@@ -590,9 +590,15 @@ async def extension_heartbeat(request: Request,
         # vendors/utilities have gone stale (machine was asleep, session lapsed),
         # tell WHICHEVER browser pinged us what to re-capture. Any signed-in
         # machine drains the debt — that's the single-machine-dependency fix.
-        from .capture_debt import debt_for_heartbeat
+        from .capture_debt import debt_for_heartbeat, cloud_capture_providers
         debt = debt_for_heartbeat(db, tenant.id)
-    out = {"ok": True, "at": datetime.utcnow().isoformat()}
+        # Providers this tenant has activated for server-side Cloud Capture. The
+        # extension caches this and suppresses its own Chrome 'reconnect' nudges for
+        # them (Ford 2026-07-11) — the server refreshes those logins, so the owner
+        # shouldn't also get the extension asking them to sign in. Always sent (even
+        # empty) so DEACTIVATING a login propagates and clears the extension's cache.
+        cloud_capture = cloud_capture_providers(db, tenant.id)
+    out = {"ok": True, "at": datetime.utcnow().isoformat(), "cloud_capture": cloud_capture}
     if debt:
         out["debt"] = debt
     return out

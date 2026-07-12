@@ -92,6 +92,33 @@ def _stale_coop_providers(db, tenant_id: str, today: date | None = None) -> dict
     return out
 
 
+def cloud_capture_providers(db, tenant_id: str) -> list[str]:
+    """Providers this tenant has ACTIVATED for server-side Cloud Capture (password
+    stored in PortalCredential + opted in). Once a login lives here, the harvester
+    farm refreshes it around the clock, so the extension must STAND DOWN for that
+    provider: no capture-debt drains (excluded below) AND no Chrome 'reconnect'
+    nudges (Ford 2026-07-11 — a customer who handed us their password server-side
+    should never also get the extension nagging them to sign in). Recovery for a
+    failing server-side login lives in the app's Credential Vault, not a
+    notification. Never raises — this rides the sacred heartbeat.
+    """
+    from .models import PortalCredential
+    try:
+        rows = db.execute(
+            select(PortalCredential.provider)
+            .where(
+                PortalCredential.tenant_id == tenant_id,
+                PortalCredential.cloud_capture_enabled.is_(True),
+                PortalCredential.secret_enc.is_not(None),
+            )
+            .distinct()
+        ).all()
+        return sorted({(p or "").strip().lower() for (p,) in rows if p})
+    except Exception:                                    # noqa: BLE001
+        log.exception("cloud_capture_providers failed for %s", tenant_id)
+        return []
+
+
 # Best-effort duplicate-drain damper: once debt is HANDED to some browser,
 # don't hand the same tenant's debt out again for this long. In-process only
 # (single web instance today); a second instance would merely double-issue an
@@ -162,6 +189,17 @@ def compute_capture_debt(db, tenant_id: str) -> dict | None:
     from .vip_watch import vip_stale_vendors
     for v in vip_stale_vendors(db, tenant_id):
         debt_vendors.setdefault(v, {"reason": "stale_self_heal"})
+
+    # Server-side Cloud Capture owns these providers — the harvester farm refreshes
+    # them 24/7, so never ask the extension to open a tab / auto-login for one (that
+    # would double-capture and, worse, risk tripping the very "suspicious sign-in"
+    # alerts the server-side path is built to avoid). Drop them from the debt.
+    cc = set(cloud_capture_providers(db, tenant_id))
+    if cc:
+        for v in [v for v in debt_vendors if v in cc]:
+            debt_vendors.pop(v, None)
+        for p in [p for p in debt_utils if p in cc]:
+            debt_utils.pop(p, None)
 
     if not debt_vendors and not debt_utils:
         return None
