@@ -63,11 +63,13 @@ def headless() -> bool:
 
 
 def tick_seconds() -> int:
-    """How often the scheduler wakes to enumerate due work. Default 90s so a
-    due inverter (INVERTER_DUE ~180s) is picked up promptly — combined worst-case
-    data age stays under the 5-minute vendor-freshness SLA. Tighten for a harder
-    SLA at the cost of more portal load."""
-    return max(60, _int("CLOUD_CAPTURE_TICK_SECONDS", 90))
+    """How often the scheduler wakes to ENUMERATE due work. Default 30s (Ford
+    2026-07-12: a just-added login shouldn't sit ~90s in 'queued' before the first
+    capture even starts). Enumeration is a cheap DB read; actual captures are still
+    gated by INVERTER_DUE (~180s) + jitter + the concurrency semaphore, so a faster
+    tick does NOT increase steady-state portal load — it only picks up NEWLY-due
+    (freshly added / re-armed) logins sooner. Env-tunable; floored so it can't hammer."""
+    return max(20, _int("CLOUD_CAPTURE_TICK_SECONDS", 30))
 
 
 def nav_timeout_ms() -> int:
