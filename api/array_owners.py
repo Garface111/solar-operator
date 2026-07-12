@@ -2144,6 +2144,33 @@ def connect_inverter(
     return {"ok": True, "site_name": result.get("site_name")}
 
 
+@router.get("/v1/array-owners/solaredge/keys")
+def list_solaredge_keys(authorization: str | None = Header(default=None)) -> dict:
+    """The tenant's connected SolarEdge monitoring API keys, so the owner can SEE
+    what's linked in the credential vault (Ford 2026-07-10). Grouped by key (one key
+    can cover many sites). Returns the full key (their OWN read-only key — for a
+    reveal/copy toggle in the UI), a masked form, and the arrays it powers."""
+    tenant = _tenant_from_bearer(authorization)
+    from .models import Array
+    by_key: dict[str, list[str]] = {}
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(Array.tenant_id == tenant.id,
+                                Array.deleted_at.is_(None))
+        ).scalars().all()
+        for a in arrays:
+            k = (getattr(a, "solaredge_api_key", None) or "").strip()
+            if k:
+                by_key.setdefault(k, []).append(a.name or f"Array {a.id}")
+    keys = []
+    for k, names in by_key.items():
+        masked = ("••••" + k[-4:]) if len(k) >= 4 else ("•" * len(k))
+        uniq = sorted(set(names))
+        keys.append({"key": k, "masked": masked, "arrays": uniq, "array_count": len(uniq)})
+    keys.sort(key=lambda x: (-x["array_count"], x["masked"]))
+    return {"ok": True, "keys": keys}
+
+
 class SolarEdgeConnectBody(BaseModel):
     api_key: str
     site_id: int
