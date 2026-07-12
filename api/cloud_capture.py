@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from .account import tenant_from_session
 from .db import SessionLocal
-from .models import PortalCredential, PortalLoginStatus, now
+from .models import PortalCredential, PortalLoginStatus, HarvestRun, now
 from .harvester import config
 from .harvester import credentials as cc
 from . import ratelimit
@@ -78,6 +78,25 @@ def status(authorization: Optional[str] = Header(default=None)):
         creds = db.execute(
             select(PortalCredential).where(PortalCredential.tenant_id == t.id)
         ).scalars().all()
+        # Distinguish WHY the last harvest wasn't ok — a bare last_harvest_ok=false
+        # can't tell "wrong password" (status=login_failed, the only real credential
+        # issue) from "signed in fine, the post-login data pull hit a transient
+        # snag" (status=scrape_failed — doesn't even count toward the fail/pause
+        # counter, see credentials.record_health). Without this the panel told
+        # owners to "check the password" for hiccups that had nothing to do with
+        # their password (Ford 2026-07-12, Chint). One query, newest-first, indexed
+        # on (tenant_id, provider, started_at) — take the first row per credential.
+        last_status: dict[tuple[str, str], str] = {}
+        recent_runs = db.execute(
+            select(HarvestRun.provider, HarvestRun.username_lc, HarvestRun.status)
+            .where(HarvestRun.tenant_id == t.id)
+            .order_by(HarvestRun.started_at.desc())
+            .limit(200)
+        ).all()
+        for provider, username_lc, run_status in recent_runs:
+            key = (provider, username_lc)
+            if key not in last_status:
+                last_status[key] = run_status
         rows = [{
             "provider": c.provider,
             "username": c.username,
@@ -85,6 +104,7 @@ def status(authorization: Optional[str] = Header(default=None)):
             "login_host": c.login_host,
             "last_harvest_at": c.last_harvest_at.isoformat() if c.last_harvest_at else None,
             "last_harvest_ok": c.last_harvest_ok,
+            "last_harvest_status": last_status.get((c.provider, c.username_lc)),
             "harvest_fails": c.harvest_fails or 0,
             "has_session": bool(c.session_state_enc),
         } for c in creds]

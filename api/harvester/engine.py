@@ -144,6 +144,17 @@ class BrowserFarm:
             context.set_default_timeout(config.action_timeout_ms())
             context.set_default_navigation_timeout(config.nav_timeout_ms())
             page = await context.new_page()
+            # Some SPAs (Chint) gate rendering/fetching on document.visibilityState
+            # and only paint/fire requests in a foreground tab — see the warning in
+            # vendors/chint.py. scrape() already does this before pulling data; do
+            # it from the START too, so the LOGIN step (not just the post-login
+            # scrape) also runs in a tab the SPA considers visible. Ford 2026-07-12:
+            # this was the root of an intermittent post-login "site list never
+            # observed" timeout that the UI then wrongly reported as a bad password.
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
 
             url = await vendor.login_url(creds)
             await page.goto(url, wait_until="domcontentloaded")
