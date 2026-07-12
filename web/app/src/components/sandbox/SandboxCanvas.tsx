@@ -476,6 +476,11 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
   // Per-node debounce timers for position persistence (free mode only)
   const posTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const pendingPosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  // The operator's saved FREE-mode arrangement (client node id → {x,y}), seeded from
+  // the DB on load and updated on every drag. Sorted mode only recomputes positions
+  // transiently; switching back to Free restores from this so their layout is never
+  // erased by toggling Sorted (Ford 2026-07-11).
+  const savedFreePosRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
   // Snapshot of client IDs before the portal-picker modal opens
   const clientIdsBeforeModal = useRef<Set<number>>(new Set());
@@ -516,6 +521,16 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
     const prevIds = opts.sseReveal ? new Set(nodesRef.current.map((n) => n.id)) : null;
     try {
       const data = await getCanvasData();
+      // Seed the saved free-layout map from the DB coords so a Sorted→Free toggle can
+      // restore the operator's arrangement even before any drag this session.
+      for (const c of data.clients) {
+        const key = `client_${c.id}`;
+        if (c.canvas_x != null && c.canvas_y != null) {
+          savedFreePosRef.current.set(key, { x: c.canvas_x, y: c.canvas_y });
+        } else {
+          savedFreePosRef.current.delete(key);
+        }
+      }
       const effectiveDensity: Density = 'full';
       // Positions are computed from sort rank — never rely on DB canvas_x/canvas_y in sorted mode
       const sortedPositions = computeSortedPositionsFromApiClients(
@@ -1349,6 +1364,9 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
   const savePosition = useCallback((nodeId: string, x: number, y: number) => {
     // Only save positions in free mode — sorted mode positions are computed, not stored.
     if (layoutModeRef.current === 'sorted') return;
+    // Remember it in-session too, so a Sorted→Free toggle restores this drag immediately
+    // (not just after a reload from the DB).
+    savedFreePosRef.current.set(nodeId, { x, y });
     pendingPosRef.current.set(nodeId, { x, y });
     const existing = posTimers.current.get(nodeId);
     if (existing) clearTimeout(existing);
@@ -1463,10 +1481,19 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
       });
       setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
     } else {
-      // Free mode — re-enable client node dragging
+      // Free mode — re-enable dragging AND restore the operator's saved arrangement.
+      // Sorted mode only moved the cards transiently; put each one back where the
+      // operator left it (from the DB-seeded / drag-updated map), so toggling Sorted
+      // never erases their organization (Ford 2026-07-11). Cards with no saved spot
+      // (never dragged) stay where they are — their free-default.
       setNodes((ns) =>
-        ns.map((n) => (n.type === 'client' ? { ...n, draggable: true } : n)),
+        ns.map((n) => {
+          if (n.type !== 'client') return n;
+          const saved = savedFreePosRef.current.get(n.id);
+          return { ...n, draggable: true, ...(saved ? { position: saved } : {}) };
+        }),
       );
+      setTimeout(() => fitView({ padding: 0.35, duration: 400, maxZoom: 0.85 }), 80);
     }
   }, [fitView, setNodes]);
 
