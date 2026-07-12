@@ -128,6 +128,15 @@ class Tenant(Base):
     # goes out (records / QA). Wired in delivery.deliver_for_client.
     cc_on_reports: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Auto-refresh capture mode the owner picked (Array Operator, Jul 2026):
+    #   "cloud"  → Cloud Capture: we store logins server-side + refresh 24/7
+    #   "device" → on-device browser extension vault
+    # Persisted SERVER-SIDE so the choice survives across browsers/devices — the
+    # dashboard's Auto-refresh panel was previously localStorage-only, so a cloud
+    # onboarding on one device read as "extension mode" on another (Ford 2026-07-12).
+    # Nullable: NULL for pre-existing tenants → the client localStorage/default rules.
+    capture_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     # ── Automatic warranty claims policy (Array Operator, June 2026) ──────
     # The owner's send policy for auto-drafted warranty claims. Full control:
     #   "manual" → agent drafts, owner approves each send (default — safe)

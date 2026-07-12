@@ -54,6 +54,9 @@ def main():
             # Array Operator automatic warranty-claims send policy (Jun 2026)
             ("claim_send_mode",        "ALTER TABLE tenants ADD COLUMN claim_send_mode VARCHAR(16) DEFAULT 'manual' NOT NULL"),
             ("claim_grace_hours",      "ALTER TABLE tenants ADD COLUMN claim_grace_hours INTEGER DEFAULT 24 NOT NULL"),
+            # Auto-refresh capture mode the owner picked (cloud | device), server-side so
+            # it survives across devices. Nullable → NULL for existing tenants.
+            ("capture_mode",           "ALTER TABLE tenants ADD COLUMN capture_mode VARCHAR(16)"),
             # Cross-product sibling link (Jun 2026): one extension install feeds
             # BOTH a user's NEPOOL and Array Operator tenants. Nullable, self-
             # referential, NULL for every existing tenant → no fan-out until a

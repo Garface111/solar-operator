@@ -853,6 +853,9 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             "subscription_status": t.subscription_status,
             "report_frequency": t.report_frequency,
             "cc_on_reports": bool(t.cc_on_reports),
+            # Auto-refresh mode the owner picked (cloud | device | None). Server-authoritative
+            # so the dashboard reflects the onboarding choice on ANY device.
+            "capture_mode": getattr(t, "capture_mode", None),
             # V2 email customization: current values (null = using default) plus
             # the built-in defaults so the dashboard can show them as placeholders.
             "send_from_email": t.send_from_email,
@@ -887,6 +890,27 @@ def account_me(authorization: Optional[str] = Header(default=None)):
                 "refresh_failures": last_sess.refresh_failures if last_sess else 0,
             } if last_sess else None,
         }
+
+
+class CaptureModeBody(BaseModel):
+    mode: str  # "cloud" | "device"
+
+
+@router.post("/v1/account/capture-mode")
+def set_capture_mode(body: CaptureModeBody, authorization: Optional[str] = Header(default=None)):
+    """Persist the owner's Auto-refresh capture choice (cloud | device) server-side so it
+    survives across browsers/devices. The dashboard reads it back from /v1/account."""
+    t = tenant_from_session(authorization)
+    mode = (body.mode or "").strip().lower()
+    if mode not in ("cloud", "device"):
+        raise HTTPException(400, "mode must be 'cloud' or 'device'")
+    with SessionLocal() as db:
+        row = db.get(Tenant, t.id)
+        if not row:
+            raise HTTPException(404, "Account not found")
+        row.capture_mode = mode
+        db.commit()
+    return {"ok": True, "capture_mode": mode}
 
 
 class SelectPlanBody(BaseModel):
