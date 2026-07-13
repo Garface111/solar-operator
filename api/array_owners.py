@@ -2149,26 +2149,51 @@ def list_solaredge_keys(authorization: str | None = Header(default=None)) -> dic
     """The tenant's connected SolarEdge monitoring API keys, so the owner can SEE
     what's linked in the credential vault (Ford 2026-07-10). Grouped by key (one key
     can cover many sites). Returns the full key (their OWN read-only key — for a
-    reveal/copy toggle in the UI), a masked form, and the arrays it powers."""
+    reveal/copy toggle in the UI), a masked form, and the arrays it powers.
+
+    Also returns a tenant-wide `last_synced_at` — the freshest DailyGeneration row
+    with source="solaredge" across this tenant's SolarEdge arrays (see
+    jobs/solaredge_pull.py) — so the Auto-refresh Credential Vault's LIVE data
+    board can show a SolarEdge status row alongside the harvester-backed vendors
+    (Ford 2026-07-12: "add its status up here"). SolarEdge has no login-based
+    health record (it's a plain API key, not a PortalCredential the harvester
+    logs into), so DailyGeneration.uploaded_at is the best honest freshness
+    signal actually available. No fabricated ok/error flag: if nothing's synced
+    yet, `last_synced_at` is simply None — the board reads that as "not yet
+    synced," not a lie."""
     tenant = _tenant_from_bearer(authorization)
-    from .models import Array
+    from .models import Array, DailyGeneration
+    from sqlalchemy import func
     by_key: dict[str, list[str]] = {}
     with SessionLocal() as db:
         arrays = db.execute(
             select(Array).where(Array.tenant_id == tenant.id,
                                 Array.deleted_at.is_(None))
         ).scalars().all()
+        array_ids = []
         for a in arrays:
             k = (getattr(a, "solaredge_api_key", None) or "").strip()
             if k:
                 by_key.setdefault(k, []).append(a.name or f"Array {a.id}")
+                array_ids.append(a.id)
+        last_synced_at = None
+        if array_ids:
+            last_synced_at = db.execute(
+                select(func.max(DailyGeneration.uploaded_at)).where(
+                    DailyGeneration.array_id.in_(array_ids),
+                    DailyGeneration.source == "solaredge",
+                )
+            ).scalar()
     keys = []
     for k, names in by_key.items():
         masked = ("••••" + k[-4:]) if len(k) >= 4 else ("•" * len(k))
         uniq = sorted(set(names))
         keys.append({"key": k, "masked": masked, "arrays": uniq, "array_count": len(uniq)})
     keys.sort(key=lambda x: (-x["array_count"], x["masked"]))
-    return {"ok": True, "keys": keys}
+    return {
+        "ok": True, "keys": keys,
+        "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
+    }
 
 
 class SolarEdgeConnectBody(BaseModel):
