@@ -836,6 +836,7 @@ def refresh_expiring_gmp_tokens() -> dict:
                         send_gmp_reauth_needed_email(
                             to=tenant.contact_email,
                             name=tenant.operator_name or tenant.company_name or tenant.name,
+                            product=tenant.product,
                         )
                     except Exception as notify_exc:
                         logger.error(
@@ -955,6 +956,7 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
                 send_gmp_reauth_needed_email(
                     to=tenant.contact_email,
                     name=tenant.operator_name or tenant.company_name or tenant.name,
+                    product=tenant.product,
                 )
             except Exception:
                 logger.exception("final-warning email failed for %s", tid)
@@ -1089,6 +1091,7 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                     to=tenant.contact_email,
                     name=tenant.operator_name or tenant.company_name or tenant.name,
                     utility_name=util_name, portal_url=portal,
+                    product=tenant.product,
                 )
             except Exception:
                 logger.exception("co-op reauth email failed for %s/%s", tid, prov)

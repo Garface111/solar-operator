@@ -880,12 +880,16 @@ def send_trial_charged_email(to: str, name: str, array_count: int,
     )
 
 
-def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
+def send_gmp_reauth_needed_email(to: str, name: str, product: str = "nepool") -> bool:
     """Notify an operator that we can't auto-refresh their GMP session and
-    they need to log in once to reconnect."""
+    they need to log in once to reconnect. Product-aware: brand + From address
+    follow the TENANT's product so an Array Operator owner never gets a
+    NEPOOL-branded email from admin@nepooloperator.com (Ford 2026-07-12)."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
     gmp_url = "https://greenmountainpower.com/account/login/"
+    _brand = branding.brand_name(product)
+    _brand_h = _html.escape(_brand)
 
     body_html = (
         f"<p>Hi {first},</p>"
@@ -896,7 +900,7 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
         f"once — the extension will capture a fresh session and automatic bill pulls "
         f"will resume immediately.</p>"
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand_h}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -904,7 +908,7 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
         f"This usually means the session was revoked (e.g. a password change).\n\n"
         f"Please log into {gmp_url} once — the extension "
         f"will capture a fresh session and automatic bill pulls will resume.\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
         preheader="Your Green Mountain Power session needs reconnecting.",
@@ -924,17 +928,23 @@ def send_gmp_reauth_needed_email(to: str, name: str) -> bool:
         subject="Action needed: reconnect your Green Mountain Power account",
         html=html,
         text=text,
+        product=product,
     )
 
 
 def send_coop_reauth_needed_email(to: str, name: str, utility_name: str,
-                                  portal_url: str) -> bool:
+                                  portal_url: str, product: str = "nepool") -> bool:
     """Notify an operator that their co-op (SmartHub) session has died and
     server-side generation pulls stopped — one portal login restores them.
-    The co-op analog of send_gmp_reauth_needed_email."""
+    The co-op analog of send_gmp_reauth_needed_email. Product-aware: brand +
+    From address follow the TENANT's product so an Array Operator owner never
+    gets a NEPOOL-branded email from admin@nepooloperator.com (Ford 2026-07-12,
+    who received exactly this for his anna800 AO tenant's VEC account)."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
     util = _html.escape(utility_name or "your utility")
+    _brand = branding.brand_name(product)
+    _brand_h = _html.escape(_brand)
 
     body_html = (
         f"<p>Hi {first},</p>"
@@ -945,7 +955,7 @@ def send_coop_reauth_needed_email(to: str, name: str, utility_name: str,
         f"once — the extension will capture a fresh session and automatic pulls "
         f"will resume that night.</p>"
         f"<p>Questions? Just reply.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand_h}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
@@ -953,7 +963,7 @@ def send_coop_reauth_needed_email(to: str, name: str, utility_name: str,
         f"daily generation data automatically.\n\n"
         f"Please log into {portal_url} once — the extension will capture a fresh "
         f"session and automatic pulls will resume that night.\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
         preheader=f"Your {utility_name} session needs reconnecting.",
@@ -973,6 +983,7 @@ def send_coop_reauth_needed_email(to: str, name: str, utility_name: str,
         subject=f"Action needed: reconnect your {utility_name} account",
         html=html,
         text=text,
+        product=product,
     )
 
 
