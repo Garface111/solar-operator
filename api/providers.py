@@ -58,7 +58,12 @@ _VALID_STATUS = {"live", "in-progress", "manual"}
 
 # Codes that are "live" via a dedicated bespoke adapter (NOT SmartHub).
 # A live row must be either a SmartHub host or one of these.
-BESPOKE_LIVE_CODES = {"gmp"}
+BESPOKE_LIVE_CODES = {
+    "gmp",
+    # Eversource Energy (CT / MA / NH) — bespoke MyAccount portal, cloud-capture
+    # harvester in api/harvester/vendors/eversource.py (Jul 2026).
+    "eversource", "eversource_ma", "eversource_ct",
+}
 
 _REQUIRED_COLS = {
     "code", "label", "state", "scrape_status", "smarthub_host", "portal_url", "notes",

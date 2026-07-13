@@ -144,9 +144,14 @@ def save_credential(body: CredentialIn, request: Request,
     provider = (body.provider or "").strip().lower()
     if not provider or not (body.username or "").strip():
         raise HTTPException(422, "provider and username are required")
-    # A co-op needs its host to know which portal to open.
-    if provider not in ("gmp",) and provider not in (
-            "fronius", "sma", "chint", "solaredge") and not (body.login_host or "").strip():
+    # A co-op needs its host to know which portal to open. Bespoke utilities
+    # (GMP, Eversource) and inverter clouds have a fixed login URL in the
+    # harvester module — no login_host required.
+    _no_host = {
+        "gmp", "eversource", "eversource_ma", "eversource_ct",
+        "fronius", "sma", "chint", "solaredge",
+    }
+    if provider not in _no_host and not (body.login_host or "").strip():
         raise HTTPException(422, "login_host (co-op subdomain) is required for SmartHub co-ops")
     with SessionLocal() as db:
         cc.upsert_credential(

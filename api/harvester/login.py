@@ -38,6 +38,18 @@ HINTS: dict[str, dict[str, str]] = {
         "pass": "#password, input[name=\"password\" i]",
         "btn": "button[type=\"submit\"], button[id*=\"login\" i], button[id*=\"signin\" i]",
     },
+    # Eversource MyAccount (Okta-backed React form on www.eversource.com).
+    # Username is typically email; Okta may also present identifier-first.
+    "eversource": {
+        "user": ("input[type=\"email\"], input[name=\"username\" i], "
+                 "input[name=\"identifier\" i], input[id*=\"username\" i], "
+                 "input[id*=\"email\" i], input[autocomplete=\"username\"]"),
+        "pass": ("input[type=\"password\"], input[name=\"password\" i], "
+                 "input[id*=\"password\" i], input[autocomplete=\"current-password\"]"),
+        "btn": ("button[type=\"submit\"], input[type=\"submit\"], "
+                "button[id*=\"login\" i], button[id*=\"signin\" i], "
+                "input[value*=\"Sign\" i], input[value*=\"Log\" i]"),
+    },
     # SmartHub spans two skins: legacy ASP.NET (#Login*TextBox) and the modern
     # NISC Angular SPA (Email + Password + a plain "Sign In" <button> with no
     # type=submit, inputs often NOT in a <form>). The text-scan submit finder is
@@ -67,9 +79,11 @@ _BTN_TEXT_RX = re.compile(r"\b(sign\s*in|log\s*in|log\s*on|login|continue|submit
 
 
 def hint_key_for(provider: str) -> str:
-    """A known inverter/gmp key uses its own hint; any other code is a SmartHub
-    co-op (vec/wec/sh_*) and shares the one SmartHub login form."""
+    """A known inverter/gmp/eversource key uses its own hint; any other code is
+    a SmartHub co-op (vec/wec/sh_*) and shares the one SmartHub login form."""
     p = (provider or "").lower()
+    if p in ("eversource", "eversource_ma", "eversource_ct"):
+        return "eversource"
     if p in HINTS:
         return p
     if p in _INVERTER_KEYS:

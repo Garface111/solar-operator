@@ -4168,10 +4168,19 @@ class UtilityMeterCaptureBody(BaseModel):
 #   gmp = Green Mountain Power (bespoke REST API, carries a GMP-style summary).
 #   vec = Vermont Electric Coop, wec = Washington Electric Coop (both NISC
 #   SmartHub — the extension supplies daily[] generation directly, no GMP summary).
-_UTILITY_CAPTURE_VENDORS = {"gmp", "vec", "wec"}
+#   eversource* = Eversource Energy CT/MA/NH (bespoke MyAccount; Cloud Capture).
+_UTILITY_CAPTURE_VENDORS = {
+    "gmp", "vec", "wec",
+    "eversource", "eversource_ma", "eversource_ct",
+}
 
 # Human label per utility for the default array name when no nickname is given.
-_UTILITY_LABEL = {"gmp": "GMP", "vec": "VEC", "wec": "WEC"}
+_UTILITY_LABEL = {
+    "gmp": "GMP", "vec": "VEC", "wec": "WEC",
+    "eversource": "Eversource",
+    "eversource_ma": "Eversource",
+    "eversource_ct": "Eversource",
+}
 
 
 def _meter_day(value: str | None):
