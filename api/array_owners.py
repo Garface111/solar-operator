@@ -5329,12 +5329,15 @@ def array_forecast_ep(array_id: int = Query(...),
                     **forecasting.Forecast(False, reason="no_location").to_dict()}
 
         # Geometry: operator override (geometry_source='manual') or our labeled
-        # default (tilt ≈ latitude, due south).
+        # default (tilt ≈ latitude, due south). PR: operator override or DEFAULT_PR.
         tilt_assumed = arr.tilt_deg is None
         az_assumed = arr.azimuth_deg is None
         tilt = arr.tilt_deg if arr.tilt_deg is not None else (
             forecasting.default_tilt_deg(arr.latitude) if has_loc else 0.0)
         az = arr.azimuth_deg if arr.azimuth_deg is not None else forecasting.DEFAULT_AZIMUTH_DEG
+        pr_assumed = arr.performance_ratio is None
+        pr = (float(arr.performance_ratio)
+              if arr.performance_ratio is not None else forecasting.DEFAULT_PR)
 
         today = now().date()
         end = today - timedelta(days=1)
@@ -5347,7 +5350,7 @@ def array_forecast_ep(array_id: int = Query(...),
             tilt_assumed=tilt_assumed, azimuth_assumed=az_assumed,
             geocode_source=arr.geocode_source, geocoded_address=arr.geocoded_address,
             actual_by_day=actual_by_day, window_days=window_days, today=today,
-            expected_kwh_per_kw_day=expected_ratio,
+            expected_kwh_per_kw_day=expected_ratio, pr=pr, pr_assumed=pr_assumed,
         )
         return {"array_id": arr.id, "array_name": arr.name, **fc.to_dict()}
 
@@ -5355,14 +5358,19 @@ def array_forecast_ep(array_id: int = Query(...),
 class ArrayGeometryBody(BaseModel):
     tilt_deg: Optional[float] = None
     azimuth_deg: Optional[float] = None
+    # Optional PR override (0.5–1.0). Omitted = leave unchanged; explicit null
+    # clears back to DEFAULT_PR. Field is optional so old clients still work.
+    performance_ratio: Optional[float] = None
+    clear_performance_ratio: bool = False
 
 
 @router.post("/v1/array-owners/arrays/{array_id}/geometry")
 def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
                           authorization: str | None = Header(default=None)) -> dict:
-    """Operator override of an array's tilt/azimuth assumption (the forecast's
-    one user-tunable input). Sending null/null clears the override → back to the
-    labeled default (tilt ≈ latitude, due south). Validated to physical ranges."""
+    """Operator override of an array's tilt/azimuth/PR assumptions (the forecast's
+    user-tunable model inputs). Sending null tilt+azimuth clears geometry → back
+    to labeled defaults (tilt ≈ latitude, due south). performance_ratio is the
+    losses derate; clear_performance_ratio=true restores the fleet default PR."""
     tenant = _tenant_from_bearer(authorization)
     from .account import require_not_demo
     require_not_demo(tenant)
@@ -5370,6 +5378,8 @@ def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
         raise HTTPException(400, "tilt_deg must be 0–90")
     if body.azimuth_deg is not None and not (-180 <= body.azimuth_deg <= 180):
         raise HTTPException(400, "azimuth_deg must be -180..180 (0=south, -90=east, 90=west)")
+    if body.performance_ratio is not None and not (0.5 <= body.performance_ratio <= 1.0):
+        raise HTTPException(400, "performance_ratio must be between 0.5 and 1.0")
     with SessionLocal() as db:
         arr = db.execute(
             select(Array).where(
@@ -5379,13 +5389,93 @@ def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
         ).scalar_one_or_none()
         if arr is None:
             raise HTTPException(404, "Array not found")
+        # Geometry: only update when the field is present in the request (model
+        # defaults both to None which also means "clear" for the classic API).
         arr.tilt_deg = body.tilt_deg
         arr.azimuth_deg = body.azimuth_deg
-        arr.geometry_source = "manual" if (body.tilt_deg is not None or body.azimuth_deg is not None) else None
+        arr.geometry_source = (
+            "manual" if (body.tilt_deg is not None or body.azimuth_deg is not None)
+            else None)
+        if body.clear_performance_ratio:
+            arr.performance_ratio = None
+        elif body.performance_ratio is not None:
+            arr.performance_ratio = round(float(body.performance_ratio), 3)
         db.commit()
         return {"ok": True, "array_id": arr.id,
                 "tilt_deg": arr.tilt_deg, "azimuth_deg": arr.azimuth_deg,
-                "geometry_source": arr.geometry_source}
+                "geometry_source": arr.geometry_source,
+                "performance_ratio": arr.performance_ratio}
+
+
+class FleetModelParamsBody(BaseModel):
+    """Apply model params across many arrays at once (Analysis tab bulk edit)."""
+    tilt_deg: Optional[float] = None
+    azimuth_deg: Optional[float] = None
+    performance_ratio: Optional[float] = None
+    # When true (default), only fill arrays that still use ASSUMED values — never
+    # clobber an array the operator already customized.
+    only_assumed: bool = True
+    array_ids: Optional[list[int]] = None
+    clear_geometry: bool = False
+    clear_performance_ratio: bool = False
+
+
+@router.post("/v1/array-owners/forecast-params")
+def set_fleet_forecast_params_ep(body: FleetModelParamsBody,
+                                 authorization: str | None = Header(default=None)) -> dict:
+    """Bulk-set tilt / azimuth / performance ratio for the weather model.
+
+    Intelligent defaults (Ford 2026-07-13): apply only to arrays still on
+    assumed geometry/PR unless only_assumed=false. Scope with array_ids or
+    all of the tenant's live arrays. Returns how many rows changed so the UI
+    can confirm.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    if body.tilt_deg is not None and not (0 <= body.tilt_deg <= 90):
+        raise HTTPException(400, "tilt_deg must be 0–90")
+    if body.azimuth_deg is not None and not (-180 <= body.azimuth_deg <= 180):
+        raise HTTPException(400, "azimuth_deg must be -180..180 (0=south)")
+    if body.performance_ratio is not None and not (0.5 <= body.performance_ratio <= 1.0):
+        raise HTTPException(400, "performance_ratio must be between 0.5 and 1.0")
+    with SessionLocal() as db:
+        q = select(Array).where(
+            Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+        if body.array_ids:
+            q = q.where(Array.id.in_(body.array_ids))
+        arrays = db.execute(q).scalars().all()
+        updated = 0
+        for arr in arrays:
+            changed = False
+            if body.clear_geometry:
+                if arr.tilt_deg is not None or arr.azimuth_deg is not None:
+                    arr.tilt_deg = arr.azimuth_deg = None
+                    arr.geometry_source = None
+                    changed = True
+            else:
+                if body.tilt_deg is not None:
+                    if (not body.only_assumed) or arr.tilt_deg is None:
+                        arr.tilt_deg = float(body.tilt_deg)
+                        arr.geometry_source = "manual"
+                        changed = True
+                if body.azimuth_deg is not None:
+                    if (not body.only_assumed) or arr.azimuth_deg is None:
+                        arr.azimuth_deg = float(body.azimuth_deg)
+                        arr.geometry_source = "manual"
+                        changed = True
+            if body.clear_performance_ratio:
+                if arr.performance_ratio is not None:
+                    arr.performance_ratio = None
+                    changed = True
+            elif body.performance_ratio is not None:
+                if (not body.only_assumed) or arr.performance_ratio is None:
+                    arr.performance_ratio = round(float(body.performance_ratio), 3)
+                    changed = True
+            if changed:
+                updated += 1
+        db.commit()
+        return {"ok": True, "updated": updated, "scoped": len(arrays)}
 
 
 class ArrayExpectedRatioBody(BaseModel):
@@ -5691,6 +5781,9 @@ def compute_fleet_forecast(tenant, window_days: int) -> dict:
             tilt = arr.tilt_deg if arr.tilt_deg is not None else (
                 forecasting.default_tilt_deg(arr.latitude) if has_loc else 0.0)
             az = arr.azimuth_deg if arr.azimuth_deg is not None else forecasting.DEFAULT_AZIMUTH_DEG
+            pr_assumed = arr.performance_ratio is None
+            pr = (float(arr.performance_ratio)
+                  if arr.performance_ratio is not None else forecasting.DEFAULT_PR)
 
             poa_by_day = None
             if expected_ratio is None:
@@ -5707,8 +5800,14 @@ def compute_fleet_forecast(tenant, window_days: int) -> dict:
                 geocode_source=arr.geocode_source, geocoded_address=arr.geocoded_address,
                 actual_by_day=actual_by_day, window_days=window_days, today=today,
                 _poa_by_day=poa_by_day,
-                expected_kwh_per_kw_day=expected_ratio,
+                expected_kwh_per_kw_day=expected_ratio, pr=pr, pr_assumed=pr_assumed,
             )
+            # Expose customizability flags on the row for the Analysis UI.
+            d_flags = {
+                "tilt_deg": round(tilt, 1), "azimuth_deg": round(az, 1),
+                "performance_ratio": round(pr, 3),
+                "performance_ratio_assumed": pr_assumed,
+            }
             d = fc.to_dict()
             measured_days = d["inputs"].get("measured_days", 0) if d.get("available") else 0
             # Expected restricted to matched days — the apples-to-apples denominator
@@ -5748,6 +5847,7 @@ def compute_fleet_forecast(tenant, window_days: int) -> dict:
                 "confidence": d["confidence"],
                 "tilt_assumed": tilt_assumed, "geocode_source": arr.geocode_source,
                 "weather_code": (wx_for(arr.latitude, arr.longitude) if has_loc else None),
+                **d_flags,
             })
             if measured_days > 0:
                 kk_act += d["actual_kwh"]

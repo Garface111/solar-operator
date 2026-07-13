@@ -558,6 +558,10 @@ class Array(Base):
     tilt_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
     azimuth_deg: Mapped[float | None] = mapped_column(Float, nullable=True)
     geometry_source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # 'default' | 'manual'
+    # Operator-entered PERFORMANCE RATIO (0.5–1.0) for the weather model:
+    # expected = nameplate × POA × PR. NULL → DEFAULT_PR (0.84), labeled assumed.
+    # The tunable "losses" knob (inverter efficiency, wiring, heat, soiling).
+    performance_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Operator-entered EXPECTED specific yield for this array, in kWh per kW
     # PER DAY (e.g. 3.5 = "I expect ~3.5 kWh per installed kW on a typical day
     # this season"). When set, predicted-vs-actual uses it as the array's

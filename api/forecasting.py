@@ -415,7 +415,7 @@ def build_forecast(
     tilt_assumed: bool, azimuth_assumed: bool, geocode_source: Optional[str],
     geocoded_address: Optional[str],
     actual_by_day: dict[str, float], window_days: int = DEFAULT_WINDOW_DAYS,
-    pr: float = DEFAULT_PR, today: Optional[date] = None,
+    pr: float = DEFAULT_PR, pr_assumed: bool = True, today: Optional[date] = None,
     _poa_by_day: Optional[dict[str, float]] = None,
     expected_kwh_per_kw_day: Optional[float] = None,
 ) -> Forecast:
@@ -526,7 +526,8 @@ def build_forecast(
             "tilt_assumed": tilt_assumed, "azimuth_assumed": azimuth_assumed,
             "azimuth_label": _azimuth_label(azimuth_deg),
         }
-        inputs["performance_ratio"] = pr
+        inputs["performance_ratio"] = round(pr, 3)
+        inputs["performance_ratio_assumed"] = bool(pr_assumed)
         inputs["irradiance"] = {
             "source": "Open-Meteo global_tilted_irradiance (hourly, integrated)",
             "stc_reference_kwh_m2": STC_IRRADIANCE_KWH_M2,

@@ -371,6 +371,14 @@ def main():
             ))
             print("  + arrays.expected_kwh_per_kw_day")
 
+        # 2026-07-13 Analysis model variables: per-array performance ratio override
+        # (losses knob). NULL → DEFAULT_PR 0.84 assumed.
+        if not column_exists(conn, "arrays", "performance_ratio"):
+            conn.execute(text(
+                "ALTER TABLE arrays ADD COLUMN performance_ratio DOUBLE PRECISION"
+            ))
+            print("  + arrays.performance_ratio")
+
         # 2026-06-04 VEC auto-populate: mirror of GMP triple for VEC provider.
         vec_cols = [
             ("clients", "vec_email",
