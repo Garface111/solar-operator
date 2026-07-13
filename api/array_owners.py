@@ -5401,10 +5401,12 @@ def set_array_geometry_ep(array_id: int, body: ArrayGeometryBody,
         elif body.performance_ratio is not None:
             arr.performance_ratio = round(float(body.performance_ratio), 3)
         db.commit()
-        return {"ok": True, "array_id": arr.id,
-                "tilt_deg": arr.tilt_deg, "azimuth_deg": arr.azimuth_deg,
-                "geometry_source": arr.geometry_source,
-                "performance_ratio": arr.performance_ratio}
+        result = {"ok": True, "array_id": arr.id,
+                  "tilt_deg": arr.tilt_deg, "azimuth_deg": arr.azimuth_deg,
+                  "geometry_source": arr.geometry_source,
+                  "performance_ratio": arr.performance_ratio}
+    invalidate_fleet_forecast(tenant.id)
+    return result
 
 
 class FleetModelParamsBody(BaseModel):
@@ -5475,7 +5477,9 @@ def set_fleet_forecast_params_ep(body: FleetModelParamsBody,
             if changed:
                 updated += 1
         db.commit()
-        return {"ok": True, "updated": updated, "scoped": len(arrays)}
+        result = {"ok": True, "updated": updated, "scoped": len(arrays)}
+    invalidate_fleet_forecast(tenant.id)
+    return result
 
 
 class ArrayExpectedRatioBody(BaseModel):
@@ -5807,6 +5811,11 @@ def compute_fleet_forecast(tenant, window_days: int) -> dict:
                 "tilt_deg": round(tilt, 1), "azimuth_deg": round(az, 1),
                 "performance_ratio": round(pr, 3),
                 "performance_ratio_assumed": pr_assumed,
+                "azimuth_assumed": az_assumed,
+                # Clean address for the per-array model editor (never re-geocode
+                # parenthetical labels like "… (from site name)").
+                "address": (arr.geocoded_address or None),
+                "latitude": arr.latitude, "longitude": arr.longitude,
             }
             d = fc.to_dict()
             measured_days = d["inputs"].get("measured_days", 0) if d.get("available") else 0
