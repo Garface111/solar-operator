@@ -94,6 +94,66 @@ def connect_ready(tenant) -> bool:
     return bool(acct and getattr(tenant, "stripe_connect_charges_enabled", False))
 
 
+def link_existing_connect_account(db, tenant) -> dict:
+    """If this tenant has no stripe_connect_account_id yet, find a matching
+    Express account on our platform (by metadata.tenant_id or contact email)
+    and attach it. Fixes the 'I finished Stripe KYC but pay links never mint'
+    case when the owner set up Connect under a different session/tenant row
+    or the DB write didn't land on the tenant they're sending from.
+    """
+    if getattr(tenant, "stripe_connect_account_id", None):
+        return {"ok": True, "linked": False, "account_id": tenant.stripe_connect_account_id}
+    if not _stripe_ready():
+        return {"ok": False, "error": "Stripe not configured"}
+    tid = str(getattr(tenant, "id", "") or "")
+    email = (getattr(tenant, "contact_email", None) or "").strip().lower()
+    try:
+        # Page through platform connected accounts (small platforms = fine).
+        starting_after = None
+        matched = None
+        for _ in range(10):  # up to 1000 accounts
+            kwargs = {"limit": 100}
+            if starting_after:
+                kwargs["starting_after"] = starting_after
+            page = stripe.Account.list(**kwargs)
+            data = page.get("data") if isinstance(page, dict) else list(page.data or [])
+            if not data:
+                break
+            for a in data:
+                ad = a if isinstance(a, dict) else a.to_dict() if hasattr(a, "to_dict") else dict(a)
+                meta = ad.get("metadata") or {}
+                a_email = (ad.get("email") or "").strip().lower()
+                if tid and meta.get("tenant_id") == tid:
+                    matched = ad
+                    break
+                if email and a_email and a_email == email:
+                    matched = ad
+                    break
+            if matched:
+                break
+            starting_after = data[-1].get("id") if isinstance(data[-1], dict) else getattr(data[-1], "id", None)
+            has_more = page.get("has_more") if isinstance(page, dict) else getattr(page, "has_more", False)
+            if not has_more:
+                break
+        if not matched:
+            return {"ok": True, "linked": False, "account_id": None}
+        acct_id = matched.get("id")
+        enabled = bool(matched.get("charges_enabled"))
+        tenant.stripe_connect_account_id = acct_id
+        tenant.stripe_connect_charges_enabled = enabled
+        db.commit()
+        logger.info("linked existing Connect account %s → tenant %s (charges=%s)",
+                    acct_id, tid, enabled)
+        return {
+            "ok": True, "linked": True, "account_id": acct_id,
+            "charges_enabled": enabled,
+            "details_submitted": bool(matched.get("details_submitted")),
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("link_existing_connect_account failed for %s: %s", tid, e)
+        return {"ok": False, "error": str(e)[:200]}
+
+
 # ─── Connect Express onboarding ─────────────────────────────────────────────
 
 def create_or_get_connect_account(db, tenant) -> dict:
@@ -273,11 +333,28 @@ def create_offtaker_payment(db, *, tenant, sub, match,
 
     if not payments_enabled():
         return {"ok": False, "skipped": True, "error": "pay-links disabled"}
+    if not _stripe_ready():
+        return {"ok": False, "skipped": True, "error": "Stripe not configured"}
+    # Auto-attach a Connect account finished under another tenant row / session
+    # (common when the operator set up payouts once, then sends from the real
+    # fleet tenant). Best-effort — never blocks the skip path below.
+    if not getattr(tenant, "stripe_connect_account_id", None):
+        try:
+            link_existing_connect_account(db, tenant)
+            db.refresh(tenant)
+        except Exception:  # noqa: BLE001
+            logger.warning("auto-link Connect failed for %s", getattr(tenant, "id", "?"),
+                           exc_info=True)
+    if not connect_ready(tenant):
+        # One more refresh in case charges_enabled flipped after KYC.
+        try:
+            create_or_get_connect_account(db, tenant)
+            db.refresh(tenant)
+        except Exception:  # noqa: BLE001
+            pass
     if not connect_ready(tenant):
         return {"ok": False, "skipped": True,
                 "error": "owner has not finished Stripe Connect onboarding"}
-    if not _stripe_ready():
-        return {"ok": False, "skipped": True, "error": "Stripe not configured"}
 
     amount_cents = _amount_cents_from_match(match)
     if amount_cents < 50:  # Stripe minimum for card charges is typically $0.50

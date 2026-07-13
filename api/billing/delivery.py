@@ -2098,9 +2098,12 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     if (getattr(tenant, "product", None) or "nepool") == "array_operator":
         try:
             from . import payments as _pay
-            # Refresh Connect charges_enabled from Stripe before minting so a
-            # just-finished bank setup is picked up without a page reload.
+            # Refresh / auto-link Connect before minting so a just-finished bank
+            # setup (or a Connect account finished under another tenant row with
+            # the same email) is picked up without a page reload.
             try:
+                if not getattr(tenant, "stripe_connect_account_id", None):
+                    _pay.link_existing_connect_account(db, tenant)
                 _pay.refresh_connect_status(db, tenant)
                 db.refresh(tenant)
             except Exception:  # noqa: BLE001

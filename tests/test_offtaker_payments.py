@@ -365,6 +365,39 @@ def test_email_html_test_banner_mentions_real_pay_button():
     assert "same as offtakers will see" in html
 
 
+def test_link_existing_connect_account_by_email(monkeypatch):
+    t = _tenant(stripe_connect_account_id=None, stripe_connect_charges_enabled=False)
+    # Override contact email to a known value for matching
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        tenant.contact_email = "owner@linktest.example"
+        tenant.stripe_connect_account_id = None
+        tenant.stripe_connect_charges_enabled = False
+        db.commit()
+
+    fake_acct = {
+        "id": "acct_linked_by_email",
+        "email": "owner@linktest.example",
+        "charges_enabled": True,
+        "details_submitted": True,
+        "metadata": {},
+    }
+
+    class _Page(dict):
+        def __init__(self):
+            super().__init__(data=[fake_acct], has_more=False)
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_fake")
+    with patch("api.billing.payments.stripe.Account.list", return_value=_Page()):
+        with SessionLocal() as db:
+            tenant = db.get(Tenant, t.id)
+            res = pay.link_existing_connect_account(db, tenant)
+            db.refresh(tenant)
+            assert res["ok"] and res["linked"]
+            assert tenant.stripe_connect_account_id == "acct_linked_by_email"
+            assert tenant.stripe_connect_charges_enabled is True
+
+
 def test_friendly_connect_error_hides_stripe_raw():
     err = pay._friendly_connect_error(Exception(
         "You can only create new accounts if you've signed up for Connect, "

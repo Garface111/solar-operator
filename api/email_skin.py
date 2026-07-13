@@ -83,25 +83,28 @@ _THEMES = {
         "chip_caption": "NEPOOL-GIS generation workbook",
     },
     "array_operator": {
-        # Array Operator SKY redesign (Jul 2026) — alpine-sky page wash + frosted
-        # white card + emerald money accents matching arrayoperator.com's sky
-        # glass UI (theme-sky.css / styles --good #3fd68a, --sky #5ec2ff).
-        "page_bg": "#dceef9",         # soft alpine sky (email-safe solid)
+        # Array Operator SKY redesign (Jul 2026) — alpine-sky page (hero plate
+        # from arrayoperator.com as background-image) + frosted white card +
+        # emerald money accents. Wordmark footer stays LIGHT (never a black bar).
+        "page_bg": "#56B4F0",         # --sky-mid solid fallback (Outlook)
+        "page_bg_image": "https://arrayoperator.com/img/sky/world-zo6-2560.jpg",
+        "page_bg_gradient": "linear-gradient(180deg,#1E90E8 0%,#56B4F0 48%,#BEE3FA 100%)",
         "card_bg": "#ffffff",
-        "card_border": "rgba(15,23,42,.08)",
-        "header_bg": "#e8f6fc",       # solid fallback for Outlook
-        "header_gradient": "linear-gradient(165deg,#cfefff 0%,#e8f7fc 45%,#f0fbf6 100%)",
+        "card_border": "rgba(255,255,255,.65)",
+        "header_bg": "#ffffff",
+        "header_gradient": "linear-gradient(165deg,rgba(207,239,255,.95) 0%,rgba(255,255,255,.98) 55%,#ffffff 100%)",
         "header_text": "#0f172a",
         "header_sub": "#5b6b7c",
         "accent": "#10b981",          # emerald hairline (pay / money)
         "body_text": "#0f172a",
         "muted_text": "#64748b",
         "footer_border": "rgba(15,23,42,.06)",
-        "cta_bg": "#10b981",          # sky-green primary button
-        "cta_text": "#06281a",        # dark ink on green (matches site buttons)
-        "wordmark_bg": "#0a0e14",     # deep sky-night strip (site --bg)
-        "wordmark_text": "#7ff0bb",   # --good2 mint on dark
-        "chip_bg": "rgba(16,185,129,.06)",
+        "cta_bg": "#10b981",
+        "cta_text": "#06281a",
+        # Light glass footer — NOT the dark night strip (Ford: black bar looks bad)
+        "wordmark_bg": "rgba(255,255,255,.72)",
+        "wordmark_text": "#5b6b7c",
+        "chip_bg": "rgba(16,185,129,.08)",
         "chip_border": "rgba(16,185,129,.22)",
         "chip_icon_bg": "#10b981",
         "chip_icon_text": "#06281a",
@@ -110,7 +113,7 @@ _THEMES = {
         "wordmark": "Array Operator · arrayoperator.com",
         "wordmark_html": (
             'Array Operator · <a href="https://arrayoperator.com" '
-            'style="color:#7ff0bb;text-decoration:none;font-weight:600;">'
+            'style="color:#047857;text-decoration:none;font-weight:600;">'
             'arrayoperator.com</a>'
         ),
         "default_tagline": "Your array, measured at its true worth — watched, valued, in dollars.",
@@ -220,6 +223,29 @@ def render_email_skin(
             '</td></tr></table>'
         )
 
+    # Outer page background: optional hero photo (AO sky plate) + gradient
+    # fallback. Many clients ignore background-image on <body>; set it on the
+    # outer table + bgcolor solid so Outlook still looks intentional.
+    _bg_img = (t.get("page_bg_image") or "").strip()
+    _bg_grad = (t.get("page_bg_gradient") or t["page_bg"]).strip()
+    if _bg_img:
+        _outer_bg_style = (
+            f"background-color:{t['page_bg']};"
+            f"background-image:url('{_bg_img}'),{_bg_grad};"
+            f"background-size:cover,cover;background-position:center top,center top;"
+            f"background-repeat:no-repeat,no-repeat;padding:40px 12px;"
+        )
+        _outer_bg_attr = f'background="{_bg_img}" bgcolor="{t["page_bg"]}"'
+    else:
+        _outer_bg_style = f"background:{t['page_bg']};padding:36px 0;"
+        _outer_bg_attr = f'bgcolor="{t["page_bg"]}"'
+
+    _card_shadow = (
+        "0 18px 50px -12px rgba(20,60,120,.18),0 1px 0 rgba(255,255,255,.8) inset"
+        if _bg_img else "0 1px 2px rgba(0,0,0,0.04)"
+    )
+    _card_radius = "18px" if _bg_img else "10px"
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -234,21 +260,21 @@ def render_email_skin(
 <body style="margin:0;padding:0;background:{t["page_bg"]};color-scheme:light only;" bgcolor="{t["page_bg"]}">
 <span style="display:none;font-size:0;line-height:0;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">{preheader}</span>
 <table cellpadding="0" cellspacing="0" border="0" width="100%" role="presentation"
-  bgcolor="{t["page_bg"]}" style="background:{t["page_bg"]};padding:36px 0;">
-  <tr><td align="center">
+  {_outer_bg_attr} style="{_outer_bg_style}">
+  <tr><td align="center" style="padding:8px 0 28px;">
     <table cellpadding="0" cellspacing="0" border="0" width="580" role="presentation"
-      bgcolor="{t["card_bg"]}" style="max-width:580px;width:100%;background:{t["card_bg"]};border:1px solid {t["card_border"]};border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,0.04);">
-      <tr><td bgcolor="{t["header_bg"]}" style="background:{t["header_bg"]};background:{t.get("header_gradient") or t["header_bg"]};padding:28px 36px;border-radius:10px 10px 0 0;border-bottom:3px solid {t["accent"]};">
-        <div style="font-family:{_FONT};font-size:22px;font-weight:600;color:{t["header_text"]};line-height:1.25;letter-spacing:-0.01em;">{_headline}</div>
+      bgcolor="{t["card_bg"]}" style="max-width:580px;width:100%;background:{t["card_bg"]};border:1px solid {t["card_border"]};border-radius:{_card_radius};box-shadow:{_card_shadow};overflow:hidden;">
+      <tr><td bgcolor="{t["header_bg"]}" style="background:{t["header_bg"]};background:{t.get("header_gradient") or t["header_bg"]};padding:28px 36px;border-radius:{_card_radius} {_card_radius} 0 0;border-bottom:3px solid {t["accent"]};">
+        <div style="font-family:{_FONT};font-size:22px;font-weight:700;color:{t["header_text"]};line-height:1.25;letter-spacing:-0.01em;">{_headline}</div>
         <div style="font-family:{_FONT};font-size:13px;color:{t["header_sub"]};margin-top:8px;line-height:1.45;">{_tagline}</div>
       </td></tr>
-      <tr><td bgcolor="{t["card_bg"]}" style="background:{t["card_bg"]};padding:32px 36px 8px 36px;font-family:{_FONT};font-size:15px;line-height:1.65;color:{t["body_text"]};">
+      <tr><td bgcolor="{t["card_bg"]}" style="background:{t["card_bg"]};padding:28px 36px 8px 36px;font-family:{_FONT};font-size:15px;line-height:1.65;color:{t["body_text"]};">
 {body_html}{_cta_block}{_attachment_block}
       </td></tr>
-      <tr><td bgcolor="{t["card_bg"]}" style="background:{t["card_bg"]};padding:20px 36px 24px 36px;font-family:{_FONT};font-size:12px;color:{t["muted_text"]};line-height:1.5;border-top:1px solid {t["footer_border"]};">
+      <tr><td bgcolor="{t["card_bg"]}" style="background:{t["card_bg"]};padding:18px 36px 20px 36px;font-family:{_FONT};font-size:12px;color:{t["muted_text"]};line-height:1.5;border-top:1px solid {t["footer_border"]};">
 {_footer}
       </td></tr>
-      <tr><td bgcolor="{t["wordmark_bg"]}" style="background:{t["wordmark_bg"]};padding:14px 36px;font-family:{_FONT};font-size:11px;color:{t["wordmark_text"]};text-align:center;border-radius:0 0 10px 10px;letter-spacing:0.04em;">
+      <tr><td bgcolor="#f0f7fc" style="background:{t["wordmark_bg"]};padding:14px 36px;font-family:{_FONT};font-size:11px;color:{t["wordmark_text"]};text-align:center;border-radius:0 0 {_card_radius} {_card_radius};letter-spacing:0.03em;border-top:1px solid rgba(15,23,42,.04);">
 {wordmark if wordmark is not None else (t.get("wordmark_html") or t["wordmark"])}
       </td></tr>
     </table>
