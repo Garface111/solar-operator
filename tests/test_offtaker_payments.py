@@ -23,13 +23,16 @@ from api.models import (
 
 # ─── fee math ───────────────────────────────────────────────────────────────
 
-def test_application_fee_default_1_5_percent():
-    # $100.00 → 1.5% = $1.50
-    assert pay.application_fee_cents(10_000, bps=150, min_cents=0) == 150
-    # $5.19 → 1.5% = 7.785¢ → 7¢ (integer floor via //)
-    assert pay.application_fee_cents(519, bps=150, min_cents=0) == 7
-    # $1.00 → 1¢
-    assert pay.application_fee_cents(100, bps=150, min_cents=0) == 1
+def test_application_fee_default_0_5_percent():
+    # $100.00 → 0.5% = $0.50
+    assert pay.application_fee_cents(10_000, bps=50, min_cents=0) == 50
+    # $5.19 → 0.5% = 2.595¢ → 2¢ (integer floor via //)
+    assert pay.application_fee_cents(519, bps=50, min_cents=0) == 2
+    # $1.00 → 0¢ at 0.5% (100 * 50 // 10000 = 0)
+    assert pay.application_fee_cents(100, bps=50, min_cents=0) == 0
+    # Default env bps is 50
+    assert pay.DEFAULT_FEE_BPS == 50
+    assert pay.application_fee_cents(10_000) == 50
 
 
 def test_application_fee_never_eats_whole_amount():
@@ -41,9 +44,10 @@ def test_application_fee_never_eats_whole_amount():
 
 
 def test_application_fee_min_floor():
-    # 10¢ invoice at 1.5% = 0¢; min floor of 30¢ clamps — but still capped to amount-1.
-    assert pay.application_fee_cents(10, bps=150, min_cents=30) == 9
-    assert pay.application_fee_cents(10_000, bps=150, min_cents=30) == 150
+    # 10¢ invoice at 0.5% = 0¢; min floor of 30¢ clamps — but still capped to amount-1.
+    assert pay.application_fee_cents(10, bps=50, min_cents=30) == 9
+    # $100 @ 0.5% = 50¢, above the 30¢ floor → 50
+    assert pay.application_fee_cents(10_000, bps=50, min_cents=30) == 50
 
 
 def test_dollars_to_cents():
@@ -154,7 +158,7 @@ def test_create_payment_mints_checkout_and_persists(monkeypatch):
     def fake_create(**kwargs):
         # Assert destination charge shape.
         pi = kwargs["payment_intent_data"]
-        assert pi["application_fee_amount"] == 150  # 1.5% of $100
+        assert pi["application_fee_amount"] == 50  # 0.5% of $100
         assert pi["transfer_data"]["destination"] == t.stripe_connect_account_id
         assert kwargs["metadata"]["kind"] == "offtaker_invoice"
         assert kwargs["mode"] == "payment"
@@ -162,7 +166,7 @@ def test_create_payment_mints_checkout_and_persists(monkeypatch):
                      payment_intent="pi_test_123")
 
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_fake")
-    monkeypatch.setenv("AO_OFFTAKER_FEE_BPS", "150")
+    monkeypatch.setenv("AO_OFFTAKER_FEE_BPS", "50")
     with patch("api.billing.payments.stripe.checkout.Session.create", side_effect=fake_create):
         with SessionLocal() as db:
             sub = db.get(BillingReportSubscription, sid)
@@ -172,14 +176,14 @@ def test_create_payment_mints_checkout_and_persists(monkeypatch):
 
     assert res["ok"] is True
     assert res["pay_url"].startswith("https://checkout.stripe.com/")
-    assert res["fee_cents"] == 150
+    assert res["fee_cents"] == 50
     assert res["amount_cents"] == 10_000
     with SessionLocal() as db:
         row = db.get(OfftakerPayment, res["payment_id"])
         assert row is not None
         assert row.status == "open"
         assert row.stripe_checkout_session_id == "cs_test_123"
-        assert row.fee_cents == 150
+        assert row.fee_cents == 50
         assert row.period_key == "2026-06-30"
 
 
@@ -218,7 +222,7 @@ def test_mark_payment_paid_idempotent(monkeypatch):
         row = OfftakerPayment(
             tenant_id=t.id, subscription_id=sid,
             invoice_number="2026-06", period_key="2026-06-30",
-            amount_cents=10_000, fee_cents=150, status="open",
+            amount_cents=10_000, fee_cents=50, status="open",
             stripe_checkout_session_id="cs_paid_1",
             pay_url="https://checkout.stripe.com/c/pay/cs_paid_1",
             customer_name="Town of Test",
@@ -291,8 +295,8 @@ def test_payments_connect_status_endpoint(client):
     assert body["ok"] is True
     assert body["connected"] is True
     assert body["ready"] is True
-    assert body["fee_bps"] == 150
-    assert body["fee_percent"] == 1.5
+    assert body["fee_bps"] == 50
+    assert body["fee_percent"] == 0.5
 
 
 def test_list_payments_endpoint(client):
@@ -302,7 +306,7 @@ def test_list_payments_endpoint(client):
         db.add(OfftakerPayment(
             tenant_id=t.id, subscription_id=sid,
             invoice_number="2026-05", period_key="2026-05-31",
-            amount_cents=5000, fee_cents=75, status="paid",
+            amount_cents=5000, fee_cents=25, status="paid",
             customer_name="Town of Test",
             paid_at=datetime.utcnow(),
         ))
@@ -314,7 +318,7 @@ def test_list_payments_endpoint(client):
     body = r.json()
     assert body["count"] >= 1
     assert body["payments"][0]["amount_usd"] == 50.0
-    assert body["payments"][0]["fee_usd"] == 0.75
+    assert body["payments"][0]["fee_usd"] == 0.25
     assert body["payments"][0]["status"] == "paid"
 
 
@@ -337,3 +341,31 @@ def test_email_html_includes_pay_cta():
     assert "Pay invoice" in html
     assert "https://checkout.stripe.com/c/pay/cs_abc" in html
     assert "Pay online:" in text
+
+
+def test_send_payment_received_emails_calls_resend():
+    sent = []
+    def fake_send(**kw):
+        sent.append(kw)
+        return True
+    # send_payment_received_emails does `from ..notify import _send_via_resend`
+    # at call time, so patch the notify module attribute.
+    with patch("api.notify._send_via_resend", side_effect=fake_send):
+        res = pay.send_payment_received_emails({
+            "offtaker_email": "off@example.com",
+            "offtaker_name": "Town of Test",
+            "owner_email": "owner@example.com",
+            "owner_name": "Owner Co",
+            "invoice_number": "2026-06",
+            "period_key": "2026-06-30",
+            "amount_cents": 10_000,
+            "fee_cents": 50,
+            "product": "array_operator",
+        })
+    assert res["sent"] is True
+    assert res["offtaker"] is True
+    assert res["owner"] is True
+    assert len(sent) == 2
+    subjects = [s["subject"] for s in sent]
+    assert any("Payment received" in s for s in subjects)
+    assert any("Paid" in s for s in subjects)

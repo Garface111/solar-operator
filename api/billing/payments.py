@@ -21,9 +21,9 @@ from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-# Platform fee: basis points of the invoice total (150 = 1.5%). "Scrape a tiny
+# Platform fee: basis points of the invoice total (50 = 0.5%). "Scrape a tiny
 # bit" — env-driven so Ford can retune without a code push. Min floor optional.
-DEFAULT_FEE_BPS = 150
+DEFAULT_FEE_BPS = 50
 DEFAULT_FEE_MIN_CENTS = 0
 
 
@@ -373,8 +373,13 @@ def create_offtaker_payment(db, *, tenant, sub, match,
 
 
 def mark_payment_paid(db, *, session_dict: dict) -> dict:
-    """Idempotently stamp an OfftakerPayment paid from a Checkout Session."""
-    from ..models import OfftakerPayment
+    """Idempotently stamp an OfftakerPayment paid from a Checkout Session.
+
+    On first transition to paid, returns `notify` details so the webhook can
+    email the offtaker (thank-you) and the owner (funds received) without a
+    second DB round-trip.
+    """
+    from ..models import OfftakerPayment, Tenant, BillingReportSubscription
 
     meta = session_dict.get("metadata") or {}
     if meta.get("kind") != "offtaker_invoice":
@@ -420,6 +425,29 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
     if isinstance(total, int) and total > 0:
         row.amount_cents = total
     db.commit()
+
+    # Snapshot notify recipients while we have the session open.
+    tenant = db.get(Tenant, row.tenant_id)
+    sub = db.get(BillingReportSubscription, row.subscription_id)
+    offtaker_email = (
+        (session_dict.get("customer_details") or {}).get("email")
+        or session_dict.get("customer_email")
+        or (getattr(sub, "client_email", None) if sub else None)
+    )
+    notify = {
+        "offtaker_email": offtaker_email,
+        "offtaker_name": row.customer_name or (getattr(sub, "customer_name", None) if sub else None),
+        "owner_email": getattr(tenant, "contact_email", None) if tenant else None,
+        "owner_name": (
+            (getattr(tenant, "company_name", None) or getattr(tenant, "name", None))
+            if tenant else None
+        ),
+        "invoice_number": row.invoice_number,
+        "period_key": row.period_key,
+        "amount_cents": row.amount_cents,
+        "fee_cents": row.fee_cents,
+        "product": getattr(tenant, "product", "array_operator") if tenant else "array_operator",
+    }
     return {
         "ok": True,
         "payment_id": row.id,
@@ -427,7 +455,137 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
         "subscription_id": row.subscription_id,
         "amount_cents": row.amount_cents,
         "fee_cents": row.fee_cents,
+        "notify": notify,
     }
+
+
+def send_payment_received_emails(notify: dict) -> dict:
+    """Thank the offtaker + notify the owner that an invoice was paid online.
+
+    Best-effort: never raises. Stripe Checkout already shows a receipt page;
+    these emails are the branded Array Operator confirmation.
+    """
+    if not notify:
+        return {"sent": False}
+    from ..notify import _send_via_resend
+    from ..email_skin import render_email_skin, render_email_skin_text
+    from ..branding import app_url, brand_name
+
+    amt = (notify.get("amount_cents") or 0) / 100.0
+    fee = (notify.get("fee_cents") or 0) / 100.0
+    net = max(amt - fee, 0.0)
+    amt_s = f"${amt:,.2f}"
+    inv = notify.get("invoice_number") or ""
+    period = notify.get("period_key") or ""
+    owner = notify.get("owner_name") or "your solar provider"
+    offtaker = notify.get("offtaker_name") or "there"
+    product = notify.get("product") or "array_operator"
+    dash = app_url(product).rstrip("/") + "/#reports"
+    brand = brand_name(product)
+    sent = {"offtaker": False, "owner": False}
+
+    # ── offtaker thank-you ────────────────────────────────────────────────
+    to_off = (notify.get("offtaker_email") or "").strip()
+    if to_off and "@" in to_off:
+        body_html = (
+            f"<p>Hi { _esc(offtaker.split()[0] if offtaker else 'there') },</p>"
+            f"<p>We received your payment of <b>{amt_s}</b>"
+            f"{f' for invoice { _esc(inv)}' if inv else ''}."
+            f" Thank you — you're all set.</p>"
+            f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin:12px 0;">'
+            f'<tr><td style="padding:6px 0;opacity:.65;">Amount paid</td>'
+            f'<td style="padding:6px 0;text-align:right;font-weight:700;color:#047857;">{amt_s}</td></tr>'
+            + (f'<tr><td style="padding:6px 0;opacity:.65;">Invoice</td>'
+               f'<td style="padding:6px 0;text-align:right;">{_esc(inv)}</td></tr>' if inv else "")
+            + (f'<tr><td style="padding:6px 0;opacity:.65;">Period</td>'
+               f'<td style="padding:6px 0;text-align:right;">{_esc(period)}</td></tr>' if period else "")
+            + f"</table>"
+            f"<p style=\"font-size:13px;opacity:.7;\">Questions? Reply to this email and it goes to { _esc(owner) }.</p>"
+        )
+        html = render_email_skin(
+            preheader=f"Payment received — {amt_s}",
+            headline="Payment received",
+            intro_line=f"Thank you · {owner}",
+            body_html=body_html,
+            footer_line=f"Solar credit invoice from {owner}.",
+            wordmark=owner,
+            product=product,
+        )
+        text = render_email_skin_text(
+            headline="Payment received",
+            intro_line=f"Thank you · {owner}",
+            body_text=(
+                f"Hi {offtaker},\n\n"
+                f"We received your payment of {amt_s}"
+                f"{f' for invoice {inv}' if inv else ''}. Thank you — you're all set.\n\n"
+                f"Questions? Reply to this email and it goes to {owner}."
+            ),
+            wordmark=owner,
+            product=product,
+        )
+        try:
+            sent["offtaker"] = bool(_send_via_resend(
+                to=to_off,
+                subject=f"Payment received — {amt_s}" + (f" · invoice {inv}" if inv else ""),
+                html=html, text=text, product=product,
+            ))
+        except Exception:  # noqa: BLE001
+            logger.exception("offtaker payment thank-you email failed")
+
+    # ── owner notice ──────────────────────────────────────────────────────
+    to_own = (notify.get("owner_email") or "").strip()
+    if to_own and "@" in to_own:
+        body_html = (
+            f"<p><b>{_esc(offtaker)}</b> just paid their solar credit invoice online.</p>"
+            f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin:12px 0;">'
+            f'<tr><td style="padding:6px 0;opacity:.65;">Amount paid</td>'
+            f'<td style="padding:6px 0;text-align:right;font-weight:700;color:#047857;">{amt_s}</td></tr>'
+            f'<tr><td style="padding:6px 0;opacity:.65;">Your net (after {fee_bps()/100:.2g}% fee)</td>'
+            f'<td style="padding:6px 0;text-align:right;">${net:,.2f}</td></tr>'
+            + (f'<tr><td style="padding:6px 0;opacity:.65;">Invoice</td>'
+               f'<td style="padding:6px 0;text-align:right;">{_esc(inv)}</td></tr>' if inv else "")
+            + f"</table>"
+            f'<p style="margin-top:14px;"><a href="{dash}" '
+            f'style="background:#047857;color:#fff;padding:11px 18px;border-radius:8px;'
+            f'text-decoration:none;font-weight:600;display:inline-block;">Open Reports</a></p>'
+            f'<p style="font-size:13px;opacity:.7;">Funds land in your connected bank per Stripe\'s payout schedule.</p>'
+        )
+        html = render_email_skin(
+            preheader=f"{offtaker} paid {amt_s}",
+            headline="Payment received",
+            intro_line=f"{offtaker} · {amt_s}",
+            body_html=body_html,
+            footer_line=f"{brand} · offtaker payments",
+            product=product,
+        )
+        text = render_email_skin_text(
+            headline="Payment received",
+            intro_line=f"{offtaker} · {amt_s}",
+            body_text=(
+                f"{offtaker} just paid their solar credit invoice online.\n\n"
+                f"Amount paid: {amt_s}\n"
+                f"Your net (after {fee_bps()/100:.2g}% fee): ${net:,.2f}\n"
+                + (f"Invoice: {inv}\n" if inv else "")
+                + f"\nOpen Reports: {dash}\n"
+                f"Funds land in your connected bank per Stripe's payout schedule."
+            ),
+            product=product,
+        )
+        try:
+            sent["owner"] = bool(_send_via_resend(
+                to=to_own,
+                subject=f"Paid · {offtaker} · {amt_s}",
+                html=html, text=text, product=product,
+            ))
+        except Exception:  # noqa: BLE001
+            logger.exception("owner payment-received email failed")
+
+    return {"sent": bool(sent["offtaker"] or sent["owner"]), **sent}
+
+
+def _esc(s: str) -> str:
+    import html as _html
+    return _html.escape(str(s or ""))
 
 
 def sync_connect_from_account_event(db, account: dict) -> dict:

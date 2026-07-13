@@ -222,10 +222,8 @@ def _process_checkout_completed(sess: dict) -> dict:
 def _process_offtaker_invoice_paid(sess: dict) -> dict:
     """V2: offtaker paid a solar-credit invoice via Checkout destination charge.
 
-    Marks the OfftakerPayment row paid (idempotent) and alerts ops with the
-    platform fee captured. Owner already receives funds via Connect transfer —
-    we do not re-notify the offtaker here (Stripe Checkout already shows a
-    receipt; a branded thank-you email is a follow-up polish).
+    Marks the OfftakerPayment row paid (idempotent), emails offtaker (thank-you)
+    + owner (funds received), and alerts ops with the platform fee captured.
     """
     with SessionLocal() as db:
         from .billing.payments import mark_payment_paid
@@ -234,6 +232,14 @@ def _process_offtaker_invoice_paid(sess: dict) -> dict:
     if result.get("ok") and not result.get("duplicate") and not result.get("not_paid_yet"):
         amt = (result.get("amount_cents") or 0) / 100
         fee = (result.get("fee_cents") or 0) / 100
+        notify = result.pop("notify", None) or {}
+        try:
+            from .billing.payments import send_payment_received_emails
+            email_res = send_payment_received_emails(notify)
+            result["emails"] = email_res
+        except Exception as e:  # noqa: BLE001 — never fail the webhook on mail
+            logger.warning("offtaker payment emails failed: %s", e)
+            result["emails"] = {"sent": False, "error": str(e)[:200]}
         send_internal_alert(
             f"💵 Offtaker invoice paid: ${amt:,.2f}",
             f"Tenant: {result.get('tenant')}\n"
@@ -241,7 +247,8 @@ def _process_offtaker_invoice_paid(sess: dict) -> dict:
             f"Payment id: {result.get('payment_id')}\n"
             f"Amount: ${amt:,.2f}\n"
             f"Platform fee: ${fee:,.2f}\n"
-            f"Session: {sess.get('id')}"
+            f"Session: {sess.get('id')}\n"
+            f"Emails: {result.get('emails')}"
         )
     return result
 

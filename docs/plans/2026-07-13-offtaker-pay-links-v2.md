@@ -47,13 +47,13 @@ Metadata (on both session + payment_intent):
 `invoice_number`, `period_key`.
 
 ### Platform fee ("scrape a tiny bit")
-Source of truth: env `AO_OFFTAKER_FEE_BPS` (basis points, default **150** = 1.5%).
+Source of truth: env `AO_OFFTAKER_FEE_BPS` (basis points, default **50** = 0.5%).
 Optional floor: `AO_OFFTAKER_FEE_MIN_CENTS` (default **0** — pure percentage).
 
   fee_cents = max(min_cents, amount_cents * bps // 10_000)
 
-Money decision: 1.5% is the engineering default. Ford can lower/raise via env
-without a code change. Flag any live rate change before minting.
+Money decision: 0.5% is the live default (Ford, Jul 2026 — was 1.5%). Retune
+via env without a code change.
 
 ### When the pay link is created
 Inside `deliver_subscription` **before** render + email, only when ALL of:
@@ -107,7 +107,7 @@ Also handle `account.updated` (Connect) to flip `charges_enabled`.
 ## Env vars
 | var | default | meaning |
 |-----|---------|---------|
-| `AO_OFFTAKER_FEE_BPS` | `150` | platform fee in basis points (1.5%) |
+| `AO_OFFTAKER_FEE_BPS` | `50` | platform fee in basis points (0.5%) |
 | `AO_OFFTAKER_FEE_MIN_CENTS` | `0` | floor fee in cents |
 | `AO_OFFTAKER_PAYMENTS` | `1` | set `0` to hard-disable pay-link creation |
 
