@@ -1913,6 +1913,8 @@ class AlertSettingsBody(BaseModel):
     email: str | None = None
     threshold_pct: int | None = None      # 10–95 sensitivity (alert under this % of peers)
     grace_hours: int | None = None        # 0–168 hours an inverter must stay down before emailing
+    # When True, skip separate alert emails — the morning fleet digest covers them.
+    via_digest: bool | None = None
 
 
 def _alert_settings_dict(tenant) -> dict:
@@ -1922,6 +1924,7 @@ def _alert_settings_dict(tenant) -> dict:
         "email_is_default": not getattr(tenant, "inverter_alert_email", None),
         "threshold_pct": int(getattr(tenant, "inverter_alert_threshold_pct", 50) or 50),
         "grace_hours": int(getattr(tenant, "inverter_alert_grace_hours", 12) or 12),
+        "via_digest": bool(getattr(tenant, "inverter_alerts_via_digest", False)),
     }
 
 
@@ -1959,6 +1962,8 @@ def put_alert_settings(body: AlertSettingsBody,
             t.inverter_alert_threshold_pct = max(10, min(95, int(body.threshold_pct)))
         if body.grace_hours is not None:
             t.inverter_alert_grace_hours = max(0, min(168, int(body.grace_hours)))
+        if body.via_digest is not None:
+            t.inverter_alerts_via_digest = bool(body.via_digest)
         db.commit()
         db.refresh(t)
         return _alert_settings_dict(t)

@@ -246,3 +246,66 @@ def test_sweep_tenant_skips_invoicing_only_before_any_db_work():
         inverter_alert_threshold_pct=50,
     )
     assert sweep.sweep_tenant(None, t) == 0
+
+
+def test_via_digest_skips_separate_email(monkeypatch):
+    """Owner folded alerts into the morning digest → no separate Resend page.
+
+    We still stamp incident state (so open incidents are tracked), but
+    notify._send_via_resend must not be called.
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace as NS
+
+    now = datetime(2026, 7, 13, 15, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(sweep, "_now", lambda: now)
+
+    # One long-flagged live-dark inverter past grace.
+    col = _col("Site", [
+        _inv("A", "ok", power=5000),
+        _inv("B", "ok", power=5000),
+        _inv("C", "ok", power=0, inverter_id="inv-c"),
+    ])
+    tree = _tree(col)
+    monkeypatch.setattr(
+        "api.inverter_fleet.build_fleet_tree",
+        lambda db, tenant, stable_verdicts=False: tree,
+    )
+
+    sent = []
+    monkeypatch.setattr(
+        sweep.notify, "_send_via_resend",
+        lambda **kw: sent.append(kw) or True,
+    )
+
+    # Fake SQLAlchemy session: empty InverterAlertState table on first load.
+    # execute(...).scalars() is used both as an iterable (states dict-comp)
+    # and via .all() elsewhere — support both.
+    class _FakeScalars:
+        def __iter__(self):
+            return iter([])
+        def all(self):
+            return []
+    class _FakeResult:
+        def scalars(self):
+            return _FakeScalars()
+    class _FakeDB:
+        def execute(self, *a, **k): return _FakeResult()
+        def add(self, obj):
+            # Simulate first_flagged long enough ago that grace has passed
+            # (LIVE_DARK_GRACE_HOURS is short; set well in the past).
+            if getattr(obj, "first_flagged_at", None) is not None:
+                obj.first_flagged_at = now - timedelta(hours=3)
+            self._added = getattr(self, "_added", []) + [obj]
+        def delete(self, obj): pass
+        def commit(self): pass
+
+    t = NS(
+        id="t-digest", inverter_alerts_enabled=True, product="array_operator",
+        billing_plan="monitoring", inverter_alert_email="ops@example.com",
+        contact_email="ops@example.com", inverter_alert_grace_hours=0,
+        inverter_alert_threshold_pct=50, inverter_alerts_via_digest=True,
+    )
+    n = sweep.sweep_tenant(_FakeDB(), t)
+    assert n == 1, "still counts the incident as handled"
+    assert sent == [], "no separate alert email when via_digest is on"

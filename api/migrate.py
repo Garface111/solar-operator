@@ -440,6 +440,9 @@ def main():
              "ALTER TABLE tenants ADD COLUMN inverter_alert_threshold_pct INTEGER NOT NULL DEFAULT 50"),
             ("inverter_alert_grace_hours",
              "ALTER TABLE tenants ADD COLUMN inverter_alert_grace_hours INTEGER NOT NULL DEFAULT 12"),
+            # Fold instant inverter alerts into the morning digest (fewer emails).
+            ("inverter_alerts_via_digest",
+             "ALTER TABLE tenants ADD COLUMN inverter_alerts_via_digest BOOLEAN NOT NULL DEFAULT FALSE"),
         ]
         for col, sql in inverter_alert_cols:
             if not column_exists(conn, "tenants", col):

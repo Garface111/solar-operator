@@ -403,16 +403,26 @@ def sweep_tenant(db, tenant: Tenant) -> int:
             db.delete(st)
 
     if to_email:
-        subject, html, text = _render_email(tenant, to_email)
-        try:
-            notify._send_via_resend(
-                to=to, subject=subject, html=html, text=text, product="array_operator"
+        # Owner opted to fold inverter alerts into the morning fleet digest
+        # (fewer emails). We still stamp last_alerted_at so incidents are
+        # tracked, but skip the separate Resend page — the daily digest already
+        # surfaces arrays/inverters that need attention.
+        if getattr(tenant, "inverter_alerts_via_digest", False):
+            logger.info(
+                "alert sweep: tenant %s via_digest — %d incident(s) held for morning digest",
+                tenant.id, len(to_email),
             )
-        except Exception:
-            logger.exception("alert sweep: send failed for %s", tenant.id)
-            # roll back the last_alerted_at stamps so we retry next tick
-            for it in to_email:
-                states[_incident_key(it["col"], it["inv"])].last_alerted_at = None
+        else:
+            subject, html, text = _render_email(tenant, to_email)
+            try:
+                notify._send_via_resend(
+                    to=to, subject=subject, html=html, text=text, product="array_operator"
+                )
+            except Exception:
+                logger.exception("alert sweep: send failed for %s", tenant.id)
+                # roll back the last_alerted_at stamps so we retry next tick
+                for it in to_email:
+                    states[_incident_key(it["col"], it["inv"])].last_alerted_at = None
 
     db.commit()
     return len(to_email)

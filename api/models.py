@@ -245,6 +245,12 @@ class Tenant(Base):
         Integer, default=50, server_default="50", nullable=False)
     inverter_alert_grace_hours: Mapped[int] = mapped_column(
         Integer, default=12, server_default="12", nullable=False)
+    # When True (owner opted in from the Fleet alerts panel), the alert sweep
+    # still tracks incidents but does NOT send separate emails — inverter issues
+    # are covered by the morning fleet digest instead. Fewer emails for owners
+    # who prefer one daily summary over real-time pages.
+    inverter_alerts_via_digest: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
     # No-upfront-payment: set the moment the ~3-day "trial ending, no card on
     # file" reminder is sent, so the scheduler fires it exactly once regardless
     # of tick cadence (replaces the fragile 1-day rolling window). NULL = not
