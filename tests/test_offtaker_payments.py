@@ -162,6 +162,10 @@ def test_create_payment_mints_checkout_and_persists(monkeypatch):
         assert pi["transfer_data"]["destination"] == t.stripe_connect_account_id
         assert kwargs["metadata"]["kind"] == "offtaker_invoice"
         assert kwargs["mode"] == "payment"
+        # Stripe rejects expires_at >= 24h — regression guard for the
+        # "pay links never mint" prod bug (2026-07-13).
+        exp = kwargs.get("expires_at")
+        assert exp is None or (exp - __import__("time").time()) < 24 * 3600
         return _Sess(id="cs_test_123", url="https://checkout.stripe.com/c/pay/cs_test_123",
                      payment_intent="pi_test_123")
 

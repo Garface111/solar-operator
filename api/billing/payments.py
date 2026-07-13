@@ -457,8 +457,10 @@ def create_offtaker_payment(db, *, tenant, sub, match,
                 "description": f"Solar credit · {cust} · {inv_no}"[:500],
             },
             metadata=meta,
-            # Expire after 30 days (invoice due window is 28 days).
-            expires_at=int(datetime.utcnow().timestamp()) + 30 * 24 * 3600,
+            # Stripe Checkout requires expires_at < 24h from creation
+            # (prod log 2026-07-13: 30-day expires_at → pay links never minted).
+            # Default Stripe expiry is 24h if omitted; set ~23h explicitly.
+            expires_at=int(datetime.utcnow().timestamp()) + 23 * 3600,
         )
         sess_id = session["id"] if isinstance(session, dict) else session.id
         pay_url = session["url"] if isinstance(session, dict) else session.url
