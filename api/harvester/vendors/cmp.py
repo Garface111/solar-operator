@@ -15,6 +15,15 @@ Emits (when data is found):
   * generation → POST /v1/array-owners/utility-meter-capture
   * accounts   → POST /v1/sync
 
+NEB billing insight (Ford screenshot 2026-07-13 — do not ignore):
+  Real CMP community/NEB operators also work from a **Net Energy Billing
+  allocation spreadsheet** (monthly): NEB Family, Facility Contract Account,
+  Facility Generation kWh (one lead row), offtaker Name / Percentage /
+  Medium Price / kWh Applied / $ — see
+  docs/knowledge/cmp-neb-allocation-spreadsheet-contract.md.
+  Portal daily sniff ≠ that allocation ledger; invoice offtakers need the
+  NEB export (or a portal page that exposes the same fields).
+
 Limitations:
   * MFA / step-up auth: fails with a clear message; lockout guard pauses retries.
   * Usage field names evolve — sniffer keeps several generation aliases.
