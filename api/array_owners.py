@@ -2201,6 +2201,160 @@ def list_solaredge_keys(authorization: str | None = Header(default=None)) -> dic
     }
 
 
+# Human labels for linked-source board rows (inverter vendors + common utilities).
+_LINKED_LABELS = {
+    "solaredge": "SolarEdge",
+    "alsoenergy": "AlsoEnergy (PowerTrack)",
+    "locus": "Locus Energy",
+    "fronius": "Fronius (Solar.web)",
+    "sma": "SMA (Sunny Portal)",
+    "chint": "Chint",
+    "enphase": "Enphase",
+    "solis": "Solis",
+    "tigo": "Tigo",
+    "gmp": "Green Mountain Power (GMP)",
+    "vec": "Vermont Electric Cooperative (SmartHub)",
+    "wec": "Washington Electric Coop (SmartHub)",
+    "eversource": "Eversource Energy",
+    "eversource_ma": "Eversource Energy (MA)",
+    "eversource_ct": "Eversource Energy (CT)",
+    "cmp": "Central Maine Power",
+}
+
+
+@router.get("/v1/array-owners/linked-sources")
+def list_linked_sources(authorization: str | None = Header(default=None)) -> dict:
+    """Every data source linked to this tenant — inverter vendors (InverterConnection
+    + legacy SolarEdge columns) and utilities (UtilityAccount / UtilitySession).
+
+    Powers the Auto-refresh LIVE board so API-key vendors (SolarEdge, AlsoEnergy,
+    Locus, …) and bill-linked utilities always appear next to harvester vault
+    logins. Does NOT return secrets — only code, label, counts, and best-effort
+    last_synced_at from DailyGeneration / account touch times.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .models import Array, DailyGeneration, UtilityAccount, UtilitySession
+    from sqlalchemy import func
+
+    inv_by: dict[str, dict] = {}  # code -> {arrays:set, last}
+    util_by: dict[str, dict] = {}
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        arr_by_id = {a.id: a for a in arrays}
+        array_ids = list(arr_by_id.keys())
+
+        # Inverter connections (AlsoEnergy, Fronius, SMA, Locus, SolarEdge, …)
+        if array_ids:
+            conns = db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_(array_ids)
+                )
+            ).scalars().all()
+            for c in conns:
+                code = (c.vendor or "").strip().lower()
+                if not code:
+                    continue
+                bucket = inv_by.setdefault(code, {"arrays": set(), "last": None})
+                a = arr_by_id.get(c.array_id)
+                if a is not None:
+                    bucket["arrays"].add(a.name or f"Array {a.id}")
+
+        # Legacy SolarEdge columns without an InverterConnection row
+        for a in arrays:
+            k = (getattr(a, "solaredge_api_key", None) or "").strip()
+            sid = getattr(a, "solaredge_site_id", None)
+            if k or sid:
+                bucket = inv_by.setdefault("solaredge", {"arrays": set(), "last": None})
+                bucket["arrays"].add(a.name or f"Array {a.id}")
+
+        # Freshest DailyGeneration per vendor source for those arrays
+        if array_ids:
+            for code in list(inv_by.keys()):
+                # DailyGeneration.source is usually the vendor code for inverter pulls
+                last = db.execute(
+                    select(func.max(DailyGeneration.uploaded_at)).where(
+                        DailyGeneration.array_id.in_(array_ids),
+                        DailyGeneration.source == code,
+                    )
+                ).scalar()
+                if last is None and code == "solaredge":
+                    # older rows sometimes used slightly different source tags
+                    last = db.execute(
+                        select(func.max(DailyGeneration.uploaded_at)).where(
+                            DailyGeneration.array_id.in_(array_ids),
+                            DailyGeneration.source.in_(("solaredge", "se", "solaredge_api")),
+                        )
+                    ).scalar()
+                inv_by[code]["last"] = last
+
+        # Utility accounts
+        accts = db.execute(
+            select(UtilityAccount).where(UtilityAccount.tenant_id == tenant.id)
+        ).scalars().all()
+        for acct in accts:
+            code = (acct.provider or "").strip().lower()
+            if not code:
+                continue
+            bucket = util_by.setdefault(code, {"accounts": set(), "last": None})
+            label = (acct.nickname or acct.account_number or "").strip()
+            if label:
+                bucket["accounts"].add(label)
+            else:
+                bucket["accounts"].add(code)
+            touched = getattr(acct, "last_seen", None) or getattr(acct, "updated_at", None)
+            if touched and (bucket["last"] is None or touched > bucket["last"]):
+                bucket["last"] = touched
+
+        # Utility sessions (JWT / cookie capture) even if account row is sparse
+        sessions = db.execute(
+            select(UtilitySession).where(UtilitySession.tenant_id == tenant.id)
+        ).scalars().all()
+        for sess in sessions:
+            code = (sess.provider or "").strip().lower()
+            if not code:
+                continue
+            bucket = util_by.setdefault(code, {"accounts": set(), "last": None})
+            if not bucket["accounts"]:
+                bucket["accounts"].add(code)
+            cap = getattr(sess, "captured_at", None)
+            if cap and (bucket["last"] is None or cap > bucket["last"]):
+                bucket["last"] = cap
+
+        # Utility-meter DailyGeneration (source=utility_meter) doesn't map cleanly
+        # per provider; skip.
+
+    sources = []
+    for code, b in inv_by.items():
+        n = len(b["arrays"])
+        last = b["last"]
+        sources.append({
+            "code": code,
+            "kind": "inverter",
+            "label": _LINKED_LABELS.get(code) or code.replace("_", " ").title(),
+            "count": n,
+            "detail": f"{n} array{'' if n == 1 else 's'}",
+            "last_synced_at": last.isoformat() if last else None,
+        })
+    for code, b in util_by.items():
+        n = len(b["accounts"])
+        last = b["last"]
+        sources.append({
+            "code": code,
+            "kind": "utility",
+            "label": _LINKED_LABELS.get(code) or code.replace("_", " ").title(),
+            "count": n,
+            "detail": f"{n} account{'' if n == 1 else 's'}",
+            "last_synced_at": last.isoformat() if last else None,
+        })
+    sources.sort(key=lambda s: (0 if s["kind"] == "inverter" else 1, s["label"].lower()))
+    return {"ok": True, "sources": sources, "count": len(sources)}
+
+
 class SolarEdgeConnectBody(BaseModel):
     api_key: str
     site_id: int
