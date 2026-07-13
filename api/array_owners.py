@@ -2520,6 +2520,14 @@ def _preview_sites_for_vendor(vendor: str, config: dict) -> list[dict]:
         return [_normalize_preview_site(vendor, {**s, "site_id": s["pv_system_id"]})
                 for s in raw]
 
+    if vendor == "alsoenergy":
+        # PowerTrack username+password lists every site on the login (no API
+        # key / client_id). A named site_id still previews just that site.
+        if str(config.get("site_id") or "").strip():
+            return [_normalize_preview_site(vendor, mod.validate(config))]
+        raw = mod.discover_sites(config)
+        return [_normalize_preview_site(vendor, s) for s in raw]
+
     # SMA: single-system validate (account cascade arrives with the OAuth app).
     return [_normalize_preview_site(vendor, mod.validate(config))]
 
@@ -3346,9 +3354,195 @@ def fronius_connect_account(
     }
 
 
+# ── AlsoEnergy (PowerTrack) — one login, every site ───────────────────────────
+# Clean REST API (api.alsoenergy.com OAuth password grant). NOT extension scrape:
+# username+password mint a bearer and GET /Sites lists the whole account. Same
+# "paste one credential, attach all arrays" shape as SolarEdge/Fronius/Locus.
+
+class AlsoEnergyConnectAccountBody(BaseModel):
+    username: str
+    password: str
+    # When omitted, every discovered site is connected.
+    site_ids: Optional[list[int]] = None
+
+
+def _attach_alsoenergy(db, arr: Array, creds: dict, site_id: int) -> None:
+    """Upsert an AlsoEnergy InverterConnection for one site on `arr`."""
+    config = {
+        "username": creds["username"],
+        "password": creds["password"],
+        "site_id": int(site_id),
+    }
+    _connect_inverter(db, arr, "alsoenergy", config)
+
+
+@router.post("/v1/array-owners/alsoenergy/connect-account")
+def alsoenergy_connect_account(
+    body: AlsoEnergyConnectAccountBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Attach every (or a chosen subset of) AlsoEnergy / PowerTrack sites under
+    one portal login to the tenant's arrays.
+
+    Per site: match an existing array by (1) its alsoenergy InverterConnection
+    site_id, or (2) an EXACT case-insensitive name match — otherwise create a
+    fresh Array (solar, no client). Idempotent: re-running updates the same
+    arrays instead of duplicating them.
+
+    Returns {connected, created, matched} so the UI can celebrate specifics.
+    """
+    tenant = _tenant_from_bearer(authorization)
+
+    username = (body.username or "").strip()
+    password = body.password or ""
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+
+    creds = {"username": username, "password": password}
+
+    requested: set[int] | None = None
+    if body.site_ids is not None:
+        requested = {int(s) for s in body.site_ids}
+
+    try:
+        discovered = inverters.alsoenergy.discover_sites(creds)
+    except InverterScopeError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"AlsoEnergy error: {exc}")
+
+    if requested is not None:
+        discovered = [s for s in discovered if int(s["site_id"]) in requested]
+
+    if not discovered:
+        return {
+            "ok": True,
+            "connected": [], "created": [], "matched": [],
+            "message": "No AlsoEnergy sites to connect.",
+        }
+
+    connected: list[dict] = []
+    created: list[dict] = []
+    matched: list[dict] = []
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            )
+        ).scalars().all()
+        conns = {
+            c.array_id: c for c in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_([a.id for a in arrays] or [0])
+                )
+            ).scalars().all()
+        }
+
+        by_site_id: dict[int, list[int]] = defaultdict(list)
+        by_name: dict[str, list[int]] = defaultdict(list)
+        names_lower: set[str] = set()
+        all_names_lower: set[str] = {
+            n.strip().lower() for (n,) in db.execute(
+                select(Array.name).where(Array.tenant_id == tenant.id)
+            ).all()
+        }
+        arr_by_id = {a.id: a for a in arrays}
+        for a in arrays:
+            key = a.name.strip().lower()
+            names_lower.add(key)
+            by_name[key].append(a.id)
+            c = conns.get(a.id)
+            if c is not None and c.vendor == "alsoenergy":
+                sid = (c.config or {}).get("site_id")
+                if sid is not None:
+                    try:
+                        by_site_id[int(sid)].append(a.id)
+                    except (TypeError, ValueError):
+                        pass
+
+        used: set[int] = set()
+
+        for site in discovered:
+            sid = int(site["site_id"])
+            site_name = (site.get("name") or "").strip() or f"AlsoEnergy site {sid}"
+            entry = {
+                "array_id": None,
+                "name": site_name,
+                "site_id": sid,
+                "peak_power_kw": site.get("peak_power_kw"),
+            }
+
+            claimants = [aid for aid in by_site_id.get(sid, []) if aid not in used]
+            if len(claimants) > 1:
+                raise HTTPException(
+                    409,
+                    f"Two arrays already claim AlsoEnergy site {sid} "
+                    f"(arrays {sorted(claimants)}). Resolve the duplicate before "
+                    "connecting this account.",
+                )
+
+            target = None
+            if claimants:
+                target = arr_by_id[claimants[0]]
+            else:
+                name_hits = [
+                    aid for aid in by_name.get(site_name.lower(), [])
+                    if aid not in used
+                ]
+                if len(name_hits) == 1:
+                    target = arr_by_id[name_hits[0]]
+
+            if target is not None:
+                _attach_alsoenergy(db, target, creds, sid)
+                used.add(target.id)
+                entry["array_id"] = target.id
+                entry["name"] = target.name
+                matched.append(entry)
+            else:
+                name = site_name
+                if name.lower() in all_names_lower:
+                    name = f"{site_name} ({sid})"
+                new_arr = Array(
+                    tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
+                )
+                db.add(new_arr)
+                db.flush()
+                _attach_alsoenergy(db, new_arr, creds, sid)
+                used.add(new_arr.id)
+                names_lower.add(name.lower())
+                all_names_lower.add(name.lower())
+                arr_by_id[new_arr.id] = new_arr
+                entry["array_id"] = new_arr.id
+                entry["name"] = new_arr.name
+                created.append(entry)
+
+            connected.append(entry)
+
+        db.commit()
+
+        for _e in connected:
+            if _e.get("array_id"):
+                _trigger_history_backfill(db, _e["array_id"])
+
+    return {
+        "ok": True,
+        "connected": connected,
+        "created": created,
+        "matched": matched,
+        "message": (
+            f"{len(connected)} arrays connected: "
+            f"{len(created)} new, {len(matched)} matched."
+        ),
+    }
+
+
 # ── single-system connect (Fronius / SMA / any one-system vendor) ──────────────
 # SMA has no account-level discovery here yet (per-system creds + owner consent);
 # Fronius NOW HAS the full cascade above (/fronius/discover + connect-account) —
+# AlsoEnergy has /alsoenergy/connect-account (username+password → every site).
 # this endpoint remains as the manual one-system path for SMA and for a Fronius
 # key the owner wants attached to a single named system. It validates the one
 # named system and attaches it to a matched-or-created array, mirroring

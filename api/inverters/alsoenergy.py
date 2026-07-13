@@ -27,7 +27,9 @@ SUPPORTS_DAILY = True
 FIELDS = [
     {"name": "username", "label": "PowerTrack username (email)", "secret": False},
     {"name": "password", "label": "PowerTrack password", "secret": True},
-    {"name": "site_id", "label": "Site ID", "secret": False},
+    # Optional when using connect-account / discover — one login attaches every site.
+    {"name": "site_id", "label": "Site ID (optional — leave blank to attach every site)",
+     "secret": False, "optional": True},
 ]
 
 

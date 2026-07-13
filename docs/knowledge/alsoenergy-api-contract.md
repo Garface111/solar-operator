@@ -16,7 +16,15 @@ like SolarEdge/Locus, NOT extension scraping.
 - Frontend VENDORS list is HARD-CODED in BOTH /root/array-operator/public/sandbox.js
   AND public/onboarding.html (not auto-rendered from backend catalog) — add new
   vendors to both, plus the BRAND map in sandbox.js + layout-view.js + fleet-store.js.
-  AlsoEnergy uses the generic /v1/array-owners/connect-single path.
+- **Account cascade (Jul 2026):** `POST /v1/array-owners/alsoenergy/connect-account`
+  `{username, password, site_ids?}` → discover_sites → match/create arrays +
+  InverterConnection per site (idempotent). UI: discover:true, Site ID optional.
+  Single-site still works via connect-single when site_id is set.
+  Public preview: `_preview_sites_for_vendor("alsoenergy")` uses discover_sites
+  when site_id omitted.
+- NOT extension-scrape: PowerTrack is a documented REST API. Cloud Capture
+  harvester treats alsoenergy as API-only (nightly `inverter_pull` uses stored
+  InverterConnection credentials).
 
 ## Auth — OAuth2 password grant, NO client_id needed (verified live)
 - POST {BASE}/Auth/token, Content-Type application/x-www-form-urlencoded.
