@@ -9,10 +9,11 @@ Two brands share one backend (see models.Tenant.product / api.branding):
       page #f4f1e4 · card #ffffff · header mint #dcebda (sky→mint→cream gradient)
       emerald accent/CTA #047857 · warm ink #2a2520 · wordmark strip #064e3b
 
-  • Array Operator (arrayoperator.com) — SKY redesign (alpine sky page, frosted
-    white card, emerald money accents) matching the live sky glass UI.
-      page #dceef9 · card #ffffff · emerald accent/CTA #10b981 · ink #0f172a
-      night wordmark strip #0a0e14 + mint #7ff0bb
+  • Array Operator (arrayoperator.com) — SKY redesign matching theme-sky.css
+    (fleet health / inverter cards: blue-is-good).
+      alpine hero plate bg · white glass card · sky primary #2196F3 CTA
+      pastel blue pay block #D9E7FB · light footer (no black bar)
+
 
 Pass product="array_operator" to render in the AO theme; anything else (incl.
 None) renders NEPOOL. Both themes are LIGHT and the skin forces light mode
@@ -83,37 +84,36 @@ _THEMES = {
         "chip_caption": "NEPOOL-GIS generation workbook",
     },
     "array_operator": {
-        # Array Operator SKY redesign (Jul 2026) — alpine-sky page (hero plate
-        # from arrayoperator.com as background-image) + frosted white card +
-        # emerald money accents. Wordmark footer stays LIGHT (never a black bar).
+        # Array Operator SKY redesign — match theme-sky.css tokens exactly
+        # (inverters / fleet health cards: blue-is-good, pastel blue glass).
+        # --sky-primary #2196F3 · --sky-pastel-blue #D9E7FB · --good #2196F3
         "page_bg": "#56B4F0",         # --sky-mid solid fallback (Outlook)
         "page_bg_image": "https://arrayoperator.com/img/sky/world-zo6-2560.jpg",
         "page_bg_gradient": "linear-gradient(180deg,#1E90E8 0%,#56B4F0 48%,#BEE3FA 100%)",
         "card_bg": "#ffffff",
         "card_border": "rgba(255,255,255,.65)",
         "header_bg": "#ffffff",
-        "header_gradient": "linear-gradient(165deg,rgba(207,239,255,.95) 0%,rgba(255,255,255,.98) 55%,#ffffff 100%)",
-        "header_text": "#0f172a",
-        "header_sub": "#5b6b7c",
-        "accent": "#10b981",          # emerald hairline (pay / money)
-        "body_text": "#0f172a",
-        "muted_text": "#64748b",
-        "footer_border": "rgba(15,23,42,.06)",
-        "cta_bg": "#10b981",
-        "cta_text": "#06281a",
-        # Light glass footer — NOT the dark night strip (Ford: black bar looks bad)
-        "wordmark_bg": "rgba(255,255,255,.72)",
-        "wordmark_text": "#5b6b7c",
-        "chip_bg": "rgba(16,185,129,.08)",
-        "chip_border": "rgba(16,185,129,.22)",
-        "chip_icon_bg": "#10b981",
-        "chip_icon_text": "#06281a",
-        "link": "#047857",
+        "header_gradient": "linear-gradient(165deg,rgba(217,231,251,.98) 0%,rgba(255,255,255,.99) 55%,#ffffff 100%)",
+        "header_text": "#0E1420",     # --ink
+        "header_sub": "#4C596B",      # --muted
+        "accent": "#2196F3",          # --sky-primary / --good (site blue, not green)
+        "body_text": "#0E1420",
+        "muted_text": "#4C596B",
+        "footer_border": "rgba(20,60,120,.10)",
+        "cta_bg": "#2196F3",          # same blue as fleet health / inverter actions
+        "cta_text": "#ffffff",
+        "wordmark_bg": "rgba(255,255,255,.78)",
+        "wordmark_text": "#4C596B",
+        "chip_bg": "#E3F0FC",         # --day-chip / --day-tile
+        "chip_border": "rgba(33,150,243,.22)",
+        "chip_icon_bg": "#2196F3",
+        "chip_icon_text": "#ffffff",
+        "link": "#1976D2",            # --sky-primary-deep
         "brand": "Array Operator",
         "wordmark": "Array Operator · arrayoperator.com",
         "wordmark_html": (
             'Array Operator · <a href="https://arrayoperator.com" '
-            'style="color:#047857;text-decoration:none;font-weight:600;">'
+            'style="color:#1976D2;text-decoration:none;font-weight:600;">'
             'arrayoperator.com</a>'
         ),
         "default_tagline": "Your array, measured at its true worth — watched, valued, in dollars.",

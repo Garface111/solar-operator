@@ -346,8 +346,9 @@ def test_email_html_includes_pay_cta():
     assert "https://checkout.stripe.com/c/pay/cs_abc" in html
     assert "Amount due" in html
     assert "Pay online" in text
-    # Sky redesign tokens on AO offtaker emails
-    assert "#dceef9" in html or "#10b981" in html
+    # Sky redesign tokens (blue system, not green) on AO offtaker emails
+    assert "#2196F3" in html or "#D9E7FB" in html
+    assert "#10b981" not in html  # no emerald CTA — match site sky blue
 
 
 def test_email_html_test_banner_mentions_real_pay_button():

@@ -1819,8 +1819,9 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         pad = "10px" if strong else "6px"
         # Day-skin emerald for the money figure (matches the redesigned invoice);
         # the old #3fd68a mint washed out on the light card.
-        valstyle = "font-weight:800;color:#059669;" if strong else "color:#0f172a;"
-        return (f'<tr><td style="padding:{pad} 0;color:#64748b;font-size:13px;">{label}</td>'
+        # Sky system: blue-is-good (#2196F3) — same as fleet health / inverter cards
+        valstyle = "font-weight:800;color:#1976D2;" if strong else "color:#0E1420;"
+        return (f'<tr><td style="padding:{pad} 0;color:#4C596B;font-size:13px;">{label}</td>'
                 f'<td style="padding:{pad} 0;text-align:right;font-size:14px;{valstyle}">{val}</td></tr>')
 
     # The operator's edited note (Paul's "edit a pre-written email"), shown above
@@ -1869,24 +1870,25 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     if pay_url:
         import html as _html_pay
         safe_url = _html_pay.escape(pay_url, quote=True)
-        # Big sky-green pay block ABOVE the letter so offtakers can't miss it.
+        # Pay block: sky pastel-blue glass (matches fleet health / inverter cards
+        # — --sky-pastel-blue #D9E7FB, --sky-primary #2196F3). No green.
         pay_cta_html = (
             f'<table width="100%" cellpadding="0" cellspacing="0" role="presentation" '
             f'style="margin:0 0 22px;border-collapse:separate;">'
-            f'<tr><td align="center" bgcolor="#ecfdf5" '
-            f'style="background:linear-gradient(180deg,#ecfdf5 0%,#d1fae5 100%);'
-            f'background-color:#ecfdf5;border:1px solid rgba(16,185,129,.28);'
-            f'border-radius:14px;padding:20px 18px 16px;">'
+            f'<tr><td align="center" bgcolor="#D9E7FB" '
+            f'style="background:linear-gradient(180deg,#EAF4FD 0%,#D9E7FB 100%);'
+            f'background-color:#D9E7FB;border:1px solid rgba(33,150,243,.28);'
+            f'border-radius:16px;padding:20px 18px 16px;">'
             f'<div style="font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;'
-            f'color:#047857;margin:0 0 6px;">Amount due</div>'
-            f'<div style="font-size:32px;font-weight:800;letter-spacing:-.02em;color:#065f46;'
+            f'color:#1976D2;margin:0 0 6px;">Amount due</div>'
+            f'<div style="font-size:32px;font-weight:800;letter-spacing:-.02em;color:#0E1420;'
             f'line-height:1.1;margin:0 0 14px;">{amount_str}</div>'
             f'<a href="{safe_url}" '
-            f'style="display:inline-block;background:linear-gradient(180deg,#6ee7b7,#10b981);'
-            f'color:#06281a;padding:14px 28px;border-radius:10px;text-decoration:none;'
-            f'font-weight:800;font-size:16px;box-shadow:0 8px 20px -8px rgba(16,185,129,.55);">'
+            f'style="display:inline-block;background:linear-gradient(180deg,#42A5F5,#2196F3);'
+            f'color:#ffffff;padding:14px 28px;border-radius:12px;text-decoration:none;'
+            f'font-weight:800;font-size:16px;box-shadow:0 8px 24px -8px rgba(33,150,243,.55);">'
             f'Pay invoice securely →</a>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:12px;line-height:1.4;">'
+            f'<div style="font-size:12px;color:#4C596B;margin-top:12px;line-height:1.4;">'
             f'Secure card payment · due within 28 days · powered by Stripe</div>'
             f'</td></tr></table>'
         )
