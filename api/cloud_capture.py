@@ -148,7 +148,7 @@ def save_credential(body: CredentialIn, request: Request,
     # (GMP, Eversource) and inverter clouds have a fixed login URL in the
     # harvester module — no login_host required.
     _no_host = {
-        "gmp", "eversource", "eversource_ma", "eversource_ct",
+        "gmp", "eversource", "eversource_ma", "eversource_ct", "cmp",
         "fronius", "sma", "chint", "solaredge",
     }
     if provider not in _no_host and not (body.login_host or "").strip():

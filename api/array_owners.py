@@ -4169,9 +4169,11 @@ class UtilityMeterCaptureBody(BaseModel):
 #   vec = Vermont Electric Coop, wec = Washington Electric Coop (both NISC
 #   SmartHub — the extension supplies daily[] generation directly, no GMP summary).
 #   eversource* = Eversource Energy CT/MA/NH (bespoke MyAccount; Cloud Capture).
+#   cmp = Central Maine Power (Avangrid portal; Cloud Capture).
 _UTILITY_CAPTURE_VENDORS = {
     "gmp", "vec", "wec",
     "eversource", "eversource_ma", "eversource_ct",
+    "cmp",
 }
 
 # Human label per utility for the default array name when no nickname is given.
@@ -4180,6 +4182,7 @@ _UTILITY_LABEL = {
     "eversource": "Eversource",
     "eversource_ma": "Eversource",
     "eversource_ct": "Eversource",
+    "cmp": "CMP",
 }
 
 

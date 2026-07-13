@@ -63,6 +63,9 @@ BESPOKE_LIVE_CODES = {
     # Eversource Energy (CT / MA / NH) — bespoke MyAccount portal, cloud-capture
     # harvester in api/harvester/vendors/eversource.py (Jul 2026).
     "eversource", "eversource_ma", "eversource_ct",
+    # Central Maine Power — Avangrid portal, cloud-capture harvester
+    # api/harvester/vendors/cmp.py (Jul 2026).
+    "cmp",
 }
 
 _REQUIRED_COLS = {
