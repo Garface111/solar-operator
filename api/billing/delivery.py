@@ -1538,7 +1538,8 @@ def _render_from_repro(match, sub, out_path) -> bool:
 def generate_files(match: BillingMatch, formats: list[str], include_summary: bool,
                    out_dir: pathlib.Path, invoice_date: Optional[date] = None,
                    peer: Optional[dict] = None, sub=None,
-                   gmp_pdf_override: Optional[bytes] = None) -> list[pathlib.Path]:
+                   gmp_pdf_override: Optional[bytes] = None,
+                   pay_url: Optional[str] = None) -> list[pathlib.Path]:
     """Render the chosen attachment files into out_dir. Returns their paths.
 
     `gmp_pdf_override` (bytes) is a GMP bill PDF to attach for THIS render only —
@@ -1547,6 +1548,10 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
     When absent, a `sub` carrying a stored GMP invoice PDF still rides it (Paul's
     dormant hook). `sub`/`gmp_pdf_override` are optional, keeping the signature
     back-compatible.
+
+    `pay_url` (V2 offtaker pay-link) is stamped onto the standard PDF/XLSX
+    invoice when present so the offtaker can pay online. Repro / operator-
+    template paths keep their own layout (pay CTA still rides the email).
     """
     invoice_date = invoice_date or date.today()
     safe = (match.customer.get("name") or "customer").replace(" ", "_").replace("/", "-")
@@ -1577,11 +1582,13 @@ def generate_files(match: BillingMatch, formats: list[str], include_summary: boo
         if not (_render_from_repro(match, sub, inv_pdf)
                 or _render_from_operator_template_repro(match, sub, inv_pdf)
                 or _render_from_operator_template(match, sub, inv_pdf)):
-            invoice_mod.render_invoice_pdf(match, inv_pdf, invoice_date=invoice_date)
+            invoice_mod.render_invoice_pdf(
+                match, inv_pdf, invoice_date=invoice_date, pay_url=pay_url)
         paths.append(inv_pdf)
     if "xlsx" in fmts:
         paths.append(invoice_mod.render_invoice_xlsx(
-            match, out_dir / f"{stem}_invoice.xlsx", invoice_date=invoice_date))
+            match, out_dir / f"{stem}_invoice.xlsx", invoice_date=invoice_date,
+            pay_url=pay_url))
     if include_summary:
         if "pdf" in fmts:
             paths.append(summary_mod.render_summary_pdf(
@@ -1750,7 +1757,8 @@ def _attachments_line(has_gmp: bool, has_summary: bool) -> str:
 
 def _email_html(match: BillingMatch, sub, is_test: bool,
                 note: Optional[str] = None,
-                attachment_names: Optional[list[str]] = None) -> tuple[str, str, str]:
+                attachment_names: Optional[list[str]] = None,
+                pay_url: Optional[str] = None) -> tuple[str, str, str]:
     from ..email_templates import (
         DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
         build_offtaker_context, render_merge, html_to_text,
@@ -1851,11 +1859,28 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         f'{amount_rows_html}'
         f"</table>"
     )
+    # V2 pay-link CTA (Stripe Checkout). Only present when the owner has Connect
+    # ready and delivery minted a session — never fabricate a dead button.
+    pay_cta_html = ""
+    pay_cta_text = ""
+    if pay_url:
+        import html as _html_pay
+        safe_url = _html_pay.escape(pay_url, quote=True)
+        pay_cta_html = (
+            f'<p style="margin:18px 0 6px;text-align:center;">'
+            f'<a href="{safe_url}" '
+            f'style="background:#047857;color:#fff;padding:12px 22px;border-radius:8px;'
+            f'text-decoration:none;font-weight:700;display:inline-block;font-size:15px;">'
+            f'Pay invoice {amount_str}</a></p>'
+            f'<p style="margin:0 0 12px;text-align:center;font-size:12px;opacity:.65;">'
+            f'Secure card payment · due within 28 days</p>'
+        )
+        pay_cta_text = f"\nPay online: {pay_url}\n"
     if note_html:
         # Per-draft note: the operator wrote this send's letter — keep the
         # legacy composition (note + figures + attachment line) exactly.
         body_html = (
-            f"{test_banner}{note_html}{figures_table}"
+            f"{test_banner}{note_html}{figures_table}{pay_cta_html}"
             f'<p style="margin-top:18px;">The full invoice'
             f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
         )
@@ -1864,19 +1889,19 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
             f"Solar credit invoice for {cust}\n\n"
             f"Billing period: {period or '—'}\n"
             f"Your production: {kwh:,.0f} kWh\n"
-            f"{amount_rows_text}\n"
+            f"{amount_rows_text}{pay_cta_text}\n"
             f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
             f"Questions? Just reply to this email."
         )
     else:
         # Mass-template letter (already carries greeting, attachments prose and
         # the sign-off) + the figures table as the receipt beneath it.
-        body_html = f"{test_banner}{letter_html}{figures_table}"
+        body_html = f"{test_banner}{letter_html}{figures_table}{pay_cta_html}"
         body_text = (
             f"{html_to_text(letter_html)}\n\n"
             f"Billing period: {period or '—'}\n"
             f"Your production: {kwh:,.0f} kWh\n"
-            f"{amount_rows_text}\n"
+            f"{amount_rows_text}{pay_cta_text}\n"
             f"Questions? Just reply to this email."
         )
     # White-label: the offtaker should see THEIR operator, never Array Operator.
@@ -2039,17 +2064,43 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     bcc = [op_bcc] if (op_bcc and not is_test and op_bcc not in to and op_bcc not in cc) else []
 
     formats = sub.formats or ["pdf"]
+
+    # V2 offtaker pay-link: mint a Stripe Checkout Session (destination charge +
+    # platform application fee) when the owner has Connect ready. Best-effort —
+    # a Stripe failure never blocks the classic invoice email.
+    pay_url = None
+    payment_id = None
+    fee_cents = None
+    if (not is_test
+            and (getattr(tenant, "product", None) or "nepool") == "array_operator"):
+        try:
+            from . import payments as _pay
+            pay_res = _pay.create_offtaker_payment(
+                db, tenant=tenant, sub=sub, match=match, force=force)
+            if pay_res.get("ok") and pay_res.get("pay_url"):
+                pay_url = pay_res["pay_url"]
+                payment_id = pay_res.get("payment_id")
+                fee_cents = pay_res.get("fee_cents")
+            elif not pay_res.get("skipped"):
+                logger.warning("offtaker pay-link skipped for sub=%s: %s",
+                               getattr(sub, "id", "?"), pay_res.get("error"))
+        except Exception:  # noqa: BLE001 — never sink a send on pay-link bugs
+            logger.exception("offtaker pay-link creation crashed for sub=%s",
+                             getattr(sub, "id", "?"))
+
     with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
         try:
             paths = generate_files(match, formats, sub.include_summary,
                                    pathlib.Path(tmp), invoice_date=invoice_date,
-                                   sub=sub, gmp_pdf_override=gmp_pdf_override)
+                                   sub=sub, gmp_pdf_override=gmp_pdf_override,
+                                   pay_url=pay_url)
         except Exception as e:  # noqa: BLE001
             logger.exception("billing render failed")
             return {"ok": False, "error": f"render failed: {e}"}
         attachments = [_b64(p) for p in paths]
         subject, html, text = _email_html(match, sub, is_test, note=note,
-                                          attachment_names=[p.name for p in paths])
+                                          attachment_names=[p.name for p in paths],
+                                          pay_url=pay_url)
 
         # White-label the sender: the offtaker sees the OPERATOR, not Array
         # Operator. Send under the operator's name — from their own verified
@@ -2075,7 +2126,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
               "attachments": [p.name for p in paths],
               "invoice_number": (match.computed_invoice or {}).get("invoice_number"),
               "amount_owed": (match.computed_invoice or {}).get("amount_owed"),
-              "triggered_by": triggered_by, "test": is_test}
+              "triggered_by": triggered_by, "test": is_test,
+              "pay_url": pay_url, "payment_id": payment_id, "fee_cents": fee_cents}
     if ok and not is_test:
         now = datetime.utcnow()
         sub.last_sent_at = now

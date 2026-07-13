@@ -1291,6 +1291,40 @@ def main():
         print(f"  {'✓' if inspect(conn).has_table('sma_consents') else '✗ MISSING'} "
               f"table sma_consents")
 
+        # 2026-07-13 V2 offtaker pay-links (Stripe Connect Express + platform fee).
+        # New offtaker_payments table comes free via create_all above. Connect
+        # columns on tenants are additive + nullable so existing owners are
+        # unchanged until they opt into online collection.
+        if not column_exists(conn, "tenants", "stripe_connect_account_id"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN stripe_connect_account_id VARCHAR(64)"
+            ))
+            added.append("stripe_connect_account_id")
+            print("  + tenants.stripe_connect_account_id")
+        if not column_exists(conn, "tenants", "stripe_connect_charges_enabled"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN stripe_connect_charges_enabled "
+                "BOOLEAN DEFAULT false NOT NULL"
+            ))
+            added.append("stripe_connect_charges_enabled")
+            print("  + tenants.stripe_connect_charges_enabled")
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS ix_tenants_stripe_connect_account_id "
+            "ON tenants (stripe_connect_account_id)",
+            "CREATE INDEX IF NOT EXISTS ix_offtaker_payments_tenant_id "
+            "ON offtaker_payments (tenant_id)",
+            "CREATE INDEX IF NOT EXISTS ix_offtaker_payments_subscription_id "
+            "ON offtaker_payments (subscription_id)",
+            "CREATE INDEX IF NOT EXISTS ix_offtaker_pay_sub_period "
+            "ON offtaker_payments (subscription_id, period_key)",
+        ]:
+            try:
+                conn.execute(text(idx_sql))
+            except Exception as _e:  # noqa: BLE001 — table may not exist yet on old envs
+                print(f"  (index skipped: {_e})")
+        print(f"  {'✓' if inspect(conn).has_table('offtaker_payments') else '✗ MISSING'} "
+              f"table offtaker_payments")
+
     print("=== Migration complete ===")
 
 

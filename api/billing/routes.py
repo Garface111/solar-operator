@@ -5058,3 +5058,114 @@ def bulk_draft_status(authorization: Optional[str] = Header(default=None)):
         p = _bulk_draft.get(t.id)
         return {"ok": True, **(p or {"total": 0, "done": 0, "drafted": 0,
                                      "held": 0, "running": False})}
+
+
+# ─── V2 offtaker pay-links (Stripe Connect + platform fee) ───────────────────
+# Owners connect a Stripe Express account once; each invoice send then attaches
+# a Checkout pay URL. Fee math + Checkout live in api/billing/payments.py.
+
+
+@router.get("/payments/connect")
+def payments_connect_status(authorization: Optional[str] = Header(default=None)):
+    """Is this owner ready to collect offtaker payments online?
+
+    Returns connected / charges_enabled / fee_bps so the Master Account UI can
+    show "Enable online payments" vs "You're set — invoices include a pay link".
+    """
+    t = tenant_from_session(authorization)
+    from . import payments as pay
+    from ..models import Tenant
+    # tenant_from_session returns a detached Tenant; re-load so we can refresh
+    # charges_enabled from Stripe and commit.
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        if tenant is None:
+            raise HTTPException(404, "tenant not found")
+        status = pay.refresh_connect_status(db, tenant)
+        account_id = (status.get("account_id")
+                      or getattr(tenant, "stripe_connect_account_id", None))
+        charges = bool(status.get("charges_enabled")
+                       or getattr(tenant, "stripe_connect_charges_enabled", False))
+    return {
+        "ok": True,
+        "enabled": pay.payments_enabled(),
+        "connected": bool(account_id),
+        "account_id": account_id,
+        "charges_enabled": charges,
+        "details_submitted": bool(status.get("details_submitted")),
+        "fee_bps": pay.fee_bps(),
+        "fee_percent": pay.fee_bps() / 100.0,
+        "fee_min_cents": pay.fee_min_cents(),
+        "ready": charges,
+    }
+
+
+@router.post("/payments/connect")
+def payments_connect_start(authorization: Optional[str] = Header(default=None)):
+    """Start (or resume) Stripe Connect Express onboarding for offtaker payouts.
+
+    Returns {url} — send the owner to that Stripe-hosted Account Link. On return
+    they land on arrayoperator.com#account; poll GET /payments/connect for
+    charges_enabled.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if (getattr(t, "product", None) or "nepool") != "array_operator":
+        raise HTTPException(400, "Online offtaker payments are Array Operator only")
+    from . import payments as pay
+    from ..branding import app_url
+    from ..models import Tenant
+    base = app_url("array_operator").rstrip("/")
+    refresh_url = f"{base}/?connect=refresh#account"
+    return_url = f"{base}/?connect=return#account"
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        if tenant is None:
+            raise HTTPException(404, "tenant not found")
+        created = pay.create_or_get_connect_account(db, tenant)
+        if not created.get("ok"):
+            raise HTTPException(502, created.get("error") or "Connect create failed")
+        # Re-load after create (account id may have just been written).
+        db.refresh(tenant)
+        link = pay.create_account_link(
+            tenant, refresh_url=refresh_url, return_url=return_url)
+    if not link.get("ok"):
+        raise HTTPException(502, link.get("error") or "Account link failed")
+    return {
+        "ok": True,
+        "url": link["url"],
+        "account_id": link.get("account_id") or created.get("account_id"),
+        "charges_enabled": bool(created.get("charges_enabled")),
+        "created": bool(created.get("created")),
+    }
+
+
+@router.get("/payments")
+def list_offtaker_payments(
+    authorization: Optional[str] = Header(default=None),
+    limit: int = Query(50, ge=1, le=200),
+    status: Optional[str] = Query(default=None),
+):
+    """Recent offtaker pay-links for this owner (open / paid / failed)."""
+    t = tenant_from_session(authorization)
+    from ..models import OfftakerPayment
+    with SessionLocal() as db:
+        q = select(OfftakerPayment).where(OfftakerPayment.tenant_id == t.id)
+        if status:
+            q = q.where(OfftakerPayment.status == status)
+        q = q.order_by(OfftakerPayment.id.desc()).limit(limit)
+        rows = db.execute(q).scalars().all()
+        items = [{
+            "id": r.id,
+            "subscription_id": r.subscription_id,
+            "customer_name": r.customer_name,
+            "invoice_number": r.invoice_number,
+            "period_key": r.period_key,
+            "amount_usd": round((r.amount_cents or 0) / 100.0, 2),
+            "fee_usd": round((r.fee_cents or 0) / 100.0, 2),
+            "status": r.status,
+            "pay_url": r.pay_url if r.status == "open" else None,
+            "paid_at": r.paid_at.isoformat() if r.paid_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]
+    return {"ok": True, "payments": items, "count": len(items)}

@@ -144,8 +144,17 @@ def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) ->
 
 
 def _process_checkout_completed(sess: dict) -> dict:
-    """Activate tenant, link Stripe IDs, send welcome email."""
+    """Activate tenant, link Stripe IDs, send welcome email.
+
+    Also handles V2 offtaker invoice pay-links (metadata.kind=offtaker_invoice):
+    those are destination charges that mark an OfftakerPayment paid — they must
+    NOT activate a tenant or send a welcome email.
+    """
     meta = sess.get("metadata") or {}
+    # V2 offtaker pay-link (Jul 2026) — offtaker paid their solar-credit invoice.
+    if meta.get("kind") == "offtaker_invoice":
+        return _process_offtaker_invoice_paid(sess)
+
     # New onboarding flow tags sessions with onboarding_token — route those to
     # the deferred-welcome handler. Legacy /v1/signup sessions fall through.
     onboarding_token = meta.get("onboarding_token")
@@ -208,6 +217,47 @@ def _process_checkout_completed(sess: dict) -> dict:
         f"Stripe subscription: {stripe_subscription_id}"
     )
     return {"tenant_activated": tenant_id}
+
+
+def _process_offtaker_invoice_paid(sess: dict) -> dict:
+    """V2: offtaker paid a solar-credit invoice via Checkout destination charge.
+
+    Marks the OfftakerPayment row paid (idempotent) and alerts ops with the
+    platform fee captured. Owner already receives funds via Connect transfer —
+    we do not re-notify the offtaker here (Stripe Checkout already shows a
+    receipt; a branded thank-you email is a follow-up polish).
+    """
+    with SessionLocal() as db:
+        from .billing.payments import mark_payment_paid
+        result = mark_payment_paid(db, session_dict=sess)
+
+    if result.get("ok") and not result.get("duplicate") and not result.get("not_paid_yet"):
+        amt = (result.get("amount_cents") or 0) / 100
+        fee = (result.get("fee_cents") or 0) / 100
+        send_internal_alert(
+            f"💵 Offtaker invoice paid: ${amt:,.2f}",
+            f"Tenant: {result.get('tenant')}\n"
+            f"Subscription: {result.get('subscription_id')}\n"
+            f"Payment id: {result.get('payment_id')}\n"
+            f"Amount: ${amt:,.2f}\n"
+            f"Platform fee: ${fee:,.2f}\n"
+            f"Session: {sess.get('id')}"
+        )
+    return result
+
+
+def _process_connect_account_updated(account: dict) -> dict:
+    """V2: Stripe Connect Express account.updated → flip charges_enabled."""
+    with SessionLocal() as db:
+        from .billing.payments import sync_connect_from_account_event
+        result = sync_connect_from_account_event(db, account)
+    if result.get("changed") and result.get("charges_enabled"):
+        send_internal_alert(
+            f"✅ Connect payouts ready: {result.get('tenant')}",
+            f"Tenant {result.get('tenant')} can now collect offtaker payments "
+            f"online (charges_enabled=true)."
+        )
+    return result
 
 
 def _process_subscription_updated(sub: dict) -> dict:
@@ -469,6 +519,8 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         "customer.subscription.deleted": _process_subscription_deleted,
         "invoice.payment_failed": _process_invoice_payment_failed,
         "payment_method.detached": _process_payment_method_detached,
+        # V2 offtaker pay-links: Connect Express KYC completed / charges enabled.
+        "account.updated": _process_connect_account_updated,
     }
     handler = handlers.get(event_type)
 

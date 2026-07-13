@@ -118,6 +118,16 @@ class Tenant(Base):
     subscription_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # active, past_due, canceled, comped, trialing
 
+    # Stripe Connect Express (V2 offtaker pay-links, Jul 2026). The OWNER's
+    # connected account that receives offtaker invoice payments (minus the
+    # platform application fee). Null until they complete Connect onboarding.
+    # charges_enabled is refreshed from Stripe (account.updated webhook +
+    # status poll) — pay links only mint when True.
+    stripe_connect_account_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True)
+    stripe_connect_charges_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
+
     # Customer prefs (controlled via /account portal)
     report_frequency: Mapped[str] = mapped_column(String(16), default="quarterly")
     # weekly | monthly | quarterly — quarterly is the operator default (NEPOOL
@@ -1499,6 +1509,46 @@ class BillingReportSubscription(Base):
 
     __table_args__ = (
         Index("ix_billing_sub_tenant_enabled", "tenant_id", "enabled"),
+    )
+
+
+class OfftakerPayment(Base):
+    """One Stripe Checkout pay-link for an offtaker invoice (V2, Jul 2026).
+
+    Created when deliver_subscription mints a destination-charge Checkout
+    Session (platform application fee + transfer to the owner's Connect
+    account). Webhook checkout.session.completed with metadata.kind=
+    offtaker_invoice flips status to paid.
+    """
+    __tablename__ = "offtaker_payments"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("tenants.id"), index=True, nullable=False)
+    subscription_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("billing_report_subscriptions.id"),
+        index=True, nullable=False)
+    invoice_number: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Stable period key (usually period_end ISO) for reuse / already-paid checks.
+    period_key: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    fee_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(8), default="usd", server_default="usd")
+    stripe_checkout_session_id: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True)
+    stripe_payment_intent_id: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True)
+    pay_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # open | paid | expired | failed
+    status: Mapped[str] = mapped_column(
+        String(16), default="open", server_default="open", nullable=False, index=True)
+    customer_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_offtaker_pay_sub_period", "subscription_id", "period_key"),
     )
 
 

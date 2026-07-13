@@ -117,7 +117,8 @@ def _kwh_source_note(kwh_source: Optional[str]) -> Optional[str]:
 
 def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
                         period: Optional[Period] = None,
-                        invoice_date: Optional[date] = None) -> pathlib.Path:
+                        invoice_date: Optional[date] = None,
+                        pay_url: Optional[str] = None) -> pathlib.Path:
     """Write an .xlsx invoice mirroring the HCT Template sheet layout."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment
@@ -196,6 +197,9 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("B20", "Amount Owed:", big)
     put("C20", _money(_final_due), big, right)
     put("B21", tpl.get("payable_to") or f"Please make payment to {tpl.get('operator') or 'your solar array owner'}.")
+    if pay_url:
+        put("B22", "Pay online:")
+        put("C22", pay_url)
 
     put("B24", "Project Total kWh generation:")
     put("C24", round(inv.get("project_total_kwh") or 0, 0), align=right)
@@ -218,12 +222,16 @@ from . import _pdf_brand as brand
 
 def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
                        period: Optional[Period] = None,
-                       invoice_date: Optional[date] = None) -> pathlib.Path:
+                       invoice_date: Optional[date] = None,
+                       pay_url: Optional[str] = None) -> pathlib.Path:
     """Write a slick, on-brand one-page PDF invoice (reportlab).
 
     Design: a dark 'energy' hero band (Array Operator green glow) up top, a clean
     payable invoice body in the middle, and a juicy monthly-energy bar chart at
     the bottom. Matches the site palette so the document feels like the product.
+
+    `pay_url` (V2): when set, the Payment section becomes a clickable "Pay online"
+    link to the Stripe Checkout Session for this invoice.
     """
     try:
         from reportlab.lib.pagesizes import letter
@@ -427,9 +435,18 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     if cmail:
         bits.append(_xesc(str(cmail)))
     contact_line = ("<br/>" + "  ·  ".join(bits)) if bits else ""
+    if pay_url:
+        # Clickable pay link (V2). linkURL makes the whole "Pay online" phrase tappable.
+        pay_line = (
+            f'Due within 28 days. {_xesc(pay_to)}<br/><br/>'
+            f'<font color="#047857"><u><a href="{_xesc(pay_url)}" color="blue">'
+            f'<b>Pay online securely →</b></a></u></font>'
+        )
+    else:
+        pay_line = f"Due within 28 days. {_xesc(pay_to)}"
     terms = Table([
         [Paragraph("<b>Payment</b>", small), Paragraph("<b>Questions about this invoice?</b>", small)],
-        [Paragraph(f"Due within 28 days. {_xesc(pay_to)}", small),
+        [Paragraph(pay_line, small),
          Paragraph(f"Contact {_xesc(operator_name)}{contact_line}", small)],
     ], colWidths=[3.3 * inch, 3.3 * inch])
     terms.setStyle(TableStyle([
