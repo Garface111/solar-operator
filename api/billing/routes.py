@@ -2751,15 +2751,26 @@ _XLSX_MEDIA = ("application/vnd.openxmlformats-officedocument"
                ".spreadsheetml.sheet")
 
 
-def _tracker_status_dict(sub) -> dict:
+def _tracker_status_dict(sub, payments: list | None = None) -> dict:
     """The tracker card state for the offtaker editor. Honest about whether a
-    sheet is attached, what we detected, and when we last appended."""
+    sheet is attached, what we detected, and when we last appended.
+
+    `payments` (optional) is the offtaker's Stripe invoice-payment history so the
+    generation-spreadsheet card can show paid / collected without a second fetch.
+    """
     m = getattr(sub, "tracker_map", None) or {}
     has = bool(getattr(sub, "tracker_workbook", None)) and bool(m.get("ok"))
     up = getattr(sub, "tracker_updated_at", None)
+    paid_n = sum(1 for p in (payments or []) if (p.get("status") or "").lower() == "paid")
+    open_n = sum(1 for p in (payments or []) if (p.get("status") or "").lower() == "open")
+    collected = round(sum(
+        (p.get("collected_usd") or 0) for p in (payments or [])
+        if (p.get("status") or "").lower() == "paid"
+    ), 2)
     return {
         "enabled": True,
         "has_sheet": has,
+        "auto": bool(m.get("auto")) if has else False,
         "filename": getattr(sub, "tracker_filename", None),
         "columns": m.get("columns") if has else None,
         "headers": m.get("headers") if has else None,
@@ -2769,6 +2780,11 @@ def _tracker_status_dict(sub) -> dict:
         "last_period": m.get("last_period") if has else None,
         "updated_at": up.isoformat() + "Z" if up else None,
         "warnings": m.get("warnings") or [],
+        # Invoice collection roll-up (Stripe offtaker pay-links)
+        "payments": payments or [],
+        "payments_paid": paid_n,
+        "payments_open": open_n,
+        "collected_usd": collected,
     }
 
 
@@ -2785,14 +2801,27 @@ def _friendly_period(lbl: str) -> str:
 @router.get("/subscriptions/{sub_id}/tracker")
 def tracker_status(sub_id: int, authorization: Optional[str] = Header(default=None)):
     """Tracker state for one offtaker (drives the card). 404 only on a missing
-    sub; returns {enabled:false} when the feature flag is off so the UI hides."""
-    from .sheet_tracker import tracker_enabled
+    sub; returns {enabled:false} when the feature flag is off so the UI hides.
+
+    Always ensures a default invoice ledger exists when no BYO sheet is attached,
+    so operators can download generation + paid/collected history without upload.
+    """
+    from .invoice_ledger import ensure_default_ledger, list_payment_rows
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
-        if not tracker_enabled():
-            return {"ok": True, "tracker": {"enabled": False}}
-        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+        pays = list_payment_rows(db, sub)
+        # Always keep a default invoice+collection ledger when no BYO sheet is
+        # attached — download works even if the legacy BYO flag is off.
+        m = getattr(sub, "tracker_map", None) or {}
+        if not getattr(sub, "tracker_workbook", None) or m.get("auto"):
+            try:
+                ensure_default_ledger(db, sub)
+                db.commit()
+                db.refresh(sub)
+            except Exception:  # noqa: BLE001
+                db.rollback()
+        return {"ok": True, "tracker": _tracker_status_dict(sub, pays)}
 
 
 @router.post("/subscriptions/{sub_id}/tracker")
@@ -2825,9 +2854,12 @@ async def tracker_upload(sub_id: int,
         if not res.get("ok"):
             warn = "; ".join(res.get("warnings") or []) or "Couldn't read that sheet."
             raise HTTPException(422, warn)
+        # Mark as operator-owned BYO (never auto) so invoice_ledger won't overwrite it.
+        mapping = dict(res["mapping"] or {})
+        mapping["auto"] = False
         sub.tracker_workbook = res["workbook"]
         sub.tracker_filename = name
-        sub.tracker_map = res["mapping"]
+        sub.tracker_map = mapping
         sub.tracker_updated_at = datetime.utcnow()
         db.add(sub)
         # Transparency: immediately reconcile the freshly-uploaded sheet against the offtaker's
@@ -2840,9 +2872,11 @@ async def tracker_upload(sub_id: int,
             recon = {"status": "error"}
         db.commit()
         db.refresh(sub)
+        from .invoice_ledger import list_payment_rows
+        pays = list_payment_rows(db, sub)
         added = recon.get("periods") if isinstance(recon.get("periods"), list) else (
             [recon["period"]] if recon.get("status") == "appended" and recon.get("period") else [])
-        return {"ok": True, "tracker": _tracker_status_dict(sub),
+        return {"ok": True, "tracker": _tracker_status_dict(sub, pays),
                 "processed": {
                     "sheet": (res.get("mapping") or {}).get("sheet"),
                     "status": recon.get("status"),
@@ -2893,8 +2927,9 @@ def tracker_remap(sub_id: int, body: dict,
 
 @router.delete("/subscriptions/{sub_id}/tracker")
 def tracker_remove(sub_id: int, authorization: Optional[str] = Header(default=None)):
-    """Detach the BYO sheet from this offtaker."""
+    """Detach the BYO sheet from this offtaker; restore the default invoice ledger."""
     from .sheet_tracker import tracker_enabled
+    from .invoice_ledger import ensure_default_ledger, list_payment_rows
     t = tenant_from_session(authorization)
     require_not_demo(t)   # mutates + commits — never on the shared demo tenant (#36)
     if not tracker_enabled():
@@ -2906,32 +2941,50 @@ def tracker_remove(sub_id: int, authorization: Optional[str] = Header(default=No
         sub.tracker_map = None
         sub.tracker_updated_at = datetime.utcnow()
         db.add(sub)
+        db.flush()
+        # Fall back to the auto invoice+collection ledger (not an empty card).
+        try:
+            ensure_default_ledger(db, sub)
+        except Exception:  # noqa: BLE001
+            pass
         db.commit()
-        return {"ok": True, "tracker": _tracker_status_dict(sub)}
+        db.refresh(sub)
+        pays = list_payment_rows(db, sub)
+        return {"ok": True, "tracker": _tracker_status_dict(sub, pays)}
 
 
 @router.get("/subscriptions/{sub_id}/tracker/download")
 def tracker_download(sub_id: int, authorization: Optional[str] = Header(default=None)):
     """Stream the current, kept-current generation spreadsheet. Before streaming
     we opportunistically append the latest period (idempotent) so 'Download
-    latest' always reflects the freshest computed bill even between worker runs."""
+    latest' always reflects the freshest computed bill even between worker runs.
+
+    If no BYO sheet exists, builds the default invoice ledger (generation +
+    invoice $ + paid date + collected $) so download always works.
+    """
     from .sheet_tracker import tracker_enabled, update_subscription_sheet
+    from .invoice_ledger import ensure_default_ledger
     t = tenant_from_session(authorization)
     require_not_demo(t)   # opportunistic append below commits — never on demo (#36)
-    if not tracker_enabled():
-        raise HTTPException(404, "Spreadsheet tracker is not enabled.")
     with SessionLocal() as db:
         sub = _get_owned(db, t.id, sub_id)
-        if not getattr(sub, "tracker_workbook", None):
-            raise HTTPException(404, "No spreadsheet uploaded yet.")
-        # Keep-current on demand: append the latest period if it isn't there.
-        res = update_subscription_sheet(db, sub)
-        if res.get("status") == "appended":
-            db.add(sub)
+        m = getattr(sub, "tracker_map", None) or {}
+        # Default ledger when no BYO sheet (or always-refresh auto ledger)
+        if not getattr(sub, "tracker_workbook", None) or m.get("auto"):
+            ensure_default_ledger(db, sub)
             db.commit()
             db.refresh(sub)
+        elif tracker_enabled():
+            # Keep-current on demand for BYO sheets
+            res = update_subscription_sheet(db, sub)
+            if res.get("status") == "appended":
+                db.add(sub)
+                db.commit()
+                db.refresh(sub)
+        if not getattr(sub, "tracker_workbook", None):
+            raise HTTPException(404, "No spreadsheet available yet.")
         blob = bytes(sub.tracker_workbook)
-        base = (getattr(sub, "tracker_filename", None) or "generation.xlsx")
+        base = (getattr(sub, "tracker_filename", None) or "invoice_ledger.xlsx")
         if base.lower().endswith(".csv"):
             base = base[:-4] + ".xlsx"
         elif not base.lower().endswith(".xlsx"):
@@ -2939,6 +2992,26 @@ def tracker_download(sub_id: int, authorization: Optional[str] = Header(default=
     return StreamingResponse(
         io.BytesIO(blob), media_type=_XLSX_MEDIA,
         headers={"Content-Disposition": f'attachment; filename="{base}"'})
+
+
+@router.get("/subscriptions/{sub_id}/payments")
+def subscription_payments(sub_id: int, authorization: Optional[str] = Header(default=None)):
+    """Invoice payment history for one offtaker (open + paid Stripe pay-links)."""
+    from .invoice_ledger import list_payment_rows
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        sub = _get_owned(db, t.id, sub_id)
+        pays = list_payment_rows(db, sub)
+    collected = round(sum(
+        (p.get("collected_usd") or 0) for p in pays if p.get("status") == "paid"), 2)
+    return {
+        "ok": True,
+        "payments": pays,
+        "count": len(pays),
+        "collected_usd": collected,
+        "paid_count": sum(1 for p in pays if p.get("status") == "paid"),
+        "open_count": sum(1 for p in pays if p.get("status") == "open"),
+    }
 
 
 @router.get("/subscriptions/{sub_id}/preview-math")

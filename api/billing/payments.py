@@ -477,6 +477,12 @@ def create_offtaker_payment(db, *, tenant, sub, match,
         row.stripe_payment_intent_id = pi if isinstance(pi, str) else None
         row.pay_url = pay_url
         db.commit()
+        # Keep the offtaker's default invoice ledger current (open row).
+        try:
+            from .invoice_ledger import sync_payment_into_ledger
+            sync_payment_into_ledger(db, row)
+        except Exception:  # noqa: BLE001
+            logger.warning("ledger sync after mint failed for payment %s", row.id, exc_info=True)
         return {
             "ok": True,
             "payment_id": row.id,
@@ -549,6 +555,13 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
     if isinstance(total, int) and total > 0:
         row.amount_cents = total
     db.commit()
+
+    # Rebuild default ledger so "Collected $" / paid date show for this period.
+    try:
+        from .invoice_ledger import sync_payment_into_ledger
+        sync_payment_into_ledger(db, row)
+    except Exception:  # noqa: BLE001
+        logger.warning("ledger sync after paid failed for payment %s", row.id, exc_info=True)
 
     # Snapshot notify recipients while we have the session open.
     tenant = db.get(Tenant, row.tenant_id)
