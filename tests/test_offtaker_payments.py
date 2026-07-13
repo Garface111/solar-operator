@@ -338,9 +338,31 @@ def test_email_html_includes_pay_cta():
         subject, html, text = _email_html(
             match, sub, is_test=False,
             pay_url="https://checkout.stripe.com/c/pay/cs_abc")
-    assert "Pay invoice" in html
+    assert "Pay invoice securely" in html
     assert "https://checkout.stripe.com/c/pay/cs_abc" in html
-    assert "Pay online:" in text
+    assert "Amount due" in html
+    assert "Pay online" in text
+    # Sky redesign tokens on AO offtaker emails
+    assert "#dceef9" in html or "#10b981" in html
+
+
+def test_email_html_test_banner_mentions_real_pay_button():
+    from api.billing.delivery import _email_html
+    match = _FakeMatch()
+    sub = SimpleNamespace(
+        customer_name="Town of Test", include_summary=False,
+        tenant_id=None, auto_attach_gmp=False, gmp_invoice_pdf=None,
+    )
+    with patch("api.billing.delivery._offtaker_email_fields",
+               return_value={"tenant_name": "Owner Co", "tenant_email": "o@x.com",
+                             "signoff_t": None, "signoff_name": None,
+                             "subject_t": None, "body_t": None}):
+        _, html, _ = _email_html(
+            match, sub, is_test=True,
+            pay_url="https://checkout.stripe.com/c/pay/cs_test")
+    assert "Test send" in html
+    assert "Pay invoice securely" in html
+    assert "same as offtakers will see" in html
 
 
 def test_friendly_connect_error_hides_stripe_raw():

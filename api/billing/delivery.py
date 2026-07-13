@@ -1773,9 +1773,11 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     from ..email_skin import render_email_skin, render_email_skin_text
     kwh = (inv.get("kwh") or 0)
     test_banner = (
-        '<p style="background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.35);'
-        'color:#ffb454;padding:10px 14px;border-radius:8px;margin:0 0 16px;font-size:13px;">'
-        'Test send — this went to you, not the customer.</p>' if is_test else "")
+        '<p style="background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);'
+        'color:#92400e;padding:10px 14px;border-radius:10px;margin:0 0 16px;font-size:13px;'
+        'line-height:1.45;">'
+        '<b>Test send</b> — this went to you, not the customer. '
+        'The Pay button below is real (same as offtakers will see).</p>' if is_test else "")
 
     # ── The LETTER: the tenant's mass template, rendered per offtaker ────────
     # (Ford, 2026-07-03: "the email should automatically say hi <offtaker name>
@@ -1817,9 +1819,9 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         pad = "10px" if strong else "6px"
         # Day-skin emerald for the money figure (matches the redesigned invoice);
         # the old #3fd68a mint washed out on the light card.
-        valstyle = "font-weight:700;color:#047857;" if strong else ""
-        return (f'<tr><td style="padding:{pad} 0;opacity:.65;">{label}</td>'
-                f'<td style="padding:{pad} 0;text-align:right;{valstyle}">{val}</td></tr>')
+        valstyle = "font-weight:800;color:#059669;" if strong else "color:#0f172a;"
+        return (f'<tr><td style="padding:{pad} 0;color:#64748b;font-size:13px;">{label}</td>'
+                f'<td style="padding:{pad} 0;text-align:right;font-size:14px;{valstyle}">{val}</td></tr>')
 
     # The operator's edited note (Paul's "edit a pre-written email"), shown above
     # the figures. Plain text → escaped + newlines to <br> so it renders safely.
@@ -1859,28 +1861,42 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         f'{amount_rows_html}'
         f"</table>"
     )
-    # V2 pay-link CTA (Stripe Checkout). Only present when the owner has Connect
-    # ready and delivery minted a session — never fabricate a dead button.
+    # V2 pay-link CTA — lead with the money action (sky redesign). Never
+    # fabricate a dead button; only render when delivery minted a real session.
     pay_cta_html = ""
     pay_cta_text = ""
+    skin_cta = None
     if pay_url:
         import html as _html_pay
         safe_url = _html_pay.escape(pay_url, quote=True)
+        # Big sky-green pay block ABOVE the letter so offtakers can't miss it.
         pay_cta_html = (
-            f'<p style="margin:18px 0 6px;text-align:center;">'
+            f'<table width="100%" cellpadding="0" cellspacing="0" role="presentation" '
+            f'style="margin:0 0 22px;border-collapse:separate;">'
+            f'<tr><td align="center" bgcolor="#ecfdf5" '
+            f'style="background:linear-gradient(180deg,#ecfdf5 0%,#d1fae5 100%);'
+            f'background-color:#ecfdf5;border:1px solid rgba(16,185,129,.28);'
+            f'border-radius:14px;padding:20px 18px 16px;">'
+            f'<div style="font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;'
+            f'color:#047857;margin:0 0 6px;">Amount due</div>'
+            f'<div style="font-size:32px;font-weight:800;letter-spacing:-.02em;color:#065f46;'
+            f'line-height:1.1;margin:0 0 14px;">{amount_str}</div>'
             f'<a href="{safe_url}" '
-            f'style="background:#047857;color:#fff;padding:12px 22px;border-radius:8px;'
-            f'text-decoration:none;font-weight:700;display:inline-block;font-size:15px;">'
-            f'Pay invoice {amount_str}</a></p>'
-            f'<p style="margin:0 0 12px;text-align:center;font-size:12px;opacity:.65;">'
-            f'Secure card payment · due within 28 days</p>'
+            f'style="display:inline-block;background:linear-gradient(180deg,#6ee7b7,#10b981);'
+            f'color:#06281a;padding:14px 28px;border-radius:10px;text-decoration:none;'
+            f'font-weight:800;font-size:16px;box-shadow:0 8px 20px -8px rgba(16,185,129,.55);">'
+            f'Pay invoice securely →</a>'
+            f'<div style="font-size:12px;color:#64748b;margin-top:12px;line-height:1.4;">'
+            f'Secure card payment · due within 28 days · powered by Stripe</div>'
+            f'</td></tr></table>'
         )
-        pay_cta_text = f"\nPay online: {pay_url}\n"
+        pay_cta_text = f"\nPay online ({amount_str}): {pay_url}\n"
+        skin_cta = {"label": f"Pay {amount_str}", "url": pay_url}
     if note_html:
         # Per-draft note: the operator wrote this send's letter — keep the
         # legacy composition (note + figures + attachment line) exactly.
         body_html = (
-            f"{test_banner}{note_html}{figures_table}{pay_cta_html}"
+            f"{test_banner}{pay_cta_html}{note_html}{figures_table}"
             f'<p style="margin-top:18px;">The full invoice'
             f'{" and performance summary are" if sub.include_summary else " is"} attached.</p>'
         )
@@ -1896,7 +1912,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     else:
         # Mass-template letter (already carries greeting, attachments prose and
         # the sign-off) + the figures table as the receipt beneath it.
-        body_html = f"{test_banner}{letter_html}{figures_table}{pay_cta_html}"
+        body_html = f"{test_banner}{pay_cta_html}{letter_html}{figures_table}"
         body_text = (
             f"{html_to_text(letter_html)}\n\n"
             f"Billing period: {period or '—'}\n"
@@ -1904,12 +1920,14 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
             f"{amount_rows_text}{pay_cta_text}\n"
             f"Questions? Just reply to this email."
         )
-    # White-label: the offtaker should see THEIR operator, never Array Operator.
+    # White-label: offtaker sees THEIR operator name; skin is Array Operator sky.
     html = render_email_skin(
-        preheader=f"Your solar credit invoice for {cust} is attached.",
+        preheader=(f"Pay {amount_str} · solar credit invoice" if pay_url
+                   else f"Your solar credit invoice for {cust} is attached."),
         headline="Your solar credit invoice",
         intro_line=(period or cust),
         body_html=body_html,
+        cta=skin_cta,
         footer_line=f"Solar credit invoice from {operator}.  ·  Questions? just reply to this email.",
         wordmark=operator,
         product="array_operator",
@@ -1918,6 +1936,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         headline="Your solar credit invoice",
         intro_line=(period or cust),
         body_text=body_text,
+        cta=skin_cta,
         wordmark=operator,
         product="array_operator",
     )
@@ -2068,23 +2087,38 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # V2 offtaker pay-link: mint a Stripe Checkout Session (destination charge +
     # platform application fee) when the owner has Connect ready. Best-effort —
     # a Stripe failure never blocks the classic invoice email.
+    #
+    # ALSO mint on test sends so the operator sees the same Pay button the
+    # offtaker will (screenshot 2026-07-13: test send had no pay link because
+    # we previously gated on not is_test).
     pay_url = None
     payment_id = None
     fee_cents = None
-    if (not is_test
-            and (getattr(tenant, "product", None) or "nepool") == "array_operator"):
+    pay_skip_reason = None
+    if (getattr(tenant, "product", None) or "nepool") == "array_operator":
         try:
             from . import payments as _pay
+            # Refresh Connect charges_enabled from Stripe before minting so a
+            # just-finished bank setup is picked up without a page reload.
+            try:
+                _pay.refresh_connect_status(db, tenant)
+                db.refresh(tenant)
+            except Exception:  # noqa: BLE001
+                logger.warning("connect status refresh failed for %s",
+                               getattr(tenant, "id", "?"), exc_info=True)
             pay_res = _pay.create_offtaker_payment(
                 db, tenant=tenant, sub=sub, match=match, force=force)
             if pay_res.get("ok") and pay_res.get("pay_url"):
                 pay_url = pay_res["pay_url"]
                 payment_id = pay_res.get("payment_id")
                 fee_cents = pay_res.get("fee_cents")
-            elif not pay_res.get("skipped"):
-                logger.warning("offtaker pay-link skipped for sub=%s: %s",
-                               getattr(sub, "id", "?"), pay_res.get("error"))
-        except Exception:  # noqa: BLE001 — never sink a send on pay-link bugs
+            else:
+                pay_skip_reason = pay_res.get("error") or "pay link not created"
+                if not pay_res.get("skipped"):
+                    logger.warning("offtaker pay-link skipped for sub=%s: %s",
+                                   getattr(sub, "id", "?"), pay_skip_reason)
+        except Exception as e:  # noqa: BLE001 — never sink a send on pay-link bugs
+            pay_skip_reason = f"pay-link error: {e}"
             logger.exception("offtaker pay-link creation crashed for sub=%s",
                              getattr(sub, "id", "?"))
 
@@ -2127,7 +2161,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
               "invoice_number": (match.computed_invoice or {}).get("invoice_number"),
               "amount_owed": (match.computed_invoice or {}).get("amount_owed"),
               "triggered_by": triggered_by, "test": is_test,
-              "pay_url": pay_url, "payment_id": payment_id, "fee_cents": fee_cents}
+              "pay_url": pay_url, "payment_id": payment_id, "fee_cents": fee_cents,
+              "pay_skip_reason": pay_skip_reason}
     if ok and not is_test:
         now = datetime.utcnow()
         sub.last_sent_at = now

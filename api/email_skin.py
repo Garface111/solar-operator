@@ -9,10 +9,10 @@ Two brands share one backend (see models.Tenant.product / api.branding):
       page #f4f1e4 · card #ffffff · header mint #dcebda (sky→mint→cream gradient)
       emerald accent/CTA #047857 · warm ink #2a2520 · wordmark strip #064e3b
 
-  • Array Operator (arrayoperator.com) — LIGHT "day" theme (utility blue on
-    cool slate), mirroring theme-day.css + the morning fleet digest.
-      page #f6f8fb · card #ffffff · blue accent #2563eb · CTA #2563eb
-      ink #0f172a · slate wordmark strip #0f172a
+  • Array Operator (arrayoperator.com) — SKY redesign (alpine sky page, frosted
+    white card, emerald money accents) matching the live sky glass UI.
+      page #dceef9 · card #ffffff · emerald accent/CTA #10b981 · ink #0f172a
+      night wordmark strip #0a0e14 + mint #7ff0bb
 
 Pass product="array_operator" to render in the AO theme; anything else (incl.
 None) renders NEPOOL. Both themes are LIGHT and the skin forces light mode
@@ -83,29 +83,36 @@ _THEMES = {
         "chip_caption": "NEPOOL-GIS generation workbook",
     },
     "array_operator": {
-        # Array Operator DAY skin -- light "utility blue on cool slate", matching
-        # theme-day.css + the morning fleet digest. (Was a dark navy/green skin.)
-        "page_bg": "#f6f8fb",
+        # Array Operator SKY redesign (Jul 2026) — alpine-sky page wash + frosted
+        # white card + emerald money accents matching arrayoperator.com's sky
+        # glass UI (theme-sky.css / styles --good #3fd68a, --sky #5ec2ff).
+        "page_bg": "#dceef9",         # soft alpine sky (email-safe solid)
         "card_bg": "#ffffff",
-        "card_border": "#e2e8f0",
-        "header_bg": "#ffffff",
+        "card_border": "rgba(15,23,42,.08)",
+        "header_bg": "#e8f6fc",       # solid fallback for Outlook
+        "header_gradient": "linear-gradient(165deg,#cfefff 0%,#e8f7fc 45%,#f0fbf6 100%)",
         "header_text": "#0f172a",
-        "header_sub": "#64748b",
-        "accent": "#2563eb",          # utility-blue hairline under the header
+        "header_sub": "#5b6b7c",
+        "accent": "#10b981",          # emerald hairline (pay / money)
         "body_text": "#0f172a",
         "muted_text": "#64748b",
-        "footer_border": "#eef2f7",
-        "cta_bg": "#2563eb",
-        "cta_text": "#ffffff",
-        "wordmark_bg": "#f8fafc",
-        "wordmark_text": "#64748b",
-        "chip_bg": "#f8fafc",
-        "chip_border": "#e2e8f0",
-        "chip_icon_bg": "#2563eb",
-        "chip_icon_text": "#ffffff",
-        "link": "#2563eb",
+        "footer_border": "rgba(15,23,42,.06)",
+        "cta_bg": "#10b981",          # sky-green primary button
+        "cta_text": "#06281a",        # dark ink on green (matches site buttons)
+        "wordmark_bg": "#0a0e14",     # deep sky-night strip (site --bg)
+        "wordmark_text": "#7ff0bb",   # --good2 mint on dark
+        "chip_bg": "rgba(16,185,129,.06)",
+        "chip_border": "rgba(16,185,129,.22)",
+        "chip_icon_bg": "#10b981",
+        "chip_icon_text": "#06281a",
+        "link": "#047857",
         "brand": "Array Operator",
         "wordmark": "Array Operator · arrayoperator.com",
+        "wordmark_html": (
+            'Array Operator · <a href="https://arrayoperator.com" '
+            'style="color:#7ff0bb;text-decoration:none;font-weight:600;">'
+            'arrayoperator.com</a>'
+        ),
         "default_tagline": "Your array, measured at its true worth — watched, valued, in dollars.",
         "footer_default": "Sent by Array Operator — an agent watching every panel for you.",
         "chip_caption": "Array performance report",
