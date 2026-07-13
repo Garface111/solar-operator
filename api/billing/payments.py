@@ -459,8 +459,9 @@ def create_offtaker_payment(db, *, tenant, sub, match,
             metadata=meta,
             # Stripe Checkout requires expires_at < 24h from creation
             # (prod log 2026-07-13: 30-day expires_at → pay links never minted).
-            # Default Stripe expiry is 24h if omitted; set ~23h explicitly.
-            expires_at=int(datetime.utcnow().timestamp()) + 23 * 3600,
+            # Use time.time() NOT datetime.utcnow().timestamp() — the latter
+            # treats naive UTC as local time and can land >24h out on non-UTC hosts.
+            expires_at=int(__import__("time").time()) + 23 * 3600,
         )
         sess_id = session["id"] if isinstance(session, dict) else session.id
         pay_url = session["url"] if isinstance(session, dict) else session.url
