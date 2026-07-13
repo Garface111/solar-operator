@@ -397,8 +397,13 @@ def create_offtaker_payment(db, *, tenant, sub, match,
 
     from ..branding import app_url
     base = app_url(getattr(tenant, "product", "array_operator")).rstrip("/")
-    success_url = f"{base}/?paid=1#reports"
-    cancel_url = f"{base}/?paid=0#reports"
+    # Public offtaker thank-you page — NEVER the owner dashboard.
+    # (Ford 2026-07-13: success used to land on /?paid=1#reports, so a pay-
+    # link open in the owner's browser dropped the offtaker into Array Operator
+    # with whatever so_session was already there. Offtakers must not enter the
+    # app; paid.html has no auth, no SPA, and tells them to close the tab.)
+    success_url = f"{base}/paid?status=ok"
+    cancel_url = f"{base}/paid?status=cancel"
 
     # Persist the row first so we have a stable payment_id in metadata even if
     # Stripe succeeds and the process dies before a second write.
