@@ -142,6 +142,84 @@ def solar_credit_from_bill(raw_json: dict) -> Optional[dict]:
             "credit_rate": round(rate, 5)}
 
 
+def tenant_bill_credit_rate(db: Session, tenant_id: str, *,
+                            lookback_days: int = 180,
+                            max_bills: int = 80) -> dict:
+    """Fleet-default solar credit rate MEASURED from the tenant's own utility bills.
+
+    Scans recent Bill.raw_json rows (GMP + any co-op bills we can parse) and
+    takes the MEDIAN of each bill's stated net-metering EXCESS credit rate
+    (`excess_credit_rate_from_bill`). This is the honest default for the
+    master "solar credit rate" field — NOT the Vermont tariff constant — when
+    the operator hasn't typed an override.
+
+    Returns:
+      {rate, sample_size, source, note} where source is
+      "utility_bills" | "none". rate is None when no bill yields a rate.
+    """
+    from datetime import timedelta
+
+    from .models import Bill, UtilityAccount, now as _now
+
+    since = _now() - timedelta(days=int(lookback_days))
+    # Prefer newest bills; raw_json is the GMP segment payload. VEC bill PDFs
+    # land credit_rate via solar_credit_usd/kwh when raw_json is sparse.
+    rows = db.execute(
+        select(Bill.raw_json, Bill.solar_credit_usd, Bill.kwh_sent_to_grid,
+               Bill.kwh_generated, UtilityAccount.provider)
+        .join(UtilityAccount, UtilityAccount.id == Bill.account_id)
+        .where(
+            Bill.tenant_id == tenant_id,
+            Bill.period_end.isnot(None),
+            Bill.period_end >= since,
+        )
+        .order_by(Bill.period_end.desc())
+        .limit(max_bills)
+    ).all()
+
+    rates: list[float] = []
+    for raw, credit_usd, sent, gen, provider in rows:
+        r = excess_credit_rate_from_bill(raw) if isinstance(raw, dict) else None
+        if r is None and isinstance(raw, dict):
+            sc = solar_credit_from_bill(raw)
+            if sc and sc.get("credit_rate"):
+                r = float(sc["credit_rate"])
+        # Fallback: stored solar_credit_usd ÷ excess kWh when raw parse failed
+        # but the bill row already carries the credit dollars (VEC/PDF path).
+        if r is None and credit_usd and credit_usd > 0:
+            kwh = sent if (sent and sent > 0) else gen
+            if kwh and kwh > 0:
+                cand = float(credit_usd) / float(kwh)
+                if 0.05 < cand < 0.80:   # same guard band as blended_rate
+                    r = round(cand, 5)
+        if r is not None and 0.05 < r < 0.80:
+            rates.append(float(r))
+
+    if not rates:
+        return {
+            "rate": None,
+            "sample_size": 0,
+            "source": "none",
+            "note": "No utility-bill credit rates found yet — connect GMP (or co-op) "
+                    "bills so we can read the rate each statement states.",
+        }
+    rates_sorted = sorted(rates)
+    med = statistics.median(rates_sorted)
+    n = len(rates_sorted)
+    # Round like the bill lines (5 dp) for stable UI display.
+    med_r = round(float(med), 5)
+    note = (f"Median EXCESS credit rate from {n} of your utility bill"
+            f"{'' if n == 1 else 's'} in the last {lookback_days} days "
+            f"(${med_r:.5f}/kWh). Each offtaker still prices off THEIR bound "
+            f"bill when it settles.")
+    return {
+        "rate": med_r,
+        "sample_size": n,
+        "source": "utility_bills",
+        "note": note,
+    }
+
+
 def excess_credit_rate_from_bill(raw_json: dict) -> Optional[float]:
     """The per-kWh net-metering EXCESS credit RATE the bill STATES ($/kWh), read
     from the CREDITED line(s) alone — i.e. credit dollars ÷ the kWh those dollars

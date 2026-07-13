@@ -159,8 +159,10 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     Precedence per field (customer override → operator global → AUTO schedule →
     legacy flat → built-in default):
       net_rate : sub.net_rate_per_kwh → tenant.default_net_rate_per_kwh
-                 → auto RateSchedule (blended, by utility/location/age/month,
-                   derived from captured bills) → legacy flat rate → MANUAL_TARIFF
+                 → MEDIAN EXCESS credit rate from the tenant's own utility bills
+                   (GMP/co-op sub-account statements)
+                 → auto RateSchedule (blended, by utility/location/age/month)
+                 → legacy flat rate → MANUAL_TARIFF (VT reference, last resort)
       discount : sub.discount_pct → tenant.default_discount_pct → DEFAULT_DISCOUNT (0.10)
 
     period_end/region/first_connect_date feed the auto schedule lookup; when not
@@ -176,7 +178,7 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     """
     from ..db import SessionLocal
     from ..models import Tenant, Array, UtilityAccount
-    from ..rate_schedule import resolve_net_rate
+    from ..rate_schedule import resolve_net_rate, tenant_bill_credit_rate
 
     sub_net = getattr(sub, "net_rate_per_kwh", None)
     sub_disc = getattr(sub, "discount_pct", None)
@@ -218,11 +220,28 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
                     if acct is not None:
                         _provider = acct.provider
 
-        # ── net rate ──  (customer → global → AUTO schedule → legacy flat → VT default)
+        # ── net rate ──  (customer → global → fleet bills → AUTO schedule →
+        #                 legacy flat → VT reference). Utility-bill-bound offtakers
+        # still price off the bound bill's own rate in build_manual_match; this is
+        # the fleet default for blank master / non-bill paths.
         if sub_net is not None and sub_net > 0:
             return float(sub_net), "customer"
         if g_net is not None and g_net > 0:
             return float(g_net), "global"
+        # Median EXCESS credit rate from the operator's own utility bills (memoized
+        # on rate_memo under a fixed key so a list of 800 offtakers only scans once).
+        bill_key = ("__tenant_bill_credit__", getattr(tenant, "id", None) if tenant else None)
+        bill_meta = rate_memo.get(bill_key) if rate_memo is not None else None
+        if bill_meta is None and tenant is not None:
+            try:
+                bill_meta = tenant_bill_credit_rate(db, tenant.id)
+            except Exception:  # noqa: BLE001
+                bill_meta = {"rate": None}
+            if rate_memo is not None:
+                rate_memo[bill_key] = bill_meta
+        if bill_meta and bill_meta.get("rate"):
+            net_note = bill_meta.get("note")
+            return float(bill_meta["rate"]), "utility_bills"
         memo_key = (_provider, _region, _fc, period_end)
         auto = rate_memo.get(memo_key) if rate_memo is not None else None
         if auto is None:
