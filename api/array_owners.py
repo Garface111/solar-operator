@@ -5107,17 +5107,9 @@ def _array_nameplate_kw(db, arr) -> float:
     return total
 
 
-def _ensure_array_geocoded(db, arr) -> bool:
-    """Lazily geocode an array from its linked UtilityAccount.service_address and
-    CACHE lat/lng on the Array row. Idempotent: returns True (and does nothing) if
-    already geocoded. Returns False when there's no address to geocode or the
-    geocoders couldn't resolve it (caller then shows an honest unavailable state).
-    Commits on a successful first geocode so the lookup is paid exactly once."""
+def _utility_oneline(db, arr) -> str | None:
+    """Best linked utility service address as a geocodable one-liner (GMP preferred)."""
     from . import forecasting
-    if arr.latitude is not None and arr.longitude is not None:
-        return True
-    # Find the best linked address among this array's utility accounts. Prefer a
-    # GMP structured address (has zip → best geocode precision).
     accts = db.execute(
         select(UtilityAccount).where(
             UtilityAccount.array_id == arr.id,
@@ -5125,11 +5117,90 @@ def _ensure_array_geocoded(db, arr) -> bool:
             UtilityAccount.service_address.isnot(None),
         )
     ).scalars().all()
-    oneline = None
     for ac in sorted(accts, key=lambda a: 0 if a.provider == "gmp" else 1):
         oneline = forecasting.address_to_oneline(ac.service_address)
         if oneline:
-            break
+            return oneline
+    return None
+
+
+def _place_from_array_name(name: str | None) -> str | None:
+    """Strip capacity/vendor noise from an array name → 'Town, VT' for geocoding.
+
+    'Londonderry 150 kW SolarEdge (416160)' → 'Londonderry, VT'
+    'Chester 150kW' → 'Chester, VT'
+    'Tannery Brook 140kW' → 'Tannery Brook, VT'
+    """
+    import re
+    if not name:
+        return None
+    s = str(name)
+    s = re.sub(r"\s*\([^)]*\)\s*", " ", s)
+    s = re.sub(r"\s+\d[\d.]*\s*(kW|kw|MW|mw)?\b", " ", s)
+    s = re.sub(r"\b(SolarEdge|Fronius|SMA|Chint|CPS|Locus|Enphase)\b", " ", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -_,")
+    if not s or len(s) < 2:
+        return None
+    # Default state for this product's fleet (VT community solar). Skip if already
+    # carries a state or looks like a pure serial/id.
+    if re.fullmatch(r"[\dA-Za-z_-]{1,6}", s):
+        return None
+    if not re.search(r",\s*[A-Za-z]{2}\b", s):
+        s = s + ", VT"
+    return s
+
+
+def _vendor_site_address(db, arr) -> str | None:
+    """Pull a street address from the vendor portal when we have API access.
+
+    SolarEdge /sites/{id}/details carries location.address/city/state — the
+    same data we already capture on connect, but older arrays may have lat/lng
+    from a name-geocode without a displayable address string.
+    """
+    try:
+        if arr.solaredge_api_key and arr.solaredge_site_id:
+            from .adapters import solaredge as se
+            det = se.site_details(arr.solaredge_api_key, int(arr.solaredge_site_id))
+            addr = (det or {}).get("address") or ""
+            if addr and str(addr).strip():
+                return str(addr).strip()
+    except Exception:
+        log.info("vendor address lookup failed for array %s", getattr(arr, "id", "?"),
+                 exc_info=True)
+    return None
+
+
+def _ensure_array_geocoded(db, arr) -> bool:
+    """Lazily geocode an array from its linked UtilityAccount.service_address and
+    CACHE lat/lng on the Array row. Idempotent: returns True (and does nothing) if
+    already geocoded. Returns False when there's no address to geocode or the
+    geocoders couldn't resolve it (caller then shows an honest unavailable state).
+    Commits on a successful first geocode so the lookup is paid exactly once.
+
+    Also backfills a missing geocoded_address LABEL when we already have coords
+    (so the Analysis model editor isn't blank for sites that only have lat/lng).
+    """
+    from . import forecasting
+    dirty = False
+    if arr.latitude is not None and arr.longitude is not None:
+        # Already located — fill a blank display label from cheap local sources
+        # only (utility bill / place-from-name). Vendor API is reserved for the
+        # explicit model-autofill path so forecast compute never fans out to SE.
+        if not (arr.geocoded_address or "").strip():
+            label = (_utility_oneline(db, arr)
+                     or _place_from_array_name(arr.name))
+            if label:
+                arr.geocoded_address = label[:500]
+                dirty = True
+        if dirty:
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+        return True
+    # Utility bill first (best precision), then place-from-name. Vendor portal
+    # addresses are applied by autofill_fleet_model (explicit, rate-limit-aware).
+    oneline = _utility_oneline(db, arr) or _place_from_array_name(arr.name)
     if not oneline:
         return False
     geo = forecasting.geocode_oneline(oneline)
@@ -5146,6 +5217,91 @@ def _ensure_array_geocoded(db, arr) -> bool:
         db.rollback()
         log.warning("forecast: geocode cache commit failed for array %s", arr.id, exc_info=True)
     return arr.latitude is not None
+
+
+def autofill_fleet_model(db, tenant) -> dict:
+    """Propagate known location/geometry into every array for the model editor.
+
+    Sources (in order, never overwrite an operator-set value):
+      • Address: utility service_address → SolarEdge site details → place-from-name
+      • Tilt: leave NULL (UI shows assumed ≈ latitude) unless we already have one
+      • Facing / PR: industry defaults already applied at forecast time; not written
+
+    Returns counts so the UI can say "filled 6 addresses from utility bills".
+    """
+    from . import forecasting
+    arrays = db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant.id,
+            Array.deleted_at.is_(None),
+            Array.excluded.is_(False),
+            exists().where(Inverter.array_id == Array.id),
+        )
+    ).scalars().all()
+    filled_addr = 0
+    located = 0
+    for arr in arrays:
+        had_loc = arr.latitude is not None and arr.longitude is not None
+        had_label = bool((arr.geocoded_address or "").strip())
+
+        # Prefer vendor street address when we still lack a label (or any location).
+        if not had_label:
+            vendor_addr = _vendor_site_address(db, arr)
+            if vendor_addr:
+                if had_loc:
+                    arr.geocoded_address = vendor_addr[:500]
+                    if not arr.geocode_source:
+                        arr.geocode_source = "vendor:solaredge"
+                    filled_addr += 1
+                    had_label = True
+                else:
+                    # Geocode the vendor address to locate the array.
+                    geo = forecasting.geocode_oneline(vendor_addr)
+                    if geo:
+                        arr.latitude = geo["lat"]
+                        arr.longitude = geo["lng"]
+                        arr.geocode_source = "vendor:solaredge"
+                        arr.geocoded_address = (geo.get("matched") or vendor_addr)[:500]
+                        arr.geocoded_at = now()
+                        located += 1
+                        filled_addr += 1
+                        had_loc = True
+                        had_label = True
+
+        ok = _ensure_array_geocoded(db, arr)
+        if ok and not had_loc:
+            located += 1
+        try:
+            db.refresh(arr)
+        except Exception:
+            pass
+        if not had_label and (arr.geocoded_address or "").strip():
+            filled_addr += 1
+        elif not had_label and not (arr.geocoded_address or "").strip():
+            # Last resort: store the place-from-name even if geocode failed, so the
+            # editor isn't blank — user can correct one character and re-save.
+            guess = _place_from_array_name(arr.name)
+            if guess:
+                arr.geocoded_address = guess[:500]
+                if not arr.geocode_source:
+                    arr.geocode_source = "name-guess"
+                filled_addr += 1
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("model autofill commit failed t=%s", tenant.id, exc_info=True)
+    return {
+        "ok": True,
+        "arrays": len(arrays),
+        "addresses_filled": filled_addr,
+        "newly_located": located,
+        "defaults": {
+            "tilt": "≈ site latitude (assumed)",
+            "facing": "South (0°)",
+            "performance_ratio": forecasting.DEFAULT_PR,
+        },
+    }
 
 
 def _set_array_location(db, arr, *, lat=None, lng=None, address=None,
@@ -5527,6 +5683,22 @@ class ArrayLocationBody(BaseModel):
     latitude: Optional[float] = None     # OR set coordinates directly
     longitude: Optional[float] = None
     use_name: Optional[bool] = None      # OR geocode the array's own name
+
+
+@router.post("/v1/array-owners/model-autofill")
+def model_autofill_ep(authorization: str | None = Header(default=None)) -> dict:
+    """Auto-propagate model inputs for every inverter array.
+
+    Fills blank addresses from utility bills, vendor site details, and the
+    array's own place-name — so the Analysis model editor isn't a wall of
+    empty fields. Never overwrites an operator-entered address or geometry.
+    Invalidates the fleet forecast snapshot so the next paint is fresh.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        result = autofill_fleet_model(db, tenant)
+    invalidate_fleet_forecast(tenant.id)
+    return result
 
 
 @router.post("/v1/array-owners/arrays/{array_id}/location")
