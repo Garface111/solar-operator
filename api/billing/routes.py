@@ -2537,54 +2537,40 @@ def get_global_rate(authorization: Optional[str] = Header(default=None)):
     """The operator's global billing defaults. The discount model:
     invoice = kWh × net_rate × (1 − discount).
 
-    When the operator has NOT typed a master override, the effective net rate is
-    the MEDIAN EXCESS credit rate read off their own utility bills (GMP / co-op
-    sub-account statements) — not the Vermont tariff constant. Offtakers bound
-    to a specific utility bill still price off THAT bill's own rate when it
-    settles; this fleet default is what blank master / non-bill paths use.
+    Master solar credit rate semantics (Ford 2026-07-13):
+      • SET  → every offtaker without a per-offtaker override uses this rate.
+      • BLANK → each offtaker uses the EXCESS credit rate from THEIR own bound
+        utility sub-account bill (custom per offtaker — never a fleet median
+        and never a hard-coded Vermont tariff).
     """
-    from .delivery import MANUAL_TARIFF, DEFAULT_DISCOUNT
-    from ..rate_schedule import tenant_bill_credit_rate
+    from .delivery import DEFAULT_DISCOUNT
     t = tenant_from_session(authorization)
     net = getattr(t, "default_net_rate_per_kwh", None)
     disc = getattr(t, "default_discount_pct", None)
 
-    bill_rate = None
-    bill_meta: dict = {"rate": None, "sample_size": 0, "source": "none", "note": ""}
-    try:
-        with SessionLocal() as db:
-            bill_meta = tenant_bill_credit_rate(db, t.id)
-            bill_rate = bill_meta.get("rate")
-    except Exception:  # noqa: BLE001 — never fail the form if bill scan hiccups
-        bill_meta = {"rate": None, "sample_size": 0, "source": "none",
-                     "note": "Couldn't read credit rates from bills right now."}
-
     if net is not None and net > 0:
-        eff_net, eff_src = float(net), "global"
-        eff_note = "Your saved master solar credit rate."
-    elif bill_rate is not None and bill_rate > 0:
-        eff_net, eff_src = float(bill_rate), "utility_bills"
-        eff_note = bill_meta.get("note") or "From your utility bills."
+        eff_src = "global"
+        eff_note = ("Master rate is set — offtakers without a custom rate all use "
+                    f"${float(net):.5f}/kWh (minus discount).")
+        eff_net = float(net)
     else:
-        eff_net, eff_src = float(MANUAL_TARIFF), "vt_default"
-        eff_note = ("No utility-bill credit rate found yet — using the documented "
-                    "Vermont net-metering reference until bills land.")
+        # No single fleet number when blank — each offtaker prices off their bill.
+        eff_src = "per_offtaker_bill"
+        eff_note = ("Master rate is blank — each offtaker uses the solar credit rate "
+                    "from their own utility sub-account bill.")
+        eff_net = None
 
     return {
         "ok": True,
         # legacy flat rate (kept for back-compat)
         "default_billing_rate_per_kwh": getattr(t, "default_billing_rate_per_kwh", None),
-        # discount model + the effective defaults actually applied
+        # discount model + master rate (null = per-offtaker bill rates)
         "default_net_rate_per_kwh": net,
         "default_discount_pct": disc,
         "effective_net_rate_per_kwh": eff_net,
         "effective_net_rate_source": eff_src,
         "effective_net_rate_note": eff_note,
         "effective_discount_pct": disc if disc is not None else DEFAULT_DISCOUNT,
-        # Bill-derived suggestion for the blank/placeholder UI
-        "bill_credit_rate_per_kwh": bill_rate,
-        "bill_credit_rate_sample": bill_meta.get("sample_size") or 0,
-        "bill_credit_rate_note": bill_meta.get("note") or "",
     }
 
 

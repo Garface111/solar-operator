@@ -1,5 +1,5 @@
-"""Master solar credit rate defaults to the fleet's utility-bill EXCESS credit
-rate (not the Vermont tariff constant)."""
+"""Master solar credit rate: blank = per-offtaker utility bill rate;
+set = fleet override. Never a fleet median."""
 from __future__ import annotations
 
 import secrets
@@ -7,8 +7,9 @@ from datetime import date, timedelta
 
 from api.account import mint_session_for_tenant
 from api.db import SessionLocal
-from api.models import Tenant, UtilityAccount, Bill, Array
-from api.rate_schedule import tenant_bill_credit_rate, excess_credit_rate_from_bill
+from api.models import Tenant, UtilityAccount, Bill, Array, BillingReportSubscription, Client
+from api.rate_schedule import excess_credit_rate_from_bill
+from api.billing.delivery import resolve_discount_pricing
 
 
 def _tenant():
@@ -29,7 +30,6 @@ def _gmp_bill_raw(rate=0.18398, kwh=100.0):
             "segmentLineItems": [
                 {"unitOfMeasure": "KWH", "unitCode": "EXCESS",
                  "unitCount": kwh, "dollarAmount": -round(rate * kwh, 2)},
-                # group-shared $0 excess must not dilute the rate
                 {"unitOfMeasure": "KWH", "unitCode": "EXCESSO",
                  "unitCount": 500.0, "dollarAmount": 0},
             ]
@@ -42,36 +42,50 @@ def test_excess_credit_rate_ignores_zero_shared_line():
     assert r is not None and abs(r - 0.18398) < 1e-4
 
 
-def test_tenant_bill_credit_rate_median(client):
+def test_global_rate_blank_means_per_offtaker_bill(client):
+    """GET /global-rate with no master override → source per_offtaker_bill, no single rate."""
     tid, auth = _tenant()
-    pe = date.today().replace(day=1) - timedelta(days=1)
-    with SessionLocal() as db:
-        arr = Array(tenant_id=tid, name="Host Array", fuel_type="solar")
-        db.add(arr); db.flush()
-        ua = UtilityAccount(tenant_id=tid, array_id=arr.id, provider="gmp",
-                            account_number="GMP-RATE-1", nickname="Host")
-        db.add(ua); db.flush()
-        # Three bills at different rates → median is the middle one.
-        for rate in (0.17, 0.20, 0.18):
-            db.add(Bill(
-                tenant_id=tid, account_id=ua.id, bill_date=pe,
-                period_start=pe.replace(day=1), period_end=pe,
-                kwh_generated=1000.0, document_number="D-" + secrets.token_hex(3),
-                raw_json=_gmp_bill_raw(rate, 80.0),
-            ))
-        db.commit()
-        meta = tenant_bill_credit_rate(db, tid)
-    assert meta["source"] == "utility_bills"
-    assert meta["sample_size"] == 3
-    assert abs(meta["rate"] - 0.18) < 1e-4
-
     r = client.get("/v1/array-operator/billing/global-rate",
                    headers={"Authorization": auth})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True
     assert body["default_net_rate_per_kwh"] is None
-    assert body["effective_net_rate_source"] == "utility_bills"
-    assert abs(body["effective_net_rate_per_kwh"] - 0.18) < 1e-4
-    assert abs(body["bill_credit_rate_per_kwh"] - 0.18) < 1e-4
-    assert body["bill_credit_rate_sample"] == 3
+    assert body["effective_net_rate_source"] == "per_offtaker_bill"
+    assert body["effective_net_rate_per_kwh"] is None
+    assert "own" in (body.get("effective_net_rate_note") or "").lower() \
+        or "bill" in (body.get("effective_net_rate_note") or "").lower()
+
+
+def test_global_rate_set_is_fleet_override(client):
+    tid, auth = _tenant()
+    r = client.put("/v1/array-operator/billing/global-rate",
+                   json={"default_net_rate_per_kwh": 0.22},
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+    r = client.get("/v1/array-operator/billing/global-rate",
+                   headers={"Authorization": auth})
+    body = r.json()
+    assert body["default_net_rate_per_kwh"] == 0.22
+    assert body["effective_net_rate_source"] == "global"
+    assert abs(body["effective_net_rate_per_kwh"] - 0.22) < 1e-9
+
+
+def test_resolve_pricing_tenant_net_rate_exposed():
+    """resolve_discount_pricing carries tenant_net_rate so bill path can apply master."""
+    tid, _ = _tenant()
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        t.default_net_rate_per_kwh = 0.19
+        db.commit()
+        # Minimal sub-like object
+        class _S:
+            net_rate_per_kwh = None
+            discount_pct = None
+            rate_per_kwh = None
+            array_id = None
+            tenant_id = tid
+        p = resolve_discount_pricing(_S())
+        assert p["net_source"] == "global"
+        assert abs(p["tenant_net_rate"] - 0.19) < 1e-9
+        assert abs(p["net_rate"] - 0.19) < 1e-9

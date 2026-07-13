@@ -159,10 +159,11 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     Precedence per field (customer override → operator global → AUTO schedule →
     legacy flat → built-in default):
       net_rate : sub.net_rate_per_kwh → tenant.default_net_rate_per_kwh
-                 → MEDIAN EXCESS credit rate from the tenant's own utility bills
-                   (GMP/co-op sub-account statements)
                  → auto RateSchedule (blended, by utility/location/age/month)
                  → legacy flat rate → MANUAL_TARIFF (VT reference, last resort)
+      For offtakers bound to a utility bill, build_manual_match OVERRIDES this
+      chain: customer → master global → THIS offtaker's bound bill credit rate
+      (per sub-account, never a fleet median).
       discount : sub.discount_pct → tenant.default_discount_pct → DEFAULT_DISCOUNT (0.10)
 
     period_end/region/first_connect_date feed the auto schedule lookup; when not
@@ -178,7 +179,7 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     """
     from ..db import SessionLocal
     from ..models import Tenant, Array, UtilityAccount
-    from ..rate_schedule import resolve_net_rate, tenant_bill_credit_rate
+    from ..rate_schedule import resolve_net_rate
 
     sub_net = getattr(sub, "net_rate_per_kwh", None)
     sub_disc = getattr(sub, "discount_pct", None)
@@ -220,28 +221,13 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
                     if acct is not None:
                         _provider = acct.provider
 
-        # ── net rate ──  (customer → global → fleet bills → AUTO schedule →
-        #                 legacy flat → VT reference). Utility-bill-bound offtakers
-        # still price off the bound bill's own rate in build_manual_match; this is
-        # the fleet default for blank master / non-bill paths.
+        # ── net rate ──  (customer → master global → AUTO schedule → legacy flat →
+        # VT reference). Bill-bound offtakers re-resolve in build_manual_match so
+        # blank master falls through to THIS offtaker's sub-account bill rate.
         if sub_net is not None and sub_net > 0:
             return float(sub_net), "customer"
         if g_net is not None and g_net > 0:
             return float(g_net), "global"
-        # Median EXCESS credit rate from the operator's own utility bills (memoized
-        # on rate_memo under a fixed key so a list of 800 offtakers only scans once).
-        bill_key = ("__tenant_bill_credit__", getattr(tenant, "id", None) if tenant else None)
-        bill_meta = rate_memo.get(bill_key) if rate_memo is not None else None
-        if bill_meta is None and tenant is not None:
-            try:
-                bill_meta = tenant_bill_credit_rate(db, tenant.id)
-            except Exception:  # noqa: BLE001
-                bill_meta = {"rate": None}
-            if rate_memo is not None:
-                rate_memo[bill_key] = bill_meta
-        if bill_meta and bill_meta.get("rate"):
-            net_note = bill_meta.get("note")
-            return float(bill_meta["rate"]), "utility_bills"
         memo_key = (_provider, _region, _fc, period_end)
         auto = rate_memo.get(memo_key) if rate_memo is not None else None
         if auto is None:
@@ -288,6 +274,10 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
         "net_source": net_source,
         "discount_source": discount_source,
         "net_rate_note": net_note,
+        # Tenant master override (None when blank). Bill-bound pricing uses this
+        # so a filled master rate wins over each offtaker's sub-account bill rate,
+        # while a blank master leaves each offtaker on their own bill's credit rate.
+        "tenant_net_rate": (float(g_net) if g_net is not None and g_net > 0 else None),
     }
 
 
@@ -1121,14 +1111,16 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         pricing = resolve_discount_pricing(sub, period_end=end)
         discount = pricing["discount_pct"]
         billing_rate = 1.0 - discount
-        # The net rate is the solar CREDIT rate. An explicit per-customer override
-        # wins; else the bill's own EXCESS+SOLCRED rate when the month CASHED, or a
-        # reference rate when the month's excess was BANKED (so the offtaker still
-        # pays for the solar received — option B). A quarterly invoice blends the
-        # quarter's per-bill rates (Σ credit ÷ Σ excess), which reproduces each
-        # month's own-rate dollars exactly.
+        # The net rate is the solar CREDIT rate. Precedence for BILL-BOUND offtakers
+        # (Ford 2026-07-13):
+        #   1. per-offtaker override (sub.net_rate_per_kwh)
+        #   2. master solar credit rate (tenant.default_net_rate_per_kwh) when SET
+        #   3. THIS offtaker's bound utility sub-account bill EXCESS credit rate
+        #      (or a banked-month reference) — custom per offtaker, never a fleet median
+        # A quarterly invoice blends the quarter's per-bill rates (Σ credit ÷ Σ excess).
         _blend = (_quarterly and q is not None
                   and len(q.get("covered_labels") or []) > 1)
+        _master = pricing.get("tenant_net_rate")
         if pricing["net_source"] == "customer":
             net_rate, net_source = pricing["net_rate"], "customer"
             net_note = pricing.get("net_rate_note")
@@ -1143,6 +1135,11 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             if sub.discount_pct is None or not (0 <= sub.discount_pct < 1):
                 discount = 0.0
                 billing_rate = 1.0
+        elif _master is not None and _master > 0:
+            # Master rate set → every offtaker without a per-offtaker override
+            # shares this fleet rate (overrides each sub-account bill rate).
+            net_rate, net_source = float(_master), "global"
+            net_note = "your master solar credit rate"
         elif rate_source == "reference":
             net_rate, net_source = (credit_rate or 0.0), "gmp_credit_reference"
             net_note = ("the solar credit rate for comparable months — this period's "
@@ -1150,31 +1147,33 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             if _blend:
                 net_note += " (blended across the quarter's bills)"
         else:
+            # Master blank → THIS offtaker's own utility sub-account bill rate.
             net_rate, net_source = (credit_rate or 0.0), "gmp_bill_credit"
             net_note = ("the quarter's blended EXCESS + SOLCRED net-metering credit"
                         if _blend else
-                        "the bill's EXCESS + SOLCRED net-metering credit")
-        # The DEFAULT rate this offtaker would price at with NO per-customer
-        # override — always the bill's own rate when the excess CASHED, or the
-        # comparable-months REFERENCE rate when it was BANKED. Surfaced (below,
-        # onto `computed`) so the editable Solar-credit-rate field can honestly
-        # show "default: $X — <source>" beneath an operator override, and label
-        # a banked period as a reference (NOT "from your GMP bill"). Independent
-        # of net_source: when a "customer" override wins, this still reports what
-        # the underlying bill/reference rate is. None when no bill has settled.
-        default_net_rate = credit_rate
-        if rate_source == "reference":
+                        "this offtaker's utility bill EXCESS + SOLCRED credit rate")
+        # The DEFAULT rate this offtaker would price at with NO per-offtaker override:
+        # master (if set) else this offtaker's own bill/reference rate. Surfaced so the
+        # offtaker editor can show "default: $X — from their utility bill" vs master.
+        if _master is not None and _master > 0:
+            default_net_rate = float(_master)
+            default_net_source = "global"
+            default_net_note = "your master solar credit rate"
+        elif rate_source == "reference":
+            default_net_rate = credit_rate
             default_net_source = "gmp_credit_reference"
             default_net_note = ("the solar credit rate for comparable months — this "
                                 "period's excess was banked (not cashed), trued up annually")
             if _blend:
                 default_net_note += " (blended across the quarter's bills)"
         elif credit_rate is not None:
+            default_net_rate = credit_rate
             default_net_source = "gmp_bill_credit"
             default_net_note = ("the quarter's blended EXCESS + SOLCRED net-metering credit"
                                 if _blend else
-                                "the bill's EXCESS + SOLCRED net-metering credit")
+                                "this offtaker's utility bill EXCESS + SOLCRED credit rate")
         else:
+            default_net_rate = None
             default_net_source = None
             default_net_note = None
         period = Period(
