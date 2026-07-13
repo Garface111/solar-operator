@@ -132,7 +132,7 @@ def create_or_get_connect_account(db, tenant) -> dict:
                     "created": False, "warning": str(e)[:200]}
 
     try:
-        acct = stripe.Account.create(
+        create_kwargs = dict(
             type="express",
             country="US",
             email=(tenant.contact_email or None),
@@ -147,6 +147,10 @@ def create_or_get_connect_account(db, tenant) -> dict:
                 "kind": "offtaker_payouts",
             },
         )
+        # Pre-fill email so Stripe's form asks for less typing.
+        if tenant.contact_email:
+            create_kwargs["individual"] = {"email": tenant.contact_email}
+        acct = stripe.Account.create(**create_kwargs)
         acct_id = acct["id"] if isinstance(acct, dict) else acct.id
         tenant.stripe_connect_account_id = acct_id
         tenant.stripe_connect_charges_enabled = False
@@ -160,7 +164,47 @@ def create_or_get_connect_account(db, tenant) -> dict:
         }
     except Exception as e:  # noqa: BLE001
         logger.exception("Connect Account.create failed for %s", tenant.id)
-        return {"ok": False, "error": f"Stripe Connect create failed: {e}"}
+        return {"ok": False, **_friendly_connect_error(e)}
+
+
+def _friendly_connect_error(exc: Exception) -> dict:
+    """Map raw Stripe errors to owner-safe codes + copy. Never leak request ids."""
+    msg = str(exc) or ""
+    low = msg.lower()
+    # Platform hasn't finished https://dashboard.stripe.com/connect once.
+    if "signed up for connect" in low or "dashboard.stripe.com/connect" in low:
+        try:
+            from ..notify import send_internal_alert
+            send_internal_alert(
+                "⚠️ Stripe Connect not activated (blocks offtaker pay-links)",
+                "An owner tried Enable online pay but Stripe rejected Account.create:\n"
+                "the Energy Agent Stripe account has not signed up for Connect yet.\n\n"
+                "ONE-TIME FIX (Ford): open https://dashboard.stripe.com/connect "
+                "while logged into the Energy Agent account, complete Get started, "
+                "then owners can one-click bank setup again.\n\n"
+                f"Raw: {msg[:300]}"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "error": (
+                "Online payments is finishing a one-time platform setup. "
+                "Please try again in a few minutes, or email us and we'll turn it on."
+            ),
+            "error_code": "platform_connect_not_ready",
+            "retryable": True,
+        }
+    if "rate" in low and "limit" in low:
+        return {
+            "error": "Stripe is busy — wait a few seconds and try again.",
+            "error_code": "rate_limited",
+            "retryable": True,
+        }
+    return {
+        "error": "Couldn't start bank setup right now. Please try again shortly.",
+        "error_code": "connect_create_failed",
+        "retryable": True,
+    }
 
 
 def create_account_link(tenant, *, refresh_url: str, return_url: str) -> dict:

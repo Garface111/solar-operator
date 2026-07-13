@@ -5124,19 +5124,43 @@ def payments_connect_start(authorization: Optional[str] = Header(default=None)):
             raise HTTPException(404, "tenant not found")
         created = pay.create_or_get_connect_account(db, tenant)
         if not created.get("ok"):
-            raise HTTPException(502, created.get("error") or "Connect create failed")
+            # Structured body so the UI can hand-hold without raw Stripe text.
+            raise HTTPException(status_code=502, detail={
+                "ok": False,
+                "error": created.get("error") or "Couldn't start bank setup.",
+                "error_code": created.get("error_code") or "connect_create_failed",
+                "retryable": bool(created.get("retryable", True)),
+            })
         # Re-load after create (account id may have just been written).
         db.refresh(tenant)
+        # Already fully onboarded → no Stripe form needed.
+        if created.get("charges_enabled"):
+            return {
+                "ok": True,
+                "url": None,
+                "already_ready": True,
+                "account_id": created.get("account_id"),
+                "charges_enabled": True,
+                "created": False,
+            }
         link = pay.create_account_link(
             tenant, refresh_url=refresh_url, return_url=return_url)
     if not link.get("ok"):
-        raise HTTPException(502, link.get("error") or "Account link failed")
+        raise HTTPException(status_code=502, detail={
+            "ok": False,
+            "error": link.get("error") or "Couldn't open bank setup.",
+            "error_code": "account_link_failed",
+            "retryable": True,
+        })
     return {
         "ok": True,
         "url": link["url"],
         "account_id": link.get("account_id") or created.get("account_id"),
         "charges_enabled": bool(created.get("charges_enabled")),
         "created": bool(created.get("created")),
+        # Hand-holding copy the UI can show while redirecting.
+        "next_step": "stripe_form",
+        "hint": "You'll enter your bank details on Stripe's secure page. We never see your bank login.",
     }
 
 

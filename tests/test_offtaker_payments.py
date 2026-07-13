@@ -343,6 +343,17 @@ def test_email_html_includes_pay_cta():
     assert "Pay online:" in text
 
 
+def test_friendly_connect_error_hides_stripe_raw():
+    err = pay._friendly_connect_error(Exception(
+        "You can only create new accounts if you've signed up for Connect, "
+        "which you can do at https://dashboard.stripe.com/connect. "
+        "Request req_tuyVo9YbNEm1XG"))
+    assert err["error_code"] == "platform_connect_not_ready"
+    assert "req_" not in err["error"]
+    assert "dashboard.stripe.com" not in err["error"]
+    assert "try again" in err["error"].lower() or "minutes" in err["error"].lower()
+
+
 def test_send_payment_received_emails_calls_resend():
     sent = []
     def fake_send(**kw):
