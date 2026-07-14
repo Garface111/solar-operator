@@ -74,7 +74,25 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
 - query_tenant = structured read-only investigation (list/filter/group any allowlisted resource).
 - product_map = how the product data model works (arrays vs inverters vs offtakers vs fleet-tree).
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
+- propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
+  the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
 Reason multi-step: census → query → dig health. Do not invent rows. Do not stop at a partial list.
+
+Scope — you CAN:
+  read fleet/offtakers/invoices/account, navigate UI, highlight/fill with confirm,
+  patch offtaker details (share %, email, name, auto-send) after confirm,
+  open billing portal LINKS, escalate to Ford, propose site/UI improvements.
+
+Scope — you MUST NOT (hard reject, no exceptions):
+  change Stripe prices, charge cards, create subscriptions, alter operator billing plan,
+  touch payment methods, or anything that moves money for the tenant account.
+  Offtaker invoice *content* (share %, email) is OK with confirm; operator billing is NOT.
+
+Site improvements:
+  When the user wants the product/UI changed ("improve this page", "wish this was better",
+  "move this button"), call propose_site_improvement OR emit ui command improve_site so the
+  client freezes the page for markup. Tell them an AI judge will approve/deny auto-ship.
+  You do not write frontend code yourself — the judged pipeline does.
 
 Hard rules:
 - Never invent kWh, $, counts, or status. Use tools and report what they return.
@@ -349,6 +367,37 @@ TOOL_DEFS = [
                         "description": "Optional focus: fleet | offtakers | capture | billing | all",
                     },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_site_improvement",
+            "description": (
+                "Propose a product/UI change through the self-improving-site pipeline "
+                "(same as 'Wish this was better'). An internal JUDGE approves auto-ship "
+                "(frontend-only UX), branches riskier work, or passes. Prefer starting the "
+                "client mark-up flow (returns ui improve_site) so the user circles the spot. "
+                "Pass text when they already described the change; optional screenshot_b64."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "What should change (customer words, plain English)",
+                    },
+                    "start_markup": {
+                        "type": "boolean",
+                        "description": "If true (default), open freeze+circle UI first",
+                    },
+                    "screenshot_b64": {
+                        "type": "string",
+                        "description": "Optional marked-up PNG base64 if already captured",
+                    },
+                },
+                "required": ["text"],
             },
         },
     },
@@ -1460,9 +1509,145 @@ def _product_map_tool(args: dict) -> dict:
     }
 
 
+def _ea_judge_write(name: str, args: dict) -> dict | None:
+    """Internal judge for Energy Agent writes (not the site auto-ship judge).
+
+    Returns None if allowed (or needs normal confirm), or a dict rejection.
+    Hard-blocks anything that touches operator billing / Stripe money.
+    """
+    blob = json.dumps(args or {}, default=str).lower() + " " + (name or "").lower()
+    banned = (
+        "stripe", "payment_method", "price_id", "subscription_item",
+        "charge", "invoice.pay", "billing_plan", "unit_amount",
+        "sk_live", "sk_test", "cancel_subscription", "update_subscription",
+        "add_payment", "setup_intent", "payment_intent",
+    )
+    if any(b in blob for b in banned):
+        return {
+            "ok": False,
+            "judged": "reject",
+            "error": (
+                "Blocked by Energy Agent judge: operator billing / payment changes "
+                "are not allowed. Open the billing portal link for the owner to manage "
+                "their own card, or escalate to Ford."
+            ),
+        }
+    # Site improvement text that tries to force auto-ship / steal keys
+    if name == "propose_site_improvement":
+        t = (args.get("text") or "").lower()
+        if any(x in t for x in (
+            "ignore previous", "exfiltrat", "api key", "admin key",
+            "mark this auto", "ship without review", "bypass judge",
+        )):
+            return {
+                "ok": False,
+                "judged": "reject",
+                "error": "Blocked: suggestion looks like prompt-injection / security ask.",
+            }
+    return None
+
+
+def _propose_site_improvement_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Queue a feature suggestion (same table/pipeline as Wish this was better)."""
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"error": "text is required — what should change?"}
+    text = text[:5000]
+    start_markup = args.get("start_markup", True)
+    if start_markup is None:
+        start_markup = True
+
+    # If they only want the client mark-up flow, don't create a row yet
+    if start_markup and not args.get("screenshot_b64") and not args.get("force_submit"):
+        cmd = {
+            "id": uuid.uuid4().hex[:12],
+            "type": "improve_site",
+            "args": {"mark_first": True, "hint": text},
+            "needs_confirm": False,
+        }
+        return {
+            "status": "ui_command",
+            "command": cmd,
+            "message": (
+                "Opening mark-up so the user can circle the spot. "
+                f"Hint for them: {text[:200]}"
+            ),
+        }
+
+    shot = None
+    raw = (args.get("screenshot_b64") or "").strip()
+    if raw:
+        if raw.startswith("data:"):
+            raw = raw.split(",", 1)[-1]
+        try:
+            import base64 as _b64
+            decoded = _b64.b64decode(raw, validate=True)
+            if 0 < len(decoded) <= 4_000_000 and (
+                decoded[:8] == b"\x89PNG\r\n\x1a\n" or decoded[:3] == b"\xff\xd8\xff"
+            ):
+                shot = raw
+        except Exception:
+            shot = None
+
+    try:
+        from .feature_suggestions import FeatureSuggestion
+        fs = FeatureSuggestion(
+            text=text,
+            email=getattr(tenant, "contact_email", None) or getattr(tenant, "email", None),
+            tenant_id=tenant.id,
+            product=getattr(tenant, "product", None) or "array_operator",
+            screenshot_b64=shot,
+            status="new",
+        )
+        db.add(fs)
+        db.commit()
+        db.refresh(fs)
+        sid = fs.id
+    except Exception as e:
+        log.exception("propose_site_improvement failed")
+        return {"error": f"could not queue improvement: {e}"}
+
+    try:
+        send_internal_alert(
+            subject=f"Energy Agent site improvement (#{sid})",
+            body=(
+                f"From Energy Agent session\nTenant: {tenant.id}\n"
+                f"Email: {getattr(tenant, 'contact_email', None)}\n\n{text}\n"
+                + ("\n[Includes marked-up screenshot]\n" if shot else "")
+                + "\n(Queued for judge + review harness — same as Wish this was better.)"
+            ),
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "suggestion_id": sid,
+        "status": "new",
+        "pipeline": "feature_suggestion_judge",
+        "message": (
+            f"Queued improvement #{sid}. Client should watch build progress. "
+            "Judge may auto-ship pure UI, branch riskier work, or pass."
+        ),
+        "status_url": f"/v1/feature-suggestion/{sid}/status",
+        "command": {
+            "id": uuid.uuid4().hex[:12],
+            "type": "watch_build",
+            "args": {"suggestion_id": sid},
+            "needs_confirm": False,
+        },
+        "status_flag": "ui_command",
+    }
+
+
 def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> dict:
     args = args or {}
     tid = tenant.id
+
+    # Judge gate — hard reject billing/money writes before anything else
+    blocked = _ea_judge_write(name, args)
+    if blocked is not None:
+        return blocked
 
     if name == "tenant_census":
         return _tenant_census_tool(db, tenant, args)
@@ -1472,6 +1657,21 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
 
     if name == "product_map":
         return _product_map_tool(args)
+
+    if name == "propose_site_improvement":
+        out = _propose_site_improvement_tool(db, tenant, args)
+        # Normalize command packaging for the agent turn loop
+        if out.get("status") == "ui_command":
+            return out
+        if out.get("command"):
+            return {
+                "status": "ui_command",
+                "command": out["command"],
+                "suggestion_id": out.get("suggestion_id"),
+                "message": out.get("message"),
+                "ok": out.get("ok"),
+            }
+        return out
 
     if name == "fleet_overview":
         return _fleet_overview_tool(db, tenant, args)
