@@ -85,7 +85,8 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   ALWAYS call this first for "how many arrays/inverters do I have?" or "what's in my fleet?"
   Fleet-tree health views can OMIT pure meter-only arrays; the census does NOT.
 - query_tenant = structured read-only investigation (list/filter/group any allowlisted resource).
-- product_map = how the product data model works (arrays vs inverters vs offtakers vs fleet-tree).
+- product_map = HOW THE SYSTEM WORKS (tabs, dual Auto-refresh capture paths, vendors,
+  offtakers, billing). Call topic=capture or topic=system before explaining Auto-refresh.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
@@ -122,6 +123,13 @@ Hard rules:
 - Master Account / email / company / plan: ALWAYS call account_summary. The email field is
   contact_email (returned as email + contact_email). Never claim email is null without
   checking account_summary first — tenant.email is NOT a real column.
+- Auto-refresh / "how do you get data" / cloud vs extension: ALWAYS product_map(topic=capture)
+  first, then account_summary for THIS tenant's capture_mode. Two paths:
+    cloud  = "Store it with us" — passwords on our servers, harvester 24/7, no extension required
+    device = "Keep it on my computer" — passwords in extension vault, capture while browser active
+  Do NOT say cloud mode uses the extension, or that SMA always requires the extension
+  (cloud harvester can scrape SMA/Fronius/Chint portals too). API-key vendors (SolarEdge)
+  are a third orthogonal path (server poll with keys, not portal passwords).
 - SHOW-AND-TELL: for "walk me through X" / "show me Master Account" use ui_tour
   (tour_id=master_account|arrays|invoices) so the browser navigates and highlights
   while you narrate. Prefer tours over long text-only explanations.
@@ -375,16 +383,21 @@ TOOL_DEFS = [
         "function": {
             "name": "product_map",
             "description": (
-                "How Array Operator's data model and UI map to the database — call when you "
-                "need to reason about what an 'array', 'inverter', 'offtaker', or fleet-tree "
-                "column means, or why census vs health counts can differ."
+                "Authoritative product knowledge for accurate explanations. "
+                "ALWAYS call before explaining Auto-refresh, cloud vs extension, "
+                "how data is scraped, or how the system works. Topics: tabs | fleet | "
+                "capture | system | offtakers | billing | all."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "topic": {
                         "type": "string",
-                        "description": "Optional focus: fleet | offtakers | capture | billing | all",
+                        "description": (
+                            "tabs | fleet | capture | system | offtakers | billing | all. "
+                            "Use 'capture' for Auto-refresh / cloud / extension; "
+                            "'system' for end-to-end architecture."
+                        ),
                     },
                 },
             },
@@ -1105,8 +1118,86 @@ PRODUCT_MAP = {
         "- fleet-tree / fleet_overview: UI health tree on Fleet Triage / Inverters. "
         "EXCLUDES pure meter-only arrays. tenant_census includes ALL non-deleted "
         "arrays — use it for 'how many arrays do I have?'.\n"
-        "- Vendors: solaredge (API-polled), sma/fronius/chint (extension capture — "
-        "refresh only when browser+helper is open and signed in)."
+        "- Vendors: SolarEdge/Locus often API-polled; Fronius/SMA/Chint need portal "
+        "scrape via cloud harvester OR device extension (see product_map topic=capture)."
+    ),
+    "capture": (
+        "AUTO-REFRESH = TWO OWNER-CHOSEN PATHS (Master Account → Auto-refresh)\n"
+        "Tenant.capture_mode is 'cloud' | 'device' | null (legacy default).\n\n"
+        "These are NOT the same as 'which vendor uses an API'. They answer:\n"
+        "  WHERE do portal passwords live, and WHO signs into the portal?\n\n"
+        "═══════════════════════════════════════════════════════════\n"
+        "PATH A — CLOUD CAPTURE  (UI: “Store it with us — live data”)\n"
+        "  capture_mode = cloud\n"
+        "  • Owner saves portal username/password once in Master Account Auto-refresh.\n"
+        "  • Passwords encrypted at rest (PortalCredential / SO_CONFIG_KEY); never returned by API.\n"
+        "  • Server-side harvester (api/cloud_capture.py + api/harvester/*) logs into portals\n"
+        "    on a schedule 24/7 — no browser tab, no extension required for that login.\n"
+        "  • Status: GET /v1/cloud-capture/status (last_harvest_ok, login_failed vs scrape_failed).\n"
+        "  • Unified roster also mirrors into PortalLoginStatus so cloud + device show one list.\n"
+        "  • Best when the owner wants hands-off refresh while the computer is off.\n\n"
+        "PATH B — DEVICE / EXTENSION VAULT  (UI: “Keep it on my computer”)\n"
+        "  capture_mode = device\n"
+        "  • Passwords stay ONLY in the EnergyAgent Chrome extension vault on that machine\n"
+        "    (encrypted locally; not sent to our servers as stored cloud creds).\n"
+        "  • Extension auto-pairs to the tenant key from the dashboard (SO_* bridge).\n"
+        "  • Owner (or auto-refresh with a tab open) opens the vendor/utility portal; content\n"
+        "    scripts capture JSON/DOM and POST to backend (e.g. /v1/array-owners/inverter-capture,\n"
+        "    utility sync). Capture is often armed from “Log in with <Vendor>” / portal deep links.\n"
+        "  • Data refreshes while a signed-in browser + extension is available — not true 24/7\n"
+        "    if the machine is asleep and no cloud path is set for that login.\n"
+        "  • extension_heartbeat_at on the tenant = last time the extension checked in.\n\n"
+        "BOTH PATHS can feed the SAME data tables (Inverter, InverterDaily, DailyGeneration,\n"
+        "utility bills). Auto-refresh is the owner’s preference for HOW portal logins are run;\n"
+        "it does not replace API keys for vendors that have them.\n\n"
+        "═══════════════════════════════════════════════════════════\n"
+        "WHERE DATA COMES FROM BY VENDOR (orthogonal to cloud vs device)\n"
+        "  • SolarEdge: account/site API key on the array/connection → server poll\n"
+        "    (live on fleet-tree load + nightly pull). No portal password scrape.\n"
+        "  • Locus: API credentials similarly server-side when connected.\n"
+        "  • Fronius / SMA / Chint: NO public US-friendly cloud API for full fleet →\n"
+        "    portal must be scraped. That scrape runs via:\n"
+        "      - device mode → extension content scripts, OR\n"
+        "      - cloud mode → server harvester with stored password.\n"
+        "  • Utilities (GMP, SmartHub co-ops, etc.): portal/API depending on provider;\n"
+        "    can be cloud-captured or extension-captured; bills land for offtaker invoicing.\n\n"
+        "STALE / UNPOLLED semantics:\n"
+        "  • Extension path dark often means no recent browser capture/heartbeat — hardware\n"
+        "    may be fine.\n"
+        "  • Cloud path dark → check last harvest status (login_failed = bad password;\n"
+        "    scrape_failed = signed in but data pull hiccuped).\n"
+        "Never tell the owner cloud mode “uses the extension for SMA” or that device mode\n"
+        "stores passwords on our servers — that is backwards."
+    ),
+    "system": (
+        "END-TO-END ARRAY OPERATOR (EnergyAgent owner product)\n"
+        "Brand: EnergyAgent umbrella; this UI is Array Operator (arrayoperator.com).\n"
+        "Backend: shared FastAPI on Railway; frontend: static public/* on Netlify.\n\n"
+        "Identity: Tenant (owner account) → Arrays (sites) → Inverters (equipment).\n"
+        "Optional: UtilityAccounts/bills for settlement; BillingReportSubscriptions = offtakers.\n\n"
+        "DATA IN:\n"
+        "  1) API keys (SolarEdge etc.) → server pollers / fleet-tree telemetry.\n"
+        "  2) Portal logins via Auto-refresh:\n"
+        "       cloud  = we store password + harvester 24/7\n"
+        "       device = extension vault + browser capture while active\n"
+        "  3) Manual connects / onboarding vendor picker.\n\n"
+        "DATA OUT (owner-facing):\n"
+        "  Fleet Triage + Inverters (health, peer index, live power)\n"
+        "  Analysis (incl. through-time)\n"
+        "  Invoices (offtaker drafts from utility bills × share)\n"
+        "  Master Account (profile, plan/card for AO subscription, Auto-refresh)\n\n"
+        "TWO “BILLING” CONCEPTS — do not mix:\n"
+        "  • Operator billing = what Array Operator charges the owner (Stripe / plan / card).\n"
+        "  • Offtaker invoices = owner → customer solar-credit invoices (Invoices tab).\n\n"
+        "Chrome extension name: EnergyAgent — pairs to tenant_key; required for device-mode\n"
+        "portal capture and optional one-click portal open from the dashboard."
+    ),
+    "billing": (
+        "ACCOUNT BILLING (operator)\n"
+        "- Array Operator bills the operator (tenant), not offtakers.\n"
+        "- Offtaker invoices are separate (operator → offtaker) on the Invoices tab.\n"
+        "- Never change Stripe prices; billing_portal_link opens Stripe customer portal.\n"
+        "- Plan/card UI lives under Master Account."
     ),
     "offtakers": (
         "OFFTAKERS / INVOICES\n"
@@ -1114,20 +1205,7 @@ PRODUCT_MAP = {
         "- allocation_pct: fraction 0–1 of measured generation (or pinned 1.0 for own-meter).\n"
         "- array_share_pct: GMP group share for sub-metered offtakers.\n"
         "- client_email, customer_name, delivery_mode approval|auto.\n"
-        "- UI: #reports Invoices tab. patch_offtaker updates with confirm."
-    ),
-    "capture": (
-        "CAPTURE / LIVE DATA\n"
-        "- SolarEdge: server pulls via API key (nightly + live on load).\n"
-        "- SMA/Fronius/Chint: Chrome extension captures portal JSON while owner is logged in.\n"
-        "- Utility meters: GMP server-side JWT; SmartHub (VEC/WEC) client cookie capture.\n"
-        "- 'Unpolled' / stale on extension vendors often means no recent capture — not dead hardware."
-    ),
-    "billing": (
-        "ACCOUNT BILLING\n"
-        "- Array Operator bills the operator (tenant), not offtakers.\n"
-        "- Offtaker invoices are separate (operator → offtaker).\n"
-        "- Never change Stripe prices; billing_portal_link opens Stripe customer portal."
+        "- UI: #reports labeled Invoices. Utility bill data feeds this pipeline."
     ),
 }
 
@@ -1583,7 +1661,8 @@ def _product_map_tool(args: dict) -> dict:
             "inventory": "tenant_census",
             "ad_hoc_lists": "query_tenant",
             "health": "investigate_attention | fleet_overview | array_detail",
-            "master_account": "account_summary (contact_email, company, plan, card-on-file)",
+            "master_account": "account_summary (contact_email, company, plan, capture_mode, cloud_capture)",
+            "how_system_works": "product_map(topic=system|capture) — required before explaining Auto-refresh",
             "offtaker_edit": "patch_offtaker (confirm)",
             "nav": "ui_navigate",
         },
@@ -1689,6 +1768,13 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
         "card_last4": card_brief.get("card_last4"),
         "card_exp": card_brief.get("card_exp"),
         "capture_mode": getattr(t, "capture_mode", None),
+        "capture_mode_label": (
+            "cloud — Store it with us (server holds encrypted passwords, harvester 24/7)"
+            if getattr(t, "capture_mode", None) == "cloud"
+            else "device — Keep it on my computer (extension vault; refresh while browser active)"
+            if getattr(t, "capture_mode", None) == "device"
+            else "unset — client may fall back to local default; ask owner to pick on Master Account → Auto-refresh"
+        ),
         "send_from_email": getattr(t, "send_from_email", None),
         "send_from_name": getattr(t, "send_from_name", None),
         "report_frequency": getattr(t, "report_frequency", None),
@@ -1710,8 +1796,39 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
             "operator_name": "Personal name of the human operator",
             "billing_plan": "Array Operator product plan (vendor_data / invoicing entitlements)",
             "has_payment_method": "Card on file for AO subscription — not offtaker invoices",
+            "capture_mode": (
+                "Auto-refresh path for portal logins: cloud=server harvester; "
+                "device=Chrome extension vault. Orthogonal to SolarEdge API keys."
+            ),
         },
+        "auto_refresh_explainer": (
+            "See product_map(topic=capture). Cloud and device are the two Auto-refresh "
+            "modes on Master Account; SolarEdge API keys are a separate server-poll path."
+        ),
     }
+
+    # Best-effort cloud-capture roster counts (no passwords)
+    try:
+        from .models import PortalCredential
+        creds = db.execute(
+            select(PortalCredential).where(PortalCredential.tenant_id == t.id)
+        ).scalars().all()
+        out["cloud_capture"] = {
+            "credential_count": len(creds),
+            "enabled_count": sum(1 for c in creds if getattr(c, "cloud_capture_enabled", False)),
+            "logins": [
+                {
+                    "provider": c.provider,
+                    "username": c.username,
+                    "enabled": bool(getattr(c, "cloud_capture_enabled", False)),
+                    "last_harvest_at": _iso(getattr(c, "last_harvest_at", None)),
+                    "last_harvest_ok": getattr(c, "last_harvest_ok", None),
+                }
+                for c in creds[:40]
+            ],
+        }
+    except Exception as e:
+        out["cloud_capture"] = {"error": str(e)[:120]}
 
     if include_billing:
         try:
