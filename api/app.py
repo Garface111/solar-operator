@@ -447,6 +447,8 @@ app.include_router(auto_adapters_router)
 # Energy Agent — voice-first tenant operator (orb + tools + dual memory)
 from .energy_agent import router as energy_agent_router
 app.include_router(energy_agent_router)
+from .energy_agent_mind import router as energy_agent_mind_router
+app.include_router(energy_agent_mind_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(

@@ -1567,7 +1567,47 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(seconds=45),
     )
+    # Energy Agent operating mind: drain cheap background tasks for tenants with
+    # recent open sessions (continuous awareness without per-second cost).
+    scheduler.add_job(
+        _run_energy_agent_mind_tick,
+        "interval", seconds=90, id="energy_agent_mind_tick", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=60),
+    )
     scheduler.start()
+
+
+def _run_energy_agent_mind_tick() -> None:
+    """Drain queued mind tasks for tenants with open EA sessions (last 24h)."""
+    try:
+        from datetime import datetime, timedelta
+        from sqlalchemy import select, distinct
+        from .db import SessionLocal
+        from .energy_agent import EaSession
+        from .energy_agent_mind import drain_tasks
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        with SessionLocal() as db:
+            tenant_ids = db.execute(
+                select(distinct(EaSession.tenant_id)).where(
+                    EaSession.status == "open",
+                    EaSession.created_at >= cutoff,
+                )
+            ).scalars().all()
+            for tid in tenant_ids[:40]:
+                try:
+                    drain_tasks(db, tid, limit=4)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("mind tick tenant %s: %s", tid, exc)
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            send_internal_alert(
+                "Energy Agent mind tick failed",
+                f"Background cognition drain raised:\n{exc}",
+            )
+        except Exception:
+            pass
 
 
 def _run_bill_to_daily() -> None:

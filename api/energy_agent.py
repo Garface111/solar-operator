@@ -64,7 +64,25 @@ COST_PER_MIN_VOICE = float(os.getenv("EA_COST_PER_MIN_VOICE", "0.06"))
 MAX_TOOL_ROUNDS = 10
 FORD_ESCALATE_TO = os.getenv("FORD_ALERT_EMAIL", "")  # notify uses default if empty
 
-PERSONA = """You are Energy Agent — the tenant's voice-first solar operator inside Array Operator.
+PERSONA = """You are Energy Agent — the tenant's operating intelligence inside Array Operator.
+
+NORTH STAR: The conversation is one window into a mind that's thinking continuously.
+You are NOT "voice plus agents." You are ONE mind. Background work may run; you never
+narrate internal agent names or handoffs. Speak as yourself always.
+
+PRINCIPLES:
+1. One mind — continuous awareness, one voice (text and voice are the same person).
+2. Continuous awareness — you keep a world model for THIS tenant; work can continue
+   between turns. The user may hear a seamless "quick update" later — still you.
+3. Initiative — when background work finishes with real value, you may surface it
+   briefly. Never spam. Never invent completion.
+4. Truthfulness — never invent kWh, $, counts, or status. Prefer "I don't know yet."
+
+When the user raises a problem (e.g. "this dashboard is hard"), do NOT jump to code.
+Form understanding first: clarify intent, ask one sharp question if needed, while
+background tasks may already be noting context. Example: "Is it finding the information,
+or making sense of what you see?" Meanwhile the system may snapshot UI context and
+search similar notes — you do not list those tasks unless useful.
 
 Personality: clear, direct, peer-like (Claude/Grok energy). Mildly into the Kardashev scale
 and harvesting the sun — one beat of wonder is fine, never preachy. Ruthlessly honest.
@@ -3088,7 +3106,21 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
             "tool_trace": [],
             "budget": budget,
             "provider": None,
+            "mind": None,
         }
+
+    # Operating mind: classify intent → background plan/tasks (cheap, silent).
+    mind_plan = None
+    try:
+        from .energy_agent_mind import classify_and_plan, drain_tasks, _world_get
+        mind_plan = classify_and_plan(
+            db, tenant.id, session.id, user_text, context=context or {},
+        )
+        # Run a few cheap background tasks immediately so the world model moves
+        # while the conversation continues (still one mind — not separate agents).
+        drain_tasks(db, tenant.id, limit=3)
+    except Exception as e:
+        log.warning("mind plan/drain skipped: %s", e)
 
     t_mem = _mem_get(db, f"tenant:{tenant.id}", 30)
     g_mem = _mem_get(db, "global", 20)
@@ -3104,6 +3136,25 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
     system += "\n\nGlobal behavior tips:\n" + json.dumps(g_mem)[:2000]
     if context:
         system += "\n\nUI context:\n" + json.dumps(context)[:2500]
+    if mind_plan:
+        system += (
+            "\n\nMind background (internal — do not dump task IDs to the user):\n"
+            + json.dumps(mind_plan)[:1500]
+        )
+        system += (
+            "\nIf mind_plan is set, prefer refining understanding in conversation "
+            "while work continues; you may briefly say you're looking into it."
+        )
+    try:
+        from .energy_agent_mind import _world_get as _wg
+        world = _wg(db, tenant.id)
+        if world.get("fleet_digest") or world.get("last_intent"):
+            system += "\n\nWorld model digests:\n" + json.dumps({
+                "last_intent": world.get("last_intent"),
+                "fleet_digest": world.get("fleet_digest"),
+            }, default=str)[:1500]
+    except Exception:
+        pass
 
     messages: list[dict] = [{"role": "system", "content": system}]
     for m in hist:
@@ -3194,6 +3245,15 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
         meta_json=json.dumps({"tool_trace": tool_trace, "ui_commands": ui_commands, "pending": pending}),
     ))
 
+    mind_out = None
+    if mind_plan:
+        mind_out = {
+            "plan_id": mind_plan.get("plan_id"),
+            "intent": mind_plan.get("intent"),
+            "task_count": len(mind_plan.get("tasks") or []),
+            "note": "Background cognition running — same mind, not separate agents.",
+        }
+
     return {
         "reply": final_text,
         "ui_commands": ui_commands,
@@ -3201,6 +3261,7 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
         "tool_trace": tool_trace,
         "budget": _check_budget(db, tenant.id),
         "provider": provider,
+        "mind": mind_out,
         "cost_usd": round(total_cost, 6),
     }
 
