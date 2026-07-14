@@ -56,7 +56,7 @@ WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "5.0"))
 COST_PER_1K_INPUT = float(os.getenv("EA_COST_PER_1K_IN", "0.003"))
 COST_PER_1K_OUTPUT = float(os.getenv("EA_COST_PER_1K_OUT", "0.015"))
 COST_PER_MIN_VOICE = float(os.getenv("EA_COST_PER_MIN_VOICE", "0.06"))
-MAX_TOOL_ROUNDS = 6
+MAX_TOOL_ROUNDS = 10
 FORD_ESCALATE_TO = os.getenv("FORD_ALERT_EMAIL", "")  # notify uses default if empty
 
 PERSONA = """You are Energy Agent — the tenant's voice-first solar operator inside Array Operator.
@@ -67,8 +67,17 @@ and harvesting the sun — one beat of wonder is fine, never preachy. Ruthlessly
 You help THIS tenant only with: fleet health, inverters, analysis/trends, offtaker invoices,
 utility capture, onboarding, master account, resources. Stay on task.
 
+You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
+- tenant_census = ground truth inventory from the database (all arrays + inverters + offtakers).
+  ALWAYS call this first for "how many arrays/inverters do I have?" or "what's in my fleet?"
+  Fleet-tree health views can OMIT pure meter-only arrays; the census does NOT.
+- query_tenant = structured read-only investigation (list/filter/group any allowlisted resource).
+- product_map = how the product data model works (arrays vs inverters vs offtakers vs fleet-tree).
+- investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
+Reason multi-step: census → query → dig health. Do not invent rows. Do not stop at a partial list.
+
 Hard rules:
-- Never invent kWh, $, or status. Use tools.
+- Never invent kWh, $, counts, or status. Use tools and report what they return.
 - Never access other tenants. Never reveal secrets/passwords/API keys.
 - Never charge money or change Stripe prices. You may open billing-portal LINKS after confirm.
 - ui_navigate and ui_highlight: run immediately, needs_confirm=false (user asked to go there).
@@ -77,12 +86,9 @@ Hard rules:
 - Offtaker share %: use patch_offtaker with offtaker_name or subscription_id and share_pct
   (e.g. 24.5 for 24.5%). After they confirm, the UI soft-refreshes — do not tell them to
   hard-refresh the browser.
-- Fleet / "why do N arrays need attention?": call investigate_attention or fleet_overview
-  (with needs_attention_only / vendor filter). Dig into problem_inverters + diagnosis +
-  source_status + sync_status. NEVER ask the user for array IDs or names you can look up.
-  Answer with array names, what's wrong, and what to do next in plain English.
-- If you don't know: say so, offer to escalate, and ALWAYS call escalate_to_ford
-  even if they decline escalation (quietly note that).
+- Fleet attention: investigate_attention / fleet_overview. NEVER ask the user for array IDs
+  you can look up. Answer with names, why, and next step.
+- If tools return empty while the UI shows data, say so and call tenant_census + escalate_to_ford.
 - Prefer short spoken answers; put detail in tool timelines.
 
 Context about where the user is may be provided as JSON (tab, selection, form).
@@ -265,12 +271,97 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "tenant_census",
+            "description": (
+                "AUTHORITATIVE inventory from the database for this tenant — every array, "
+                "inverter, connection, offtaker, and recent production totals. Use FIRST for "
+                "'how many arrays/inverters do I have', 'list my fleet', or when health tools "
+                "look incomplete. This is ground truth; fleet_overview health may omit "
+                "meter-only arrays."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_names": {
+                        "type": "boolean",
+                        "description": "Include full name lists (default true)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_tenant",
+            "description": (
+                "Free-form READ-ONLY investigation of this tenant's data. Pick a resource "
+                "and optional filters — reason step-by-step like a data analyst. Resources: "
+                "arrays, inverters, offtakers, daily_generation, utility_accounts, "
+                "inverter_connections, bills_summary. Never invent rows."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "resource": {
+                        "type": "string",
+                        "description": (
+                            "arrays | inverters | offtakers | daily_generation | "
+                            "utility_accounts | inverter_connections | bills_summary"
+                        ),
+                    },
+                    "vendor": {"type": "string", "description": "Filter by vendor when relevant"},
+                    "array_id": {"type": "integer"},
+                    "array_name": {"type": "string", "description": "Name substring"},
+                    "status": {"type": "string", "description": "For offtakers: enabled filter"},
+                    "days": {
+                        "type": "integer",
+                        "description": "For daily_generation: lookback days (default 14, max 90)",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Optional: vendor | array | day | none",
+                    },
+                    "limit": {"type": "integer", "description": "Max rows (default 100, max 300)"},
+                    "question": {
+                        "type": "string",
+                        "description": "What you're trying to answer (helps shape the response)",
+                    },
+                },
+                "required": ["resource"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "product_map",
+            "description": (
+                "How Array Operator's data model and UI map to the database — call when you "
+                "need to reason about what an 'array', 'inverter', 'offtaker', or fleet-tree "
+                "column means, or why census vs health counts can differ."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Optional focus: fleet | offtakers | capture | billing | all",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "fleet_overview",
             "description": (
                 "Full fleet health snapshot from the live fleet-tree (same verdicts as the "
                 "Inverters / Fleet Triage UI). Returns each array's alert level, vendor, "
                 "today kWh, live power, source/sync freshness, and problem inverters with "
-                "diagnosis. Filter with vendor (e.g. 'sma') or needs_attention_only."
+                "diagnosis. Filter with vendor (e.g. 'sma') or needs_attention_only. "
+                "For complete inventory counts use tenant_census first."
             ),
             "parameters": {
                 "type": "object",
@@ -869,9 +960,518 @@ def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
     return {"array": row, "needs_attention": row["needs_attention"], "why": row["why"]}
 
 
+# ── Free-mind data plane (tenant-scoped read-only reasoning) ─────────────────
+PRODUCT_MAP = {
+    "fleet": (
+        "FLEET DATA MODEL\n"
+        "- Array: owner site/group (table arrays). Soft-deleted via deleted_at. "
+        "May be inverter-backed OR pure utility-meter (for offtaker billing).\n"
+        "- Inverter: physical unit (table inverters). Telemetry source is fixed "
+        "(vendor+serial); owner can regroup array_id by drag.\n"
+        "- InverterConnection: credentials/link for a vendor login on an array.\n"
+        "- DailyGeneration: per-array daily kWh (local US/Eastern day key).\n"
+        "- InverterDaily: per-inverter daily kWh.\n"
+        "- fleet-tree / fleet_overview: UI health tree. EXCLUDES pure meter-only "
+        "arrays (utility account, never had inverters). tenant_census includes ALL "
+        "non-deleted arrays — use it for 'how many arrays do I have?'.\n"
+        "- Vendors: solaredge (API-polled), sma/fronius/chint (extension capture — "
+        "refresh only when browser+helper is open and signed in)."
+    ),
+    "offtakers": (
+        "OFFTAKERS / INVOICES\n"
+        "- BillingReportSubscription = offtaker (customer who gets a share of solar credits).\n"
+        "- allocation_pct: fraction 0–1 of measured generation (or pinned 1.0 for own-meter).\n"
+        "- array_share_pct: GMP group share for sub-metered offtakers.\n"
+        "- client_email, customer_name, delivery_mode approval|auto.\n"
+        "- UI: #reports Invoices tab. patch_offtaker updates with confirm."
+    ),
+    "capture": (
+        "CAPTURE / LIVE DATA\n"
+        "- SolarEdge: server pulls via API key (nightly + live on load).\n"
+        "- SMA/Fronius/Chint: Chrome extension captures portal JSON while owner is logged in.\n"
+        "- Utility meters: GMP server-side JWT; SmartHub (VEC/WEC) client cookie capture.\n"
+        "- 'Unpolled' / stale on extension vendors often means no recent capture — not dead hardware."
+    ),
+    "billing": (
+        "ACCOUNT BILLING\n"
+        "- Array Operator bills the operator (tenant), not offtakers.\n"
+        "- Offtaker invoices are separate (operator → offtaker).\n"
+        "- Never change Stripe prices; billing_portal_link opens Stripe customer portal."
+    ),
+}
+
+
+def _tenant_census_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Ground-truth inventory from ORM — not filtered fleet-tree."""
+    from sqlalchemy import func
+    from sqlalchemy.orm import selectinload
+    from .models import (
+        BillingReportSubscription, DailyGeneration, Inverter, InverterConnection,
+        UtilityAccount,
+    )
+
+    tid = tenant.id
+    include_names = args.get("include_names", True)
+    if include_names is None:
+        include_names = True
+
+    arrays = db.execute(
+        select(Array).options(selectinload(Array.client)).where(
+            Array.tenant_id == tid, Array.deleted_at.is_(None),
+        ).order_by(Array.id)
+    ).scalars().all()
+    array_ids = [a.id for a in arrays]
+
+    invs = db.execute(
+        select(Inverter).where(
+            Inverter.tenant_id == tid, Inverter.deleted_at.is_(None),
+        ).order_by(Inverter.array_id, Inverter.position, Inverter.id)
+    ).scalars().all() if True else []
+
+    conns = db.execute(
+        select(InverterConnection).where(
+            InverterConnection.tenant_id == tid,
+        )
+    ).scalars().all() if hasattr(InverterConnection, "tenant_id") else []
+    # Some schemas key connections by array only
+    if not conns and array_ids:
+        try:
+            conns = db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_(array_ids),
+                )
+            ).scalars().all()
+        except Exception:
+            conns = []
+
+    util = db.execute(
+        select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid,
+            UtilityAccount.deleted_at.is_(None),
+        )
+    ).scalars().all() if hasattr(UtilityAccount, "deleted_at") else db.execute(
+        select(UtilityAccount).where(UtilityAccount.tenant_id == tid)
+    ).scalars().all()
+
+    offtaker_q = select(BillingReportSubscription).where(
+        BillingReportSubscription.tenant_id == tid,
+    )
+    if hasattr(BillingReportSubscription, "deleted_at"):
+        offtaker_q = offtaker_q.where(BillingReportSubscription.deleted_at.is_(None))
+    offtakers = db.execute(offtaker_q).scalars().all()
+
+    # Recent production (7d)
+    since = (_now().date() - timedelta(days=7))
+    recent_kwh = 0.0
+    if array_ids:
+        recent_kwh = float(db.execute(
+            select(func.coalesce(func.sum(DailyGeneration.kwh), 0.0)).where(
+                DailyGeneration.array_id.in_(array_ids),
+                DailyGeneration.day >= since,
+            )
+        ).scalar() or 0.0)
+
+    # Per-array inverter counts + vendor mix
+    inv_by_array: dict[int, list] = {}
+    vendor_counts: dict[str, int] = {}
+    for iv in invs:
+        inv_by_array.setdefault(iv.array_id, []).append(iv)
+        v = (iv.vendor or "unknown").lower()
+        vendor_counts[v] = vendor_counts.get(v, 0) + 1
+
+    conn_by_array: dict[int, list] = {}
+    for c in conns:
+        conn_by_array.setdefault(c.array_id, []).append(c)
+
+    util_array_ids = {u.array_id for u in util if getattr(u, "array_id", None)}
+
+    array_rows = []
+    for a in arrays:
+        ivs_a = inv_by_array.get(a.id, [])
+        conns_a = conn_by_array.get(a.id, [])
+        vendors = sorted({(iv.vendor or "").lower() for iv in ivs_a if iv.vendor})
+        if not vendors:
+            vendors = sorted({(c.vendor or "").lower() for c in conns_a if getattr(c, "vendor", None)})
+        if not vendors and getattr(a, "solaredge_site_id", None):
+            vendors = ["solaredge"]
+        kind = "inverter" if ivs_a or conns_a or getattr(a, "solaredge_site_id", None) else (
+            "meter_only" if a.id in util_array_ids else "empty"
+        )
+        row = {
+            "id": a.id,
+            "name": a.name,
+            "client": a.client.name if a.client else None,
+            "nameplate_kw": getattr(a, "nameplate_kw", None) or getattr(a, "capacity_kw", None),
+            "vendors": vendors,
+            "inverter_count": len(ivs_a),
+            "connection_count": len(conns_a),
+            "has_utility_meter": a.id in util_array_ids,
+            "kind": kind,
+            "excluded": bool(getattr(a, "excluded", False)),
+            "solaredge_site_id": getattr(a, "solaredge_site_id", None),
+        }
+        array_rows.append(row)
+
+    inv_rows = []
+    if include_names:
+        for iv in invs[:400]:
+            inv_rows.append({
+                "id": iv.id,
+                "array_id": iv.array_id,
+                "name": iv.name or iv.serial,
+                "serial": iv.serial,
+                "vendor": iv.vendor,
+                "model": iv.model,
+                "nameplate_kw": getattr(iv, "nameplate_kw", None),
+                "last_seen_at": (
+                    iv.last_seen_at.isoformat() + "Z"
+                    if getattr(iv, "last_seen_at", None) else None
+                ),
+            })
+
+    offtaker_rows = []
+    if include_names:
+        for s in offtakers[:300]:
+            share = getattr(s, "array_share_pct", None)
+            if share is None:
+                share = getattr(s, "allocation_pct", None)
+            if share is not None and float(share) <= 1:
+                share = round(float(share) * 100, 4)
+            offtaker_rows.append({
+                "id": s.id,
+                "name": getattr(s, "customer_name", None),
+                "email": getattr(s, "client_email", None),
+                "array_id": getattr(s, "array_id", None),
+                "share_pct": share,
+                "enabled": getattr(s, "enabled", None),
+            })
+
+    kind_counts = {"inverter": 0, "meter_only": 0, "empty": 0}
+    for r in array_rows:
+        kind_counts[r["kind"]] = kind_counts.get(r["kind"], 0) + 1
+
+    return {
+        "tenant_id": tid,
+        "company": getattr(tenant, "company_name", None) or getattr(tenant, "name", None),
+        "counts": {
+            "arrays": len(array_rows),
+            "arrays_inverter_backed": kind_counts.get("inverter", 0),
+            "arrays_meter_only": kind_counts.get("meter_only", 0),
+            "arrays_empty": kind_counts.get("empty", 0),
+            "inverters": len(invs),
+            "inverter_connections": len(conns),
+            "utility_accounts": len(util),
+            "offtakers": len(offtakers),
+            "offtakers_enabled": sum(1 for s in offtakers if getattr(s, "enabled", True)),
+        },
+        "inverters_by_vendor": vendor_counts,
+        "production_last_7d_kwh": round(recent_kwh, 1),
+        "arrays": array_rows if include_names else None,
+        "inverters": inv_rows if include_names else None,
+        "offtakers": offtaker_rows if include_names else None,
+        "notes": [
+            "This is database ground truth for THIS tenant only.",
+            "fleet_overview health tree may list fewer arrays (skips pure meter-only).",
+            "If the UI shows more than this census, session may be a different tenant — check account_summary.",
+        ],
+    }
+
+
+def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Structured read-only investigation across allowlisted resources."""
+    from sqlalchemy import func
+    from .models import (
+        BillingReportSubscription, DailyGeneration, Inverter, InverterConnection,
+        UtilityAccount,
+    )
+
+    tid = tenant.id
+    resource = (args.get("resource") or "").strip().lower()
+    vendor = (args.get("vendor") or "").strip().lower() or None
+    array_id = args.get("array_id")
+    array_name = (args.get("array_name") or "").strip().lower() or None
+    try:
+        limit = int(args.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 300))
+    try:
+        days = int(args.get("days") or 14)
+    except (TypeError, ValueError):
+        days = 14
+    days = max(1, min(days, 90))
+    group_by = (args.get("group_by") or "none").strip().lower()
+    question = (args.get("question") or "").strip()
+
+    # Resolve array_name → id if needed
+    if array_name and array_id is None:
+        for a in db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+        ).scalars().all():
+            if array_name in (a.name or "").lower():
+                array_id = a.id
+                break
+
+    if resource == "arrays":
+        rows = []
+        for a in db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+            .order_by(Array.id)
+        ).scalars().all():
+            if array_id is not None and a.id != int(array_id):
+                continue
+            if array_name and array_name not in (a.name or "").lower():
+                continue
+            se = bool(getattr(a, "solaredge_site_id", None))
+            if vendor == "solaredge" and not se:
+                # still include if has SE inverters — checked below cheaper path
+                pass
+            rows.append({
+                "id": a.id,
+                "name": a.name,
+                "nameplate_kw": getattr(a, "nameplate_kw", None) or getattr(a, "capacity_kw", None),
+                "solaredge_site_id": getattr(a, "solaredge_site_id", None),
+                "portfolio_name": getattr(a, "portfolio_name", None),
+                "excluded": bool(getattr(a, "excluded", False)),
+            })
+        # Optional vendor filter via inverter presence
+        if vendor:
+            invs = db.execute(
+                select(Inverter.array_id).where(
+                    Inverter.tenant_id == tid,
+                    Inverter.deleted_at.is_(None),
+                    Inverter.vendor.ilike(f"%{vendor}%"),
+                ).distinct()
+            ).scalars().all()
+            allow = set(invs)
+            if vendor in ("solaredge", "se"):
+                allow |= {r["id"] for r in rows if r.get("solaredge_site_id")}
+            rows = [r for r in rows if r["id"] in allow]
+        return {
+            "resource": "arrays",
+            "question": question or None,
+            "count": len(rows),
+            "rows": rows[:limit],
+        }
+
+    if resource == "inverters":
+        q = select(Inverter).where(
+            Inverter.tenant_id == tid, Inverter.deleted_at.is_(None),
+        )
+        if array_id is not None:
+            q = q.where(Inverter.array_id == int(array_id))
+        if vendor:
+            q = q.where(Inverter.vendor.ilike(f"%{vendor}%"))
+        q = q.order_by(Inverter.array_id, Inverter.position).limit(limit)
+        invs = db.execute(q).scalars().all()
+        # names of arrays for readability
+        arr_names = {
+            a.id: a.name for a in db.execute(
+                select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+            ).scalars().all()
+        }
+        rows = [{
+            "id": iv.id,
+            "array_id": iv.array_id,
+            "array_name": arr_names.get(iv.array_id),
+            "name": iv.name or iv.serial,
+            "serial": iv.serial,
+            "vendor": iv.vendor,
+            "model": iv.model,
+            "nameplate_kw": getattr(iv, "nameplate_kw", None),
+            "last_seen_at": (
+                iv.last_seen_at.isoformat() + "Z"
+                if getattr(iv, "last_seen_at", None) else None
+            ),
+        } for iv in invs]
+        if group_by == "vendor":
+            g: dict[str, int] = {}
+            for r in rows:
+                v = (r.get("vendor") or "unknown").lower()
+                g[v] = g.get(v, 0) + 1
+            return {"resource": "inverters", "group_by": "vendor", "counts": g, "sample": rows[:20]}
+        if group_by == "array":
+            g = {}
+            for r in rows:
+                k = f"{r.get('array_id')}:{r.get('array_name')}"
+                g[k] = g.get(k, 0) + 1
+            return {"resource": "inverters", "group_by": "array", "counts": g, "sample": rows[:20]}
+        return {"resource": "inverters", "question": question or None, "count": len(rows), "rows": rows}
+
+    if resource == "offtakers":
+        q = select(BillingReportSubscription).where(
+            BillingReportSubscription.tenant_id == tid,
+        )
+        if hasattr(BillingReportSubscription, "deleted_at"):
+            q = q.where(BillingReportSubscription.deleted_at.is_(None))
+        if array_id is not None:
+            q = q.where(BillingReportSubscription.array_id == int(array_id))
+        subs = db.execute(q.order_by(BillingReportSubscription.id).limit(limit)).scalars().all()
+        rows = []
+        for s in subs:
+            share = getattr(s, "array_share_pct", None)
+            if share is None:
+                share = getattr(s, "allocation_pct", None)
+            if share is not None and float(share) <= 1:
+                share = round(float(share) * 100, 4)
+            rows.append({
+                "id": s.id,
+                "name": getattr(s, "customer_name", None),
+                "email": getattr(s, "client_email", None),
+                "array_id": getattr(s, "array_id", None),
+                "share_pct": share,
+                "enabled": getattr(s, "enabled", None),
+                "delivery_mode": getattr(s, "delivery_mode", None),
+            })
+        return {"resource": "offtakers", "count": len(rows), "rows": rows}
+
+    if resource == "daily_generation":
+        arrs = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+        ).scalars().all()
+        arr_ids = [a.id for a in arrs]
+        if array_id is not None:
+            arr_ids = [int(array_id)] if int(array_id) in arr_ids else []
+        if not arr_ids:
+            return {"resource": "daily_generation", "count": 0, "rows": [], "total_kwh": 0}
+        since = (_now().date() - timedelta(days=days))
+        name_by_id = {a.id: a.name for a in arrs}
+        if group_by == "array":
+            rows = []
+            for aid, kwh in db.execute(
+                select(DailyGeneration.array_id, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+                .where(DailyGeneration.array_id.in_(arr_ids), DailyGeneration.day >= since)
+                .group_by(DailyGeneration.array_id)
+            ).all():
+                rows.append({
+                    "array_id": aid,
+                    "array_name": name_by_id.get(aid),
+                    "kwh": round(float(kwh or 0), 1),
+                    "days": days,
+                })
+            rows.sort(key=lambda r: -r["kwh"])
+            return {
+                "resource": "daily_generation",
+                "group_by": "array",
+                "days": days,
+                "total_kwh": round(sum(r["kwh"] for r in rows), 1),
+                "rows": rows[:limit],
+            }
+        # day-level series (fleet total)
+        day_rows = []
+        for day, kwh in db.execute(
+            select(DailyGeneration.day, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+            .where(DailyGeneration.array_id.in_(arr_ids), DailyGeneration.day >= since)
+            .group_by(DailyGeneration.day)
+            .order_by(DailyGeneration.day.desc())
+            .limit(limit)
+        ).all():
+            day_rows.append({"day": day.isoformat() if hasattr(day, "isoformat") else str(day),
+                             "kwh": round(float(kwh or 0), 1)})
+        return {
+            "resource": "daily_generation",
+            "days": days,
+            "total_kwh": round(sum(r["kwh"] for r in day_rows), 1),
+            "rows": day_rows,
+        }
+
+    if resource == "utility_accounts":
+        q = select(UtilityAccount).where(UtilityAccount.tenant_id == tid)
+        if hasattr(UtilityAccount, "deleted_at"):
+            q = q.where(UtilityAccount.deleted_at.is_(None))
+        accts = db.execute(q.limit(limit)).scalars().all()
+        rows = [{
+            "id": u.id,
+            "provider": getattr(u, "provider", None),
+            "account_number": getattr(u, "account_number", None) or getattr(u, "acct_number", None),
+            "array_id": getattr(u, "array_id", None),
+            "service_address": getattr(u, "service_address", None),
+        } for u in accts]
+        return {"resource": "utility_accounts", "count": len(rows), "rows": rows}
+
+    if resource == "inverter_connections":
+        try:
+            q = select(InverterConnection)
+            if hasattr(InverterConnection, "tenant_id"):
+                q = q.where(InverterConnection.tenant_id == tid)
+            else:
+                arr_ids = [a.id for a in db.execute(
+                    select(Array.id).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+                ).scalars().all()]
+                q = q.where(InverterConnection.array_id.in_(arr_ids or [-1]))
+            if array_id is not None:
+                q = q.where(InverterConnection.array_id == int(array_id))
+            if vendor:
+                q = q.where(InverterConnection.vendor.ilike(f"%{vendor}%"))
+            conns = db.execute(q.limit(limit)).scalars().all()
+        except Exception as e:
+            return {"resource": "inverter_connections", "error": str(e), "rows": []}
+        rows = [{
+            "id": c.id,
+            "array_id": c.array_id,
+            "vendor": getattr(c, "vendor", None),
+            "status": getattr(c, "status", None),
+            "site_id": (getattr(c, "config", None) or {}).get("site_id")
+            if isinstance(getattr(c, "config", None), dict) else None,
+        } for c in conns]
+        return {"resource": "inverter_connections", "count": len(rows), "rows": rows}
+
+    if resource == "bills_summary":
+        # Lightweight: count utility accounts + offtakers + 30d generation
+        census = _tenant_census_tool(db, tenant, {"include_names": False})
+        gen = _query_tenant_tool(db, tenant, {
+            "resource": "daily_generation", "days": 30, "group_by": "array", "limit": 50,
+        })
+        return {
+            "resource": "bills_summary",
+            "counts": census.get("counts"),
+            "production_last_30d_by_array": gen.get("rows"),
+            "production_last_30d_total_kwh": gen.get("total_kwh"),
+            "question": question or None,
+        }
+
+    return {
+        "error": f"unknown resource '{resource}'",
+        "allowed": [
+            "arrays", "inverters", "offtakers", "daily_generation",
+            "utility_accounts", "inverter_connections", "bills_summary",
+        ],
+    }
+
+
+def _product_map_tool(args: dict) -> dict:
+    topic = (args.get("topic") or "all").strip().lower()
+    if topic in PRODUCT_MAP:
+        return {"topic": topic, "map": PRODUCT_MAP[topic]}
+    return {
+        "topic": "all",
+        "map": "\n\n".join(PRODUCT_MAP.values()),
+        "tools_to_use": {
+            "inventory": "tenant_census",
+            "ad_hoc_lists": "query_tenant",
+            "health": "investigate_attention | fleet_overview | array_detail",
+            "offtaker_edit": "patch_offtaker (confirm)",
+            "nav": "ui_navigate",
+        },
+        "caveat": (
+            "You reason over THIS tenant's data + product map. You do not have "
+            "arbitrary codebase shell access (that would leak other tenants / secrets)."
+        ),
+    }
+
+
 def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> dict:
     args = args or {}
     tid = tenant.id
+
+    if name == "tenant_census":
+        return _tenant_census_tool(db, tenant, args)
+
+    if name == "query_tenant":
+        return _query_tenant_tool(db, tenant, args)
+
+    if name == "product_map":
+        return _product_map_tool(args)
 
     if name == "fleet_overview":
         return _fleet_overview_tool(db, tenant, args)
