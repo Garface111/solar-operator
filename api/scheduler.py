@@ -1288,6 +1288,13 @@ def start():
         maybe_send_scheduled,
         "interval", minutes=15, id="cloud_capture_announce", replace_existing=True,
     )
+    # Energy Agent + redesign announcement — fires ONCE at/after
+    # ENERGY_AGENT_ANNOUNCE_AT (same KVFlag fire-once pattern).
+    from .jobs.energy_agent_announce import maybe_send_scheduled as maybe_send_ea_announce
+    scheduler.add_job(
+        maybe_send_ea_announce,
+        "interval", minutes=15, id="energy_agent_announce", replace_existing=True,
+    )
     # Drain the queue every minute
     from .worker import run_pending_jobs
     scheduler.add_job(
