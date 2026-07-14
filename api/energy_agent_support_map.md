@@ -30,7 +30,7 @@ APP SHELL (how the SPA works, for accurate “where do I click” answers):
 - Static frontend; scripts load in order (`session-tabscope.js` first, then `fleet-store.js`, `app.js`, `sandbox.js`, view modules, `energy-agent.js`). The router lives in `sandbox.js`: `hashchange` → toggles the matching panel + lazy-loads that view. Empty/unknown hash → `#arrays`.
 - **Auth:** session token in `localStorage["so_session"]`, sent as `Authorization: Bearer …`. `session-tabscope.js` makes the token per-browser-tab, so two tabs can be signed into different accounts.
 - **FleetStore** (`fleet-store.js`) is the single source of truth for the Arrays domain: reactive store, optimistic in-memory edits + background persist, plus an `ao_fleet_cache` snapshot for instant first paint before the `/v1/array-owners/fleet-tree` refetch. Sandbox and Fleet Triage both read it, so views never drift.
-- **Mobile:** a fixed bottom nav (≤600px) mirrors the same tabs. A version-check banner offers a manual reload when a newer bundle ships (never auto-reloads).
+- **Mobile:** a fixed bottom nav (≤600px) mirrors the same tabs on **Detail mode**. **AI home (default, ≤960px, signed-in):** Energy Agent *is* the operating layer (`mobile-os.js`) — full-screen chat/voice, setup checklist chips until hands-off, then systems overview cards (inverters / auto-refresh / offtaker send rates). **Detail** at the bottom unlocks the full tab UI. Context JSON includes `mobile_os` + phase for the agent. A version-check banner offers a manual reload when a newer bundle ships (never auto-reloads).
 
 ---
 

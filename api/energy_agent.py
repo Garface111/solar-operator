@@ -184,6 +184,21 @@ Hard rules:
 - Prefer short spoken answers; put detail in tool timelines.
 
 Context about where the user is may be provided as JSON (tab, selection, form).
+
+MOBILE OS (when context.mobile_os or context.is_mobile_os_home is true):
+- YOU are the operating layer on the phone — not a side chat over tabs. There is no
+  tab bar in AI-home mode; the owner talks to you to finish setup and run the fleet.
+- Phase "setup": drive the hands-off checklist as fast as possible, one next step at a
+  time. Order: arrays live → auto-refresh (cloud portal login) → utility bills →
+  offtakers (optional if monitor-only) → online pay (required once offtakers exist).
+  Use context.mobile_os.next_setup_step and pillars[].done. Celebrate greens; don't
+  dump desktop navigation unless they ask for Detail mode.
+- Phase "running": lead with status — inverter health, last sync, cloud login health,
+  offtaker send success / delivery mode / period. Offer Detail mode for deep edits
+  (spreadsheets, template studio), not as the default path.
+- Prefer short spoken answers + one clear CTA. ui_navigate still works if they open
+  Detail mode; on pure mobile OS home, explain and use tools/census rather than
+  "click the third tab."
 """
 
 
@@ -3273,10 +3288,11 @@ def create_session(body: SessionIn, authorization: str | None = Header(default=N
     with SessionLocal() as db:
         budget = _check_budget(db, t.id)
         sid = "ea_" + uuid.uuid4().hex[:16]
+        ctx = body.context or {}
         s = EaSession(
             id=sid,
             tenant_id=t.id,
-            context_json=json.dumps(body.context or {}),
+            context_json=json.dumps(ctx),
         )
         db.add(s)
         db.add(EaMessage(
@@ -3284,15 +3300,37 @@ def create_session(body: SessionIn, authorization: str | None = Header(default=N
             content="session_start",
         ))
         db.commit()
+        # Mobile OS: AI is the home surface — intro matches setup vs running phase.
+        mos = ctx.get("mobile_os") if isinstance(ctx, dict) else None
+        if not isinstance(mos, dict):
+            mos = {}
+        if mos or ctx.get("is_mobile_os_home"):
+            phase = (mos.get("phase") or "").lower()
+            nxt = mos.get("next_setup_step") or {}
+            if phase == "setup" or (not mos.get("hands_off_ready") and nxt):
+                label = (nxt.get("label") if isinstance(nxt, dict) else None) or "setup"
+                intro = (
+                    f"I'm your operating layer on mobile. Let's get you hands-off. "
+                    f"Next: **{label}**. Tap a chip above or tell me your vendor/"
+                    f"utility — I'll take the fastest path."
+                )
+            else:
+                intro = (
+                    "Hands-off mode. Ask for a status brief anytime — inverters, "
+                    "sync age, offtaker send rates. Deep edits live under **Detail** "
+                    "at the bottom."
+                )
+        else:
+            intro = (
+                "Hi — I'm Energy Agent. I can see your Array Operator account, "
+                "drive the screen when you say yes, and help with fleet, invoices, "
+                "and earnings. What should we tackle?"
+            )
         return {
             "ok": True,
             "session_id": sid,
             "budget": budget,
-            "intro": (
-                "Hi — I'm Energy Agent. I can see your Array Operator account, "
-                "drive the screen when you say yes, and help with fleet, invoices, "
-                "and earnings. What should we tackle?"
-            ),
+            "intro": intro,
             "realtime_ready": bool(OPENAI_API_KEY),
             "brain": "grok" if XAI_API_KEY else ("claude" if ANTHROPIC_API_KEY else "stub"),
         }
