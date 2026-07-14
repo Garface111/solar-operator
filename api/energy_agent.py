@@ -3966,11 +3966,10 @@ def _visual_fix_fast_path(
 
     mind_out = None
     try:
-        from .energy_agent_mind import classify_and_plan, drain_tasks
+        from .energy_agent_mind import classify_and_plan
         mind_plan = classify_and_plan(
             db, tenant.id, session.id, text, context=ctx,
         )
-        drain_tasks(db, tenant.id, limit=3)
         if mind_plan:
             mind_out = {
                 "plan_id": mind_plan.get("plan_id"),
