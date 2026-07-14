@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select, func, or_
-from .db import init_db, SessionLocal
+from .db import init_db, SessionLocal, pool_status, PoolTimeout, record_pool_timeout
 from .models import Tenant, Client, UtilityAccount, UtilitySession, Bill, Job, Array, now
 from .fuels import normalize_fuel
 from .adapters import get_adapter, is_smarthub_provider
@@ -471,22 +471,33 @@ def _startup():
 
 
 @app.get("/health")
-def health():
+async def health():
+    """Liveness + non-secret readiness diagnostics.
+
+    CRITICAL: this handler is **async** so it never competes for the sync
+    threadpool. The 2026-07-14 outage mode was: every sync worker blocked on
+    QueuePool checkout → even /health hung → Railway couldn't recover. Pool
+    stats below use counter introspection only (no DB checkout).
+    """
     # Additive, non-secret readiness diagnostics so we can verify at a glance that
     # prod is on Postgres (not the SQLite fallback) and that email/billing are
     # wired. Booleans only — no keys or values are exposed. Still returns ok:true
     # so the Railway healthcheck contract is unchanged.
     try:
-        from .db import engine
-        dialect = engine.dialect.name
-        pool_max = engine.pool.size() + engine.pool._max_overflow if dialect != "sqlite" else None
+        ps = pool_status()
+        dialect = ps.get("dialect") or "unknown"
+        pool_max = ps.get("capacity")
     except Exception:
-        dialect, pool_max = "unknown", None
+        dialect, pool_max, ps = "unknown", None, {}
     return {
         "ok": True,
         "service": "solar-operator-api",
         "db": dialect,                       # "postgresql" = good; "sqlite" = NOT production-ready
         "db_pool_max": pool_max,
+        # Live pool utilization — no checkout. pressure=true means near exhaustion.
+        "db_pool_checked_out": ps.get("checked_out"),
+        "db_pool_pressure": bool(ps.get("pressure")),
+        "db_pool_timeouts": ps.get("timeouts"),
         "email_configured": bool(os.getenv("RESEND_API_KEY")),
         "stripe_configured": bool(os.getenv("STRIPE_SECRET_KEY")),
         "stripe_array_price_set": bool(os.getenv("STRIPE_ARRAY_PRICE_ID")),
@@ -497,6 +508,29 @@ def health():
         "encryption_at_rest": bool(os.getenv("SO_CONFIG_KEY")),
         "api_docs_public": not _DOCS_OFF,
     }
+
+
+@app.exception_handler(PoolTimeout)
+async def _pool_timeout_handler(request: Request, exc: PoolTimeout):
+    """Fail-fast when the SQLAlchemy pool is exhausted.
+
+    Was: hang every request thread for pool_timeout seconds → cascade outage.
+    Now: 503 + Retry-After so clients back off and workers free immediately.
+    """
+    record_pool_timeout()
+    try:
+        import sentry_sdk
+        sentry_sdk.capture_exception(exc)
+    except Exception:
+        pass
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Server is busy right now — please try again in a few seconds.",
+            "code": "db_pool_exhausted",
+        },
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.post("/v1/client-error")

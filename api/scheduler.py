@@ -1558,6 +1558,15 @@ def start():
         id="bill_to_daily", replace_existing=True,
         max_instances=1, coalesce=True,
     )
+    # Every 60s: watch the SQLAlchemy pool. If it stays near-exhausted across
+    # two consecutive ticks, dispose + alert so the process self-heals instead
+    # of wedging forever (2026-07-14 QueuePool outage). Async-safe counters only.
+    scheduler.add_job(
+        _run_pool_watchdog,
+        "interval", seconds=60, id="db_pool_watchdog", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=45),
+    )
     scheduler.start()
 
 
@@ -1572,6 +1581,55 @@ def _run_bill_to_daily() -> None:
             "Bill→daily transform: unhandled exception",
             f"The bill-to-daily transformer raised an error:\n{exc}",
         )
+
+
+# Consecutive high-pressure ticks before dispose (2 × 60s = ~2 min of saturation).
+_pool_pressure_streak = 0
+
+
+def _run_pool_watchdog() -> None:
+    """Self-heal a wedged SQLAlchemy pool without a full Railway restart.
+
+    If checked_out stays ≥ 85% of capacity for two consecutive ticks, dispose
+    the pool (idle connections drop immediately; in-flight ones finish) and
+    page the internal alert. Cheap: never opens a DB session itself.
+    """
+    global _pool_pressure_streak
+    try:
+        from .db import pool_status, dispose_pool
+        st = pool_status()
+        if st.get("dialect") == "sqlite":
+            _pool_pressure_streak = 0
+            return
+        pressure = bool(st.get("pressure"))
+        if pressure:
+            _pool_pressure_streak += 1
+            logger.warning(
+                "db_pool_watchdog: pressure streak=%s status=%s",
+                _pool_pressure_streak, st,
+            )
+        else:
+            if _pool_pressure_streak:
+                logger.info("db_pool_watchdog: pressure cleared (was streak=%s)",
+                            _pool_pressure_streak)
+            _pool_pressure_streak = 0
+            return
+        if _pool_pressure_streak < 2:
+            return
+        # Wedged — dispose and alert once, then reset streak so we don't thrash.
+        result = dispose_pool(reason=f"watchdog streak={_pool_pressure_streak}")
+        _pool_pressure_streak = 0
+        send_internal_alert(
+            "DB pool disposed by watchdog (was near exhaustion)",
+            "The SQLAlchemy connection pool stayed near capacity for ~2 minutes. "
+            "The watchdog disposed the pool so new requests can check out fresh "
+            "connections instead of hanging the whole API.\n\n"
+            f"before={result.get('before')}\nafter={result.get('after')}\n\n"
+            "If this fires repeatedly, hunt for a session held open across a "
+            "slow vendor HTTP call or a runaway scheduler job.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("db_pool_watchdog failed: %s", exc)
 
 
 def _run_freshness_scorecard() -> None:
