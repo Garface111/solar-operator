@@ -30,9 +30,15 @@ REPLY_TO = "admin@solaroperator.org"
 SUBJECT = "Array Operator just got a major upgrade — new design + Energy Agent"
 SENT_FLAG = "energy_agent_announce_sent"
 
-# Comped design partner — do not mass-mail (standing rule). Override by clearing.
+# Comped design partner — usually held out of mass mail. Ford 2026-07-14: include
+# Paul on THIS Energy Agent / redesign announce. Env ANNOUNCE_DENYLIST still works
+# for others; ANNOUNCE_ALLOWLIST always wins (comma emails forced in if a tenant).
 _DENY_EXACT = {e.strip().lower() for e in
-               (os.environ.get("ANNOUNCE_DENYLIST") or "pbozuwa@gmail.com").split(",") if e.strip()}
+               (os.environ.get("ANNOUNCE_DENYLIST") or "").split(",") if e.strip()}
+# Always include Paul (and any extra allowlist) even if they appear on a denylist.
+_ALLOW_EXACT = {e.strip().lower() for e in
+                (os.environ.get("ANNOUNCE_ALLOWLIST") or "pbozuwa@gmail.com").split(",")
+                if e.strip()}
 # Undeliverable placeholder domains (demo/system rows), never real inboxes.
 _PLACEHOLDER = re.compile(r"@(example\.com|energyagent-demo\.com|test\.com)$", re.I)
 
@@ -41,13 +47,15 @@ def _deliverable(t: Tenant) -> bool:
     email = (t.contact_email or "").strip().lower()
     if not email or "@" not in email or " " in email:
         return False
+    if email in _ALLOW_EXACT:
+        return True
     if email in _DENY_EXACT or _PLACEHOLDER.search(email):
         return False
     return True
 
 
 def recipients() -> list[Tenant]:
-    """Every Array Operator tenant with a deliverable email (testers included)."""
+    """Every Array Operator tenant with a deliverable email (testers + Paul)."""
     with SessionLocal() as db:
         rows = db.execute(
             select(Tenant).where(Tenant.product == "array_operator")
@@ -61,6 +69,19 @@ def recipients() -> list[Tenant]:
             continue
         seen.add(email)
         out.append(t)
+    # If Paul has no AO tenant row but is allowlisted, still send a bare recipient.
+    # (Tenant.contact_email is preferred when a real row exists.)
+    for extra in sorted(_ALLOW_EXACT):
+        if extra in seen:
+            continue
+        # Synthetic stand-in so send loop has an address (no name personalization).
+        class _Extra:
+            contact_email = extra
+            name = "Paul"
+            operator_name = "Paul"
+            id = "allowlist:" + extra
+        out.append(_Extra())  # type: ignore[arg-type]
+        seen.add(extra)
     return out
 
 
