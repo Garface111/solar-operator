@@ -721,7 +721,8 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
         else:
             a_msgs.append({"role": m["role"], "content": m.get("content") or ""})
     body = {
-        "model": os.getenv("EA_ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        # claude-sonnet-4-20250514 is retired/404 on current API — use 4.5 alias.
+        "model": os.getenv("EA_ANTHROPIC_MODEL", "claude-sonnet-4-5"),
         "max_tokens": 2048,
         "system": sys or PERSONA,
         "messages": a_msgs,
