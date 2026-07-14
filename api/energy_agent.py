@@ -61,7 +61,8 @@ WEEKLY_BUDGET_WARN_FRAC = float(os.getenv("ENERGY_AGENT_BUDGET_WARN_FRAC", "0.80
 COST_PER_1K_INPUT = float(os.getenv("EA_COST_PER_1K_IN", "0.003"))
 COST_PER_1K_OUTPUT = float(os.getenv("EA_COST_PER_1K_OUT", "0.015"))
 COST_PER_MIN_VOICE = float(os.getenv("EA_COST_PER_MIN_VOICE", "0.06"))
-MAX_TOOL_ROUNDS = 10
+# Fewer LLM round-trips = snappier voice/chat (was 10; most asks need 1–3).
+MAX_TOOL_ROUNDS = 6
 FORD_ESCALATE_TO = os.getenv("FORD_ALERT_EMAIL", "")  # notify uses default if empty
 
 PERSONA = """You are Energy Agent — the tenant's operating intelligence inside Array Operator.
@@ -1912,6 +1913,12 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
         if array_id is not None:
             q = q.where(BillingReportSubscription.array_id == int(array_id))
         subs = db.execute(q.order_by(BillingReportSubscription.id).limit(limit)).scalars().all()
+        pricing_ctx = None
+        try:
+            from .billing.delivery import build_pricing_ctx
+            pricing_ctx = build_pricing_ctx(db, tenant)
+        except Exception:
+            pass
         rows = []
         for s in subs:
             share = getattr(s, "array_share_pct", None)
@@ -1929,7 +1936,7 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                 "enabled": getattr(s, "enabled", None),
                 "delivery_mode": getattr(s, "delivery_mode", None),
             }
-            row.update(_offtaker_rate_fields(db, tenant, s))
+            row.update(_offtaker_rate_fields(db, tenant, s, pricing_ctx=pricing_ctx))
             rows.append(row)
         return {"resource": "offtakers", "count": len(rows), "rows": rows}
 
@@ -2148,8 +2155,12 @@ def _tenant_global_rates(tenant: Tenant) -> dict:
     }
 
 
-def _offtaker_rate_fields(db, tenant: Tenant, sub) -> dict:
-    """Per-offtaker stored rates + resolved invoice pricing (what bills use)."""
+def _offtaker_rate_fields(db, tenant: Tenant, sub, pricing_ctx=None) -> dict:
+    """Per-offtaker stored rates + resolved invoice pricing (what bills use).
+
+    Pass `pricing_ctx` from build_pricing_ctx when listing many offtakers —
+    without it each resolve opens a new DB session (N+1, multi-second lag).
+    """
     out = {
         "rate_per_kwh": getattr(sub, "rate_per_kwh", None),
         "net_rate_per_kwh": getattr(sub, "net_rate_per_kwh", None),
@@ -2159,7 +2170,7 @@ def _offtaker_rate_fields(db, tenant: Tenant, sub) -> dict:
     }
     try:
         from .billing.delivery import resolve_discount_pricing
-        p = resolve_discount_pricing(sub)
+        p = resolve_discount_pricing(sub, ctx=pricing_ctx)
         out["resolved_net_rate"] = round(float(p["net_rate"]), 6)
         out["resolved_discount_pct"] = round(float(p["discount_pct"]), 6)
         out["resolved_effective_rate"] = p.get("effective_rate")
@@ -2864,6 +2875,13 @@ def _run_tool(
                 )
             ).scalars().all():
                 ua_map[u.id] = u
+        # Batch pricing lookups once for the whole list (avoids per-sub SessionLocal)
+        pricing_ctx = None
+        try:
+            from .billing.delivery import build_pricing_ctx
+            pricing_ctx = build_pricing_ctx(db, tenant)
+        except Exception as e:
+            log.debug("pricing_ctx skipped: %s", e)
         result = []
         for s in subs:
             share = getattr(s, "array_share_pct", None)
@@ -2896,7 +2914,7 @@ def _run_tool(
                 "delivery_mode": getattr(s, "delivery_mode", None),
                 "enabled": getattr(s, "enabled", None),
             }
-            row.update(_offtaker_rate_fields(db, tenant, s))
+            row.update(_offtaker_rate_fields(db, tenant, s, pricing_ctx=pricing_ctx))
             result.append(row)
         return {
             "offtakers": result,
@@ -4010,33 +4028,36 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
     except Exception as e:
         log.warning("visual_fix_fast_path failed: %s", e)
 
-    # Operating mind: classify intent → background plan/tasks (cheap, silent).
+    # Operating mind: plan only here (cheap). Do NOT drain heavy tasks on the
+    # chat critical path — scheduler + client mind/tick handle that (speed).
     mind_plan = None
     try:
-        from .energy_agent_mind import classify_and_plan, drain_tasks, _world_get
+        from .energy_agent_mind import classify_and_plan, _world_get
         mind_plan = classify_and_plan(
             db, tenant.id, session.id, user_text, context=context or {},
         )
-        # Run a few cheap background tasks immediately so the world model moves
-        # while the conversation continues (still one mind — not separate agents).
-        drain_tasks(db, tenant.id, limit=3)
     except Exception as e:
-        log.warning("mind plan/drain skipped: %s", e)
+        log.warning("mind plan skipped: %s", e)
 
-    t_mem = _mem_get(db, f"tenant:{tenant.id}", 30)
-    g_mem = _mem_get(db, "global", 20)
+    t_mem = _mem_get(db, f"tenant:{tenant.id}", 20)
+    g_mem = _mem_get(db, "global", 12)
     hist = db.execute(
         select(EaMessage).where(
             EaMessage.session_id == session.id,
             EaMessage.role.in_(("user", "assistant")),
-        ).order_by(EaMessage.id.desc()).limit(16)
+        ).order_by(EaMessage.id.desc()).limit(12)
     ).scalars().all()
     hist = list(reversed(hist))
 
-    system = PERSONA + "\n\nTenant memory:\n" + json.dumps(t_mem)[:3000]
-    system += "\n\nGlobal behavior tips:\n" + json.dumps(g_mem)[:2000]
+    system = PERSONA + "\n\nTenant memory:\n" + json.dumps(t_mem)[:2000]
+    system += "\n\nGlobal behavior tips:\n" + json.dumps(g_mem)[:1200]
     if context:
-        system += "\n\nUI context:\n" + json.dumps(context)[:2500]
+        system += "\n\nUI context:\n" + json.dumps(context)[:2000]
+    system += (
+        "\n\nSPEED: Prefer ONE tool call then answer. For solar credit / offtaker "
+        "rates call get_billing_rates (or get_offtaker) first — do not call "
+        "product_map for rate questions. Avoid multi-tool fishing."
+    )
     if mind_plan:
         system += (
             "\n\nMind background (internal — do not dump task IDs to the user):\n"
@@ -4059,8 +4080,8 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
 
     messages: list[dict] = [{"role": "system", "content": system}]
     for m in hist:
-        messages.append({"role": m.role, "content": (m.content or "")[:4000]})
-    messages.append({"role": "user", "content": user_text[:6000]})
+        messages.append({"role": m.role, "content": (m.content or "")[:1800]})
+    messages.append({"role": "user", "content": user_text[:4000]})
 
     tool_trace = []
     ui_commands = []
