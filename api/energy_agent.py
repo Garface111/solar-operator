@@ -94,13 +94,23 @@ Reason multi-step: census → query → dig health. Do not invent rows. Do not s
 
 Scope — you CAN:
   read fleet/offtakers/invoices/account, navigate UI, highlight/fill with confirm,
-  patch offtaker details (share %, email, name, auto-send) after confirm,
+  patch offtaker details after confirm: share %, email, customer name, auto-send,
+  AND rebind utility/array sources (utility_account_id, array_id / master group),
   open billing portal LINKS, escalate to Ford, propose site/UI improvements.
 
 Scope — you MUST NOT (hard reject, no exceptions):
   change Stripe prices, charge cards, create subscriptions, alter operator billing plan,
   touch payment methods, or anything that moves money for the tenant account.
-  Offtaker invoice *content* (share %, email) is OK with confirm; operator billing is NOT.
+  Offtaker invoice *content* (share %, email, bill source rebind) is OK with confirm;
+  operator billing is NOT.
+
+CRITICAL — offtaker "master account" / utility source is NOT the offtaker's name:
+  The Invoices edit form has a MASTER (net-meter group host) dropdown and an optional
+  SUB-account dropdown. Those bind array_id + utility_account_id (bill source).
+  When the user says "change master account to Timberworks" or "switch utility source
+  to X", use patch_offtaker with array_name / master_account / utility_account_name —
+  NEVER rename customer_name to that value. Renaming is only when they explicitly say
+  rename / change the offtaker's display name.
 
 Site improvements:
   When the user wants the product/UI changed ("improve this page", "wish this was better",
@@ -118,6 +128,10 @@ Hard rules:
 - Offtaker share %: use patch_offtaker with offtaker_name or subscription_id and share_pct
   (e.g. 24.5 for 24.5%). After they confirm, the UI soft-refreshes — do not tell them to
   hard-refresh the browser.
+- Offtaker utility / master account rebind: list_offtakers first (shows utility_account_id,
+  array_id, nicknames), then patch_offtaker with utility_account_id|utility_account_name
+  and/or array_id|array_name|master_account. product_map(topic=offtakers) for the full
+  invoice generator model.
 - Fleet attention: investigate_attention / fleet_overview. NEVER ask the user for array IDs
   you can look up. Answer with names, why, and next step.
 - Master Account / email / company / plan: ALWAYS call account_summary. The email field is
@@ -509,7 +523,11 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "list_offtakers",
-            "description": "List offtaker subscriptions (name, share, email, array, auto-send).",
+            "description": (
+                "List offtaker subscriptions with name, share, email, array_id/array_name, "
+                "utility_account_id + nickname/account number (bill source), delivery mode. "
+                "Call before rebinding master account / utility source."
+            ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -726,9 +744,13 @@ TOOL_DEFS = [
         "function": {
             "name": "patch_offtaker",
             "description": (
-                "Update one offtaker's details: share percentage, email, name, auto-send. "
+                "Update one offtaker: share %, email, display name, auto-send, AND/OR "
+                "rebind the bill source (utility account + master net-meter group). "
                 "Identify by subscription_id OR offtaker_name (partial match ok). "
-                "share_pct is a percent number (e.g. 25 for 25%) OR a fraction 0–1. "
+                "CRITICAL: 'master account' / 'utility source' / 'array source' means "
+                "array_id + utility_account_id — NOT renaming customer_name. "
+                "Only pass name= when the user explicitly wants to rename the offtaker. "
+                "share_pct is percent (25) or fraction 0–1. "
                 "Requires confirm unless the user already clearly approved the exact change."
             ),
             "parameters": {
@@ -740,12 +762,44 @@ TOOL_DEFS = [
                         "description": "Customer/offtaker name when id is unknown",
                     },
                     "email": {"type": "string"},
-                    "name": {"type": "string", "description": "New display name for the offtaker"},
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "New DISPLAY name for the offtaker only. Do NOT set this when "
+                            "the user wants to change master account / utility / array source."
+                        ),
+                    },
                     "share_pct": {
                         "type": "number",
                         "description": "Share as percent (25) or fraction (0.25). Applied as allocation_pct / array_share_pct.",
                     },
                     "auto_send": {"type": "boolean"},
+                    "utility_account_id": {
+                        "type": "integer",
+                        "description": "Bind offtaker to this utility bill source (sub-meter or host).",
+                    },
+                    "utility_account_name": {
+                        "type": "string",
+                        "description": (
+                            "Resolve utility bill by nickname, account number, or service address "
+                            "(e.g. 'Timberworks', 'St J Main St'). Prefer over guessing ids."
+                        ),
+                    },
+                    "array_id": {
+                        "type": "integer",
+                        "description": "Master net-meter GROUP (array) for allocation cross-check.",
+                    },
+                    "array_name": {
+                        "type": "string",
+                        "description": "Resolve master group by array name (partial match ok).",
+                    },
+                    "master_account": {
+                        "type": "string",
+                        "description": (
+                            "UI 'Master account' dropdown target — utility nickname OR array/"
+                            "group name (e.g. Timberworks). Rebinds bill group, does NOT rename."
+                        ),
+                    },
                     "needs_confirm": {"type": "boolean", "default": True},
                 },
                 "required": [],
@@ -1200,12 +1254,54 @@ PRODUCT_MAP = {
         "- Plan/card UI lives under Master Account."
     ),
     "offtakers": (
-        "OFFTAKERS / INVOICES\n"
-        "- BillingReportSubscription = offtaker (customer who gets a share of solar credits).\n"
-        "- allocation_pct: fraction 0–1 of measured generation (or pinned 1.0 for own-meter).\n"
-        "- array_share_pct: GMP group share for sub-metered offtakers.\n"
-        "- client_email, customer_name, delivery_mode approval|auto.\n"
-        "- UI: #reports labeled Invoices. Utility bill data feeds this pipeline."
+        "OFFTAKER INVOICE GENERATOR — START TO FINISH\n"
+        "UI tab: Invoices (#reports). Entity: BillingReportSubscription = one offtaker.\n\n"
+        "═══════════════════════════════════════════════════════════\n"
+        "1) DATA IN — utility bills are the SOURCE OF TRUTH\n"
+        "  • UtilityAccount rows (GMP, VEC/SmartHub, etc.) linked to Arrays (net-meter groups).\n"
+        "  • Captured paper bills (Bill.kwh_generated per period) — NEVER inverter telemetry.\n"
+        "  • Link utility bills from Invoices toolbar or Master Account auto-refresh paths.\n"
+        "  • Bill sources show as “✓ N bill sources” on the Invoices header.\n\n"
+        "2) OFFTAKER ROW — what each subscription stores\n"
+        "  • customer_name + client_email — who the invoice is FOR (display + send).\n"
+        "  • array_id — MASTER net-meter GROUP (the array / group host the share audits against).\n"
+        "  • utility_account_id — WHICH utility bill this offtaker invoices from:\n"
+        "      - own sub-meter → their personal account (topology A)\n"
+        "      - or the group host meter when they bill a % of the master (topology B)\n"
+        "  • allocation_pct — fraction 0–1 billing multiplier on the bound meter.\n"
+        "      Own-meter (sub ≠ host): PINNED to 1.0 (bill 100% of their sub-meter excess).\n"
+        "  • array_share_pct — their % of the net-meter GROUP (for GMP bill-accuracy cross-check\n"
+        "      and real_math). Distinct from allocation_pct.\n"
+        "  • delivery_mode approval|auto, cadence monthly|quarterly, rates/discounts, enabled.\n\n"
+        "3) EDIT FORM — TWO ACCOUNT DROPDOWNS (do not confuse with the offtaker name)\n"
+        "  • MASTER account dropdown = net-meter group host (drives array_id + host bill).\n"
+        "    Labels come from utility nickname / service address (e.g. Timberworks), NOT\n"
+        "    the offtaker’s customer_name.\n"
+        "  • SUB-account dropdown (optional) = offtaker’s own meter (utility_account_id).\n"
+        "    Blank = bill their share of the master; set = bill off their own meter.\n"
+        "  • Changing “master account to Timberworks” = rebind array_id/utility host to\n"
+        "    Timberworks — NEVER rename customer_name to Timberworks.\n"
+        "  • Agent tool: patch_offtaker with master_account / array_name / utility_account_name\n"
+        "    (or explicit ids). list_offtakers returns current bindings + nicknames.\n\n"
+        "4) INVOICE MATH (delivery pipeline)\n"
+        "  • Read utility bill kWh for the bound utility_account_id covering the period.\n"
+        "  • Own-meter: invoice kWh ≈ sub-meter excess (allocation_pct=1).\n"
+        "  • Percent-of-array: invoice kWh ≈ group excess × share (array_share_pct / allocation).\n"
+        "  • Price: rate_per_kwh / discount_pct overrides → tenant default → VT default.\n"
+        "  • Optional: auto-attach captured GMP PDF, budget_amount_usd override, invoice # sequence.\n"
+        "  • Cross-check: GMP implied share vs entered array_share_pct → “doesn’t match GMP” flag.\n\n"
+        "5) DRAFT → APPROVE → SEND\n"
+        "  • delivery_mode=approval: drafts land in “ready to review & send”; nothing emails until\n"
+        "    operator approves (or send-now).\n"
+        "  • delivery_mode=auto: scheduler can send when bill period is complete.\n"
+        "  • send_mode to_me first (test) vs real client_email.\n"
+        "  • Invoice archive stores sent history; Export / pay-links / Stripe Connect optional.\n\n"
+        "6) AGENT ACTIONS\n"
+        "  • list_offtakers / get_offtaker — see share, array, utility_account_id, nicknames.\n"
+        "  • patch_offtaker — share_pct, email, name (rename only), auto_send, utility_*, array_*,\n"
+        "    master_account. Always confirm writes. Soft-refresh Invoices after apply.\n"
+        "  • product_map(topic=offtakers) when explaining this system; never invent bill kWh.\n"
+        "  • query_tenant resource=utility_accounts to list bill sources for rebinding."
     ),
 }
 
@@ -1351,6 +1447,7 @@ def _tenant_census_tool(db, tenant: Tenant, args: dict) -> dict:
                 "name": getattr(s, "customer_name", None),
                 "email": getattr(s, "client_email", None),
                 "array_id": getattr(s, "array_id", None),
+                "utility_account_id": getattr(s, "utility_account_id", None),
                 "share_pct": share,
                 "enabled": getattr(s, "enabled", None),
             })
@@ -1530,6 +1627,7 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                 "name": getattr(s, "customer_name", None),
                 "email": getattr(s, "client_email", None),
                 "array_id": getattr(s, "array_id", None),
+                "utility_account_id": getattr(s, "utility_account_id", None),
                 "share_pct": share,
                 "enabled": getattr(s, "enabled", None),
                 "delivery_mode": getattr(s, "delivery_mode", None),
@@ -1595,8 +1693,13 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
             "id": u.id,
             "provider": getattr(u, "provider", None),
             "account_number": getattr(u, "account_number", None) or getattr(u, "acct_number", None),
+            "nickname": getattr(u, "nickname", None),
             "array_id": getattr(u, "array_id", None),
             "service_address": getattr(u, "service_address", None),
+            "label": (
+                (getattr(u, "nickname", None) or "").strip()
+                or f"{getattr(u, 'provider', '')} {getattr(u, 'account_number', None) or ''}".strip()
+            ),
         } for u in accts]
         return {"resource": "utility_accounts", "count": len(rows), "rows": rows}
 
@@ -2020,7 +2123,7 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
         return _array_detail_tool(db, tenant, args)
 
     if name == "list_offtakers":
-        from .models import BillingReportSubscription
+        from .models import BillingReportSubscription, UtilityAccount
         q = select(BillingReportSubscription).where(
             BillingReportSubscription.tenant_id == tid,
         )
@@ -2031,6 +2134,25 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
             subs = db.execute(q).scalars().all()
         except Exception as e:
             return {"error": f"could not list offtakers: {e}", "offtakers": []}
+        # Batch-resolve array names + utility account labels for rebinding UI
+        arr_ids = {getattr(s, "array_id", None) for s in subs}
+        arr_ids.discard(None)
+        ua_ids = {getattr(s, "utility_account_id", None) for s in subs}
+        ua_ids.discard(None)
+        arr_name = {}
+        if arr_ids:
+            for a in db.execute(
+                select(Array).where(Array.id.in_(arr_ids), Array.tenant_id == tid)
+            ).scalars().all():
+                arr_name[a.id] = a.name
+        ua_map = {}
+        if ua_ids:
+            for u in db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.id.in_(ua_ids), UtilityAccount.tenant_id == tid,
+                )
+            ).scalars().all():
+                ua_map[u.id] = u
         result = []
         for s in subs:
             share = getattr(s, "array_share_pct", None)
@@ -2038,12 +2160,27 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
                 share = getattr(s, "allocation_pct", None)
             if share is not None and float(share) <= 1:
                 share = round(float(share) * 100, 4)
+            uaid = getattr(s, "utility_account_id", None)
+            aid = getattr(s, "array_id", None)
+            ua = ua_map.get(uaid) if uaid else None
+            nick = (getattr(ua, "nickname", None) or "").strip() if ua else None
+            acct_num = getattr(ua, "account_number", None) if ua else None
             result.append({
                 "id": s.id,
                 "name": getattr(s, "customer_name", None),
                 "email": getattr(s, "client_email", None),
                 "share_pct": share,
-                "array_id": getattr(s, "array_id", None),
+                "allocation_pct": getattr(s, "allocation_pct", None),
+                "array_share_pct": getattr(s, "array_share_pct", None),
+                "array_id": aid,
+                "array_name": arr_name.get(aid) if aid else None,
+                "utility_account_id": uaid,
+                "utility_account_nickname": nick,
+                "utility_account_number": acct_num,
+                "utility_provider": (getattr(ua, "provider", None) if ua else None),
+                "utility_label": (
+                    nick or (f"{getattr(ua, 'provider', '')} {acct_num}".strip() if ua else None)
+                ),
                 "send_mode": getattr(s, "send_mode", None),
                 "delivery_mode": getattr(s, "delivery_mode", None),
                 "enabled": getattr(s, "enabled", None),
@@ -2201,7 +2338,13 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
                     return {
                         "error": "multiple offtakers match — pass subscription_id",
                         "matches": [
-                            {"id": o.get("id"), "name": o.get("name"), "share_pct": o.get("share_pct")}
+                            {
+                                "id": o.get("id"),
+                                "name": o.get("name"),
+                                "share_pct": o.get("share_pct"),
+                                "array_name": o.get("array_name"),
+                                "utility_label": o.get("utility_label"),
+                            }
                             for o in matches[:12]
                         ],
                     }
@@ -2217,6 +2360,8 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
         payload: dict = {}
         if args.get("email") is not None:
             payload["client_email"] = str(args["email"]).strip()
+        # Display rename ONLY when explicitly requested via name= — never treat
+        # master_account / utility source targets as a customer_name change.
         if args.get("name") is not None:
             payload["customer_name"] = str(args["name"]).strip()
         if args.get("share_pct") is not None:
@@ -2233,20 +2378,39 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
             has_own_meter = getattr(sub, "utility_account_id", None) is not None
             if has_own_meter:
                 payload["array_share_pct"] = frac
-                # allocation_pct stays 1.0 for own-meter; only change the share field
             else:
                 payload["allocation_pct"] = frac
         if args.get("auto_send") is not None:
             payload["delivery_mode"] = "auto" if bool(args["auto_send"]) else "approval"
 
+        # ── Utility / master group rebind ─────────────────────────────────
+        bind = _resolve_offtaker_bind_targets(db, tid, sub, args)
+        if bind.get("error"):
+            return bind
+        if "utility_account_id" in bind:
+            payload["utility_account_id"] = bind["utility_account_id"]
+        if "array_id" in bind:
+            payload["array_id"] = bind["array_id"]
+
         if not payload:
             return {
-                "error": "nothing to change — pass share_pct, email, name, and/or auto_send",
+                "error": (
+                    "nothing to change — pass share_pct, email, name (rename only), "
+                    "auto_send, utility_account_id|utility_account_name, "
+                    "array_id|array_name, and/or master_account"
+                ),
                 "offtaker": {
                     "id": sub.id,
                     "name": getattr(sub, "customer_name", None),
                     "email": getattr(sub, "client_email", None),
+                    "array_id": getattr(sub, "array_id", None),
+                    "utility_account_id": getattr(sub, "utility_account_id", None),
                 },
+                "hint": (
+                    "Master account / utility source = utility_account + array bind, "
+                    "NOT customer_name. Call list_offtakers or query_tenant "
+                    "resource=utility_accounts to see options."
+                ),
             }
 
         needs = args.get("needs_confirm", True)
@@ -2254,6 +2418,8 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
             f"Update offtaker #{sub.id} ({getattr(sub, 'customer_name', '') or 'unnamed'}): "
             + ", ".join(f"{k}={v}" for k, v in payload.items())
         )
+        if bind.get("resolved_labels"):
+            reason += " (" + "; ".join(bind["resolved_labels"]) + ")"
         cmd = {
             "id": uuid.uuid4().hex[:12],
             "type": "api_patch",
@@ -2281,6 +2447,8 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
                     "subscription_id": sub.id,
                     "allocation_pct": getattr(sub, "allocation_pct", None),
                     "array_share_pct": getattr(sub, "array_share_pct", None),
+                    "array_id": getattr(sub, "array_id", None),
+                    "utility_account_id": getattr(sub, "utility_account_id", None),
                     "customer_name": getattr(sub, "customer_name", None),
                     "client_email": getattr(sub, "client_email", None),
                 },
@@ -2302,15 +2470,262 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
                 "subscription_id": sub.id,
                 "name": getattr(sub, "customer_name", None),
                 "payload": payload,
+                "resolved": bind.get("resolved_labels"),
             },
         }
 
     return {"error": f"unknown tool {name}"}
 
 
+def _resolve_offtaker_bind_targets(db, tid: str, sub, args: dict) -> dict:
+    """Resolve array_id / utility_account_id from patch_offtaker args.
+
+    Supports explicit ids, utility nickname/account #, array name, and the UI
+    concept of 'master account' (group host) without renaming the offtaker.
+    """
+    from .models import UtilityAccount
+
+    out: dict = {}
+    labels: list[str] = []
+
+    # Explicit ids win when provided
+    explicit_ua = args.get("utility_account_id")
+    explicit_arr = args.get("array_id")
+    ua_name = (
+        args.get("utility_account_name")
+        or args.get("bill_source")
+        or args.get("sub_account")
+        or args.get("sub_account_name")
+        or ""
+    ).strip()
+    arr_name = (args.get("array_name") or "").strip()
+    master = (args.get("master_account") or args.get("master_account_name") or "").strip()
+
+    # Resolve utility by name
+    resolved_ua = None
+    if explicit_ua is not None:
+        try:
+            uaid = int(explicit_ua)
+        except (TypeError, ValueError):
+            return {"error": f"invalid utility_account_id: {explicit_ua}"}
+        resolved_ua = db.get(UtilityAccount, uaid)
+        if (
+            resolved_ua is None
+            or resolved_ua.tenant_id != tid
+            or getattr(resolved_ua, "deleted_at", None)
+        ):
+            return {"error": f"utility account #{uaid} not found in your account"}
+    elif ua_name:
+        resolved_ua, err = _find_utility_account(db, tid, ua_name)
+        if err:
+            return err
+        if resolved_ua is None:
+            return {
+                "error": f"no utility account matching '{ua_name}'",
+                "hint": "query_tenant resource=utility_accounts or check list_offtakers labels",
+            }
+
+    # Resolve array by id/name
+    resolved_arr = None
+    if explicit_arr is not None:
+        try:
+            aid = int(explicit_arr)
+        except (TypeError, ValueError):
+            return {"error": f"invalid array_id: {explicit_arr}"}
+        resolved_arr = db.get(Array, aid)
+        if (
+            resolved_arr is None
+            or resolved_arr.tenant_id != tid
+            or getattr(resolved_arr, "deleted_at", None)
+        ):
+            return {"error": f"array #{aid} not found in your account"}
+    elif arr_name:
+        resolved_arr, err = _find_array(db, tid, arr_name)
+        if err:
+            return err
+        if resolved_arr is None:
+            return {"error": f"no array matching '{arr_name}'", "hint": "call tenant_census"}
+
+    # master_account = UI master dropdown (group host). Prefer utility nickname,
+    # then array name. Does NOT set customer_name.
+    if master and resolved_ua is None and resolved_arr is None:
+        ua_hit, _ = _find_utility_account(db, tid, master)
+        arr_hit, arr_err = _find_array(db, tid, master)
+        if ua_hit is not None and arr_hit is not None:
+            # Prefer utility when nickname matches (dropdown labels are utility-based)
+            resolved_ua = ua_hit
+            # Also set master group array from the utility's array if present
+            if ua_hit.array_id:
+                resolved_arr = db.get(Array, ua_hit.array_id)
+        elif ua_hit is not None:
+            resolved_ua = ua_hit
+            if ua_hit.array_id:
+                resolved_arr = db.get(Array, ua_hit.array_id)
+        elif arr_hit is not None:
+            resolved_arr = arr_hit
+            # Pick host utility for that array (lowest id among accounts on array)
+            host = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.tenant_id == tid,
+                    UtilityAccount.array_id == arr_hit.id,
+                    UtilityAccount.deleted_at.is_(None),
+                ).order_by(UtilityAccount.id).limit(1)
+            ).scalars().first()
+            # For percent-of-master offtakers (no distinct sub), rebind host bill.
+            # For offtakers already on their own sub-meter, only update array_id.
+            cur_ua = getattr(sub, "utility_account_id", None)
+            if host is not None:
+                if cur_ua is None or cur_ua == host.id:
+                    resolved_ua = host
+                else:
+                    # Keep their sub-meter; only move the master group
+                    labels.append(
+                        f"kept sub-meter utility_account_id={cur_ua}; "
+                        f"master group → array {arr_hit.name}"
+                    )
+        else:
+            return {
+                "error": f"no master account / group matching '{master}'",
+                "hint": (
+                    "Master account labels are utility nicknames (e.g. Timberworks) "
+                    "or array/group names. query_tenant resource=utility_accounts."
+                ),
+                **(arr_err or {}),
+            }
+
+    if resolved_ua is not None:
+        out["utility_account_id"] = resolved_ua.id
+        nick = (getattr(resolved_ua, "nickname", None) or "").strip()
+        labels.append(
+            f"utility_account_id={resolved_ua.id}"
+            + (f" ({nick})" if nick else f" (acct {resolved_ua.account_number})")
+        )
+        # If caller didn't pick array, derive from utility (host group) — same as API
+        if resolved_arr is None and resolved_ua.array_id and "array_id" not in out:
+            # Only auto-fill array when master_account or ua was the primary bind
+            if master or ua_name or explicit_ua is not None:
+                if explicit_arr is None and not arr_name:
+                    # Leave array to _apply / PATCH derivation unless master set it
+                    pass
+
+    if resolved_arr is not None:
+        out["array_id"] = resolved_arr.id
+        labels.append(f"array_id={resolved_arr.id} ({resolved_arr.name})")
+    elif resolved_ua is not None and resolved_ua.array_id is not None:
+        # Mirror routes.py: derive array_id from bound account when not explicit
+        out["array_id"] = resolved_ua.array_id
+        arr = db.get(Array, resolved_ua.array_id)
+        labels.append(
+            f"array_id={resolved_ua.array_id}"
+            + (f" ({arr.name})" if arr else "")
+            + " [from utility]"
+        )
+
+    if labels:
+        out["resolved_labels"] = labels
+    return out
+
+
+def _find_array(db, tid: str, name_q: str) -> tuple:
+    """Return (Array|None, error_dict|None). Partial name match, prefer exact."""
+    q = (name_q or "").strip().lower()
+    if not q:
+        return None, None
+    rows = db.execute(
+        select(Array).where(
+            Array.tenant_id == tid,
+            Array.deleted_at.is_(None),
+        )
+    ).scalars().all()
+    matches = [a for a in rows if q in (a.name or "").lower()]
+    if not matches:
+        return None, None
+    exact = [a for a in matches if (a.name or "").lower() == q]
+    if len(exact) == 1:
+        return exact[0], None
+    if len(matches) == 1:
+        return matches[0], None
+    return None, {
+        "error": f"multiple arrays match '{name_q}' — pass array_id",
+        "matches": [{"id": a.id, "name": a.name} for a in matches[:12]],
+    }
+
+
+def _find_utility_account(db, tid: str, name_q: str) -> tuple:
+    """Return (UtilityAccount|None, error_dict|None). Match nickname, acct #, address."""
+    from .models import UtilityAccount
+
+    q = (name_q or "").strip().lower()
+    if not q:
+        return None, None
+    rows = db.execute(
+        select(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid,
+            UtilityAccount.deleted_at.is_(None),
+        )
+    ).scalars().all()
+
+    def _addr(u) -> str:
+        sa = getattr(u, "service_address", None)
+        if isinstance(sa, dict):
+            return " ".join(str(v) for v in sa.values() if v).lower()
+        return str(sa or "").lower()
+
+    def _score(u) -> int:
+        nick = (getattr(u, "nickname", None) or "").strip().lower()
+        acct = (getattr(u, "account_number", None) or "").strip().lower()
+        addr = _addr(u)
+        if nick == q or acct == q:
+            return 3
+        if nick and q in nick:
+            return 2
+        if acct and q in acct:
+            return 2
+        if addr and q in addr:
+            return 1
+        return 0
+
+    scored = [(u, _score(u)) for u in rows]
+    scored = [(u, s) for u, s in scored if s > 0]
+    if not scored:
+        return None, None
+    scored.sort(key=lambda x: -x[1])
+    best = scored[0][1]
+    top = [u for u, s in scored if s == best]
+    if len(top) == 1:
+        return top[0], None
+    # Prefer exact nickname among ties
+    exact_nick = [
+        u for u in top
+        if (getattr(u, "nickname", None) or "").strip().lower() == q
+    ]
+    if len(exact_nick) == 1:
+        return exact_nick[0], None
+    return None, {
+        "error": f"multiple utility accounts match '{name_q}' — pass utility_account_id",
+        "matches": [
+            {
+                "id": u.id,
+                "nickname": getattr(u, "nickname", None),
+                "account_number": u.account_number,
+                "provider": u.provider,
+                "array_id": u.array_id,
+            }
+            for u in top[:12]
+        ],
+    }
+
+
 def _apply_offtaker_patch(db, sub, payload: dict) -> dict:
-    """Apply a validated offtaker field map to the ORM row and commit."""
+    """Apply a validated offtaker field map to the ORM row and commit.
+
+    Supports the same core fields as PATCH /billing/subscriptions/{id}:
+    customer_name, client_email, allocation_pct, array_share_pct, delivery_mode,
+    array_id, utility_account_id (+ sub-meter invariant).
+    """
     try:
+        from .models import UtilityAccount
+
         if "client_email" in payload:
             sub.client_email = payload["client_email"] or None
         if "customer_name" in payload:
@@ -2325,14 +2740,60 @@ def _apply_offtaker_patch(db, sub, payload: dict) -> dict:
             if not (0 < pct <= 1.0):
                 return {"ok": False, "error": "array_share_pct must be fraction in (0, 1]"}
             sub.array_share_pct = pct
-            # Own-meter offtakers keep allocation_pct = 1.0
-            if getattr(sub, "utility_account_id", None) is not None:
-                sub.allocation_pct = 1.0
         if "delivery_mode" in payload:
             dm = payload["delivery_mode"]
             if dm not in ("approval", "auto"):
                 return {"ok": False, "error": "delivery_mode must be approval or auto"}
             sub.delivery_mode = dm
+
+        # Array (master group) first so utility rebind can preserve explicit array
+        if "array_id" in payload and payload["array_id"] is not None:
+            aid = int(payload["array_id"])
+            arr = db.get(Array, aid)
+            if arr is None or arr.tenant_id != sub.tenant_id or getattr(arr, "deleted_at", None):
+                return {"ok": False, "error": f"array #{aid} not found"}
+            sub.array_id = aid
+
+        if "utility_account_id" in payload and payload["utility_account_id"] is not None:
+            uaid = int(payload["utility_account_id"])
+            acct = db.get(UtilityAccount, uaid)
+            if (
+                acct is None
+                or acct.tenant_id != sub.tenant_id
+                or getattr(acct, "deleted_at", None)
+            ):
+                return {"ok": False, "error": f"utility account #{uaid} not found"}
+            sub.utility_account_id = uaid
+            # Derive array_id from utility only when caller did not set array explicitly
+            # (master+sub: array_id = group host, utility = offtaker's own sub-meter)
+            if "array_id" not in payload or payload.get("array_id") is None:
+                if acct.array_id is not None:
+                    sub.array_id = acct.array_id
+
+        # Sub-meter invariant: own meter (≠ group host) → allocation_pct = 1.0
+        if (
+            "utility_account_id" in payload
+            or "array_id" in payload
+            or "allocation_pct" in payload
+            or "array_share_pct" in payload
+        ):
+            if sub.utility_account_id is not None and sub.array_id is not None:
+                host_id = db.execute(
+                    select(UtilityAccount.id).where(
+                        UtilityAccount.array_id == sub.array_id,
+                        UtilityAccount.deleted_at.is_(None),
+                    ).order_by(UtilityAccount.id)
+                ).scalars().first()
+                if host_id is not None and host_id != sub.utility_account_id:
+                    # Route share to array_share_pct if only allocation was set
+                    if (
+                        "array_share_pct" not in payload
+                        and "allocation_pct" in payload
+                        and payload.get("allocation_pct") is not None
+                    ):
+                        sub.array_share_pct = float(payload["allocation_pct"])
+                    sub.allocation_pct = 1.0
+
         db.add(sub)
         db.commit()
         db.refresh(sub)
@@ -2343,6 +2804,8 @@ def _apply_offtaker_patch(db, sub, payload: dict) -> dict:
             "client_email": sub.client_email,
             "allocation_pct": sub.allocation_pct,
             "array_share_pct": getattr(sub, "array_share_pct", None),
+            "array_id": getattr(sub, "array_id", None),
+            "utility_account_id": getattr(sub, "utility_account_id", None),
             "delivery_mode": getattr(sub, "delivery_mode", None),
         }
     except Exception as e:
@@ -2970,6 +3433,9 @@ def confirm(body: ConfirmIn, authorization: str | None = Header(default=None)):
                                 "subscription_id": sub.id,
                                 "allocation_pct": sub.allocation_pct,
                                 "array_share_pct": getattr(sub, "array_share_pct", None),
+                                "array_id": getattr(sub, "array_id", None),
+                                "utility_account_id": getattr(sub, "utility_account_id", None),
+                                "customer_name": getattr(sub, "customer_name", None),
                             },
                             "needs_confirm": False,
                         })
