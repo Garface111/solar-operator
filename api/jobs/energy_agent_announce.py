@@ -131,8 +131,7 @@ def email_html(name: str) -> str:
       cloud vs device auto-refresh, how offtaker invoices are generated from utility
       bills, tabs and workflows.</li>
       <li><strong>Voice + text</strong> — GPT natural voice when you enable the mic, or
-      type anytime. Weekly usage is metered (thinking + voice) with a simple fill bar;
-      default allowance is $5/week so costs stay predictable.</li>
+      type anytime.</li>
       <li><strong>Improve this site</strong> — mark up a change and send it through our
       judge pipeline for small UI fixes on your account.</li>
     </ul>
@@ -178,7 +177,7 @@ def email_text(name: str) -> str:
             "- Give guided tours of the real UI\n"
             "- Help with offtakers (list, share %, bill source rebind) after you confirm\n"
             "- Explain how the product works (auto-refresh, invoice pipeline)\n"
-            "- Voice + text; weekly usage metered (default $5 thinking+voice)\n"
+            "- Voice + text\n"
             "- Propose small UI improvements via Improve\n\n"
             "It will NOT change Stripe plans, charge cards, or touch operator billing.\n\n"
             "Try: \"What needs attention in my fleet?\" or \"Show me the Invoices tab.\"\n\n"
