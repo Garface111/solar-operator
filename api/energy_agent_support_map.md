@@ -21,10 +21,11 @@ TOP NAV — use EXACTLY these labels when speaking to the owner (hashes are inte
 | Analysis | `#analysis` | Fleet NOC: production vs expected, sites, health, hardware. Trends/through-time is a **sub-view** (NOT a separate top tab) |
 | Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”) |
 | Resources | `#resources` | VT net-metering rates, rate cases, news |
-| Master Account | `#account` | Profile, plan/card, Auto-refresh vault (NOT “Account”) |
+| Account | `#account` | Profile, plan/card, Auto-refresh vault (was “Master Account”; use **Account**) |
 
-Never say Dashboard, Arrays, Reports, Account, or Trends as top-tab names.  
-Trends lives under Analysis (`#trends` is a sub-route only).
+Never say Dashboard, Arrays, Reports, or Trends as top-tab names.  
+Trends lives under Analysis (`#trends` is a sub-route only).  
+Offtaker invoice form field **Master account** = net-meter group host (different concept).
 
 ---
 
@@ -39,7 +40,7 @@ END-TO-END PRODUCT
 
 DATA IN
 1. **API keys** (SolarEdge, Locus, AlsoEnergy when connected) → server poll / fleet-tree.
-2. **Portal logins** via Master Account → Auto-refresh:
+2. **Portal logins** via Account → Auto-refresh:
    - **cloud** = “Store it with us” — we store encrypted password; harvester 24/7.
    - **device** = “Keep it on my computer” — extension vault; capture while browser active.
 3. **Onboarding / connect** vendor picker (one-key multi-site where supported).
@@ -48,11 +49,11 @@ DATA OUT (owner UI)
 - Fleet Triage + Inverters — health, peer index, live power, vendor issues.
 - Analysis — weather-expected, kWh/kW, sites grid, hardware (14d peer + live).
 - Invoices — drafts from **utility bills × share** (not inverter kWh).
-- Master Account — profile, AO subscription/card, Auto-refresh.
+- Account — profile, AO subscription/card, Auto-refresh.
 - Resources — rates/news.
 
 TWO BILLING CONCEPTS — never mix
-- **Operator billing** = Array Operator charges the owner (Stripe plan/card on Master Account).
+- **Operator billing** = Array Operator charges the owner (Stripe plan/card on Account).
 - **Offtaker invoices** = owner bills customers for solar credits (Invoices tab).
 
 Chrome extension name: **EnergyAgent** (pairs with tenant key). Required for device-mode portal capture.
@@ -85,7 +86,7 @@ Status semantics (honest)
 
 ## capture
 
-AUTO-REFRESH = TWO OWNER PATHS (Master Account → Auto-refresh)
+AUTO-REFRESH = TWO OWNER PATHS (Account → Auto-refresh)
 
 `Tenant.capture_mode` = `cloud` | `device` | null.
 
@@ -192,7 +193,7 @@ UI: **Invoices** (`#reports`). Entity: **BillingReportSubscription**.
 
 OPERATOR BILLING (Array Operator → owner)
 
-- Charged on Master Account (plan, card, Stripe portal).
+- Charged on Account (plan, card, Stripe portal).
 - Separate from offtaker invoices.
 - Agent may open **billing portal links** after confirm — never change prices, create subscriptions, or touch payment methods/cards.
 
@@ -241,7 +242,7 @@ WHEN TO CALL WHAT
 | Why peer vs Solar.web disagree | `product_map(topic=status)` + health tools |
 | Fleet health / attention | `investigate_attention` / `fleet_overview` / `array_detail` |
 | Ad-hoc lists | `query_tenant` |
-| Master Account email/company/plan/mode | `account_summary` |
+| Account email/company/plan/mode | `account_summary` |
 | Navigate / show UI | `ui_navigate` / `ui_tour` / highlight |
 | Change offtaker fields | `patch_offtaker` (confirm) |
 | Product wish / UI change | `propose_site_improvement` |

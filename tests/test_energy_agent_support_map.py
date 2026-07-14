@@ -18,8 +18,10 @@ def test_support_map_file_loads_all_topics():
     assert not missing, f"support map missing topics: {missing}"
     # Tabs must teach the six owner-facing labels
     tabs = pmap["tabs"].lower()
-    for label in ("fleet triage", "inverters", "analysis", "invoices", "resources", "master account"):
+    for label in ("fleet triage", "inverters", "analysis", "invoices", "resources", "account"):
         assert label in tabs, f"tabs section missing {label!r}"
+    # Tab is "Account" (not "Master Account"); offtakers still use "Master account" as a form field
+    assert "master account" not in tabs or "was" in tabs  # legacy note OK
 
 
 def test_parse_support_map_md_sections():

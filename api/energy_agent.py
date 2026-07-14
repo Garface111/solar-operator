@@ -76,10 +76,11 @@ CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are intern
   | Analysis               | #analysis              | Through-time / trends live INSIDE Analysis (no separate Trends tab). |
   | Invoices               | #reports               | NOT "Reports". Offtaker invoices. |
   | Resources              | #resources             | Net-metering rates & news. |
-  | Master Account         | #account               | NOT "Account". Profile, plan, billing, auto-refresh. |
+  | Account                | #account               | Profile, plan, billing, auto-refresh. (Was "Master Account"; use Account.) |
 
-Never say Dashboard, Arrays, Reports, or Account as tab names. Never list Trends as its own tab.
+Never say Dashboard, Arrays, Reports as tab names. Never list Trends as its own tab.
 If the user asks "what are the tabs?", list only the six labels above in that order.
+(Offtaker form field "Master account" = net-meter group host — different from the Account tab.)
 
 You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
 - tenant_census = ground truth inventory from the database (all arrays + inverters + offtakers).
@@ -137,7 +138,7 @@ Hard rules:
   invoice generator model.
 - Fleet attention: investigate_attention / fleet_overview. NEVER ask the user for array IDs
   you can look up. Answer with names, why, and next step.
-- Master Account / email / company / plan: ALWAYS call account_summary. The email field is
+- Account tab / email / company / plan: ALWAYS call account_summary. The email field is
   contact_email (returned as email + contact_email). Never claim email is null without
   checking account_summary first — tenant.email is NOT a real column.
 - Auto-refresh / "how do you get data" / cloud vs extension: ALWAYS product_map(topic=capture)
@@ -147,7 +148,7 @@ Hard rules:
   Do NOT say cloud mode uses the extension, or that SMA always requires the extension
   (cloud harvester can scrape SMA/Fronius/Chint portals too). API-key vendors (SolarEdge)
   are a third orthogonal path (server poll with keys, not portal passwords).
-- SHOW-AND-TELL: for "walk me through X" / "show me Master Account" use ui_tour
+- SHOW-AND-TELL: for "walk me through X" / "show me Account" use ui_tour
   (tour_id=master_account|arrays|invoices) so the browser navigates and highlights
   while you narrate. Prefer tours over long text-only explanations.
 - If a site improvement is held by the judge: explain the reason and offer escalate_to_ford.
@@ -563,10 +564,10 @@ TOOL_DEFS = [
         "function": {
             "name": "account_summary",
             "description": (
-                "Master Account tab data for THIS tenant — company, operator name, "
+                "Account tab data for THIS tenant — company, operator name, "
                 "contact email, plan, subscription/trial status, card on file (yes/no, "
                 "not full card number), capture mode, connected utilities, counts. "
-                "Use whenever the user asks about Master Account, email, company, plan, "
+                "Use whenever the user asks about Account, Master Account (legacy name), email, company, plan, "
                 "or 'what's on my account'. Source of truth is contact_email (not a null email field)."
             ),
             "parameters": {
@@ -604,7 +605,7 @@ TOOL_DEFS = [
                 "Navigate immediately (no confirm). Use USER-FACING tab names in speech; "
                 "hashes are internal: Fleet Triage=#dashboard, Inverters=#arrays, "
                 "Analysis=#analysis (trends is a sub-view, not a tab), Invoices=#reports, "
-                "Resources=#resources, Master Account=#account. Never call tabs Dashboard/"
+                "Resources=#resources, Account=#account. Never call tabs Dashboard/"
                 "Arrays/Reports/Account/Trends."
             ),
             "parameters": {
@@ -614,7 +615,7 @@ TOOL_DEFS = [
                         "type": "string",
                         "description": (
                             "#dashboard (Fleet Triage) | #arrays (Inverters) | #analysis | "
-                            "#reports (Invoices) | #resources | #account (Master Account)"
+                            "#reports (Invoices) | #resources | #account (Account)"
                         ),
                     },
                     "reason": {"type": "string"},
@@ -646,7 +647,7 @@ TOOL_DEFS = [
             "name": "ui_tour",
             "description": (
                 "SHOW-AND-TELL walkthrough: navigates tabs and highlights real UI "
-                "elements while narrating. Use for 'walk me through Master Account', "
+                "elements while narrating. Use for 'walk me through Account', "
                 "'show me invoices', etc. Prefer this over a text-only explanation."
             ),
             "parameters": {
@@ -1165,7 +1166,7 @@ _PRODUCT_MAP_FALLBACK: dict[str, str] = {
     "tabs": (
         "TOP NAV labels: Fleet Triage (#dashboard), Inverters (#arrays), "
         "Analysis (#analysis; trends is a sub-view), Invoices (#reports), "
-        "Resources (#resources), Master Account (#account). Never say Dashboard/Arrays/Reports/Account/Trends as top tabs."
+        "Resources (#resources), Account (#account). Never say Dashboard/Arrays/Reports/Trends as top tabs."
     ),
     "system": (
         "Array Operator (arrayoperator.com) = EnergyAgent owner product. "
@@ -1713,7 +1714,7 @@ def _product_map_tool(args: dict) -> dict:
 
 
 def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
-    """Same fields the Master Account tab shows — never use tenant.email (it's contact_email)."""
+    """Same fields the Account tab shows — never use tenant.email (it's contact_email)."""
     from sqlalchemy import func
     from .models import UtilityAccount, UtilitySession, Bill, Client
 
@@ -1812,7 +1813,7 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
             if getattr(t, "capture_mode", None) == "cloud"
             else "device — Keep it on my computer (extension vault; refresh while browser active)"
             if getattr(t, "capture_mode", None) == "device"
-            else "unset — client may fall back to local default; ask owner to pick on Master Account → Auto-refresh"
+            else "unset — client may fall back to local default; ask owner to pick on Account → Auto-refresh"
         ),
         "send_from_email": getattr(t, "send_from_email", None),
         "send_from_name": getattr(t, "send_from_name", None),
@@ -1830,7 +1831,7 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
         } if last_sess else None,
         "ui_tab": "#account",
         "field_notes": {
-            "email": "Maps to tenants.contact_email — the Master Account 'Email' field",
+            "email": "Maps to tenants.contact_email — the Account tab 'Email' field",
             "company_name": "Business name on the profile card",
             "operator_name": "Personal name of the human operator",
             "billing_plan": "Array Operator product plan (vendor_data / invoicing entitlements)",
@@ -1842,7 +1843,7 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
         },
         "auto_refresh_explainer": (
             "See product_map(topic=capture). Cloud and device are the two Auto-refresh "
-            "modes on Master Account; SolarEdge API keys are a separate server-poll path."
+            "modes on Account; SolarEdge API keys are a separate server-poll path."
         ),
     }
 
