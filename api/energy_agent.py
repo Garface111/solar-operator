@@ -106,6 +106,9 @@ Hard rules:
   hard-refresh the browser.
 - Fleet attention: investigate_attention / fleet_overview. NEVER ask the user for array IDs
   you can look up. Answer with names, why, and next step.
+- Master Account / email / company / plan: ALWAYS call account_summary. The email field is
+  contact_email (returned as email + contact_email). Never claim email is null without
+  checking account_summary first — tenant.email is NOT a real column.
 - If tools return empty while the UI shows data, say so and call tenant_census + escalate_to_ford.
 - Prefer short spoken answers; put detail in tool timelines.
 
@@ -506,8 +509,22 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "account_summary",
-            "description": "Tenant plan, company, email, trial/subscription status.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "description": (
+                "Master Account tab data for THIS tenant — company, operator name, "
+                "contact email, plan, subscription/trial status, card on file (yes/no, "
+                "not full card number), capture mode, connected utilities, counts. "
+                "Use whenever the user asks about Master Account, email, company, plan, "
+                "or 'what's on my account'. Source of truth is contact_email (not a null email field)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_billing": {
+                        "type": "boolean",
+                        "description": "Include month-to-date billing snapshot (default true)",
+                    },
+                },
+            },
         },
     },
     {
@@ -1202,6 +1219,8 @@ def _tenant_census_tool(db, tenant: Tenant, args: dict) -> dict:
     return {
         "tenant_id": tid,
         "company": getattr(tenant, "company_name", None) or getattr(tenant, "name", None),
+        "email": getattr(tenant, "contact_email", None),
+        "operator_name": getattr(tenant, "operator_name", None),
         "counts": {
             "arrays": len(array_rows),
             "arrays_inverter_backed": kind_counts.get("inverter", 0),
@@ -1499,6 +1518,7 @@ def _product_map_tool(args: dict) -> dict:
             "inventory": "tenant_census",
             "ad_hoc_lists": "query_tenant",
             "health": "investigate_attention | fleet_overview | array_detail",
+            "master_account": "account_summary (contact_email, company, plan, card-on-file)",
             "offtaker_edit": "patch_offtaker (confirm)",
             "nav": "ui_navigate",
         },
@@ -1507,6 +1527,141 @@ def _product_map_tool(args: dict) -> dict:
             "arbitrary codebase shell access (that would leak other tenants / secrets)."
         ),
     }
+
+
+def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Same fields the Master Account tab shows — never use tenant.email (it's contact_email)."""
+    from sqlalchemy import func
+    from .models import UtilityAccount, UtilitySession, Bill, Client
+
+    # Fresh row inside this session (caller's tenant may be detached/stale)
+    t = db.get(Tenant, tenant.id) or tenant
+    include_billing = args.get("include_billing", True)
+    if include_billing is None:
+        include_billing = True
+
+    accounts_count = 0
+    bills_count = 0
+    clients_count = 0
+    connected_providers: list[str] = []
+    last_sess = None
+    try:
+        accounts_count = int(db.execute(
+            select(func.count()).select_from(UtilityAccount)
+            .where(UtilityAccount.tenant_id == t.id)
+        ).scalar() or 0)
+        connected_providers = [
+            row[0]
+            for row in db.execute(
+                select(UtilityAccount.provider)
+                .where(UtilityAccount.tenant_id == t.id)
+                .distinct()
+            ).all()
+            if row[0]
+        ]
+        bills_count = int(db.execute(
+            select(func.count()).select_from(Bill).where(Bill.tenant_id == t.id)
+        ).scalar() or 0)
+        clients_count = int(db.execute(
+            select(func.count()).select_from(Client).where(
+                Client.tenant_id == t.id, Client.deleted_at.is_(None),
+            )
+        ).scalar() or 0)
+        last_sess = db.execute(
+            select(UtilitySession).where(UtilitySession.tenant_id == t.id)
+            .order_by(UtilitySession.captured_at.desc())
+        ).scalars().first()
+    except Exception as e:
+        log.warning("account_summary counts: %s", e)
+
+    plan_features = None
+    try:
+        from .stripe_helpers import ao_plan_features
+        plan_features = ao_plan_features(
+            getattr(t, "product", None), getattr(t, "billing_plan", None),
+        )
+    except Exception:
+        plan_features = None
+
+    has_pm = bool(getattr(t, "stripe_payment_method_id", None))
+    card_brief = {"has_payment_method": has_pm, "card_brand": None, "card_last4": None}
+    # Best-effort card brand/last4 via account helpers (never fail the tool)
+    try:
+        from .account import _resolve_pm_id, _card_brief
+        has_pm = _resolve_pm_id(t) is not None
+        card_brief = _card_brief(t)
+        card_brief["has_payment_method"] = has_pm
+    except Exception:
+        card_brief["has_payment_method"] = has_pm
+
+    def _iso(dt):
+        if not dt:
+            return None
+        try:
+            return dt.isoformat() + ("Z" if not str(dt).endswith("Z") else "")
+        except Exception:
+            return str(dt)
+
+    email = getattr(t, "contact_email", None) or getattr(t, "email", None)
+    out = {
+        "tenant_id": t.id,
+        # Match /v1/account field names so the model aligns with the Master Account UI
+        "company_name": getattr(t, "company_name", None) or getattr(t, "name", None),
+        "operator_name": getattr(t, "operator_name", None),
+        "email": email,  # contact_email — THIS is what the UI shows
+        "contact_email": email,
+        "product": getattr(t, "product", None) or "array_operator",
+        "plan": getattr(t, "plan", None),
+        "billing_plan": getattr(t, "billing_plan", None),
+        "plan_features": plan_features,
+        "subscription_status": getattr(t, "subscription_status", None),
+        "active": getattr(t, "active", None),
+        "is_demo": bool(getattr(t, "is_demo", False)),
+        "trial_ends_at": _iso(getattr(t, "trial_ends_at", None)),
+        "has_password": bool(getattr(t, "password_hash", None)),
+        "has_payment_method": card_brief.get("has_payment_method"),
+        "card_brand": card_brief.get("card_brand"),
+        "card_last4": card_brief.get("card_last4"),
+        "card_exp": card_brief.get("card_exp"),
+        "capture_mode": getattr(t, "capture_mode", None),
+        "send_from_email": getattr(t, "send_from_email", None),
+        "send_from_name": getattr(t, "send_from_name", None),
+        "report_frequency": getattr(t, "report_frequency", None),
+        "accounts_count": accounts_count,
+        "connected_providers": connected_providers,
+        "bills_count": bills_count,
+        "clients_count": clients_count,
+        "created_at": _iso(getattr(t, "created_at", None)),
+        "extension_heartbeat_at": _iso(getattr(t, "extension_heartbeat_at", None)),
+        "last_pull_at": _iso(getattr(t, "last_pull_at", None)),
+        "utility_session": {
+            "captured_at": _iso(getattr(last_sess, "captured_at", None)) if last_sess else None,
+            "expires_at": _iso(getattr(last_sess, "expires_at", None)) if last_sess else None,
+        } if last_sess else None,
+        "ui_tab": "#account",
+        "field_notes": {
+            "email": "Maps to tenants.contact_email — the Master Account 'Email' field",
+            "company_name": "Business name on the profile card",
+            "operator_name": "Personal name of the human operator",
+            "billing_plan": "Array Operator product plan (vendor_data / invoicing entitlements)",
+            "has_payment_method": "Card on file for AO subscription — not offtaker invoices",
+        },
+    }
+
+    if include_billing:
+        try:
+            from .account import billing_summary as _billing_summary_ep
+            # Call the pure helpers with tenant object (no HTTP)
+            from .stripe_helpers import is_array_operator
+            from . import account as account_mod
+            if is_array_operator(getattr(t, "product", "nepool")):
+                out["billing_snapshot"] = account_mod._billing_summary_kwh(t)
+            else:
+                out["billing_snapshot"] = account_mod._billing_summary_arrays(t)
+        except Exception as e:
+            out["billing_snapshot"] = {"error": str(e)[:200]}
+
+    return out
 
 
 def _ea_judge_write(name: str, args: dict) -> dict | None:
@@ -1755,15 +1910,7 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
             return {"error": str(e)}
 
     if name == "account_summary":
-        return {
-            "tenant_id": tenant.id,
-            "email": getattr(tenant, "email", None),
-            "company": getattr(tenant, "company_name", None) or getattr(tenant, "name", None),
-            "plan": getattr(tenant, "plan", None) or getattr(tenant, "ao_plan", None),
-            "subscription_status": getattr(tenant, "subscription_status", None),
-            "active": getattr(tenant, "active", None),
-            "is_demo": bool(getattr(tenant, "is_demo", False)),
-        }
+        return _account_summary_tool(db, tenant, args)
 
     if name == "billing_portal_link":
         # Do not invent Stripe; return instruction for UI to call existing endpoint
