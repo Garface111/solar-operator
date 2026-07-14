@@ -1575,6 +1575,13 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(seconds=60),
     )
+    # Long-term mind: proactive insights + world model even when no chat open.
+    scheduler.add_job(
+        _run_energy_agent_long_term_mind,
+        "interval", minutes=20, id="energy_agent_long_term_mind", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(minutes=3),
+    )
     scheduler.start()
 
 
@@ -1607,6 +1614,70 @@ def _run_energy_agent_mind_tick() -> None:
             send_internal_alert(
                 "Energy Agent mind tick failed",
                 f"Background cognition drain raised:\n{exc}",
+            )
+        except Exception:
+            pass
+
+
+def _run_energy_agent_long_term_mind() -> None:
+    """Long-term mind: wake tenants with a world model or recent AO activity.
+
+    Feels like one mind that keeps caring about the account between visits —
+    fleet pulse + proactive insight, email when something worth knowing.
+    """
+    try:
+        from datetime import datetime, timedelta
+        from sqlalchemy import select, distinct
+        from .db import SessionLocal
+        from .energy_agent import EaSession
+        from .energy_agent_mind import (
+            EaWorldState, wake_mind, mind_tick, sync_improvement_wins,
+        )
+        from .models import Tenant
+
+        cutoff = datetime.utcnow() - timedelta(days=14)
+        with SessionLocal() as db:
+            # Tenants that already have a mind (world row) OR recent EA session
+            world_ids = set(
+                db.execute(select(EaWorldState.tenant_id)).scalars().all()
+            )
+            session_ids = set(
+                db.execute(
+                    select(distinct(EaSession.tenant_id)).where(
+                        EaSession.created_at >= cutoff,
+                    )
+                ).scalars().all()
+            )
+            # Prefer array_operator product for proactive fleet UX
+            ao_ids = set(
+                db.execute(
+                    select(Tenant.id).where(
+                        Tenant.product == "array_operator",
+                        Tenant.active.is_(True),
+                        Tenant.is_demo.is_(False),
+                    ).limit(80)
+                ).scalars().all()
+            )
+            known = world_ids | session_ids
+            # Only tenants we already know (world or session) — avoid cold spam
+            if ao_ids:
+                candidates = list(known & ao_ids)
+            else:
+                candidates = list(known)
+            # Cap per tick
+            for tid in candidates[:25]:
+                try:
+                    wake_mind(db, tid, "scheduled_proactive", enqueue_insight=True)
+                    mind_tick(db, tid)
+                    sync_improvement_wins(db, tid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("long-term mind tenant %s: %s", tid, exc)
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            send_internal_alert(
+                "Energy Agent long-term mind failed",
+                f"Proactive cognition raised:\n{exc}",
             )
         except Exception:
             pass

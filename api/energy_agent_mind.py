@@ -51,6 +51,10 @@ KIND_IMPORTANCE: dict[str, int] = {
     "propose_ui": 82,
     "analyze_focus": 68,
     "mark_improvement": 90,
+    # Phase E — long-term / proactive
+    "proactive_insight": 72,
+    "prepare_ux_approval": 78,
+    "profile_sync": 12,
 }
 
 # Cheap cost attribution for workers (ledger reason worker:<kind>)
@@ -62,7 +66,15 @@ WORKER_COST_USD: dict[str, float] = {
     "propose_ui_candidate": 0.001,
     "propose_ui": 0.05,  # queues judge pipeline — real cost is downstream
     "analyze_focus": 0.015,
+    "proactive_insight": 0.008,
+    "prepare_ux_approval": 0.02,
+    "profile_sync": 0.0,
 }
+
+# How often the long-term mind may email the owner (proactive insights)
+PROACTIVE_EMAIL_COOLDOWN_HOURS = 20
+# Attention spike threshold to wake proactive insight
+ATTENTION_SPIKE_DELTA = 1
 
 
 # ── persistence ─────────────────────────────────────────────────────────────
@@ -169,14 +181,44 @@ def _payload(ev: EaEvent) -> dict:
         return {}
 
 
+def _default_world() -> dict:
+    """Canonical long-term mind profile + digests (one mind per tenant)."""
+    return {
+        "revision": 0,
+        "open_intents": [],
+        "notes": {},
+        "fleet_digest": None,
+        "profile": {
+            # Preferences that survive sessions — the mind "knows you"
+            "email_insights": True,       # proactive fleet/UX notes by email
+            "email_ux_approvals": True,    # when mind prepares/ships a UI change
+            "auto_prepare_ux": True,      # may stage UX proposals offline
+            "auto_approve_ux": False,     # only auto-queue judge after clear pattern
+            "voice_pref": "one_mind",     # never narrate multi-agent
+        },
+        "insights": [],                   # recent proactive insight objects
+        "pending_approvals": [],          # UX changes prepared, awaiting/notified
+        "last_proactive_at": None,
+        "last_proactive_email_at": None,
+        "last_attention_count": None,
+        "last_wake_reason": None,
+        "last_wake_at": None,
+    }
+
+
 def _world_get(db, tenant_id: str) -> dict:
+    base = _default_world()
     row = db.get(EaWorldState, tenant_id)
     if not row:
-        return {"revision": 0, "open_intents": [], "notes": {}, "fleet_digest": None}
+        return base
     try:
         data = json.loads(row.state_json or "{}")
     except Exception:
         data = {}
+    # Deep-merge profile so new keys appear for old rows
+    prof = dict(base.get("profile") or {})
+    prof.update(data.get("profile") or {})
+    data = {**base, **data, "profile": prof}
     data["revision"] = row.revision
     data["updated_at"] = row.updated_at.isoformat() + "Z" if row.updated_at else None
     data["last_tick_at"] = row.last_tick_at.isoformat() + "Z" if row.last_tick_at else None
@@ -265,6 +307,14 @@ def score_importance(kind: str, result: dict | None, speak: str | None) -> int:
     elif kind == "analyze_focus":
         if result.get("problems"):
             boost += 15
+    elif kind == "proactive_insight":
+        ins = result.get("insight") or {}
+        boost += max(0, int(ins.get("importance") or 0) - 55)
+        if result.get("emailed", {}).get("owner"):
+            boost -= 15  # already emailed — softer in-app interrupt
+    elif kind == "prepare_ux_approval":
+        if result.get("suggestion_id"):
+            boost += 10
 
     if speak and len(speak) > 20:
         boost += 5
@@ -819,8 +869,57 @@ def _search_similar_worker(db, tenant_id: str, payload: dict) -> dict:
     return result
 
 
+def _email_owner_and_ford(
+    tenant,
+    *,
+    subject: str,
+    body: str,
+    html: str | None = None,
+    owner: bool = True,
+    ford: bool = True,
+) -> dict:
+    """One mind notifying humans — owner + Ford for prepared/approved work."""
+    from .notify import send_internal_alert, _send_via_resend
+
+    out = {"owner": False, "ford": False}
+    owner_email = (getattr(tenant, "contact_email", None) or "").strip()
+    if ford:
+        try:
+            send_internal_alert(subject, body, to="ford.genereaux@gmail.com")
+            out["ford"] = True
+        except Exception:
+            try:
+                send_internal_alert(subject, body)
+                out["ford"] = True
+            except Exception as e:
+                log.warning("mind email ford failed: %s", e)
+    if owner and owner_email and "@" in owner_email:
+        try:
+            out["owner"] = bool(
+                _send_via_resend(
+                    to=owner_email,
+                    subject=f"EnergyAgent · {subject}",
+                    html=html
+                    or (
+                        "<div style='font-family:system-ui,sans-serif;line-height:1.5;"
+                        f"color:#0f172a'><p>{body.replace(chr(10), '<br>')}</p>"
+                        "<p style='color:#64748b;font-size:13px'>— Your Energy Agent "
+                        "(one mind, working for this account)</p></div>"
+                    ),
+                    text=body,
+                )
+            )
+        except Exception as e:
+            log.warning("mind email owner failed: %s", e)
+    return out
+
+
 def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
-    """Queue a real feature suggestion (judge pipeline) — heavy path on clear win."""
+    """Queue a real feature suggestion (judge pipeline) — heavy path on clear win.
+
+    Always emails Ford (and owner when profile.email_ux_approvals) so prepared
+    / auto-approved changes are never silent.
+    """
     from .models import Tenant
     from .energy_agent import _check_budget
 
@@ -839,6 +938,7 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
     text = (payload.get("text") or "").strip()
     clarification = payload.get("clarification") or ""
     ctx = payload.get("context") or {}
+    auto = bool(payload.get("auto_approved") or payload.get("proactive"))
     if not text:
         text = "Improve layout scannability on the current surface."
 
@@ -850,10 +950,13 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
             f"Context tab: {ctx.get('tab_label') or ctx.get('hash') or 'unknown'}. "
             "Prefer status-first layout, less visual noise, easier scan."
         )[:5000]
+    if auto:
+        composed = (
+            f"[Proactive mind — prepared for your fleet's UX]\n{composed}"
+        )[:5000]
 
     try:
         from .feature_suggestions import FeatureSuggestion
-        from .notify import send_internal_alert
 
         fs = FeatureSuggestion(
             text=composed,
@@ -866,38 +969,348 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
         db.add(fs)
         db.flush()
         sid = fs.id
-        try:
-            send_internal_alert(
-                subject=f"Mind UI proposal (#{sid})",
-                body=(
-                    f"Operating mind queued improvement\nTenant: {tenant.id}\n"
-                    f"Email: {getattr(tenant, 'contact_email', None)}\n"
-                    f"Clarification: {clarification or 'n/a'}\n\n{composed}\n"
-                ),
-            )
-        except Exception:
-            pass
+
+        world = _world_get(db, tenant_id)
+        prof = world.get("profile") or {}
+        approval = {
+            "id": sid,
+            "kind": "ux_change",
+            "status": "queued_judge",
+            "auto_approved": auto,
+            "text": composed[:400],
+            "at": _now().isoformat() + "Z",
+        }
+        pending = list(world.get("pending_approvals") or [])
+        pending = [approval] + pending[:19]
+
+        email_bits = _email_owner_and_ford(
+            tenant,
+            subject=(
+                f"Mind auto-prepared UX change #{sid}"
+                if auto
+                else f"Mind UI proposal #{sid}"
+            ),
+            body=(
+                f"Your Energy Agent prepared a UI improvement for this account.\n\n"
+                f"Suggestion id: {sid}\n"
+                f"Tenant: {tenant.id}\n"
+                f"Mode: {'proactive/auto-prepared' if auto else 'user-directed'}\n"
+                f"Clarification: {clarification or 'n/a'}\n\n"
+                f"{composed}\n\n"
+                f"Pipeline: feature_suggestion judge (same as in-app improve).\n"
+                f"Status: /v1/feature-suggestion/{sid}/status\n"
+            ),
+            owner=bool(prof.get("email_ux_approvals", True)),
+            ford=True,
+        )
 
         _world_patch(db, tenant_id, {
             "last_proposal_id": sid,
             "last_proposal_at": _now().isoformat() + "Z",
             "pending_ui_proposal": None,
+            "pending_approvals": pending,
         })
+        _emit(
+            db, tenant_id, "ux_prepared",
+            f"UI change #{sid} prepared" + (" (proactive)" if auto else ""),
+            payload={"suggestion_id": sid, "auto": auto, "email": email_bits},
+            speak_as_mind=None,
+        )
         return {
             "ok": True,
             "suggestion_id": sid,
             "status": "new",
             "pipeline": "feature_suggestion_judge",
             "refresh_and_ask": True,
+            "auto_approved": auto,
+            "emailed": email_bits,
             "status_url": f"/v1/feature-suggestion/{sid}/status",
             "message": (
                 f"Queued improvement #{sid}. "
-                "When live: refresh and validate scanability with the user."
+                "You were emailed. When live: refresh and tell me if it feels better."
             ),
         }
     except Exception as e:
         log.exception("propose_ui worker failed")
         return {"ok": False, "error": str(e)[:500]}
+
+
+def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
+    """Synthesize a long-term insight from world model + fleet (one mind, offline)."""
+    from .models import Tenant
+    from .energy_agent import _tenant_census_tool, _investigate_attention_tool
+
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        return {"ok": False, "skipped": True}
+
+    world = _world_get(db, tenant_id)
+    dig = world.get("fleet_digest")
+    # Refresh pulse if empty
+    if not dig or payload.get("force_pulse"):
+        census = _tenant_census_tool(db, tenant, {"include_names": False})
+        att = _investigate_attention_tool(db, tenant, {"limit": 8})
+        problems = att.get("problems") or []
+        dig = {
+            "arrays": (census.get("totals") or {}).get("arrays"),
+            "inverters": (census.get("totals") or {}).get("inverters"),
+            "attention_count": int(att.get("count") or len(problems)),
+            "top": [
+                {
+                    "name": p.get("name"),
+                    "why": p.get("why"),
+                    "next_step": p.get("next_step"),
+                }
+                for p in problems[:5]
+            ],
+            "brief": att.get("brief"),
+        }
+        _world_patch(db, tenant_id, {"fleet_digest": dig})
+
+    attn = int((dig or {}).get("attention_count") or 0)
+    top = (dig or {}).get("top") or []
+    reason = payload.get("reason") or "scheduled"
+    prev = world.get("last_attention_count")
+    spiked = prev is not None and attn > int(prev) + (ATTENTION_SPIKE_DELTA - 1)
+
+    # Build plain-language insight (no invented kWh)
+    if attn <= 0:
+        headline = "Fleet looks clear"
+        detail = (
+            f"{(dig or {}).get('arrays') or '—'} arrays · "
+            f"{(dig or {}).get('inverters') or '—'} inverters. "
+            "Nothing needs attention right now."
+        )
+        importance = 30
+    else:
+        first = top[0] if top else {}
+        name = first.get("name") or "a site"
+        why = first.get("why") or "needs a look"
+        headline = f"{attn} need attention" + (f" · {name}" if name else "")
+        detail = (
+            f"{why}. "
+            + (f"Next: {first.get('next_step')}. " if first.get("next_step") else "")
+            + ("Attention increased since last check. " if spiked else "")
+            + "Open Fleet Triage for the full queue."
+        )
+        importance = 75 if spiked or attn >= 2 else 60
+
+    # UX keep-good: if repeated friction notes, nudge prepare
+    friction_n = _count_recent_ux_friction(db, tenant_id)
+    ux_note = None
+    if friction_n >= 2 and (world.get("profile") or {}).get("auto_prepare_ux", True):
+        ux_note = (
+            f"You've hit UX friction {friction_n}× recently — "
+            "I can prepare a layout fix offline and email you."
+        )
+        importance = max(importance, 70)
+
+    insight = {
+        "id": "ins_" + uuid.uuid4().hex[:12],
+        "at": _now().isoformat() + "Z",
+        "reason": reason,
+        "headline": headline,
+        "detail": detail,
+        "ux_note": ux_note,
+        "attention_count": attn,
+        "importance": importance,
+    }
+    insights = [insight] + list(world.get("insights") or [])[:14]
+
+    speak = None
+    if importance >= MIN_IMPORTANCE_TO_SPEAK:
+        speak = f"{headline}. {detail}"
+        if ux_note:
+            speak = f"{speak} {ux_note}"
+
+    emailed = {"owner": False, "ford": False}
+    prof = world.get("profile") or {}
+    can_email = bool(prof.get("email_insights", True)) and importance >= 60
+    # Cooldown
+    last_em = world.get("last_proactive_email_at")
+    if can_email and last_em:
+        try:
+            le = datetime.fromisoformat(str(last_em).replace("Z", ""))
+            if (_now() - le).total_seconds() < PROACTIVE_EMAIL_COOLDOWN_HOURS * 3600:
+                can_email = False
+        except Exception:
+            pass
+
+    if can_email and (spiked or attn >= 2 or ux_note):
+        body = (
+            f"Proactive note from your Energy Agent\n\n"
+            f"{headline}\n{detail}\n"
+            + (f"\n{ux_note}\n" if ux_note else "\n")
+            + f"Reason: {reason}\nTenant: {tenant_id}\n"
+            "Open arrayoperator.com → Fleet Triage (or ask me in the app).\n"
+        )
+        emailed = _email_owner_and_ford(
+            tenant,
+            subject=headline[:80],
+            body=body,
+            owner=True,
+            ford=bool(ux_note),  # Ford only if UX work may follow
+        )
+
+    patch = {
+        "insights": insights,
+        "last_proactive_at": _now().isoformat() + "Z",
+        "last_attention_count": attn,
+        "last_wake_reason": reason,
+    }
+    if emailed.get("owner") or emailed.get("ford"):
+        patch["last_proactive_email_at"] = _now().isoformat() + "Z"
+    _world_patch(db, tenant_id, patch)
+
+    # Stage UX prepare if friction pattern + auto_prepare
+    staged = False
+    if ux_note and (world.get("profile") or {}).get("auto_prepare_ux", True):
+        already = db.execute(
+            select(func.count()).select_from(EaTask).where(
+                EaTask.tenant_id == tenant_id,
+                EaTask.kind.in_(("prepare_ux_approval", "propose_ui")),
+                EaTask.status == "queued",
+            )
+        ).scalar() or 0
+        if not int(already):
+            db.add(EaTask(
+                id="tk_" + uuid.uuid4().hex[:16],
+                tenant_id=tenant_id,
+                kind="prepare_ux_approval",
+                status="queued",
+                priority=55,
+                title="Prepare UX improvement from friction pattern",
+                payload_json=json.dumps({
+                    "text": (
+                        "Repeated UX friction notes — improve scannability and "
+                        "status-first layout on the surfaces they use most."
+                    ),
+                    "clarification": "understanding",
+                    "proactive": True,
+                    "auto_approved": bool(
+                        (world.get("profile") or {}).get("auto_approve_ux")
+                    ),
+                }),
+                speak_hint=(
+                    "I prepared a UX improvement offline based on repeated friction. "
+                    "Check your email — I can open it in the app when you're ready."
+                ),
+            ))
+            staged = True
+
+    return {
+        "ok": True,
+        "insight": insight,
+        "emailed": emailed,
+        "staged_ux": staged,
+        "speak": speak,
+    }
+
+
+def _prepare_ux_approval_worker(db, tenant_id: str, payload: dict) -> dict:
+    """Think → prepare UI change → email humans. Auto-queue judge only if allowed."""
+    world = _world_get(db, tenant_id)
+    prof = world.get("profile") or {}
+    auto = bool(
+        payload.get("auto_approved")
+        if "auto_approved" in payload
+        else prof.get("auto_approve_ux")
+    )
+    # Always prepare via propose_ui path (creates FeatureSuggestion + emails)
+    result = _propose_ui_worker(
+        db,
+        tenant_id,
+        {
+            "text": payload.get("text"),
+            "clarification": payload.get("clarification") or "proactive",
+            "context": payload.get("context") or world.get("last_context") or {},
+            "proactive": True,
+            "auto_approved": auto,
+        },
+    )
+    result["prepared"] = True
+    result["awaiting_human"] = not auto
+    return result
+
+
+def wake_mind(
+    db,
+    tenant_id: str,
+    reason: str,
+    *,
+    payload: dict | None = None,
+    session_id: str | None = None,
+    enqueue_insight: bool = True,
+) -> dict:
+    """Event-driven wake: something happened → long-term mind notices.
+
+    Call from capture success, alert sweeps, bill settlement, chat, scheduler.
+    Never narrates multi-agent — one mind, internal tasks only.
+    """
+    reason = (reason or "event")[:80]
+    pl = payload or {}
+    _world_patch(db, tenant_id, {
+        "last_wake_reason": reason,
+        "last_wake_at": _now().isoformat() + "Z",
+    })
+    _emit(
+        db, tenant_id, "mind_wake",
+        f"Woke: {reason}",
+        session_id=session_id,
+        payload={"reason": reason, **{k: pl[k] for k in list(pl)[:8]}},
+    )
+    actions: list[str] = ["woke"]
+
+    # Always refresh fleet awareness on significant wakes
+    if reason in (
+        "fleet_attention", "capture", "alert", "bill", "scheduled_proactive",
+        "inverter_flag", "session_open",
+    ):
+        already = db.execute(
+            select(func.count()).select_from(EaTask).where(
+                EaTask.tenant_id == tenant_id,
+                EaTask.kind == "fleet_pulse",
+                EaTask.status == "queued",
+            )
+        ).scalar() or 0
+        if not int(already):
+            db.add(EaTask(
+                id="tk_" + uuid.uuid4().hex[:16],
+                tenant_id=tenant_id,
+                kind="fleet_pulse",
+                status="queued",
+                priority=40,
+                title=f"Fleet pulse after {reason}",
+                payload_json="{}",
+                session_id=session_id,
+            ))
+            actions.append("queued_fleet_pulse")
+
+    if enqueue_insight:
+        already_i = db.execute(
+            select(func.count()).select_from(EaTask).where(
+                EaTask.tenant_id == tenant_id,
+                EaTask.kind == "proactive_insight",
+                EaTask.status == "queued",
+            )
+        ).scalar() or 0
+        if not int(already_i):
+            db.add(EaTask(
+                id="tk_" + uuid.uuid4().hex[:16],
+                tenant_id=tenant_id,
+                kind="proactive_insight",
+                status="queued",
+                priority=50,
+                title=f"Proactive insight ({reason})",
+                payload_json=json.dumps({"reason": reason, **pl}, default=str)[:4000],
+                session_id=session_id,
+                speak_hint=None,  # worker sets speak via interrupt policy
+            ))
+            actions.append("queued_proactive_insight")
+
+    ran = drain_tasks(db, tenant_id, limit=6)
+    actions.append(f"drained_{ran}")
+    return {"ok": True, "reason": reason, "actions": actions, "tasks_ran": ran}
 
 
 def _analyze_focus_worker(db, tenant_id: str, payload: dict) -> dict:
@@ -1056,11 +1469,46 @@ def run_task(db, task: EaTask) -> None:
             result = _propose_ui_worker(db, task.tenant_id, payload)
             if result.get("ok") and result.get("suggestion_id"):
                 speak = speak or (
-                    "Quick update: the improvement is queued for review. "
+                    "Quick update: the improvement is queued for review — I emailed you too. "
                     "When it ships, refresh and tell me if it feels easier to scan."
                 )
             else:
                 speak = None
+
+        elif task.kind == "proactive_insight":
+            result = _proactive_insight_worker(db, task.tenant_id, payload)
+            speak = result.get("speak") or speak
+            if result.get("emailed", {}).get("owner"):
+                # Don't double-speak a full email; short in-app note only
+                speak = speak or (
+                    "I left a proactive note for this account (also emailed). "
+                    "Ask me about fleet attention anytime."
+                )
+
+        elif task.kind == "prepare_ux_approval":
+            result = _prepare_ux_approval_worker(db, task.tenant_id, payload)
+            if result.get("ok") and result.get("suggestion_id"):
+                speak = speak or (
+                    "I prepared a UX change offline and emailed you. "
+                    "Say yes in the app if you want me to walk it when it lands."
+                )
+            else:
+                speak = None
+
+        elif task.kind == "profile_sync":
+            # Merge payload prefs into world.profile
+            world = _world_get(db, task.tenant_id)
+            prof = dict(world.get("profile") or {})
+            prefs = payload.get("prefs") or payload
+            for k in (
+                "email_insights", "email_ux_approvals",
+                "auto_prepare_ux", "auto_approve_ux", "voice_pref",
+            ):
+                if k in prefs:
+                    prof[k] = prefs[k]
+            _world_patch(db, task.tenant_id, {"profile": prof})
+            result = {"ok": True, "profile": prof}
+            speak = None
 
         else:
             result = {"ok": True, "skipped": True, "kind": task.kind}
@@ -1130,25 +1578,20 @@ def drain_tasks(db, tenant_id: str, *, limit: int = 5) -> int:
 
 
 def observe_and_reprioritize(db, tenant_id: str) -> dict:
-    """Phase B cognitive tick extras: stale fleet pulse, open-plan hygiene."""
+    """Cognitive observe: stale fleet pulse, proactive insights, open-plan hygiene."""
     world = _world_get(db, tenant_id)
     actions: list[str] = []
 
-    # Enqueue fleet_pulse if digest older than 6h and tenant has recent session activity
     dig = world.get("fleet_digest")
     stale = True
-    if dig and world.get("updated_at"):
-        # If we have a digest and last tick was recent, not stale for pulse
-        last_tick = world.get("last_tick_at")
-        if last_tick:
-            try:
-                lt = datetime.fromisoformat(str(last_tick).replace("Z", ""))
-                if (_now() - lt).total_seconds() < 6 * 3600 and dig:
-                    stale = False
-            except Exception:
-                pass
+    if dig and world.get("last_tick_at"):
+        try:
+            lt = datetime.fromisoformat(str(world.get("last_tick_at")).replace("Z", ""))
+            if (_now() - lt).total_seconds() < 6 * 3600 and dig:
+                stale = False
+        except Exception:
+            pass
 
-    # Only auto-pulse if there's an open plan about fleet or we never pulsed
     open_fleet = db.execute(
         select(func.count()).select_from(EaPlan).where(
             EaPlan.tenant_id == tenant_id,
@@ -1166,9 +1609,8 @@ def observe_and_reprioritize(db, tenant_id: str) -> dict:
     ).scalar() or 0
 
     if (stale or int(open_fleet) > 0) and not dig and not int(already_queued):
-        tid = "tk_" + uuid.uuid4().hex[:16]
         db.add(EaTask(
-            id=tid,
+            id="tk_" + uuid.uuid4().hex[:16],
             tenant_id=tenant_id,
             kind="fleet_pulse",
             status="queued",
@@ -1177,6 +1619,37 @@ def observe_and_reprioritize(db, tenant_id: str) -> dict:
             payload_json="{}",
         ))
         actions.append("queued_fleet_pulse")
+
+    # Proactive insight if never run or attention may have drifted (long-term mind)
+    last_pro = world.get("last_proactive_at")
+    need_insight = not last_pro
+    if last_pro:
+        try:
+            lp = datetime.fromisoformat(str(last_pro).replace("Z", ""))
+            if (_now() - lp).total_seconds() > 12 * 3600:
+                need_insight = True
+        except Exception:
+            need_insight = True
+
+    already_insight = db.execute(
+        select(func.count()).select_from(EaTask).where(
+            EaTask.tenant_id == tenant_id,
+            EaTask.kind == "proactive_insight",
+            EaTask.status == "queued",
+        )
+    ).scalar() or 0
+
+    if need_insight and not int(already_insight):
+        db.add(EaTask(
+            id="tk_" + uuid.uuid4().hex[:16],
+            tenant_id=tenant_id,
+            kind="proactive_insight",
+            status="queued",
+            priority=65,
+            title="Long-term proactive insight",
+            payload_json=json.dumps({"reason": "observe_tick"}),
+        ))
+        actions.append("queued_proactive_insight")
 
     # Bump priority of propose_ui if pending and user clarified
     if world.get("ux_clarification") and world.get("pending_ui_proposal"):
@@ -1488,7 +1961,11 @@ def mind_snapshot(authorization: str | None = Header(default=None)):
         return {
             "ok": True,
             "north_star": "The conversation is one window into a mind that's thinking continuously.",
+            "one_mind": True,
             "world": world,
+            "profile": world.get("profile") or {},
+            "insights": (world.get("insights") or [])[:5],
+            "pending_approvals": (world.get("pending_approvals") or [])[:5],
             "interrupt_budget": interrupt_budget(db, t.id),
             "open_tasks": [
                 {
@@ -1508,6 +1985,48 @@ def mind_snapshot(authorization: str | None = Header(default=None)):
                 for e in recent
             ],
         }
+
+
+class ProfileIn(BaseModel):
+    """Update long-term mind preferences (persists with this account)."""
+    email_insights: bool | None = None
+    email_ux_approvals: bool | None = None
+    auto_prepare_ux: bool | None = None
+    auto_approve_ux: bool | None = None
+
+
+class WakeIn(BaseModel):
+    reason: str = "client"
+    payload: dict | None = None
+    session_id: str | None = None
+
+
+@router.patch("/v1/energy-agent/mind/profile")
+def mind_profile(body: ProfileIn, authorization: str | None = Header(default=None)):
+    """Owner prefs for the long-term mind — part of the account profile."""
+    t = _auth(authorization)
+    with SessionLocal() as db:
+        world = _world_get(db, t.id)
+        prof = dict(world.get("profile") or {})
+        data = body.model_dump(exclude_none=True)
+        prof.update(data)
+        _world_patch(db, t.id, {"profile": prof})
+        db.commit()
+        return {"ok": True, "profile": prof}
+
+
+@router.post("/v1/energy-agent/mind/wake")
+def mind_wake_ep(body: WakeIn, authorization: str | None = Header(default=None)):
+    """Explicit wake (client open, or internal systems with session auth)."""
+    t = _auth(authorization)
+    with SessionLocal() as db:
+        out = wake_mind(
+            db, t.id, body.reason or "client",
+            payload=body.payload or {},
+            session_id=body.session_id,
+        )
+        db.commit()
+        return out
 
 
 @router.get("/v1/energy-agent/mind/metrics")

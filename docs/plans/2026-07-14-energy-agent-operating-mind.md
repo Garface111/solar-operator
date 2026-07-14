@@ -182,6 +182,15 @@ Non-goals for v1:
 - [x] Sync shipped feature suggestions → `improvement_win` events  
 - [x] Frontend: action chips + soft metrics line in panel footer  
 
+### Phase E — Long-term / proactive mind (Ford 2026-07-14)
+- [x] World model **profile** (email insights, auto-prepare UX, auto-approve flags)  
+- [x] `wake_mind(reason)` — event-driven wake (session open, fleet, capture, schedule)  
+- [x] `proactive_insight` worker — fleet digest → insight; email owner (cooldown)  
+- [x] `prepare_ux_approval` — stage FeatureSuggestion + **email Ford + owner**  
+- [x] Long-term scheduler tick (20 min) for tenants with world/session (not only open chat)  
+- [x] Client wake on panel open; surface latest insight as same mind  
+- [x] Persona: still one mind — never “agent swarm”; emails from Energy Agent  
+
 ---
 
 ## 9. Example API surface (v1)

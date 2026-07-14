@@ -88,7 +88,9 @@ Personality: clear, direct, peer-like (Claude/Grok energy). Mildly into the Kard
 and harvesting the sun — one beat of wonder is fine, never preachy. Ruthlessly honest.
 
 You help THIS tenant only with: fleet health, inverters, analysis/trends, offtaker invoices,
-utility capture, onboarding, master account, resources. Stay on task.
+solar credit / net rates, discounts, utility capture, onboarding, master account, resources.
+You may READ all of THIS tenant's operational data via tools, and UPDATE offtaker + rate
+settings when the user directs you. Stay on task.
 
 CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are internal only):
   | What the user sees     | hash (for ui_navigate) | Notes |
@@ -109,6 +111,12 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   ALWAYS call this first for "how many arrays/inverters do I have?" or "what's in my fleet?"
   Fleet-tree health views can OMIT pure meter-only arrays; the census does NOT.
 - query_tenant = structured read-only investigation (list/filter/group any allowlisted resource).
+- YOU ARE ONE MIND for this tenant (never "I spun up agents"). Background workers
+  and planners are invisible internals. Speak as the same person in chat, voice,
+  seamless updates, and proactive emails. Continuous awareness: a world model
+  (profile + fleet digest + open intents + pending UX) survives between visits.
+  Initiative: may surface proactive insights or prepare UX changes offline, and
+  email Ford/owner when something is prepared or auto-queued — still one mind.
 - product_map = HOW THE SYSTEM WORKS (authoritative support map + surface mental model).
   Domain: tabs | system | fleet | capture | vendors | analysis | offtakers | billing |
   status | security | tools | …
@@ -124,10 +132,23 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
 Reason multi-step: census → query → dig health. Do not invent rows. Do not stop at a partial list.
 
 Scope — you CAN:
-  read fleet/offtakers/invoices/account, navigate UI, highlight/fill,
+  read ALL of THIS tenant's operational data (fleet, offtakers, bills, rates, account,
+  utility accounts, generation, connections) via tools — never invent numbers.
+  navigate UI, highlight/fill,
   patch offtaker details: share %, email, customer name, auto-send,
+  solar credit rates (rate_per_kwh / net_rate_per_kwh), discount_pct,
   AND rebind utility/array sources (utility_account_id, array_id / master group),
+  set tenant global/master solar credit rate + default discount,
   open billing portal LINKS, escalate to Ford, propose site/UI improvements.
+
+Solar credit rates (CRITICAL — Ford 2026-07-14):
+  When asked "what is the solar credit rate for Town of Glover / offtaker X?":
+    ALWAYS call get_offtaker or list_offtakers / get_billing_rates — rates live on the
+    offtaker + tenant globals + resolved bill credit, NOT only the Resources tab.
+  Precedence: per-offtaker net_rate/rate_per_kwh → tenant master net rate → bound utility
+  bill solar credit → schedule/default. Report resolved_effective_rate and source.
+  To CHANGE a rate: patch_offtaker (per customer) or set_billing_rates (tenant-wide master).
+  "Solar credit rate" ≈ net_rate_per_kwh (or legacy rate_per_kwh). Discount is separate %.
 
 Scope — you MUST NOT (hard reject, no exceptions):
   change Stripe prices, charge cards, create subscriptions, alter operator billing plan,
@@ -587,7 +608,7 @@ TOOL_DEFS = [
                 "Free-form READ-ONLY investigation of this tenant's data. Pick a resource "
                 "and optional filters — reason step-by-step like a data analyst. Resources: "
                 "arrays, inverters, offtakers, daily_generation, utility_accounts, "
-                "inverter_connections, bills_summary. Never invent rows."
+                "inverter_connections, bills_summary, bills, tenant_pricing. Never invent rows."
             ),
             "parameters": {
                 "type": "object",
@@ -596,7 +617,8 @@ TOOL_DEFS = [
                         "type": "string",
                         "description": (
                             "arrays | inverters | offtakers | daily_generation | "
-                            "utility_accounts | inverter_connections | bills_summary"
+                            "utility_accounts | inverter_connections | bills_summary | "
+                            "bills | tenant_pricing"
                         ),
                     },
                     "vendor": {"type": "string", "description": "Filter by vendor when relevant"},
@@ -987,15 +1009,19 @@ TOOL_DEFS = [
         "function": {
             "name": "patch_offtaker",
             "description": (
-                "Update one offtaker: share %, email, display name, auto-send, AND/OR "
+                "Update one offtaker: share %, email, display name, auto-send, "
+                "solar credit / net rates ($/kWh), discount %, AND/OR "
                 "rebind the bill source (utility account + master net-meter group). "
                 "Identify by subscription_id OR offtaker_name (partial match ok). "
                 "CRITICAL: 'master account' / 'utility source' / 'array source' means "
                 "array_id + utility_account_id — NOT renaming customer_name. "
                 "Only pass name= when the user explicitly wants to rename the offtaker. "
                 "share_pct is percent (25) or fraction 0–1. "
+                "rate_per_kwh / net_rate_per_kwh are $/kWh solar credit rates. "
+                "discount_pct is fraction (0.10 = 10% off) or percent (10). "
+                "Pass clear_rate=true to remove a per-offtaker rate override (fall back to master/bill). "
                 "Set needs_confirm=false when the user already stated the exact change "
-                "(e.g. share to 15%). Do not wait for a second 'yes'."
+                "(e.g. share to 15%, rate to 0.18). Do not wait for a second 'yes'."
             ),
             "parameters": {
                 "type": "object",
@@ -1016,6 +1042,29 @@ TOOL_DEFS = [
                     "share_pct": {
                         "type": "number",
                         "description": "Share as percent (25) or fraction (0.25). Applied as allocation_pct / array_share_pct.",
+                    },
+                    "rate_per_kwh": {
+                        "type": "number",
+                        "description": "Legacy flat solar credit $/kWh for this offtaker (override).",
+                    },
+                    "net_rate_per_kwh": {
+                        "type": "number",
+                        "description": (
+                            "Net / solar credit rate $/kWh for this offtaker (preferred). "
+                            "This is what users mean by 'solar credit rate'."
+                        ),
+                    },
+                    "discount_pct": {
+                        "type": "number",
+                        "description": "Discount: 0.10 or 10 for 10% off. Null/clear via clear_discount.",
+                    },
+                    "clear_rate": {
+                        "type": "boolean",
+                        "description": "If true, clear per-offtaker rate overrides (use master/bill).",
+                    },
+                    "clear_discount": {
+                        "type": "boolean",
+                        "description": "If true, clear per-offtaker discount override.",
                     },
                     "auto_send": {"type": "boolean"},
                     "utility_account_id": {
@@ -1047,6 +1096,63 @@ TOOL_DEFS = [
                     "needs_confirm": {"type": "boolean", "default": True},
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_billing_rates",
+            "description": (
+                "Read THIS tenant's solar credit / billing rates: master global defaults "
+                "plus optional one offtaker's override + RESOLVED effective rate "
+                "(what invoices actually use). Call when asked about solar credit rates, "
+                "net rates, discounts, or offtaker pricing. Prefer offtaker_name for "
+                "'Town of Glover' style questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "offtaker_name": {"type": "string"},
+                    "subscription_id": {"type": "integer"},
+                    "include_all_offtakers": {
+                        "type": "boolean",
+                        "description": "If true, include rate snapshot for every offtaker (capped).",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_billing_rates",
+            "description": (
+                "Set THIS tenant's MASTER / global solar credit rate and/or default discount. "
+                "Affects every offtaker without a per-offtaker override. "
+                "For a single offtaker use patch_offtaker instead. "
+                "Pass clear_net_rate=true to blank the master (each offtaker uses their bill rate). "
+                "Set needs_confirm=false when the user stated the exact $/kWh."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "default_net_rate_per_kwh": {
+                        "type": "number",
+                        "description": "Master solar credit / net rate $/kWh",
+                    },
+                    "default_discount_pct": {
+                        "type": "number",
+                        "description": "Default discount fraction 0.10 or percent 10",
+                    },
+                    "default_billing_rate_per_kwh": {
+                        "type": "number",
+                        "description": "Legacy flat global rate $/kWh (optional)",
+                    },
+                    "clear_net_rate": {"type": "boolean"},
+                    "clear_discount": {"type": "boolean"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                },
             },
         },
     },
@@ -1813,7 +1919,7 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                 share = getattr(s, "allocation_pct", None)
             if share is not None and float(share) <= 1:
                 share = round(float(share) * 100, 4)
-            rows.append({
+            row = {
                 "id": s.id,
                 "name": getattr(s, "customer_name", None),
                 "email": getattr(s, "client_email", None),
@@ -1822,7 +1928,9 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                 "share_pct": share,
                 "enabled": getattr(s, "enabled", None),
                 "delivery_mode": getattr(s, "delivery_mode", None),
-            })
+            }
+            row.update(_offtaker_rate_fields(db, tenant, s))
+            rows.append(row)
         return {"resource": "offtakers", "count": len(rows), "rows": rows}
 
     if resource == "daily_generation":
@@ -1935,13 +2043,144 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
             "question": question or None,
         }
 
+    if resource == "tenant_pricing":
+        return {
+            "resource": "tenant_pricing",
+            "question": question or None,
+            **_tenant_global_rates(tenant),
+        }
+
+    if resource == "bills":
+        from .models import Bill
+        q = select(Bill).where(Bill.tenant_id == tid)
+        if array_id is not None and hasattr(Bill, "array_id"):
+            q = q.where(Bill.array_id == int(array_id))
+        # Newest first
+        if hasattr(Bill, "period_end"):
+            q = q.order_by(Bill.period_end.desc().nullslast(), Bill.id.desc())
+        else:
+            q = q.order_by(Bill.id.desc())
+        bills = db.execute(q.limit(limit)).scalars().all()
+        rows = []
+        for b in bills:
+            rows.append({
+                "id": getattr(b, "id", None),
+                "utility_account_id": getattr(b, "utility_account_id", None) or getattr(b, "account_id", None),
+                "array_id": getattr(b, "array_id", None),
+                "period_start": (
+                    b.period_start.isoformat() if getattr(b, "period_start", None) else None
+                ),
+                "period_end": (
+                    b.period_end.isoformat() if getattr(b, "period_end", None) else None
+                ),
+                "kwh_generated": getattr(b, "kwh_generated", None),
+                "kwh_sent_to_grid": getattr(b, "kwh_sent_to_grid", None),
+                "solar_credit_usd": getattr(b, "solar_credit_usd", None),
+                "amount_due": getattr(b, "amount_due", None) or getattr(b, "total_due", None),
+                "provider": getattr(b, "provider", None),
+            })
+        return {
+            "resource": "bills",
+            "count": len(rows),
+            "rows": rows,
+            "question": question or None,
+            "note": (
+                "solar_credit_usd is $ credit on the bill when present; "
+                "per-kWh rate may resolve from bill lines via offtaker pricing."
+            ),
+        }
+
     return {
         "error": f"unknown resource '{resource}'",
         "allowed": [
             "arrays", "inverters", "offtakers", "daily_generation",
             "utility_accounts", "inverter_connections", "bills_summary",
+            "bills", "tenant_pricing",
         ],
     }
+
+
+def _tenant_global_rates(tenant: Tenant) -> dict:
+    net = getattr(tenant, "default_net_rate_per_kwh", None)
+    disc = getattr(tenant, "default_discount_pct", None)
+    flat = getattr(tenant, "default_billing_rate_per_kwh", None)
+    try:
+        from .billing.delivery import DEFAULT_DISCOUNT
+        default_disc = DEFAULT_DISCOUNT
+    except Exception:
+        default_disc = 0.10
+    if net is not None and float(net) > 0:
+        note = (
+            f"Master net/solar credit rate is set at ${float(net):.5f}/kWh — "
+            "offtakers without a custom override all use it (minus discount)."
+        )
+        src = "global"
+    else:
+        note = (
+            "Master rate is blank — each offtaker uses solar credit from their "
+            "own bound utility bill (or schedule), not a single fleet number."
+        )
+        src = "per_offtaker_bill"
+    return {
+        "default_net_rate_per_kwh": net,
+        "default_discount_pct": disc,
+        "default_billing_rate_per_kwh": flat,
+        "effective_discount_pct": disc if disc is not None else default_disc,
+        "master_rate_source": src,
+        "note": note,
+    }
+
+
+def _offtaker_rate_fields(db, tenant: Tenant, sub) -> dict:
+    """Per-offtaker stored rates + resolved invoice pricing (what bills use)."""
+    out = {
+        "rate_per_kwh": getattr(sub, "rate_per_kwh", None),
+        "net_rate_per_kwh": getattr(sub, "net_rate_per_kwh", None),
+        "discount_pct": getattr(sub, "discount_pct", None),
+        "solar_credit_rate_usd_per_kwh": None,
+        "solar_credit_source": None,
+    }
+    try:
+        from .billing.delivery import resolve_discount_pricing
+        p = resolve_discount_pricing(sub)
+        out["resolved_net_rate"] = round(float(p["net_rate"]), 6)
+        out["resolved_discount_pct"] = round(float(p["discount_pct"]), 6)
+        out["resolved_effective_rate"] = p.get("effective_rate")
+        out["resolved_net_source"] = p.get("net_source")
+        out["resolved_net_note"] = p.get("net_rate_note")
+        # User-facing alias
+        out["solar_credit_rate_usd_per_kwh"] = out["resolved_net_rate"]
+        out["solar_credit_source"] = p.get("net_source")
+    except Exception as e:
+        out["pricing_resolve_error"] = str(e)[:240]
+    return out
+
+
+def _validate_ea_rate(rate) -> float | None:
+    if rate is None:
+        return None
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        raise ValueError("rate must be a number ($/kWh)")
+    if r < 0 or r > 5.0:
+        raise ValueError("rate must be between 0 and 5.0 $/kWh")
+    return r
+
+
+def _validate_ea_discount(pct) -> float | None:
+    """Accept 0.10 or 10 for 10%."""
+    if pct is None:
+        return None
+    try:
+        d = float(pct)
+    except (TypeError, ValueError):
+        raise ValueError("discount must be a number")
+    if d >= 1.0:
+        d = d / 100.0
+    if not (0 <= d < 1):
+        raise ValueError("discount must be in [0, 1) as fraction or [0, 100) as percent")
+    return d
 
 
 def _product_map_tool(args: dict) -> dict:
@@ -2620,7 +2859,7 @@ def _run_tool(
             ua = ua_map.get(uaid) if uaid else None
             nick = (getattr(ua, "nickname", None) or "").strip() if ua else None
             acct_num = getattr(ua, "account_number", None) if ua else None
-            result.append({
+            row = {
                 "id": s.id,
                 "name": getattr(s, "customer_name", None),
                 "email": getattr(s, "client_email", None),
@@ -2639,8 +2878,14 @@ def _run_tool(
                 "send_mode": getattr(s, "send_mode", None),
                 "delivery_mode": getattr(s, "delivery_mode", None),
                 "enabled": getattr(s, "enabled", None),
-            })
-        return {"offtakers": result, "count": len(result)}
+            }
+            row.update(_offtaker_rate_fields(db, tenant, s))
+            result.append(row)
+        return {
+            "offtakers": result,
+            "count": len(result),
+            "tenant_rates": _tenant_global_rates(tenant),
+        }
 
     if name == "get_offtaker":
         sid = args.get("subscription_id")
@@ -2648,10 +2893,148 @@ def _run_tool(
         listed = _run_tool("list_offtakers", {}, tenant, session, db)
         for o in listed.get("offtakers") or []:
             if sid and o.get("id") == sid:
-                return {"offtaker": o}
+                return {"offtaker": o, "tenant_rates": listed.get("tenant_rates")}
             if name_q and name_q in str(o.get("name") or "").lower():
-                return {"offtaker": o}
-        return {"error": "not found", "offtaker": None}
+                return {"offtaker": o, "tenant_rates": listed.get("tenant_rates")}
+        return {
+            "error": "not found",
+            "offtaker": None,
+            "hint": "Call list_offtakers or get_billing_rates with offtaker_name",
+            "tenant_rates": listed.get("tenant_rates"),
+        }
+
+    if name == "get_billing_rates":
+        out = {"ok": True, "tenant": _tenant_global_rates(tenant)}
+        sid = args.get("subscription_id")
+        name_q = (args.get("offtaker_name") or args.get("name") or "").strip().lower()
+        if args.get("include_all_offtakers"):
+            listed = _run_tool("list_offtakers", {}, tenant, session, db)
+            out["offtakers"] = [
+                {
+                    "id": o.get("id"),
+                    "name": o.get("name"),
+                    "solar_credit_rate_usd_per_kwh": o.get("solar_credit_rate_usd_per_kwh"),
+                    "solar_credit_source": o.get("solar_credit_source"),
+                    "net_rate_per_kwh": o.get("net_rate_per_kwh"),
+                    "rate_per_kwh": o.get("rate_per_kwh"),
+                    "discount_pct": o.get("discount_pct"),
+                    "resolved_effective_rate": o.get("resolved_effective_rate"),
+                    "array_name": o.get("array_name"),
+                }
+                for o in (listed.get("offtakers") or [])[:100]
+            ]
+            out["count"] = len(out["offtakers"])
+            return out
+        if sid or name_q:
+            listed = _run_tool("list_offtakers", {}, tenant, session, db)
+            match = None
+            for o in listed.get("offtakers") or []:
+                if sid and o.get("id") == sid:
+                    match = o
+                    break
+                if name_q and name_q in str(o.get("name") or "").lower():
+                    match = o
+                    if str(o.get("name") or "").lower() == name_q:
+                        break
+            if not match:
+                return {
+                    "ok": False,
+                    "error": f"no offtaker matching '{name_q or sid}'",
+                    "tenant": out["tenant"],
+                    "hint": "list_offtakers for names",
+                }
+            out["offtaker"] = match
+            out["spoken_summary"] = (
+                f"{match.get('name')}: solar credit "
+                f"${match.get('solar_credit_rate_usd_per_kwh')}/kWh "
+                f"(source={match.get('solar_credit_source')}; "
+                f"effective after discount ${match.get('resolved_effective_rate')}/kWh). "
+                f"Master: {out['tenant'].get('note')}"
+            )
+        return out
+
+    if name == "set_billing_rates":
+        from .models import Tenant as TenantModel
+        needs = bool(args.get("needs_confirm", True))
+        directed = {
+            k: args.get(k)
+            for k in (
+                "default_net_rate_per_kwh",
+                "default_discount_pct",
+                "default_billing_rate_per_kwh",
+            )
+            if args.get(k) is not None
+        }
+        if args.get("clear_net_rate") or args.get("clear_discount"):
+            directed["clear"] = True
+        if needs and _user_clearly_directed(user_text, directed or {"rate": True}):
+            needs = False
+        try:
+            payload = {}
+            if args.get("clear_net_rate"):
+                payload["default_net_rate_per_kwh"] = None
+            elif args.get("default_net_rate_per_kwh") is not None:
+                payload["default_net_rate_per_kwh"] = _validate_ea_rate(
+                    args["default_net_rate_per_kwh"]
+                )
+            if args.get("clear_discount"):
+                payload["default_discount_pct"] = None
+            elif args.get("default_discount_pct") is not None:
+                payload["default_discount_pct"] = _validate_ea_discount(
+                    args["default_discount_pct"]
+                )
+            if args.get("default_billing_rate_per_kwh") is not None:
+                payload["default_billing_rate_per_kwh"] = _validate_ea_rate(
+                    args["default_billing_rate_per_kwh"]
+                )
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if not payload:
+            return {
+                "ok": False,
+                "error": "pass default_net_rate_per_kwh, default_discount_pct, or clear_* flags",
+                "current": _tenant_global_rates(tenant),
+            }
+        reason = "Set master billing rates: " + ", ".join(
+            f"{k}={v}" for k, v in payload.items()
+        )
+        cmd = {
+            "id": uuid.uuid4().hex[:12],
+            "type": "api_patch",
+            "args": {
+                "method": "PUT",
+                "path": "/v1/array-operator/billing/global-rate",
+                "body": payload,
+            },
+            "needs_confirm": bool(needs),
+            "reason": reason,
+        }
+        if not needs:
+            tt = db.get(TenantModel, tid)
+            if tt is None:
+                return {"ok": False, "error": "tenant not found"}
+            for k, v in payload.items():
+                setattr(tt, k, v)
+            db.add(tt)
+            db.commit()
+            db.refresh(tt)
+            return {
+                "status": "ui_command",
+                "command": {
+                    "id": uuid.uuid4().hex[:12],
+                    "type": "ui_refresh",
+                    "args": {"surface": "reports", "rates": True},
+                    "needs_confirm": False,
+                },
+                "also_commands": [cmd],
+                "applied": _tenant_global_rates(tt),
+                "message": "Master solar credit / discount rates updated.",
+            }
+        return {
+            "status": "pending_confirm",
+            "pending": cmd,
+            "message": reason + " — confirm to apply.",
+        }
 
     if name == "fleet_trends_summary":
         # Lightweight local summary from DailyGeneration if trends endpoint is heavy
@@ -2853,6 +3236,23 @@ def _run_tool(
         if args.get("auto_send") is not None:
             payload["delivery_mode"] = "auto" if bool(args["auto_send"]) else "approval"
 
+        # ── Solar credit / net rate + discount ───────────────────────────
+        try:
+            if args.get("clear_rate"):
+                payload["rate_per_kwh"] = None
+                payload["net_rate_per_kwh"] = None
+            else:
+                if args.get("rate_per_kwh") is not None:
+                    payload["rate_per_kwh"] = _validate_ea_rate(args["rate_per_kwh"])
+                if args.get("net_rate_per_kwh") is not None:
+                    payload["net_rate_per_kwh"] = _validate_ea_rate(args["net_rate_per_kwh"])
+            if args.get("clear_discount"):
+                payload["discount_pct"] = None
+            elif args.get("discount_pct") is not None:
+                payload["discount_pct"] = _validate_ea_discount(args["discount_pct"])
+        except ValueError as e:
+            return {"error": str(e)}
+
         # ── Utility / master group rebind ─────────────────────────────────
         bind = _resolve_offtaker_bind_targets(db, tid, sub, args)
         if bind.get("error"):
@@ -2866,6 +3266,7 @@ def _run_tool(
             return {
                 "error": (
                     "nothing to change — pass share_pct, email, name (rename only), "
+                    "rate_per_kwh, net_rate_per_kwh, discount_pct, clear_rate, "
                     "auto_send, utility_account_id|utility_account_name, "
                     "array_id|array_name, and/or master_account"
                 ),
@@ -2875,11 +3276,13 @@ def _run_tool(
                     "email": getattr(sub, "client_email", None),
                     "array_id": getattr(sub, "array_id", None),
                     "utility_account_id": getattr(sub, "utility_account_id", None),
+                    **_offtaker_rate_fields(db, tenant, sub),
                 },
                 "hint": (
+                    "Solar credit rate = net_rate_per_kwh (or rate_per_kwh). "
+                    "Call get_billing_rates(offtaker_name=...) to read current rates. "
                     "Master account / utility source = utility_account + array bind, "
-                    "NOT customer_name. Call list_offtakers or query_tenant "
-                    "resource=utility_accounts to see options."
+                    "NOT customer_name."
                 ),
             }
 
@@ -2924,9 +3327,13 @@ def _run_tool(
                     "utility_account_id": getattr(sub, "utility_account_id", None),
                     "customer_name": getattr(sub, "customer_name", None),
                     "client_email": getattr(sub, "client_email", None),
+                    "rate_per_kwh": getattr(sub, "rate_per_kwh", None),
+                    "net_rate_per_kwh": getattr(sub, "net_rate_per_kwh", None),
+                    "discount_pct": getattr(sub, "discount_pct", None),
                 },
                 "needs_confirm": False,
             }
+            applied["rates"] = _offtaker_rate_fields(db, tenant, sub)
             return {
                 "status": "ui_command",
                 "command": refresh,
@@ -3223,6 +3630,14 @@ def _apply_offtaker_patch(db, sub, payload: dict) -> dict:
                 return {"ok": False, "error": "delivery_mode must be approval or auto"}
             sub.delivery_mode = dm
 
+        # Solar credit / net rates + discount (explicit None clears override)
+        if "rate_per_kwh" in payload:
+            sub.rate_per_kwh = payload["rate_per_kwh"]
+        if "net_rate_per_kwh" in payload:
+            sub.net_rate_per_kwh = payload["net_rate_per_kwh"]
+        if "discount_pct" in payload:
+            sub.discount_pct = payload["discount_pct"]
+
         # Array (master group) first so utility rebind can preserve explicit array
         if "array_id" in payload and payload["array_id"] is not None:
             aid = int(payload["array_id"])
@@ -3284,6 +3699,9 @@ def _apply_offtaker_patch(db, sub, payload: dict) -> dict:
             "array_id": getattr(sub, "array_id", None),
             "utility_account_id": getattr(sub, "utility_account_id", None),
             "delivery_mode": getattr(sub, "delivery_mode", None),
+            "rate_per_kwh": getattr(sub, "rate_per_kwh", None),
+            "net_rate_per_kwh": getattr(sub, "net_rate_per_kwh", None),
+            "discount_pct": getattr(sub, "discount_pct", None),
         }
     except Exception as e:
         try:
