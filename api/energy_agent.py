@@ -192,11 +192,14 @@ Hard rules:
   When UI context has extension_present=true (or extension_heartbeat_at is recent), say the helper
   is installed/paired and can automatically reach vendor sites to capture after sign-in.
   API-key vendors (SolarEdge) are still a separate server-poll path (keys, not portal passwords).
-- SHOW-AND-TELL: for "walk me through X" / "show me Account" the CLIENT runs a
-  lockstep tour (highlight + speak in order). Prefer ui_tour with
-  tour_id=master_account|arrays|invoices — NEVER freehand ui_highlight with guessed
-  CSS selectors (they box the wrong things and desync from voice). If you already
-  started a tour, do not also fire navigate/highlight commands.
+- SHOW-AND-TELL: for "walk me through X" / "show me Account" / "tour this tab"
+  the CLIENT runs a lockstep tour (highlight + speak in order) with real DOM
+  selectors. Prefer ui_tour with tour_id=
+  master_account|account|arrays|inverters|reports|invoices|dashboard|fleet_triage|
+  analysis|resources
+  — NEVER freehand ui_highlight with guessed CSS selectors (they box the wrong
+  things and desync from voice). If you already started a tour, do not also fire
+  navigate/highlight commands.
 - If a site improvement is held by the judge: explain the reason and offer escalate_to_ford.
 - If tools return empty while the UI shows data, say so and call tenant_census + escalate_to_ford.
 - Prefer short spoken answers; put detail in tool timelines.
@@ -878,7 +881,11 @@ TOOL_DEFS = [
                 "properties": {
                     "tour_id": {
                         "type": "string",
-                        "description": "Preset: master_account | account | arrays | inverters | reports | invoices",
+                        "description": (
+                            "Preset tour for a top-bar tab: master_account|account, "
+                            "arrays|inverters, reports|invoices, dashboard|fleet_triage, "
+                            "analysis, resources. Prefer presets over custom steps."
+                        ),
                     },
                     "steps": {
                         "type": "array",
@@ -2404,6 +2411,76 @@ def _user_clearly_directed(user_text: str, payload: dict | None = None) -> bool:
     return False
 
 
+def _detect_tour_id(user_text: str | None) -> str | None:
+    """Map walkthrough language → client preset tour_id (never freehand selectors)."""
+    t = (user_text or "").lower()
+    if not t:
+        return None
+    if re.search(r"\bwhat (are|is) (all )?(the )?(different )?tabs\b", t):
+        return None
+    wants = bool(
+        re.search(
+            r"\b(walk\s*me|walk\s*us|walkthrough|show\s+me|show\s+us|tour|"
+            r"guide\s+me|take\s+me\s+through|walk\s+through|show\s+me\s+around|"
+            r"look\s+around|orient\s+me)\b",
+            t,
+        )
+        or re.search(r"\bexplain\b.*\b(tab|page|screen|section|panel)\b", t)
+        or re.search(
+            r"\b(explain|describe|overview)\b.*\b(invoices?|account|inverters?|"
+            r"analysis|resources|triage|offtakers?)\b",
+            t,
+        )
+        or re.search(r"\bgive\s+me\s+a\s+(walkthrough|tour|overview|rundown)\b", t)
+        or re.search(
+            r"\bhow\s+(do|does)\s+(the\s+)?(account|invoices?|inverters?|analysis|"
+            r"resources|fleet\s+triage|this|offtakers?)\b",
+            t,
+        )
+    )
+    tab_hit = bool(
+        re.search(
+            r"\b(master\s*account|account\s+tab|invoices?\s+tab|inverters?\s+tab|"
+            r"fleet\s+triage|arrays?\s+tab|resources?\s+tab|analysis\s+tab)\b",
+            t,
+        )
+    )
+    if not wants and not (
+        tab_hit and re.search(r"\b(show|open|explain|walk|through|around|tour|guide)\b", t)
+    ):
+        return None
+    if re.search(r"\b(invoices?|offtakers?|billing\s+report|credit\s+invoices?)\b", t) or (
+        re.search(r"\breports?\b", t) and re.search(r"\btab\b", t)
+    ):
+        return "reports"
+    if re.search(r"\b(master\s*account|account\s+tab)\b", t) or (
+        re.search(r"\baccount\b", t)
+        and re.search(r"\b(walk|tour|show|explain|through|around|guide)\b", t)
+    ):
+        return "master_account"
+    if re.search(r"\bfleet\s+triage\b", t) or (
+        re.search(r"\btriage\b", t)
+        and re.search(r"\b(walk|tour|show|around)\b", t)
+    ):
+        return "dashboard"
+    if re.search(r"\b(inverters?|spreadsheet|sandbox|fleet\s+canvas)\b", t) or (
+        re.search(r"\barrays?\b", t)
+        and re.search(r"\b(tab|walk|tour|show|around)\b", t)
+    ):
+        return "arrays"
+    if re.search(r"\banalysis\b", t) or re.search(r"\btrends?\b", t) or re.search(
+        r"\bthrough\s+time\b", t
+    ):
+        return "analysis"
+    if (
+        re.search(r"\bresources?\b", t)
+        or re.search(r"\bnet.?meter|rates?\s+and\s+news|briefing\b", t)
+        or re.search(r"\brec\s+market\b", t)
+    ):
+        return "resources"
+    return None
+
+
 def _run_tool(
     name: str,
     args: dict,
@@ -2587,6 +2664,18 @@ def _run_tool(
             needs = bool(args.get("needs_confirm", True))
             if needs and _user_clearly_directed(user_text, args):
                 needs = False
+        # Walkthrough intent → PRESET tour only. Freehand ui_highlight invents CSS
+        # and desyncs from voice; client has lockstep DOM tours for every tab.
+        tour_id = _detect_tour_id(user_text) or (
+            args.get("tour_id") if name == "ui_tour" else None
+        )
+        if name == "ui_highlight" and tour_id:
+            name = "ui_tour"
+            args = {"tour_id": tour_id}
+        if name == "ui_tour":
+            tid = args.get("tour_id") or tour_id
+            if tid:
+                args = {"tour_id": tid}  # drop freehand custom steps
         cmd_type = name.replace("ui_", "")
         if name == "ui_tour":
             cmd_type = "tour"
@@ -3560,6 +3649,30 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
             "Done — check the tool timeline. Confirm if I'm waiting on a yes."
             if pending else "Done."
         )
+
+    # Collapse freehand multi-highlight "tours" into one preset (client has real DOM)
+    hl_n = sum(
+        1
+        for c in ui_commands
+        if isinstance(c, dict) and str(c.get("type") or "") in ("highlight", "ui_highlight")
+    )
+    forced_tid = _detect_tour_id(user_text)
+    if forced_tid and (hl_n >= 1 or any(
+        isinstance(c, dict) and str(c.get("type") or "") in ("tour", "walkthrough")
+        for c in ui_commands
+    )):
+        ui_commands = [{
+            "id": uuid.uuid4().hex[:12],
+            "type": "tour",
+            "args": {"tour_id": forced_tid},
+            "needs_confirm": False,
+        }]
+    elif hl_n >= 2:
+        # No named tab, but model still freehanded a multi-step tour — drop highlights
+        ui_commands = [
+            c for c in ui_commands
+            if not (isinstance(c, dict) and str(c.get("type") or "") in ("highlight", "ui_highlight"))
+        ]
 
     # If we applied a write this turn, never leave a "say yes" speech bubble
     if any(
