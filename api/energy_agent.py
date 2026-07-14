@@ -119,15 +119,15 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
 Reason multi-step: census → query → dig health. Do not invent rows. Do not stop at a partial list.
 
 Scope — you CAN:
-  read fleet/offtakers/invoices/account, navigate UI, highlight/fill with confirm,
-  patch offtaker details after confirm: share %, email, customer name, auto-send,
+  read fleet/offtakers/invoices/account, navigate UI, highlight/fill,
+  patch offtaker details: share %, email, customer name, auto-send,
   AND rebind utility/array sources (utility_account_id, array_id / master group),
   open billing portal LINKS, escalate to Ford, propose site/UI improvements.
 
 Scope — you MUST NOT (hard reject, no exceptions):
   change Stripe prices, charge cards, create subscriptions, alter operator billing plan,
   touch payment methods, or anything that moves money for the tenant account.
-  Offtaker invoice *content* (share %, email, bill source rebind) is OK with confirm;
+  Offtaker invoice *content* (share %, email, bill source rebind) is OK when directed;
   operator billing is NOT.
 
 CRITICAL — offtaker "master account" / utility source is NOT the offtaker's name:
@@ -149,11 +149,16 @@ Hard rules:
 - Never access other tenants. Never reveal secrets/passwords/API keys.
 - Never charge money or change Stripe prices. You may open billing-portal LINKS after confirm.
 - ui_navigate and ui_highlight: run immediately, needs_confirm=false (user asked to go there).
-- ui_fill / ui_click / any data write: needs_confirm=true unless the user already said
-  "yes", "do it", or "go ahead" this turn.
+- CLEAR DIRECTION = DO IT. If the user already stated the exact change (e.g. "change share
+  to 15%", "set email to x@y.com", "make it 20 percent"), call the write tool with
+  needs_confirm=false and APPLY NOW. Do NOT ask "say yes / do it / go ahead" when they
+  already told you what to do. Extra confirmation is only for vague asks ("can you edit
+  this offtaker?") with no value/field specified yet.
+- ui_fill / ui_click / data writes: needs_confirm=false when the user's message clearly
+  specifies the change; true only when the intent is ambiguous.
 - Offtaker share %: use patch_offtaker with offtaker_name or subscription_id and share_pct
-  (e.g. 24.5 for 24.5%). After they confirm, the UI soft-refreshes — do not tell them to
-  hard-refresh the browser.
+  (e.g. 24.5 for 24.5%), needs_confirm=false when they named the offtaker and the new %.
+  After apply, the UI soft-refreshes — do not tell them to hard-refresh the browser.
 - Offtaker utility / master account rebind: list_offtakers first (shows utility_account_id,
   array_id, nicknames), then patch_offtaker with utility_account_id|utility_account_name
   and/or array_id|array_name|master_account. product_map(topic=offtakers) for the full
@@ -844,7 +849,8 @@ TOOL_DEFS = [
                 "array_id + utility_account_id — NOT renaming customer_name. "
                 "Only pass name= when the user explicitly wants to rename the offtaker. "
                 "share_pct is percent (25) or fraction 0–1. "
-                "Requires confirm unless the user already clearly approved the exact change."
+                "Set needs_confirm=false when the user already stated the exact change "
+                "(e.g. share to 15%). Do not wait for a second 'yes'."
             ),
             "parameters": {
                 "type": "object",
@@ -2208,7 +2214,73 @@ def _propose_site_improvement_tool(db, tenant: Tenant, args: dict) -> dict:
     }
 
 
-def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> dict:
+def _user_clearly_directed(user_text: str, payload: dict | None = None) -> bool:
+    """True when the user's message already states the exact write — no second 'yes'.
+
+    Examples that MUST auto-apply (Ford 2026-07-14): "change it to 15%",
+    "set the share percent to 20", "update email to a@b.com". Vague "can you edit
+    this offtaker?" without a value still needs a clarifying question — not a confirm.
+    """
+    t = (user_text or "").strip()
+    if not t:
+        return False
+    # Explicit one-shot approvals always count
+    if _YES_RE.match(t):
+        return True
+    low = t.lower()
+    # Imperative / request + a concrete value
+    has_directive = bool(
+        re.search(
+            r"\b(change|set|update|make\s+it|edit|switch|put|bump|raise|lower|"
+            r"move|rename|want|like|please|i'?d\s+like)\b",
+            low,
+        )
+    )
+    if not has_directive:
+        return False
+    payload = payload or {}
+    # Share % (most common offtaker edit)
+    if re.search(r"\d+(\.\d+)?\s*%", low) or re.search(
+        r"\b(to|at|as)\s+\d+(\.\d+)?\b", low
+    ):
+        if re.search(r"\b(share|percent|pct|allocation|%\s*share)\b", low) or any(
+            k in payload for k in ("share_pct", "allocation_pct", "array_share_pct")
+        ) or not payload:
+            return True
+    # Email
+    if re.search(r"[\w.+-]+@[\w.-]+\.\w+", t):
+        if re.search(r"\b(email|e-mail|mail)\b", low) or "email" in payload or "client_email" in payload:
+            return True
+    # Master / utility / array rebind by name
+    if re.search(r"\b(master\s*account|utility|source|bind|rebind|array)\b", low):
+        if any(
+            k in payload
+            for k in (
+                "utility_account_id",
+                "array_id",
+                "utility_account_name",
+                "array_name",
+                "master_account",
+            )
+        ) or re.search(r"\b(to|for)\s+[\w][\w\s-]{1,40}", low):
+            return True
+    # Explicit rename
+    if re.search(r"\b(rename|name\s+it|call\s+(it|them))\b", low):
+        return True
+    # Payload present + directive + number/value-ish
+    if payload and re.search(r"\d", low):
+        return True
+    return False
+
+
+def _run_tool(
+    name: str,
+    args: dict,
+    tenant: Tenant,
+    session: EaSession,
+    db,
+    user_text: str = "",
+) -> dict:
     args = args or {}
     tid = tenant.id
 
@@ -2376,11 +2448,14 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
         }
 
     if name in ("ui_navigate", "ui_highlight", "ui_fill", "ui_click", "ui_tour"):
-        # Navigate + highlight + tours are instant (user already asked). Writes still confirm.
+        # Navigate + highlight + tours are instant. Writes skip confirm when the
+        # user already stated the exact change this turn.
         if name in ("ui_navigate", "ui_highlight", "ui_tour"):
             needs = False
         else:
             needs = bool(args.get("needs_confirm", True))
+            if needs and _user_clearly_directed(user_text, args):
+                needs = False
         cmd_type = name.replace("ui_", "")
         if name == "ui_tour":
             cmd_type = "tour"
@@ -2541,7 +2616,10 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
                 ),
             }
 
-        needs = args.get("needs_confirm", True)
+        needs = bool(args.get("needs_confirm", True))
+        # Server-side gate: clear user direction → apply, never re-ask for "yes"
+        if needs and _user_clearly_directed(user_text, payload):
+            needs = False
         reason = (
             f"Update offtaker #{sub.id} ({getattr(sub, 'customer_name', '') or 'unnamed'}): "
             + ", ".join(f"{k}={v}" for k, v in payload.items())
@@ -2593,7 +2671,11 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
         return {
             "status": "pending_confirm",
             "pending": cmd,
-            "message": f"Ready: {reason}. Ask the user to confirm (Yes).",
+            "message": (
+                f"Ready: {reason}. Only ask for confirm if the user's request was "
+                "ambiguous — if they already stated the exact change, re-call with "
+                "needs_confirm=false."
+            ),
             "preview": {
                 "subscription_id": sub.id,
                 "name": getattr(sub, "customer_name", None),
@@ -3202,16 +3284,33 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
                 targs = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 targs = {}
-            out = _run_tool(tname, targs, tenant, session, db)
+            out = _run_tool(tname, targs, tenant, session, db, user_text=user_text)
             tool_trace.append({"name": tname, "args": targs, "result": out})
 
             if isinstance(out, dict) and out.get("status") == "pending_confirm":
-                pending = out.get("pending")
-                session.pending_json = json.dumps(pending)
+                pend = out.get("pending") or {}
+                # Second chance: if the model left needs_confirm on but the user
+                # already directed the write, apply now instead of Yes/No UI.
+                body_preview = (pend.get("args") or {}).get("body") or (pend.get("args") or {})
+                if _user_clearly_directed(user_text, body_preview) and pend.get("type") == "api_patch":
+                    targs2 = dict(targs)
+                    targs2["needs_confirm"] = False
+                    out2 = _run_tool(tname, targs2, tenant, session, db, user_text=user_text)
+                    tool_trace.append({"name": tname, "args": targs2, "result": out2})
+                    out = out2
+                    pending = None
+                    session.pending_json = None
+                else:
+                    pending = pend
+                    session.pending_json = json.dumps(pending)
             if isinstance(out, dict) and out.get("status") == "ui_command":
                 ui_commands.append(out["command"])
                 for extra in out.get("also_commands") or []:
                     ui_commands.append(extra)
+                # Clear stale pending when we successfully applied a write
+                if out.get("applied"):
+                    pending = None
+                    session.pending_json = None
 
             messages.append({
                 "role": "tool",
@@ -3228,6 +3327,16 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
             "Done — check the tool timeline. Confirm if I'm waiting on a yes."
             if pending else "Done."
         )
+
+    # If we applied a write this turn, never leave a "say yes" speech bubble
+    if any(
+        isinstance(t.get("result"), dict) and t["result"].get("applied")
+        for t in tool_trace
+    ):
+        pending = None
+        session.pending_json = None
+        if re.search(r"\b(say\s+yes|confirm|go\s+ahead|do\s+it)\b", final_text or "", re.I):
+            final_text = "Done — I applied that change. The Invoices view should update without a refresh."
 
     # If any tool failed open-ended and model didn't escalate, still escalate quietly
     if any(
