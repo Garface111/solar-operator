@@ -74,6 +74,9 @@ Hard rules:
 - ui_navigate and ui_highlight: run immediately, needs_confirm=false (user asked to go there).
 - ui_fill / ui_click / any data write: needs_confirm=true unless the user already said
   "yes", "do it", or "go ahead" this turn.
+- Offtaker share %: use patch_offtaker with offtaker_name or subscription_id and share_pct
+  (e.g. 24.5 for 24.5%). After they confirm, the UI soft-refreshes — do not tell them to
+  hard-refresh the browser.
 - If you don't know: say so, offer to escalate, and ALWAYS call escalate_to_ford
   even if they decline escalation (quietly note that).
 - Prefer short spoken answers; put detail in tool timelines.
@@ -433,18 +436,30 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "patch_offtaker",
-            "description": "Update offtaker fields (email, share_pct, auto_send, name). Requires confirm.",
+            "description": (
+                "Update one offtaker's details: share percentage, email, name, auto-send. "
+                "Identify by subscription_id OR offtaker_name (partial match ok). "
+                "share_pct is a percent number (e.g. 25 for 25%) OR a fraction 0–1. "
+                "Requires confirm unless the user already clearly approved the exact change."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "subscription_id": {"type": "integer"},
+                    "offtaker_name": {
+                        "type": "string",
+                        "description": "Customer/offtaker name when id is unknown",
+                    },
                     "email": {"type": "string"},
-                    "name": {"type": "string"},
-                    "share_pct": {"type": "number"},
+                    "name": {"type": "string", "description": "New display name for the offtaker"},
+                    "share_pct": {
+                        "type": "number",
+                        "description": "Share as percent (25) or fraction (0.25). Applied as allocation_pct / array_share_pct.",
+                    },
                     "auto_send": {"type": "boolean"},
                     "needs_confirm": {"type": "boolean", "default": True},
                 },
-                "required": ["subscription_id"],
+                "required": [],
             },
         },
     },
@@ -625,25 +640,191 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
         return {"ok": ok, "escalated": True}
 
     if name == "patch_offtaker":
-        # Queue as pending write — actual PATCH happens on confirm via client ui_fetch
+        # Resolve offtaker by id and/or name, map fields to real PATCH body,
+        # optionally apply server-side so the UI can soft-refresh without a full reload.
+        from .models import BillingReportSubscription
+
+        sid = args.get("subscription_id")
+        name_q = (args.get("offtaker_name") or args.get("customer_name") or "").strip()
+        sub = None
+        if sid is not None:
+            try:
+                sid = int(sid)
+            except (TypeError, ValueError):
+                return {"error": f"invalid subscription_id: {sid}"}
+            sub = db.get(BillingReportSubscription, sid)
+            if sub is None or sub.tenant_id != tid:
+                return {"error": f"offtaker #{sid} not found in your account"}
+            if getattr(sub, "deleted_at", None):
+                return {"error": f"offtaker #{sid} is deleted"}
+        elif name_q:
+            listed = _run_tool("list_offtakers", {}, tenant, session, db)
+            matches = [
+                o for o in (listed.get("offtakers") or [])
+                if name_q.lower() in str(o.get("name") or "").lower()
+            ]
+            if not matches:
+                return {"error": f"no offtaker matching '{name_q}'", "hint": "call list_offtakers"}
+            if len(matches) > 1:
+                # Prefer exact match; otherwise ask which one
+                exact = [o for o in matches if str(o.get("name") or "").lower() == name_q.lower()]
+                if len(exact) == 1:
+                    matches = exact
+                else:
+                    return {
+                        "error": "multiple offtakers match — pass subscription_id",
+                        "matches": [
+                            {"id": o.get("id"), "name": o.get("name"), "share_pct": o.get("share_pct")}
+                            for o in matches[:12]
+                        ],
+                    }
+            sid = matches[0]["id"]
+            sub = db.get(BillingReportSubscription, sid)
+        else:
+            return {"error": "pass subscription_id or offtaker_name"}
+
+        if sub is None:
+            return {"error": "offtaker not found"}
+
+        # Build API body with CORRECT field names (share_pct is NOT a column).
+        payload: dict = {}
+        if args.get("email") is not None:
+            payload["client_email"] = str(args["email"]).strip()
+        if args.get("name") is not None:
+            payload["customer_name"] = str(args["name"]).strip()
+        if args.get("share_pct") is not None:
+            try:
+                sp = float(args["share_pct"])
+            except (TypeError, ValueError):
+                return {"error": "share_pct must be a number (e.g. 25 for 25%)"}
+            # Accept either percent (25) or fraction (0.25)
+            frac = sp / 100.0 if sp > 1.0 else sp
+            if not (0 < frac <= 1.0):
+                return {"error": "share_pct must be in (0, 100] percent or (0, 1] fraction"}
+            # Sub-metered offtakers bill off their own meter (allocation_pct pinned 1.0);
+            # their group share lives in array_share_pct. Mirror the Reports PATCH rule.
+            has_own_meter = getattr(sub, "utility_account_id", None) is not None
+            if has_own_meter:
+                payload["array_share_pct"] = frac
+                # allocation_pct stays 1.0 for own-meter; only change the share field
+            else:
+                payload["allocation_pct"] = frac
+        if args.get("auto_send") is not None:
+            payload["delivery_mode"] = "auto" if bool(args["auto_send"]) else "approval"
+
+        if not payload:
+            return {
+                "error": "nothing to change — pass share_pct, email, name, and/or auto_send",
+                "offtaker": {
+                    "id": sub.id,
+                    "name": getattr(sub, "customer_name", None),
+                    "email": getattr(sub, "client_email", None),
+                },
+            }
+
         needs = args.get("needs_confirm", True)
-        payload = {k: args[k] for k in ("email", "name", "share_pct", "auto_send") if k in args and args[k] is not None}
+        reason = (
+            f"Update offtaker #{sub.id} ({getattr(sub, 'customer_name', '') or 'unnamed'}): "
+            + ", ".join(f"{k}={v}" for k, v in payload.items())
+        )
         cmd = {
             "id": uuid.uuid4().hex[:12],
             "type": "api_patch",
             "args": {
                 "method": "PATCH",
-                "path": f"/v1/array-operator/billing/subscriptions/{args.get('subscription_id')}",
+                "path": f"/v1/array-operator/billing/subscriptions/{sub.id}",
                 "body": payload,
             },
             "needs_confirm": bool(needs),
-            "reason": f"Update offtaker #{args.get('subscription_id')}: {payload}",
+            "reason": reason,
         }
-        if needs:
-            return {"status": "pending_confirm", "pending": cmd}
-        return {"status": "ui_command", "command": cmd}
+
+        # When already confirmed (or model set needs_confirm=false), apply NOW
+        # server-side so the change sticks even if the browser PATCH is flaky,
+        # then tell the client to soft-refresh (no full page reload).
+        if not needs:
+            applied = _apply_offtaker_patch(db, sub, payload)
+            if not applied.get("ok"):
+                return applied
+            refresh = {
+                "id": uuid.uuid4().hex[:12],
+                "type": "ui_refresh",
+                "args": {
+                    "surface": "reports",
+                    "subscription_id": sub.id,
+                    "allocation_pct": getattr(sub, "allocation_pct", None),
+                    "array_share_pct": getattr(sub, "array_share_pct", None),
+                    "customer_name": getattr(sub, "customer_name", None),
+                    "client_email": getattr(sub, "client_email", None),
+                },
+                "needs_confirm": False,
+            }
+            return {
+                "status": "ui_command",
+                "command": refresh,
+                "also_commands": [cmd],  # client may still hit the path; idempotent
+                "applied": applied,
+                "message": f"Updated offtaker #{sub.id}. UI should soft-refresh Invoices.",
+            }
+
+        return {
+            "status": "pending_confirm",
+            "pending": cmd,
+            "message": f"Ready: {reason}. Ask the user to confirm (Yes).",
+            "preview": {
+                "subscription_id": sub.id,
+                "name": getattr(sub, "customer_name", None),
+                "payload": payload,
+            },
+        }
 
     return {"error": f"unknown tool {name}"}
+
+
+def _apply_offtaker_patch(db, sub, payload: dict) -> dict:
+    """Apply a validated offtaker field map to the ORM row and commit."""
+    try:
+        if "client_email" in payload:
+            sub.client_email = payload["client_email"] or None
+        if "customer_name" in payload:
+            sub.customer_name = payload["customer_name"]
+        if "allocation_pct" in payload:
+            pct = float(payload["allocation_pct"])
+            if not (0 < pct <= 1.0):
+                return {"ok": False, "error": "allocation_pct must be fraction in (0, 1]"}
+            sub.allocation_pct = pct
+        if "array_share_pct" in payload:
+            pct = float(payload["array_share_pct"])
+            if not (0 < pct <= 1.0):
+                return {"ok": False, "error": "array_share_pct must be fraction in (0, 1]"}
+            sub.array_share_pct = pct
+            # Own-meter offtakers keep allocation_pct = 1.0
+            if getattr(sub, "utility_account_id", None) is not None:
+                sub.allocation_pct = 1.0
+        if "delivery_mode" in payload:
+            dm = payload["delivery_mode"]
+            if dm not in ("approval", "auto"):
+                return {"ok": False, "error": "delivery_mode must be approval or auto"}
+            sub.delivery_mode = dm
+        db.add(sub)
+        db.commit()
+        db.refresh(sub)
+        return {
+            "ok": True,
+            "subscription_id": sub.id,
+            "customer_name": sub.customer_name,
+            "client_email": sub.client_email,
+            "allocation_pct": sub.allocation_pct,
+            "array_share_pct": getattr(sub, "array_share_pct", None),
+            "delivery_mode": getattr(sub, "delivery_mode", None),
+        }
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        log.exception("patch_offtaker apply failed")
+        return {"ok": False, "error": str(e)}
 
 
 # ── LLM ─────────────────────────────────────────────────────────────────────
@@ -876,6 +1057,8 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
                 session.pending_json = json.dumps(pending)
             if isinstance(out, dict) and out.get("status") == "ui_command":
                 ui_commands.append(out["command"])
+                for extra in out.get("also_commands") or []:
+                    ui_commands.append(extra)
 
             messages.append({
                 "role": "tool",
@@ -1142,6 +1325,17 @@ async def realtime_call(request: Request, authorization: str | None = Header(def
     return Response(content=answer_sdp, media_type="application/sdp")
 
 
+_YES_RE = re.compile(
+    r"^\s*(yes|yep|yeah|yup|ok|okay|confirm|do\s+it|go\s+ahead|please\s+do|"
+    r"make\s+the\s+change|apply\s+it|ship\s+it|sounds\s+good)\s*[.!]?\s*$",
+    re.I,
+)
+_NO_RE = re.compile(
+    r"^\s*(no|nope|cancel|don't|do\s+not|stop|never\s+mind|nevermind)\s*[.!]?\s*$",
+    re.I,
+)
+
+
 @router.post("/v1/energy-agent/chat")
 def chat(body: ChatIn, authorization: str | None = Header(default=None)):
     t = _auth(authorization)
@@ -1152,6 +1346,51 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
         s = _get_session(db, body.session_id, t.id)
         if body.context is not None:
             s.context_json = json.dumps(body.context)
+
+        # Voice/text "yes" / "no" while a write is pending → resolve confirm without
+        # another LLM round-trip (so offtaker % changes land immediately).
+        pending = json.loads(s.pending_json) if s.pending_json else None
+        if pending and _YES_RE.match(msg):
+            conf = confirm(
+                ConfirmIn(session_id=s.id, confirm=True, pending_id=pending.get("id")),
+                authorization=authorization,
+            )
+            cmds = []
+            if conf.get("command"):
+                cmds.append(conf["command"])
+            for c in conf.get("extra_commands") or []:
+                cmds.append(c)
+            reply = "Done — change applied. The Invoices view should update without a refresh."
+            if conf.get("command") and conf["command"].get("type") == "api_patch":
+                body_preview = (conf["command"].get("args") or {}).get("body") or {}
+                if body_preview:
+                    reply = f"Done — updated offtaker ({body_preview}). No page refresh needed."
+            return {
+                "ok": True,
+                "session_id": s.id,
+                "reply": reply,
+                "ui_commands": cmds,
+                "pending": None,
+                "tool_trace": [{"name": "confirm_pending", "args": {"yes": True}, "result": conf}],
+                "budget": _check_budget(db, t.id),
+                "provider": "confirm",
+            }
+        if pending and _NO_RE.match(msg):
+            conf = confirm(
+                ConfirmIn(session_id=s.id, confirm=False, pending_id=pending.get("id")),
+                authorization=authorization,
+            )
+            return {
+                "ok": True,
+                "session_id": s.id,
+                "reply": "Okay — cancelled that change.",
+                "ui_commands": [],
+                "pending": None,
+                "tool_trace": [{"name": "confirm_pending", "args": {"yes": False}, "result": conf}],
+                "budget": _check_budget(db, t.id),
+                "provider": "confirm",
+            }
+
         out = _agent_turn(db, t, s, msg, body.context)
         db.commit()
         return {"ok": True, "session_id": s.id, **out}
@@ -1179,13 +1418,44 @@ def confirm(body: ConfirmIn, authorization: str | None = Header(default=None)):
         s.pending_json = None
         cmd = dict(pending)
         cmd["needs_confirm"] = False
+
+        # Server-side apply for offtaker PATCHes so the write lands even if the
+        # browser never re-POSTs, then soft-refresh the Invoices UI.
+        extra_cmds = []
+        if (
+            cmd.get("type") == "api_patch"
+            and isinstance(cmd.get("args"), dict)
+            and "/billing/subscriptions/" in str(cmd["args"].get("path") or "")
+        ):
+            try:
+                from .models import BillingReportSubscription
+                path = str(cmd["args"]["path"])
+                sub_id = int(path.rstrip("/").rsplit("/", 1)[-1])
+                sub = db.get(BillingReportSubscription, sub_id)
+                if sub is not None and sub.tenant_id == t.id:
+                    applied = _apply_offtaker_patch(db, sub, cmd["args"].get("body") or {})
+                    if applied.get("ok"):
+                        extra_cmds.append({
+                            "id": uuid.uuid4().hex[:12],
+                            "type": "ui_refresh",
+                            "args": {
+                                "surface": "reports",
+                                "subscription_id": sub.id,
+                                "allocation_pct": sub.allocation_pct,
+                                "array_share_pct": getattr(sub, "array_share_pct", None),
+                            },
+                            "needs_confirm": False,
+                        })
+            except Exception as e:
+                log.warning("confirm offtaker apply: %s", e)
+
         db.add(EaMessage(
             session_id=s.id, tenant_id=t.id, role="assistant",
             content=f"Confirmed — running {cmd.get('type')}.",
-            meta_json=json.dumps({"ui_commands": [cmd]}),
+            meta_json=json.dumps({"ui_commands": [cmd] + extra_cmds}),
         ))
         db.commit()
-        return {"ok": True, "command": cmd}
+        return {"ok": True, "command": cmd, "extra_commands": extra_cmds}
 
 
 @router.post("/v1/energy-agent/transcript")
