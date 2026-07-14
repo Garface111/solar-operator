@@ -3819,7 +3819,13 @@ def realtime_session(body: dict | None = None, authorization: str | None = Heade
     with SessionLocal() as db:
         budget = _check_budget(db, t.id)
         if not budget["ok"]:
-            raise HTTPException(402, "Weekly Energy Agent budget exhausted")
+            raise HTTPException(
+                402,
+                detail={
+                    "error": "Weekly Energy Agent budget exhausted",
+                    "budget": budget,
+                },
+            )
     voice = (body or {}).get("voice") if body else None
     # Modern client_secrets endpoint (Realtime 2.x)
     payload = {"session": _realtime_session_config(voice)}
@@ -3878,7 +3884,13 @@ async def realtime_call(request: Request, authorization: str | None = Header(def
     with SessionLocal() as db:
         budget = _check_budget(db, t.id)
         if not budget["ok"]:
-            raise HTTPException(402, "Weekly Energy Agent budget exhausted")
+            raise HTTPException(
+                402,
+                detail={
+                    "error": "Weekly Energy Agent budget exhausted",
+                    "budget": budget,
+                },
+            )
 
     sdp_offer = (await request.body()).decode("utf-8", "replace")
     if not sdp_offer.strip():
