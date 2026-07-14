@@ -443,6 +443,10 @@ app.include_router(cloud_capture_router)
 # Auto-adapter engine: self-improving declarative adapters (synth -> validate -> registry)
 from .auto_adapters import router as auto_adapters_router
 app.include_router(auto_adapters_router)
+
+# Energy Agent — voice-first tenant operator (orb + tools + dual memory)
+from .energy_agent import router as energy_agent_router
+app.include_router(energy_agent_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(
