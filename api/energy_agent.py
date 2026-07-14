@@ -27,7 +27,8 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Float, Integer, String, Text, select
 from sqlalchemy.orm import Mapped, mapped_column
@@ -47,9 +48,9 @@ XAI_API_KEY = (os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY") or "").stri
 ANTHROPIC_API_KEY = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 XAI_BASE = os.getenv("XAI_API_BASE", "https://api.x.ai/v1").rstrip("/")
 XAI_MODEL = os.getenv("ENERGY_AGENT_MODEL", "grok-4-1-fast-reasoning")
-OPENAI_REALTIME_MODEL = os.getenv(
-    "OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview"
-)
+# Latest OpenAI Realtime voice model (docs 2026: gpt-realtime-2.1)
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
+OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")
 WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "5.0"))
 # Rough cost estimates when provider doesn't return usage $
 COST_PER_1K_INPUT = float(os.getenv("EA_COST_PER_1K_IN", "0.003"))
@@ -991,40 +992,144 @@ def get_session(sid: str, authorization: str | None = Header(default=None)):
         }
 
 
+def _realtime_session_config(voice: str | None = None) -> dict:
+    """Session config for latest GPT Realtime (WebRTC / client_secrets)."""
+    return {
+        "type": "realtime",
+        "model": OPENAI_REALTIME_MODEL,
+        "instructions": (
+            "You are Energy Agent, the tenant's voice-first solar operator inside Array Operator. "
+            "Speak English, short and natural (like GPT Live). Slight warmth about harvesting the sun "
+            "and climbing the Kardashev ladder is fine — never preachy. "
+            "You help with fleet health, offtaker invoices, analysis, onboarding, and account. "
+            "Be honest about what you can and cannot do. Never invent kWh or money numbers — "
+            "when you need facts, call tools. Never reveal secrets or other tenants' data. "
+            "Never charge cards. Confirm before changing anything on screen. "
+            "If you don't know, say so and say you'll flag it for Ford."
+        ),
+        "audio": {
+            "output": {"voice": voice or OPENAI_REALTIME_VOICE},
+            "input": {
+                "transcription": {"model": "gpt-4o-mini-transcribe"},
+            },
+        },
+    }
+
+
 @router.post("/v1/energy-agent/realtime-session")
 def realtime_session(body: dict | None = None, authorization: str | None = Header(default=None)):
-    """Mint ephemeral OpenAI Realtime credentials (never expose OPENAI_API_KEY)."""
+    """Mint ephemeral OpenAI Realtime client secret (never expose OPENAI_API_KEY).
+
+    Browser uses the secret only for WebRTC; prefer /realtime-call (unified) when possible.
+    """
     t = _auth(authorization)
     if not OPENAI_API_KEY:
         raise HTTPException(
             503,
-            "Voice not configured — set OPENAI_API_KEY on the server. Text chat still works.",
+            "Voice not configured — set OPENAI_API_KEY on the server (Railway). Text still works.",
         )
     with SessionLocal() as db:
         budget = _check_budget(db, t.id)
         if not budget["ok"]:
             raise HTTPException(402, "Weekly Energy Agent budget exhausted")
-    payload = {
+    voice = (body or {}).get("voice") if body else None
+    # Modern client_secrets endpoint (Realtime 2.x)
+    payload = {"session": _realtime_session_config(voice)}
+    try:
+        out = _http_json(
+            "https://api.openai.com/v1/realtime/client_secrets",
+            {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            payload,
+            timeout=30,
+        )
+    except HTTPException:
+        # Fallback older sessions API
+        legacy = {
+            "model": OPENAI_REALTIME_MODEL,
+            "voice": voice or OPENAI_REALTIME_VOICE,
+            "modalities": ["audio", "text"],
+            "instructions": _realtime_session_config(voice)["instructions"],
+        }
+        out = _http_json(
+            "https://api.openai.com/v1/realtime/sessions",
+            {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+                "OpenAI-Beta": "realtime=v1",
+            },
+            legacy,
+            timeout=30,
+        )
+    # Normalize: client_secrets returns {value, ...}; sessions returns {client_secret:{value}}
+    secret = out.get("value") or (out.get("client_secret") or {}).get("value")
+    return {
+        "ok": True,
         "model": OPENAI_REALTIME_MODEL,
-        "voice": (body or {}).get("voice") or "alloy",
-        "modalities": ["audio", "text"],
-        "instructions": (
-            "You are the voice interface for Energy Agent. Keep replies short and natural. "
-            "The app handles tools via a separate channel — acknowledge actions briefly. "
-            "English only. Allow barge-in."
-        ),
+        "voice": voice or OPENAI_REALTIME_VOICE,
+        "client_secret": secret,
+        "realtime": out,
+        "budget": budget,
     }
-    out = _http_json(
-        "https://api.openai.com/v1/realtime/sessions",
-        {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-            "OpenAI-Beta": "realtime=v1",
-        },
-        payload,
-        timeout=30,
+
+
+@router.post("/v1/energy-agent/realtime-call")
+async def realtime_call(request: Request, authorization: str | None = Header(default=None)):
+    """Unified WebRTC path: browser POSTs SDP offer; we auth to OpenAI and return SDP answer.
+
+    Key never leaves the server. Body is raw application/sdp.
+    """
+    t = _auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            503,
+            "Voice not configured — set OPENAI_API_KEY on the server (Railway).",
+        )
+    with SessionLocal() as db:
+        budget = _check_budget(db, t.id)
+        if not budget["ok"]:
+            raise HTTPException(402, "Weekly Energy Agent budget exhausted")
+
+    sdp_offer = (await request.body()).decode("utf-8", "replace")
+    if not sdp_offer.strip():
+        raise HTTPException(400, "Empty SDP offer")
+
+    session_cfg = json.dumps(_realtime_session_config())
+    # multipart form: sdp + session
+    boundary = "----EAFormBoundary" + uuid.uuid4().hex[:12]
+    parts = []
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"sdp\"\r\n"
+        f"Content-Type: application/sdp\r\n\r\n{sdp_offer}\r\n"
     )
-    return {"ok": True, "realtime": out, "budget": budget}
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"session\"\r\n"
+        f"Content-Type: application/json\r\n\r\n{session_cfg}\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n")
+    body = "".join(parts).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/realtime/calls",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "OpenAI-Safety-Identifier": f"ea-tenant-{t.id}"[:64],
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            answer_sdp = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", "replace")[:800]
+        log.error("realtime-call failed %s: %s", e.code, err)
+        raise HTTPException(502, f"OpenAI Realtime error {e.code}: {err}") from e
+
+    return Response(content=answer_sdp, media_type="application/sdp")
 
 
 @router.post("/v1/energy-agent/chat")
