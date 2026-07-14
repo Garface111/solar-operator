@@ -130,7 +130,7 @@ def email_html(name: str) -> str:
       <li><strong>Product knowledge</strong> — plain-English how Array Operator works:
       cloud vs device auto-refresh, how offtaker invoices are generated from utility
       bills, tabs and workflows.</li>
-      <li><strong>Voice + text</strong> — GPT natural voice when you enable the mic, or
+      <li><strong>Voice + text</strong> — natural voice when you enable the mic, or
       type anytime.</li>
       <li><strong>Improve this site</strong> — mark up a change and send it through our
       judge pipeline for small UI fixes on your account.</li>
