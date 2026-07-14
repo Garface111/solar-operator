@@ -1579,13 +1579,13 @@ def start():
 
 
 def _run_energy_agent_mind_tick() -> None:
-    """Drain queued mind tasks for tenants with open EA sessions (last 24h)."""
+    """Cognitive tick: observe → reprioritize → drain for tenants with open EA sessions."""
     try:
         from datetime import datetime, timedelta
         from sqlalchemy import select, distinct
         from .db import SessionLocal
         from .energy_agent import EaSession
-        from .energy_agent_mind import drain_tasks
+        from .energy_agent_mind import mind_tick, sync_improvement_wins
         cutoff = datetime.utcnow() - timedelta(hours=24)
         with SessionLocal() as db:
             tenant_ids = db.execute(
@@ -1596,7 +1596,9 @@ def _run_energy_agent_mind_tick() -> None:
             ).scalars().all()
             for tid in tenant_ids[:40]:
                 try:
-                    drain_tasks(db, tid, limit=4)
+                    mind_tick(db, tid)
+                    # Phase D: fold shipped feature suggestions into win events
+                    sync_improvement_wins(db, tid)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("mind tick tenant %s: %s", tid, exc)
             db.commit()

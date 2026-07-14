@@ -166,15 +166,21 @@ Non-goals for v1:
 - [x] Frontend: subtle mind activity + inject background updates as same voice  
 
 ### Phase B — Cognitive tick
-- [x] Scheduler soft tick (90s drain for tenants with open EA sessions)  
-- [ ] Interrupt policy hardening (rate limit, importance score)  
+- [x] Scheduler soft tick (90s observe → reprioritize → drain for open EA sessions)  
+- [x] Interrupt policy hardening (importance score, cooldown, max/hour + max/day)  
+- [x] `interrupt_suppressed` events when policy holds a speak back  
 
 ### Phase C — Richer workers
-- Similar-complaint search across tenant digests  
-- Full UX proposal loop with refresh-and-ask  
+- [x] Similar-complaint search across memory + past plans + feature suggestions  
+- [x] UX refine intents (finding vs understanding)  
+- [x] Full UX proposal loop: friction → clarify → user yes → `propose_ui` → judge pipeline → refresh-and-ask speak  
+- [x] `analyze_focus` worker for fleet concerns  
 
 ### Phase D — Metrics
-- Dashboard: cost per successful improvement, task success rate, interrupt accept rate  
+- [x] `GET /v1/energy-agent/mind/metrics` — cost per successful improvement, task success rate, interrupt accept rate  
+- [x] Interrupt outcomes (`shown` / `accepted` / `dismissed`) for accept-rate  
+- [x] Sync shipped feature suggestions → `improvement_win` events  
+- [x] Frontend: action chips + soft metrics line in panel footer  
 
 ---
 
