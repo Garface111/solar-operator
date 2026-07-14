@@ -138,11 +138,22 @@ CRITICAL — offtaker "master account" / utility source is NOT the offtaker's na
   NEVER rename customer_name to that value. Renaming is only when they explicitly say
   rename / change the offtaker's display name.
 
-Site improvements:
-  When the user wants the product/UI changed ("improve this page", "wish this was better",
-  "move this button"), call propose_site_improvement OR emit ui command improve_site so the
-  client freezes the page for markup. Tell them an AI judge will approve/deny auto-ship.
-  You do not write frontend code yourself — the judged pipeline does.
+Site improvements (CRITICAL — Ford 2026-07-14 voice fail):
+  Visual / color / button / "doesn't look good" asks are NOT a design lecture.
+  Do NOT monologue about design tokens, sky mode, CSS variables, or system language.
+  Do NOT call product_map for pure visual polish.
+  Do NOT fire many tools at once. One mind, one quiet fix path:
+    1) One short spoken line: "Oh I see — I'll fix that." (or similar, ≤2 sentences)
+    2) Call propose_site_improvement with their words as text (force_submit true if no
+       screenshot yet) OR emit improve_site for markup — still as YOU, never "an agent."
+    3) Say you'll nudge when there's something to refresh. Then STOP talking.
+  Never narrate a multi-step redesign plan out loud. Background work is silent.
+
+Voice discipline:
+  - WAIT for the full request. Prefer one clarifying question over premature action.
+  - Short spoken replies. Long analysis stays in tools, not in the mouth.
+  - If the user says stop / wait / cancel / enough — halt immediately (client enforces;
+    still never keep monologuing if they already asked you to stop).
 
 Hard rules:
 - Never invent kWh, $, counts, or status. Use tools and report what they return.
@@ -3250,6 +3261,100 @@ def _usage_cost(usage: dict) -> float:
     return (pin / 1000.0) * COST_PER_1K_INPUT + (pout / 1000.0) * COST_PER_1K_OUTPUT
 
 
+_VISUAL_FIX_RE = re.compile(
+    r"\b(color|colour|look(s|ing)?|ugly|pretty|style|styling|theme|contrast|"
+    r"button|chip|badge|doesn.?t look|does not look|fix the (color|colour|button)|"
+    r"hard to (read|see|scan))\b",
+    re.I,
+)
+
+
+def _visual_fix_fast_path(
+    db, tenant: Tenant, session: EaSession, user_text: str, context: dict | None,
+) -> dict | None:
+    """Short ack + quiet propose_site_improvement — no design monologue, no tool spam."""
+    ctx = context or {}
+    text = (user_text or "").strip()
+    if not text or len(text) < 8:
+        return None
+    force = bool(ctx.get("visual_fix_fast") or ctx.get("prefer_short_reply"))
+    if not force and not _VISUAL_FIX_RE.search(text):
+        return None
+    # Don't steal pure data asks that merely mention "look"
+    if re.search(r"\b(share|percent|kwh|invoice|offtaker|underperform|fault)\b", text, re.I) and not force:
+        if not re.search(r"\b(button|color|colour|style|theme|ugly)\b", text, re.I):
+            return None
+
+    reply = (
+        "Oh I see — I'll fix that. Working on it in the background; "
+        "I'll nudge you when there's something to refresh and check."
+    )
+    tool_trace = []
+    ui_commands = []
+    # Queue improvement as this mind (not a separate "agent")
+    try:
+        out = _propose_site_improvement_tool(db, tenant, {
+            "text": text[:2000],
+            "force_submit": True,
+            "start_markup": False,
+        })
+        tool_trace.append({
+            "name": "propose_site_improvement",
+            "args": {"text": text[:200], "force_submit": True},
+            "result": {k: out.get(k) for k in ("ok", "suggestion_id", "status", "message", "error") if k in out},
+        })
+        if out.get("command"):
+            ui_commands.append(out["command"])
+        elif out.get("status") == "ui_command" and out.get("command"):
+            ui_commands.append(out["command"])
+    except Exception as e:
+        log.warning("visual fix propose failed: %s", e)
+        # Fall back to client markup command
+        ui_commands.append({
+            "id": uuid.uuid4().hex[:12],
+            "type": "improve_site",
+            "args": {"mark_first": False, "hint": text[:400]},
+            "needs_confirm": False,
+        })
+
+    mind_out = None
+    try:
+        from .energy_agent_mind import classify_and_plan, drain_tasks
+        mind_plan = classify_and_plan(
+            db, tenant.id, session.id, text, context=ctx,
+        )
+        drain_tasks(db, tenant.id, limit=3)
+        if mind_plan:
+            mind_out = {
+                "plan_id": mind_plan.get("plan_id"),
+                "intent": mind_plan.get("intent"),
+                "task_count": len(mind_plan.get("tasks") or []),
+                "note": "Quiet UX work — same mind.",
+            }
+    except Exception as e:
+        log.warning("visual fix mind skipped: %s", e)
+
+    db.add(EaMessage(
+        session_id=session.id, tenant_id=tenant.id, role="user", content=text[:8000],
+        meta_json=json.dumps({"context": ctx, "visual_fix_fast": True}) if ctx else None,
+    ))
+    db.add(EaMessage(
+        session_id=session.id, tenant_id=tenant.id, role="assistant", content=reply,
+        meta_json=json.dumps({"tool_trace": tool_trace, "ui_commands": ui_commands, "visual_fix_fast": True}),
+    ))
+
+    return {
+        "reply": reply,
+        "ui_commands": ui_commands,
+        "pending": None,
+        "tool_trace": tool_trace,
+        "budget": _check_budget(db, tenant.id),
+        "provider": "visual_fix_fast",
+        "mind": mind_out,
+        "cost_usd": 0.0,
+    }
+
+
 def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context: dict | None) -> dict:
     budget = _check_budget(db, tenant.id)
     if not budget["ok"]:
@@ -3267,6 +3372,14 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
             "provider": None,
             "mind": None,
         }
+
+    # Visual polish: short ack + quiet pipeline (skip multi-tool design lectures)
+    try:
+        fast = _visual_fix_fast_path(db, tenant, session, user_text, context)
+        if fast is not None:
+            return fast
+    except Exception as e:
+        log.warning("visual_fix_fast_path failed: %s", e)
 
     # Operating mind: classify intent → background plan/tasks (cheap, silent).
     mind_plan = None
@@ -3620,10 +3733,11 @@ def _realtime_session_config(voice: str | None = None) -> dict:
                     # 0.5 default is twitchy in rooms with fans/keyboard. Higher = quieter
                     # sounds ignored (OpenAI docs: better in noisy environments).
                     "threshold": 0.78,
-                    "prefix_padding_ms": 280,
-                    # Longer silence before "user finished" — less choppy mid-sentence cuts
-                    # and fewer ghost turns from brief clicks/coughs.
-                    "silence_duration_ms": 900,
+                    "prefix_padding_ms": 320,
+                    # Longer silence before "user finished" — multi-clause voice asks
+                    # were cut mid-thought at 900ms (Ford 2026-07-14). Keep in sync with
+                    # energy-agent.js realtimeVadConfig().
+                    "silence_duration_ms": 1400,
                     "create_response": False,
                     "interrupt_response": False,
                 },
