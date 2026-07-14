@@ -109,10 +109,15 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   ALWAYS call this first for "how many arrays/inverters do I have?" or "what's in my fleet?"
   Fleet-tree health views can OMIT pure meter-only arrays; the census does NOT.
 - query_tenant = structured read-only investigation (list/filter/group any allowlisted resource).
-- product_map = HOW THE SYSTEM WORKS (authoritative support map on the server:
-  tabs | fleet | capture | system | vendors | analysis | offtakers | billing | status | security | tools).
-  Call topic=capture or topic=system before explaining Auto-refresh; topic=status when
-  Solar.web/peer “dead vs fine” disagrees.
+- product_map = HOW THE SYSTEM WORKS (authoritative support map + surface mental model).
+  Domain: tabs | system | fleet | capture | vendors | analysis | offtakers | billing |
+  status | security | tools | …
+  SURFACE (macro why page exists / meso user goal / micro real controls — load BEFORE
+  tours or “what is this page?”): surface | product_spine | surface_invoices |
+  surface_inverters | surface_fleet_triage | surface_analysis | surface_account |
+  surface_resources | orientation_playbook.
+  Call topic=surface for whole-product layout; topic=surface_<tab> for that page;
+  topic=capture before Auto-refresh; topic=status when Solar.web/peer disagree.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
@@ -621,13 +626,13 @@ TOOL_DEFS = [
         "function": {
             "name": "product_map",
             "description": (
-                "Authoritative Array Operator product knowledge (server support map). "
-                "ALWAYS call before explaining Auto-refresh, cloud vs extension, "
-                "scraping, invoices, analysis status, plans, onboarding, or how the "
-                "system works. Topics: tabs | system | fleet | capture | vendors | "
-                "analysis | health | offtakers | billing | plans | onboarding | "
-                "resources | status | agent | api | datamodel | glossary | security | "
-                "tools | all."
+                "Authoritative Array Operator product knowledge (support map + "
+                "surface mental model). ALWAYS call before explaining Auto-refresh, "
+                "cloud vs extension, invoices, analysis, plans, onboarding, OR before "
+                "describing what a page/tab is for (use surface / surface_*). "
+                "Topics include tabs, system, surface, product_spine, "
+                "surface_invoices, surface_inverters, surface_fleet_triage, "
+                "surface_analysis, surface_account, surface_resources, and domain topics."
             ),
             "parameters": {
                 "type": "object",
@@ -635,14 +640,16 @@ TOOL_DEFS = [
                     "topic": {
                         "type": "string",
                         "description": (
-                            "tabs | system | fleet | capture | vendors | analysis | "
-                            "health | offtakers | billing | plans | onboarding | "
-                            "resources | status | agent | api | datamodel | glossary | "
-                            "security | tools | all. capture = Auto-refresh cloud/device; "
-                            "health = how the verdict/attention engine works; status = peer "
-                            "vs live vs vendor issue; offtakers = invoice generator; plans = "
-                            "entitlements/pricing tiers; agent = what you (the agent) can do; "
-                            "system = end-to-end. Pass 'all' for the topic directory."
+                            "Domain: tabs | system | fleet | capture | vendors | analysis | "
+                            "health | offtakers | billing | plans | onboarding | resources | "
+                            "status | agent | api | datamodel | glossary | security | tools. "
+                            "Surface mental model (macro/meso/micro): surface | product_spine | "
+                            "surface_invoices | surface_inverters | surface_fleet_triage | "
+                            "surface_analysis | surface_account | surface_resources | "
+                            "orientation_playbook | surface_global | anti_hallucination. "
+                            "surface = whole-product layout + orientation playbook; "
+                            "surface_invoices = Invoices tab purpose+structure; etc. "
+                            "Pass 'all' for the topic directory."
                         ),
                     },
                 },
@@ -1389,6 +1396,7 @@ def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
 # here for product behavior the in-app agent must explain correctly.
 
 _SUPPORT_MAP_PATH = Path(__file__).with_name("energy_agent_support_map.md")
+_SURFACE_MODEL_PATH = Path(__file__).with_name("energy_agent_surface_model.md")
 _PRODUCT_MAP_CACHE: dict[str, str] | None = None
 _PRODUCT_MAP_MTIME: float | None = None
 
@@ -1432,12 +1440,19 @@ def _parse_support_map_md(text: str) -> dict[str, str]:
 
 
 def load_product_map(*, force: bool = False) -> dict[str, str]:
-    """Load support topics from markdown (mtime-aware cache)."""
+    """Load support topics + surface mental model (mtime-aware cache).
+
+    Support map = domain mechanics. Surface model = macro/meso/micro page atlas
+    (why each tab exists, user goals, real controls, nav graph).
+    """
     global _PRODUCT_MAP_CACHE, _PRODUCT_MAP_MTIME
-    try:
-        mtime = _SUPPORT_MAP_PATH.stat().st_mtime
-    except OSError:
-        mtime = None
+    mtimes: list[float] = []
+    for p in (_SUPPORT_MAP_PATH, _SURFACE_MODEL_PATH):
+        try:
+            mtimes.append(p.stat().st_mtime)
+        except OSError:
+            pass
+    mtime = max(mtimes) if mtimes else None
     if (
         _PRODUCT_MAP_CACHE is not None
         and not force
@@ -1450,6 +1465,24 @@ def load_product_map(*, force: bool = False) -> dict[str, str]:
         parsed = _parse_support_map_md(raw)
         if not parsed:
             raise ValueError("no ## topics in support map")
+        # Merge surface atlas topics (product_spine, surface_invoices, …)
+        try:
+            surf = _SURFACE_MODEL_PATH.read_text(encoding="utf-8")
+            for k, v in _parse_support_map_md(surf).items():
+                parsed[k] = v
+            # Convenience alias: product_map(topic=surface) → full spine + playbook
+            if "product_spine" in parsed:
+                bits = [parsed["product_spine"]]
+                for key in (
+                    "orientation_playbook",
+                    "anti_hallucination",
+                    "surface_global",
+                ):
+                    if key in parsed:
+                        bits.append(parsed[key])
+                parsed["surface"] = "\n\n".join(bits)
+        except OSError as se:
+            log.warning("surface model missing (%s)", se)
         _PRODUCT_MAP_CACHE = parsed
         _PRODUCT_MAP_MTIME = mtime
         return parsed
@@ -1917,15 +1950,29 @@ def _product_map_tool(args: dict) -> dict:
     pmap = load_product_map()
     topic = (args.get("topic") or "all").strip().lower()
     if topic in pmap:
+        src = (
+            "energy_agent_surface_model.md"
+            if topic.startswith("surface")
+            or topic in (
+                "product_spine",
+                "orientation_playbook",
+                "anti_hallucination",
+            )
+            else "energy_agent_support_map.md"
+        )
         return {
             "topic": topic,
             "map": pmap[topic],
-            "source": "energy_agent_support_map.md",
+            "source": src,
         }
     # Unknown/all → topic directory + entry-point sections (NOT a dump of every
-    # topic; the map now spans ~20 topics — call a specific one for depth).
+    # topic; the map now spans many topics — call a specific one for depth).
     keys = sorted(pmap.keys())
-    entry = {k: pmap[k] for k in ("system", "tabs", "tools") if k in pmap}
+    entry = {
+        k: pmap[k]
+        for k in ("system", "tabs", "surface", "tools")
+        if k in pmap
+    }
     result = {
         "topic": "directory" if topic == "all" else "unknown",
         "topics": keys,

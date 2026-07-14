@@ -7,7 +7,12 @@ Coding agents editing the product still load skill **`solar-operator-energyagent
 When product behavior changes, update **this file** (regenerate with the **product-map-cartographer** agent, or edit by hand).
 
 Topics = `## heading` ids below. Call `product_map(topic=<id>)` before explaining that area.
-Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools`.
+Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_*`.
+
+**Page-level understanding** (macro / meso / micro): `product_map(topic=surface)` or
+`surface_invoices` / `surface_inverters` / `surface_fleet_triage` / `surface_analysis` /
+`surface_account` / `surface_resources`. Full atlas + screenshots:
+`array-operator/docs/surface-atlas/` (source: `energy_agent_surface_model.md`).
 
 ---
 
