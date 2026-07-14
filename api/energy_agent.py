@@ -52,7 +52,11 @@ XAI_MODEL = os.getenv("ENERGY_AGENT_MODEL", "grok-4-1-fast-reasoning")
 # Latest OpenAI Realtime voice model (docs 2026: gpt-realtime-2.1)
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")
+# Combined weekly cap for thinking (chat/LLM tools) + voice (Realtime minutes).
+# One meter, one $5 default — UI shows a fill bar, not a cash countdown.
 WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "5.0"))
+# Soft-warn threshold (fraction of cap) before hard stop
+WEEKLY_BUDGET_WARN_FRAC = float(os.getenv("ENERGY_AGENT_BUDGET_WARN_FRAC", "0.80"))
 # Rough cost estimates when provider doesn't return usage $
 COST_PER_1K_INPUT = float(os.getenv("EA_COST_PER_1K_IN", "0.003"))
 COST_PER_1K_OUTPUT = float(os.getenv("EA_COST_PER_1K_OUT", "0.015"))
@@ -262,15 +266,41 @@ def _auth(authorization: str | None) -> Tenant:
     return tenant_from_session(authorization)
 
 
-def _budget_spent(db, tenant_id: str) -> float:
+def _budget_rows(db, tenant_id: str) -> list:
     ws = _week_start()
-    rows = db.execute(
-        select(EaCostLedger).where(
-            EaCostLedger.tenant_id == tenant_id,
-            EaCostLedger.week_start >= ws,
-        )
-    ).scalars().all()
-    return float(sum(r.amount_usd or 0 for r in rows))
+    return list(
+        db.execute(
+            select(EaCostLedger).where(
+                EaCostLedger.tenant_id == tenant_id,
+                EaCostLedger.week_start >= ws,
+            )
+        ).scalars().all()
+    )
+
+
+def _budget_spent(db, tenant_id: str) -> float:
+    return float(sum(r.amount_usd or 0 for r in _budget_rows(db, tenant_id)))
+
+
+def _budget_breakdown(db, tenant_id: str) -> dict:
+    """Split weekly spend into thinking (chat/LLM) vs voice for the usage UI."""
+    thinking = 0.0
+    voice = 0.0
+    other = 0.0
+    for r in _budget_rows(db, tenant_id):
+        amt = float(r.amount_usd or 0)
+        reason = (r.reason or "").lower()
+        if reason.startswith("voice"):
+            voice += amt
+        elif reason.startswith("chat") or reason.startswith("llm") or reason.startswith("tool"):
+            thinking += amt
+        else:
+            other += amt
+    return {
+        "thinking_usd": round(thinking, 4),
+        "voice_usd": round(voice, 4),
+        "other_usd": round(other, 4),
+    }
 
 
 def _charge(db, tenant_id: str, amount: float, reason: str):
@@ -285,14 +315,26 @@ def _charge(db, tenant_id: str, amount: float, reason: str):
 
 
 def _check_budget(db, tenant_id: str) -> dict:
+    """Weekly $ cap covering BOTH thinking (chat/tools) and voice minutes.
+
+    UI fills a usage bar from 0→100% of weekly_budget_usd (default $5).
+    """
     spent = _budget_spent(db, tenant_id)
-    remaining = max(0.0, WEEKLY_BUDGET_USD - spent)
+    cap = max(0.01, float(WEEKLY_BUDGET_USD))
+    remaining = max(0.0, cap - spent)
+    pct = min(100.0, (spent / cap) * 100.0)
+    warn_at = max(0.0, min(1.0, WEEKLY_BUDGET_WARN_FRAC)) * 100.0
+    ok = remaining > 0.02
     return {
-        "weekly_budget_usd": WEEKLY_BUDGET_USD,
+        "weekly_budget_usd": round(cap, 2),
         "spent_usd": round(spent, 4),
         "remaining_usd": round(remaining, 4),
+        "pct_used": round(pct, 1),
+        "warn": bool(ok and pct >= warn_at),
         "week_start": _week_start().isoformat() + "Z",
-        "ok": remaining > 0.02,
+        "ok": ok,
+        "covers": "thinking+voice",
+        "breakdown": _budget_breakdown(db, tenant_id),
     }
 
 
@@ -2937,8 +2979,10 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
     if not budget["ok"]:
         return {
             "reply": (
-                f"You've hit this week's Energy Agent budget (${WEEKLY_BUDGET_USD:.0f}). "
-                "Text is paused for voice/tools until next week — Ford can raise the cap."
+                f"You've used this week's Energy Agent allowance "
+                f"(${WEEKLY_BUDGET_USD:.0f} for thinking + voice). "
+                "It resets next week — I can still show what's already on screen, "
+                "or Ford can raise the cap."
             ),
             "ui_commands": [],
             "pending": None,
