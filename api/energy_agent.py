@@ -403,9 +403,11 @@ TOOL_DEFS = [
             "description": (
                 "Authoritative Array Operator product knowledge (server support map). "
                 "ALWAYS call before explaining Auto-refresh, cloud vs extension, "
-                "scraping, invoices, analysis status, or how the system works. "
-                "Topics: tabs | fleet | capture | system | vendors | analysis | "
-                "offtakers | billing | status | security | tools | all."
+                "scraping, invoices, analysis status, plans, onboarding, or how the "
+                "system works. Topics: tabs | system | fleet | capture | vendors | "
+                "analysis | health | offtakers | billing | plans | onboarding | "
+                "resources | status | agent | api | datamodel | glossary | security | "
+                "tools | all."
             ),
             "parameters": {
                 "type": "object",
@@ -413,10 +415,14 @@ TOOL_DEFS = [
                     "topic": {
                         "type": "string",
                         "description": (
-                            "tabs | fleet | capture | system | vendors | analysis | "
-                            "offtakers | billing | status | security | tools | all. "
-                            "capture = Auto-refresh cloud/device; status = peer vs live vs vendor issue; "
-                            "offtakers = invoice generator; system = end-to-end."
+                            "tabs | system | fleet | capture | vendors | analysis | "
+                            "health | offtakers | billing | plans | onboarding | "
+                            "resources | status | agent | api | datamodel | glossary | "
+                            "security | tools | all. capture = Auto-refresh cloud/device; "
+                            "health = how the verdict/attention engine works; status = peer "
+                            "vs live vs vendor issue; offtakers = invoice generator; plans = "
+                            "entitlements/pricing tiers; agent = what you (the agent) can do; "
+                            "system = end-to-end. Pass 'all' for the topic directory."
                         ),
                     },
                 },
@@ -1690,17 +1696,25 @@ def _product_map_tool(args: dict) -> dict:
             "map": pmap[topic],
             "source": "energy_agent_support_map.md",
         }
-    # Unknown topic → all sections + directory of available topics
-    return {
-        "topic": "all",
-        "topics": sorted(pmap.keys()),
-        "map": "\n\n".join(f"## {k}\n{v}" for k, v in sorted(pmap.items())),
+    # Unknown/all → topic directory + entry-point sections (NOT a dump of every
+    # topic; the map now spans ~20 topics — call a specific one for depth).
+    keys = sorted(pmap.keys())
+    entry = {k: pmap[k] for k in ("system", "tabs", "tools") if k in pmap}
+    result = {
+        "topic": "directory" if topic == "all" else "unknown",
+        "topics": keys,
+        "map": "\n\n".join(f"## {k}\n{v}" for k, v in entry.items()),
         "source": "energy_agent_support_map.md",
+        "note": (
+            "This is the topic directory + entry sections. Call "
+            "product_map(topic=<id>) for the full text of any topic above "
+            "(e.g. capture, health, offtakers, plans, agent, datamodel)."
+        ),
         "tools_to_use": {
             "inventory": "tenant_census",
             "ad_hoc_lists": "query_tenant",
             "health": "investigate_attention | fleet_overview | array_detail",
-            "master_account": "account_summary (contact_email, company, plan, capture_mode, cloud_capture)",
+            "account": "account_summary (contact_email, company, plan, capture_mode, cloud_capture)",
             "how_system_works": "product_map(topic=system|capture) — required before explaining Auto-refresh",
             "peer_vs_portal": "product_map(topic=status)",
             "offtaker_edit": "patch_offtaker (confirm)",
@@ -1711,6 +1725,9 @@ def _product_map_tool(args: dict) -> dict:
             "arbitrary codebase shell access (that would leak other tenants / secrets)."
         ),
     }
+    if topic not in ("all", "", "directory"):
+        result["requested_topic_not_found"] = topic
+    return result
 
 
 def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
