@@ -31,7 +31,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Float, Integer, String, Text, select
+from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .account import require_not_demo, tenant_from_session
@@ -409,17 +409,34 @@ def _get_session(db, sid: str, tenant_id: str) -> EaSession:
     return s
 
 
-def _session_messages_payload(db, session_id: str, *, limit: int = 200) -> list[dict]:
-    """User/assistant turns for UI restore (skip system/tool noise)."""
-    msgs = db.execute(
+def _session_message_count(db, session_id: str) -> int:
+    n = db.execute(
+        select(func.count()).select_from(EaMessage).where(
+            EaMessage.session_id == session_id,
+            EaMessage.role.in_(("user", "assistant")),
+        )
+    ).scalar() or 0
+    return int(n)
+
+
+def _session_messages_payload(db, session_id: str, *, limit: int = 500) -> list[dict]:
+    """User/assistant turns for UI restore (skip system/tool noise).
+
+    Returns the *most recent* `limit` turns in chronological order so long
+    conversations still restore a deep scrollback (not just the first N).
+    """
+    limit = max(20, min(int(limit or 500), 1000))
+    # Take newest `limit` by id desc, then reverse for paint order
+    newest = db.execute(
         select(EaMessage)
         .where(
             EaMessage.session_id == session_id,
             EaMessage.role.in_(("user", "assistant")),
         )
-        .order_by(EaMessage.id.asc())
+        .order_by(EaMessage.id.desc())
         .limit(limit)
     ).scalars().all()
+    msgs = list(reversed(newest))
     out = []
     for m in msgs:
         content = (m.content or "").strip()
@@ -440,18 +457,59 @@ def _find_resumable_session(
     *,
     max_age_days: int = 90,
 ) -> EaSession | None:
-    """Latest open session for this tenant (mind + chat history are server-side)."""
+    """Open session with the richest recent chat — not merely newest created.
+
+    Bug (Ford 2026-07-14): ordering by session.created_at alone resumed empty
+    brand-new sessions and hid the long conversation with only the last reply.
+    Prefer preferred_id only if it has real user/assistant turns; else pick the
+    open session with the latest chat activity.
+    """
     cutoff = _now() - timedelta(days=max(1, max_age_days))
+
+    def _ok(s: EaSession | None) -> bool:
+        return bool(
+            s
+            and s.tenant_id == tenant_id
+            and s.status == "open"
+            and s.created_at
+            and s.created_at >= cutoff
+        )
+
     if preferred_id:
         pref = db.get(EaSession, preferred_id)
-        if (
-            pref
-            and pref.tenant_id == tenant_id
-            and pref.status == "open"
-            and pref.created_at
-            and pref.created_at >= cutoff
-        ):
+        if _ok(pref) and _session_message_count(db, pref.id) > 0:
             return pref
+
+    # Open sessions with last user/assistant activity
+    last_msg = (
+        select(
+            EaMessage.session_id.label("sid"),
+            func.max(EaMessage.id).label("last_id"),
+            func.count(EaMessage.id).label("n"),
+        )
+        .where(
+            EaMessage.tenant_id == tenant_id,
+            EaMessage.role.in_(("user", "assistant")),
+        )
+        .group_by(EaMessage.session_id)
+        .subquery()
+    )
+    row = db.execute(
+        select(EaSession)
+        .join(last_msg, EaSession.id == last_msg.c.sid)
+        .where(
+            EaSession.tenant_id == tenant_id,
+            EaSession.status == "open",
+            EaSession.created_at >= cutoff,
+            last_msg.c.n > 0,
+        )
+        .order_by(last_msg.c.last_id.desc())
+        .limit(1)
+    ).scalars().first()
+    if row is not None:
+        return row
+
+    # No chat yet — fall back to newest open shell session
     return db.execute(
         select(EaSession)
         .where(
