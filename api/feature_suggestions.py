@@ -133,20 +133,98 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
     return {"ok": True, "id": sid}
 
 
+def _customer_facing_outcome(status: str, review: str | None) -> dict:
+    """Safe, short explanation for the customer journey UI.
+
+    Never returns full agent transcripts or emails — only a lifecycle status
+    plus a one-line reason when a change was held (not auto-shipped)."""
+    import re
+    review = review or ""
+    if status == "shipped":
+        return {
+            "status": "shipped",
+            "outcome": "live",
+            "detail": "Your change is live on the site. Refresh to see it.",
+            "can_escalate": False,
+        }
+    if status == "building":
+        return {
+            "status": "building",
+            "outcome": "building",
+            "detail": "An AI engineer is writing the change…",
+            "can_escalate": False,
+        }
+    if status == "new":
+        return {
+            "status": "new",
+            "outcome": "queued",
+            "detail": "Queued — the judge will review it shortly.",
+            "can_escalate": False,
+        }
+    # reviewed (held, branched, or passed)
+    tier_m = re.search(
+        r"tier:\s*(auto|branch|pass)\s*[—\-–:]+\s*(.+?)(?:\n|$)",
+        review, re.I,
+    )
+    rec_m = re.search(
+        r"Recommendation:\s*\*?\*?(BUILD NOW|BACKLOG|PASS)\*?\*?",
+        review, re.I,
+    )
+    auto_fail = bool(re.search(r"auto-ship failed|AUTO-SHIP[\s\S]{0,80}fail", review, re.I))
+    detail = None
+    outcome = "held"
+    if tier_m:
+        tier = tier_m.group(1).lower()
+        reason = (tier_m.group(2) or "").strip()[:200]
+        if tier == "pass":
+            detail = f"Judge passed (won't build as described): {reason}"
+            outcome = "passed"
+        elif tier == "branch":
+            detail = f"Needs a human review before going live: {reason}"
+            outcome = "branched"
+        elif tier == "auto" and auto_fail:
+            detail = f"Auto-ship started but failed safety checks: {reason or 'see developer'}"
+            outcome = "failed_ship"
+        elif tier == "auto":
+            detail = f"Reviewed for auto-ship: {reason}" if reason else "Reviewed."
+    if not detail and rec_m:
+        rec = rec_m.group(1).upper()
+        if rec in ("BACKLOG", "PASS"):
+            detail = (
+                f"Reviewer recommended {rec} — not auto-shipped as a small live UI fix. "
+                "A pure color/CSS tweak should usually ship; this one may have been "
+                "misclassified or the review agent is offline."
+            )
+            outcome = "backlog" if rec == "BACKLOG" else "passed"
+    if not detail and auto_fail:
+        detail = "Auto-ship failed a safety gate (file allowlist / size / checks)."
+        outcome = "failed_ship"
+    if not detail:
+        detail = (
+            "The AI reviewed it but did not auto-ship (not BUILD NOW, or needs a human). "
+            "Nothing was lost — we still have your request."
+        )
+    return {
+        "status": "reviewed",
+        "outcome": outcome,
+        "detail": detail[:320],
+        "can_escalate": True,
+    }
+
+
 @router.get("/v1/feature-suggestion/{sid}/status")
 def suggestion_status(sid: int):
-    """PUBLIC: the suggestion's lifecycle status — and nothing else.
+    """PUBLIC: lifecycle status + short customer-safe outcome detail.
 
-    Powers the widget's "being built… / live — refresh" pill: the submitter
-    holds the id from POST and polls this. Deliberately exposes a single enum
-    string — no text, no email, no tenant, no review, nothing an id-guesser
-    could mine."""
+    Powers the journey UI. Exposes status + a one-line reason when held —
+    never full review text, email, or tenant id."""
     with SessionLocal() as db:
         fs = db.get(FeatureSuggestion, sid)
         if not fs:
             raise HTTPException(404, "Unknown suggestion")
         status = fs.status if fs.status in VALID_STATUSES else "reviewed"
-    return {"status": status}
+        out = _customer_facing_outcome(status, fs.review)
+    return out
 
 
 @router.get("/admin/feature-suggestions/wait")

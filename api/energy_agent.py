@@ -109,6 +109,10 @@ Hard rules:
 - Master Account / email / company / plan: ALWAYS call account_summary. The email field is
   contact_email (returned as email + contact_email). Never claim email is null without
   checking account_summary first — tenant.email is NOT a real column.
+- SHOW-AND-TELL: for "walk me through X" / "show me Master Account" use ui_tour
+  (tour_id=master_account|arrays|invoices) so the browser navigates and highlights
+  while you narrate. Prefer tours over long text-only explanations.
+- If a site improvement is held by the judge: explain the reason and offer escalate_to_ford.
 - If tools return empty while the UI shows data, say so and call tenant_census + escalate_to_ford.
 - Prefer short spoken answers; put detail in tool timelines.
 
@@ -565,14 +569,41 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "ui_highlight",
-            "description": "Highlight a CSS selector on the page immediately (no confirm).",
+            "description": "Highlight a CSS selector on the page immediately (no confirm). Optionally say a short line while highlighting.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "selector": {"type": "string"},
                     "label": {"type": "string"},
+                    "say": {"type": "string", "description": "Short narration shown+spoken during highlight"},
+                    "ms": {"type": "integer", "description": "Highlight duration ms (default 4500)"},
                 },
                 "required": ["selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ui_tour",
+            "description": (
+                "SHOW-AND-TELL walkthrough: navigates tabs and highlights real UI "
+                "elements while narrating. Use for 'walk me through Master Account', "
+                "'show me invoices', etc. Prefer this over a text-only explanation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tour_id": {
+                        "type": "string",
+                        "description": "Preset: master_account | account | arrays | inverters | reports | invoices",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Optional custom steps: {hash?, selector?, say?, ms?}",
+                        "items": {"type": "object"},
+                    },
+                },
             },
         },
     },
@@ -1928,15 +1959,18 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
             "hint": "Prefer navigating user to #reports if they want to act.",
         }
 
-    if name in ("ui_navigate", "ui_highlight", "ui_fill", "ui_click"):
-        # Navigate + highlight are instant (user already asked). Writes still confirm.
-        if name in ("ui_navigate", "ui_highlight"):
+    if name in ("ui_navigate", "ui_highlight", "ui_fill", "ui_click", "ui_tour"):
+        # Navigate + highlight + tours are instant (user already asked). Writes still confirm.
+        if name in ("ui_navigate", "ui_highlight", "ui_tour"):
             needs = False
         else:
             needs = bool(args.get("needs_confirm", True))
+        cmd_type = name.replace("ui_", "")
+        if name == "ui_tour":
+            cmd_type = "tour"
         cmd = {
             "id": uuid.uuid4().hex[:12],
-            "type": name.replace("ui_", ""),
+            "type": cmd_type,
             "args": {k: v for k, v in args.items() if k != "needs_confirm"},
             "needs_confirm": needs,
         }
