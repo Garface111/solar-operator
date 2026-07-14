@@ -2057,12 +2057,24 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
             q = q.where(Bill.array_id == int(array_id))
         # Newest first
         if hasattr(Bill, "period_end"):
-            q = q.order_by(Bill.period_end.desc().nullslast(), Bill.id.desc())
+            try:
+                q = q.order_by(Bill.period_end.desc().nulls_last(), Bill.id.desc())
+            except Exception:
+                q = q.order_by(Bill.id.desc())
         else:
             q = q.order_by(Bill.id.desc())
         bills = db.execute(q.limit(limit)).scalars().all()
         rows = []
         for b in bills:
+            avg_cents = getattr(b, "avg_rate_cents_kwh", None)
+            solar_usd = getattr(b, "solar_credit_usd", None) or getattr(b, "net_credit", None)
+            excess = getattr(b, "kwh_sent_to_grid", None)
+            implied = None
+            try:
+                if solar_usd is not None and excess and float(excess) > 0:
+                    implied = round(float(solar_usd) / float(excess), 6)
+            except Exception:
+                pass
             rows.append({
                 "id": getattr(b, "id", None),
                 "utility_account_id": getattr(b, "utility_account_id", None) or getattr(b, "account_id", None),
@@ -2074,10 +2086,15 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                     b.period_end.isoformat() if getattr(b, "period_end", None) else None
                 ),
                 "kwh_generated": getattr(b, "kwh_generated", None),
-                "kwh_sent_to_grid": getattr(b, "kwh_sent_to_grid", None),
-                "solar_credit_usd": getattr(b, "solar_credit_usd", None),
-                "amount_due": getattr(b, "amount_due", None) or getattr(b, "total_due", None),
-                "provider": getattr(b, "provider", None),
+                "kwh_sent_to_grid": excess,
+                "solar_credit_usd": solar_usd,
+                "implied_solar_credit_rate_per_kwh": implied,
+                "avg_rate_cents_kwh": avg_cents,
+                "avg_rate_usd_per_kwh": (
+                    round(float(avg_cents) / 100.0, 6) if avg_cents is not None else None
+                ),
+                "total_cost": getattr(b, "total_cost", None),
+                "provider": getattr(b, "provider", None) or getattr(b, "supplier", None),
             })
         return {
             "resource": "bills",
@@ -2085,8 +2102,8 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
             "rows": rows,
             "question": question or None,
             "note": (
-                "solar_credit_usd is $ credit on the bill when present; "
-                "per-kWh rate may resolve from bill lines via offtaker pricing."
+                "implied_solar_credit_rate_per_kwh = solar_credit_usd / excess kWh when both present; "
+                "offtaker invoice rates also via get_billing_rates / list_offtakers."
             ),
         }
 
