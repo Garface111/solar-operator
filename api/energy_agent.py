@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -85,8 +86,10 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   ALWAYS call this first for "how many arrays/inverters do I have?" or "what's in my fleet?"
   Fleet-tree health views can OMIT pure meter-only arrays; the census does NOT.
 - query_tenant = structured read-only investigation (list/filter/group any allowlisted resource).
-- product_map = HOW THE SYSTEM WORKS (tabs, dual Auto-refresh capture paths, vendors,
-  offtakers, billing). Call topic=capture or topic=system before explaining Auto-refresh.
+- product_map = HOW THE SYSTEM WORKS (authoritative support map on the server:
+  tabs | fleet | capture | system | vendors | analysis | offtakers | billing | status | security | tools).
+  Call topic=capture or topic=system before explaining Auto-refresh; topic=status when
+  Solar.web/peer “dead vs fine” disagrees.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
@@ -397,10 +400,11 @@ TOOL_DEFS = [
         "function": {
             "name": "product_map",
             "description": (
-                "Authoritative product knowledge for accurate explanations. "
+                "Authoritative Array Operator product knowledge (server support map). "
                 "ALWAYS call before explaining Auto-refresh, cloud vs extension, "
-                "how data is scraped, or how the system works. Topics: tabs | fleet | "
-                "capture | system | offtakers | billing | all."
+                "scraping, invoices, analysis status, or how the system works. "
+                "Topics: tabs | fleet | capture | system | vendors | analysis | "
+                "offtakers | billing | status | security | tools | all."
             ),
             "parameters": {
                 "type": "object",
@@ -408,9 +412,10 @@ TOOL_DEFS = [
                     "topic": {
                         "type": "string",
                         "description": (
-                            "tabs | fleet | capture | system | offtakers | billing | all. "
-                            "Use 'capture' for Auto-refresh / cloud / extension; "
-                            "'system' for end-to-end architecture."
+                            "tabs | fleet | capture | system | vendors | analysis | "
+                            "offtakers | billing | status | security | tools | all. "
+                            "capture = Auto-refresh cloud/device; status = peer vs live vs vendor issue; "
+                            "offtakers = invoice generator; system = end-to-end."
                         ),
                     },
                 },
@@ -1147,163 +1152,83 @@ def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
 
 
 # ── Free-mind data plane (tenant-scoped read-only reasoning) ─────────────────
-PRODUCT_MAP = {
+# Authoritative support knowledge lives in energy_agent_support_map.md (## topics).
+# Coding/ops agents still use skill solar-operator-energyagent — that skill points
+# here for product behavior the in-app agent must explain correctly.
+
+_SUPPORT_MAP_PATH = Path(__file__).with_name("energy_agent_support_map.md")
+_PRODUCT_MAP_CACHE: dict[str, str] | None = None
+_PRODUCT_MAP_MTIME: float | None = None
+
+# Minimal emergency fallback if the markdown file is missing at runtime.
+_PRODUCT_MAP_FALLBACK: dict[str, str] = {
     "tabs": (
-        "TOP NAV (labels users see — always use these words):\n"
-        "1. Fleet Triage (#dashboard) — fleet attention / triage overview\n"
-        "2. Inverters (#arrays) — live inverter canvas (NOT called Arrays)\n"
-        "3. Analysis (#analysis) — includes Through time / trends as a SUB-VIEW "
-        "(there is NO separate Trends tab)\n"
-        "4. Invoices (#reports) — offtaker invoices (NOT called Reports)\n"
-        "5. Resources (#resources) — net-metering rates & regulatory news\n"
-        "6. Master Account (#account) — profile, plan, card, auto-refresh "
-        "(NOT called Account)\n"
-        "Legacy names Dashboard/Arrays/Reports/Account/Trends must never be spoken."
-    ),
-    "fleet": (
-        "FLEET DATA MODEL\n"
-        "- Array: owner site/group (table arrays). Soft-deleted via deleted_at. "
-        "May be inverter-backed OR pure utility-meter (for offtaker billing).\n"
-        "- Inverter: physical unit (table inverters). Telemetry source is fixed "
-        "(vendor+serial); owner can regroup array_id by drag.\n"
-        "- InverterConnection: credentials/link for a vendor login on an array.\n"
-        "- DailyGeneration: per-array daily kWh (local US/Eastern day key).\n"
-        "- InverterDaily: per-inverter daily kWh.\n"
-        "- fleet-tree / fleet_overview: UI health tree on Fleet Triage / Inverters. "
-        "EXCLUDES pure meter-only arrays. tenant_census includes ALL non-deleted "
-        "arrays — use it for 'how many arrays do I have?'.\n"
-        "- Vendors: SolarEdge/Locus often API-polled; Fronius/SMA/Chint need portal "
-        "scrape via cloud harvester OR device extension (see product_map topic=capture)."
-    ),
-    "capture": (
-        "AUTO-REFRESH = TWO OWNER-CHOSEN PATHS (Master Account → Auto-refresh)\n"
-        "Tenant.capture_mode is 'cloud' | 'device' | null (legacy default).\n\n"
-        "These are NOT the same as 'which vendor uses an API'. They answer:\n"
-        "  WHERE do portal passwords live, and WHO signs into the portal?\n\n"
-        "═══════════════════════════════════════════════════════════\n"
-        "PATH A — CLOUD CAPTURE  (UI: “Store it with us — live data”)\n"
-        "  capture_mode = cloud\n"
-        "  • Owner saves portal username/password once in Master Account Auto-refresh.\n"
-        "  • Passwords encrypted at rest (PortalCredential / SO_CONFIG_KEY); never returned by API.\n"
-        "  • Server-side harvester (api/cloud_capture.py + api/harvester/*) logs into portals\n"
-        "    on a schedule 24/7 — no browser tab, no extension required for that login.\n"
-        "  • Status: GET /v1/cloud-capture/status (last_harvest_ok, login_failed vs scrape_failed).\n"
-        "  • Unified roster also mirrors into PortalLoginStatus so cloud + device show one list.\n"
-        "  • Best when the owner wants hands-off refresh while the computer is off.\n\n"
-        "PATH B — DEVICE / EXTENSION VAULT  (UI: “Keep it on my computer”)\n"
-        "  capture_mode = device\n"
-        "  • Passwords stay ONLY in the EnergyAgent Chrome extension vault on that machine\n"
-        "    (encrypted locally; not sent to our servers as stored cloud creds).\n"
-        "  • Extension auto-pairs to the tenant key from the dashboard (SO_* bridge).\n"
-        "  • Owner (or auto-refresh with a tab open) opens the vendor/utility portal; content\n"
-        "    scripts capture JSON/DOM and POST to backend (e.g. /v1/array-owners/inverter-capture,\n"
-        "    utility sync). Capture is often armed from “Log in with <Vendor>” / portal deep links.\n"
-        "  • Data refreshes while a signed-in browser + extension is available — not true 24/7\n"
-        "    if the machine is asleep and no cloud path is set for that login.\n"
-        "  • extension_heartbeat_at on the tenant = last time the extension checked in.\n\n"
-        "BOTH PATHS can feed the SAME data tables (Inverter, InverterDaily, DailyGeneration,\n"
-        "utility bills). Auto-refresh is the owner’s preference for HOW portal logins are run;\n"
-        "it does not replace API keys for vendors that have them.\n\n"
-        "═══════════════════════════════════════════════════════════\n"
-        "WHERE DATA COMES FROM BY VENDOR (orthogonal to cloud vs device)\n"
-        "  • SolarEdge: account/site API key on the array/connection → server poll\n"
-        "    (live on fleet-tree load + nightly pull). No portal password scrape.\n"
-        "  • Locus: API credentials similarly server-side when connected.\n"
-        "  • Fronius / SMA / Chint: NO public US-friendly cloud API for full fleet →\n"
-        "    portal must be scraped. That scrape runs via:\n"
-        "      - device mode → extension content scripts, OR\n"
-        "      - cloud mode → server harvester with stored password.\n"
-        "  • Utilities (GMP, SmartHub co-ops, etc.): portal/API depending on provider;\n"
-        "    can be cloud-captured or extension-captured; bills land for offtaker invoicing.\n\n"
-        "STALE / UNPOLLED semantics:\n"
-        "  • Extension path dark often means no recent browser capture/heartbeat — hardware\n"
-        "    may be fine.\n"
-        "  • Cloud path dark → check last harvest status (login_failed = bad password;\n"
-        "    scrape_failed = signed in but data pull hiccuped).\n"
-        "Never tell the owner cloud mode “uses the extension for SMA” or that device mode\n"
-        "stores passwords on our servers — that is backwards."
+        "TOP NAV labels: Fleet Triage (#dashboard), Inverters (#arrays), "
+        "Analysis (#analysis; trends is a sub-view), Invoices (#reports), "
+        "Resources (#resources), Master Account (#account). Never say Dashboard/Arrays/Reports/Account/Trends as top tabs."
     ),
     "system": (
-        "END-TO-END ARRAY OPERATOR (EnergyAgent owner product)\n"
-        "Brand: EnergyAgent umbrella; this UI is Array Operator (arrayoperator.com).\n"
-        "Backend: shared FastAPI on Railway; frontend: static public/* on Netlify.\n\n"
-        "Identity: Tenant (owner account) → Arrays (sites) → Inverters (equipment).\n"
-        "Optional: UtilityAccounts/bills for settlement; BillingReportSubscriptions = offtakers.\n\n"
-        "DATA IN:\n"
-        "  1) API keys (SolarEdge etc.) → server pollers / fleet-tree telemetry.\n"
-        "  2) Portal logins via Auto-refresh:\n"
-        "       cloud  = we store password + harvester 24/7\n"
-        "       device = extension vault + browser capture while active\n"
-        "  3) Manual connects / onboarding vendor picker.\n\n"
-        "DATA OUT (owner-facing):\n"
-        "  Fleet Triage + Inverters (health, peer index, live power)\n"
-        "  Analysis (incl. through-time)\n"
-        "  Invoices (offtaker drafts from utility bills × share)\n"
-        "  Master Account (profile, plan/card for AO subscription, Auto-refresh)\n\n"
-        "TWO “BILLING” CONCEPTS — do not mix:\n"
-        "  • Operator billing = what Array Operator charges the owner (Stripe / plan / card).\n"
-        "  • Offtaker invoices = owner → customer solar-credit invoices (Invoices tab).\n\n"
-        "Chrome extension name: EnergyAgent — pairs to tenant_key; required for device-mode\n"
-        "portal capture and optional one-click portal open from the dashboard."
+        "Array Operator (arrayoperator.com) = EnergyAgent owner product. "
+        "Tenant → Arrays → Inverters; bills → offtaker invoices. "
+        "Auto-refresh cloud vs device is password path; API keys are separate."
     ),
-    "billing": (
-        "ACCOUNT BILLING (operator)\n"
-        "- Array Operator bills the operator (tenant), not offtakers.\n"
-        "- Offtaker invoices are separate (operator → offtaker) on the Invoices tab.\n"
-        "- Never change Stripe prices; billing_portal_link opens Stripe customer portal.\n"
-        "- Plan/card UI lives under Master Account."
-    ),
-    "offtakers": (
-        "OFFTAKER INVOICE GENERATOR — START TO FINISH\n"
-        "UI tab: Invoices (#reports). Entity: BillingReportSubscription = one offtaker.\n\n"
-        "═══════════════════════════════════════════════════════════\n"
-        "1) DATA IN — utility bills are the SOURCE OF TRUTH\n"
-        "  • UtilityAccount rows (GMP, VEC/SmartHub, etc.) linked to Arrays (net-meter groups).\n"
-        "  • Captured paper bills (Bill.kwh_generated per period) — NEVER inverter telemetry.\n"
-        "  • Link utility bills from Invoices toolbar or Master Account auto-refresh paths.\n"
-        "  • Bill sources show as “✓ N bill sources” on the Invoices header.\n\n"
-        "2) OFFTAKER ROW — what each subscription stores\n"
-        "  • customer_name + client_email — who the invoice is FOR (display + send).\n"
-        "  • array_id — MASTER net-meter GROUP (the array / group host the share audits against).\n"
-        "  • utility_account_id — WHICH utility bill this offtaker invoices from:\n"
-        "      - own sub-meter → their personal account (topology A)\n"
-        "      - or the group host meter when they bill a % of the master (topology B)\n"
-        "  • allocation_pct — fraction 0–1 billing multiplier on the bound meter.\n"
-        "      Own-meter (sub ≠ host): PINNED to 1.0 (bill 100% of their sub-meter excess).\n"
-        "  • array_share_pct — their % of the net-meter GROUP (for GMP bill-accuracy cross-check\n"
-        "      and real_math). Distinct from allocation_pct.\n"
-        "  • delivery_mode approval|auto, cadence monthly|quarterly, rates/discounts, enabled.\n\n"
-        "3) EDIT FORM — TWO ACCOUNT DROPDOWNS (do not confuse with the offtaker name)\n"
-        "  • MASTER account dropdown = net-meter group host (drives array_id + host bill).\n"
-        "    Labels come from utility nickname / service address (e.g. Timberworks), NOT\n"
-        "    the offtaker’s customer_name.\n"
-        "  • SUB-account dropdown (optional) = offtaker’s own meter (utility_account_id).\n"
-        "    Blank = bill their share of the master; set = bill off their own meter.\n"
-        "  • Changing “master account to Timberworks” = rebind array_id/utility host to\n"
-        "    Timberworks — NEVER rename customer_name to Timberworks.\n"
-        "  • Agent tool: patch_offtaker with master_account / array_name / utility_account_name\n"
-        "    (or explicit ids). list_offtakers returns current bindings + nicknames.\n\n"
-        "4) INVOICE MATH (delivery pipeline)\n"
-        "  • Read utility bill kWh for the bound utility_account_id covering the period.\n"
-        "  • Own-meter: invoice kWh ≈ sub-meter excess (allocation_pct=1).\n"
-        "  • Percent-of-array: invoice kWh ≈ group excess × share (array_share_pct / allocation).\n"
-        "  • Price: rate_per_kwh / discount_pct overrides → tenant default → VT default.\n"
-        "  • Optional: auto-attach captured GMP PDF, budget_amount_usd override, invoice # sequence.\n"
-        "  • Cross-check: GMP implied share vs entered array_share_pct → “doesn’t match GMP” flag.\n\n"
-        "5) DRAFT → APPROVE → SEND\n"
-        "  • delivery_mode=approval: drafts land in “ready to review & send”; nothing emails until\n"
-        "    operator approves (or send-now).\n"
-        "  • delivery_mode=auto: scheduler can send when bill period is complete.\n"
-        "  • send_mode to_me first (test) vs real client_email.\n"
-        "  • Invoice archive stores sent history; Export / pay-links / Stripe Connect optional.\n\n"
-        "6) AGENT ACTIONS\n"
-        "  • list_offtakers / get_offtaker — see share, array, utility_account_id, nicknames.\n"
-        "  • patch_offtaker — share_pct, email, name (rename only), auto_send, utility_*, array_*,\n"
-        "    master_account. Always confirm writes. Soft-refresh Invoices after apply.\n"
-        "  • product_map(topic=offtakers) when explaining this system; never invent bill kWh.\n"
-        "  • query_tenant resource=utility_accounts to list bill sources for rebinding."
+    "capture": (
+        "Auto-refresh: cloud = store passwords, harvester 24/7; device = extension vault. "
+        "SolarEdge usually API keys; Fronius/SMA/Chint portal scrape (cloud or extension)."
     ),
 }
+
+
+def _parse_support_map_md(text: str) -> dict[str, str]:
+    """Split energy_agent_support_map.md into {topic: body} on ## headings."""
+    topics: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current:
+                topics[current] = "\n".join(buf).strip()
+            current = line[3:].strip().lower().split()[0]  # first word = topic id
+            buf = []
+            continue
+        if current is not None:
+            buf.append(line)
+    if current:
+        topics[current] = "\n".join(buf).strip()
+    return {k: v for k, v in topics.items() if v}
+
+
+def load_product_map(*, force: bool = False) -> dict[str, str]:
+    """Load support topics from markdown (mtime-aware cache)."""
+    global _PRODUCT_MAP_CACHE, _PRODUCT_MAP_MTIME
+    try:
+        mtime = _SUPPORT_MAP_PATH.stat().st_mtime
+    except OSError:
+        mtime = None
+    if (
+        _PRODUCT_MAP_CACHE is not None
+        and not force
+        and mtime is not None
+        and mtime == _PRODUCT_MAP_MTIME
+    ):
+        return _PRODUCT_MAP_CACHE
+    try:
+        raw = _SUPPORT_MAP_PATH.read_text(encoding="utf-8")
+        parsed = _parse_support_map_md(raw)
+        if not parsed:
+            raise ValueError("no ## topics in support map")
+        _PRODUCT_MAP_CACHE = parsed
+        _PRODUCT_MAP_MTIME = mtime
+        return parsed
+    except Exception as exc:
+        log.warning("energy_agent support map load failed (%s) — using fallback", exc)
+        _PRODUCT_MAP_CACHE = dict(_PRODUCT_MAP_FALLBACK)
+        _PRODUCT_MAP_MTIME = mtime
+        return _PRODUCT_MAP_CACHE
+
+
+# Eager load so import surfaces a missing map early (falls back if needed).
+PRODUCT_MAP = load_product_map()
 
 
 def _tenant_census_tool(db, tenant: Tenant, args: dict) -> dict:
@@ -1754,18 +1679,29 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
 
 
 def _product_map_tool(args: dict) -> dict:
+    # Reload if the support map file changed (deploy without process restart rare,
+    # but local/dev edits should pick up without full restart when force-path used).
+    pmap = load_product_map()
     topic = (args.get("topic") or "all").strip().lower()
-    if topic in PRODUCT_MAP:
-        return {"topic": topic, "map": PRODUCT_MAP[topic]}
+    if topic in pmap:
+        return {
+            "topic": topic,
+            "map": pmap[topic],
+            "source": "energy_agent_support_map.md",
+        }
+    # Unknown topic → all sections + directory of available topics
     return {
         "topic": "all",
-        "map": "\n\n".join(PRODUCT_MAP.values()),
+        "topics": sorted(pmap.keys()),
+        "map": "\n\n".join(f"## {k}\n{v}" for k, v in sorted(pmap.items())),
+        "source": "energy_agent_support_map.md",
         "tools_to_use": {
             "inventory": "tenant_census",
             "ad_hoc_lists": "query_tenant",
             "health": "investigate_attention | fleet_overview | array_detail",
             "master_account": "account_summary (contact_email, company, plan, capture_mode, cloud_capture)",
             "how_system_works": "product_map(topic=system|capture) — required before explaining Auto-refresh",
+            "peer_vs_portal": "product_map(topic=status)",
             "offtaker_edit": "patch_offtaker (confirm)",
             "nav": "ui_navigate",
         },
