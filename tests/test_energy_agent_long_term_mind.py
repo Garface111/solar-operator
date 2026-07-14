@@ -38,8 +38,9 @@ def db():
 
 def test_default_world_has_profile():
     w = _default_world()
-    assert w["profile"]["email_insights"] is True
-    assert w["profile"]["email_ux_approvals"] is True
+    # Owner email defaults OFF — hard allowlist required at send time
+    assert w["profile"]["email_insights"] is False
+    assert w["profile"]["email_ux_approvals"] is False
     assert w["profile"]["voice_pref"] == "one_mind"
     assert w["insights"] == []
     assert w["pending_approvals"] == []
@@ -48,11 +49,38 @@ def test_default_world_has_profile():
 def test_world_merge_profile_preserves_defaults(db):
     tid = "ten_lt1"
     w = _world_get(db, tid)
-    assert w["profile"]["email_insights"] is True
-    _world_patch(db, tid, {"profile": {"auto_approve_ux": True}})
+    # No tenant row → not allowlisted → email flags forced off
+    assert w["profile"]["email_insights"] is False
+    _world_patch(db, tid, {"profile": {"auto_approve_ux": True, "email_insights": True}})
     w2 = _world_get(db, tid)
     assert w2["profile"]["auto_approve_ux"] is True
-    assert w2["profile"]["email_insights"] is True
+    # Stale True in JSON still forced off for non-Ford
+    assert w2["profile"]["email_insights"] is False
+
+
+def test_owner_email_allowlist():
+    from api.energy_agent_mind import _owner_email_allowed, _email_owner_and_ford
+
+    assert _owner_email_allowed("ford.genereaux@gmail.com") is True
+    assert _owner_email_allowed("ford.genereaux+ao@gmail.com") is True
+    assert _owner_email_allowed("bruce.genereaux@gmail.com") is False
+    assert _owner_email_allowed("random@customer.com") is False
+    assert _owner_email_allowed(None) is False
+
+    tenant = MagicMock()
+    tenant.id = "ten_x"
+    tenant.contact_email = "random@customer.com"
+    with patch("api.energy_agent_mind.send_internal_alert", create=True), \
+         patch("api.notify.send_internal_alert") as sia, \
+         patch("api.notify._send_via_resend") as resend:
+        sia.return_value = True
+        resend.return_value = True
+        out = _email_owner_and_ford(
+            tenant, subject="test", body="body", owner=True, ford=True,
+        )
+    assert out["owner"] is False
+    assert out.get("owner_blocked") is True
+    resend.assert_not_called()
 
 
 def test_score_proactive_insight():

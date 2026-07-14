@@ -76,6 +76,15 @@ PROACTIVE_EMAIL_COOLDOWN_HOURS = 20
 # Attention spike threshold to wake proactive insight
 ATTENTION_SPIKE_DELTA = 1
 
+# HARD GATE: proactive mind emails to the *owner* only for allowlisted addresses.
+# Never blast random tenants — Ford dogfood only until productized.
+# Internal Ford alerts (ops) are separate and may still fire for any tenant.
+_MIND_OWNER_EMAIL_ALLOWLIST = frozenset({
+    "ford.genereaux@gmail.com",
+    "ford.genereaux@dysonswarmtechnologies.com",
+    "ford@dysonswarmtechnologies.com",
+})
+
 
 # ── persistence ─────────────────────────────────────────────────────────────
 class EaWorldState(Base):
@@ -189,10 +198,11 @@ def _default_world() -> dict:
         "notes": {},
         "fleet_digest": None,
         "profile": {
-            # Preferences that survive sessions — the mind "knows you"
-            "email_insights": True,       # proactive fleet/UX notes by email
-            "email_ux_approvals": True,    # when mind prepares/ships a UI change
-            "auto_prepare_ux": True,      # may stage UX proposals offline
+            # Preferences that survive sessions — the mind "knows you".
+            # Owner-email defaults OFF for everyone; hard allowlist still required.
+            "email_insights": False,      # proactive fleet/UX notes by email (Ford only)
+            "email_ux_approvals": False,  # when mind prepares/ships a UI change (Ford only)
+            "auto_prepare_ux": True,      # may stage UX proposals offline (silent + Ford ops mail)
             "auto_approve_ux": False,     # only auto-queue judge after clear pattern
             "voice_pref": "one_mind",     # never narrate multi-agent
         },
@@ -206,19 +216,46 @@ def _default_world() -> dict:
     }
 
 
+def _tenant_contact_email(db, tenant_id: str) -> str | None:
+    try:
+        from .models import Tenant
+        t = db.get(Tenant, tenant_id)
+        return (getattr(t, "contact_email", None) or None) if t else None
+    except Exception:
+        return None
+
+
+def _merge_profile(db, tenant_id: str, stored: dict | None) -> dict:
+    """Defaults + stored prefs, then HARD gate: non-Ford never gets owner email flags on."""
+    base = dict((_default_world().get("profile") or {}))
+    stored = dict(stored or {})
+    base.update(stored)
+    email = _tenant_contact_email(db, tenant_id)
+    if _owner_email_allowed(email):
+        # Ford dogfood: enable email prefs unless explicitly stored as False
+        if "email_insights" not in stored:
+            base["email_insights"] = True
+        if "email_ux_approvals" not in stored:
+            base["email_ux_approvals"] = True
+        base["_ford_dogfood"] = True
+    else:
+        base["email_insights"] = False
+        base["email_ux_approvals"] = False
+        base["_ford_dogfood"] = False
+    return base
+
+
 def _world_get(db, tenant_id: str) -> dict:
     base = _default_world()
     row = db.get(EaWorldState, tenant_id)
     if not row:
+        base["profile"] = _merge_profile(db, tenant_id, None)
         return base
     try:
         data = json.loads(row.state_json or "{}")
     except Exception:
         data = {}
-    # Deep-merge profile so new keys appear for old rows
-    prof = dict(base.get("profile") or {})
-    prof.update(data.get("profile") or {})
-    data = {**base, **data, "profile": prof}
+    data = {**base, **data, "profile": _merge_profile(db, tenant_id, data.get("profile"))}
     data["revision"] = row.revision
     data["updated_at"] = row.updated_at.isoformat() + "Z" if row.updated_at else None
     data["last_tick_at"] = row.last_tick_at.isoformat() + "Z" if row.last_tick_at else None
@@ -869,6 +906,23 @@ def _search_similar_worker(db, tenant_id: str, payload: dict) -> dict:
     return result
 
 
+def _owner_email_allowed(email: str | None) -> bool:
+    """True only for Ford dogfood addresses — never random tenants."""
+    e = (email or "").strip().lower()
+    if not e or "@" not in e:
+        return False
+    if e in _MIND_OWNER_EMAIL_ALLOWLIST:
+        return True
+    # Plus-addressing / subdomain variants on allowlisted local+domain
+    local, _, domain = e.partition("@")
+    base_local = local.split("+", 1)[0]
+    for allowed in _MIND_OWNER_EMAIL_ALLOWLIST:
+        a_local, _, a_domain = allowed.partition("@")
+        if domain == a_domain and base_local == a_local:
+            return True
+    return False
+
+
 def _email_owner_and_ford(
     tenant,
     *,
@@ -878,10 +932,14 @@ def _email_owner_and_ford(
     owner: bool = True,
     ford: bool = True,
 ) -> dict:
-    """One mind notifying humans — owner + Ford for prepared/approved work."""
+    """Notify Ford (ops) and optionally the owner — owner only if allowlisted.
+
+    Random tenants NEVER get proactive mind email even if profile flags are on.
+    Ford always can get internal alerts so dogfood/ops stay visible.
+    """
     from .notify import send_internal_alert, _send_via_resend
 
-    out = {"owner": False, "ford": False}
+    out = {"owner": False, "ford": False, "owner_blocked": False}
     owner_email = (getattr(tenant, "contact_email", None) or "").strip()
     if ford:
         try:
@@ -894,23 +952,31 @@ def _email_owner_and_ford(
             except Exception as e:
                 log.warning("mind email ford failed: %s", e)
     if owner and owner_email and "@" in owner_email:
-        try:
-            out["owner"] = bool(
-                _send_via_resend(
-                    to=owner_email,
-                    subject=f"EnergyAgent · {subject}",
-                    html=html
-                    or (
-                        "<div style='font-family:system-ui,sans-serif;line-height:1.5;"
-                        f"color:#0f172a'><p>{body.replace(chr(10), '<br>')}</p>"
-                        "<p style='color:#64748b;font-size:13px'>— Your Energy Agent "
-                        "(one mind, working for this account)</p></div>"
-                    ),
-                    text=body,
-                )
+        if not _owner_email_allowed(owner_email):
+            out["owner_blocked"] = True
+            log.info(
+                "mind owner email blocked (not allowlisted): %s tenant=%s",
+                owner_email[:3] + "…",
+                getattr(tenant, "id", None),
             )
-        except Exception as e:
-            log.warning("mind email owner failed: %s", e)
+        else:
+            try:
+                out["owner"] = bool(
+                    _send_via_resend(
+                        to=owner_email,
+                        subject=f"EnergyAgent · {subject}",
+                        html=html
+                        or (
+                            "<div style='font-family:system-ui,sans-serif;line-height:1.5;"
+                            f"color:#0f172a'><p>{body.replace(chr(10), '<br>')}</p>"
+                            "<p style='color:#64748b;font-size:13px'>— Your Energy Agent "
+                            "(one mind, working for this account)</p></div>"
+                        ),
+                        text=body,
+                    )
+                )
+            except Exception as e:
+                log.warning("mind email owner failed: %s", e)
     return out
 
 
@@ -1000,8 +1066,8 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
                 f"Pipeline: feature_suggestion judge (same as in-app improve).\n"
                 f"Status: /v1/feature-suggestion/{sid}/status\n"
             ),
-            owner=bool(prof.get("email_ux_approvals", True)),
-            ford=True,
+            owner=bool(prof.get("email_ux_approvals", False)),
+            ford=True,  # ops only — Ford sees every prepared change
         )
 
         _world_patch(db, tenant_id, {
@@ -1125,7 +1191,8 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
 
     emailed = {"owner": False, "ford": False}
     prof = world.get("profile") or {}
-    can_email = bool(prof.get("email_insights", True)) and importance >= 60
+    # Owner-facing email: opt-in profile AND allowlist (defaults off for everyone)
+    can_email = bool(prof.get("email_insights", False)) and importance >= 60
     # Cooldown
     last_em = world.get("last_proactive_email_at")
     if can_email and last_em:
@@ -1136,7 +1203,7 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
         except Exception:
             pass
 
-    if can_email and (spiked or attn >= 2 or ux_note):
+    if (spiked or attn >= 2 or ux_note) and (can_email or ux_note):
         body = (
             f"Proactive note from your Energy Agent\n\n"
             f"{headline}\n{detail}\n"
@@ -1144,12 +1211,13 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
             + f"Reason: {reason}\nTenant: {tenant_id}\n"
             "Open arrayoperator.com → Fleet Triage (or ask me in the app).\n"
         )
+        # Owner mail only if allowlisted + opted in; Ford ops mail on UX staging
         emailed = _email_owner_and_ford(
             tenant,
             subject=headline[:80],
             body=body,
-            owner=True,
-            ford=bool(ux_note),  # Ford only if UX work may follow
+            owner=bool(can_email),
+            ford=bool(ux_note),  # Ford ops only when UX work may follow
         )
 
     patch = {
