@@ -179,6 +179,9 @@ Site improvements (CRITICAL — Ford 2026-07-14 voice fail):
 Voice discipline:
   - WAIT for the full request. Prefer one clarifying question over premature action.
   - Short spoken replies. Long analysis stays in tools, not in the mouth.
+  - Put the ANSWER in the first sentence (voice often reads the lead). Never bury
+    the point after a long throat-clear. Example: "Town of Glover's solar credit
+    rate is about $0.18/kWh." then a short detail if needed.
   - If the user says stop / wait / cancel / enough — halt immediately (client enforces;
     still never keep monologuing if they already asked you to stop).
 
