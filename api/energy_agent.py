@@ -67,6 +67,19 @@ and harvesting the sun — one beat of wonder is fine, never preachy. Ruthlessly
 You help THIS tenant only with: fleet health, inverters, analysis/trends, offtaker invoices,
 utility capture, onboarding, master account, resources. Stay on task.
 
+CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are internal only):
+  | What the user sees     | hash (for ui_navigate) | Notes |
+  |------------------------|------------------------|-------|
+  | Fleet Triage           | #dashboard             | NOT "Dashboard". Attention / fleet overview. |
+  | Inverters              | #arrays                | NOT "Arrays". Live inverter canvas. |
+  | Analysis               | #analysis              | Through-time / trends live INSIDE Analysis (no separate Trends tab). |
+  | Invoices               | #reports               | NOT "Reports". Offtaker invoices. |
+  | Resources              | #resources             | Net-metering rates & news. |
+  | Master Account         | #account               | NOT "Account". Profile, plan, billing, auto-refresh. |
+
+Never say Dashboard, Arrays, Reports, or Account as tab names. Never list Trends as its own tab.
+If the user asks "what are the tabs?", list only the six labels above in that order.
+
 You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
 - tenant_census = ground truth inventory from the database (all arrays + inverters + offtakers).
   ALWAYS call this first for "how many arrays/inverters do I have?" or "what's in my fleet?"
@@ -551,13 +564,22 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "ui_navigate",
-            "description": "Navigate the user's browser to an AO page immediately (no confirm). Use when they ask to go to invoices, analysis, arrays, etc.",
+            "description": (
+                "Navigate immediately (no confirm). Use USER-FACING tab names in speech; "
+                "hashes are internal: Fleet Triage=#dashboard, Inverters=#arrays, "
+                "Analysis=#analysis (trends is a sub-view, not a tab), Invoices=#reports, "
+                "Resources=#resources, Master Account=#account. Never call tabs Dashboard/"
+                "Arrays/Reports/Account/Trends."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "hash": {
                         "type": "string",
-                        "description": "e.g. #reports #analysis #arrays #dashboard #account #resources #trends",
+                        "description": (
+                            "#dashboard (Fleet Triage) | #arrays (Inverters) | #analysis | "
+                            "#reports (Invoices) | #resources | #account (Master Account)"
+                        ),
                     },
                     "reason": {"type": "string"},
                 },
@@ -1059,6 +1081,18 @@ def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
 
 # ── Free-mind data plane (tenant-scoped read-only reasoning) ─────────────────
 PRODUCT_MAP = {
+    "tabs": (
+        "TOP NAV (labels users see — always use these words):\n"
+        "1. Fleet Triage (#dashboard) — fleet attention / triage overview\n"
+        "2. Inverters (#arrays) — live inverter canvas (NOT called Arrays)\n"
+        "3. Analysis (#analysis) — includes Through time / trends as a SUB-VIEW "
+        "(there is NO separate Trends tab)\n"
+        "4. Invoices (#reports) — offtaker invoices (NOT called Reports)\n"
+        "5. Resources (#resources) — net-metering rates & regulatory news\n"
+        "6. Master Account (#account) — profile, plan, card, auto-refresh "
+        "(NOT called Account)\n"
+        "Legacy names Dashboard/Arrays/Reports/Account/Trends must never be spoken."
+    ),
     "fleet": (
         "FLEET DATA MODEL\n"
         "- Array: owner site/group (table arrays). Soft-deleted via deleted_at. "
@@ -1068,9 +1102,9 @@ PRODUCT_MAP = {
         "- InverterConnection: credentials/link for a vendor login on an array.\n"
         "- DailyGeneration: per-array daily kWh (local US/Eastern day key).\n"
         "- InverterDaily: per-inverter daily kWh.\n"
-        "- fleet-tree / fleet_overview: UI health tree. EXCLUDES pure meter-only "
-        "arrays (utility account, never had inverters). tenant_census includes ALL "
-        "non-deleted arrays — use it for 'how many arrays do I have?'.\n"
+        "- fleet-tree / fleet_overview: UI health tree on Fleet Triage / Inverters. "
+        "EXCLUDES pure meter-only arrays. tenant_census includes ALL non-deleted "
+        "arrays — use it for 'how many arrays do I have?'.\n"
         "- Vendors: solaredge (API-polled), sma/fronius/chint (extension capture — "
         "refresh only when browser+helper is open and signed in)."
     ),
