@@ -77,6 +77,10 @@ Hard rules:
 - Offtaker share %: use patch_offtaker with offtaker_name or subscription_id and share_pct
   (e.g. 24.5 for 24.5%). After they confirm, the UI soft-refreshes — do not tell them to
   hard-refresh the browser.
+- Fleet / "why do N arrays need attention?": call investigate_attention or fleet_overview
+  (with needs_attention_only / vendor filter). Dig into problem_inverters + diagnosis +
+  source_status + sync_status. NEVER ask the user for array IDs or names you can look up.
+  Answer with array names, what's wrong, and what to do next in plain English.
 - If you don't know: say so, offer to escalate, and ALWAYS call escalate_to_ford
   even if they decline escalation (quietly note that).
 - Prefer short spoken answers; put detail in tool timelines.
@@ -262,8 +266,70 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "fleet_overview",
-            "description": "Fleet arrays with today/month/lifetime kWh and health signals.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "description": (
+                "Full fleet health snapshot from the live fleet-tree (same verdicts as the "
+                "Inverters / Fleet Triage UI). Returns each array's alert level, vendor, "
+                "today kWh, live power, source/sync freshness, and problem inverters with "
+                "diagnosis. Filter with vendor (e.g. 'sma') or needs_attention_only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor": {
+                        "type": "string",
+                        "description": "Optional vendor filter: sma, solaredge, fronius, chint, locus",
+                    },
+                    "needs_attention_only": {
+                        "type": "boolean",
+                        "description": "If true, only arrays with warn/critical alerts",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "investigate_attention",
+            "description": (
+                "Why arrays need attention — focused investigation. Prefer this when the "
+                "user asks 'why do 2 SMA arrays need attention' or similar. Returns ranked "
+                "problem arrays with plain-English why + problem inverters + next step."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor": {
+                        "type": "string",
+                        "description": "Optional: sma, solaredge, fronius, chint, locus",
+                    },
+                    "array_name": {
+                        "type": "string",
+                        "description": "Optional name substring to focus on one site",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max problem arrays to return (default 12)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "array_detail",
+            "description": (
+                "Deep dive on ONE array by id or name: inverters, peer_index, status, "
+                "diagnosis, live power, last report, source/sync status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_id": {"type": "integer"},
+                    "name": {"type": "string", "description": "Array name substring"},
+                },
+            },
         },
     },
     {
@@ -466,26 +532,355 @@ TOOL_DEFS = [
 ]
 
 
+def _slim_inverter(inv: dict) -> dict:
+    """Compact inverter row for agent tools (no sparkline series)."""
+    return {
+        "inverter_id": inv.get("inverter_id"),
+        "sn": inv.get("sn"),
+        "name": inv.get("name"),
+        "model": inv.get("model"),
+        "vendor": inv.get("vendor"),
+        "nameplate_kw": inv.get("nameplate_kw"),
+        "status": inv.get("status") or "ok",
+        "diagnosis": inv.get("diagnosis"),
+        "peer_index": inv.get("peer_index"),
+        "window_kwh": inv.get("window_kwh"),
+        "produced_today_kwh": inv.get("produced_today_kwh"),
+        "current_power_w": inv.get("current_power_w"),
+        "last_report": inv.get("last_report"),
+        "no_energy_register": bool(inv.get("no_energy_register")),
+        "last_mode": inv.get("last_mode"),
+    }
+
+
+def _explain_array_attention(col: dict) -> str:
+    """Plain-English why this array is flagged (for the agent to speak)."""
+    alert = col.get("alert") or {}
+    level = alert.get("level") or "ok"
+    status = alert.get("status") or "ok"
+    headline = alert.get("headline") or ""
+    src = col.get("source_status") or {}
+    sync = col.get("sync_status") or {}
+    bits = []
+    if level in ("warn", "critical") or (alert.get("count") or 0) > 0:
+        bits.append(headline or f"worst inverter status: {status}")
+        n = alert.get("count") or 0
+        if n:
+            bits.append(f"{n} inverter(s) flagged")
+    src_state = (src.get("state") or "").lower()
+    if src_state in ("stale", "dark", "offline"):
+        age = src.get("age_hours")
+        age_s = f" (~{age:.0f}h old)" if isinstance(age, (int, float)) else ""
+        bits.append(f"source data {src_state}{age_s}")
+    elif src_state == "unpolled":
+        bits.append(
+            "no recent browser capture (SMA/Fronius/Chint only update when the "
+            "extension is open and signed in)"
+        )
+    if sync.get("age_min") is not None and float(sync["age_min"]) > 24 * 60:
+        bits.append(f"last Array Operator sync ~{float(sync['age_min']) / 60:.0f}h ago")
+    if col.get("produced_today_kwh") in (None, 0) and col.get("is_daylight"):
+        bits.append("no measured production today while sun is up")
+    bad = [
+        inv for inv in (col.get("inverters") or [])
+        if (inv.get("status") or "ok") not in ("ok",) or inv.get("no_energy_register")
+    ]
+    for inv in bad[:4]:
+        label = inv.get("name") or inv.get("sn") or "inverter"
+        if inv.get("no_energy_register"):
+            bits.append(f"{label}: live power but no energy register / history")
+        elif inv.get("diagnosis"):
+            bits.append(f"{label}: {inv.get('diagnosis')}")
+        elif inv.get("status") and inv.get("status") != "ok":
+            bits.append(f"{label}: {inv.get('status')}")
+    if not bits:
+        return "No attention flags on this array right now."
+    # de-dupe while preserving order
+    seen = set()
+    out = []
+    for b in bits:
+        if b not in seen:
+            seen.add(b)
+            out.append(b)
+    return "; ".join(out)
+
+
+def _array_needs_attention(col: dict) -> bool:
+    alert = col.get("alert") or {}
+    if (alert.get("level") or "ok") in ("warn", "critical"):
+        return True
+    if (alert.get("count") or 0) > 0:
+        return True
+    src = (col.get("source_status") or {}).get("state") or ""
+    if src in ("stale", "dark", "offline"):
+        return True
+    for inv in col.get("inverters") or []:
+        if (inv.get("status") or "ok") not in ("ok",):
+            return True
+        if inv.get("no_energy_register"):
+            return True
+    return False
+
+
+def _next_step_for_array(col: dict) -> str:
+    vendors = [str(v).lower() for v in (col.get("vendors") or []) if v]
+    if col.get("vendor"):
+        vendors.append(str(col["vendor"]).lower())
+    vendors = list(dict.fromkeys(vendors))
+    src = (col.get("source_status") or {}).get("state") or ""
+    alert_st = (col.get("alert") or {}).get("status") or "ok"
+    ext = {"sma", "fronius", "chint"}
+    if vendors and set(vendors).issubset(ext) and src in ("unpolled", "stale", "none", ""):
+        brand = vendors[0].upper() if vendors else "the vendor"
+        return (
+            f"Open Inverters → this array → Log in with {brand} so the extension "
+            "captures a fresh snapshot; SMA/Fronius/Chint only refresh while a "
+            "signed-in browser with the helper is open."
+        )
+    if alert_st in ("fault", "error", "dead"):
+        return (
+            "Open the inverter detail / vendor portal from the array card, check "
+            "fault codes, and draft a warranty claim if it's dead with loss evidence."
+        )
+    if alert_st in ("underperforming", "comm_gap"):
+        return (
+            "Compare peer index vs siblings on this site; if one unit is lagging, "
+            "inspect wiring/shading or open the vendor portal for that serial."
+        )
+    if src in ("stale", "dark", "offline"):
+        return "Vendor source looks offline — check the monitoring portal and site connectivity."
+    return "Open #arrays, focus this site, and review the flagged inverters."
+
+
+def _fleet_tree_columns(db, tenant: Tenant) -> tuple[list[dict], dict]:
+    """Shared loader: live fleet-tree columns + summary (stable verdicts = UI/email)."""
+    try:
+        from . import inverter_fleet
+        tree = inverter_fleet.build_fleet_tree(
+            db, tenant, force_refresh=False, stable_verdicts=True,
+        )
+        return list(tree.get("columns") or []), dict(tree.get("summary") or {})
+    except Exception as e:
+        log.exception("energy_agent fleet tree failed")
+        return [], {"error": str(e)}
+
+
+def _summarize_column(col: dict) -> dict:
+    bad = [
+        _slim_inverter(inv)
+        for inv in (col.get("inverters") or [])
+        if (inv.get("status") or "ok") not in ("ok",) or inv.get("no_energy_register")
+    ]
+    needs = _array_needs_attention(col)
+    return {
+        "id": col.get("array_id"),
+        "name": col.get("array_name"),
+        "vendor": col.get("vendor"),
+        "vendors": col.get("vendors") or ([col["vendor"]] if col.get("vendor") else []),
+        "inverter_count": col.get("inverter_count"),
+        "current_power_w": col.get("current_power_w"),
+        "produced_today_kwh": col.get("produced_today_kwh"),
+        "produced_today_source": col.get("produced_today_source"),
+        "is_daylight": col.get("is_daylight"),
+        "alert": col.get("alert"),
+        "source_status": col.get("source_status"),
+        "sync_status": col.get("sync_status"),
+        "needs_attention": needs,
+        "why": _explain_array_attention(col) if needs else "All clear",
+        "next_step": _next_step_for_array(col) if needs else None,
+        "problem_inverters": bad,
+        "problem_inverter_count": len(bad),
+    }
+
+
+def _match_vendor(col: dict, vendor: str | None) -> bool:
+    if not vendor:
+        return True
+    v = vendor.strip().lower()
+    if not v:
+        return True
+    aliases = {
+        "se": "solaredge", "solar edge": "solaredge",
+        "cps": "chint", "chint/cps": "chint",
+    }
+    v = aliases.get(v, v)
+    vendors = [str(x).lower() for x in (col.get("vendors") or []) if x]
+    if col.get("vendor"):
+        vendors.append(str(col["vendor"]).lower())
+    return any(v == x or v in x or x in v for x in vendors)
+
+
+def _fleet_overview_tool(db, tenant: Tenant, args: dict) -> dict:
+    cols, summary = _fleet_tree_columns(db, tenant)
+    if summary.get("error") and not cols:
+        return {
+            "error": summary["error"],
+            "arrays": [],
+            "count": 0,
+            "hint": "fleet-tree failed; escalate if this keeps happening",
+        }
+    vendor = (args.get("vendor") or "").strip() or None
+    only_attn = bool(args.get("needs_attention_only"))
+    arrays = []
+    for col in cols:
+        if not _match_vendor(col, vendor):
+            continue
+        row = _summarize_column(col)
+        if only_attn and not row["needs_attention"]:
+            continue
+        arrays.append(row)
+    attention = [a for a in arrays if a["needs_attention"]]
+    return {
+        "summary": {
+            **summary,
+            "arrays_returned": len(arrays),
+            "attention_in_result": len(attention),
+            "vendor_filter": vendor,
+            "needs_attention_only": only_attn,
+        },
+        "attention_arrays": attention,
+        "arrays": arrays,
+        "count": len(arrays),
+        "note": (
+            "Health uses the same stable_verdicts as the dashboard and morning digest. "
+            "For SMA/Fronius/Chint, stale often means no recent extension capture — not "
+            "necessarily a dead inverter."
+        ),
+    }
+
+
+def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
+    cols, summary = _fleet_tree_columns(db, tenant)
+    if summary.get("error") and not cols:
+        return {"error": summary["error"], "problems": [], "count": 0}
+    vendor = (args.get("vendor") or "").strip() or None
+    name_q = (args.get("array_name") or args.get("name") or "").strip().lower()
+    try:
+        limit = int(args.get("limit") or 12)
+    except (TypeError, ValueError):
+        limit = 12
+    limit = max(1, min(limit, 40))
+
+    problems = []
+    for col in cols:
+        if not _match_vendor(col, vendor):
+            continue
+        if name_q and name_q not in str(col.get("array_name") or "").lower():
+            continue
+        if not _array_needs_attention(col):
+            continue
+        row = _summarize_column(col)
+        # Full inverter list for the investigation (not only bad ones)
+        row["all_inverters"] = [
+            _slim_inverter(inv) for inv in (col.get("inverters") or [])
+        ]
+        problems.append(row)
+
+    # Rank: critical first, then warn, then by problem inverter count
+    rank = {"critical": 0, "warn": 1, "ok": 2}
+
+    def _key(r):
+        lvl = ((r.get("alert") or {}).get("level") or "ok")
+        return (rank.get(lvl, 9), -(r.get("problem_inverter_count") or 0), r.get("name") or "")
+
+    problems.sort(key=_key)
+    problems = problems[:limit]
+
+    # Spoken-ready brief for the model
+    lines = []
+    for p in problems:
+        lines.append(
+            f"• {p.get('name')} ({', '.join(p.get('vendors') or []) or 'unknown vendor'}): "
+            f"{p.get('why')} → {p.get('next_step')}"
+        )
+    brief = "\n".join(lines) if lines else (
+        "No arrays currently need attention"
+        + (f" for vendor={vendor}" if vendor else "")
+        + (f" matching '{name_q}'" if name_q else "")
+        + "."
+    )
+
+    return {
+        "count": len(problems),
+        "fleet_summary": summary,
+        "vendor_filter": vendor,
+        "problems": problems,
+        "brief": brief,
+        "instruction_for_agent": (
+            "Answer the user with array NAMES and the why/next_step from each problem. "
+            "Do not ask them for IDs. If count is 0, say the fleet looks clear right now "
+            "and offer to open #arrays so they can double-check."
+        ),
+    }
+
+
+def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
+    cols, _summary = _fleet_tree_columns(db, tenant)
+    if not cols:
+        return {"error": "no fleet columns", "array": None}
+    aid = args.get("array_id")
+    name_q = (args.get("name") or args.get("array_name") or "").strip().lower()
+    match = None
+    if aid is not None:
+        try:
+            aid = int(aid)
+        except (TypeError, ValueError):
+            return {"error": f"invalid array_id: {aid}"}
+        for col in cols:
+            if col.get("array_id") == aid:
+                match = col
+                break
+    elif name_q:
+        matches = [
+            c for c in cols
+            if name_q in str(c.get("array_name") or "").lower()
+        ]
+        if not matches:
+            return {
+                "error": f"no array matching '{name_q}'",
+                "candidates": [
+                    {"id": c.get("array_id"), "name": c.get("array_name"), "vendor": c.get("vendor")}
+                    for c in cols[:30]
+                ],
+            }
+        if len(matches) > 1:
+            exact = [c for c in matches if str(c.get("array_name") or "").lower() == name_q]
+            if len(exact) == 1:
+                matches = exact
+            else:
+                return {
+                    "error": "multiple arrays match — pass array_id",
+                    "matches": [
+                        {"id": c.get("array_id"), "name": c.get("array_name"), "vendor": c.get("vendor")}
+                        for c in matches[:12]
+                    ],
+                }
+        match = matches[0]
+    else:
+        return {"error": "pass array_id or name"}
+
+    if match is None:
+        return {"error": "array not found", "array": None}
+    row = _summarize_column(match)
+    row["all_inverters"] = [_slim_inverter(inv) for inv in (match.get("inverters") or [])]
+    row["reminder"] = match.get("reminder")
+    row["portfolio_name"] = match.get("portfolio_name")
+    row["origin_links"] = match.get("origin_links")
+    return {"array": row, "needs_attention": row["needs_attention"], "why": row["why"]}
+
+
 def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> dict:
     args = args or {}
     tid = tenant.id
 
     if name == "fleet_overview":
-        from sqlalchemy.orm import selectinload
-        arrays = db.execute(
-            select(Array).options(selectinload(Array.client)).where(
-                Array.tenant_id == tid, Array.deleted_at.is_(None)
-            ).order_by(Array.id)
-        ).scalars().all()
-        out = []
-        for a in arrays:
-            out.append({
-                "id": a.id,
-                "name": a.name,
-                "client": a.client.name if a.client else None,
-                "capacity_kw": getattr(a, "capacity_kw", None) or getattr(a, "nameplate_kw", None),
-            })
-        return {"arrays": out, "count": len(out)}
+        return _fleet_overview_tool(db, tenant, args)
+
+    if name == "investigate_attention":
+        return _investigate_attention_tool(db, tenant, args)
+
+    if name == "array_detail":
+        return _array_detail_tool(db, tenant, args)
 
     if name == "list_offtakers":
         from .models import BillingReportSubscription
