@@ -3107,7 +3107,14 @@ def get_session(sid: str, authorization: str | None = Header(default=None)):
 
 
 def _realtime_session_config(voice: str | None = None) -> dict:
-    """Session config for latest GPT Realtime (WebRTC / client_secrets)."""
+    """Session config for latest GPT Realtime (WebRTC / client_secrets).
+
+    VAD is tuned less "jumpy" than OpenAI defaults (threshold 0.5 / short silence):
+    higher threshold needs louder speech; longer silence waits for real end-of-turn;
+    near_field noise reduction helps laptop/headset mics ignore room hiss.
+    App owns replies (create_response false) — Realtime only listens + speaks
+    what we send via response.create.
+    """
     return {
         "type": "realtime",
         "model": OPENAI_REALTIME_MODEL,
@@ -3125,11 +3132,19 @@ def _realtime_session_config(voice: str | None = None) -> dict:
             "output": {"voice": voice or OPENAI_REALTIME_VOICE},
             "input": {
                 "transcription": {"model": "gpt-4o-mini-transcribe"},
-                # App owns replies (tools + one chat log). Realtime only listens + speaks
-                # what we send via response.create — avoids double chat/double talk.
+                # near_field = close mic / laptop / headset (far_field for conference rooms)
+                "noise_reduction": {"type": "near_field"},
                 "turn_detection": {
                     "type": "server_vad",
+                    # 0.5 default is twitchy in rooms with fans/keyboard. Higher = quieter
+                    # sounds ignored (OpenAI docs: better in noisy environments).
+                    "threshold": 0.78,
+                    "prefix_padding_ms": 280,
+                    # Longer silence before "user finished" — less choppy mid-sentence cuts
+                    # and fewer ghost turns from brief clicks/coughs.
+                    "silence_duration_ms": 900,
                     "create_response": False,
+                    "interrupt_response": False,
                 },
             },
         },
