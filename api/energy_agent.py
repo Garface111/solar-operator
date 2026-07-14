@@ -146,12 +146,18 @@ Hard rules:
   contact_email (returned as email + contact_email). Never claim email is null without
   checking account_summary first — tenant.email is NOT a real column.
 - Auto-refresh / "how do you get data" / cloud vs extension: ALWAYS product_map(topic=capture)
-  first, then account_summary for THIS tenant's capture_mode. Two paths:
-    cloud  = "Store it with us" — passwords on our servers, harvester 24/7, no extension required
-    device = "Keep it on my computer" — passwords in extension vault, capture while browser active
-  Do NOT say cloud mode uses the extension, or that SMA always requires the extension
-  (cloud harvester can scrape SMA/Fronius/Chint portals too). API-key vendors (SolarEdge)
-  are a third orthogonal path (server poll with keys, not portal passwords).
+  first, then account_summary for THIS tenant. THREE capture ideas (do not collapse them):
+    cloud  = "Store it with us" — passwords on our servers, harvester 24/7 for those logins
+    device = "Keep it on my computer" — passwords in extension vault; scheduled capture while browser active
+    extension one-click = "Log in with SMA/Fronius/Chint…" — EnergyAgent extension opens the portal,
+      auto-captures authenticated data, POSTs arrays. Does NOT create a cloud vault row.
+  CRITICAL: fleet arrays for SMA/Fronius/Chint often arrived via extension one-click or onboarding
+  even when capture_mode=cloud and cloud_capture.logins only lists another vendor (e.g. only Chint).
+  If the owner says "I never entered SMA into cloud capture," explain extension auto-capture —
+  do NOT invent that the harvester must have had the SMA password.
+  When UI context has extension_present=true (or extension_heartbeat_at is recent), say the helper
+  is installed/paired and can automatically reach vendor sites to capture after sign-in.
+  API-key vendors (SolarEdge) are still a separate server-poll path (keys, not portal passwords).
 - SHOW-AND-TELL: for "walk me through X" / "show me Account" use ui_tour
   (tour_id=master_account|arrays|invoices) so the browser navigates and highlights
   while you narrate. Prefer tours over long text-only explanations.
@@ -1223,7 +1229,8 @@ _PRODUCT_MAP_FALLBACK: dict[str, str] = {
     ),
     "capture": (
         "Auto-refresh: cloud = store passwords, harvester 24/7; device = extension vault. "
-        "SolarEdge usually API keys; Fronius/SMA/Chint portal scrape (cloud or extension)."
+        "PLUS extension one-click Log-in-with capture attaches SMA/Fronius/Chint without a cloud vault row. "
+        "SolarEdge usually API keys; never equate fleet vendors with cloud_capture.logins only."
     ),
 }
 
@@ -1897,14 +1904,91 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
             "has_payment_method": "Card on file for AO subscription — not offtaker invoices",
             "capture_mode": (
                 "Auto-refresh path for portal logins: cloud=server harvester; "
-                "device=Chrome extension vault. Orthogonal to SolarEdge API keys."
+                "device=Chrome extension vault. Orthogonal to SolarEdge API keys AND to "
+                "extension one-click capture (which can attach arrays without a vault row)."
+            ),
+            "extension_heartbeat_at": (
+                "Last time the EnergyAgent Chrome extension pinged this tenant. Recent = "
+                "extension installed/paired on some browser; not the same as cloud vault."
+            ),
+            "fleet_vendors_vs_cloud_logins": (
+                "fleet_vendors = vendors seen on live arrays/inverters. cloud_capture.logins = "
+                "only passwords saved for server harvest. SMA arrays with no SMA cloud login "
+                "usually came from extension Log-in-with capture."
             ),
         },
         "auto_refresh_explainer": (
-            "See product_map(topic=capture). Cloud and device are the two Auto-refresh "
-            "modes on Account; SolarEdge API keys are a separate server-poll path."
+            "See product_map(topic=capture). Cloud + device are scheduled Auto-refresh modes; "
+            "extension one-click Log-in-with is a separate first-attach path; SolarEdge API "
+            "keys are a third server-poll path."
         ),
     }
+
+    # Extension liveness (paired browser somewhere)
+    try:
+        hb = getattr(t, "extension_heartbeat_at", None)
+        age_s = None
+        if hb is not None:
+            try:
+                age_s = max(0, int((_now() - hb.replace(tzinfo=None)).total_seconds()))
+            except Exception:
+                age_s = None
+        out["extension"] = {
+            "heartbeat_at": _iso(hb),
+            "seen_recently": bool(age_s is not None and age_s < 6 * 3600),
+            "heartbeat_age_seconds": age_s,
+            "role": (
+                "EnergyAgent Chrome extension pairs to this tenant, can open vendor portals, "
+                "auto-capture authenticated data, and POST it. Works for first attach even "
+                "when capture_mode=cloud and that vendor is not in the cloud vault."
+            ),
+        }
+    except Exception as e:
+        out["extension"] = {"error": str(e)[:120]}
+
+    # Fleet vendor mix (ground truth for "what vendors do I have?") vs vault.
+    # Array has no vendor column — vendors live on Inverter + InverterConnection.
+    try:
+        from .models import Inverter, InverterConnection, Array
+        counts: dict[str, int] = {}
+        inv_rows = db.execute(
+            select(Inverter.vendor).where(
+                Inverter.tenant_id == t.id,
+                Inverter.deleted_at.is_(None),
+            )
+        ).all()
+        for (v,) in inv_rows:
+            key = (v or "").strip().lower() or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        # Connections for API vendors that may not yet have inverter rows
+        conn_rows = db.execute(
+            select(InverterConnection.vendor)
+            .join(Array, Array.id == InverterConnection.array_id)
+            .where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+            )
+        ).all()
+        for (v,) in conn_rows:
+            key = (v or "").strip().lower() or "unknown"
+            if key not in counts:
+                counts[key] = 1
+        # SolarEdge legacy columns on Array
+        se_n = db.execute(
+            select(Array.id).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+                Array.solaredge_site_id.is_not(None),
+            )
+        ).all()
+        if se_n and "solaredge" not in counts:
+            counts["solaredge"] = len(se_n)
+        out["fleet_vendors"] = [
+            {"vendor": k, "count": counts[k]}
+            for k in sorted(counts.keys())
+        ]
+    except Exception as e:
+        out["fleet_vendors"] = {"error": str(e)[:120]}
 
     # Best-effort cloud-capture roster counts (no passwords)
     try:
@@ -1912,6 +1996,14 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
         creds = db.execute(
             select(PortalCredential).where(PortalCredential.tenant_id == t.id)
         ).scalars().all()
+        cloud_provs = sorted({
+            (c.provider or "").strip().lower()
+            for c in creds if c.provider
+        })
+        fleet_provs = []
+        if isinstance(out.get("fleet_vendors"), list):
+            fleet_provs = [x["vendor"] for x in out["fleet_vendors"] if x.get("vendor")]
+        only_fleet = sorted(set(fleet_provs) - set(cloud_provs) - {"unknown", ""})
         out["cloud_capture"] = {
             "credential_count": len(creds),
             "enabled_count": sum(1 for c in creds if getattr(c, "cloud_capture_enabled", False)),
@@ -1925,6 +2017,13 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
                 }
                 for c in creds[:40]
             ],
+            "providers_in_vault": cloud_provs,
+            "fleet_vendors_not_in_cloud_vault": only_fleet,
+            "provenance_note": (
+                "If a vendor is on the fleet but not in the cloud vault, data almost "
+                "certainly arrived via EnergyAgent extension one-click capture, "
+                "onboarding sync, or an API key — not from a cloud PortalCredential."
+            ),
         }
     except Exception as e:
         out["cloud_capture"] = {"error": str(e)[:120]}

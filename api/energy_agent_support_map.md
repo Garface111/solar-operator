@@ -43,12 +43,18 @@ END-TO-END PRODUCT
 - **Tenant identity:** one owner account (Tenant) per product. SPA session auth (`so_session`); the Chrome extension pairs with a tenant key.
 - **Core chain:** Tenant → Arrays (sites/net-meter groups) → Inverters (equipment). Optional UtilityAccounts + Bills for settlement. BillingReportSubscription = one offtaker.
 
-DATA IN (three orthogonal sources)
+DATA IN (orthogonal sources — all write the same tables)
 1. **API keys** (SolarEdge, Locus/AlsoEnergy) → server polls telemetry directly.
 2. **Portal logins** via Account → Auto-refresh (see `capture`):
    - **cloud** = “Store it with us” — encrypted password on server; headless harvester logs in 24/7.
    - **device** = “Keep it on my computer” — password stays in the Chrome extension vault; capture while a signed-in browser is active.
-3. **Onboarding / connect** vendor picker (one key discovers many sites where the vendor supports it).
+3. **One-click “Log in with &lt;vendor&gt;” via the EnergyAgent Chrome extension** (see `capture` → Path C). Owner signs into the real portal once; the extension **auto-captures** sites/inverters and POSTs them up. **Does not require** that login to be in the cloud vault.
+4. **Onboarding / connect** vendor picker (sync-all or one key discovers many sites where the vendor supports it).
+
+CRITICAL ANTI-CONFUSION
+- **Arrays on the fleet for SMA/Fronius/Chint do NOT prove a cloud vault login exists** for that vendor. They often arrived via extension one-click capture or onboarding.
+- **Cloud vault roster ≠ full fleet.** Account may show only Chint in cloud capture while Inverters still lists SMA arrays from an earlier extension capture.
+- When the owner says “I never entered that login into cloud capture,” believe them and explain Path C (extension auto-capture), not “the harvester must have pulled it.”
 
 DATA OUT (owner UI)
 - **Fleet Triage** + **Inverters** — health, peer index, live power, vendor issues.
@@ -61,7 +67,11 @@ TWO BILLING CONCEPTS — never mix (see `billing` vs `offtakers`)
 - **Operator billing** = Array Operator charges the owner (Stripe plan/card on Account).
 - **Offtaker invoices** = the owner bills their own customers for solar credits (Invoices tab).
 
-Chrome extension name: **EnergyAgent** (pairs with the tenant key). Required for device-mode portal capture.
+Chrome extension name: **EnergyAgent** (pairs with the tenant key).
+- Required for **device-mode** vault auto-refresh.
+- Also powers **one-click “Log in with…”** capture even when Auto-refresh mode is **cloud** (for vendors that are not already covered by a cloud login).
+- Heartbeats ~every 60s when present (`Tenant.extension_heartbeat_at`). A recent heartbeat means some browser with the extension is paired to this account — not that every vendor is cloud-vaulted.
+- When present, the extension can **automatically open / reach vendor portals** to capture (or re-capture) data: armed capture intent → portal tab → content scripts read authenticated responses → POST `/v1/array-owners/inverter-capture` (or utility capture). Owner usually just needs to sign in once if the portal session is cold.
 
 ---
 
@@ -91,7 +101,7 @@ Honesty
 
 ## capture
 
-AUTO-REFRESH = TWO OWNER-CHOSEN PATHS (Account → Auto-refresh). `Tenant.capture_mode` = `cloud` | `device` | null. This is **where passwords live** and **who signs into portals** — orthogonal to “does this vendor use an API key?”
+AUTO-REFRESH modes on Account choose **where portal passwords live** for scheduled refresh. `Tenant.capture_mode` = `cloud` | `device` | null. This is **orthogonal** to “does this vendor use an API key?” and **orthogonal** to one-click extension capture (Path C).
 
 ### Path A — Cloud (“Store it with us — live data”)
 - Owner saves a portal username/password once. Stored **encrypted at rest** on the server (`PortalCredential`); **never returned** by any API; deleting it is a hard delete of the ciphertext. Requires explicit consent, and the server refuses to accept a password unless encryption-at-rest is armed.
@@ -101,24 +111,44 @@ AUTO-REFRESH = TWO OWNER-CHOSEN PATHS (Account → Auto-refresh). `Tenant.captur
 - Passwords stay in the **Chrome extension vault** (encrypted in the browser, AES-GCM) on that machine and **never reach our servers** — if we’re breached, there are zero portal passwords to steal.
 - The extension pairs to the tenant and captures when the portal is opened (or during auto-refresh with a tab active), then POSTs the data up. It heartbeats ~every 60s. Not true 24/7 if the machine is asleep and no cloud path covers that login.
 
-Both paths write the **same** tables (inverter/daily rows, and utility bills when utilities are captured).
+### Path C — One-click portal capture (EnergyAgent Chrome extension) — VERY COMMON
+This is how SMA / Fronius / Chint arrays often first appear **even when Auto-refresh is set to cloud** and the owner never saved that login in the cloud vault.
+
+Flow:
+1. Owner (or onboarding) clicks **Log in with SMA / Fronius / Chint / SolarEdge…** (or the extension is already paired and a portal tab is opened with capture intent).
+2. Extension **arms capture intent**, opens the real vendor site, and (when the owner is signed in) **automatically reads** the portal’s authenticated API/DOM responses.
+3. Extension POSTs the snapshot to `/v1/array-owners/inverter-capture` (or utility capture paths). Arrays + inverters land on the tenant **immediately**.
+4. **No cloud vault row is created** unless the owner later saves that portal under Account → Auto-refresh (or hands-off login form).
+
+What the agent must say when asked “how did you get my SMA login?”:
+- We may **not** have their SMA password at all.
+- The arrays almost certainly came from **extension auto-capture** when they (or onboarding) signed into Sunny Portal / Solar.web / Chint Connect.
+- For ongoing hands-off refresh of that vendor they still need either a **cloud vault login** (Path A) or **device vault + extension** (Path B). Path C is primarily **attach / first capture**, not 24/7 by itself.
+
+When UI context says `extension_present: true` (or a recent `extension_heartbeat_at`):
+- Tell the owner the EnergyAgent helper is installed/paired on a browser for this account.
+- Prefer “the extension can open vendor sites and capture automatically after you sign in” over “you must paste the password into cloud capture” — unless they want true hands-off 24/7 without a browser.
 
 ### Status semantics (the critical distinction)
 - **`login_failed`** = the login itself failed → a real credential problem (wrong/changed password, MFA wall). Only this status counts as a failure, backs off, and eventually pauses — the lockout guard. Re-saving the password re-arms it immediately.
 - **`scrape_failed`** = signed in fine, but the post-login data pull hiccuped → NOT a password problem; retries on normal cadence. Only accuse the password on a true `login_failed`.
 
 ### Capture-debt / self-heal
-The **server** decides what’s stale and hands each heartbeat a to-do list (“drain this vendor / keep this utility session warm”); whichever signed-in browser wakes first drains it. A second laptop is free redundancy — captures are idempotent. Some co-op portals (SmartHub/NISC) are browser-only because their data is cookie-bound; there is no server pull for those.
+The **server** decides what’s stale and hands each extension heartbeat a to-do list (“drain this vendor / keep this utility session warm”); whichever signed-in browser wakes first drains it. A second laptop is free redundancy — captures are idempotent. Some co-op portals (SmartHub/NISC) are browser-only because their data is cookie-bound; there is no server pull for those.
 
 ### By vendor (orthogonal to cloud vs device)
 | Vendor | How data usually arrives |
 |--------|---------------------------|
-| SolarEdge | Account/site **API key** → server poll (not a portal scrape) |
+| SolarEdge | Account/site **API key** → server poll (not a portal scrape); portal login is optional |
 | Locus / AlsoEnergy | API when connected |
-| Fronius / SMA / Chint | Portal scrape — cloud harvester **or** extension |
+| Fronius / SMA / Chint | Portal scrape — **extension one-click** (first attach) and/or cloud harvester / device vault (ongoing) |
 | Utilities (GMP, SmartHub co-ops, Eversource, CMP, …) | Portal/API by provider; bills feed Invoices |
 
-Anti-confusion rules: cloud mode does **not** use the extension; device mode does **not** store passwords on our servers. When a login is running via Cloud Capture, the extension **stands down** for that provider (no reconnect nudges). Recovery for a failing cloud login lives in the app’s Credential Vault, never a browser nudge.
+Anti-confusion rules:
+- Cloud **vault** mode stores passwords server-side; the extension **stands down reconnect nudges** for providers that already have an enabled cloud login.
+- Device mode does **not** store portal passwords on our servers.
+- Extension one-click capture **still works** for vendors **without** a cloud login — that is how SMA arrays appear with only a Chint row in the cloud vault.
+- Recovery for a failing **cloud** login lives in Account → Auto-refresh, never a vague “check the browser” only.
 
 ---
 
