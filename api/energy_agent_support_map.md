@@ -433,5 +433,7 @@ WHEN TO CALL WHAT
 | Navigate / show UI | `ui_navigate` / `ui_tour` / highlight |
 | Change offtaker fields | `patch_offtaker` (confirm) |
 | Product wish / UI change | `propose_site_improvement` |
+| Outside facts (policy, vendor docs, news, market) | `web_search` then cite URL; `web_fetch` for a specific page |
+| This account’s kWh / offtakers / arrays | Never web_search — use census / query / health tools |
 
-You do **not** have codebase shell access. You have this map + tenant tools only.
+You do **not** have codebase shell access. You have this map + tenant tools + optional public web search/fetch.

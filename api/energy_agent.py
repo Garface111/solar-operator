@@ -130,11 +130,17 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
-Reason multi-step: census → query → dig health. Do not invent rows. Do not stop at a partial list.
+- web_search = LIVE public internet search (news, regulations, utility policy, vendor docs,
+  weather context, market rates). Use when the answer is outside this tenant's DB.
+  web_fetch = open a public URL and extract readable text (after search or a pasted link).
+  Always cite title + URL. Prefer tenant tools for THIS account's arrays/kWh/offtakers.
+Reason multi-step: census → query → dig health. For outside facts: web_search → cite.
+Do not invent rows. Do not invent web facts — search first.
 
 Scope — you CAN:
   read ALL of THIS tenant's operational data (fleet, offtakers, bills, rates, account,
   utility accounts, generation, connections) via tools — never invent numbers.
+  search the public web and fetch public pages when needed,
   navigate UI, highlight/fill,
   patch offtaker details: share %, email, customer name, auto-send,
   solar credit rates (rate_per_kwh / net_rate_per_kwh), discount_pct,
@@ -1157,6 +1163,58 @@ TOOL_DEFS = [
                     "clear_discount": {"type": "boolean"},
                     "needs_confirm": {"type": "boolean", "default": True},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the live public internet (news, utility policy, weather context, "
+                "vendor docs, rates, regulations). Use for questions OUTSIDE this tenant's "
+                "database — e.g. 'Vermont net metering 2026', 'SMA ennexOS error code', "
+                "'GMP solar credit rates'. Do NOT use for this account's arrays/offtakers/"
+                "kWh (use tenant_census / query_tenant / fleet tools). Cite title + URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (plain English or keywords)",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "How many results (1–8, default 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch and extract readable text from a public HTTPS URL (after web_search "
+                "or when the user pastes a link). Use for policy PDFs pages, utility pages, "
+                "vendor help. Never fetch internal/private hosts. Max ~40k chars extracted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Public http(s) URL to fetch",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max characters of text to return (default 12000, max 40000)",
+                    },
+                },
+                "required": ["url"],
             },
         },
     },
@@ -2214,6 +2272,293 @@ def _validate_ea_discount(pct) -> float | None:
     return d
 
 
+# ── Public web tools (Energy Agent internet access) ─────────────────────────
+_WEB_UA = (
+    "Mozilla/5.0 (compatible; EnergyAgent/1.0; +https://arrayoperator.com; research)"
+)
+_BLOCKED_HOST_SUFFIXES = (
+    "railway.internal",
+    "localhost",
+    "local",
+    "internal",
+    "svc.cluster.local",
+)
+_BLOCKED_HOSTS = frozenset({
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "::1",
+    "metadata.google.internal",
+    "169.254.169.254",
+})
+
+
+def _web_url_allowed(url: str) -> tuple[bool, str]:
+    """Reject private/internal targets. Returns (ok, reason)."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False, "invalid URL"
+    if p.scheme not in ("http", "https"):
+        return False, "only http/https URLs are allowed"
+    host = (p.hostname or "").lower().strip(".")
+    if not host:
+        return False, "missing host"
+    if host in _BLOCKED_HOSTS:
+        return False, "blocked host"
+    if any(host == s or host.endswith("." + s) for s in _BLOCKED_HOST_SUFFIXES):
+        return False, "internal host blocked"
+    # Private IP ranges (basic)
+    if re.match(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|127\.)", host):
+        return False, "private IP blocked"
+    return True, "ok"
+
+
+def _html_to_text(html: str, max_chars: int = 12000) -> str:
+    """Very small HTML → text (no extra deps)."""
+    if not html:
+        return ""
+    # Drop scripts/styles
+    t = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", html)
+    t = re.sub(r"(?is)<!--.*?-->", " ", t)
+    t = re.sub(r"(?i)<br\s*/?>", "\n", t)
+    t = re.sub(r"(?i)</(p|div|h[1-6]|li|tr|section|article)>", "\n", t)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = (
+        t.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()[:max_chars]
+
+
+def _web_search_tool(args: dict) -> dict:
+    """Live public search via DuckDuckGo (no API key)."""
+    import html as html_lib
+    from urllib.parse import quote_plus, unquote
+
+    query = (args.get("query") or "").strip()
+    if not query:
+        return {"error": "query is required", "results": []}
+    if len(query) > 300:
+        return {"error": "query too long (max 300 chars)", "results": []}
+    try:
+        max_results = int(args.get("max_results") or 5)
+    except (TypeError, ValueError):
+        max_results = 5
+    max_results = max(1, min(8, max_results))
+
+    results: list[dict] = []
+    abstract = None
+    abstract_url = None
+    abstract_source = None
+    related: list[str] = []
+
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not installed on server", "results": []}
+
+    headers = {"User-Agent": _WEB_UA, "Accept": "application/json,text/html"}
+
+    # 1) Instant Answer API — good for facts / Wikipedia-style abstracts
+    try:
+        ia_url = (
+            "https://api.duckduckgo.com/?"
+            f"q={quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
+        )
+        with httpx.Client(timeout=httpx.Timeout(12.0), follow_redirects=True) as client:
+            r = client.get(ia_url, headers=headers)
+            if r.status_code == 200:
+                data = r.json() or {}
+                abstract = (data.get("AbstractText") or "").strip() or None
+                abstract_url = (data.get("AbstractURL") or "").strip() or None
+                abstract_source = (data.get("AbstractSource") or "").strip() or None
+                for topic in (data.get("RelatedTopics") or [])[:6]:
+                    if isinstance(topic, dict):
+                        if topic.get("Text"):
+                            related.append(str(topic["Text"])[:240])
+                        for t2 in topic.get("Topics") or []:
+                            if isinstance(t2, dict) and t2.get("Text"):
+                                related.append(str(t2["Text"])[:240])
+                    if len(related) >= 6:
+                        break
+                # Official DDG "Results" (often empty)
+                for item in data.get("Results") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    u = (item.get("FirstURL") or item.get("url") or "").strip()
+                    t = (item.get("Text") or item.get("title") or "").strip()
+                    if u and t:
+                        results.append({
+                            "title": t[:200],
+                            "url": u,
+                            "snippet": t[:280],
+                            "source": "duckduckgo_ia",
+                        })
+    except Exception as e:
+        log.warning("web_search instant-answer failed: %s", e)
+
+    # 2) HTML search — organic links when IA is thin
+    if len(results) < max_results:
+        try:
+            html_url = "https://html.duckduckgo.com/html/"
+            with httpx.Client(timeout=httpx.Timeout(14.0), follow_redirects=True) as client:
+                r = client.post(
+                    html_url,
+                    data={"q": query, "b": ""},
+                    headers={
+                        **headers,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "text/html",
+                    },
+                )
+                body = r.text or ""
+            # Result blocks: <a class="result__a" href="...">title</a>
+            # DDG wraps redirects: //duckduckgo.com/l/?uddg=<urlencoded>
+            link_re = re.compile(
+                r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                re.I | re.S,
+            )
+            snip_re = re.compile(
+                r'class="result__snippet"[^>]*>(.*?)</(?:a|td|div)>',
+                re.I | re.S,
+            )
+            titles = link_re.findall(body)
+            snips = snip_re.findall(body)
+            seen = {x.get("url") for x in results}
+            for idx, (href, title_html) in enumerate(titles):
+                if len(results) >= max_results:
+                    break
+                href = html_lib.unescape(href.strip())
+                title = re.sub(r"<[^>]+>", "", html_lib.unescape(title_html)).strip()
+                # Unwrap DDG redirect
+                m = re.search(r"[?&]uddg=([^&]+)", href)
+                if m:
+                    href = unquote(m.group(1))
+                if href.startswith("//"):
+                    href = "https:" + href
+                ok, _ = _web_url_allowed(href)
+                if not ok or not title or href in seen:
+                    continue
+                snippet = ""
+                if idx < len(snips):
+                    snippet = re.sub(
+                        r"<[^>]+>", "", html_lib.unescape(snips[idx])
+                    ).strip()[:280]
+                seen.add(href)
+                results.append({
+                    "title": title[:200],
+                    "url": href,
+                    "snippet": snippet,
+                    "source": "duckduckgo_html",
+                })
+        except Exception as e:
+            log.warning("web_search html failed: %s", e)
+
+    if not results and not abstract:
+        return {
+            "query": query,
+            "results": [],
+            "error": "No web results returned — try a simpler query.",
+            "provider": "duckduckgo",
+        }
+
+    return {
+        "query": query,
+        "results": results[:max_results],
+        "abstract": abstract,
+        "abstract_url": abstract_url,
+        "abstract_source": abstract_source,
+        "related": related[:6],
+        "provider": "duckduckgo",
+        "note": (
+            "Public web results. Cite title + URL when answering. "
+            "For THIS tenant's fleet/offtakers/kWh use census/query tools instead."
+        ),
+    }
+
+
+def _web_fetch_tool(args: dict) -> dict:
+    """Fetch a public page and return extracted text."""
+    url = (args.get("url") or "").strip()
+    if not url:
+        return {"error": "url is required"}
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    ok, reason = _web_url_allowed(url)
+    if not ok:
+        return {"error": f"URL not allowed: {reason}", "url": url}
+    try:
+        max_chars = int(args.get("max_chars") or 12000)
+    except (TypeError, ValueError):
+        max_chars = 12000
+    max_chars = max(1000, min(40000, max_chars))
+
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not installed on server", "url": url}
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(18.0),
+            follow_redirects=True,
+            headers={"User-Agent": _WEB_UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+        ) as client:
+            r = client.get(url)
+            final = str(r.url)
+            ok2, reason2 = _web_url_allowed(final)
+            if not ok2:
+                return {"error": f"redirect target blocked: {reason2}", "url": url, "final_url": final}
+            ct = (r.headers.get("content-type") or "").lower()
+            raw = r.content[:800_000]  # hard cap bytes
+            if r.status_code >= 400:
+                return {
+                    "error": f"HTTP {r.status_code}",
+                    "url": url,
+                    "final_url": final,
+                }
+            # PDF / binary: don't dump
+            if "pdf" in ct or raw[:4] == b"%PDF":
+                return {
+                    "url": url,
+                    "final_url": final,
+                    "content_type": ct,
+                    "note": "PDF binary — cannot extract full text here. Use web_search or ask the user for key excerpts.",
+                    "text": "",
+                    "bytes": len(raw),
+                }
+            try:
+                text_body = raw.decode(r.encoding or "utf-8", errors="replace")
+            except Exception:
+                text_body = raw.decode("utf-8", errors="replace")
+            if "html" in ct or text_body.lstrip().lower().startswith("<!doctype") or "<html" in text_body[:200].lower():
+                extracted = _html_to_text(text_body, max_chars=max_chars)
+            else:
+                extracted = text_body[:max_chars]
+            title_m = re.search(r"(?is)<title[^>]*>(.*?)</title>", text_body)
+            title = re.sub(r"\s+", " ", title_m.group(1)).strip() if title_m else None
+            return {
+                "url": url,
+                "final_url": final,
+                "status": r.status_code,
+                "content_type": ct,
+                "title": (title or "")[:200] or None,
+                "text": extracted,
+                "truncated": len(extracted) >= max_chars,
+                "note": "Extracted public page text. Quote carefully; prefer primary sources.",
+            }
+    except Exception as e:
+        return {"error": f"fetch failed: {e}", "url": url}
+
+
 def _product_map_tool(args: dict) -> dict:
     # Reload if the support map file changed (deploy without process restart rare,
     # but local/dev edits should pick up without full restart when force-path used).
@@ -2262,10 +2607,12 @@ def _product_map_tool(args: dict) -> dict:
             "peer_vs_portal": "product_map(topic=status)",
             "offtaker_edit": "patch_offtaker (confirm)",
             "nav": "ui_navigate",
+            "internet": "web_search | web_fetch — live public web (cite URLs); not for this tenant's kWh",
         },
         "caveat": (
-            "You reason over THIS tenant's data + product map. You do not have "
-            "arbitrary codebase shell access (that would leak other tenants / secrets)."
+            "You reason over THIS tenant's data + product map + optional public web. "
+            "You do not have arbitrary codebase shell access (that would leak other "
+            "tenants / secrets)."
         ),
     }
     if topic not in ("all", "", "directory"):
@@ -2822,6 +3169,22 @@ def _run_tool(
 
     if name == "product_map":
         return _product_map_tool(args)
+
+    if name == "web_search":
+        out = _web_search_tool(args)
+        try:
+            _charge(db, tid, 0.003, "web_search")
+        except Exception:
+            pass
+        return out
+
+    if name == "web_fetch":
+        out = _web_fetch_tool(args)
+        try:
+            _charge(db, tid, 0.004, "web_fetch")
+        except Exception:
+            pass
+        return out
 
     if name == "propose_site_improvement":
         out = _propose_site_improvement_tool(db, tenant, args)
