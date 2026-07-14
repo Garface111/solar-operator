@@ -267,6 +267,11 @@ class EaCostLedger(Base):
 # ── pydantic ────────────────────────────────────────────────────────────────
 class SessionIn(BaseModel):
     context: dict[str, Any] | None = None
+    # Resume the tenant's open conversation (default). Survives refresh + cache clear
+    # because history lives in the DB, not the browser. force_new=True starts fresh.
+    resume: bool = True
+    force_new: bool = False
+    preferred_session_id: str | None = None
 
 
 class ChatIn(BaseModel):
@@ -391,6 +396,61 @@ def _get_session(db, sid: str, tenant_id: str) -> EaSession:
     if s.status != "open":
         raise HTTPException(400, "Session ended")
     return s
+
+
+def _session_messages_payload(db, session_id: str, *, limit: int = 200) -> list[dict]:
+    """User/assistant turns for UI restore (skip system/tool noise)."""
+    msgs = db.execute(
+        select(EaMessage)
+        .where(
+            EaMessage.session_id == session_id,
+            EaMessage.role.in_(("user", "assistant")),
+        )
+        .order_by(EaMessage.id.asc())
+        .limit(limit)
+    ).scalars().all()
+    out = []
+    for m in msgs:
+        content = (m.content or "").strip()
+        if not content:
+            continue
+        out.append({
+            "role": m.role,
+            "content": content[:8000],
+            "at": m.created_at.isoformat() + "Z" if m.created_at else None,
+        })
+    return out
+
+
+def _find_resumable_session(
+    db,
+    tenant_id: str,
+    preferred_id: str | None = None,
+    *,
+    max_age_days: int = 90,
+) -> EaSession | None:
+    """Latest open session for this tenant (mind + chat history are server-side)."""
+    cutoff = _now() - timedelta(days=max(1, max_age_days))
+    if preferred_id:
+        pref = db.get(EaSession, preferred_id)
+        if (
+            pref
+            and pref.tenant_id == tenant_id
+            and pref.status == "open"
+            and pref.created_at
+            and pref.created_at >= cutoff
+        ):
+            return pref
+    return db.execute(
+        select(EaSession)
+        .where(
+            EaSession.tenant_id == tenant_id,
+            EaSession.status == "open",
+            EaSession.created_at >= cutoff,
+        )
+        .order_by(EaSession.created_at.desc())
+        .limit(1)
+    ).scalars().first()
 
 
 def _mem_get(db, scope: str, limit: int = 40) -> list[dict]:
@@ -3395,11 +3455,57 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
 # ── routes ──────────────────────────────────────────────────────────────────
 @router.post("/v1/energy-agent/session")
 def create_session(body: SessionIn, authorization: str | None = Header(default=None)):
+    """Start or resume a conversation.
+
+    Default resume=True: reattach the tenant's open session + message history.
+    Chat history and operating mind (world model / tasks) live in the DB, so a
+    browser refresh or localStorage clear does not wipe the mind — only sign-out
+    or force_new starts clean.
+    """
     t = _auth(authorization)
     with SessionLocal() as db:
         budget = _check_budget(db, t.id)
-        sid = "ea_" + uuid.uuid4().hex[:16]
         ctx = body.context or {}
+        brain = "grok" if XAI_API_KEY else ("claude" if ANTHROPIC_API_KEY else "stub")
+        realtime_ready = bool(OPENAI_API_KEY)
+
+        # ── Resume existing open conversation (survives refresh / cache clear) ──
+        if body.resume and not body.force_new:
+            existing = _find_resumable_session(
+                db, t.id, preferred_id=body.preferred_session_id,
+            )
+            if existing is not None:
+                if ctx:
+                    # Merge fresh UI context; keep prior keys as fallback
+                    try:
+                        prev = json.loads(existing.context_json or "{}")
+                    except Exception:
+                        prev = {}
+                    if not isinstance(prev, dict):
+                        prev = {}
+                    prev.update(ctx)
+                    existing.context_json = json.dumps(prev)[:8000]
+                messages = _session_messages_payload(db, existing.id)
+                db.commit()
+                return {
+                    "ok": True,
+                    "session_id": existing.id,
+                    "resumed": True,
+                    "messages": messages,
+                    "message_count": len(messages),
+                    "budget": budget,
+                    # No full intro on resume — client paints history instead
+                    "intro": None,
+                    "welcome_back": (
+                        "Still here — picking up where we left off."
+                        if messages
+                        else None
+                    ),
+                    "realtime_ready": realtime_ready,
+                    "brain": brain,
+                }
+
+        sid = "ea_" + uuid.uuid4().hex[:16]
         s = EaSession(
             id=sid,
             tenant_id=t.id,
@@ -3440,10 +3546,13 @@ def create_session(body: SessionIn, authorization: str | None = Header(default=N
         return {
             "ok": True,
             "session_id": sid,
+            "resumed": False,
+            "messages": [],
+            "message_count": 0,
             "budget": budget,
             "intro": intro,
-            "realtime_ready": bool(OPENAI_API_KEY),
-            "brain": "grok" if XAI_API_KEY else ("claude" if ANTHROPIC_API_KEY else "stub"),
+            "realtime_ready": realtime_ready,
+            "brain": brain,
         }
 
 
@@ -3452,10 +3561,6 @@ def get_session(sid: str, authorization: str | None = Header(default=None)):
     t = _auth(authorization)
     with SessionLocal() as db:
         s = _get_session(db, sid, t.id)
-        msgs = db.execute(
-            select(EaMessage).where(EaMessage.session_id == sid)
-            .order_by(EaMessage.id.asc()).limit(100)
-        ).scalars().all()
         return {
             "session": {
                 "id": s.id,
@@ -3463,17 +3568,23 @@ def get_session(sid: str, authorization: str | None = Header(default=None)):
                 "cost_usd": s.cost_usd,
                 "pending": json.loads(s.pending_json) if s.pending_json else None,
             },
-            "messages": [
-                {
-                    "role": m.role,
-                    "content": m.content,
-                    "meta": json.loads(m.meta_json) if m.meta_json else None,
-                    "at": m.created_at.isoformat() + "Z",
-                }
-                for m in msgs if m.role != "system"
-            ],
+            "messages": _session_messages_payload(db, sid),
             "budget": _check_budget(db, t.id),
         }
+
+
+@router.post("/v1/energy-agent/session/{sid}/end")
+def end_session(sid: str, authorization: str | None = Header(default=None)):
+    """Explicitly end a conversation (next open starts fresh). Mind world model stays."""
+    t = _auth(authorization)
+    with SessionLocal() as db:
+        s = db.get(EaSession, sid)
+        if not s or s.tenant_id != t.id:
+            raise HTTPException(404, "Session not found")
+        s.status = "ended"
+        s.ended_at = _now()
+        db.commit()
+        return {"ok": True, "session_id": sid, "status": "ended"}
 
 
 def _realtime_session_config(voice: str | None = None) -> dict:
