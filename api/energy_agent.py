@@ -71,8 +71,9 @@ Hard rules:
 - Never invent kWh, $, or status. Use tools.
 - Never access other tenants. Never reveal secrets/passwords/API keys.
 - Never charge money or change Stripe prices. You may open billing-portal LINKS after confirm.
-- For ui.navigate / ui.fill / ui.click / any write: call the tool with needs_confirm=true
-  unless the user already confirmed in this turn ("yes", "do it", "go ahead").
+- ui_navigate and ui_highlight: run immediately, needs_confirm=false (user asked to go there).
+- ui_fill / ui_click / any data write: needs_confirm=true unless the user already said
+  "yes", "do it", or "go ahead" this turn.
 - If you don't know: say so, offer to escalate, and ALWAYS call escalate_to_ford
   even if they decline escalation (quietly note that).
 - Prefer short spoken answers; put detail in tool timelines.
@@ -320,7 +321,7 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "ui_navigate",
-            "description": "Navigate the user's browser to an AO hash route or deep link. Requires confirm unless user already said yes.",
+            "description": "Navigate the user's browser to an AO page immediately (no confirm). Use when they ask to go to invoices, analysis, arrays, etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -329,7 +330,6 @@ TOOL_DEFS = [
                         "description": "e.g. #reports #analysis #arrays #dashboard #account #resources #trends",
                     },
                     "reason": {"type": "string"},
-                    "needs_confirm": {"type": "boolean", "default": True},
                 },
                 "required": ["hash"],
             },
@@ -339,13 +339,12 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "ui_highlight",
-            "description": "Highlight a CSS selector or data attribute on the page (after navigate).",
+            "description": "Highlight a CSS selector on the page immediately (no confirm).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "selector": {"type": "string"},
                     "label": {"type": "string"},
-                    "needs_confirm": {"type": "boolean", "default": False},
                 },
                 "required": ["selector"],
             },
@@ -573,12 +572,16 @@ def _run_tool(name: str, args: dict, tenant: Tenant, session: EaSession, db) -> 
         }
 
     if name in ("ui_navigate", "ui_highlight", "ui_fill", "ui_click"):
-        needs = args.get("needs_confirm", name != "ui_highlight")
+        # Navigate + highlight are instant (user already asked). Writes still confirm.
+        if name in ("ui_navigate", "ui_highlight"):
+            needs = False
+        else:
+            needs = bool(args.get("needs_confirm", True))
         cmd = {
             "id": uuid.uuid4().hex[:12],
             "type": name.replace("ui_", ""),
             "args": {k: v for k, v in args.items() if k != "needs_confirm"},
-            "needs_confirm": bool(needs),
+            "needs_confirm": needs,
         }
         if needs:
             return {
@@ -1012,6 +1015,12 @@ def _realtime_session_config(voice: str | None = None) -> dict:
             "output": {"voice": voice or OPENAI_REALTIME_VOICE},
             "input": {
                 "transcription": {"model": "gpt-4o-mini-transcribe"},
+                # App owns replies (tools + one chat log). Realtime only listens + speaks
+                # what we send via response.create — avoids double chat/double talk.
+                "turn_detection": {
+                    "type": "server_vad",
+                    "create_response": False,
+                },
             },
         },
     }
