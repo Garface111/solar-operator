@@ -498,7 +498,7 @@ WHEN TO CALL WHAT
 | Who repairs my arrays / O&M team | **In chat on Repairs** (`#ops`): `list_service_contacts` first. Agent is **hungry** for a full roster — on any name/email scrap call `upsert_service_contact` immediately (`needs_confirm=false`), confirm what was saved, then ask phone → arrays → “anyone else?”. Never close with “Done.” while the sheet is incomplete. |
 | Down site — contact the tech | Agent drafts outreach; owner may **Approve & send** on the case card or say “send it” in chat (`send_repair_checkin`). First outreach is never auto. |
 | Repair pipeline status | Repairs panel “what I’m working on” + agent log; tools: `repair_ops_overview` / `list_repair_tickets` |
-| Repair status update from tech | Inbound email to `repairs@agent.arrayoperator.com` (`[AO-TICKET-#]`) → logged + owner chat update. **Energy Agent then continues the email conversation** with whoever replied (purposeful, open-ended): schedule / parts / done / owner action — until the case is coordinated. Auto-replies (OOO) are ignored. |
+| Repair status update from tech | Inbound email to `repairs@agent.arrayoperator.com` (`[AO-TICKET-#]`) → logged + owner chat update. **Energy Agent then continues the email conversation** with whoever replied (purposeful, open-ended): schedule / parts / done / owner action — until the case is coordinated. Auto-replies (OOO) are ignored. **Chat ⇄ email is one continuous surface:** every mail turn is mirrored into the open chat session and injected as ground-truth into agent context so “did they reply?” never invents silence. |
 | Rates / news / REC | **Analysis → Resources** (`#resources`) — not under Repairs |
 | Ad-hoc lists | `query_tenant` |
 | Account email/company/plan/mode | `account_summary` |

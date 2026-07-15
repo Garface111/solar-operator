@@ -399,6 +399,76 @@ def serialize_checkin(c: RepairCheckIn) -> dict:
     }
 
 
+def build_email_surface_digest(db, tenant_id: str, *, limit: int = 20) -> str:
+    """Plain-text ground truth of recent repair emails for the agent mind.
+
+    Chat and mailbox are one continuous surface — this digest is injected into
+    every Energy Agent turn so the model never invents 'no reply' against mail.
+    """
+    rows = list(
+        db.execute(
+            select(RepairCheckIn)
+            .where(
+                RepairCheckIn.tenant_id == tenant_id,
+                RepairCheckIn.channel == "email",
+            )
+            .order_by(RepairCheckIn.created_at.desc())
+            .limit(max(4, min(40, int(limit))))
+        ).scalars().all()
+    )
+    if not rows:
+        return ""
+    rows = list(reversed(rows))
+    ticket_ids = {r.ticket_id for r in rows if r.ticket_id}
+    tickets: dict[int, RepairTicket] = {}
+    if ticket_ids:
+        for t in db.execute(
+            select(RepairTicket).where(RepairTicket.id.in_(ticket_ids))
+        ).scalars().all():
+            tickets[t.id] = t
+    lines = []
+    for r in rows:
+        t = tickets.get(r.ticket_id)
+        site = (t.site_name if t else None) or "site"
+        inv = (t.inv_name if t else None) or (t.serial if t else None) or "unit"
+        st = (t.status if t else "?")
+        direction = (r.direction or "?").lower()
+        via = (r.via or "").lower()
+        who = (r.sent_to or "").strip()
+        body = re.sub(r"\s+", " ", (r.body or "")).strip()
+        if len(body) > 280:
+            body = body[:277].rsplit(" ", 1)[0] + "…"
+        when = _iso(r.created_at) or ""
+        if direction == "inbound":
+            head = f"IN from {who or 'tech'}"
+        elif direction == "outbound":
+            head = f"OUT to {who or 'tech'}" + (f" ({via})" if via else "")
+        else:
+            head = f"{direction}"
+        lines.append(
+            f"- [{when}] ticket #{r.ticket_id} {site}/{inv} status={st} | {head}: {body}"
+        )
+    return "\n".join(lines)
+
+
+def _mirror_email_to_chat(
+    db,
+    tenant_id: str,
+    speak_line: str,
+    *,
+    kind: str,
+    ticket_id: int | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Best-effort: write email turn into open EA session + mind already separate."""
+    try:
+        from .energy_agent import mirror_repair_to_open_session
+        meta = {"kind": kind, "ticket_id": ticket_id, **(extra or {})}
+        mirror_repair_to_open_session(db, tenant_id, speak_line, meta=meta)
+    except Exception:
+        log.exception("mirror repair email to chat session failed ticket=%s", ticket_id)
+
+
 def effective_checkin_mode(tenant: Tenant) -> str:
     mode = (tenant.repair_checkin_mode or "manual").strip().lower()
     return mode if mode in VALID_CHECKIN_MODES else "manual"
@@ -892,6 +962,18 @@ def send_checkin(
                 f"When they reply to Energy Agent, I'll update you here."
             ),
         )
+        _mirror_email_to_chat(
+            db,
+            tenant.id,
+            (
+                f"I emailed {who} about {site} / {inv} "
+                f"(ticket #{ticket.id}, check-in #{ticket.checkin_count}). "
+                f"When they reply to Energy Agent, it continues here."
+            ),
+            kind="repair_outbound",
+            ticket_id=ticket.id,
+            extra={"to": go_to, "via": via},
+        )
     db.flush()
     if not ok:
         log.warning("repair check-in send failed ticket=%s tenant=%s", ticket.id, tenant.id)
@@ -1079,25 +1161,32 @@ def list_tickets(
 def _apply_status_heuristics(ticket: RepairTicket, text: str) -> None:
     """Bump ticket status from free-text (tech reply, phone note, SMS)."""
     low = (text or "").lower()
-    if any(w in low for w in (
-        "fixed", "replaced", "repaired", "back online", "resolved",
-        "completed", "all good", "working again",
-    )):
-        if ticket.status in ACTIVE_TICKET_STATUSES:
+    # Strong fix language only — casual "complete" / banter must not close cases
+    fixed = any(w in low for w in (
+        "fixed", "replaced", "repaired", "back online", "working again",
+        "all good now", "unit is up", "inverter is up", "back producing",
+    ))
+    scheduled = any(w in low for w in (
+        "scheduled", "will visit", "on site", "appointment", "coming by",
+        "tomorrow", "going up there", "be there", "site visit",
+    ))
+    in_prog = any(w in low for w in (
+        "working on", "in progress", "parts ordered", "parts on order",
+        "ordered parts", "en route", "replacement inverter",
+    ))
+    if fixed:
+        if ticket.status in ACTIVE_TICKET_STATUSES + ("resolved",):
             ticket.status = "resolved"
             ticket.resolved_at = now()
             ticket.next_checkin_at = None
-    elif any(w in low for w in (
-        "scheduled", "will visit", "on site", "appointment", "coming by", "eta",
-    )):
-        if ticket.status in ("open", "waiting_reply"):
+    elif scheduled:
+        if ticket.status in ("open", "waiting_reply", "in_progress", "resolved"):
             ticket.status = "scheduled"
-    elif any(w in low for w in (
-        "working on", "in progress", "parts ordered", "parts on order",
-        "ordered parts", "en route",
-    )):
-        if ticket.status in ("open", "waiting_reply", "scheduled"):
+            ticket.resolved_at = None
+    elif in_prog:
+        if ticket.status in ("open", "waiting_reply", "scheduled", "resolved"):
             ticket.status = "in_progress"
+            ticket.resolved_at = None
 
 
 def log_inbound_note(
@@ -1720,19 +1809,29 @@ def continue_repair_email_conversation(
         result["skipped"] = "empty_body"
         return result
 
-    # Apply status from plan (LLM) then heuristics on inbound already applied
+    # Apply status from plan carefully — never resolve on LLM alone without
+    # clear fix language in the tech's message (prevents "screw you" → closed).
     desired = plan.get("status")
-    if desired in VALID_TICKET_STATUSES and ticket.status not in TERMINAL_STATUSES:
-        if desired == "resolved":
+    inbound_low = (inbound_body or "").lower()
+    clear_fix = any(w in inbound_low for w in (
+        "fixed", "replaced", "repaired", "back online", "working again",
+        "back producing", "all good now",
+    ))
+    if desired in VALID_TICKET_STATUSES and ticket.status not in ("cancelled", "cleared"):
+        if desired == "resolved" and clear_fix:
             ticket.status = "resolved"
             ticket.resolved_at = now()
             ticket.next_checkin_at = None
-        elif desired == "scheduled" and ticket.status in ("open", "waiting_reply", "in_progress"):
+        elif desired == "scheduled" and ticket.status in (
+            "open", "waiting_reply", "in_progress", "resolved",
+        ):
             ticket.status = "scheduled"
+            ticket.resolved_at = None
         elif desired == "in_progress" and ticket.status in (
-            "open", "waiting_reply", "scheduled",
+            "open", "waiting_reply", "scheduled", "resolved",
         ):
             ticket.status = "in_progress"
+            ticket.resolved_at = None
         elif desired == "waiting_reply" and ticket.status == "open":
             ticket.status = "waiting_reply"
 
@@ -1778,6 +1877,14 @@ def continue_repair_email_conversation(
             owner_chat = (
                 f"I emailed {who} back about {site} / {inv} to keep the repair moving."
             )
+        # Richer chat line: what we told them (continuous surface with email)
+        body_prev = re.sub(r"\s+", " ", body).strip()
+        if len(body_prev) > 320:
+            body_prev = body_prev[:317].rsplit(" ", 1)[0] + "…"
+        chat_line = (
+            f"{owner_chat} (via email to {to}). "
+            f"I wrote: \"{body_prev}\""
+        )[:900]
         _safe_mind_emit(
             db,
             tenant.id,
@@ -1794,12 +1901,19 @@ def continue_repair_email_conversation(
                 "needs_owner": bool(plan.get("needs_owner")),
                 "preview": body[:300],
             },
-            speak_as_mind=owner_chat[:500],
+            speak_as_mind=chat_line[:500],
+        )
+        _mirror_email_to_chat(
+            db, tenant.id, chat_line,
+            kind="repair_outbound",
+            ticket_id=ticket.id,
+            extra={"to": to, "via": "conversation"},
         )
         result["sent"] = True
         result["checkin_id"] = row.id
         result["to"] = to
         result["owner_chat"] = owner_chat
+        result["chat_line"] = chat_line
         result["needs_owner"] = bool(plan.get("needs_owner"))
         result["status"] = ticket.status
     else:
@@ -1942,6 +2056,13 @@ def ingest_inbound_email(
         },
         speak_as_mind=speak,
     )
+    # Mirror inbound into open chat session (continuous surface with email)
+    _mirror_email_to_chat(
+        db, ticket.tenant_id, speak,
+        kind="repair_inbound",
+        ticket_id=ticket.id,
+        extra={"from_email": from_email, "status": ticket.status},
+    )
 
     # Continue the email conversation with whoever replied — purposeful,
     # open-ended, directed at scheduling / fix / owner action. First outreach
@@ -1956,9 +2077,9 @@ def ingest_inbound_email(
             inbound_body=cleaned,
             inbound_subject=subject,
         )
-        if convo.get("sent") and convo.get("owner_chat"):
-            # Prefer a combined chat line when we already replied
-            speak = f"{speak} {convo['owner_chat']}".strip()
+        if convo.get("sent"):
+            # Prefer chat line that includes what we wrote back
+            speak = (convo.get("chat_line") or f"{speak} {convo.get('owner_chat') or ''}").strip()
     except Exception:
         log.exception("repair inbound: conversation reply failed ticket=%s", ticket.id)
         convo = {"attempted": True, "sent": False, "skipped": "exception"}

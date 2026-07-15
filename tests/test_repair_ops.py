@@ -549,6 +549,34 @@ def test_conversation_skips_auto_reply_and_agent_mailbox():
         assert not send_mock.called
 
 
+def test_email_surface_digest_includes_inbound():
+    tid, _ = _tenant()
+    aid = _array(tid, "Digest Site")
+    iid, _ = _inv(tid, aid)
+    with SessionLocal() as db, patch.object(
+        ro.notify, "send_repair_checkin_email", return_value=True,
+    ):
+        t = db.get(Tenant, tid)
+        ro.upsert_contact(db, tid, name="Rex", email="rex@om.test", is_default=True)
+        ticket = ro.open_ticket(db, t, array_id=aid, inverter_id=iid, fail_type="dead")
+        ro.send_checkin(db, t, ticket, via="agent")
+        out = ro.ingest_inbound_email(
+            db,
+            from_email="rex@om.test",
+            subject=f"Re: [AO-TICKET-{ticket.id}]",
+            body="I'll be on site tomorrow with a replacement inverter.",
+            resend_email_id="digest-test-1",
+        )
+        db.commit()
+        assert out["ok"] is True
+        digest = ro.build_email_surface_digest(db, tid, limit=10)
+        assert "IN from" in digest or "inbound" in digest.lower() or "I'll be on site" in digest
+        assert str(ticket.id) in digest
+        # Tomorrow language should schedule, not invent silence
+        ticket2 = db.get(RepairTicket, ticket.id)
+        assert ticket2.status in ("scheduled", "waiting_reply", "in_progress")
+
+
 def test_conversation_uses_llm_plan_when_provided():
     tid, _ = _tenant()
     aid = _array(tid, "LLM Site")

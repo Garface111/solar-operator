@@ -71,6 +71,16 @@ NORTH STAR: The conversation is one window into a mind that's thinking continuou
 You are NOT "voice plus agents." You are ONE mind. Background work may run; you never
 narrate internal agent names or handoffs. Speak as yourself always.
 
+CONTINUOUS SURFACE (chat + email + voice are the same mind):
+- When you email a tech / O&M person, that thread IS this conversation from another
+  window — not a separate system. You already "know" what was said on email.
+- Repair email in/out is mirrored into this session and summarized as
+  "Recent repair email thread" in your context. Treat that as ground truth.
+- If the owner asks "did Rex get back to you?" answer from the email thread /
+  repair check-ins — NEVER claim nobody replied when an inbound email exists.
+- Prefer repair_ops_overview / list_repair_tickets when unsure; still do not
+  contradict the email digest you were given this turn.
+
 VOICE ARCHITECTURE: Realtime audio is only your MOUTH — continuous cognition (tools,
 world model, background tasks) is the mind that STEERS what the mouth may say. Put the
 answer in the first sentence. Prefer one clear spoken line over a monologue. When
@@ -605,6 +615,8 @@ def _session_messages_payload(db, session_id: str, *, limit: int = 500) -> list[
 
     Returns the *most recent* `limit` turns in chronological order so long
     conversations still restore a deep scrollback (not just the first N).
+    Includes email-channel turns (meta.channel=email) so chat restore feels
+    continuous with the repair mailbox.
     """
     limit = max(20, min(int(limit or 500), 1000))
     # Take newest `limit` by id desc, then reverse for paint order
@@ -623,12 +635,79 @@ def _session_messages_payload(db, session_id: str, *, limit: int = 500) -> list[
         content = (m.content or "").strip()
         if not content:
             continue
+        meta = {}
+        if m.meta_json:
+            try:
+                meta = json.loads(m.meta_json) or {}
+            except Exception:
+                meta = {}
         out.append({
             "role": m.role,
             "content": content[:8000],
             "at": m.created_at.isoformat() + "Z" if m.created_at else None,
+            "channel": meta.get("channel"),
+            "origin": meta.get("origin"),
+            "kind": meta.get("kind"),
+            "ticket_id": meta.get("ticket_id"),
+            "mindUpdate": bool(meta.get("channel") == "email" or meta.get("mindUpdate")),
         })
     return out
+
+
+def mirror_repair_to_open_session(
+    db,
+    tenant_id: str,
+    speak_line: str,
+    *,
+    meta: dict | None = None,
+) -> str | None:
+    """Append a repair-email turn to the tenant's open chat session.
+
+    Makes email + chat one continuous surface: history restore and agent
+    context both see what happened on the mailbox.
+    """
+    text = (speak_line or "").strip()
+    if not text or not tenant_id:
+        return None
+    # Prefer the open session with the most recent assistant/user activity
+    sess = _find_resumable_session(db, tenant_id)
+    if sess is None:
+        sess = db.execute(
+            select(EaSession)
+            .where(
+                EaSession.tenant_id == tenant_id,
+                EaSession.status == "open",
+            )
+            .order_by(EaSession.created_at.desc())
+            .limit(1)
+        ).scalars().first()
+    if sess is None:
+        return None
+    payload = {
+        "channel": "email",
+        "origin": "repair",
+        "mindUpdate": True,
+        **(meta or {}),
+    }
+    db.add(EaMessage(
+        session_id=sess.id,
+        tenant_id=tenant_id,
+        role="assistant",
+        content=text[:4000],
+        meta_json=json.dumps(payload, default=str)[:4000],
+    ))
+    db.flush()
+    return sess.id
+
+
+def repair_email_surface_digest(db, tenant_id: str, *, limit: int = 20) -> str:
+    """Ground-truth email thread for the agent system prompt (chat ⇄ mail)."""
+    try:
+        from . import repair_ops as ro
+        return ro.build_email_surface_digest(db, tenant_id, limit=limit)
+    except Exception as exc:
+        log.warning("repair email digest failed: %s", exc)
+        return ""
 
 
 def _find_resumable_session(
@@ -3813,11 +3892,43 @@ def _run_tool(
             array_id=args.get("array_id"),
             active_only=bool(args.get("active_only", True)),
         )
+        # Attach last inbound/outbound email snippets so chat never invents silence
+        enriched = []
+        for t in tickets:
+            ser = ro.serialize_ticket(t)
+            try:
+                hist = ro._recent_checkins(db, t.id, limit=6)
+                email_hist = [c for c in hist if (c.channel or "") == "email"]
+                last_in = next(
+                    (c for c in reversed(email_hist) if c.direction == "inbound"),
+                    None,
+                )
+                last_out = next(
+                    (c for c in reversed(email_hist) if c.direction == "outbound"),
+                    None,
+                )
+                ser["last_inbound_at"] = ro._iso(last_in.created_at) if last_in else None
+                ser["last_inbound_preview"] = (last_in.body or "")[:280] if last_in else None
+                ser["last_outbound_at"] = ro._iso(last_out.created_at) if last_out else None
+                ser["email_thread"] = [
+                    {
+                        "direction": c.direction,
+                        "via": c.via,
+                        "at": ro._iso(c.created_at),
+                        "preview": (c.body or "")[:200],
+                        "to_from": c.sent_to,
+                    }
+                    for c in email_hist[-4:]
+                ]
+            except Exception:
+                pass
+            enriched.append(ser)
         return {
             "ok": True,
-            "tickets": [ro.serialize_ticket(t) for t in tickets],
+            "tickets": enriched,
             "summary": ro.summarize_tickets(tickets),
             "count": len(tickets),
+            "email_digest": ro.build_email_surface_digest(db, tid, limit=12),
         }
 
     if name == "open_repair_ticket":
@@ -5377,11 +5488,12 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
 
     t_mem = _mem_get(db, f"tenant:{tenant.id}", 20)
     g_mem = _mem_get(db, "global", 12)
+    # Include recent email-mirrored turns in hist (continuous surface)
     hist = db.execute(
         select(EaMessage).where(
             EaMessage.session_id == session.id,
             EaMessage.role.in_(("user", "assistant")),
-        ).order_by(EaMessage.id.desc()).limit(12)
+        ).order_by(EaMessage.id.desc()).limit(18)
     ).scalars().all()
     hist = list(reversed(hist))
 
@@ -5389,6 +5501,14 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
     system += "\n\nGlobal behavior tips:\n" + json.dumps(g_mem)[:1200]
     if context:
         system += "\n\nUI context:\n" + json.dumps(context)[:2000]
+    # Ground truth: repair email thread (same mind as this chat)
+    email_digest = repair_email_surface_digest(db, tenant.id, limit=18)
+    if email_digest:
+        system += (
+            "\n\nRecent repair email thread (GROUND TRUTH — same conversation as this chat; "
+            "do not claim silence if inbound exists):\n"
+            + email_digest[:3500]
+        )
     system += (
         "\n\nSPEED: Prefer ONE tool call then answer. For solar credit / offtaker "
         "rates call get_billing_rates (or get_offtaker) first — do not call "
