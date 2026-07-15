@@ -143,17 +143,92 @@ def _process_onboarding_checkout_completed(sess: dict, onboarding_token: str) ->
     return {"tenant_activated": tid}
 
 
+def _is_energy_agent_pro_meta(meta: dict | None) -> bool:
+    """True when Stripe metadata marks Energy Agent Pro (add-on, not fleet bill)."""
+    m = meta or {}
+    return (m.get("product") or "").strip().lower() in (
+        "energy_agent_pro",
+        "ai_pro",
+        "ao_ai_pro",
+    )
+
+
+def _is_energy_agent_pro_subscription(sub: dict) -> bool:
+    """Identify an AI Pro add-on subscription (must NOT drive fleet active/cancel)."""
+    if _is_energy_agent_pro_meta(sub.get("metadata")):
+        return True
+    # Fallback: match the configured Pro price id on line items.
+    try:
+        from .pricing_ao_unified import AI_PRO_PRICE_ID
+    except Exception:
+        AI_PRO_PRICE_ID = ""
+    price_id = (AI_PRO_PRICE_ID or "").strip()
+    if not price_id:
+        return False
+    items = ((sub.get("items") or {}).get("data")) or []
+    for it in items:
+        p = it.get("price") if isinstance(it, dict) else None
+        pid = p.get("id") if isinstance(p, dict) else (p if isinstance(p, str) else None)
+        if pid == price_id:
+            return True
+    return False
+
+
+def _process_ai_pro_checkout_completed(sess: dict) -> dict:
+    """Energy Agent Pro add-on Checkout completed → set Tenant.ai_pro.
+
+    Orthogonal to the fleet monitoring/invoicing subscription. Never overwrites
+    stripe_subscription_id, never flips active, never sends a welcome email.
+    """
+    meta = sess.get("metadata") or {}
+    tenant_id = meta.get("tenant_id")
+    if not tenant_id:
+        return {"ignored": "energy_agent_pro checkout missing tenant_id"}
+    stripe_customer_id = sess.get("customer")
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            send_internal_alert(
+                "Energy Agent Pro checkout for unknown tenant",
+                f"checkout.session.completed product=energy_agent_pro "
+                f"tenant_id={tenant_id} — no tenant row."
+            )
+            return {"ignored": "tenant not found"}
+        was = bool(getattr(t, "ai_pro", False))
+        t.ai_pro = True
+        if stripe_customer_id and not t.stripe_customer_id:
+            t.stripe_customer_id = stripe_customer_id
+        db.commit()
+        email = t.contact_email
+        name = t.operator_name or t.company_name or t.name
+    if not was:
+        send_internal_alert(
+            f"⚡ Energy Agent Pro active: {tenant_id}",
+            f"Tenant {tenant_id} ({email} / {name}) upgraded to Energy Agent Pro "
+            f"($50/mo unlimited AI).\nStripe customer: {stripe_customer_id}\n"
+            f"Subscription: {sess.get('subscription')}"
+        )
+    return {"ai_pro": True, "tenant": tenant_id, "already": was}
+
+
 def _process_checkout_completed(sess: dict) -> dict:
     """Activate tenant, link Stripe IDs, send welcome email.
 
     Also handles V2 offtaker invoice pay-links (metadata.kind=offtaker_invoice):
     those are destination charges that mark an OfftakerPayment paid — they must
     NOT activate a tenant or send a welcome email.
+
+    Energy Agent Pro add-on (metadata.product=energy_agent_pro) only flips
+    Tenant.ai_pro — never treated as a new signup.
     """
     meta = sess.get("metadata") or {}
     # V2 offtaker pay-link (Jul 2026) — offtaker paid their solar-credit invoice.
     if meta.get("kind") == "offtaker_invoice":
         return _process_offtaker_invoice_paid(sess)
+
+    # Energy Agent Pro add-on (Jul 2026 freemium) — unlimited AI for $50/mo.
+    if _is_energy_agent_pro_meta(meta):
+        return _process_ai_pro_checkout_completed(sess)
 
     # New onboarding flow tags sessions with onboarding_token — route those to
     # the deferred-welcome handler. Legacy /v1/signup sessions fall through.
@@ -269,11 +344,18 @@ def _process_connect_account_updated(account: dict) -> dict:
 
 def _process_subscription_updated(sub: dict) -> dict:
     """Sync Tenant.subscription_status from Stripe (handles upgrades,
-    cancellation-at-period-end toggles, etc.)."""
+    cancellation-at-period-end toggles, etc.).
+
+    Energy Agent Pro add-on subscriptions only flip Tenant.ai_pro — they must
+    never overwrite the fleet stripe_subscription_id or deactivate the account.
+    """
     sub_id = sub.get("id")
     customer_id = sub.get("customer")
     new_status = sub.get("status")  # active, past_due, canceled, unpaid, trialing
     cancel_at_period_end = sub.get("cancel_at_period_end")
+
+    if _is_energy_agent_pro_subscription(sub):
+        return _process_ai_pro_subscription_lifecycle(sub, deleted=False)
 
     with SessionLocal() as db:
         t = db.execute(
@@ -302,8 +384,55 @@ def _process_subscription_updated(sub: dict) -> dict:
     return {"tenant": tid, "status": new_status}
 
 
+def _process_ai_pro_subscription_lifecycle(sub: dict, *, deleted: bool) -> dict:
+    """Flip Tenant.ai_pro from an Energy Agent Pro subscription event.
+
+    Lookup order: subscription metadata.tenant_id → customer_id. Never touches
+    active / subscription_status / stripe_subscription_id (fleet billing).
+    """
+    meta = sub.get("metadata") or {}
+    tenant_id = meta.get("tenant_id")
+    customer_id = sub.get("customer")
+    status = (sub.get("status") or "").lower()
+    pro_on = (not deleted) and status in ("active", "trialing", "past_due")
+
+    with SessionLocal() as db:
+        t = None
+        if tenant_id:
+            t = db.get(Tenant, tenant_id)
+        if t is None and customer_id:
+            t = db.execute(
+                select(Tenant).where(Tenant.stripe_customer_id == customer_id)
+            ).scalars().first()
+        if not t:
+            return {
+                "ignored": (
+                    f"no tenant for ai_pro sub={sub.get('id')} "
+                    f"customer={customer_id} tenant_id={tenant_id}"
+                )
+            }
+        was = bool(getattr(t, "ai_pro", False))
+        t.ai_pro = bool(pro_on)
+        db.commit()
+        tid, email = t.id, t.contact_email
+
+    if was != pro_on:
+        send_internal_alert(
+            f"{'⚡' if pro_on else '⏹️'} Energy Agent Pro {'on' if pro_on else 'off'}: {tid}",
+            f"Tenant {tid} ({email}) ai_pro {was} → {pro_on}\n"
+            f"Stripe sub: {sub.get('id')} status={status} deleted={deleted}"
+        )
+    return {"tenant": tid, "ai_pro": pro_on, "status": status, "deleted": deleted}
+
+
 def _process_subscription_deleted(sub: dict) -> dict:
-    """Hard cancellation — mark tenant inactive."""
+    """Hard cancellation — mark tenant inactive.
+
+    Energy Agent Pro add-on cancel only clears ai_pro (fleet subscription stays).
+    """
+    if _is_energy_agent_pro_subscription(sub):
+        return _process_ai_pro_subscription_lifecycle(sub, deleted=True)
+
     sub_id = sub.get("id")
     customer_id = sub.get("customer")
 
