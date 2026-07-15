@@ -307,8 +307,9 @@ Three independent product lines + freemium AI (source: `api/pricing_ao_unified.p
 | Line | What it bills | Typical rate |
 |------|----------------|--------------|
 | **Fleet monitoring** | Registered nameplate kW | ~$0.15/kW·mo (graduated volume discount) |
-| **Offtaker invoices** | Count of offtakers you invoice | ~$15/offtaker·mo (graduated) |
+| **Offtaker invoices** | Count of offtakers you invoice | ~$15/offtaker·mo (graduated) — always on Regular |
 | **Online pay fee** | When offtakers pay an invoice online | **0.5%** of that payment only (not monthly) |
+| **Plan** | Regular (default) | Full product: monitoring + offtakers. **AI Pro** is the only add-on. |
 | **Energy Agent Pro** | Flat add-on | **$50/mo unlimited AI** |
 
 - **Plan choice** (`billing_plan` = monitoring | invoicing | both) turns monitoring / offtaker lines on/off (tab entitlements). AI Pro is **orthogonal** — optional on any plan.
