@@ -1,15 +1,11 @@
-# Adapter Plan: Palmetto Electric Cooperative (SC)
+# Palmetto Electric Cooperative (SC) Adapter Plan
 
-**Status**: bespoke (Meridian Cooperative OnlinePortal)
+**Status**: Bespoke (Meridian Cooperative OnlinePortal). Not SmartHub.
+
 **Portal**: https://epayment.palmetto.coop/onlineportal/Customer-Login
-**SmartHub host**: -
 
-## Evidence
-- Explicitly identified as non-SmartHub in request metadata (family=bespoke, high confidence).
-- Login uses account number/user ID + password (no SmartHub JSON flows).
-- No CSV entry or smarthub_host present; cannot be promoted via registry.
+**Evidence**: Brief states "NOT on SmartHub — it runs a bespoke Meridian Cooperative 'OnlinePortal' (login = account number/user ID + password)". No smarthub_host in providers catalog.
 
-## Next Step (HAR required)
-Capture real logged-in session traffic as .HAR during sign-in + billing/usage pull. Reverse-engineer auth + data endpoints from Meridian OnlinePortal only after capture. Do not fabricate endpoints or mark 'added'.
+**Next step (no fabricated code)**: Capture real logged-in .HAR at epayment.palmetto.coop (sign-in + billing/usage pull). Reverse-engineer auth + data endpoints from HAR only. Do not mark `added` or implement adapter without verified HAR evidence.
 
-No code changes; research-only artifact.
+**Do not**: Invent endpoints, promote to SMARTHUB_UTILITIES, or update any registry/CSV.
