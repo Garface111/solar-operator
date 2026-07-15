@@ -364,3 +364,53 @@ export async function requestUtility(
   if (!res.ok) throw new Error(await parseError(res));
   return res.json();
 }
+
+// ─── Cloud Capture — "store it with us" onboarding fork ─────────────────────
+// The cloud step completes onboarding EARLY (to mint a dashboard session it can
+// store credentials with), so /done must NOT complete a second time and fire a
+// duplicate magic-link/sample email. It checks this flag.
+export const ONBOARDING_COMPLETED_KEY = "so:onboarding:completed";
+
+export interface CloudCredentialInput {
+  provider: string;
+  username: string;
+  password: string;
+  login_host?: string | null;
+}
+
+/** Store a utility login server-side (encrypted at rest). Authed with the
+ *  dashboard session_token from completeOnboarding(). Consent is explicit. */
+export async function saveCloudCredential(
+  sessionToken: string,
+  input: CloudCredentialInput,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetchWithTimeout("/v1/cloud-capture/credentials", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${sessionToken}`,
+    },
+    body: JSON.stringify({ ...input, enable: true, consent: true }),
+  });
+  let detail = `http_${res.status}`;
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") detail = body.detail;
+    else if (typeof body?.error === "string") detail = body.error;
+  } catch {
+    /* non-JSON */
+  }
+  return { ok: res.ok, error: res.ok ? undefined : detail };
+}
+
+/** Persist capture_mode=cloud so the dashboard opens the Cloud Capture vault. */
+export async function setCaptureModeCloud(sessionToken: string): Promise<void> {
+  await fetchWithTimeout("/v1/account/capture-mode", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${sessionToken}`,
+    },
+    body: JSON.stringify({ mode: "cloud" }),
+  });
+}

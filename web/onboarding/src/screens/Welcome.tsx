@@ -8,7 +8,7 @@ import { MarkdownDoc } from "../ui/MarkdownDoc";
 import { setConsentAccepted } from "../lib/onboarding";
 
 const SERVICES = [
-  "Auto-pull bills from your utility — hundreds supported nationwide",
+  "Auto-pull bills from your utilities — hundreds supported nationwide",
   "NEPOOL-format Excel reports",
   "Email delivery to your clients",
   "Multi-client portal",
@@ -18,9 +18,9 @@ const SERVICES = [
 // and tos.md (Quick summary sections). If you edit those files, update here.
 const PP_BULLETS = [
   "We never sell your data — it's only used to run the reporting service.",
-  "We only read your utility billing data — nothing else from your browser.",
+  "We only read your utility billing data — nothing else from your portals.",
   "You can delete everything by emailing admin@solaroperator.org. We purge your data within 24 hours.",
-  "Your utility login session expires automatically (~21 days) and is refreshed each time you log in with the extension active.",
+  "Cloud Capture (optional): portal passwords you store with us are encrypted on our servers so we can refresh bills 24/7; remove any login anytime. On-device path: passwords stay in your browser and never reach our servers.",
   "Our only email provider is Resend.com — it delivers your reports and sign-in links. No other third party sees your data.",
 ];
 

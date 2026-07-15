@@ -144,7 +144,8 @@ export default function ClientSetup() {
         array_count: count,
       });
       setToken(onboarding_token);
-      navigate("/extension");
+      // Connect fork: cloud (recommended) vs on-device extension.
+      navigate("/connect");
     } catch (err) {
       toast.error(
         err instanceof Error
@@ -164,8 +165,8 @@ export default function ClientSetup() {
         <p className="mt-2 text-sm text-zinc-500">
           A ballpark is fine — drag the slider to see your price. No payment
           today; your 14-day free trial begins right now. You&apos;ll add your
-          real clients and arrays in the dashboard, and the extension
-          auto-populates most of it when you log into your utility portal. We
+          real clients and arrays in the dashboard. Cloud Capture pulls bills
+          from utility logins you store once (or use the optional extension). We
           reconcile your subscription quantity automatically as the real count
           comes in.
         </p>
@@ -398,7 +399,7 @@ export default function ClientSetup() {
         </div>
 
         <p className="mt-4 text-xs text-zinc-500">
-          Chrome desktop required — extension scrapes utility portals
+          Most operators use Cloud Capture — no install. Extension optional.
         </p>
 
         <p className="mt-2 text-xs text-zinc-400">

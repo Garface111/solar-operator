@@ -108,6 +108,8 @@ Honesty
 
 AUTO-REFRESH modes on Account choose **where portal passwords live** for scheduled refresh. `Tenant.capture_mode` = `cloud` | `device` | null. This is **orthogonal** to “does this vendor use an API key?” and **orthogonal** to one-click extension capture (Path C).
 
+**NEPOOL Operator (solaroperator.org / nepooloperator.com):** Cloud Capture is the **recommended default** for new signups (onboarding fork: “Store it with us” vs “Keep it on my computer”). Operators store **client utility** logins (GMP, SmartHub co-ops, etc.) in Master account → Cloud Capture; the harvester pulls **bills** ~12h. Extension remains available as the private/device path. Existing tenants with `capture_mode` null or `device` keep the extension portal roster as primary — no forced migration.
+
 ### Path A — Cloud (“Store it with us — live data”)
 - Owner saves a portal username/password once. Stored **encrypted at rest** on the server (`PortalCredential`); **never returned** by any API; deleting it is a hard delete of the ciphertext. Requires explicit consent, and the server refuses to accept a password unless encryption-at-rest is armed.
 - A headless browser farm (`cloud_capture` + `harvester/*`) signs in on a schedule 24/7 — **no tab, no extension needed** for that login. Inverter logins refresh on a tight cadence (target: never more than ~5 minutes stale); utility logins refresh roughly every 12h (bills are monthly; polling harder invites lockouts). It reuses a warm session to avoid tripping “suspicious sign-in” alerts.
@@ -339,6 +341,8 @@ UX: locked tabs show a 🔒 with an inline upgrade popup. The plan **picker is o
 ---
 
 ## onboarding
+
+**NEPOOL wizard path (live):** Welcome → Info → ClientSetup → **Connect fork** → either **Cloud** (complete early → save utility logins → Done) or **Extension** (device path, unchanged) → Done. GetStarted marketing leads with Cloud Capture, not Chrome install. Cloud path sets `capture_mode=cloud` and must not double-call `/complete` (duplicate welcome email guard).
 
 SIGNUP → CONNECT → VERIFY (no upfront payment) → **optional offtaker roster**
 
