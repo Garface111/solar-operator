@@ -65,34 +65,52 @@ REQUIRED_FIELDS: tuple[str, ...] = ("offtaker_name", "array_name", "allocation_p
 
 _ROSTER_FIELD_KEYWORDS: dict[str, list[tuple[str, float]]] = {
     "offtaker_name": [
-        ("offtaker name", 3.5), ("customer name", 3.5), ("tenant", 2.0),
-        ("offtaker", 2.0), ("customer", 1.5), ("subscriber", 2.0),
-        ("member", 1.5), ("name", 2.0),
+        ("offtaker name", 3.5), ("customer name", 3.5), ("subscriber name", 3.5),
+        ("member name", 3.5), ("beneficiary", 2.5), ("participant", 2.2),
+        ("tenant", 2.0), ("offtaker", 2.0), ("customer", 1.5), ("subscriber", 2.0),
+        ("member", 1.5), ("owner name", 2.8), ("bill to", 2.2), ("name", 2.0),
     ],
     "array_name": [
-        ("array name", 3.5), ("site", 2.5), ("project", 2.0), ("system", 1.8),
-        ("array", 2.0), ("generator", 1.5), ("facility", 1.8), ("installation", 1.5),
+        ("array name", 3.5), ("master array", 3.5), ("solar site", 3.0),
+        ("site name", 3.0), ("project name", 2.8), ("system name", 2.8),
+        ("net meter group", 3.2), ("group name", 2.5), ("site", 2.5),
+        ("project", 2.0), ("system", 1.8), ("array", 2.0), ("generator", 1.5),
+        ("facility", 1.8), ("installation", 1.5), ("farm", 1.4),
     ],
     "email": [
-        ("email", 3.0), ("e-mail", 3.0), ("contact", 2.0),
+        ("email", 3.0), ("e-mail", 3.0), ("email address", 3.5),
+        ("contact email", 3.2), ("contact", 2.0),
     ],
     "allocation_pct": [
         ("allocation %", 4.0), ("share %", 3.5), ("allocation pct", 4.0),
+        ("ownership %", 3.8), ("ownership interest", 3.5), ("interest %", 3.2),
+        ("percent ownership", 3.5), ("kw share", 3.0), ("% share", 3.5),
+        ("subscription %", 3.5), ("subscriber share", 3.2), ("capacity share", 3.0),
         ("percent", 2.5), ("allocation", 2.0), ("share", 1.5),
-        ("%", 2.0), ("pct", 2.0), ("portion", 1.8),
+        ("%", 2.0), ("pct", 2.0), ("portion", 1.8), ("fraction", 1.8),
     ],
     "discount_pct": [
         ("discount %", 3.5), ("discount", 2.5), ("savings", 1.5), ("markdown", 1.5),
+        ("credit discount", 3.0),
     ],
     "net_rate": [
         ("$/kwh", 4.0), ("credit rate", 3.0), ("net rate", 3.0), ("rate", 2.0),
-        ("price", 1.5), ("$ / kwh", 4.0), ("per kwh", 3.0),
+        ("price", 1.5), ("$ / kwh", 4.0), ("per kwh", 3.0), ("$/kwh rate", 4.0),
+        ("billing rate", 2.8),
     ],
     "account_number": [
-        ("gmp account", 3.0), ("account", 2.5), ("acct", 2.0), ("meter", 2.0),
-        ("account #", 3.0), ("account number", 3.0),
+        ("gmp account", 3.0), ("utility account", 3.2), ("account number", 3.0),
+        ("account #", 3.0), ("acct number", 2.8), ("acct #", 2.8),
+        ("meter number", 2.8), ("account", 2.5), ("acct", 2.0), ("meter", 2.0),
+        ("service account", 2.8), ("esiid", 2.5), ("account id", 2.5),
     ],
 }
+
+# Rows that look like totals / footers — never treat as offtaker data when sniffing.
+_TOTAL_ROW_RE = re.compile(
+    r"^\s*(total|totals|subtotal|grand\s*total|sum|overall|aggregate)\b",
+    re.I,
+)
 
 # A discount column, when unlabeled, is usually the SECOND percentage column (allocation
 # is the first). We use this only as a tiebreaker in the content pass.
@@ -171,10 +189,25 @@ def _find_roster_header(grid: list[list]) -> tuple[Optional[int], list[str]]:
 
 # ─── content sniffing (the crucial add: judge a column by its DATA) ───────────
 
+def _row_looks_like_total(row: list) -> bool:
+    """True when the first non-empty cell is a totals/subtotal label (not an offtaker)."""
+    for c in row or []:
+        if c is None or not str(c).strip():
+            continue
+        return bool(_TOTAL_ROW_RE.search(str(c).strip()))
+    return False
+
+
 def _column_values(grid: list[list], header_row: int, col: int) -> list[Any]:
-    """The non-empty data cells in one column below the header (capped)."""
+    """The non-empty data cells in one column below the header (capped).
+
+    Skips blank rows and total/subtotal footers so content sniffing isn't
+    poisoned by a trailing "Total 100%" row (common on utility exports).
+    """
     out: list[Any] = []
     for row in grid[header_row + 1:]:
+        if _row_looks_like_total(row):
+            continue
         if col < len(row):
             v = row[col]
             if v is not None and str(v).strip():
@@ -226,7 +259,14 @@ def _looks_percentage(values: list[Any]) -> float:
     if not nums:
         return 0.0
     ok = sum(1 for n in nums if 0.0 < n <= 100.0)
-    return ok / len(nums)
+    base = ok / len(nums)
+    # Bonus: column values sum near 1.0 or 100 (typical of a complete share roster).
+    # Helps pick the true allocation column when two % columns exist (share vs discount).
+    if len(nums) >= 2 and base >= 0.5:
+        s = sum(nums)
+        if 0.85 <= s <= 1.15 or 85.0 <= s <= 115.0:
+            base = min(1.0, base + 0.25)
+    return base
 
 
 def _looks_rate(values: list[Any]) -> float:

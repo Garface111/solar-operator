@@ -360,7 +360,8 @@ def test_offtaker_template_download(client):
     ws = wb["Offtakers"]
     # Ford 2026-07-09 richer roster format: the two account-number columns pin the
     # exact utility bill (master → array; offtaker's own → their sub-account).
+    # Utility-agnostic headers (Ford multi-utility import) — not GMP-only labels.
     assert [c.value for c in ws[1]] == [
-        "Master Array Account", "Master GMP Account Number",
-        "GMP Account of Offtaker", "Offtaker", "Share %", "Email",
-        "Discount %", "Your Offtaker Account Number", "Budget Monthly ($)"]
+        "Master Array Account", "Master Utility Account Number",
+        "Offtaker Utility Name", "Offtaker", "Share %", "Email",
+        "Discount %", "Offtaker Account Number", "Budget Monthly ($)"]

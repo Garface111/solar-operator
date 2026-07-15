@@ -251,6 +251,44 @@ OFFTAKER INVOICE GENERATOR — START TO FINISH. UI: **Invoices** (`#reports`). E
 - `list_offtakers` / `get_offtaker` (see share, array, utility_account_id, nicknames) → `patch_offtaker` (share %, email, name, auto_send, and utility/master rebind). Confirm writes; the UI soft-refreshes after.
 - **Critical rule:** “change master account to X” / “switch utility source to X” = **rebind** array_id/utility source, **NEVER** rename `customer_name`. Renaming is only when the user explicitly says rename the offtaker’s display name.
 
+### 7) Bulk offtaker spreadsheet import (CRITICAL — product capability)
+**What it is:** Operators almost never type offtakers one-by-one. They already have a **roster spreadsheet** (utility membership export, their own Excel bookkeeping, Google Sheets download, installer handoff). **Invoices → ⬆ Bulk import** ingests **any** `.xlsx` / `.csv` layout — not just our template.
+
+**Where in the UI**
+- Tab: **Invoices** (`#reports`)
+- Toolbar button: **⬆ Bulk import** (`#rbBulkImport`)
+- Deep link: `/?setup=offtakers#reports` or `#reports` with `?bulk=1` / `setup=offtakers` opens the bulk panel automatically
+- Template (optional): `GET /v1/array-operator/billing/offtaker-template.xlsx` — blank starter; **not required**
+- Onboarding: optional “Upload offtaker roster” path after connect (same API; lands on Invoices bulk import when they open the dashboard)
+
+**Pipeline (never silent-wrong)**
+1. Operator drops a file → `POST /v1/array-operator/billing/subscriptions/bulk-import?dry_run=true` (preview only; **writes nothing**).
+2. **Column detection** (`api/billing/roster_detector.py`): header keywords + content sniffing (array column found by fuzzy-matching cell values to the tenant’s real arrays; emails, %, account #s from data shapes). Junk title rows above the header are skipped. Optional LLM header assist only when required fields are weak.
+3. UI phase 1 — **column mapping review**: operator confirms/corrects which sheet column = offtaker name / share % / array or account # / email / discount / rate / etc.
+4. UI phase 2 — **per-row review**: fuzzy `match_array` confidence (exact/high/medium/none). Medium/none **must** be confirmed or re-picked. No auto-commit of low confidence.
+5. Operator commits only ready/confirmed rows → `POST .../bulk-commit` (idempotent). Creates `BillingReportSubscription` rows.
+
+**Required per row (conceptually)**
+- Offtaker **name**
+- **Share %** (accepts `25`, `25%`, or `0.25`)
+- Array identity: **array name** *or* master/offtaker **utility account number**
+
+**Optional enrichments scraped when present:** email, discount %, net $/kWh rate, master utility account #, offtaker’s own account #, budget monthly $, plus any unknown columns preserved in `extra` for review.
+
+**Philosophy (how we “scrape” messy spreadsheets)**
+- **Header-first, content-second** — headers propose; cell values win when headers are junk (“Col1”, “Solar Site”).
+- **Reviewable mapping** — every field has confidence; weak fields surface; operator overrides whole mapping.
+- **Array-first matching** with utility-bill override — wrong array → wrong invoice, so confidence gates commit.
+- **Format-agnostic** — CSV/XLSX, reordered columns, title banners, multi-sheet (best data sheet chosen), BOM-safe CSV.
+- **Skip noise** — blank rows; total/subtotal-style rows demoted during sniffing.
+- Prefer: utility export as-is, then our template if they want a blank starter.
+
+**What the agent must say / do**
+- When asked “how do I add many offtakers / import a roster / upload a spreadsheet of customers?”: explain **Bulk import** on **Invoices**, offer to `ui_navigate` to `#reports` and highlight `#rbBulkImport`, or deep-link `/?setup=offtakers#reports`.
+- Never claim bulk import is missing or “coming soon.”
+- Never invent offtaker rows from a pasted table without the import flow — guide them to drop the file in Bulk import so mapping + confidence review run.
+- product_map(topic=offtakers) for this full model; onboarding topic covers the optional signup path.
+
 ---
 
 ## billing
@@ -283,7 +321,7 @@ UX: locked tabs show a 🔒 with an inline upgrade popup. The plan **picker is o
 
 ## onboarding
 
-SIGNUP → CONNECT → VERIFY (no upfront payment)
+SIGNUP → CONNECT → VERIFY (no upfront payment) → **optional offtaker roster**
 
 - **Signup** creates a trialing tenant, gated by server-side affirmative consent (fail-closed).
 - **Duplicate email → 409**, resolved gracefully: an *active* account gets “sign in instead”; a *deactivated* one gets a recoverable “welcome back — sign in to reactivate.” The same email may hold different products.
@@ -292,6 +330,7 @@ SIGNUP → CONNECT → VERIFY (no upfront payment)
   - **“Keep it on my computer”** → the Chrome extension; passwords never leave the device.
   The chosen `capture_mode` persists server-side, so it’s consistent on any device.
 - **Sync verification loop:** the connect screen polls for a recent capture (extension ping / test-connection) and auto-advances when data lands. A reconcile step self-heals a paid-but-inactive tenant. Completing onboarding mints a session and sends a product-aware welcome + magic link.
+- **Optional offtaker spreadsheet (woven in):** after connect / on the done screen, owners with a roster can choose **“Upload offtaker spreadsheet”** instead of only “Open dashboard.” That path lands them signed-in on **Invoices → Bulk import** (`/?setup=offtakers#reports`) so the same format-agnostic detector + review flow runs during first-run setup. Skipping is always fine — they can bulk-import later from Invoices. See `offtakers` §7.
 
 ---
 
@@ -422,6 +461,7 @@ WHEN TO CALL WHAT
 | Tab names / where do I click | `product_map(topic=tabs)` |
 | How is health / attention computed? | `product_map(topic=health)` + health tools |
 | Invoice generator model | `product_map(topic=offtakers)` |
+| Bulk import offtakers / roster spreadsheet | `product_map(topic=offtakers)` §7 — navigate `#reports`, highlight `#rbBulkImport`, or `/?setup=offtakers#reports` |
 | Plans / what’s locked / pricing tiers | `product_map(topic=plans)` |
 | Signup / connect / capture fork | `product_map(topic=onboarding)` |
 | Net-metering rates / news | `product_map(topic=resources)` |
