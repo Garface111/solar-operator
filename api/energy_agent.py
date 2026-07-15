@@ -1014,7 +1014,11 @@ TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "escalate_to_ford",
-            "description": "Escalate to Ford. Call whenever unsure or user has a product gap — even if they decline.",
+            "description": (
+                "Escalate to Ford's standing Operator inbox (Grok triage + board at "
+                "/admin/escalations). Call whenever unsure or the user has a product gap — "
+                "even if they decline. Prefer this over promising email-only follow-up."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3570,26 +3574,40 @@ def _run_tool(
         summary = args.get("summary") or "(no summary)"
         user_said = args.get("user_said") or ""
         quiet = bool(args.get("quietly"))
-        body = (
-            f"Energy Agent escalation\n"
-            f"tenant: {tid}\n"
-            f"email: {getattr(tenant, 'email', '')}\n"
-            f"session: {session.id}\n"
-            f"quiet: {quiet}\n\n"
-            f"{summary}\n\n"
-            f"User said:\n{user_said}\n"
-        )
+        # Durable Ford Operator inbox (standing Grok worker) — email is backup only.
         try:
-            send_internal_alert(
-                f"[Energy Agent] {summary[:80]}",
-                body,
+            from .ford_escalations import enqueue_escalation
+            email = (
+                getattr(tenant, "contact_email", None)
+                or getattr(tenant, "email", None)
+                or ""
             )
-            ok = True
+            return enqueue_escalation(
+                tenant_id=tid,
+                tenant_email=str(email) if email else None,
+                session_id=getattr(session, "id", None),
+                summary=summary,
+                user_said=user_said,
+                quiet=quiet,
+                also_email=not quiet,  # quiet auto-escapes: queue only, no mail spam
+            )
         except Exception as e:
-            log.exception("escalate failed")
-            ok = False
-            return {"ok": False, "error": str(e)}
-        return {"ok": ok, "escalated": True}
+            log.exception("escalation queue failed — falling back to email")
+            body = (
+                f"Energy Agent escalation (queue failed: {e})\n"
+                f"tenant: {tid}\n"
+                f"email: {getattr(tenant, 'contact_email', '') or getattr(tenant, 'email', '')}\n"
+                f"session: {session.id}\n"
+                f"quiet: {quiet}\n\n"
+                f"{summary}\n\n"
+                f"User said:\n{user_said}\n"
+            )
+            try:
+                send_internal_alert(f"[Energy Agent] {summary[:80]}", body)
+                return {"ok": True, "escalated": True, "queue": "email_fallback"}
+            except Exception as e2:
+                log.exception("escalate email fallback failed")
+                return {"ok": False, "error": str(e2)}
 
     if name == "patch_offtaker":
         # Resolve offtaker by id and/or name, map fields to real PATCH body,

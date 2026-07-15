@@ -1582,7 +1582,29 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
+    # Ford Operator: standing Grok triage for Energy Agent escalations inbox.
+    # Every 2 min process a small batch of open items → needs_ford + notify.
+    scheduler.add_job(
+        _run_ford_escalation_worker,
+        "interval", minutes=2, id="ford_escalation_worker", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=90),
+    )
     scheduler.start()
+
+
+def _run_ford_escalation_worker() -> None:
+    """Triage open EA escalations with Grok; board at /admin/escalations."""
+    try:
+        from .ford_escalations import process_open_escalations
+        res = process_open_escalations()
+        if res.get("processed"):
+            logger.info(
+                "ford_escalation_worker: processed=%s notified=%s errors=%s",
+                res.get("processed"), res.get("notified"), res.get("errors"),
+            )
+    except Exception:
+        logger.exception("ford_escalation_worker crashed")
 
 
 def _run_energy_agent_mind_tick() -> None:
