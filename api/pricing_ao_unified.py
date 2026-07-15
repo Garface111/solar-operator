@@ -104,26 +104,40 @@ def build_unified_bill(
     ai_pro: bool = False,
     include_monitoring: Optional[bool] = None,
     include_invoicing: Optional[bool] = None,
+    always_show_product_lines: bool = True,
 ) -> dict:
     """Itemized monthly product bill + AI line for the Account Billing section.
 
-    include_* default from billing_plan (monitoring | invoicing | both).
+    include_* control what is *charged* (added to total_cents), defaulting from
+    billing_plan (monitoring | invoicing | both). Account UI always shows both
+    product lines when always_show_product_lines=True so operators can see the
+    per-offtaker rate even on a monitoring-only plan (line marked billed=False).
+
     Amounts in cents (may be fractional for nameplate half-cents).
     """
     p = (billing_plan or "").strip().lower()
     if include_monitoring is None:
+        # Unset plan → monitoring default (conservative Stripe meter).
         include_monitoring = p in ("monitoring", "both", "")
     if include_invoicing is None:
+        # Unset plan does NOT charge per-offtaker until they pick invoicing/both.
         include_invoicing = p in ("invoicing", "both")
+
+    mon_billed = bool(include_monitoring)
+    inv_billed = bool(include_invoicing)
+    # Account "Your bill" always surfaces both commercial product lines.
+    show_mon = mon_billed or always_show_product_lines
+    show_inv = inv_billed or always_show_product_lines
 
     lines: list[dict] = []
     total = 0.0
 
-    if include_monitoring:
+    if show_mon:
         mon = float(nameplate_monthly_cents(nameplate_kw) or 0.0)
         full = float(NAMEPLATE_FULL_CENTS)
         blended = (mon / float(nameplate_kw)) if nameplate_kw and nameplate_kw > 0 else full
-        total += mon
+        if mon_billed:
+            total += mon
         lines.append({
             "id": "monitoring",
             "kind": "Fleet monitoring",
@@ -133,18 +147,22 @@ def build_unified_bill(
             "unit_cents": round(blended, 3),
             "full_unit_cents": full,
             "amount_cents": round(mon, 2),
+            "billed": mon_billed,
+            "included_in_monthly_total": mon_billed,
             "desc": (
                 "Live fleet health, billed on registered inverter nameplate. "
                 "Volume discounts apply automatically for large fleets."
+                + ("" if mon_billed else " Not on your current plan — not charged.")
             ),
         })
 
-    if include_invoicing:
+    if show_inv:
         n = int(offtaker_count or 0)
         inv = float(offtaker_monthly_cents(n) or 0.0)
         full = float(OFFTAKER_FULL_CENTS)
         blended = float(offtaker_blended_cents(n) or full)
-        total += inv
+        if inv_billed:
+            total += inv
         lines.append({
             "id": "invoicing",
             "kind": "Offtaker invoices",
@@ -154,9 +172,15 @@ def build_unified_bill(
             "unit_cents": round(blended, 2),
             "full_unit_cents": full,
             "amount_cents": round(inv, 2),
+            "billed": inv_billed,
+            "included_in_monthly_total": inv_billed,
             "desc": (
-                f"Automatic offtaker solar-credit invoices — "
-                f"${full / 100:.0f}/offtaker·mo headline, volume discounts as your roster grows."
+                f"${full / 100:.0f} per offtaker / month (volume discounts as the roster grows). "
+                + (
+                    "Charged on your monthly bill for every active offtaker."
+                    if inv_billed
+                    else "Not on your current plan — switch to Invoicing or Both to charge this."
+                )
             ),
         })
 
@@ -170,6 +194,8 @@ def build_unified_bill(
         "full_unit_cents": float(AI_PRO_MONTHLY_CENTS),
         "amount_cents": float(AI_PRO_MONTHLY_CENTS) if ai_pro else 0.0,
         "included": bool(ai_pro),
+        "billed": bool(ai_pro),
+        "included_in_monthly_total": bool(ai_pro),
         "desc": (
             f"Unlimited integrated AI (thinking + voice). "
             f"Without Pro you get a ${AI_FREE_WEEKLY_BUDGET_USD:.2f}/week sample."
@@ -181,28 +207,29 @@ def build_unified_bill(
 
     # Transparency only — never added to total_cents (not a fixed monthly charge).
     collection = _collection_fee_info()
-    # Always show when invoicing is on the plan (pay links are an invoicing feature).
-    # Also show on "both"/empty so Account always explains the skim for AO owners.
-    show_collection = bool(include_invoicing) or p in ("both", "invoicing", "")
-    if show_collection:
-        lines.append({
-            "id": collection["id"],
-            "kind": collection["kind"],
-            "basis": collection["basis"],
-            "quantity": 0,
-            "unit_label": f"{collection['fee_percent']:g}% of online payments",
-            "unit_cents": 0,
-            "full_unit_cents": 0,
-            "amount_cents": None,
-            "included_in_monthly_total": False,
-            "fee_bps": collection["fee_bps"],
-            "fee_percent": collection["fee_percent"],
-            "desc": collection["desc"],
-        })
+    lines.append({
+        "id": collection["id"],
+        "kind": collection["kind"],
+        "basis": collection["basis"],
+        "quantity": 0,
+        "unit_label": f"{collection['fee_percent']:g}% of online payments",
+        "unit_cents": 0,
+        "full_unit_cents": 0,
+        "amount_cents": None,
+        "billed": False,
+        "included_in_monthly_total": False,
+        "fee_bps": collection["fee_bps"],
+        "fee_percent": collection["fee_percent"],
+        "desc": collection["desc"],
+    })
 
+    plan_key = p if p in PLAN_LABELS else ("both" if not p else p)
     return {
-        "plan": p or "both",
-        "plan_label": PLAN_LABELS.get(p or "both", "Array Operator"),
+        "plan": plan_key if plan_key in PLAN_LABELS else (p or "monitoring"),
+        "plan_label": PLAN_LABELS.get(
+            p if p in PLAN_LABELS else ("monitoring" if not p else p),
+            "Array Operator",
+        ),
         "lines": lines,
         "total_cents": round(total, 2),
         "ai": {
@@ -211,13 +238,13 @@ def build_unified_bill(
             "free_weekly_usd": AI_FREE_WEEKLY_BUDGET_USD,
             "stripe_price_ready": bool(AI_PRO_PRICE_ID),
         },
-        "collection_fee": collection if show_collection else None,
+        "collection_fee": collection,
         "model_note": (
-            "Monthly bill: monitoring (kW) + offtaker invoices ($"
-            f"{OFFTAKER_FULL_CENTS / 100:.0f}/offtaker headline) + optional Energy Agent Pro "
-            f"(${AI_PRO_MONTHLY_USD:.0f}/mo). "
-            f"Separately, when offtakers pay online we keep "
-            f"{collection['fee_percent']:g}% of that payment — not part of the monthly total. "
-            "Free accounts keep a small weekly AI sample."
+            "Monthly bill charges only the lines marked on your plan. "
+            f"Offtaker invoices are ${OFFTAKER_FULL_CENTS / 100:.0f}/offtaker·mo when that plan is on. "
+            f"When offtakers pay online we keep {collection['fee_percent']:g}% of that payment "
+            "(not part of the monthly total). "
+            f"Energy Agent Pro is ${AI_PRO_MONTHLY_USD:.0f}/mo unlimited AI; free tier keeps a "
+            f"${AI_FREE_WEEKLY_BUDGET_USD:.2f}/week sample."
         ),
     }
