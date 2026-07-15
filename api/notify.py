@@ -1068,17 +1068,11 @@ def send_repair_sms(to: str, body: str) -> bool:
         return False
 
 
-# Energy Agent mailbox.
-# From: prefer agent.arrayoperator.com once DKIM is verified; default falls back
-# to the already-verified arrayoperator.com sender so mail always delivers.
-# Reply-To: always the receiving address so tech replies hit Resend inbound
-# (email.received → webhook → repair_ops.ingest_inbound_email).
+# Energy Agent mailbox — From AND Reply-To MUST be the same address.
+# Otherwise "Reply" in Gmail/Outlook often goes to From and never hits inbound.
+# Domain: agent.arrayoperator.com (Resend send + receive). Override REPAIR_MAIL_FROM.
 REPAIR_MAIL_FROM = os.getenv(
     "REPAIR_MAIL_FROM",
-    "Energy Agent <hello@arrayoperator.com>",
-)
-REPAIR_MAIL_REPLY_TO = os.getenv(
-    "REPAIR_MAIL_REPLY_TO",
     "Energy Agent <repairs@agent.arrayoperator.com>",
 )
 
@@ -1093,8 +1087,8 @@ def send_repair_checkin_email(
 ) -> bool:
     """O&M / installer status check-in for a repair ticket.
 
-    Plain professional text (no brand chrome). From + Reply-To are the Energy
-    Agent mailbox so the tech replies straight back into the agent.
+    Plain professional text (no brand chrome). From and Reply-To are identical
+    Energy Agent addresses so Reply goes back into the agent inbox.
     """
     # Minimal HTML mirror of plain text — system fonts, white page, no color bars.
     paras = []
@@ -1116,17 +1110,15 @@ def send_repair_checkin_email(
         "</body></html>"
     )
     from_addr = REPAIR_MAIL_FROM
-    if from_name and "<" not in from_addr:
-        # Keep the agent address; only rename display if caller insists
-        addr = _addr_only(from_addr) or "repairs@agent.arrayoperator.com"
-        from_addr = f"Energy Agent <{addr}>"
+    # Hard rule: Reply-To == From (ignore mismatched reply_to / env split)
+    same = from_addr
     return _send_via_resend(
         to=to,
         subject=subject,
         html=html,
         text=body_text,
         from_addr=from_addr,
-        reply_to=reply_to or REPAIR_MAIL_REPLY_TO,
+        reply_to=same,
         product="array_operator",
     )
 
