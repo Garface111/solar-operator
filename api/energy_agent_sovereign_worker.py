@@ -997,29 +997,41 @@ def process_job(db, job) -> dict[str, Any]:
     )[:50_000]
     job.finished_at = _now()
 
-    # Auto-mark feature shipped when job succeeds (Ford: ship authority)
+    # Auto-mark feature shipped when job succeeds (Ford: ship authority).
+    # Use savepoints so a schema/ops glitch never poisons the job transaction.
     if job.status == "done":
         try:
             m = re.search(r"feature\s*#?\s*(\d+)", f"{title}\n{brief}", re.I)
             if m:
                 from .energy_agent_sovereign_ops import mark_feature_shipped
-                mark_feature_shipped(
-                    db, int(m.group(1)),
-                    note=f"Auto-shipped after code job {job.id} (worker).",
-                )
+                try:
+                    with db.begin_nested():
+                        mark_feature_shipped(
+                            db, int(m.group(1)),
+                            note=f"Auto-shipped after code job {job.id} (worker).",
+                        )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("feature ship mark failed: %s", e)
         except Exception as e:  # noqa: BLE001
-            log.warning("feature ship mark failed: %s", e)
+            log.warning("feature ship mark outer failed: %s", e)
         try:
             m2 = re.search(r"utility[^\n]*#?\s*(\d+)|request\s*#(\d+)", f"{title}\n{brief}", re.I)
             if m2:
                 uid = int(m2.group(1) or m2.group(2))
                 from .energy_agent_sovereign_ops import set_utility_status
-                set_utility_status(
-                    db, uid, "researching",
-                    result_note=f"Code job {job.id} completed; adapter work landed — verify before mark added.",
-                )
+                try:
+                    with db.begin_nested():
+                        set_utility_status(
+                            db, uid, "researching",
+                            result_note=(
+                                f"Code job {job.id} completed; adapter work landed — "
+                                "verify before mark added."
+                            ),
+                        )
+                except Exception as e:  # noqa: BLE001
+                    log.warning("utility note after job failed: %s", e)
         except Exception as e:  # noqa: BLE001
-            log.warning("utility note after job failed: %s", e)
+            log.warning("utility note outer failed: %s", e)
 
     write_note(
         db,

@@ -965,6 +965,12 @@ def main():
                 "ALTER TABLE feature_suggestions ADD COLUMN screenshot_b64 TEXT"
             ))
             print("  + feature_suggestions.screenshot_b64")
+        # 2026-07-15 Sovereign ship path + UX #18 auto-prompt into build box
+        if not column_exists(conn, "feature_suggestions", "auto_prompt"):
+            conn.execute(text(
+                "ALTER TABLE feature_suggestions ADD COLUMN auto_prompt TEXT"
+            ))
+            print("  + feature_suggestions.auto_prompt")
 
         # 2026-06-22 Sequential invoice numbering: operator sets a starting number,
         # Array Operator adds 1 per real send. start = seed entered; next = running
