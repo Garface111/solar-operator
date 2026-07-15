@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import tempfile
+from datetime import date
 from typing import Optional
 
 from sqlalchemy import select, func
@@ -62,7 +63,8 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
                        triggered_by: str = "manual",
                        subject_prefix: str = "",
-                       skip_if_empty: bool = False) -> dict:
+                       skip_if_empty: bool = False,
+                       reference_date: Optional[date] = None) -> dict:
     """Build & email the workbook for ONE client.
 
     skip_if_empty=True makes an automatic/scheduled send refuse to mail a
@@ -72,6 +74,11 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
     applies by hand when they only send reports that have real numbers. Explicit
     operator sends (the dashboard buttons) leave it False so a forced send always
     goes through.
+
+    reference_date: when set (from a dashboard quarter picker), the rolling
+    workbook window ends at the complete quarter before this date — same
+    semantics as GET /report.xlsx?quarter=. Email merge tags ({{quarter}},
+    {{period_start}}, {{period_end}}) use the same reference.
     """
     with SessionLocal() as db:
         client = db.get(Client, client_id)
@@ -174,8 +181,10 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # client gets a fuel-correct REC workbook, so don't brand it solar.
         out_path = pathlib.Path(tmpdir) / f"{safe_client}-report.xlsx"
         try:
-            path = build_workbook(client_id=client_id, year=year,
-                                  out_path=out_path)
+            path = build_workbook(
+                client_id=client_id, year=year, out_path=out_path,
+                reference_date=reference_date,
+            )
         except Exception as e:
             logger.exception("Workbook build failed for client %s", client_id)
             send_internal_alert(
@@ -204,9 +213,16 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         # Render the email from the tenant's templates (or built-in defaults).
         # Merge tags resolve against this client's real name / array count /
         # headline quarter; see api/email_templates.py.
+        # Email period tags use the same reference_date as the workbook so a
+        # selected quarter (e.g. Q1-2026) is honest in both attachment + body.
+        email_ref = reference_date
+        if email_ref is None:
+            from .writers.gmcs_writer import default_reporting_reference_date
+            email_ref = default_reporting_reference_date(date.today())
         ctx = build_context(
             client_name=client_name, tenant_name=tenant_name,
             arrays_count=arrays_count, tenant_email=tenant_email,
+            ref=email_ref,
             signoff_template=signoff_template,
             tenant_signoff_name=send_from_name or operator_name,
         )

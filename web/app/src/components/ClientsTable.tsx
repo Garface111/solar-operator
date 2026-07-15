@@ -30,7 +30,10 @@ import {
   sendClientReportToMe,
   downloadClientReport,
   mergeClientInto,
+  recentReportQuarters,
 } from "../lib/api";
+
+const REPORT_QUARTERS = recentReportQuarters(8);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1035,6 +1038,7 @@ function ExpandedPanel({
   const toast = useToast();
   const [sendingToMe, setSendingToMe] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [reportQuarter, setReportQuarter] = useState(REPORT_QUARTERS[0]?.value ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
@@ -1065,8 +1069,9 @@ function ExpandedPanel({
     if (!operatorEmail || sendingToMe) return;
     setSendingToMe(true);
     try {
-      await sendClientReportToMe(client.id, operatorEmail);
-      toast.success(`Sent to ${operatorEmail}. Check your inbox.`);
+      await sendClientReportToMe(client.id, operatorEmail, reportQuarter || undefined);
+      const qLabel = REPORT_QUARTERS.find((q) => q.value === reportQuarter)?.label ?? reportQuarter;
+      toast.success(`Sent ${qLabel} report to ${operatorEmail}. Check your inbox.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Couldn't send report";
       toast.error(
@@ -1083,7 +1088,7 @@ function ExpandedPanel({
     if (downloading) return;
     setDownloading(true);
     try {
-      await downloadClientReport(client.id, client.name);
+      await downloadClientReport(client.id, client.name, reportQuarter || undefined);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Couldn't download";
       toast.error(
@@ -1240,6 +1245,23 @@ function ExpandedPanel({
               </span>
             </div>
             <div className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 rounded-md bg-white/70 px-2 py-1.5">
+                <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Quarter
+                </span>
+                <select
+                  value={reportQuarter}
+                  onChange={(e) => setReportQuarter(e.target.value)}
+                  className="min-w-0 flex-1 rounded-md border border-emerald-100 bg-white px-2 py-1 text-sm font-medium text-zinc-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  aria-label="Report quarter"
+                >
+                  {REPORT_QUARTERS.map((q) => (
+                    <option key={q.value} value={q.value}>
+                      {q.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <Button
                 variant="primary"
                 className="w-full"
