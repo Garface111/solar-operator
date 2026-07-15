@@ -52,7 +52,8 @@ _DOGFOOD_EMAILS = frozenset({
 MAX_INJECT_PER_HOUR_GLOBAL = 30
 MAX_INJECT_PER_HOUR_TENANT = 4
 MAX_SOFT_ACTS_PER_HOUR = 20
-MAX_JOBS_PER_DAY = 25
+# Ford grant: autonomous ship of building features + utility adapters needs headroom
+MAX_JOBS_PER_DAY = int(os.getenv("SOVEREIGN_MAX_JOBS_PER_DAY", "100") or 100)
 TICK_ACTION_BUDGET = 5  # max decisions that act/speak per tick
 
 
