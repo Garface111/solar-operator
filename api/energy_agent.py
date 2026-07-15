@@ -52,9 +52,9 @@ XAI_MODEL = os.getenv("ENERGY_AGENT_MODEL", "grok-4-1-fast-reasoning")
 # Latest OpenAI Realtime voice model (docs 2026: gpt-realtime-2.1)
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")
-# Combined weekly cap for thinking (chat/LLM tools) + voice (Realtime minutes).
-# One meter, one $5 default — UI shows a fill bar, not a cash countdown.
-WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "5.0"))
+# Free-tier weekly sample for thinking + voice (Pro = unlimited via tenant.ai_pro).
+# Default $2.50 so owners can try the agent without upgrading.
+WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "2.5"))
 # Soft-warn threshold (fraction of cap) before hard stop
 WEEKLY_BUDGET_WARN_FRAC = float(os.getenv("ENERGY_AGENT_BUDGET_WARN_FRAC", "0.80"))
 # Rough cost estimates when provider doesn't return usage $
@@ -439,10 +439,49 @@ def _charge(db, tenant_id: str, amount: float, reason: str):
 def _check_budget(db, tenant_id: str) -> dict:
     """Weekly $ cap covering BOTH thinking (chat/tools) and voice minutes.
 
-    UI fills a usage bar from 0→100% of weekly_budget_usd (default $5).
+    Free tier: small weekly sample (default $2.50) so owners can try the agent.
+    Energy Agent Pro ($50/mo) or comped/demo → unlimited (ok always).
     """
     spent = _budget_spent(db, tenant_id)
-    cap = max(0.01, float(WEEKLY_BUDGET_USD))
+    tenant = db.get(Tenant, tenant_id) if tenant_id else None
+    pro_usd = 50.0
+    stripe_ready = False
+    pro = False
+    cap_opt: float | None = WEEKLY_BUDGET_USD
+    try:
+        from .pricing_ao_unified import (
+            AI_FREE_WEEKLY_BUDGET_USD,
+            AI_PRO_MONTHLY_USD,
+            AI_PRO_PRICE_ID,
+            ai_budget_cap_usd,
+            tenant_has_ai_pro,
+        )
+        pro_usd = float(AI_PRO_MONTHLY_USD)
+        stripe_ready = bool(AI_PRO_PRICE_ID)
+        pro = bool(tenant and tenant_has_ai_pro(tenant))
+        cap_opt = ai_budget_cap_usd(tenant) if tenant is not None else AI_FREE_WEEKLY_BUDGET_USD
+    except Exception:  # noqa: BLE001 — never break chat on pricing import
+        pass
+
+    if pro or cap_opt is None:
+        # Unlimited — still report spend for transparency, bar stays green
+        return {
+            "weekly_budget_usd": None,
+            "spent_usd": round(spent, 4),
+            "remaining_usd": None,
+            "pct_used": 0.0,
+            "warn": False,
+            "week_start": _week_start().isoformat() + "Z",
+            "ok": True,
+            "unlimited": True,
+            "tier": "pro",
+            "pro_monthly_usd": pro_usd,
+            "covers": "thinking+voice",
+            "breakdown": _budget_breakdown(db, tenant_id),
+            "upgrade": None,
+        }
+
+    cap = max(0.01, float(cap_opt))
     remaining = max(0.0, cap - spent)
     pct = min(100.0, (spent / cap) * 100.0)
     warn_at = max(0.0, min(1.0, WEEKLY_BUDGET_WARN_FRAC)) * 100.0
@@ -455,8 +494,18 @@ def _check_budget(db, tenant_id: str) -> dict:
         "warn": bool(ok and pct >= warn_at),
         "week_start": _week_start().isoformat() + "Z",
         "ok": ok,
+        "unlimited": False,
+        "tier": "free",
+        "pro_monthly_usd": pro_usd,
         "covers": "thinking+voice",
         "breakdown": _budget_breakdown(db, tenant_id),
+        "upgrade": {
+            "product": "energy_agent_pro",
+            "price_usd": pro_usd,
+            "stripe_ready": stripe_ready,
+            "cta": f"Upgrade to Energy Agent Pro — ${pro_usd:.0f}/mo unlimited AI",
+            "path": "/#account",
+        },
     }
 
 

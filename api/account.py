@@ -845,6 +845,8 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             # vendor_data, invoicing}. See stripe_helpers.ao_plan_features.
             "billing_plan": getattr(t, "billing_plan", None),
             "plan_features": _plan_features,
+            # Energy Agent Pro ($50/mo unlimited AI). Free tier keeps a weekly sample.
+            "ai_pro": bool(getattr(t, "ai_pro", False)),
             "plan": t.plan,
             "active": t.active,
             # Shared read-only demo tenant flag. Drives the SPA demo banner and
@@ -2004,6 +2006,19 @@ def _billing_summary_kwh(t: Tenant) -> dict:
               else "invoicing" if _inv_active else "kwh")
     combined_total_cents = ((monitoring_total_cents if _mon_active else 0.0)
                             + (invoicing_total_cents if _inv_active else 0.0))
+    # Unified commercial model (Account Billing section) + AI freemium
+    from .pricing_ao_unified import build_unified_bill, tenant_has_ai_pro
+    ai_pro = tenant_has_ai_pro(t)
+    unified = build_unified_bill(
+        billing_plan=_plan,
+        nameplate_kw=float(nameplate_kw or 0),
+        offtaker_count=int(offtaker_count or 0),
+        ai_pro=ai_pro,
+        include_monitoring=_mon_active,
+        include_invoicing=_inv_active,
+    )
+    # Product lines + AI Pro when active
+    total_with_ai = float(unified.get("total_cents") or combined_total_cents)
     return {
         "billing_basis": active,        # which AO plan is currently active
         "currency": "usd",
@@ -2029,8 +2044,12 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         "invoicing_blended_cents_per_offtaker": inv_pricing.blended_unit_cents(offtaker_count),
         "invoicing_setup_cents": inv_pricing.SETUP_CENTS,
         "invoicing_total_cents": invoicing_total_cents,
-        # The active plan's total — 'both' sums the per-kWh meter + invoicing line.
-        "total_cents": combined_total_cents,
+        # The active plan's total — 'both' sums monitoring + invoicing (+ AI Pro if on).
+        "total_cents": total_with_ai,
+        # ── Unified Account Billing section (single source for UI) ──
+        "unified": unified,
+        "ai_pro": ai_pro,
+        "subscription_status": getattr(t, "subscription_status", None),
     }
 
 
@@ -2082,6 +2101,82 @@ def billing_portal(authorization: Optional[str] = Header(default=None)):
             return_url=f"{branding.dashboard_url(t.product)}/",
         )
         return {"url": session.url}
+    except stripe.error.StripeError as e:
+        raise HTTPException(502, f"Stripe error: {e}")
+
+
+@router.post("/v1/account/ai-pro/checkout")
+def ai_pro_checkout(authorization: Optional[str] = Header(default=None)):
+    """Start Stripe Checkout for Energy Agent Pro ($50/mo unlimited AI).
+
+    Money gate: requires STRIPE_AO_AI_PRO_PRICE_ID (minted Stripe price). Until
+    that env is set, returns stripe_ready=false so the UI can show an honest
+    "coming soon / contact us" path without inventing a live charge.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from .pricing_ao_unified import (
+        AI_PRO_MONTHLY_USD,
+        AI_PRO_PRICE_ID,
+        tenant_has_ai_pro,
+    )
+    if tenant_has_ai_pro(t):
+        return {
+            "ok": True,
+            "already_pro": True,
+            "ai_pro": True,
+            "message": "Energy Agent Pro is already active on this account.",
+        }
+    if not AI_PRO_PRICE_ID:
+        return {
+            "ok": False,
+            "stripe_ready": False,
+            "ai_pro": False,
+            "price_usd": AI_PRO_MONTHLY_USD,
+            "message": (
+                f"Energy Agent Pro is ${AI_PRO_MONTHLY_USD:.0f}/mo for unlimited AI. "
+                "Checkout isn't live yet — contact us or check back shortly."
+            ),
+        }
+    if not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(500, "Stripe not configured")
+    customer_id = t.stripe_customer_id
+    if not customer_id:
+        try:
+            customer = stripe.Customer.create(
+                email=t.contact_email,
+                name=t.company_name or t.name or t.operator_name or None,
+                metadata={"tenant_id": t.id},
+            )
+            customer_id = customer["id"] if isinstance(customer, dict) else customer.id
+        except stripe.error.StripeError as e:
+            raise HTTPException(502, f"Stripe error: {e}")
+        with SessionLocal() as db:
+            db_t = db.get(Tenant, t.id)
+            if db_t:
+                db_t.stripe_customer_id = customer_id
+                db.commit()
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            customer=customer_id,
+            line_items=[{"price": AI_PRO_PRICE_ID, "quantity": 1}],
+            success_url=(
+                f"{branding.dashboard_url(t.product)}/?ai_pro=1#account"
+            ),
+            cancel_url=f"{branding.dashboard_url(t.product)}/?ai_pro_cancelled=1#account",
+            metadata={"tenant_id": t.id, "product": "energy_agent_pro"},
+            subscription_data={
+                "metadata": {"tenant_id": t.id, "product": "energy_agent_pro"},
+            },
+        )
+        url = session["url"] if isinstance(session, dict) else session.url
+        return {
+            "ok": True,
+            "stripe_ready": True,
+            "checkout_url": url,
+            "price_usd": AI_PRO_MONTHLY_USD,
+        }
     except stripe.error.StripeError as e:
         raise HTTPException(502, f"Stripe error: {e}")
 

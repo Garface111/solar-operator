@@ -51,6 +51,8 @@ def main():
             ("last_delivery_at",       "ALTER TABLE tenants ADD COLUMN last_delivery_at TIMESTAMP"),
             ("product",                "ALTER TABLE tenants ADD COLUMN product VARCHAR(32) DEFAULT 'nepool' NOT NULL"),
             ("billing_plan",           "ALTER TABLE tenants ADD COLUMN billing_plan VARCHAR(32)"),
+            # Energy Agent Pro add-on (unlimited AI vs free weekly sample)
+            ("ai_pro",                 "ALTER TABLE tenants ADD COLUMN ai_pro BOOLEAN DEFAULT false NOT NULL"),
             # Array Operator automatic warranty-claims send policy (Jun 2026)
             ("claim_send_mode",        "ALTER TABLE tenants ADD COLUMN claim_send_mode VARCHAR(16) DEFAULT 'manual' NOT NULL"),
             ("claim_grace_hours",      "ALTER TABLE tenants ADD COLUMN claim_grace_hours INTEGER DEFAULT 24 NOT NULL"),

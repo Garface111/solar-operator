@@ -300,15 +300,25 @@ OFFTAKER INVOICE GENERATOR — START TO FINISH. UI: **Invoices** (`#reports`). E
 
 ## billing
 
-OPERATOR BILLING (Array Operator → the owner)
+OPERATOR BILLING (Array Operator → the owner) — **unified Account → Billing section**
 
-- Signup collects **no card** — the tenant starts a 14-day trial. The owner adds a card later from **Account** (a Stripe Checkout “setup” session); once a card is on file the live subscription is minted and the account goes active.
-- **Manage billing** opens a Stripe **Billing Portal** link (update card, download invoices, cancel). If there’s no card yet it routes to add-payment-method instead.
-- Prices are set only via server config/price-ids — never edited live. Cancelled/paused tenants get gates that route to a fresh checkout; a just-paid owner never sees a stale “cancelled” banner.
-- Account (`GET /v1/account`) surfaces: company, `contact_email`, operator name, product, plan + plan_features, subscription status, whether a card is on file, capture_mode, trial end, connected providers.
-- **This is separate from offtaker invoices** (see `offtakers`).
+Three independent product lines + freemium AI (source: `api/pricing_ao_unified.py`):
 
-AGENT SCOPE: may open **billing-portal links** after confirm. **Never** change prices, create subscriptions, migrate plans for money, or touch cards/payment methods. The operator money path is read-only + link-only.
+| Line | What it bills | Typical rate |
+|------|----------------|--------------|
+| **Fleet monitoring** | Registered nameplate kW | ~$0.15/kW·mo (graduated volume discount) |
+| **Offtaker invoices** | Count of offtakers you invoice | ~$20/offtaker·mo (graduated) |
+| **Energy Agent Pro** | Flat add-on | **$50/mo unlimited AI** |
+
+- **Plan choice** (`billing_plan` = monitoring | invoicing | both) turns monitoring / offtaker lines on/off (tab entitlements). AI Pro is **orthogonal** — optional on any plan.
+- **Free AI sample:** every free account gets **~$2.50/week** of Energy Agent (thinking + voice) so they can try it. At 100% the meter pauses deep AI until next week (or Pro).
+- **Pro AI:** `Tenant.ai_pro` / comped / demo → unlimited; Account shows “Energy Agent Pro · $50/mo” upgrade (`POST /v1/account/ai-pro/checkout` when Stripe price id is set).
+- Signup collects **no card** — 14-day trial. Card later from Account (Stripe setup Checkout).
+- **Manage billing** → Stripe Billing Portal. Prices only via server price-ids.
+- Account surfaces: plan_features, **ai_pro**, unified bill block on `GET /v1/account/billing-summary` (`unified.lines`, `unified.ai`).
+- **This is separate from offtaker invoices** the owner sends to *their* customers (see `offtakers`).
+
+AGENT SCOPE: may open **billing-portal links** and point owners to Account → Billing / AI Pro upgrade after confirm. **Never** change prices, create subscriptions, migrate plans for money, or touch cards/payment methods.
 
 ---
 

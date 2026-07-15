@@ -97,6 +97,11 @@ class Tenant(Base):
     # Ignored for NEPOOL (always per-array). Null for every existing tenant so
     # nothing changes until a tenant is explicitly put on the invoicing plan.
     billing_plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Energy Agent Pro ($50/mo unlimited AI). Free tier keeps a small weekly sample.
+    # Orthogonal to billing_plan (monitoring / invoicing / both).
+    ai_pro: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     # Send-pipeline pause switch (Ford 2026-07-03): True → the SCHEDULER's
     # billing runs skip this tenant entirely (no auto sends, no auto drafts).
     # Manual sends + draft approvals still work — pause stops the machine,
