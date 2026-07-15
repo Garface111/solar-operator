@@ -3314,10 +3314,29 @@ def refresh_capture(client_id: int,
         return {"ok": True, "client": _client_to_dict(c, len(n_arr))}
 
 
+def _reference_date_from_quarter_query(quarter: Optional[str]):
+    """Parse ?quarter=Q1-2026 into the reference_date build_workbook expects.
+    Returns None when quarter is omitted (current rolling window)."""
+    if not quarter:
+        return None
+    try:
+        qy, qq = _parse_quarter_str(quarter)
+        return _quarter_to_reference_date(qy, qq)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.post("/v1/account/clients/{client_id}/send-report")
 def send_one_client_report(client_id: int,
                            to: Optional[str] = Query(default=None),
+                           quarter: Optional[str] = Query(default=None),
                            authorization: Optional[str] = Header(default=None)):
+    """Email one client's NEPOOL workbook.
+
+    Optional `quarter` (e.g. Q1-2026) selects which complete quarter is the
+    headline / last sheet in the rolling window — same semantics as the
+    .xlsx download. Omit for the default current reporting window.
+    """
     t = tenant_from_session(authorization)
     require_not_demo(t)
     require_active_subscription(t)
@@ -3334,15 +3353,19 @@ def send_one_client_report(client_id: int,
         if not tenant_email or to.strip().lower() != tenant_email:
             raise HTTPException(403, "?to must match your account email")
         override_to = to.strip()
+    reference_date = _reference_date_from_quarter_query(quarter)
     from .delivery import deliver_for_client
-    return deliver_for_client(client_id, override_to=override_to,
-                              triggered_by="self-serve")
+    return deliver_for_client(
+        client_id, override_to=override_to, triggered_by="self-serve",
+        reference_date=reference_date,
+    )
 
 
 @router.post("/v1/account/clients/{client_id}/resend-report")
 def resend_client_report(client_id: int,
+                         quarter: Optional[str] = Query(default=None),
                          authorization: Optional[str] = Header(default=None)):
-    """Re-send the current report for one client.
+    """Re-send the report for one client (optional ?quarter=Q1-2026).
 
     Calls deliver_for_client and surfaces a clear result:
       200 {ok, recipient, client_name} on success.
@@ -3358,8 +3381,11 @@ def resend_client_report(client_id: int,
     if not t.active and t.subscription_status not in ("active", "trialing", "comped"):
         raise HTTPException(402, "Reactivate your subscription to send reports")
 
+    reference_date = _reference_date_from_quarter_query(quarter)
     from .delivery import deliver_for_client
-    result = deliver_for_client(client_id, triggered_by="resend")
+    result = deliver_for_client(
+        client_id, triggered_by="resend", reference_date=reference_date,
+    )
 
     if not result.get("ok"):
         reason = result.get("reason", "report generation failed")

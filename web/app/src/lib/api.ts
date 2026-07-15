@@ -1022,16 +1022,44 @@ export async function refreshCapture(id: number): Promise<ClientRow> {
   return res.client;
 }
 
-/** Send the client's latest report to the operator's own email (not the client).
- *  `toEmail` must match the operator's account email — validated server-side. */
+/** Send a client's report to the operator's own email (not the client).
+ *  `toEmail` must match the operator's account email — validated server-side.
+ *  Optional `quarter` (e.g. "Q1-2026") selects the headline complete quarter. */
 export async function sendClientReportToMe(
   clientId: number,
   toEmail: string,
+  quarter?: string,
 ): Promise<{ ok: boolean; recipient: string }> {
+  const qs = new URLSearchParams({ to: toEmail });
+  if (quarter) qs.set("quarter", quarter);
   return request<{ ok: boolean; recipient: string }>(
-    `/v1/account/clients/${clientId}/send-report?to=${encodeURIComponent(toEmail)}`,
+    `/v1/account/clients/${clientId}/send-report?${qs.toString()}`,
     { method: "POST" },
   );
+}
+
+/** Most-recently-complete calendar quarters for the report picker.
+ *  Values match backend `?quarter=Q1-2026` format. */
+export function recentReportQuarters(count = 8): { value: string; label: string }[] {
+  const now = new Date();
+  let y = now.getUTCFullYear();
+  // 1..4 quarter of "today", then step back one so default is COMPLETE.
+  let q = Math.floor(now.getUTCMonth() / 3) + 1;
+  q -= 1;
+  if (q < 1) {
+    q = 4;
+    y -= 1;
+  }
+  const out: { value: string; label: string }[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push({ value: `Q${q}-${y}`, label: `Q${q} ${y}` });
+    q -= 1;
+    if (q < 1) {
+      q = 4;
+      y -= 1;
+    }
+  }
+  return out;
 }
 
 /** Fetch a .xlsx workbook for a client and trigger a browser download.
