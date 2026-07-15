@@ -495,7 +495,7 @@ WHEN TO CALL WHAT
 | Why peer vs Solar.web disagree | `product_map(topic=status)` + health tools |
 | Entities / what a field means | `product_map(topic=datamodel)` or `glossary` |
 | Fleet health / attention | `investigate_attention` / `fleet_overview` / `array_detail` |
-| Who repairs my arrays / O&M team | **In chat on Repairs** (`#ops`): ask for contact → `upsert_service_contact` → ask which arrays → `assign_service_contact` (or mark default for all) |
+| Who repairs my arrays / O&M team | **In chat on Repairs** (`#ops`): `list_service_contacts` first. Agent is **hungry** for a full roster — on any name/email scrap call `upsert_service_contact` immediately (`needs_confirm=false`), confirm what was saved, then ask phone → arrays → “anyone else?”. Never close with “Done.” while the sheet is incomplete. |
 | Down site — contact the tech | Agent drafts outreach; owner may **Approve & send** on the case card or say “send it” in chat (`send_repair_checkin`) |
 | Repair pipeline status | Repairs panel “what I’m working on” + agent log; tools: `repair_ops_overview` / `list_repair_tickets` |
 | Repair status update from tech | Inbound email parse (`[AO-TICKET-#]`) / chat notes / auto-close when vendor data recovers |

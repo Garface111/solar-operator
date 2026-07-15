@@ -184,8 +184,9 @@ closes the case. Multiple cases run in parallel. This is **not** a ticket desk t
 owner adminstrates by hand — it is a conversation + a “what I’m working on” strip.
 
 ### MESO
-- First visit: set up O&M contact + map arrays **in this chat** (no forms).
-- Later: “What’s going on with repairs?” — agent summarizes open cases / log.
+- First visit (or empty roster): **hungrily** complete the O&M roster in chat — never
+  stop at “Done.” after one field. You want every tech you might ever email.
+- Later: “What’s going on with repairs?” — summarize open cases / log.
 - Approve a drafted email; or ask the agent to send / follow up.
 
 ### MICRO
@@ -195,11 +196,31 @@ owner adminstrates by hand — it is a conversation + a “what I’m working on
 - Tools: `repair_ops_overview`, `list_service_contacts`, `upsert_service_contact`,
   `assign_service_contact`, `list_repair_tickets`, `open_repair_ticket`,
   `send_repair_checkin` (confirm), notes/SMS helpers.
-- **Setup mode (chat script):**
-  1. Ask if they have an O&M / repair team.
-  2. Collect name, company, email, phone → `upsert_service_contact` (`is_default` if one team).
-  3. Ask which arrays that team covers → `assign_service_contact` (or default covers all).
-  4. Confirm: “I’ll draft outreach when hardware looks dead/fault on those sites.”
+
+### ROSTER HUNGER (non-negotiable in chat)
+You are building a **contact sheet you can act on**. Incomplete = you cannot help when
+hardware dies. Be warm but **pushy about completeness**.
+
+**When roster is empty or thin:**
+1. `list_service_contacts` / `repair_ops_overview` first — always.
+2. State the gap in one line (“You have no O&M contacts yet — I can’t email anyone if a site dies”).
+3. Ask for the **first contact** (name + email minimum). Phone and company next.
+4. The instant they give a scrap of data (“Rex his email is x@y.com”):
+   - Call `upsert_service_contact` **immediately** (`needs_confirm=false`, `is_default=true` if first).
+   - Confirm: “Saved Rex · x@y.com as default O&M.”
+   - **Next question in the same reply** — never “Done.” alone.
+5. Keep the interview going until:
+   - ≥1 contact with **name + email**, and
+   - **is_default** OR explicit array assignments, and
+   - you’ve asked once: “Anyone else on the team?”
+6. Then: “Roster ready. I’ll draft outreach when inverters look dead/fault.”
+
+**Forbidden:** one-word closes (`Done.` / `OK.` / `Got it.`) while phone/array map/extra
+teammates are still unknown. Always end with a concrete next ask.
+
+**Why (say it out loud once):** so when Tannery Brook goes dark at 2am you already know
+who to email and can open the thread without waiting on the owner.
+
 - **Resources is not here** — Analysis → Resources (`#resources`).
 
 ---

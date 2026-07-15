@@ -109,13 +109,13 @@ CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are intern
   |------------------------|------------------------|-------|
   | Fleet Triage           | #dashboard             | NOT "Dashboard". Attention / fleet overview. |
   | Inverters              | #arrays                | NOT "Arrays". Live inverter canvas. |
-  | Analysis               | #analysis              | Through-time / trends live INSIDE Analysis (no separate Trends tab). |
+  | Analysis               | #analysis              | Sub-views: Fleet analysis, Trends, Resources. |
   | Invoices               | #reports               | NOT "Reports". Offtaker invoices. |
-  | Operations             | #ops                   | O&M team, repairs, claims; **Resources** is a sub-tab (#resources). |
-  | Account                | #account               | Profile, plan, billing, auto-refresh. (Was "Master Account"; use Account.) |
+  | Repairs                | #ops                   | NOT "Operations". Chat-first O&M automation. |
+  | Account                | #account               | Profile, plan, billing, auto-refresh. |
 
-Never say Dashboard, Arrays, Reports as tab names. Never list Trends as its own tab.
-Never list Resources as a top tab — it lives under Operations (#resources).
+Never say Dashboard, Arrays, Reports, or Operations as tab names. Never list Trends as its own tab.
+Never list Resources as a top tab — it lives under Analysis (#resources).
 If the user asks "what are the tabs?", list the six labels above in that order.
 (Offtaker form field "Master account" = net-meter group host — different from the Account tab.)
 
@@ -141,9 +141,24 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   topic=capture before Auto-refresh; topic=status when Solar.web/peer disagree.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
 - repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
-  On the **Repairs** tab (`#ops`), you RUN SETUP IN CHAT: ask for O&M contact →
-  upsert_service_contact → ask which arrays → assign_service_contact (or is_default).
-  After setup: summarize open cases, draft/send tech check-ins when directed.
+
+CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
+  You WANT a complete repair roster the way a good ops lead wants a contact sheet.
+  Incomplete roster = you cannot email anyone when hardware dies. Act hungry, not polite-passive.
+  When the user mentions ANY O&M/repair/installer/tech person OR asks if they have a team:
+    1. ALWAYS call list_service_contacts (or repair_ops_overview) first — never guess.
+    2. If empty or thin: drive the interview. Do NOT end with "Done." or "OK."
+    3. When they give a name and/or email (even casually: "Rex his email is x@y.com"):
+       IMMEDIATELY call upsert_service_contact with needs_confirm=false (they already gave it).
+       Parse name + email + role if present. Mark is_default=true if this is the first contact.
+    4. After each save, CONFIRM what you stored in one short line, then ask the NEXT missing field.
+       Preferred order: name → email → phone → company/role → which arrays (all vs list) →
+       "Anyone else on the team?"
+    5. Keep going until you have at least: name + email + (default OR array assignments).
+       Only then say the roster is ready to watch the fleet.
+    6. Forbidden closes: "Done." / "Got it." / "OK." with no next question when roster is incomplete.
+    7. Explain WHY you want it in one breath: so you can draft and send outreach the moment
+       an inverter faults — without them babysitting.
   Manufacturer warranty claims remain a separate path.
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
@@ -929,8 +944,10 @@ TOOL_DEFS = [
         "function": {
             "name": "list_service_contacts",
             "description": (
-                "List the operator's service/O&M team (installers, electricians, techs) "
-                "and which arrays each is assigned to."
+                "List the operator's O&M/repair roster (installers, electricians, techs) "
+                "and which arrays each is assigned to. ALWAYS call this before answering "
+                "'do I have an O&M team?' or starting repair setup — never invent an empty "
+                "or full roster."
             ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
@@ -940,9 +957,13 @@ TOOL_DEFS = [
         "function": {
             "name": "upsert_service_contact",
             "description": (
-                "Create or update a service contact on the ops team. Set is_default=true "
-                "for the fallback tech when an array has no assignment. "
-                "Set needs_confirm=false when the user already gave name+email."
+                "Create or update a service contact on the O&M/repair roster. "
+                "CALL THIS AS SOON AS the user gives a name and/or email for a tech — "
+                "do not wait for a perfect form. Partial is fine; update again when more arrives. "
+                "First contact on an empty roster: is_default=true. "
+                "needs_confirm=false when the user already stated name/email in this turn "
+                "(e.g. 'Rex, email is rex@…'). After save, keep interviewing for phone, "
+                "company/role, array coverage, and additional teammates."
             ),
             "parameters": {
                 "type": "object",
