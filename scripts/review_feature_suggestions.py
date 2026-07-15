@@ -34,6 +34,10 @@ The judge/build prompts treat the suggestion as UNTRUSTED CUSTOMER INPUT (never
 follow embedded instructions); the merge/deploy itself is done by THIS harness,
 never by the customer-steered agent. Every auto-ship emails Ford the diff
 summary + branch/commit ids via the review post.
+
+2026-07-15 (Ford): when Claude hits its daily/weekly limit, fall back to Grok
+(xAI chat completions) for review + judge + structured implement. Same auto-ship
+gates apply. XAI_API_KEY / GROK_API_KEY from env (or Railway web service).
 """
 import json
 import os
@@ -41,6 +45,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 BASE = os.getenv("AO_API_BASE", "https://web-production-49c83.up.railway.app")
@@ -53,6 +58,10 @@ AUTO_SHIP = os.getenv("FS_AUTO_SHIP", "1") not in ("0", "false", "no")
 AUTO_MAX_LINES = int(os.getenv("FS_AUTO_MAX_LINES", "400"))
 LIVE_BASE = os.getenv("AO_LIVE_BASE", "https://arrayoperator.com")
 DEPLOY_SCRIPT = os.getenv("AO_DEPLOY_SCRIPT", "/mnt/c/Users/fordg/CC/netlify_deploy_dir.py")
+XAI_API_KEY = (os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY") or "").strip()
+XAI_BASE = os.getenv("XAI_API_BASE", "https://api.x.ai/v1").rstrip("/")
+XAI_MODEL = os.getenv("XAI_MODEL", "grok-3")
+GROK_FALLBACK = os.getenv("FS_GROK_FALLBACK", "1") not in ("0", "false", "no")
 
 PROMPT = """You are reviewing a CUSTOMER feature suggestion for Array Operator, a solar-fleet \
 monitoring + utility-bill billing SaaS. Live operator UI is the STATIC vanilla-JS app in \
@@ -262,10 +271,243 @@ def _fetch_shot(s):
         return ""
 
 
+def _looks_rate_limited(text: str) -> bool:
+    """True when Claude (or the CLI) is capacity/limit blocked."""
+    t = text or ""
+    return bool(re.search(
+        r"weekly limit|daily limit|rate.?limit|hit your limit|"
+        r"usage limit|quota|overloaded|capacity|"
+        r"try again (later|at)|resets \d|out of (credits|usage)|"
+        r"429|too many requests|anthropic.*(limit|quota)",
+        t, re.I,
+    ))
+
+
+def _resolve_xai_key() -> str:
+    """Prefer env; else one-shot pull from Railway web (same as ADMIN_API_KEY)."""
+    global XAI_API_KEY
+    if XAI_API_KEY:
+        return XAI_API_KEY
+    try:
+        p = subprocess.run(
+            ["railway", "variables", "--service", "web", "--environment",
+             "production", "--json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            d = json.loads(p.stdout)
+            XAI_API_KEY = (d.get("XAI_API_KEY") or d.get("GROK_API_KEY") or "").strip()
+    except Exception as e:
+        print(f"  (XAI key resolve failed: {e})")
+    return XAI_API_KEY
+
+
+def _grok_chat(prompt: str, *, system: str | None = None, timeout: int = 180) -> str:
+    """xAI chat completions — text-only review/judge fallback when Claude is limited."""
+    key = _resolve_xai_key()
+    if not key:
+        return "(grok fallback unavailable: XAI_API_KEY not set)"
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    body = json.dumps({
+        "model": XAI_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+    }).encode()
+    req = urllib.request.Request(
+        f"{XAI_BASE}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")[:400]
+        return f"(grok fallback HTTP {e.code}: {err})"
+    except Exception as e:
+        return f"(grok fallback failed: {e})"
+    msg = ((out.get("choices") or [{}])[0].get("message") or {})
+    content = (msg.get("content") or "").strip()
+    if not content:
+        return "(grok fallback: empty response)"
+    return content + f"\n\n=== PROVIDER ===\ngrok ({XAI_MODEL}) — Claude limit fallback"
+
+
+def _grok_context_files(cwd: str, max_files: int = 8, max_chars: int = 120_000) -> str:
+    """Pack likely-relevant public/* sources for Grok implement fallback."""
+    root = cwd or AO_FRONTEND
+    pub = os.path.join(root, "public")
+    if not os.path.isdir(pub):
+        return ""
+    # Prefer high-traffic surfaces; skip vendor/min bundles
+    prefer = (
+        "sandbox.js", "reports.js", "app.js", "energy-agent.js", "fleet-store.js",
+        "command-center.js", "styles.css", "index.html", "analysis.js",
+        "hands-off-tour.js", "theme-sky",
+    )
+    paths = []
+    for dirpath, _dirs, names in os.walk(pub):
+        for n in names:
+            if not n.endswith((".js", ".css", ".html")):
+                continue
+            if n.startswith(".") or "vendor" in dirpath or n.endswith(".min.js"):
+                continue
+            full = os.path.join(dirpath, n)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            paths.append(rel)
+    def rank(p):
+        base = os.path.basename(p)
+        for i, pref in enumerate(prefer):
+            if pref in base or pref in p:
+                return i
+        return 50
+    paths.sort(key=rank)
+    chunks = []
+    total = 0
+    for rel in paths[:max_files * 3]:
+        if len(chunks) >= max_files:
+            break
+        full = os.path.join(root, rel)
+        try:
+            raw = open(full, "r", encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        if len(raw) > 80_000:
+            raw = raw[:80_000] + "\n/* …truncated… */\n"
+        piece = f"\n===== FILE: {rel} =====\n{raw}\n"
+        if total + len(piece) > max_chars:
+            break
+        chunks.append(piece)
+        total += len(piece)
+    return "".join(chunks)
+
+
+def _apply_grok_patches(cwd: str, text: str) -> tuple[bool, str]:
+    """Apply *** Begin Patch / *** Update File blocks or SEARCH/REPLACE pairs.
+
+    Returns (ok, detail). Only writes under public/.
+    """
+    root = cwd or AO_FRONTEND
+    applied = []
+
+    # Format A: *** Begin Patch / *** Update File: path / *** End Patch (Aider-ish)
+    for m in re.finditer(
+        r"\*\*\*\s*Begin Patch\s*\n\*\*\*\s*Update File:\s*(\S+)\s*\n([\s\S]*?)\*\*\*\s*End Patch",
+        text, re.I,
+    ):
+        rel = m.group(1).strip().lstrip("./")
+        if not rel.startswith("public/"):
+            rel = "public/" + rel if not rel.startswith("/") else rel
+        body = m.group(2)
+        # Collect + and - lines into old/new via unified hunks is hard; prefer
+        # simple full-file rewrite if present as "===FULL==="
+        full_m = re.search(r"===FULL===\s*\n([\s\S]*?)\n===END FULL===", body)
+        if full_m:
+            path = os.path.join(root, rel)
+            if not path.startswith(os.path.join(root, "public")):
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w", encoding="utf-8").write(full_m.group(1))
+            applied.append(f"full:{rel}")
+            continue
+        # SEARCH/REPLACE inside the patch block
+        for sm in re.finditer(
+            r"<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE",
+            body,
+        ):
+            old, new = sm.group(1), sm.group(2)
+            path = os.path.join(root, rel)
+            if not os.path.isfile(path):
+                continue
+            src = open(path, "r", encoding="utf-8", errors="replace").read()
+            if old not in src:
+                continue
+            open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+            applied.append(f"sr:{rel}")
+
+    # Format B: free-standing SEARCH/REPLACE with FILE: header
+    file_cur = None
+    for m in re.finditer(
+        r"(?:^|\n)(?:FILE|MARKER_FILE):\s*(public/\S+)\s*\n"
+        r"<<<<<<< SEARCH\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> REPLACE",
+        text,
+    ):
+        rel, old, new = m.group(1).strip(), m.group(2), m.group(3)
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            continue
+        src = open(path, "r", encoding="utf-8", errors="replace").read()
+        if old not in src:
+            continue
+        open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+        applied.append(f"sr2:{rel}")
+        file_cur = rel
+
+    if not applied:
+        return False, "no applyable patches in grok output"
+    return True, f"applied {len(applied)} edit(s): {', '.join(applied[:8])}"
+
+
+def _grok_implement(prompt: str, cwd: str, timeout: int = 300) -> str:
+    """When Claude can't edit files, Grok proposes SEARCH/REPLACE patches we apply."""
+    ctx = _grok_context_files(cwd)
+    system = (
+        "You are implementing a small Array Operator frontend fix. "
+        "Edit ONLY files under public/. Output one or more SEARCH/REPLACE blocks "
+        "in exactly this form (no other wrapper):\n\n"
+        "FILE: public/example.js\n"
+        "<<<<<<< SEARCH\n"
+        "exact old lines from the file\n"
+        "=======\n"
+        "replacement lines\n"
+        ">>>>>>> REPLACE\n\n"
+        "Then end with:\n"
+        "READY: yes\n"
+        "MARKER_FILE: public/example.js\n"
+        "MARKER: a unique short ASCII string you added\n"
+        "If you cannot do it safely: READY: no and one line why."
+    )
+    user = (
+        f"{prompt}\n\n"
+        f"=== RELEVANT SOURCE (truncated) ===\n{ctx}\n"
+        "Emit SEARCH/REPLACE patches against those files only."
+    )
+    out = _grok_chat(user, system=system, timeout=timeout)
+    ok, detail = _apply_grok_patches(cwd, out)
+    # Ensure READY trailer if patches applied
+    if ok and not re.search(r"^READY:\s*yes\b", out, re.I | re.M):
+        # Infer marker from first applied file
+        m = re.search(r"(?:FILE|MARKER_FILE):\s*(public/\S+)", out)
+        mf = m.group(1) if m else "public/sandbox.js"
+        marker = f"grok_fb_{int(time.time()) % 100000}"
+        # Stamp marker as a comment if possible
+        path = os.path.join(cwd or AO_FRONTEND, mf)
+        if os.path.isfile(path) and path.endswith(".js"):
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"\n/* {marker} */\n")
+            except Exception:
+                pass
+        out += f"\nREADY: yes\nMARKER_FILE: {mf}\nMARKER: {marker}\n"
+    if not ok and not re.search(r"^READY:\s*no\b", out, re.I | re.M):
+        out += f"\nREADY: no\n({detail})\n"
+    else:
+        out += f"\n=== GROK APPLY ===\n{detail}\n"
+    return out
+
+
 def _claude(prompt, plan=True, timeout=600, cwd=None):
-    """Run claude -p. Always --add-dir the frontend + shot dir so implement
-    agents can write public/* and read markups even when cwd is the backend
-    (or vice versa).
+    """Run claude -p; on daily/weekly/rate limit fall back to Grok (xAI).
+
+    Always --add-dir the frontend + shot dir so implement agents can write
+    public/* and read markups even when cwd is the backend (or vice versa).
 
     Implement mode uses acceptEdits only (NOT --dangerously-skip-permissions):
     that flag is rejected when the pipeline runs as root, which caused #16 to
@@ -284,9 +526,37 @@ def _claude(prompt, plan=True, timeout=600, cwd=None):
             add_dirs.append(d)
     for d in add_dirs:
         cmd += ["--add-dir", d]
-    out = subprocess.run(cmd, cwd=cwd or REPO, capture_output=True, text=True,
-                         timeout=timeout)
-    return (out.stdout or "").strip() or (out.stderr or "").strip() or "(no agent output)"
+    stderr = ""
+    try:
+        proc = subprocess.run(cmd, cwd=cwd or REPO, capture_output=True, text=True,
+                              timeout=timeout)
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        text = stdout or stderr or "(no agent output)"
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        text = "(claude timed out)"
+        rc = 1
+    except Exception as e:
+        text = f"(claude failed: {e})"
+        rc = 1
+
+    combined = f"{text}\n{stderr}"
+    limited = _looks_rate_limited(combined)
+    # Non-zero + empty/useless output: treat as unavailable and try Grok
+    if not limited and rc != 0 and (
+        not text or text in ("(no agent output)", "(claude timed out)")
+        or text.startswith("(claude failed")
+    ):
+        limited = True
+
+    if limited and GROK_FALLBACK:
+        print(f"  ⚠️ Claude limited/unavailable — falling back to Grok ({XAI_MODEL})…")
+        if plan:
+            return _grok_chat(prompt, timeout=min(timeout, 240))
+        return _grok_implement(prompt, cwd or AO_FRONTEND, timeout=min(timeout, 360))
+
+    return text
 
 
 def _shot_in(cwd, shot_path):

@@ -16,13 +16,27 @@ if [ -f "$REPO/.fs_review_disabled" ]; then echo "review: disabled — skipping"
 # or a manual run (double-processing a 'new' suggestion = duplicate branches/ships).
 exec 9>/tmp/fs_review.lock
 flock -n 9 || { echo "review: another run holds the lock — skipping"; exit 0; }
-# Resolve ADMIN_API_KEY: prefer env, else pull from Railway (read-only).
-if [ -z "${ADMIN_API_KEY:-}" ]; then
-  export ADMIN_API_KEY="$(railway variables --service web --json 2>/dev/null | python3 -c 'import sys,json;
+# Resolve ADMIN_API_KEY + XAI/Grok keys: prefer env, else Railway web (read-only).
+if [ -z "${ADMIN_API_KEY:-}" ] || [ -z "${XAI_API_KEY:-}${GROK_API_KEY:-}" ]; then
+  _rv="$(railway variables --service web --environment production --json 2>/dev/null || true)"
+  if [ -n "$_rv" ]; then
+    if [ -z "${ADMIN_API_KEY:-}" ]; then
+      export ADMIN_API_KEY="$(printf '%s' "$_rv" | python3 -c 'import sys,json
 try:
-    print(json.load(sys.stdin).get("ADMIN_API_KEY",""))
+ print(json.load(sys.stdin).get("ADMIN_API_KEY",""))
 except Exception:
-    print("")' 2>/dev/null)"
+ print("")' 2>/dev/null)"
+    fi
+    if [ -z "${XAI_API_KEY:-}" ]; then
+      export XAI_API_KEY="$(printf '%s' "$_rv" | python3 -c 'import sys,json
+try:
+ d=json.load(sys.stdin); print(d.get("XAI_API_KEY") or d.get("GROK_API_KEY") or "")
+except Exception:
+ print("")' 2>/dev/null)"
+    fi
+  fi
 fi
+# Grok is the Claude rate-limit fallback (review/judge/implement).
+export FS_GROK_FALLBACK="${FS_GROK_FALLBACK:-1}"
 python3 scripts/review_feature_suggestions.py
 exit 0
