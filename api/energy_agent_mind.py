@@ -2490,6 +2490,9 @@ def mind_events(
                     "speak_as_mind": e.speak_as_mind,
                     "ref_id": e.ref_id,
                     "importance": _payload(e).get("importance"),
+                    # sovereign injects tag origin in payload so the UI can use a
+                    # deep-blue product-mind bubble (distinct from normal agent chat).
+                    "origin": _payload(e).get("origin"),
                     "created_at": e.created_at.isoformat() + "Z" if e.created_at else None,
                     "consumed": bool(e.consumed),
                 }
