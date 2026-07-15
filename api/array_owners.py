@@ -1000,11 +1000,23 @@ def array_owners_fleet_trends(
             except Exception:  # noqa: BLE001
                 pass
             life = round(sum(per_day.values()), 1)
+            kwh_by_year: dict[int, float] = {}
+            for d, kwh in per_day.items():
+                kwh_by_year[d.year] = kwh_by_year.get(d.year, 0.0) + float(kwh or 0)
+            ytd_year = today.year
+            ytd_kwh = round(sum(
+                v for d, v in per_day.items() if d.year == ytd_year
+            ), 1)
             by_array[arr.id] = {
                 "array_id": arr.id,
                 "name": arr.name,
                 "lifetime_kwh": life,
                 "years": sorted({d.year for d in per_day.keys()}),
+                "kwh_by_year": {
+                    str(y): round(v, 1) for y, v in sorted(kwh_by_year.items())
+                },
+                "kwh_ytd": ytd_kwh,
+                "ytd_year": ytd_year,
             }
 
     years = sorted({y for (y, _m) in fleet_ym.keys()})
