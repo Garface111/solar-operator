@@ -223,9 +223,9 @@ as a product — monitors system health, coordinates expansion, protects UX, rep
 issues, holds executive control under kill switches, and can speak through **any**
 owner chat window.
 
-- Architecture: [`2026-07-15-energy-agent-sovereign-mind.md`](./2026-07-15-energy-agent-sovereign-mind.md)
-- Runtime skeleton (dark): `api/energy_agent_sovereign.py` — `SOVEREIGN_ENABLED=0` default
-- **Not live.** Do not enable without Ford go on Phase F+.
+- Architecture + runtime: [`2026-07-15-energy-agent-sovereign-mind.md`](./2026-07-15-energy-agent-sovereign-mind.md)
+- Module: `api/energy_agent_sovereign.py` — **live** (sense/act on; speak dogfood-only by default)
+- Kill: `SOVEREIGN_ENABLED=0`
 
 ---
 

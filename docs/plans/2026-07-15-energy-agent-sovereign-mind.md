@@ -1,9 +1,21 @@
 # Energy Agent — Sovereign Mind (Product Executive)
 
-**Status:** Architecture locked for the future — **NOT ENABLED**.  
+**Status:** **BUILT + LIVE** (Phases F–J implemented 2026-07-15).  
 **Date:** 2026-07-15  
 **Owner:** Ford / Array Operator  
 **Depends on:** [Operating Mind (tenant)](./2026-07-14-energy-agent-operating-mind.md) — Phases A–E **shipped**.
+
+### Runtime defaults
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `SOVEREIGN_ENABLED` | **1** | Master switch (set `0` to kill) |
+| `SOVEREIGN_SENSE_ENABLED` | **1** | Product digests every 5 min |
+| `SOVEREIGN_ACT_ENABLED` | **1** | Soft exec: utility triage, stage features, code-hire jobs |
+| `SOVEREIGN_SPEAK_ENABLED` | **1** | Session inject as Energy Agent |
+| `SOVEREIGN_SPEAK_ALL` | **0** | Inject only dogfood emails until armed |
+| `SOVEREIGN_ARM_T4_T5` | **0** | Deploy/money still never autonomous |
+
+Module: `api/energy_agent_sovereign.py` · Scheduler: `energy_agent_sovereign_tick` (5 min)
 
 ---
 

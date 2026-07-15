@@ -1646,6 +1646,14 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
+    # Sovereign Mind (product executive): observe queues/health, soft acts, dogfood speak.
+    # Kill with SOVEREIGN_ENABLED=0. See docs/plans/2026-07-15-energy-agent-sovereign-mind.md
+    scheduler.add_job(
+        _run_energy_agent_sovereign_tick,
+        "interval", minutes=5, id="energy_agent_sovereign_tick", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(minutes=2),
+    )
     # Ford Operator: standing Grok triage for Energy Agent escalations inbox.
     # Every 2 min process a small batch of open items → needs_ford + notify.
     scheduler.add_job(
@@ -1764,6 +1772,30 @@ def _run_energy_agent_long_term_mind() -> None:
             send_internal_alert(
                 "Energy Agent long-term mind failed",
                 f"Proactive cognition raised:\n{exc}",
+            )
+        except Exception:
+            pass
+
+
+def _run_energy_agent_sovereign_tick() -> None:
+    """Product executive mind: observe queues/health, soft acts, dogfood speak."""
+    try:
+        from .energy_agent_sovereign import sovereign_enabled, sovereign_tick
+        if not sovereign_enabled():
+            return
+        res = sovereign_tick(reason="scheduler")
+        if res.get("decisions"):
+            logger.info(
+                "sovereign_tick: decisions=%s queues=%s",
+                len(res.get("decisions") or []),
+                (res.get("digests") or {}).get("queues"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("energy_agent_sovereign_tick crashed: %s", exc)
+        try:
+            send_internal_alert(
+                "Energy Agent sovereign tick failed",
+                f"Product mind raised:\n{exc}",
             )
         except Exception:
             pass

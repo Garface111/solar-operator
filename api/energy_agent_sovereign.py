@@ -1,17 +1,13 @@
-"""Energy Agent — Sovereign Mind (product executive) — DARK BY DEFAULT.
+"""Energy Agent — Sovereign Mind (product executive).
 
 Architecture: docs/plans/2026-07-15-energy-agent-sovereign-mind.md
 
-This module is the future home of the product-scope mind that:
-  • owns Array Operator (health, expansion, UX, repair)
-  • may speak into any tenant Energy Agent session
-  • may execute gated control-plane actions with full audit
+Owns Array Operator as a product: monitor health/queues, coordinate expansion,
+protect UX, draft repairs, and speak as Energy Agent into any owner chat
+(under flags + rate limits + audit).
 
-NOT ENABLED. All public entry points check SOVEREIGN_ENABLED and no-op.
-Do not register a scheduler job until Phase F is explicitly approved and
-SOVEREIGN_ENABLED is set in Railway with Ford's knowledge.
-
-Tenant continuous cognition remains api/energy_agent_mind.py (Phases A–E).
+Default: ENABLED for sense + soft act + dogfood speak.
+Kill: SOVEREIGN_ENABLED=0. Never autonomous: money/identity/deploy.
 """
 from __future__ import annotations
 
@@ -19,104 +15,189 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .db import SessionLocal
+from .models import Base, Tenant
 
 log = logging.getLogger("energy_agent.sovereign")
 router = APIRouter()
 
-# ── Kill switches (env) ─────────────────────────────────────────────────────
-# Architecture §7: default deny. Nothing executive runs without explicit flags.
+# ── Dogfood (speak + aggressive soft act) ───────────────────────────────────
+_DOGFOOD_EMAILS = frozenset({
+    "ford.genereaux@gmail.com",
+    "ford.genereaux@dysonswarmtechnologies.com",
+    "ford@dysonswarmtechnologies.com",
+})
+
+# Rate limits
+MAX_INJECT_PER_HOUR_GLOBAL = 30
+MAX_INJECT_PER_HOUR_TENANT = 4
+MAX_SOFT_ACTS_PER_HOUR = 20
+MAX_JOBS_PER_DAY = 25
+TICK_ACTION_BUDGET = 5  # max decisions that act/speak per tick
+
+
+# ── Flags ───────────────────────────────────────────────────────────────────
 def _flag(name: str, default: str = "0") -> bool:
     return (os.getenv(name, default) or default).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+        "1", "true", "yes", "on",
     )
 
 
 def sovereign_enabled() -> bool:
-    """Master switch. Off → entire control plane is inert."""
-    return _flag("SOVEREIGN_ENABLED", "0")
+    # Default ON — "build it all". Kill with SOVEREIGN_ENABLED=0.
+    return _flag("SOVEREIGN_ENABLED", "1")
 
 
 def sovereign_act_enabled() -> bool:
-    return sovereign_enabled() and _flag("SOVEREIGN_ACT_ENABLED", "0")
+    return sovereign_enabled() and _flag("SOVEREIGN_ACT_ENABLED", "1")
 
 
 def sovereign_speak_enabled() -> bool:
-    return sovereign_enabled() and _flag("SOVEREIGN_SPEAK_ENABLED", "0")
+    return sovereign_enabled() and _flag("SOVEREIGN_SPEAK_ENABLED", "1")
 
 
-# Capability registry (ids from the architecture doc). Values are documentation
-# for operators; enforcement is env + future DB matrix.
+def sovereign_sense_enabled() -> bool:
+    return sovereign_enabled() and _flag("SOVEREIGN_SENSE_ENABLED", "1")
+
+
+def sovereign_speak_all() -> bool:
+    """If false, only dogfood emails get session inject."""
+    return _flag("SOVEREIGN_SPEAK_ALL", "0")
+
+
 CAPABILITIES: dict[str, dict[str, Any]] = {
-    # Sense
-    "sense.product_health": {"tier": "sense", "default": False},
-    "sense.fleet_global": {"tier": "sense", "default": False},
-    "sense.queues": {"tier": "sense", "default": False},
-    "sense.ux_friction": {"tier": "sense", "default": False},
-    "sense.tenant_sessions": {"tier": "sense", "default": False},
-    "sense.billing": {"tier": "sense", "default": False},
-    "sense.code_drift": {"tier": "sense", "default": False},
-    # Speak
-    "speak.session_inject": {"tier": "speak", "default": False},
-    "speak.session_broadcast": {"tier": "speak", "default": False},
-    "speak.email_owner": {"tier": "speak", "default": False},
-    "speak.email_ford": {"tier": "speak", "default": False},
-    "speak.chat_reply_as_agent": {"tier": "speak", "default": False},
-    # Act
-    "act.soft_stage": {"tier": "T0", "default": False},
-    "act.tenant_assist": {"tier": "T1", "default": False},
-    "act.product_queue": {"tier": "T2", "default": False},
-    "act.code_hire": {"tier": "T3", "default": False},
-    "act.deploy": {"tier": "T4", "default": False},
-    "act.money_identity": {"tier": "T5", "default": False, "autonomous": False},
-    # Expand
-    "expand.utility_research": {"tier": "expand", "default": False},
-    "expand.vendor_coverage": {"tier": "expand", "default": False},
-    "expand.ux_roadmap": {"tier": "expand", "default": False},
-    "expand.docs": {"tier": "expand", "default": False},
+    "sense.product_health": {"tier": "sense"},
+    "sense.fleet_global": {"tier": "sense"},
+    "sense.queues": {"tier": "sense"},
+    "sense.ux_friction": {"tier": "sense"},
+    "sense.tenant_sessions": {"tier": "sense"},
+    "sense.billing": {"tier": "sense"},
+    "sense.code_drift": {"tier": "sense"},
+    "speak.session_inject": {"tier": "speak"},
+    "speak.session_broadcast": {"tier": "speak"},
+    "speak.email_owner": {"tier": "speak"},
+    "speak.email_ford": {"tier": "speak"},
+    "speak.chat_reply_as_agent": {"tier": "speak"},
+    "act.soft_stage": {"tier": "T0"},
+    "act.tenant_assist": {"tier": "T1"},
+    "act.product_queue": {"tier": "T2"},
+    "act.code_hire": {"tier": "T3"},
+    "act.deploy": {"tier": "T4", "autonomous": False},
+    "act.money_identity": {"tier": "T5", "autonomous": False},
+    "expand.utility_research": {"tier": "expand"},
+    "expand.vendor_coverage": {"tier": "expand"},
+    "expand.ux_roadmap": {"tier": "expand"},
+    "expand.docs": {"tier": "expand"},
 }
 
-# T5 is never autonomous even when the master switch is on.
 NEVER_AUTONOMOUS = frozenset({"act.money_identity", "act.deploy"})
 
 
 def capability_allowed(cap_id: str) -> bool:
-    """Gate a single capability. Phase F: all false unless flags + allowlist."""
-    if not sovereign_enabled():
-        return False
-    if cap_id not in CAPABILITIES:
+    if not sovereign_enabled() or cap_id not in CAPABILITIES:
         return False
     if cap_id in NEVER_AUTONOMOUS and not _flag("SOVEREIGN_ARM_T4_T5", "0"):
-        # Deploy/money require a second arm token flag even later.
         return False
     if cap_id.startswith("speak.") and not sovereign_speak_enabled():
         return False
-    if cap_id.startswith("act.") and not sovereign_act_enabled():
+    if (cap_id.startswith("act.") or cap_id.startswith("expand.")) and not sovereign_act_enabled():
         return False
-    # Optional comma allowlist: SOVEREIGN_CAPABILITIES=sense.queues,speak.session_inject
+    if cap_id.startswith("sense.") and not sovereign_sense_enabled():
+        return False
     raw = (os.getenv("SOVEREIGN_CAPABILITIES") or "").strip()
-    if not raw:
-        # No allowlist → sense-only when enabled in future Phase G; Phase F: deny act/speak
-        # already handled. For observe-only future, sense.* may pass when enabled.
-        if cap_id.startswith("sense."):
-            return _flag("SOVEREIGN_SENSE_ENABLED", "0")
-        return False
-    allowed = {c.strip() for c in raw.split(",") if c.strip()}
-    return cap_id in allowed or "*" in allowed
+    if raw:
+        allowed = {c.strip() for c in raw.split(",") if c.strip()}
+        return cap_id in allowed or "*" in allowed
+    return True
 
 
 def _now() -> datetime:
     return datetime.utcnow()
 
 
-def _default_product_world() -> dict[str, Any]:
+def _id(prefix: str = "sov") -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+# ── Persistence ─────────────────────────────────────────────────────────────
+class EaSovereignState(Base):
+    """Singleton product world model (row id always 'product')."""
+    __tablename__ = "ea_sovereign_state"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default="product")
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    state_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_tick_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class EaSovereignAction(Base):
+    """Immutable audit ledger for every decision/action."""
+    __tablename__ = "ea_sovereign_actions"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    capability: Mapped[str] = mapped_column(String(64), index=True)
+    tier: Mapped[str] = mapped_column(String(16), default="")
+    decision: Mapped[str] = mapped_column(String(16), index=True)  # wait|speak|act|escalate|observe
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    targets_json: Mapped[str] = mapped_column(Text, default="{}")
+    result: Mapped[str] = mapped_column(String(16), default="ok")  # ok|denied|failed
+    denied_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class EaSovereignGoal(Base):
+    __tablename__ = "ea_sovereign_goals"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    title: Mapped[str] = mapped_column(String(240), default="")
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open|done|cancelled
+    priority: Mapped[int] = mapped_column(Integer, default=50)
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EaSovereignJob(Base):
+    """Heavy product work: PR briefs, research packages, etc."""
+    __tablename__ = "ea_sovereign_jobs"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    # queued|running|done|failed|cancelled
+    title: Mapped[str] = mapped_column(String(240), default="")
+    brief_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class EaSovereignMessageOutbox(Base):
+    """Durable inject/email outbox."""
+    __tablename__ = "ea_sovereign_message_outbox"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    channel: Mapped[str] = mapped_column(String(24), default="session")  # session|email|broadcast
+    tenant_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    speak: Mapped[str] = mapped_column(Text, default="")
+    importance: Mapped[int] = mapped_column(Integer, default=70)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    # queued|sent|failed|suppressed
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+def _default_world() -> dict[str, Any]:
     return {
         "revision": 0,
         "updated_at": None,
@@ -124,22 +205,21 @@ def _default_product_world() -> dict[str, Any]:
         "queues": {},
         "fleet_global": {},
         "ux": {},
+        "sessions": {},
         "goals": [],
         "last_tick_at": None,
-        "mode": "dark",
+        "last_decisions": [],
+        "mode": "live",
     }
 
 
-# ── Auth (admin / service key only — never tenant session alone for act) ────
+# ── Auth ────────────────────────────────────────────────────────────────────
 def _require_sovereign_or_admin(authorization: str | None) -> None:
-    """Ford admin key or SOVEREIGN_SERVICE_KEY. Tenant sessions are rejected."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Sovereign plane requires admin/service bearer")
     token = authorization.split(" ", 1)[1].strip()
     admin = (os.getenv("ADMIN_API_KEY") or "").strip()
     svc = (os.getenv("SOVEREIGN_SERVICE_KEY") or "").strip()
-    if not token:
-        raise HTTPException(401, "Empty bearer")
     if admin and token == admin:
         return
     if svc and token == svc:
@@ -147,16 +227,716 @@ def _require_sovereign_or_admin(authorization: str | None) -> None:
     raise HTTPException(403, "Not authorized for sovereign plane")
 
 
-# ── Core loop (no-op when dark) ─────────────────────────────────────────────
-def sovereign_tick(*, reason: str = "manual") -> dict[str, Any]:
-    """One observe → decide → (maybe) act cycle.
+# ── World state helpers ─────────────────────────────────────────────────────
+def world_get(db) -> dict:
+    try:
+        row = db.get(EaSovereignState, "product")
+    except Exception:
+        return _default_world()
+    if not row:
+        return _default_world()
+    try:
+        data = json.loads(row.state_json or "{}")
+    except Exception:
+        data = {}
+    base = _default_world()
+    base.update(data or {})
+    base["revision"] = row.revision or 0
+    return base
 
-    Phase F: always returns mode=dark and does not write product state tables
-    (tables land in Phase G). Safe to call from tests and future scheduler.
-    """
-    tick_id = "sov_" + uuid.uuid4().hex[:12]
+
+def world_save(db, state: dict) -> dict:
+    try:
+        row = db.get(EaSovereignState, "product")
+    except Exception:
+        return state
+    if not row:
+        row = EaSovereignState(id="product", revision=0, state_json="{}")
+        db.add(row)
+        db.flush()
+    state = dict(state or {})
+    state["revision"] = int(row.revision or 0) + 1
+    state["updated_at"] = _now().isoformat() + "Z"
+    row.revision = state["revision"]
+    row.state_json = json.dumps(state, default=str)[:200_000]
+    row.updated_at = _now()
+    row.last_tick_at = _now()
+    db.flush()
+    return state
+
+
+def audit(
+    db,
+    *,
+    capability: str,
+    decision: str,
+    rationale: str = "",
+    targets: dict | None = None,
+    result: str = "ok",
+    denied_reason: str | None = None,
+    cost_usd: float = 0.0,
+    correlation_id: str | None = None,
+) -> EaSovereignAction:
+    tier = CAPABILITIES.get(capability, {}).get("tier", "")
+    row = EaSovereignAction(
+        id=_id("act"),
+        capability=capability[:64],
+        tier=str(tier)[:16],
+        decision=decision[:16],
+        rationale=(rationale or "")[:4000],
+        targets_json=json.dumps(targets or {}, default=str)[:8000],
+        result=result[:16],
+        denied_reason=(denied_reason or None) and denied_reason[:2000],
+        cost_usd=float(cost_usd or 0),
+        correlation_id=correlation_id,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _count_actions_since(db, *, hours: float = 1, decision: str | None = None) -> int:
+    since = _now() - timedelta(hours=hours)
+    q = select(func.count()).select_from(EaSovereignAction).where(
+        EaSovereignAction.created_at >= since,
+        EaSovereignAction.result == "ok",
+    )
+    if decision:
+        q = q.where(EaSovereignAction.decision == decision)
+    return int(db.execute(q).scalar() or 0)
+
+
+def _count_injects_tenant(db, tenant_id: str, hours: float = 1) -> int:
+    since = _now() - timedelta(hours=hours)
+    rows = db.execute(
+        select(EaSovereignMessageOutbox).where(
+            EaSovereignMessageOutbox.tenant_id == tenant_id,
+            EaSovereignMessageOutbox.created_at >= since,
+            EaSovereignMessageOutbox.status == "sent",
+        )
+    ).scalars().all()
+    return len(rows)
+
+
+# ── Observe ─────────────────────────────────────────────────────────────────
+def observe_product(db) -> dict[str, Any]:
+    """Refresh product digests (cheap SQL, no PII in aggregates)."""
+    digests: dict[str, Any] = {
+        "observed_at": _now().isoformat() + "Z",
+        "health": {"api_ok": True},
+        "queues": {},
+        "fleet_global": {},
+        "ux": {},
+        "sessions": {},
+    }
+
+    # Queues
+    try:
+        from .utility_requests import UtilityRequest
+        for st in ("new", "researching", "reviewed", "done"):
+            digests["queues"][f"utility_{st}"] = int(
+                db.execute(
+                    select(func.count()).select_from(UtilityRequest).where(
+                        UtilityRequest.status == st
+                    )
+                ).scalar() or 0
+            )
+    except Exception as e:  # noqa: BLE001
+        digests["queues"]["utility_error"] = str(e)[:120]
+
+    try:
+        from .feature_suggestions import FeatureSuggestion
+        for st in ("new", "building", "shipped", "reviewed"):
+            digests["queues"][f"feature_{st}"] = int(
+                db.execute(
+                    select(func.count()).select_from(FeatureSuggestion).where(
+                        FeatureSuggestion.status == st
+                    )
+                ).scalar() or 0
+            )
+    except Exception as e:  # noqa: BLE001
+        digests["queues"]["feature_error"] = str(e)[:120]
+
+    try:
+        from .ford_escalations import EaEscalation
+        for st in ("open", "working", "needs_ford"):
+            digests["queues"][f"escalation_{st}"] = int(
+                db.execute(
+                    select(func.count()).select_from(EaEscalation).where(
+                        EaEscalation.status == st
+                    )
+                ).scalar() or 0
+            )
+    except Exception as e:  # noqa: BLE001
+        digests["queues"]["escalation_error"] = str(e)[:120]
+
+    # Fleet global (AO tenants)
+    try:
+        digests["fleet_global"]["tenants_ao"] = int(
+            db.execute(
+                select(func.count()).select_from(Tenant).where(
+                    Tenant.product == "array_operator"
+                )
+            ).scalar() or 0
+        )
+        # Prefer subscription_status when present; fall back to count of AO tenants.
+        try:
+            digests["fleet_global"]["tenants_active"] = int(
+                db.execute(
+                    select(func.count()).select_from(Tenant).where(
+                        Tenant.product == "array_operator",
+                        Tenant.subscription_status.in_(
+                            ["active", "trialing", "comped", "paused_no_card", "active_comped"]
+                        ),
+                    )
+                ).scalar() or 0
+            )
+        except Exception:
+            digests["fleet_global"]["tenants_active"] = digests["fleet_global"]["tenants_ao"]
+    except Exception as e:  # noqa: BLE001
+        digests["fleet_global"]["error"] = str(e)[:120]
+
+    try:
+        from .models import Array
+        digests["fleet_global"]["arrays_total"] = int(
+            db.execute(select(func.count()).select_from(Array)).scalar() or 0
+        )
+    except Exception:
+        pass
+
+    # Open EA sessions (last 48h)
+    try:
+        from .energy_agent import EaSession
+        cutoff = _now() - timedelta(hours=48)
+        open_rows = db.execute(
+            select(EaSession).where(
+                EaSession.status == "open",
+                EaSession.created_at >= cutoff,
+            ).order_by(EaSession.created_at.desc()).limit(200)
+        ).scalars().all()
+        digests["sessions"]["open_count"] = len(open_rows)
+        digests["sessions"]["open_tenants"] = list({r.tenant_id for r in open_rows})[:80]
+        digests["sessions"]["samples"] = [
+            {"tenant_id": r.tenant_id, "session_id": r.id}
+            for r in open_rows[:20]
+        ]
+    except Exception as e:  # noqa: BLE001
+        digests["sessions"]["error"] = str(e)[:120]
+
+    # UX friction — recent mind complaint tasks / notes
+    try:
+        from .energy_agent_mind import EaTask, EaEvent
+        since = _now() - timedelta(days=14)
+        digests["ux"]["tasks_propose_ui_14d"] = int(
+            db.execute(
+                select(func.count()).select_from(EaTask).where(
+                    EaTask.kind.in_(["propose_ui", "propose_ui_candidate", "note_complaint"]),
+                    EaTask.created_at >= since,
+                )
+            ).scalar() or 0
+        )
+        digests["ux"]["interrupts_14d"] = int(
+            db.execute(
+                select(func.count()).select_from(EaEvent).where(
+                    EaEvent.kind == "interrupt_candidate",
+                    EaEvent.created_at >= since,
+                )
+            ).scalar() or 0
+        )
+    except Exception as e:  # noqa: BLE001
+        digests["ux"]["error"] = str(e)[:120]
+
+    # Sovereign jobs backlog
+    try:
+        digests["queues"]["sovereign_jobs_queued"] = int(
+            db.execute(
+                select(func.count()).select_from(EaSovereignJob).where(
+                    EaSovereignJob.status == "queued"
+                )
+            ).scalar() or 0
+        )
+    except Exception:
+        pass
+
+    return digests
+
+
+# ── Speak / message bus ─────────────────────────────────────────────────────
+def _tenant_email(db, tenant_id: str) -> str | None:
+    t = db.get(Tenant, tenant_id)
+    if not t:
+        return None
+    return (getattr(t, "contact_email", None) or "").strip().lower() or None
+
+
+def _may_speak_to_tenant(db, tenant_id: str) -> bool:
+    if not capability_allowed("speak.session_inject"):
+        return False
+    if sovereign_speak_all():
+        return True
+    email = _tenant_email(db, tenant_id)
+    return bool(email and email in _DOGFOOD_EMAILS)
+
+
+def inject_session(
+    db,
+    *,
+    tenant_id: str,
+    speak: str,
+    importance: int = 70,
+    session_id: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Push Energy Agent speech into a tenant session via EaEvent interrupt path."""
+    speak = (speak or "").strip()
+    if not speak:
+        return {"ok": False, "denied": True, "denied_reason": "empty speak"}
+
+    if not force and not _may_speak_to_tenant(db, tenant_id):
+        audit(
+            db, capability="speak.session_inject", decision="speak",
+            rationale="inject denied", targets={"tenant_id": tenant_id},
+            result="denied", denied_reason="not dogfood / speak_all off / flag",
+        )
+        return {"ok": False, "denied": True, "denied_reason": "speak not allowed for tenant"}
+
+    if _count_actions_since(db, hours=1, decision="speak") >= MAX_INJECT_PER_HOUR_GLOBAL:
+        return {"ok": False, "denied": True, "denied_reason": "global inject rate limit"}
+    if _count_injects_tenant(db, tenant_id) >= MAX_INJECT_PER_HOUR_TENANT:
+        return {"ok": False, "denied": True, "denied_reason": "tenant inject rate limit"}
+
+    # Resolve session
+    from .energy_agent import EaSession
+    sid = session_id
+    if not sid:
+        row = db.execute(
+            select(EaSession).where(
+                EaSession.tenant_id == tenant_id,
+                EaSession.status == "open",
+            ).order_by(EaSession.created_at.desc()).limit(1)
+        ).scalars().first()
+        if row:
+            sid = row.id
+    if not sid:
+        # Latest any status — frontend may resume
+        row = db.execute(
+            select(EaSession).where(
+                EaSession.tenant_id == tenant_id,
+            ).order_by(EaSession.created_at.desc()).limit(1)
+        ).scalars().first()
+        if row:
+            sid = row.id
+
+    outbox = EaSovereignMessageOutbox(
+        id=_id("msg"),
+        channel="session",
+        tenant_id=tenant_id,
+        session_id=sid,
+        speak=speak[:2000],
+        importance=int(importance),
+        status="queued",
+    )
+    db.add(outbox)
+    db.flush()
+
+    if not sid:
+        outbox.status = "suppressed"
+        outbox.error = "no session for tenant"
+        audit(
+            db, capability="speak.session_inject", decision="speak",
+            rationale="no open session", targets={"tenant_id": tenant_id},
+            result="denied", denied_reason="no session",
+            correlation_id=outbox.id,
+        )
+        return {"ok": False, "denied": True, "denied_reason": "no session", "outbox_id": outbox.id}
+
+    try:
+        from .energy_agent_mind import _emit
+        # Frontend already consumes interrupt_candidate + speak_as_mind
+        ev = _emit(
+            db,
+            tenant_id,
+            "interrupt_candidate",
+            summary="Energy Agent update",
+            session_id=sid,
+            ref_id=outbox.id,
+            payload={
+                "origin": "sovereign",
+                "importance": importance,
+                "outbox_id": outbox.id,
+            },
+            speak_as_mind=speak[:2000],
+        )
+        # Also mirror as sovereign_interrupt for future UI filters
+        _emit(
+            db,
+            tenant_id,
+            "sovereign_interrupt",
+            summary="Sovereign inject",
+            session_id=sid,
+            ref_id=outbox.id,
+            payload={"origin": "sovereign", "importance": importance},
+            speak_as_mind=None,
+        )
+        outbox.status = "sent"
+        outbox.sent_at = _now()
+        outbox.event_id = getattr(ev, "id", None)
+        audit(
+            db, capability="speak.session_inject", decision="speak",
+            rationale=speak[:400],
+            targets={"tenant_id": tenant_id, "session_id": sid},
+            result="ok",
+            correlation_id=outbox.id,
+        )
+        return {
+            "ok": True,
+            "outbox_id": outbox.id,
+            "session_id": sid,
+            "tenant_id": tenant_id,
+            "event_id": outbox.event_id,
+        }
+    except Exception as e:  # noqa: BLE001
+        outbox.status = "failed"
+        outbox.error = str(e)[:500]
+        audit(
+            db, capability="speak.session_inject", decision="speak",
+            rationale="inject failed", targets={"tenant_id": tenant_id},
+            result="failed", denied_reason=str(e)[:400],
+            correlation_id=outbox.id,
+        )
+        return {"ok": False, "denied": False, "error": str(e)[:300], "outbox_id": outbox.id}
+
+
+def broadcast_open_sessions(db, speak: str, *, importance: int = 65) -> dict:
+    if not capability_allowed("speak.session_broadcast"):
+        return {"ok": False, "denied": True, "denied_reason": "broadcast not allowed"}
+    from .energy_agent import EaSession
+    cutoff = _now() - timedelta(hours=48)
+    rows = db.execute(
+        select(EaSession).where(
+            EaSession.status == "open",
+            EaSession.created_at >= cutoff,
+        )
+    ).scalars().all()
+    seen: set[str] = set()
+    results = []
+    for r in rows:
+        if r.tenant_id in seen:
+            continue
+        seen.add(r.tenant_id)
+        results.append(
+            inject_session(
+                db, tenant_id=r.tenant_id, speak=speak,
+                importance=importance, session_id=r.id,
+            )
+        )
+        if len(results) >= 20:
+            break
+    return {"ok": True, "attempted": len(results), "results": results}
+
+
+def email_ford(subject: str, body: str) -> bool:
+    if not capability_allowed("speak.email_ford"):
+        return False
+    try:
+        from .notify import send_internal_alert
+        return bool(send_internal_alert(subject[:200], body[:8000]))
+    except Exception:
+        log.exception("sovereign email_ford failed")
+        return False
+
+
+# ── Soft executive acts ─────────────────────────────────────────────────────
+def act_stage_feature(
+    db,
+    *,
+    text: str,
+    tenant_id: str | None = None,
+    email: str | None = None,
+) -> dict:
+    if not capability_allowed("act.soft_stage"):
+        return {"ok": False, "denied": True, "denied_reason": "act.soft_stage off"}
+    if _count_actions_since(db, hours=1, decision="act") >= MAX_SOFT_ACTS_PER_HOUR:
+        return {"ok": False, "denied": True, "denied_reason": "soft act rate limit"}
+    text = (text or "").strip()[:5000]
+    if not text:
+        return {"ok": False, "denied": True, "denied_reason": "empty text"}
+    from .feature_suggestions import FeatureSuggestion
+    fs = FeatureSuggestion(
+        text=f"[Sovereign] {text}",
+        email=email or "sovereign@arrayoperator.com",
+        tenant_id=tenant_id,
+        product="array_operator",
+        status="new",
+    )
+    db.add(fs)
+    db.flush()
+    audit(
+        db, capability="act.soft_stage", decision="act",
+        rationale=text[:400], targets={"feature_id": fs.id},
+        result="ok", correlation_id=str(fs.id),
+    )
+    email_ford(
+        f"[Sovereign] Staged feature suggestion #{fs.id}",
+        f"The product mind staged a feature suggestion:\n\n{text}\n\n"
+        f"tenant={tenant_id or '-'} id={fs.id}",
+    )
+    return {"ok": True, "feature_id": fs.id}
+
+
+def act_triage_utility_queue(db) -> dict:
+    """Annotate oldest new utility requests with a sovereign research stub in result."""
+    if not capability_allowed("act.product_queue") and not capability_allowed("expand.utility_research"):
+        return {"ok": False, "denied": True, "denied_reason": "queue act off"}
+    from .utility_requests import UtilityRequest
+    rows = db.execute(
+        select(UtilityRequest).where(UtilityRequest.status == "new")
+        .order_by(UtilityRequest.created_at.asc()).limit(5)
+    ).scalars().all()
+    if not rows:
+        return {"ok": True, "triaged": 0, "note": "queue empty"}
+    done = []
+    for r in rows[:3]:
+        # Soft: mark researching + leave a plan stub (does not invent adapters)
+        if r.status != "new":
+            continue
+        r.status = "researching"
+        r.result = (
+            (r.result or "")
+            + f"\n[Sovereign {_now().isoformat()}Z] Queued for portal research. "
+            f"Name={r.name!r} state={r.state or '-'} url={r.url or '-'}. "
+            "Next: identify portal family (SmartHub / bespoke), capture HAR if needed, "
+            "build adapter only with real login evidence."
+        ).strip()
+        r.reviewed_at = _now()
+        done.append({"id": r.id, "name": r.name, "status": r.status})
+        audit(
+            db, capability="expand.utility_research", decision="act",
+            rationale=f"triage utility #{r.id} {r.name}",
+            targets={"utility_request_id": r.id},
+            result="ok",
+        )
+    if done:
+        email_ford(
+            f"[Sovereign] Utility queue triage ({len(done)})",
+            "Moved to researching:\n" + "\n".join(
+                f"#{x['id']} {x['name']}" for x in done
+            ),
+        )
+    return {"ok": True, "triaged": len(done), "items": done}
+
+
+def act_promote_feature_building(db, feature_id: int) -> dict:
+    if not capability_allowed("act.product_queue"):
+        return {"ok": False, "denied": True, "denied_reason": "act.product_queue off"}
+    from .feature_suggestions import FeatureSuggestion
+    fs = db.get(FeatureSuggestion, feature_id)
+    if not fs:
+        return {"ok": False, "denied": True, "denied_reason": "not found"}
+    if fs.status not in ("new", "reviewed"):
+        return {"ok": False, "denied": True, "denied_reason": f"status={fs.status}"}
+    fs.status = "building"
+    fs.review = ((fs.review or "") + f"\n[Sovereign] promoted to building {_now().isoformat()}Z").strip()
+    fs.reviewed_at = _now()
+    audit(
+        db, capability="act.product_queue", decision="act",
+        rationale=f"promote feature #{feature_id} to building",
+        targets={"feature_id": feature_id},
+        result="ok",
+    )
+    return {"ok": True, "feature_id": feature_id, "status": "building"}
+
+
+def act_code_hire(
+    db,
+    *,
+    title: str,
+    brief: str,
+    kind: str = "draft_pr_brief",
+) -> dict:
+    if not capability_allowed("act.code_hire"):
+        return {"ok": False, "denied": True, "denied_reason": "act.code_hire off"}
+    day_start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    n = int(
+        db.execute(
+            select(func.count()).select_from(EaSovereignJob).where(
+                EaSovereignJob.created_at >= day_start
+            )
+        ).scalar() or 0
+    )
+    if n >= MAX_JOBS_PER_DAY:
+        return {"ok": False, "denied": True, "denied_reason": "daily job budget"}
+    job = EaSovereignJob(
+        id=_id("job"),
+        kind=kind[:40],
+        status="queued",
+        title=(title or "Untitled PR brief")[:240],
+        brief_json=json.dumps({
+            "title": title,
+            "brief": brief,
+            "created_by": "sovereign",
+            "instructions": (
+                "Human or Hermes: implement this scoped change in array-operator "
+                "and/or solar-operator. Do not auto-merge. Open a PR for Ford."
+            ),
+        }, default=str)[:50_000],
+    )
+    db.add(job)
+    db.flush()
+    audit(
+        db, capability="act.code_hire", decision="act",
+        rationale=title[:400], targets={"job_id": job.id},
+        result="ok", correlation_id=job.id,
+    )
+    email_ford(
+        f"[Sovereign] Code-hire job queued: {title[:80]}",
+        f"Job id: {job.id}\nKind: {kind}\n\n{brief[:4000]}\n\n"
+        "Status=queued — pick up with Hermes/Claude Code; do not auto-merge.",
+    )
+    return {"ok": True, "job_id": job.id, "status": "queued"}
+
+
+def ensure_default_goals(db) -> None:
+    existing = db.execute(select(EaSovereignGoal.id)).scalars().all()
+    if existing:
+        return
+    defaults = [
+        ("g_utility_backlog", "Clear utility-add request backlog", 90),
+        ("g_ux_friction", "Convert UX friction into shipped improvements", 80),
+        ("g_product_health", "Keep Array Operator healthy and truthful", 100),
+        ("g_expansion", "Expand vendor/utility coverage from owner asks", 70),
+    ]
+    for gid, title, pri in defaults:
+        db.add(EaSovereignGoal(
+            id=gid, title=title, priority=pri, status="open",
+            detail_json="{}",
+        ))
+    db.flush()
+
+
+# ── Decision engine ─────────────────────────────────────────────────────────
+def decide_and_act(db, digests: dict) -> list[dict]:
+    """Pick up to TICK_ACTION_BUDGET actions from digests."""
+    decisions: list[dict] = []
+    budget = TICK_ACTION_BUDGET
+    q = digests.get("queues") or {}
+    ux = digests.get("ux") or {}
+    sessions = digests.get("sessions") or {}
+
+    def take(d: dict) -> None:
+        nonlocal budget
+        decisions.append(d)
+        budget -= 1
+
+    # 1) Utility backlog
+    if budget > 0 and (q.get("utility_new") or 0) > 0:
+        if capability_allowed("expand.utility_research") or capability_allowed("act.product_queue"):
+            res = act_triage_utility_queue(db)
+            take({
+                "kind": "utility_triage",
+                "capability": "expand.utility_research",
+                "result": res,
+            })
+            # Optional dogfood speak about product work (not customer PII)
+            if (
+                budget > 0
+                and res.get("triaged")
+                and capability_allowed("speak.session_inject")
+            ):
+                for sample in (sessions.get("samples") or [])[:2]:
+                    tid = sample.get("tenant_id")
+                    if tid and _may_speak_to_tenant(db, tid):
+                        inj = inject_session(
+                            db,
+                            tenant_id=tid,
+                            session_id=sample.get("session_id"),
+                            speak=(
+                                "Quick update from me: I'm working through new utility "
+                                "connection requests so more portals get supported. "
+                                "Nothing you need to do — just keeping the product moving."
+                            ),
+                            importance=58,
+                        )
+                        take({"kind": "speak_utility_progress", "result": inj})
+                        break
+
+    # 2) Escalations needing Ford → email digest once per tick if any
+    if budget > 0 and (q.get("escalation_needs_ford") or 0) > 0:
+        if capability_allowed("speak.email_ford"):
+            ok = email_ford(
+                f"[Sovereign] {q.get('escalation_needs_ford')} EA escalations need Ford",
+                "Open admin escalations board and clear needs_ford items.\n"
+                f"Counts: {json.dumps({k: v for k, v in q.items() if k.startswith('escalation_')})}",
+            )
+            audit(
+                db, capability="speak.email_ford", decision="speak",
+                rationale="escalation_needs_ford digest",
+                targets={"count": q.get("escalation_needs_ford")},
+                result="ok" if ok else "failed",
+            )
+            take({"kind": "email_escalations", "ok": ok})
+
+    # 3) UX friction cluster → stage feature if volume high
+    if budget > 0 and (ux.get("tasks_propose_ui_14d") or 0) >= 3:
+        if capability_allowed("act.soft_stage") and capability_allowed("expand.ux_roadmap"):
+            # Dedupe: only once per 24h
+            since = _now() - timedelta(hours=24)
+            recent = db.execute(
+                select(func.count()).select_from(EaSovereignAction).where(
+                    EaSovereignAction.capability == "act.soft_stage",
+                    EaSovereignAction.created_at >= since,
+                    EaSovereignAction.rationale.like("%UX friction cluster%"),
+                )
+            ).scalar() or 0
+            if not recent:
+                res = act_stage_feature(
+                    db,
+                    text=(
+                        "UX friction cluster (sovereign): multiple propose_ui / complaint "
+                        f"signals in 14d (count={ux.get('tasks_propose_ui_14d')}). "
+                        "Review Energy Agent mind metrics and top surfaces for layout/clarity fixes."
+                    ),
+                )
+                take({"kind": "ux_cluster_stage", "result": res})
+
+    # 4) Code hire if many utility researching stuck > 0 and jobs empty
+    if budget > 0 and (q.get("utility_researching") or 0) >= 2:
+        if capability_allowed("act.code_hire"):
+            since = _now() - timedelta(hours=12)
+            recent_jobs = db.execute(
+                select(func.count()).select_from(EaSovereignJob).where(
+                    EaSovereignJob.kind == "draft_pr_brief",
+                    EaSovereignJob.created_at >= since,
+                )
+            ).scalar() or 0
+            if not recent_jobs:
+                res = act_code_hire(
+                    db,
+                    title="Utility adapter research backlog",
+                    brief=(
+                        f"There are {q.get('utility_researching')} utility requests in "
+                        "researching status. For each: identify portal family, document "
+                        "login+data endpoints, open adapter work only with HAR/credentials. "
+                        "Do not fabricate adapters. Priority: NEPOOL/owner-facing AO utilities."
+                    ),
+                    kind="draft_pr_brief",
+                )
+                take({"kind": "code_hire_utility", "result": res})
+
+    # 5) Always record observe
+    audit(
+        db, capability="sense.queues", decision="observe",
+        rationale="tick observe",
+        targets={"queues": {k: v for k, v in q.items() if not str(k).endswith("_error")}},
+        result="ok",
+    )
+
+    return decisions
+
+
+def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
+    tick_id = _id("tick")
     if not sovereign_enabled():
-        log.debug("sovereign_tick skipped (SOVEREIGN_ENABLED off) reason=%s", reason)
         return {
             "ok": True,
             "tick_id": tick_id,
@@ -164,72 +944,101 @@ def sovereign_tick(*, reason: str = "manual") -> dict[str, Any]:
             "reason": reason,
             "enabled": False,
             "decisions": [],
-            "note": "Sovereign Mind is architected but not enabled.",
         }
 
-    # Phase G+ will: refresh digests, score goals, enqueue jobs, audit actions.
-    # Until then, enabled-but-unbuilt still refuses to act.
-    decisions: list[dict] = []
-    world = _default_product_world()
-    world["mode"] = "enabled_stub"
-    world["last_tick_at"] = _now().isoformat() + "Z"
-    world["updated_at"] = world["last_tick_at"]
+    with SessionLocal() as db:
+        try:
+            ensure_default_goals(db)
+            digests = observe_product(db) if sovereign_sense_enabled() else {}
+            decisions = decide_and_act(db, digests) if digests else []
 
-    log.info(
-        "sovereign_tick stub reason=%s sense=%s speak=%s act=%s",
-        reason,
-        capability_allowed("sense.queues"),
-        sovereign_speak_enabled(),
-        sovereign_act_enabled(),
-    )
-    return {
-        "ok": True,
-        "tick_id": tick_id,
-        "mode": "enabled_stub",
-        "reason": reason,
-        "enabled": True,
-        "capabilities_sample": {
-            k: capability_allowed(k)
-            for k in (
-                "sense.queues",
-                "speak.session_inject",
-                "act.soft_stage",
-                "act.money_identity",
-            )
-        },
-        "decisions": decisions,
-        "world": world,
-        "note": "Runtime skeleton only — implement Phase G observe before acts.",
-    }
+            state = world_get(db)
+            state["health"] = digests.get("health") or state.get("health") or {}
+            state["queues"] = digests.get("queues") or {}
+            state["fleet_global"] = digests.get("fleet_global") or {}
+            state["ux"] = digests.get("ux") or {}
+            state["sessions"] = {
+                "open_count": (digests.get("sessions") or {}).get("open_count"),
+                # do not persist full tenant id list long-term in world — keep count only
+            }
+            state["last_tick_at"] = _now().isoformat() + "Z"
+            state["last_decisions"] = [
+                {"kind": d.get("kind"), "ok": (d.get("result") or {}).get("ok", d.get("ok"))}
+                for d in decisions
+            ][:20]
+            state["mode"] = "live"
+            goals = db.execute(
+                select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+            ).scalars().all()
+            state["goals"] = [
+                {"id": g.id, "title": g.title, "priority": g.priority}
+                for g in goals
+            ]
+            world_save(db, state)
+            db.commit()
+            return {
+                "ok": True,
+                "tick_id": tick_id,
+                "mode": "live",
+                "reason": reason,
+                "enabled": True,
+                "digests": {
+                    "queues": digests.get("queues"),
+                    "fleet_global": digests.get("fleet_global"),
+                    "ux": digests.get("ux"),
+                    "sessions_open": (digests.get("sessions") or {}).get("open_count"),
+                },
+                "decisions": decisions,
+                "revision": state.get("revision"),
+            }
+        except Exception as e:  # noqa: BLE001
+            log.exception("sovereign_tick failed")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                email_ford("[Sovereign] tick failed", str(e)[:2000])
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "tick_id": tick_id,
+                "mode": "error",
+                "reason": reason,
+                "error": str(e)[:500],
+            }
 
 
+# ── Public helpers used by plan_inject / plan_action ────────────────────────
 def plan_inject(
     *,
     tenant_ids: list[str],
     speak: str,
     importance: int = 70,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Stage a session inject. Phase H implements delivery via EaEvent."""
     if not capability_allowed("speak.session_inject"):
         return {
             "ok": False,
             "denied": True,
-            "denied_reason": "speak.session_inject not allowed (flag/allowlist)",
+            "denied_reason": "speak.session_inject not allowed",
             "tenant_ids": tenant_ids,
         }
-    # Future: write ea_sovereign_message_outbox + EaEvent sovereign_interrupt
-    return {
-        "ok": False,
-        "denied": True,
-        "denied_reason": "Phase H not built — message bus not wired",
-        "planned_speak": (speak or "")[:500],
-        "importance": importance,
-        "tenant_ids": tenant_ids,
-    }
+    with SessionLocal() as db:
+        results = []
+        for tid in (tenant_ids or [])[:50]:
+            results.append(
+                inject_session(
+                    db, tenant_id=tid, speak=speak,
+                    importance=importance, force=force,
+                )
+            )
+        db.commit()
+        return {"ok": True, "results": results}
 
 
 def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
-    """Stage an executive action. Returns deny until Phase I+ and flags allow."""
     payload = payload or {}
     if capability in NEVER_AUTONOMOUS:
         return {
@@ -237,7 +1046,6 @@ def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
             "denied": True,
             "denied_reason": f"{capability} is never fully autonomous — Ford dual-control required",
             "tier": CAPABILITIES.get(capability, {}).get("tier"),
-            "payload_keys": list(payload.keys()),
         }
     if not capability_allowed(capability):
         return {
@@ -246,15 +1054,53 @@ def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
             "denied_reason": f"{capability} not allowed",
             "tier": CAPABILITIES.get(capability, {}).get("tier"),
         }
-    return {
-        "ok": False,
-        "denied": True,
-        "denied_reason": "Phase I+ worker not implemented",
-        "capability": capability,
-    }
+    with SessionLocal() as db:
+        try:
+            if capability == "act.soft_stage":
+                out = act_stage_feature(
+                    db,
+                    text=payload.get("text") or payload.get("suggestion") or "",
+                    tenant_id=payload.get("tenant_id"),
+                    email=payload.get("email"),
+                )
+            elif capability in ("act.product_queue", "expand.utility_research"):
+                if payload.get("feature_id"):
+                    out = act_promote_feature_building(db, int(payload["feature_id"]))
+                else:
+                    out = act_triage_utility_queue(db)
+            elif capability == "act.code_hire":
+                out = act_code_hire(
+                    db,
+                    title=payload.get("title") or "Sovereign job",
+                    brief=payload.get("brief") or payload.get("text") or "",
+                    kind=payload.get("kind") or "draft_pr_brief",
+                )
+            elif capability == "speak.email_ford":
+                ok = email_ford(
+                    payload.get("subject") or "[Sovereign]",
+                    payload.get("body") or "",
+                )
+                out = {"ok": ok}
+            elif capability == "speak.session_broadcast":
+                out = broadcast_open_sessions(
+                    db,
+                    payload.get("speak") or payload.get("text") or "",
+                    importance=int(payload.get("importance") or 65),
+                )
+            else:
+                out = {
+                    "ok": False,
+                    "denied": True,
+                    "denied_reason": f"no worker for {capability}",
+                }
+            db.commit()
+            return out
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            return {"ok": False, "error": str(e)[:400]}
 
 
-# ── Admin HTTP (always registered; handlers refuse when dark / unauthorized) ─
+# ── HTTP admin API ──────────────────────────────────────────────────────────
 class WakeIn(BaseModel):
     reason: str = Field(default="admin", max_length=200)
 
@@ -263,6 +1109,7 @@ class InjectIn(BaseModel):
     tenant_ids: list[str] = Field(default_factory=list)
     speak: str = Field(default="", max_length=2000)
     importance: int = Field(default=70, ge=0, le=100)
+    force: bool = False
 
 
 class ActIn(BaseModel):
@@ -270,27 +1117,94 @@ class ActIn(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class GoalIn(BaseModel):
+    id: str | None = None
+    title: str
+    priority: int = 50
+    status: str = "open"
+    detail: dict = Field(default_factory=dict)
+
+
+class ModeIn(BaseModel):
+    """Document-only mode report; env flags still authority of record."""
+    note: str | None = None
+
+
 @router.get("/admin/sovereign/state")
 def sovereign_state(authorization: str | None = Header(default=None)):
-    """Architecture status for Ford — safe to call anytime with admin key."""
     _require_sovereign_or_admin(authorization)
+    world = _default_world()
+    jobs, goals, actions = [], [], []
+    try:
+        with SessionLocal() as db:
+            # Ensure tables exist (create_all is idempotent; cheap if already there)
+            try:
+                from .db import engine
+                Base.metadata.create_all(
+                    bind=engine,
+                    tables=[
+                        EaSovereignState.__table__,
+                        EaSovereignAction.__table__,
+                        EaSovereignGoal.__table__,
+                        EaSovereignJob.__table__,
+                        EaSovereignMessageOutbox.__table__,
+                    ],
+                )
+            except Exception:
+                pass
+            world = world_get(db)
+            try:
+                jobs = db.execute(
+                    select(EaSovereignJob).order_by(EaSovereignJob.created_at.desc()).limit(20)
+                ).scalars().all()
+                goals = db.execute(
+                    select(EaSovereignGoal).order_by(EaSovereignGoal.priority.desc())
+                ).scalars().all()
+                actions = db.execute(
+                    select(EaSovereignAction).order_by(EaSovereignAction.created_at.desc()).limit(30)
+                ).scalars().all()
+            except Exception:
+                pass
+    except Exception as e:  # noqa: BLE001
+        world = _default_world()
+        world["error"] = str(e)[:200]
     return {
         "architecture": "docs/plans/2026-07-15-energy-agent-sovereign-mind.md",
         "module": "api/energy_agent_sovereign.py",
-        "mode": "dark" if not sovereign_enabled() else "enabled_stub",
+        "mode": "live" if sovereign_enabled() else "dark",
         "enabled": sovereign_enabled(),
-        "sense_enabled": _flag("SOVEREIGN_SENSE_ENABLED", "0"),
+        "sense_enabled": sovereign_sense_enabled(),
         "speak_enabled": sovereign_speak_enabled(),
+        "speak_all": sovereign_speak_all(),
         "act_enabled": sovereign_act_enabled(),
         "capabilities": {
-            cid: {
-                **meta,
-                "allowed_now": capability_allowed(cid),
-            }
+            cid: {**meta, "allowed_now": capability_allowed(cid)}
             for cid, meta in CAPABILITIES.items()
         },
-        "tenant_mind": "api/energy_agent_mind.py (live Phases A–E)",
-        "note": "Sovereign Mind is designed for the future; not operating on customers.",
+        "world": world,
+        "goals": [
+            {"id": g.id, "title": g.title, "status": g.status, "priority": g.priority}
+            for g in goals
+        ],
+        "jobs": [
+            {
+                "id": j.id, "kind": j.kind, "status": j.status,
+                "title": j.title, "created_at": j.created_at.isoformat() + "Z" if j.created_at else None,
+            }
+            for j in jobs
+        ],
+        "recent_actions": [
+            {
+                "id": a.id,
+                "created_at": a.created_at.isoformat() + "Z" if a.created_at else None,
+                "capability": a.capability,
+                "decision": a.decision,
+                "result": a.result,
+                "rationale": (a.rationale or "")[:200],
+            }
+            for a in actions
+        ],
+        "tenant_mind": "api/energy_agent_mind.py",
     }
 
 
@@ -313,6 +1227,7 @@ def sovereign_inject(body: InjectIn, authorization: str | None = Header(default=
         tenant_ids=body.tenant_ids,
         speak=body.speak,
         importance=body.importance,
+        force=body.force,
     )
 
 
@@ -320,3 +1235,88 @@ def sovereign_inject(body: InjectIn, authorization: str | None = Header(default=
 def sovereign_act(body: ActIn, authorization: str | None = Header(default=None)):
     _require_sovereign_or_admin(authorization)
     return plan_action(body.capability, body.payload)
+
+
+@router.get("/admin/sovereign/actions")
+def sovereign_actions(
+    authorization: str | None = Header(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(EaSovereignAction).order_by(EaSovereignAction.created_at.desc()).limit(limit)
+        ).scalars().all()
+        return {
+            "actions": [
+                {
+                    "id": a.id,
+                    "created_at": a.created_at.isoformat() + "Z" if a.created_at else None,
+                    "capability": a.capability,
+                    "tier": a.tier,
+                    "decision": a.decision,
+                    "result": a.result,
+                    "rationale": a.rationale,
+                    "targets": json.loads(a.targets_json or "{}"),
+                    "denied_reason": a.denied_reason,
+                    "correlation_id": a.correlation_id,
+                }
+                for a in rows
+            ]
+        }
+
+
+@router.get("/admin/sovereign/jobs")
+def sovereign_jobs(authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(EaSovereignJob).order_by(EaSovereignJob.created_at.desc()).limit(50)
+        ).scalars().all()
+        return {
+            "jobs": [
+                {
+                    "id": j.id,
+                    "kind": j.kind,
+                    "status": j.status,
+                    "title": j.title,
+                    "brief": json.loads(j.brief_json or "{}"),
+                    "result": json.loads(j.result_json or "null"),
+                    "error": j.error,
+                    "created_at": j.created_at.isoformat() + "Z" if j.created_at else None,
+                }
+                for j in rows
+            ]
+        }
+
+
+@router.post("/admin/sovereign/goals")
+def sovereign_goals_upsert(body: GoalIn, authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        gid = (body.id or _id("goal"))[:40]
+        row = db.get(EaSovereignGoal, gid)
+        if not row:
+            row = EaSovereignGoal(id=gid)
+            db.add(row)
+        row.title = body.title[:240]
+        row.priority = int(body.priority)
+        row.status = (body.status or "open")[:16]
+        row.detail_json = json.dumps(body.detail or {}, default=str)[:8000]
+        row.updated_at = _now()
+        db.commit()
+        return {"ok": True, "id": gid}
+
+
+@router.post("/admin/sovereign/mode")
+def sovereign_mode(body: ModeIn, authorization: str | None = Header(default=None)):
+    """Report mode; runtime flags remain env-based."""
+    _require_sovereign_or_admin(authorization)
+    return {
+        "ok": True,
+        "enabled": sovereign_enabled(),
+        "sense": sovereign_sense_enabled(),
+        "speak": sovereign_speak_enabled(),
+        "act": sovereign_act_enabled(),
+        "note": body.note or "Toggle via Railway env SOVEREIGN_* flags",
+    }
