@@ -322,6 +322,35 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning("record_scheduled_batch failed (%s): %s", frequency, e)
 
+    # Operator NEPOOL-GIS directory: one workbook with every client array that
+    # was in this batch, emailed only to each NEPOOL tenant operator so they
+    # can bulk-upload to the NEPOOL site. Group by tenant from result rows.
+    try:
+        from .delivery import deliver_operator_directory
+        by_tenant: dict[str, list[int]] = {}
+        for r in results:
+            tid = r.get("tenant") or r.get("tenant_id")
+            cid = r.get("client_id")
+            if not tid or cid is None:
+                continue
+            # Include clients that sent OR had data skipped — directory still
+            # only includes arrays with generation in the window.
+            if r.get("ok") or r.get("skipped_empty"):
+                by_tenant.setdefault(str(tid), []).append(int(cid))
+        for tid, cids in by_tenant.items():
+            try:
+                deliver_operator_directory(
+                    tid,
+                    client_ids=sorted(set(cids)),
+                    triggered_by=f"sched-{frequency}-directory",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "scheduled directory failed tenant=%s: %s", tid, e,
+                )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("scheduled directory fan-out failed (%s): %s", frequency, e)
+
     # Internal-alert on failures AND on skipped-empty clients, so the operator
     # learns which clients have no data instead of silently sending nothing.
     if failed or skipped_empty:

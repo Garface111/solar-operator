@@ -1023,6 +1023,78 @@ def account_energy_history(authorization: Optional[str] = Header(default=None)):
         }
 
 
+@router.get("/v1/account/directory-report.xlsx")
+def download_directory_report(
+    quarter: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Download the operator NEPOOL-GIS directory workbook (all clients'
+    arrays, one sheet each, GMCS form) for upload to the NEPOOL site.
+
+    Optional `quarter` (e.g. Q1-2026) selects the rolling window — same as
+    the per-client report download.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if getattr(t, "product", "nepool") == "array_operator":
+        raise HTTPException(404, "Directory reports are for NEPOOL Operator only")
+    reference_date = None
+    if quarter:
+        try:
+            qy, qq = _parse_quarter_str(quarter)
+            reference_date = _quarter_to_reference_date(qy, qq)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    from .writers.gmcs_writer import build_directory_workbook
+    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    try:
+        path = build_directory_workbook(
+            t.id, reference_date=reference_date, out_path=tmp_path,
+        )
+    except ValueError as e:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(422, str(e)) from e
+    label = re.sub(r"[^A-Za-z0-9]+", "-", quarter) if quarter else "latest"
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"NEPOOL-directory-{label}.xlsx",
+        background=BackgroundTask(lambda: path.unlink(missing_ok=True)),
+    )
+
+
+@router.post("/v1/account/directory-report/send")
+def send_directory_report(
+    quarter: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Email the operator their NEPOOL-GIS directory (all clients/arrays)."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    require_active_subscription(t)
+    if getattr(t, "product", "nepool") == "array_operator":
+        raise HTTPException(404, "Directory reports are for NEPOOL Operator only")
+    reference_date = None
+    if quarter:
+        try:
+            qy, qq = _parse_quarter_str(quarter)
+            reference_date = _quarter_to_reference_date(qy, qq)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    from .delivery import deliver_operator_directory
+    result = deliver_operator_directory(
+        t.id, reference_date=reference_date, triggered_by="self-serve-directory",
+    )
+    if not result.get("ok"):
+        raise HTTPException(422, result.get("reason") or "Couldn't build directory")
+    return result
+
+
 @router.get("/v1/account/fleet-report")
 def account_fleet_report(fmt: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
                          authorization: Optional[str] = Header(default=None)):
@@ -1473,10 +1545,11 @@ def send_my_report(
     from .delivery import deliver_for_tenant, deliver_for_client
 
     if not ids:
-        # Legacy path — every active client
+        # Legacy path — every active client + operator NEPOOL directory
         return deliver_for_tenant(t.id, override_to=None, triggered_by="self-serve")
 
-    # Per-client picker path — validate ownership, then fan out
+    # Per-client picker path — validate ownership, then fan out, then
+    # email the operator a directory covering just those clients.
     with SessionLocal() as db:
         rows = db.execute(
             select(Client)
@@ -1493,11 +1566,21 @@ def send_my_report(
         results.append(r)
         if r.get("ok") and r.get("email_sent"):
             delivered += 1
+    directory = None
+    try:
+        from .delivery import deliver_operator_directory
+        directory = deliver_operator_directory(
+            t.id, client_ids=resolved_ids, triggered_by="self-serve-picker-directory",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("directory after picker send failed: %s", e)
+        directory = {"ok": False, "reason": str(e)}
     return {
         "ok": True,
         "client_count": len(resolved_ids),
         "delivered": delivered,
         "results": results,
+        "directory": directory,
     }
 
 

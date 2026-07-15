@@ -22,6 +22,9 @@ import {
   listClients,
   getReports,
   sendSampleReport,
+  downloadDirectoryReport,
+  sendDirectoryReport,
+  recentReportQuarters,
 } from "../lib/api";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -123,6 +126,11 @@ export default function NepoolReportsTab() {
   // own inbox, no client ever contacted (POST /v1/account/send-sample-report). ──
   const [sampleSending, setSampleSending] = useState(false);
   const [sampleMsg, setSampleMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // NEPOOL-GIS directory (all clients × arrays) for operator bulk upload.
+  const dirQuarters = recentReportQuarters(8);
+  const [dirQuarter, setDirQuarter] = useState(dirQuarters[0]?.value ?? "");
+  const [dirBusy, setDirBusy] = useState<"dl" | "mail" | null>(null);
+  const [dirMsg, setDirMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const handleSendSample = useCallback(() => {
     setSampleSending(true);
     setSampleMsg(null);
@@ -259,6 +267,100 @@ export default function NepoolReportsTab() {
 
       {/* 5. Next run countdown + send-now */}
       <NextRunCard onSent={loadData} />
+
+      {/* NEPOOL-GIS directory — full book of every client array for GIS upload.
+          Also emailed automatically whenever client reports go out. */}
+      <div className="rounded-xl border border-primary-200 bg-primary-50/40 px-5 py-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-zinc-800">
+              NEPOOL-GIS directory
+            </p>
+            <p className="mt-0.5 text-xs leading-relaxed text-zinc-600">
+              One workbook with a sheet for every array across all clients (same
+              NEPOOL report form). Upload it to the NEPOOL-GIS site. When you send
+              client reports, this directory is also emailed to you automatically.
+            </p>
+            {dirMsg && (
+              <p
+                className={`mt-1.5 text-xs ${dirMsg.ok ? "text-primary-700" : "text-red-600"}`}
+              >
+                {dirMsg.text}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-col items-stretch gap-2 sm:items-end">
+            <label className="flex items-center gap-2 text-xs text-zinc-600">
+              <span className="font-semibold uppercase tracking-wide">Quarter</span>
+              <select
+                value={dirQuarter}
+                onChange={(e) => setDirQuarter(e.target.value)}
+                className="rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-sm font-medium text-zinc-800"
+              >
+                {dirQuarters.map((q) => (
+                  <option key={q.value} value={q.value}>
+                    {q.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                disabled={dirBusy !== null}
+                onClick={() => {
+                  setDirBusy("dl");
+                  setDirMsg(null);
+                  downloadDirectoryReport(dirQuarter || undefined)
+                    .then(() =>
+                      setDirMsg({ ok: true, text: "Directory downloaded." }),
+                    )
+                    .catch((err) =>
+                      setDirMsg({
+                        ok: false,
+                        text:
+                          err instanceof Error
+                            ? err.message
+                            : "Couldn't download directory.",
+                      }),
+                    )
+                    .finally(() => setDirBusy(null));
+                }}
+              >
+                {dirBusy === "dl" ? "Building…" : "Download directory"}
+              </Button>
+              <Button
+                disabled={dirBusy !== null}
+                onClick={() => {
+                  setDirBusy("mail");
+                  setDirMsg(null);
+                  sendDirectoryReport(dirQuarter || undefined)
+                    .then((r) =>
+                      setDirMsg({
+                        ok: true,
+                        text: r.recipient
+                          ? `Directory (${r.sheet_count ?? "?"} arrays) emailed to ${r.recipient}.`
+                          : "Directory emailed to you.",
+                      }),
+                    )
+                    .catch((err) =>
+                      setDirMsg({
+                        ok: false,
+                        text:
+                          err instanceof Error
+                            ? err.message
+                            : "Couldn't email directory.",
+                      }),
+                    )
+                    .finally(() => setDirBusy(null));
+                }}
+              >
+                {dirBusy === "mail" ? "Sending…" : "Email me directory"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Send myself a test report — a real [SAMPLE] workbook to the operator's
           own inbox so they can preview before any client is ever contacted. */}
