@@ -1646,13 +1646,21 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
-    # Sovereign Mind (product executive): observe queues/health, soft acts, dogfood speak.
+    # Sovereign Mind (product executive): observe queues/health, soft acts, desk.
     # Kill with SOVEREIGN_ENABLED=0. See docs/plans/2026-07-15-energy-agent-sovereign-mind.md
     scheduler.add_job(
         _run_energy_agent_sovereign_tick,
         "interval", minutes=5, id="energy_agent_sovereign_tick", replace_existing=True,
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=2),
+    )
+    # Sovereign code worker: Claude Code / Grok implement queued jobs + push/deploy.
+    # Ford authorized live ship 2026-07-15. Kill: SOVEREIGN_CODE_LIVE=0
+    scheduler.add_job(
+        _run_energy_agent_sovereign_jobs,
+        "interval", minutes=3, id="energy_agent_sovereign_jobs", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(minutes=4),
     )
     # Ford Operator: standing Grok triage for Energy Agent escalations inbox.
     # Every 2 min process a small batch of open items → needs_ford + notify.
@@ -1778,7 +1786,7 @@ def _run_energy_agent_long_term_mind() -> None:
 
 
 def _run_energy_agent_sovereign_tick() -> None:
-    """Product executive mind: observe queues/health, soft acts, dogfood speak."""
+    """Product executive mind: observe queues/health, soft acts, desk."""
     try:
         from .energy_agent_sovereign import sovereign_enabled, sovereign_tick
         if not sovereign_enabled():
@@ -1796,6 +1804,28 @@ def _run_energy_agent_sovereign_tick() -> None:
             send_internal_alert(
                 "Energy Agent sovereign tick failed",
                 f"Product mind raised:\n{exc}",
+            )
+        except Exception:
+            pass
+
+
+def _run_energy_agent_sovereign_jobs() -> None:
+    """Drain Sovereign code-hire queue (Claude Code / Grok → push/deploy)."""
+    try:
+        from .db import SessionLocal
+        from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
+        if not code_live_enabled():
+            return
+        with SessionLocal() as db:
+            res = drain_jobs(db, limit=1)
+            if res.get("processed"):
+                logger.info("sovereign_jobs: %s", res)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("energy_agent_sovereign_jobs crashed: %s", exc)
+        try:
+            send_internal_alert(
+                "Sovereign code worker failed",
+                f"Job drain raised:\n{exc}",
             )
         except Exception:
             pass

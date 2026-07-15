@@ -839,13 +839,29 @@ def act_code_hire(
     )
     if expanded:
         body += f"--- Expanded plan ---\n{expanded[:3500]}\n\n"
-    body += "Status=queued — pick up with Hermes/Claude Code; do not auto-merge."
+    live = False
+    try:
+        from .energy_agent_sovereign_worker import code_live_enabled
+        live = code_live_enabled()
+    except Exception:
+        live = False
+    body += (
+        "Status=queued — worker will run Claude Code (cloth) or Grok (rock), "
+        "then push/deploy if SOVEREIGN_CODE_LIVE=1 (Ford authorized 2026-07-15)."
+        if live
+        else "Status=queued — code live shipping is off."
+    )
     email_ford(f"[Sovereign] Code-hire job queued: {title[:80]}", body)
+
+    # Jobs are drained by scheduler (energy_agent_sovereign_jobs) so HTTP ticks
+    # never block on Claude Code. Admin can force: POST /admin/sovereign/jobs/drain
     return {
         "ok": True,
         "job_id": job.id,
-        "status": "queued",
+        "status": job.status,
         "expand_provider": expand_meta.get("provider"),
+        "live_shipping": live,
+        "note": "queued for sovereign worker (Claude Code / Grok → push/deploy)",
     }
 
 
@@ -1829,3 +1845,14 @@ def sovereign_think(authorization: str | None = Header(default=None)):
     """Force a full ivory-tower think cycle (same as tick with brain)."""
     _require_sovereign_or_admin(authorization)
     return sovereign_tick(reason="admin_think")
+
+
+@router.post("/admin/sovereign/jobs/drain")
+def sovereign_jobs_drain(authorization: str | None = Header(default=None)):
+    """Run queued code jobs now (Claude Code / Grok → push/deploy)."""
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        from .energy_agent_sovereign_worker import drain_jobs
+        out = drain_jobs(db, limit=2)
+        db.commit()
+        return out
