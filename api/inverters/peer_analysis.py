@@ -219,11 +219,30 @@ def analyze_cohort(
             else:
                 break
 
+        # Calendar-gap dead: last daily row is older than DEAD_DAYS while peers
+        # kept producing later (missing days, not stored zeros — Danville #54).
+        gap_dead_days = 0
+        last_day = u["daily"][-1]["date"] if u.get("daily") else None
+        if last_day:
+            try:
+                from datetime import date as _date
+                _ld = _date.fromisoformat(str(last_day)[:10])
+                _newer = [
+                    _date.fromisoformat(str(dd)[:10])
+                    for dd in peers_alive_by_day.keys()
+                    if peers_alive_by_day.get(dd, 0) > 0
+                ]
+                if _newer:
+                    _gap = (max(_newer) - _ld).days
+                    if _gap >= DEAD_DAYS:
+                        gap_dead_days = _gap
+            except Exception:
+                gap_dead_days = 0
+
         ts = _parse_ts(u.get("last_report"))
         stale_h = (now - ts).total_seconds() / 3600 if ts else None
         u["stale_hours"] = round(stale_h, 1) if stale_h is not None else None
 
-        last_day = u["daily"][-1]["date"] if u.get("daily") else None
         peers_that_day = peers_alive_by_day.get(last_day, 0) if last_day else 0
 
         if u.get("error_code"):
@@ -232,11 +251,12 @@ def analyze_cohort(
                 f"Vendor fault {u['error_code']} — reports mode "
                 f"{u.get('mode') or '?'}. Dispatch-worthy."
             )
-        elif zero_streak >= DEAD_DAYS:
+        elif zero_streak >= DEAD_DAYS or gap_dead_days >= DEAD_DAYS:
+            _days = max(zero_streak, gap_dead_days)
             u["status"] = "dead"
             u["diagnosis"] = (
-                f"Zero output for {zero_streak} days while {peers_that_day} "
-                "peers produced. Hard failure or open AC disconnect."
+                f"No production for {_days} days while peers kept producing. "
+                "Hard failure, open AC disconnect, or vendor dropped this unit."
             )
         elif stale_h is not None and (
             # Stable mode: quiet only RELATIVE to the freshest peer (an overnight

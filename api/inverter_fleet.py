@@ -1126,13 +1126,24 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             merged = _merged_daily(db, iv.id, live_daily)
             m = dict(m)
             m["daily"] = merged if merged else live_daily
+            # Extension vendors often lack live-API last_report — fall back to
+            # source_last_data_at / last_power_at so dead units (e.g. Danville #54
+            # silent since Jul 1 while peers still report) trip comm_gap/dead.
+            _lr = m.get("last_report")
+            if not _lr:
+                _src = _sane_dt(getattr(iv, "source_last_data_at", None))
+                _cap = _sane_dt(getattr(iv, "last_power_at", None))
+                _pick = _src or _cap
+                if _pick is not None:
+                    _lr = _pick.isoformat()
+            m["last_report"] = _lr
             meta_by_serial[iv.serial] = m
             units.append({
                 "id": iv.serial,
                 "nameplate_kw": _eff_nameplate_kw(iv, m),
                 "daily": m.get("daily", []),
                 "error_code": m.get("error_code"),
-                "last_report": m.get("last_report"),
+                "last_report": _lr,
             })
 
         analyzed = peer_analysis.analyze_cohort(
