@@ -170,13 +170,15 @@ export default function DashboardLayout({ onSignOut }: Props) {
     (account?.subscription_status === "cancelled" ||
       account?.subscription_status === "canceled");
 
-  // Auto-pair the extension as soon as we know the operator's tenant_key.
-  // The activation-code UI was removed — pairing is fully zero-touch now.
+  // Auto-pair the extension only in device mode. Cloud ("Store it with us")
+  // never needs the helper — skip pairing so we don't surface extension noise.
   // NEVER pair a demo/read-only account: its captures are refused server-side
-  // (403 demo-read-only), so pairing to it would break capture for an operator who
-  // is also viewing the demo or signed into two accounts at once. Only a real
-  // account may become the extension's capture target.
-  useAutoPairExtension(account?.is_demo ? null : (account?.tenant_key ?? null));
+  // (403 demo-read-only). Only a real account may become the extension target.
+  useAutoPairExtension(
+    account?.is_demo || account?.capture_mode === "cloud"
+      ? null
+      : (account?.tenant_key ?? null),
+  );
 
   // Show a banner if the extension hasn't phoned home in 48+ hours. After 48h
   // without a heartbeat, new bill captures aren't flowing — the operator should

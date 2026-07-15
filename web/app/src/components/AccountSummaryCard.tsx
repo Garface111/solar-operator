@@ -235,7 +235,13 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
           </span>
         </Field>
         <Field label="Utility accounts">
-          <span title="Utility account numbers detected by the extension. Each array typically has 1–3 accounts.">
+          <span
+            title={
+              account.capture_mode === "cloud"
+                ? "Utility account numbers captured via Auto-refresh. Each array typically has 1–3 accounts."
+                : "Utility account numbers detected by the extension. Each array typically has 1–3 accounts."
+            }
+          >
             <RevealNumber value={account.accounts_count} delayMs={120} />
           </span>
         </Field>
@@ -244,7 +250,7 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
             <RevealNumber value={account.bills_count} delayMs={240} />
           </span>
         </Field>
-        {account.extension_heartbeat_at && (
+        {account.capture_mode !== "cloud" && account.extension_heartbeat_at && (
           <Field label="Last capture">
             <span>
               {new Date(account.extension_heartbeat_at).toLocaleDateString()}{" "}
@@ -346,9 +352,11 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
         </div>
       )}
 
-      {/* Vein F: warn when extension is active but no bills have been captured */}
-      {account.extension_heartbeat_at && account.bills_count === 0 &&
-       account.accounts_count > 0 && (
+      {/* Device-mode only: extension active but no bills yet */}
+      {account.capture_mode !== "cloud" &&
+        account.extension_heartbeat_at &&
+        account.bills_count === 0 &&
+        account.accounts_count > 0 && (
         <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
           <p className="text-sm font-medium text-amber-900">
             Extension is active but no bills captured yet.
@@ -427,7 +435,9 @@ export function AccountSummaryCard({ account, onAccountChange }: Props) {
               </>
             ) : (
               <span className="text-zinc-400">
-                soon — the extension will begin pulling automatically
+                {account.capture_mode === "cloud"
+                  ? "soon — Auto-refresh will pull bills automatically"
+                  : "soon — the extension will begin pulling automatically"}
               </span>
             )}
           </li>

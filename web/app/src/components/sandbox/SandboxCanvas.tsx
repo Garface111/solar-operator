@@ -38,6 +38,7 @@ import {
 import { notifyFleetChanged, FLEET_CHANGED, fleetChangeSource } from '../../lib/fleetEvents';
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
+import { useDashboardContext } from '../../screens/DashboardLayout';
 
 const AddClientByLoginModal = lazyWithRetry(() =>
   import('../AddClientByLoginModal').then((m) => ({ default: m.AddClientByLoginModal })),
@@ -375,6 +376,8 @@ interface SandboxCanvasProps {
 
 export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen }: SandboxCanvasProps) {
   const toast = useToast();
+  const { account } = useDashboardContext();
+  const cloudMode = account?.capture_mode === "cloud";
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -2551,6 +2554,7 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
           <Suspense fallback={null}>
             <AddClientByLoginModal
               open={showAddByLogin}
+              cloudMode={cloudMode}
               onClose={() => setShowAddByLogin(false)}
               onCaptured={async () => {
                 void loadCanvas();

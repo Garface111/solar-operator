@@ -110,20 +110,21 @@ export default function AccountTab() {
 
       {isCloud ? (
         <>
-          {/* AO-style Auto-refresh: utility grid + search + multi-login */}
+          {/* AO-style Auto-refresh: utility grid + search + multi-login.
+              No extension install/roster nags in cloud mode — vault is enough. */}
           <CloudCaptureCard />
-          <details className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
-            <summary className="cursor-pointer font-medium text-zinc-800">
-              Prefer on-device capture instead?
-            </summary>
-            <p className="mt-2 text-xs text-zinc-500">
-              Switch to &quot;Keep it on my computer&quot; above, then use the portal
-              roster with the EnergyAgent extension.
-            </p>
-            <div className="mt-3">
-              <PortalAccessCard />
-            </div>
-          </details>
+          <p className="mb-6 text-center text-[11px] text-zinc-400">
+            Prefer passwords only on your machine? Switch to{" "}
+            <button
+              type="button"
+              disabled={modeBusy}
+              onClick={() => void switchMode("device")}
+              className="font-semibold text-zinc-600 underline-offset-2 hover:underline"
+            >
+              Keep it on my computer
+            </button>
+            .
+          </p>
         </>
       ) : (
         <>

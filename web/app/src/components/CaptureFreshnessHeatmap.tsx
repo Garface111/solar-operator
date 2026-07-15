@@ -224,8 +224,8 @@ export function CaptureFreshnessHeatmap({ clientId, accountCount }: Props) {
         </div>
       ) : accounts.length === 0 ? (
         <p className="mt-3 text-sm leading-snug text-zinc-500">
-          No utility accounts captured yet — the extension will populate this once
-          you log in to your portal.
+          No utility accounts captured yet — save a utility login under Master
+          account → Auto-refresh (or sign into the portal if you use on-device capture).
         </p>
       ) : (
         <>

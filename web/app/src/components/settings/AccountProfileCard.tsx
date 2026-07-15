@@ -248,7 +248,13 @@ export function AccountProfileCard({ account, onAccountChange }: Props) {
               </span>
             </Row>
             <Row label="Utility accounts">
-              <span title="Utility account numbers detected by the extension.">
+              <span
+                title={
+                  account.capture_mode === "cloud"
+                    ? "Utility account numbers captured via Auto-refresh."
+                    : "Utility account numbers detected by the extension."
+                }
+              >
                 {account.accounts_count}
               </span>
             </Row>

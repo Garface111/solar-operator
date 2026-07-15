@@ -34,6 +34,9 @@ interface Props {
   /** Switch into the legacy manual form for the rare case someone wants
    *  to add a placeholder without ever touching a portal. */
   onSwitchToManual: () => void;
+  /** When true (Store it with us / cloud), hide extension install nags —
+   *  bills come from Auto-refresh, not the Chrome helper. */
+  cloudMode?: boolean;
 }
 
 const GMP_FRIENDLY = "Green Mountain Power";
@@ -64,9 +67,11 @@ export function AddClientByLoginModal({
   onClose,
   onCaptured,
   onSwitchToManual,
+  cloudMode = false,
 }: Props) {
   const toast = useToast();
-  const ext = useExtensionStatus(open);
+  // Cloud mode never needs extension probe UI — skip live probe noise.
+  const ext = useExtensionStatus(open && !cloudMode);
 
   // SmartHub portals, loaded live from the provider catalog (rows with a
   // smarthub_host). Falls back to an empty list on error — GMP + the manual
@@ -280,36 +285,53 @@ export function AddClientByLoginModal({
       }
     >
       <div className="space-y-4">
-        <ExtensionStatusBanner status={ext.status} version={ext.version} />
+        {cloudMode ? (
+          <p className="text-sm text-zinc-600">
+            Pick a portal to open, or{" "}
+            <button
+              type="button"
+              onClick={onSwitchToManual}
+              className="font-semibold text-primary-700 underline-offset-2 hover:underline"
+            >
+              add the client manually
+            </button>
+            . Utility bills refresh via Master account → Auto-refresh — no
+            extension required.
+          </p>
+        ) : (
+          <>
+            <ExtensionStatusBanner status={ext.status} version={ext.version} />
 
-        {extensionUsable && (
-          <p className="text-sm text-zinc-600">
-            Pick the portal your client signs into. We&apos;ll open it in
-            a fresh tab — sign in there as the new client, and their
-            arrays appear in your dashboard automatically.
-          </p>
-        )}
-        {extensionUnpaired && (
-          <p className="text-sm text-zinc-600">
-            Your extension is installed but not paired to this account yet.
-            You can still pick a portal — after sign-in we&apos;ll fall back
-            to a manual refresh.
-          </p>
-        )}
-        {extensionAbsent && (
-          <p className="text-sm text-zinc-600">
-            Without the extension, auto-capture can&apos;t finish.{" "}
-            <b className="text-zinc-900">Add manually instead</b> — it&apos;s
-            quick, and the extension will continue capturing data on future logins.
-          </p>
-        )}
-        {extensionUnknown && (
-          <p className="text-sm text-zinc-500">
-            Checking your extension&hellip;
-          </p>
+            {extensionUsable && (
+              <p className="text-sm text-zinc-600">
+                Pick the portal your client signs into. We&apos;ll open it in
+                a fresh tab — sign in there as the new client, and their
+                arrays appear in your dashboard automatically.
+              </p>
+            )}
+            {extensionUnpaired && (
+              <p className="text-sm text-zinc-600">
+                Your extension is installed but not paired to this account yet.
+                You can still pick a portal — after sign-in we&apos;ll fall back
+                to a manual refresh.
+              </p>
+            )}
+            {extensionAbsent && (
+              <p className="text-sm text-zinc-600">
+                Without the extension, auto-capture can&apos;t finish.{" "}
+                <b className="text-zinc-900">Add manually instead</b> — it&apos;s
+                quick, and the extension will continue capturing data on future logins.
+              </p>
+            )}
+            {extensionUnknown && (
+              <p className="text-sm text-zinc-500">
+                Checking your extension&hellip;
+              </p>
+            )}
+          </>
         )}
 
-        <div className={extensionAbsent ? "opacity-50" : ""}>
+        <div className={!cloudMode && extensionAbsent ? "opacity-50" : ""}>
           {/* GMP — its own button, not SmartHub */}
           <PortalCard
             label="Green Mountain Power"

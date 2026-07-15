@@ -571,15 +571,35 @@ export function ClientsSection({ expandClientId }: Props) {
               Add your first client to auto-detect their arrays
             </h3>
             <p className="text-sm text-zinc-600">
-              For each client, add their name and the utility login they use to
-              sign in. Then open their utility portal once signed in with that
-              client&apos;s login — the extension captures their bills and
-              creates the arrays for you. You only do this once per client.
+              {account?.capture_mode === "cloud" ? (
+                <>
+                  Add each client and their arrays, then save utility logins under{" "}
+                  <b>Master account → Auto-refresh</b> so bills refresh 24/7 —
+                  no browser extension needed.
+                </>
+              ) : (
+                <>
+                  For each client, add their name and the utility login they use to
+                  sign in. Then open their utility portal once signed in with that
+                  client&apos;s login — the extension captures their bills and
+                  creates the arrays for you. You only do this once per client.
+                </>
+              )}
             </p>
             <ol className="ml-5 list-decimal space-y-1 text-sm text-zinc-700">
-              <li>Click <b>+ Add client</b> and enter their utility login.</li>
-              <li>Open <a href="https://greenmountainpower.com" target="_blank" rel="noopener noreferrer" className="text-primary-600 underline-offset-2 hover:underline">greenmountainpower.com</a> signed in as that client.</li>
-              <li>Their arrays show up here automatically.</li>
+              {account?.capture_mode === "cloud" ? (
+                <>
+                  <li>Click <b>+ Add client</b> (manually or by portal).</li>
+                  <li>Add their arrays on the client card.</li>
+                  <li>Save the utility login under Master account → Auto-refresh.</li>
+                </>
+              ) : (
+                <>
+                  <li>Click <b>+ Add client</b> and enter their utility login.</li>
+                  <li>Open <a href="https://greenmountainpower.com" target="_blank" rel="noopener noreferrer" className="text-primary-600 underline-offset-2 hover:underline">greenmountainpower.com</a> signed in as that client.</li>
+                  <li>Their arrays show up here automatically.</li>
+                </>
+              )}
             </ol>
             <div className="pt-1">
               <Button onClick={() => setAddingByLogin(true)}>+ Add your first client</Button>
@@ -664,6 +684,7 @@ export function ClientsSection({ expandClientId }: Props) {
         <Suspense fallback={null}>
           <AddClientByLoginModal
             open={addingByLogin}
+            cloudMode={account?.capture_mode === "cloud"}
             onClose={() => setAddingByLogin(false)}
             onCaptured={loadClients}
             onSwitchToManual={() => {

@@ -239,6 +239,10 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
     ? new Date(gmpSess.last_refresh_at)
     : null;
 
+  // "Store it with us" (cloud) — no extension install/stale nags. Device mode
+  // still shows the Chrome extension strip.
+  const cloudMode = account.capture_mode === "cloud";
+
   return (
     <div>
       <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-400">
@@ -246,7 +250,8 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
       </h2>
 
       <div className="rounded-2xl border border-cream-border bg-cream shadow-sm">
-        {/* Extension heartbeat */}
+        {/* Extension heartbeat — device mode only */}
+        {!cloudMode && (
         <div className="px-5 py-4">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -302,12 +307,13 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
             )}
           </div>
         </div>
+        )}
 
         {/* Live portals — collapsible. Auto-shows the portals this operator is
             connected to; the not-connected national catalog stays hidden behind
             "Show all" so the list isn't a 400-utility wall. */}
         {providers.length > 0 && (
-          <div className="border-t border-cream-border px-5 py-4">
+          <div className={`${cloudMode ? "" : "border-t border-cream-border "}px-5 py-4`}>
             <button
               type="button"
               onClick={() => setPortalsOpen((o) => !o)}
@@ -509,8 +515,8 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
         )}
       </div>
 
-      {/* Warning banners */}
-      {extensionStale && lastSeen && (
+      {/* Warning banners — extension-only; cloud Auto-refresh has its own vault UI */}
+      {!cloudMode && extensionStale && lastSeen && (
         <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
           <p className="text-sm font-medium text-amber-900">
             Extension hasn&apos;t checked in for 48+ hours.
@@ -522,7 +528,8 @@ export function UtilityConnectionsCard({ account, onRefresh }: Props) {
         </div>
       )}
 
-      {account.extension_heartbeat_at &&
+      {!cloudMode &&
+        account.extension_heartbeat_at &&
         account.bills_count === 0 &&
         account.accounts_count > 0 && (
           <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
