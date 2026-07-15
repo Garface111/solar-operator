@@ -26,10 +26,10 @@ TOP NAV — use EXACTLY these labels when speaking to the owner (hashes are inte
 | Inverters | `#arrays` | Live inverter canvas; **Sandbox** (spatial fleet tree) + **Spreadsheet** sub-views (NOT “Arrays”). This is the default landing tab. |
 | Analysis | `#analysis` | Fleet NOC: production vs expected, sites, health, hardware. **Trends / through-time is a sub-view** (`#trends`), NOT a separate top tab |
 | Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”) |
-| Repairs | `#ops` | **Command center** for parallel repair pipelines (detect → draft outreach → coordinate → verify → close). Sub-views: Command / Team / Settings. **Resources** is a sibling main sub-view (`#resources` — rates, news, REC) |
+| Repairs | `#ops` | **Chat-first O&M automation.** Energy Agent opens with a staged prompt (not auto-sent). Setup (O&M contact + which arrays they cover) happens **in chat** via tools. After setup: panel shows what the agent is working on (open cases) or a calm empty state. Pipeline: detect fault → draft outreach → coordinate → verify recovery → close. Multiple cases in parallel. |
 | Account | `#account` | Profile, plan/card, Auto-refresh vault (was “Master Account”; use **Account**) |
 
-Never say Dashboard, Arrays, Reports, Operations, or Trends as top-tab names (Operations was renamed **Repairs**). `#trends` routes into Analysis as a sub-view only. **Resources is not a top tab** — it lives under Repairs (`#resources`). The offtaker invoice form field **Master account** is a different concept (net-meter group host — see `offtakers`).
+Never say Dashboard, Arrays, Reports, Operations, or Trends as top-tab names (Operations was renamed **Repairs**). **Analysis** has three sub-views: Fleet analysis (`#analysis`), Trends (`#trends`), Resources (`#resources` — rates/news/REC). **Resources is not a top tab.** The offtaker form field **Master account** is a different concept (net-meter group host — see `offtakers`).
 
 APP SHELL (how the SPA works, for accurate “where do I click” answers):
 - Static frontend; scripts load in order (`session-tabscope.js` first, then `fleet-store.js`, `app.js`, `sandbox.js`, view modules, `energy-agent.js`). The router lives in `sandbox.js`: `hashchange` → toggles the matching panel + lazy-loads that view. Empty/unknown hash → `#arrays`.
@@ -495,11 +495,11 @@ WHEN TO CALL WHAT
 | Why peer vs Solar.web disagree | `product_map(topic=status)` + health tools |
 | Entities / what a field means | `product_map(topic=datamodel)` or `glossary` |
 | Fleet health / attention | `investigate_attention` / `fleet_overview` / `array_detail` |
-| Who repairs my arrays / O&M team | `repair_ops_overview` / `list_service_contacts` · UI: **Repairs** tab → Team (`#ops`) |
-| Down site — contact the tech | Command center battle card → **Approve & send** (`send_repair_checkin` with confirm); SMS / phone notes on the same card |
-| Repair pipeline status | Battle cards show Detected → Drafted → Coordinating → Scheduled → In progress → Closed; agent log lists every outreach/step |
-| Repair status update from tech | `log_repair_note` / inbound email parse (`[AO-TICKET-#]`) / auto-close when vendor data recovers |
-| Warranty claims | Linked on the case card when present (no separate Claims sub-tab) |
+| Who repairs my arrays / O&M team | **In chat on Repairs** (`#ops`): ask for contact → `upsert_service_contact` → ask which arrays → `assign_service_contact` (or mark default for all) |
+| Down site — contact the tech | Agent drafts outreach; owner may **Approve & send** on the case card or say “send it” in chat (`send_repair_checkin`) |
+| Repair pipeline status | Repairs panel “what I’m working on” + agent log; tools: `repair_ops_overview` / `list_repair_tickets` |
+| Repair status update from tech | Inbound email parse (`[AO-TICKET-#]`) / chat notes / auto-close when vendor data recovers |
+| Rates / news / REC | **Analysis → Resources** (`#resources`) — not under Repairs |
 | Ad-hoc lists | `query_tenant` |
 | Account email/company/plan/mode | `account_summary` |
 | Navigate / show UI | `ui_navigate` / `ui_tour` / highlight |

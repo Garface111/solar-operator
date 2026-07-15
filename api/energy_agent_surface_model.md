@@ -33,8 +33,8 @@ Everything else (Analysis, Resources, Account, Energy Agent) supports those two 
        ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  TOP BAR (always, signed-in)                                             │
-│  EnergyAgent brand │ Fleet Triage │ Inverters* │ Analysis │ Invoices     │
-│  │ Resources │ Account │ whoami │ Sign out                               │
+│  EnergyAgent │ Fleet Triage │ Inverters* │ Analysis │ Invoices │ Repairs  │
+│  │ Account │ whoami │ Sign out                                           │
 │  * DEFAULT landing = Inverters (#arrays)                                 │
 └──────────────────────────────────────────────────────────────────────────┘
        │
@@ -45,11 +45,12 @@ Everything else (Analysis, Resources, Account, Energy Agent) supports those two 
 
 | Job | Primary tab | Supporting |
 |-----|-------------|------------|
-| “Who needs me *right now*?” | **Fleet Triage** | Alerts FAB, Analysis Operations |
+| “Who needs me *right now*?” | **Fleet Triage** | Alerts FAB |
 | “Show me the machines” | **Inverters** (Sandbox / Spreadsheet) | Add array, extension sync |
-| “Why is yield off / weather?” | **Analysis** (+ Trends sub-view) | Sites, Performance, Hardware |
+| “Why is yield off / weather?” | **Analysis** (Fleet analysis · Trends · Resources) | Sites, Performance, Hardware |
 | “Bill my customers” | **Invoices** (Offtakers / Bill audit) | Account online pay, utility link |
-| “What do rates/rules say?” | **Resources** | state picker, REC card |
+| “What do rates/rules say?” | **Analysis → Resources** | state picker, REC card |
+| “Who fixes my fleet when it’s down?” | **Repairs** (chat-first O&M agent) | service contacts, repair tickets |
 | “Keep data + plan working” | **Account** | Auto-refresh, card, files |
 
 ### Design language (visual system — sky skin)
@@ -62,10 +63,11 @@ Everything else (Analysis, Resources, Account, Energy Agent) supports those two 
 - **Density:** Triage = glance tiles; Inverters = spatial or table; Analysis = long scroll of sections; Invoices = pipeline then list; Account = form rows top→bottom.
 
 ### Navigation rules (never invent)
-- There is **no** top tab named Dashboard, Arrays, Reports, or Trends.
-- **Trends** is only Analysis → **Trends** segment (`#trends`).
+- There is **no** top tab named Dashboard, Arrays, Reports, Operations, or Trends.
+- **Trends** and **Resources** are only Analysis sub-views (`#trends`, `#resources`).
 - **Bill audit** is only Invoices → **Bill audit** segment.
 - **Sandbox / Spreadsheet** are only under Inverters.
+- **Repairs** (`#ops`) has **no** nested sub-tabs — chat + “what the agent is working on.”
 - Empty hash / unknown → **Inverters** (`#arrays`).
 
 ### Atlas shots (re-capture: `docs/surface-atlas/capture.mjs`)
@@ -146,23 +148,59 @@ not have to open every vendor portal. Product promise: quiet underperformers sur
 
 ## surface_analysis
 
-**Hash:** `#analysis` (Trends: `#trends`) · **Panels:** `#panelAnalysis` / `#panelTrends`.
+**Hash:** `#analysis` (Trends: `#trends`, Resources: `#resources`) · **Panels:** `#panelAnalysis` / `#panelTrends` / `#panelResources`.
 
 ### MACRO
-The **engineering NOC** — weather-adjusted truth and multi-year shape. Exists because
-Triage says *who* is wrong; Analysis explains *how much vs sun* and *over what history*.
+The **engineering NOC** — weather-adjusted truth, multi-year shape, and market/rate
+context. Exists because Triage says *who* is wrong; Analysis explains *how much vs sun*,
+*over what history*, and *what the rules/rates say*.
 
 ### MESO
 - “Are we beating weather-expected?”
 - “Which site is the problem child on kWh/kW?”
-- “What’s the multi-year trend?” (Trends sub-view)
+- “What’s the multi-year trend?” (Trends)
+- “What are net-metering / REC rules for my state?” (Resources)
 
 ### MICRO — Fleet analysis (scroll sections in `#anSections`)
-Segment: **Fleet analysis** | **Trends**.
-Sections (order of capture): Production vs expected → Fleet health kWh/kW → Through time → Sites grid → Performance (PI / CF) → Operations → Event log → Hardware → Files.
+Segment: **Fleet analysis** | **Trends** | **Resources**.
+Sections (order of capture): Production vs expected → Fleet health kWh/kW → Through time → Sites grid → Performance (PI / CF) → Event log → Hardware → Files.
 
 ### MICRO — Trends
 Portfolio multi-year / multi-view analytics (bars, spiral, heat-field, etc.), array picker, export CSV. **Not a top tab.**
+
+### MICRO — Resources
+See `surface_resources`. Same Analysis segment control.
+
+---
+
+## surface_repairs
+
+**Hash:** `#ops` · **Panel:** `#panelOps` · **Label:** Repairs (never “Operations”).
+
+### MACRO
+**Automated O&M healing.** Energy Agent detects dead/fault hardware, drafts outreach
+to the owner’s repair team, coordinates until live vendor data shows recovery, then
+closes the case. Multiple cases run in parallel. This is **not** a ticket desk the
+owner adminstrates by hand — it is a conversation + a “what I’m working on” strip.
+
+### MESO
+- First visit: set up O&M contact + map arrays **in this chat** (no forms).
+- Later: “What’s going on with repairs?” — agent summarizes open cases / log.
+- Approve a drafted email; or ask the agent to send / follow up.
+
+### MICRO
+- Opening Repairs **opens Energy Agent** and **stages** a prompt in the composer
+  (does **not** auto-send). Context-aware: setup vs status.
+- Panel: calm empty state **or** compact “working on” case cards + thin agent log.
+- Tools: `repair_ops_overview`, `list_service_contacts`, `upsert_service_contact`,
+  `assign_service_contact`, `list_repair_tickets`, `open_repair_ticket`,
+  `send_repair_checkin` (confirm), notes/SMS helpers.
+- **Setup mode (chat script):**
+  1. Ask if they have an O&M / repair team.
+  2. Collect name, company, email, phone → `upsert_service_contact` (`is_default` if one team).
+  3. Ask which arrays that team covers → `assign_service_contact` (or default covers all).
+  4. Confirm: “I’ll draft outreach when hardware looks dead/fault on those sites.”
+- **Resources is not here** — Analysis → Resources (`#resources`).
 
 ---
 
@@ -199,7 +237,7 @@ Invoices draft from **settled utility bills × share**, never raw inverter kWh a
 
 ## surface_resources
 
-**Hash:** `#resources` · **Panel:** `#panelResources`.
+**Hash:** `#resources` · **Panel:** `#panelResources` · **Parent tab:** Analysis (3rd segment).
 
 ### MACRO
 **Regulatory and market context** so invoices and strategy aren’t flying blind —
@@ -209,7 +247,9 @@ net-metering rules, REC prices, rate cases for the owner’s state.
 - Pick my state; scan today’s headlines; check Class I REC ballpark; open primary sources.
 
 ### MICRO
+Segment: **Fleet analysis** | **Trends** | **Resources** (active).
 State chips (VT/NH/ME/MA/CT/RI) · Latest & live feed `#resFeed` · REC market card · state reference card · Go to the source links.
+**Not under Repairs.**
 
 ---
 

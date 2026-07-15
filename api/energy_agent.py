@@ -136,13 +136,15 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   SURFACE (macro why page exists / meso user goal / micro real controls — load BEFORE
   tours or “what is this page?”): surface | product_spine | surface_invoices |
   surface_inverters | surface_fleet_triage | surface_analysis | surface_account |
-  surface_resources | orientation_playbook.
+  surface_resources | surface_repairs | orientation_playbook.
   Call topic=surface for whole-product layout; topic=surface_<tab> for that page;
   topic=capture before Auto-refresh; topic=status when Solar.web/peer disagree.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
 - repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
-  Know who installs and repairs arrays; open tickets when hardware is down; draft/send
-  check-ins to the tech. Manufacturer warranty claims remain a separate path.
+  On the **Repairs** tab (`#ops`), you RUN SETUP IN CHAT: ask for O&M contact →
+  upsert_service_contact → ask which arrays → assign_service_contact (or is_default).
+  After setup: summarize open cases, draft/send tech check-ins when directed.
+  Manufacturer warranty claims remain a separate path.
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
 - web_search = LIVE public internet search (news, regulations, utility policy, vendor docs,
@@ -763,7 +765,8 @@ TOOL_DEFS = [
                 "describing what a page/tab is for (use surface / surface_*). "
                 "Topics include tabs, system, surface, product_spine, "
                 "surface_invoices, surface_inverters, surface_fleet_triage, "
-                "surface_analysis, surface_account, surface_resources, and domain topics."
+                "surface_analysis, surface_account, surface_resources, surface_repairs, "
+                "and domain topics."
             ),
             "parameters": {
                 "type": "object",
@@ -777,7 +780,8 @@ TOOL_DEFS = [
                             "Surface mental model (macro/meso/micro): surface | product_spine | "
                             "surface_invoices | surface_inverters | surface_fleet_triage | "
                             "surface_analysis | surface_account | surface_resources | "
-                            "orientation_playbook | surface_global | anti_hallucination. "
+                            "surface_repairs | orientation_playbook | surface_global | "
+                            "anti_hallucination. "
                             "surface = whole-product layout + orientation playbook; "
                             "surface_invoices = Invoices tab purpose+structure; etc. "
                             "Pass 'all' for the topic directory."
