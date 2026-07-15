@@ -27,6 +27,7 @@ const CaptureCeremony = lazyWithRetry(() =>
 import {
   type ClientRow,
   listClients,
+  listArrays,
   bulkDeleteClients,
   undoDelete,
   undoMerge,
@@ -62,6 +63,7 @@ export function ClientsSection({ expandClientId }: Props) {
   // Tracks which array the guided-fill button last scrolled to so each click
   // advances to the NEXT empty field rather than always jumping to the first.
   const lastFocusedNepoolArrayIdRef = useRef<number | null>(null);
+  const [guidingNepool, setGuidingNepool] = useState(false);
 
   // Live polling indicator state.
   const [pollingNewData, setPollingNewData] = useState(false);
@@ -210,60 +212,155 @@ export function ClientsSection({ expandClientId }: Props) {
       .catch(() => { /* non-critical, ignore */ });
   }
 
-  // Guided-fill: scroll + pulse + focus the next array row missing a NEPOOL ID.
-  // Uses a DOM walk over [data-nepool-array-id][data-nepool-empty] elements
-  // (stamped by ArrayItem in ArrayList) rather than a separate API call —
-  // simpler and always in sync with what's rendered. The canvas (ClientNode)
-  // renders NEPOOL as a read-only title attribute only, so we only target the
-  // list-view rows below.
-  function handleTakeToNextNepool() {
-    const empties = Array.from(
-      document.querySelectorAll<HTMLElement>("[data-nepool-array-id][data-nepool-empty]"),
-    );
-    if (empties.length === 0) return;
-
-    // Find the first empty element after the last one we focused (wraps to 0).
-    let nextIdx = 0;
-    if (lastFocusedNepoolArrayIdRef.current != null) {
-      const lastIdx = empties.findIndex(
-        (el) => el.dataset.nepoolArrayId === String(lastFocusedNepoolArrayIdRef.current),
-      );
-      if (lastIdx !== -1 && lastIdx + 1 < empties.length) nextIdx = lastIdx + 1;
-    }
-
-    const target = empties[nextIdx];
+  // Guided-fill: expand the right client row (Table view keeps arrays collapsed
+  // until expanded), wait for ArrayList to stamp [data-nepool-empty], then
+  // scroll + focus the next missing NEPOOL ID field.
+  function focusNepoolTarget(target: HTMLElement) {
     const arrayId = Number(target.dataset.nepoolArrayId);
-    const clientId = Number(target.dataset.nepoolClientId);
     lastFocusedNepoolArrayIdRef.current = arrayId;
 
-    // If the row is CSS-collapsed (height = 0), expand it first then retry
-    // after the CSS grid expand animation (~350ms) completes.
-    if (target.getBoundingClientRect().height === 0) {
-      window.dispatchEvent(
-        new CustomEvent("so:nepool:expand-client", { detail: { clientId } }),
-      );
-      setTimeout(() => handleTakeToNextNepool(), 450);
-      return;
-    }
-
     target.scrollIntoView({ behavior: "smooth", block: "center" });
-
-    // Wait for smooth-scroll (~500ms), then pulse ring + activate the field.
     setTimeout(() => {
       target.classList.add("ring-2", "ring-amber-400", "animate-pulse");
-      setTimeout(() => target.classList.remove("ring-2", "ring-amber-400", "animate-pulse"), 1500);
+      setTimeout(
+        () => target.classList.remove("ring-2", "ring-amber-400", "animate-pulse"),
+        1500,
+      );
 
-      // EditableField renders as a <button> until clicked; click it to enter
-      // edit mode, then focus the resulting <input> after React re-renders.
-      const editBtn = target.querySelector<HTMLButtonElement>("[data-nepool-field] button");
+      // InlineNepoolField / EditableField: click the button to enter edit mode.
+      const editBtn = target.querySelector<HTMLButtonElement>(
+        "[data-nepool-field] button",
+      );
       if (editBtn) {
         editBtn.click();
         setTimeout(() => {
-          const input = target.querySelector<HTMLInputElement>("[data-nepool-field] input");
-          if (input) input.focus();
-        }, 50);
+          const input = target.querySelector<HTMLInputElement>(
+            "[data-nepool-field] input",
+          );
+          if (input) {
+            input.focus();
+            input.select?.();
+          }
+        }, 60);
       }
-    }, 600);
+      setGuidingNepool(false);
+    }, 500);
+  }
+
+  async function handleTakeToNextNepool() {
+    if (guidingNepool) return;
+    setGuidingNepool(true);
+
+    const pickFromDom = (): HTMLElement | null => {
+      const empties = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "[data-nepool-array-id][data-nepool-empty]",
+        ),
+      );
+      if (empties.length === 0) return null;
+      let nextIdx = 0;
+      if (lastFocusedNepoolArrayIdRef.current != null) {
+        const lastIdx = empties.findIndex(
+          (el) =>
+            el.dataset.nepoolArrayId ===
+            String(lastFocusedNepoolArrayIdRef.current),
+        );
+        if (lastIdx !== -1 && lastIdx + 1 < empties.length) nextIdx = lastIdx + 1;
+      }
+      return empties[nextIdx] ?? empties[0] ?? null;
+    };
+
+    // Fast path: array rows already rendered (client expanded).
+    let target = pickFromDom();
+    if (target) {
+      // Height 0 = CSS-collapsed parent — expand first.
+      if (target.getBoundingClientRect().height === 0) {
+        const clientId = Number(target.dataset.nepoolClientId);
+        window.dispatchEvent(
+          new CustomEvent("so:nepool:expand-client", { detail: { clientId } }),
+        );
+        await new Promise((r) => setTimeout(r, 450));
+        target = pickFromDom();
+      }
+      if (target) {
+        focusNepoolTarget(target);
+        return;
+      }
+    }
+
+    // Slow path (Table default): rows are collapsed so nothing is in the DOM.
+    // Load arrays per client, expand the first client that has missing NEPOOL IDs,
+    // wait for React to paint ArrayList, then focus.
+    try {
+      const rows = clients ?? (await listClients());
+      if (!clients) setClients(rows);
+
+      // Build ordered list of (clientId, arrayId) missing NEPOOL, resume after last.
+      const missing: { clientId: number; arrayId: number }[] = [];
+      for (const c of rows) {
+        if (!c.array_count) continue;
+        let arrays;
+        try {
+          arrays = await listArrays(c.id);
+        } catch {
+          continue;
+        }
+        for (const a of arrays) {
+          if (!a.nepool_gis_id || !String(a.nepool_gis_id).trim()) {
+            missing.push({ clientId: c.id, arrayId: a.id });
+          }
+        }
+      }
+
+      if (missing.length === 0) {
+        toast.show("Every array already has a NEPOOL ID.", "success");
+        setGuidingNepool(false);
+        loadNepoolStats();
+        return;
+      }
+
+      let pick = 0;
+      if (lastFocusedNepoolArrayIdRef.current != null) {
+        const lastIdx = missing.findIndex(
+          (m) => m.arrayId === lastFocusedNepoolArrayIdRef.current,
+        );
+        if (lastIdx !== -1 && lastIdx + 1 < missing.length) pick = lastIdx + 1;
+      }
+      const next = missing[pick];
+
+      window.dispatchEvent(
+        new CustomEvent("so:nepool:expand-client", {
+          detail: { clientId: next.clientId },
+        }),
+      );
+
+      // Wait for expand + array fetch + paint (ClientsTable loads arrays on expand).
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((r) => setTimeout(r, 200));
+        const el = document.querySelector<HTMLElement>(
+          `[data-nepool-array-id="${next.arrayId}"][data-nepool-empty]`,
+        );
+        if (el && el.getBoundingClientRect().height > 0) {
+          focusNepoolTarget(el);
+          return;
+        }
+        // Also accept any empty field under that client if id markup lagged.
+        const any = pickFromDom();
+        if (any && Number(any.dataset.nepoolClientId) === next.clientId) {
+          focusNepoolTarget(any);
+          return;
+        }
+      }
+
+      toast.error(
+        "Couldn't open the next array — expand a client row and try again.",
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't find the next NEPOOL field.",
+      );
+    }
+    setGuidingNepool(false);
   }
 
   function loadClients(): Promise<ClientRow[]> {
@@ -474,7 +571,11 @@ export function ClientsSection({ expandClientId }: Props) {
                 </li>
                 <li className="flex items-start gap-1.5">
                   <span className="text-amber-600">▸</span>
-                  <span><strong className="text-zinc-800">Don&apos;t have one?</strong> Click any array name in the canvas above to edit its NEPOOL ID inline.</span>
+                  <span>
+                    <strong className="text-zinc-800">Don&apos;t have one?</strong>{" "}
+                    Use <em>Take me to the next NEPOOL ID</em> — it expands each
+                    client and focuses the next empty field in the table.
+                  </span>
                 </li>
               </ul>
             </div>
@@ -488,10 +589,13 @@ export function ClientsSection({ expandClientId }: Props) {
               </button>
               <button
                 type="button"
-                onClick={handleTakeToNextNepool}
-                className="rounded-xl border border-amber-400 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 shadow-sm transition-colors hover:bg-amber-100 active:bg-amber-200"
+                onClick={() => void handleTakeToNextNepool()}
+                disabled={guidingNepool}
+                className="rounded-xl border border-amber-400 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 shadow-sm transition-colors hover:bg-amber-100 active:bg-amber-200 disabled:opacity-60"
               >
-                Take me to the next NEPOOL ID →
+                {guidingNepool
+                  ? "Opening next field…"
+                  : "Take me to the next NEPOOL ID →"}
               </button>
             </div>
           </div>
