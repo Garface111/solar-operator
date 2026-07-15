@@ -275,13 +275,20 @@ OFFTAKER INVOICE GENERATOR — START TO FINISH. UI: **Invoices** (`#reports`). E
 
 **Optional enrichments scraped when present:** email, discount %, net $/kWh rate, master utility account #, offtaker’s own account #, budget monthly $, plus any unknown columns preserved in `extra` for review.
 
-**Philosophy (how we “scrape” messy spreadsheets)**
+**Philosophy (how we “scrape” messy spreadsheets) — power pipeline**
 - **Header-first, content-second** — headers propose; cell values win when headers are junk (“Col1”, “Solar Site”).
 - **Reviewable mapping** — every field has confidence; weak fields surface; operator overrides whole mapping.
 - **Array-first matching** with utility-bill override — wrong array → wrong invoice, so confidence gates commit.
-- **Format-agnostic** — CSV/XLSX, reordered columns, title banners, multi-sheet (best data sheet chosen), BOM-safe CSV.
-- **Skip noise** — blank rows; total/subtotal-style rows demoted during sniffing.
+- **Multi-sheet pick** — scores tabs for roster-ness; skips Instructions / SAMPLE / Pivot / Summary; prefers Members / Roster / Export.
+- **Section banners** — site title rows (“Maple Street Solar” alone on a line) fill-forward into a synthetic Array column when no array column exists.
+- **Multi-row headers** — merges label stacks (“Subscriber” + “Name” → “Subscriber Name”) without swallowing the first data row.
+- **Encodings & delimiters** — utf-8 / utf-16 / cp1252 / latin-1; comma, tab, semicolon, pipe.
+- **European numbers** — `25,5%` / `50,0` shares parse correctly; DE/FR headers (Abonnent, Anlage, Anteil).
+- **Phone ≠ account** — phone columns never win the utility account field.
+- **Excel float accounts** — `10001.0` normalizes to `10001`.
+- **Skip noise** — blank rows; total/subtotal footers demoted; trailing empty columns trimmed.
 - Prefer: utility export as-is, then our template if they want a blank starter.
+- Gauntlet fixtures: `tests/fixtures/rosters/` + `tests/test_roster_power.py` (hostile real-world shapes).
 
 **What the agent must say / do**
 - When asked “how do I add many offtakers / import a roster / upload a spreadsheet of customers?”: explain **Bulk import** on **Invoices**, offer to `ui_navigate` to `#reports` and highlight `#rbBulkImport`, or deep-link `/?setup=offtakers#reports`.

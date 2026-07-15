@@ -1,0 +1,272 @@
+[
+  {
+    "file": "01_wide_utility_export.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 40,
+    "fields": {
+      "offtaker_name": 2,
+      "array_name": 4,
+      "allocation_pct": 6,
+      "email": 11,
+      "discount_pct": 7,
+      "net_rate": 8,
+      "account_number": 9,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "02_section_banners.xlsx",
+    "ok": true,
+    "sheet": "Members",
+    "via": "mixed+section",
+    "data_rows": 9,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 3,
+      "allocation_pct": 2,
+      "email": 1,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": null,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": [
+      "Detected 2 section header(s) naming arrays \u2014 filled Array column from those banners."
+    ]
+  },
+  {
+    "file": "03_european_semicolon.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 12,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 1,
+      "allocation_pct": 2,
+      "email": 3,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": null,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "04_account_first.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 15,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": null,
+      "allocation_pct": 1,
+      "email": 3,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": 2,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "05_multirow_phone.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 20,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 1,
+      "allocation_pct": 2,
+      "email": 3,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": null,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "06_tsv_blanks.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 25,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 2,
+      "allocation_pct": 4,
+      "email": 6,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": null,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "07_kitchen_sink.xlsx",
+    "ok": true,
+    "sheet": "Export",
+    "via": "mixed+section",
+    "data_rows": 12,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 5,
+      "allocation_pct": 2,
+      "email": 1,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": 3,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": [
+      "Detected 2 section header(s) naming arrays \u2014 filled Array column from those banners."
+    ]
+  },
+  {
+    "file": "08_bill_to_ownership.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 18,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 1,
+      "allocation_pct": 2,
+      "email": 3,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": null,
+      "master_account_number": null,
+      "budget": 4
+    },
+    "warnings": []
+  },
+  {
+    "file": "09_latin1_accents.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 5,
+    "fields": {
+      "offtaker_name": 0,
+      "array_name": 1,
+      "allocation_pct": 2,
+      "email": 3,
+      "discount_pct": null,
+      "net_rate": null,
+      "account_number": null,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "10_chaos_0.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 30,
+    "fields": {
+      "offtaker_name": 2,
+      "array_name": 5,
+      "allocation_pct": 3,
+      "email": 4,
+      "discount_pct": 1,
+      "net_rate": null,
+      "account_number": 0,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "10_chaos_1.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 30,
+    "fields": {
+      "offtaker_name": 1,
+      "array_name": 2,
+      "allocation_pct": 3,
+      "email": 5,
+      "discount_pct": 4,
+      "net_rate": null,
+      "account_number": 0,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "10_chaos_2.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 30,
+    "fields": {
+      "offtaker_name": 1,
+      "array_name": 5,
+      "allocation_pct": 3,
+      "email": 2,
+      "discount_pct": 4,
+      "net_rate": null,
+      "account_number": 0,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "10_chaos_3.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 30,
+    "fields": {
+      "offtaker_name": 4,
+      "array_name": 5,
+      "allocation_pct": 2,
+      "email": 1,
+      "discount_pct": 3,
+      "net_rate": null,
+      "account_number": 0,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  },
+  {
+    "file": "10_chaos_4.csv",
+    "ok": true,
+    "sheet": null,
+    "via": "mixed",
+    "data_rows": 30,
+    "fields": {
+      "offtaker_name": 5,
+      "array_name": 4,
+      "allocation_pct": 2,
+      "email": 1,
+      "discount_pct": 3,
+      "net_rate": null,
+      "account_number": 0,
+      "master_account_number": null,
+      "budget": null
+    },
+    "warnings": []
+  }
+]

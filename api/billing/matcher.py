@@ -126,7 +126,11 @@ def _s(v: Any) -> str:
 
 
 def _num(v: Any) -> Optional[float]:
-    """Coerce a cell value to a float, tolerating $, %, commas, and stray text."""
+    """Coerce a cell value to a float, tolerating $, %, commas, and stray text.
+
+    European decimal commas ("50,0" / "25,5%") are accepted when the value looks
+    like a single decimal number (digits + one comma + digits), not thousands.
+    """
     if v is None:
         return None
     if isinstance(v, bool):
@@ -136,9 +140,16 @@ def _num(v: Any) -> Optional[float]:
     s = str(v).strip()
     if not s:
         return None
-    s = s.replace("$", "").replace(",", "").replace("\xa0", "").strip()
+    s = s.replace("$", "").replace("\xa0", "").replace(" ", "").strip()
     pct = s.endswith("%")
     s = s.rstrip("%").strip()
+    # European decimal: "50,0" / "1.234,56" (last separator is comma)
+    if re.search(r"^\d+,\d+$", s):
+        s = s.replace(",", ".")
+    elif re.search(r"^\d{1,3}(\.\d{3})+,\d+$", s):
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", "")
     try:
         n = float(s)
         return n / 100.0 if pct else n

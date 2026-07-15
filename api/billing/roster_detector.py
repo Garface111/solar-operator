@@ -34,17 +34,13 @@ from typing import Any, Optional
 
 from .matcher import _num, _s
 from .offtaker_match import match_array
-from .sheet_tracker import (
-    _looks_numeric,
-    _open_grid,
-    _read_csv_grid,
-    _read_xlsx_grid,
-)
+from .roster_prepare import is_phone_like, prepare_roster_grid
+from .sheet_tracker import _looks_numeric
 
 # ─── target fields ────────────────────────────────────────────────────────────
 
-# The seven roster fields we detect. offtaker_name / array_name / allocation_pct are
-# REQUIRED for a usable import; the rest are optional enrichments.
+# Core + optional enrichments. offtaker_name + allocation_pct required;
+# array identity can be array_name OR account numbers (caller soft-checks).
 TARGET_FIELDS: tuple[str, ...] = (
     "offtaker_name",
     "array_name",
@@ -53,6 +49,8 @@ TARGET_FIELDS: tuple[str, ...] = (
     "discount_pct",
     "net_rate",
     "account_number",
+    "master_account_number",
+    "budget",
 )
 REQUIRED_FIELDS: tuple[str, ...] = ("offtaker_name", "array_name", "allocation_pct")
 
@@ -69,6 +67,8 @@ _ROSTER_FIELD_KEYWORDS: dict[str, list[tuple[str, float]]] = {
         ("member name", 3.5), ("beneficiary", 2.5), ("participant", 2.2),
         ("tenant", 2.0), ("offtaker", 2.0), ("customer", 1.5), ("subscriber", 2.0),
         ("member", 1.5), ("owner name", 2.8), ("bill to", 2.2), ("name", 2.0),
+        ("abonnent", 3.5), ("teilnehmer", 3.0), ("kunde", 2.5),
+        ("abonné", 3.5), ("abonne", 3.5), ("cliente", 2.5),
     ],
     "array_name": [
         ("array name", 3.5), ("master array", 3.5), ("solar site", 3.0),
@@ -76,6 +76,7 @@ _ROSTER_FIELD_KEYWORDS: dict[str, list[tuple[str, float]]] = {
         ("net meter group", 3.2), ("group name", 2.5), ("site", 2.5),
         ("project", 2.0), ("system", 1.8), ("array", 2.0), ("generator", 1.5),
         ("facility", 1.8), ("installation", 1.5), ("farm", 1.4),
+        ("anlage", 3.5), ("projekt", 2.5), ("site solaire", 3.0), ("instalación", 2.5),
     ],
     "email": [
         ("email", 3.0), ("e-mail", 3.0), ("email address", 3.5),
@@ -88,6 +89,9 @@ _ROSTER_FIELD_KEYWORDS: dict[str, list[tuple[str, float]]] = {
         ("subscription %", 3.5), ("subscriber share", 3.2), ("capacity share", 3.0),
         ("percent", 2.5), ("allocation", 2.0), ("share", 1.5),
         ("%", 2.0), ("pct", 2.0), ("portion", 1.8), ("fraction", 1.8),
+        # DE / FR / ES community-solar exports
+        ("anteil", 3.5), ("beteiligungsquote", 3.5), ("quote", 2.0),
+        ("part", 1.8), ("pourcentage", 3.0), ("porcentaje", 3.0), ("pct.", 2.5),
     ],
     "discount_pct": [
         ("discount %", 3.5), ("discount", 2.5), ("savings", 1.5), ("markdown", 1.5),
@@ -99,10 +103,20 @@ _ROSTER_FIELD_KEYWORDS: dict[str, list[tuple[str, float]]] = {
         ("billing rate", 2.8),
     ],
     "account_number": [
-        ("gmp account", 3.0), ("utility account", 3.2), ("account number", 3.0),
-        ("account #", 3.0), ("acct number", 2.8), ("acct #", 2.8),
+        ("offtaker account", 3.5), ("customer account", 3.3), ("member account", 3.3),
+        ("subscriber account", 3.3), ("gmp account", 3.0), ("utility account", 3.2),
+        ("account number", 3.0), ("account #", 3.0), ("acct number", 2.8), ("acct #", 2.8),
         ("meter number", 2.8), ("account", 2.5), ("acct", 2.0), ("meter", 2.0),
         ("service account", 2.8), ("esiid", 2.5), ("account id", 2.5),
+    ],
+    "master_account_number": [
+        ("master utility account", 4.0), ("master account number", 3.8),
+        ("master account", 3.5), ("host account", 3.2), ("group account", 3.0),
+        ("array account", 3.0), ("master gmp", 3.2), ("primary account", 2.8),
+    ],
+    "budget": [
+        ("budget monthly", 4.0), ("monthly budget", 3.8), ("budget $", 3.5),
+        ("budget bill", 3.5), ("fixed monthly", 3.0), ("budget", 2.5),
     ],
 }
 
@@ -299,7 +313,11 @@ def _frac_free_text(values: list[Any]) -> float:
 
 def _frac_account_id(values: list[Any], account_numbers: set[str]) -> float:
     """Fraction of cells that look like an account/meter id: alphanumeric ID-ish, OR an
-    exact match to one of the tenant's known utility-account numbers."""
+    exact match to one of the tenant's known utility-account numbers.
+
+    Phones are explicitly excluded — utility exports often have a Phone column next
+    to Account # and phones must never win the account field.
+    """
     if not values:
         return 0.0
     hits = 0
@@ -307,10 +325,15 @@ def _frac_account_id(values: list[Any], account_numbers: set[str]) -> float:
         s = str(v).strip()
         if not s:
             continue
+        if is_phone_like(s):
+            continue
         if s in account_numbers:
             hits += 1
         elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-]{3,}", s) and any(ch.isdigit() for ch in s):
-            hits += 1
+            # Prefer digit-heavy IDs (accounts) over short codes
+            digits = sum(ch.isdigit() for ch in s)
+            if digits >= 4:
+                hits += 1
     return hits / len(values)
 
 
@@ -525,7 +548,8 @@ def _preview_rows(grid: list[list], header_row: int, ncols: int,
 
 def detect_roster_columns(file_bytes: bytes, filename: str,
                           arrays: list[dict],
-                          utility_accounts: list[dict]) -> dict:
+                          utility_accounts: list[dict],
+                          preferred_sheet: str | None = None) -> dict:
     """Detect which column is which roster field in an arbitrary uploaded spreadsheet.
 
     Args:
@@ -534,14 +558,17 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
       arrays:      [{id, name}, ...] — the tenant's arrays (for content array-matching).
       utility_accounts: [{utility_account_id, array_id, array_name, nickname, provider,
                           has_bill, account_number?}, ...] — same shape match_array reads.
+      preferred_sheet: optional workbook tab name to force.
 
     Returns (JSON-serializable):
-      { ok, sheet, header_row (0-based), headers: [str...],
+      { ok, sheet, sheets, header_row (0-based), headers: [str...],
         column_map: { <field>: {index, header, confidence:"high|medium|low"} | None
                       for each target field },
         unmapped_columns: [{index, header, sample:[first ~3 non-empty values]}],
         preview: [ [cell,...] x up to 5 data rows ],
-        data_rows: int, via: "heuristic|content|mixed|llm", warnings: [str] }
+        data_rows: int, via: "heuristic|content|mixed|llm", warnings: [str],
+        normalized_rows: full string grid (post section-expand) for bulk-import,
+        section_array_col: int|None }
 
     Deterministic given the inputs, except the optional LLM header fallback. Never
     raises — a failure returns ok=False with warnings.
@@ -550,30 +577,40 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
     arrays = arrays or []
     utility_accounts = utility_accounts or []
 
-    # 1) Load the grid (reuse the proven readers; they pick the best sheet).
-    try:
-        grid, sheet, _kind = _open_grid(file_bytes, filename)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "sheet": None, "header_row": None, "headers": [],
+    # 1) Power prepare: multi-sheet pick, encodings, multi-row headers, section banners.
+    prep = prepare_roster_grid(
+        file_bytes, filename,
+        arrays=arrays,
+        utility_accounts=utility_accounts,
+        preferred_sheet=preferred_sheet,
+    )
+    warnings.extend(prep.get("warnings") or [])
+    grid = prep.get("grid") or []
+    sheet = prep.get("sheet")
+    if not prep.get("ok") or not grid:
+        return {"ok": False, "sheet": sheet, "sheets": prep.get("sheets") or [],
+                "header_row": None, "headers": [],
                 "column_map": {f: None for f in TARGET_FIELDS},
                 "unmapped_columns": [], "preview": [], "data_rows": 0,
-                "via": "heuristic", "warnings": [f"Could not open the file: {e}"]}
-    if not grid:
-        return {"ok": False, "sheet": sheet, "header_row": None, "headers": [],
-                "column_map": {f: None for f in TARGET_FIELDS},
-                "unmapped_columns": [], "preview": [], "data_rows": 0,
-                "via": "heuristic", "warnings": ["The file appears to be empty."]}
+                "via": "heuristic",
+                "warnings": warnings or ["The file appears to be empty."],
+                "normalized_rows": [], "section_array_col": None}
 
-    # 2) Find the header row.
+    # 2) Find the header row on the prepared grid.
     header_row, headers = _find_roster_header(grid)
     if header_row is None:
-        header_row = 0
-        headers = [str(c).strip() if c is not None else "" for c in (grid[0] if grid else [])]
+        header_row = int(prep.get("header_row_hint") or 0)
+        headers = [str(c).strip() if c is not None else "" for c in (grid[header_row] if grid else [])]
         warnings.append("Couldn't confidently find a header row; assuming the first row.")
 
     ncols = max((len(r) for r in grid), default=0)
-    # Pad headers to ncols.
     headers = [(headers[i] if i < len(headers) else "") for i in range(ncols)]
+
+    # Force-map synthetic section array column when prepare invented one.
+    section_col = prep.get("section_array_col")
+    if isinstance(section_col, int) and 0 <= section_col < ncols:
+        if not headers[section_col]:
+            headers[section_col] = "Array (from section)"
 
     # 3) Score each column by header keywords AND by sniffing its data cells.
     header_scores = [_score_roster_cell(_s(h)) for h in headers]
@@ -581,17 +618,33 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
     content_scores = _content_scores(grid, header_row, ncols, arrays,
                                      utility_accounts, acct_nums)
 
+    # Boost synthetic section array column for array_name
+    if isinstance(section_col, int) and 0 <= section_col < len(content_scores):
+        content_scores[section_col]["array_name"] = max(
+            content_scores[section_col].get("array_name", 0.0), 1.15,
+        )
+        header_scores[section_col]["array_name"] = (
+            max(header_scores[section_col].get("array_name", (0.0, ""))[0], 40.0),
+            "section",
+        )
+
     # 4) Greedy bipartite assignment.
     assigned = _assign(header_scores, content_scores, ncols)
 
-    # Determine provenance (heuristic/content/mixed) from what drove each pick.
     any_header = any(v["_header_score"] > 0 for v in assigned.values())
     any_content = any(v["_content_score"] > 0 for v in assigned.values())
     via = "mixed" if (any_header and any_content) else ("content" if any_content else "heuristic")
+    if isinstance(section_col, int) and assigned.get("array_name", {}).get("index") == section_col:
+        via = "section" if via == "heuristic" else f"{via}+section"
 
     # 5) Optional LLM header fallback if a REQUIRED field is unmapped or low-confidence.
     required_weak = [f for f in REQUIRED_FIELDS
                      if f not in assigned or assigned[f]["confidence"] == "low"]
+    # Soft: array_name weak is OK when account_number is strong
+    if ("array_name" in required_weak
+            and assigned.get("account_number")
+            and assigned["account_number"]["confidence"] in ("high", "medium")):
+        required_weak = [f for f in required_weak if f != "array_name"]
     if required_weak:
         llm = _llm_header_fallback(headers, required_weak)
         if llm:
@@ -600,8 +653,6 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
                 col = llm.get(field)
                 if col is None:
                     continue
-                # Don't clobber a confident existing pick; only fill/upgrade weak ones,
-                # and never steal a column already assigned to another field.
                 if field in assigned and assigned[field]["confidence"] != "low":
                     continue
                 if col in used_cols and (field not in assigned or assigned[field]["index"] != col):
@@ -612,7 +663,7 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
                 used_cols.add(col)
                 via = "llm"
 
-    # 6) Build the column_map (every target field present, None when unmapped).
+    # 6) Build the column_map
     column_map: dict[str, Optional[dict]] = {}
     for field in TARGET_FIELDS:
         pick = assigned.get(field)
@@ -626,7 +677,7 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
             "confidence": pick["confidence"],
         }
 
-    # 7) Unmapped columns (for the operator to eyeball / hand-map).
+    # 7) Unmapped columns
     mapped_cols = {v["index"] for v in assigned.values()}
     unmapped_columns: list[dict] = []
     for col in range(ncols):
@@ -640,21 +691,42 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
         })
 
     preview = _preview_rows(grid, header_row, ncols, n=5)
-    data_rows = sum(1 for row in grid[header_row + 1:]
-                    if any(c is not None and str(c).strip() for c in row))
+    data_rows = sum(
+        1 for row in grid[header_row + 1:]
+        if any(c is not None and str(c).strip() for c in row)
+        and not _row_looks_like_total(row)
+        and len([c for c in row if c is not None and str(c).strip()]) >= 2
+    )
 
-    # Warn on required fields that are unmapped or low.
+    # Soft-required: array_name may be satisfied by account numbers or section expand
     for f in REQUIRED_FIELDS:
         if column_map.get(f) is None:
+            if f == "array_name" and (
+                column_map.get("account_number") or column_map.get("master_account_number")
+            ):
+                continue
             warnings.append(f"Required field '{f}' could not be detected — map it manually.")
         elif column_map[f]["confidence"] == "low":
             warnings.append(f"Required field '{f}' was detected with LOW confidence — please confirm.")
 
-    ok = all(column_map.get(f) is not None for f in REQUIRED_FIELDS)
+    has_name = column_map.get("offtaker_name") is not None
+    has_pct = column_map.get("allocation_pct") is not None
+    has_array_id = (
+        column_map.get("array_name") is not None
+        or column_map.get("account_number") is not None
+        or column_map.get("master_account_number") is not None
+    )
+    ok = bool(has_name and has_pct and has_array_id)
+
+    # Full string grid for bulk-import (same sheet + section expansion as detection)
+    normalized_rows = [
+        [("" if c is None else str(c)) for c in row] for row in grid
+    ]
 
     return {
         "ok": ok,
         "sheet": sheet,
+        "sheets": prep.get("sheets") or [],
         "header_row": header_row,
         "headers": headers,
         "column_map": column_map,
@@ -663,6 +735,8 @@ def detect_roster_columns(file_bytes: bytes, filename: str,
         "data_rows": data_rows,
         "via": via,
         "warnings": warnings,
+        "normalized_rows": normalized_rows,
+        "section_array_col": section_col,
     }
 
 

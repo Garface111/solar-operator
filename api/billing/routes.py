@@ -1539,15 +1539,26 @@ async def _read_roster_upload(file: UploadFile) -> bytes:
     return data
 
 
-def _roster_rows(raw: bytes, filename: str) -> list[list[str]]:
-    """Parse a roster's bytes into a list of string rows (header + data), from
-    EITHER .xlsx or .csv. xlsx is detected by the ZIP/OpenXML magic (PK\\x03\\x04);
-    everything else is treated as delimited text. Every cell is stringified +
-    stripped so downstream parsing is uniform regardless of source format."""
+def _roster_rows(raw: bytes, filename: str,
+                 arrays: Optional[list] = None,
+                 utility_accounts: Optional[list] = None) -> list[list[str]]:
+    """Parse a roster into string rows via the power preparer (multi-sheet,
+    encodings, section banners). Falls back to a thin CSV/xlsx reader on failure."""
+    try:
+        from .roster_prepare import prepare_roster_grid
+        prep = prepare_roster_grid(
+            raw, filename or "",
+            arrays=arrays or [],
+            utility_accounts=utility_accounts or [],
+        )
+        if prep.get("ok") and prep.get("grid"):
+            return [[("" if c is None else str(c)) for c in row]
+                    for row in prep["grid"]]
+    except Exception:  # noqa: BLE001 — never block import on prepare hiccup
+        pass
     name = (filename or "").lower()
-    is_xlsx = raw[:4] == _MAGIC_XLSX or name.endswith(".xlsx")
+    is_xlsx = raw[:4] == _MAGIC_XLSX or name.endswith(".xlsx") or name.endswith(".xlsm")
     if is_xlsx:
-        # Reuse openpyxl (already a dependency; the matcher/invoice_writer use it).
         from openpyxl import load_workbook
         try:
             wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
@@ -1555,32 +1566,46 @@ def _roster_rows(raw: bytes, filename: str) -> list[list[str]]:
             raise HTTPException(
                 422, "Couldn't read that .xlsx — re-save it from Excel/Google "
                      "Sheets, or export as CSV.")
-        ws = wb.active
-        rows: list[list[str]] = []
-        for r in ws.iter_rows(values_only=True):
-            rows.append(["" if c is None else str(c).strip() for c in r])
-        wb.close()
-        return rows
-    # CSV / delimited text.
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
+        # Prefer best roster-scored sheet, not only active
+        best_rows: list[list[str]] = []
+        best_score = -1.0
         try:
-            text = raw.decode("latin-1")
-        except Exception:
-            raise HTTPException(
-                422, "Couldn't read that file — upload a .csv or .xlsx "
-                     "(Excel/Google Sheets: File → Download).")
-    return [[(c or "").strip() for c in row] for row in csv.reader(io.StringIO(text))]
+            from .roster_prepare import _roster_sheet_score, _row_strs, _trim_grid
+            for ws in wb.worksheets:
+                rows_ws = [_row_strs(r) for i, r in enumerate(ws.iter_rows(values_only=True)) if i <= 5000]
+                rows_ws = _trim_grid(rows_ws)
+                sc = _roster_sheet_score(rows_ws, ws.title or "")
+                if sc > best_score:
+                    best_score = sc
+                    best_rows = rows_ws
+        finally:
+            wb.close()
+        if best_rows:
+            return best_rows
+        raise HTTPException(422, "Couldn't read that .xlsx — empty workbook.")
+    # CSV / delimited text with multi-encoding
+    try:
+        from .roster_prepare import _read_csv_grid
+        return _read_csv_grid(raw)
+    except Exception:
+        raise HTTPException(
+            422, "Couldn't read that file — upload a .csv or .xlsx "
+                 "(Excel/Google Sheets: File → Download).")
 
 
 def _bulk_pct(raw: str) -> tuple[Optional[float], Optional[str]]:
-    """Parse a percent cell to a fraction in (0,1]. Accepts "25", "25%", "0.25".
-    Returns (value, None) or (None, error_message)."""
+    """Parse a percent cell to a fraction in (0,1]. Accepts "25", "25%", "0.25",
+    European "25,5" / "25,5%". Returns (value, None) or (None, error_message)."""
     if not raw:
         return None, "missing percent"
+    s = raw.replace("%", "").replace(" ", "").strip()
+    # European decimal comma when no thousands-dot ambiguity (e.g. "25,5")
+    if _re.search(r"^\d+,\d+$", s):
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")  # thousands separators
     try:
-        v = float(raw.replace("%", "").strip())
+        v = float(s)
     except ValueError:
         return None, f'"{raw}" isn\'t a number'
     # Percent-first (the template says "Accepts 25, 25%, or 0.25"): a value >= 1 is
@@ -1710,13 +1735,16 @@ async def bulk_import_offtakers(
     from .roster_detector import detect_roster_columns
 
     raw = await _read_roster_upload(file)
-    rows = _roster_rows(raw, file.filename or "")
-    if not rows:
-        raise HTTPException(422, "That file is empty.")
 
     # Pick-list for matching + the frontend correction dropdowns. Needed by the
     # detector too (content array-matching resolves against these real arrays).
     arrays, uaccts = _arrays_and_accounts_for_tenant(t)
+
+    # Power preparer first (multi-sheet / encodings / section banners) so alias
+    # and detector see the same grid.
+    rows = _roster_rows(raw, file.filename or "", arrays=arrays, utility_accounts=uaccts)
+    if not rows:
+        raise HTTPException(422, "That file is empty.")
 
     # ── Resolve the column mapping (override → alias fast-path → detector). ───────
     detection: Optional[dict] = None
@@ -1749,14 +1777,23 @@ async def bulk_import_offtakers(
     if override_map is not None:
         colmap = override_map
     else:
-        # (2) Clean alias match on the first row.
-        header = rows[0]
-        colmap = _bulk_classify_columns(header)
-        alias_ok = ("name" in colmap and "percent" in colmap
-                    and _has_array_identity(colmap))
+        # (2) Clean alias match on the header row (may not be row 0 after junk titles —
+        # try first 12 rows for a clean alias hit before full detector).
+        colmap = {}
+        alias_ok = False
+        for hi in range(min(12, len(rows))):
+            trial = _bulk_classify_columns(rows[hi])
+            if ("name" in trial and "percent" in trial and _has_array_identity(trial)):
+                colmap = trial
+                header_row_idx = hi
+                alias_ok = True
+                break
         if not alias_ok:
-            # (3) Format-agnostic detector — reads junk rows / weird headers / any order.
+            # (3) Format-agnostic power detector.
             detection = detect_roster_columns(raw, file.filename or "", arrays, uaccts)
+            # Prefer detector's normalized grid (same section-expand / sheet pick).
+            if detection.get("normalized_rows"):
+                rows = detection["normalized_rows"]
             header_row_idx = detection.get("header_row") or 0
             det_map = detection.get("column_map") or {}
             colmap = {}
