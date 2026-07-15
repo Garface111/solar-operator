@@ -43,6 +43,16 @@ export default function DashboardLayout({ onSignOut }: Props) {
   const [account, setAccount] = useState<Account | null>(null);
   const [failed, setFailed] = useState(false);
   const [loadKey, setLoadKey] = useState(0);
+  // ClientsTab toggles body.so-clients-sandbox while the large canvas is up.
+  const [sandboxFooterHidden, setSandboxFooterHidden] = useState(false);
+  useEffect(() => {
+    const sync = () =>
+      setSandboxFooterHidden(document.body.classList.contains("so-clients-sandbox"));
+    sync();
+    const mo = new MutationObserver(sync);
+    mo.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    return () => mo.disconnect();
+  }, []);
 
   const retryLoad = useCallback(() => {
     setFailed(false);
@@ -277,9 +287,9 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
       <AllSetCelebration account={account} />
 
-      {/* Clients tab (sandbox + table) is full-bleed so the canvas can own the
-          viewport under the top bars — no max-w-4xl dead gutters. Other tabs
-          keep the tighter reading column. */}
+      {/* Clients main is full-bleed so Sandbox can span the window; Table
+          re-applies max-w-4xl gutters inside ClientsTab. Other tabs stay
+          max-w-4xl. Footer hides only while body.so-clients-sandbox is set. */}
       {(() => {
         const clientsRoute = location.pathname.startsWith("/clients");
         return (
@@ -300,10 +310,9 @@ export default function DashboardLayout({ onSignOut }: Props) {
               )}
             </main>
 
-            {/* Footer sits under Account/Reports; Clients hides it so sandbox
-                can fill to the bottom of the window. */}
-            {!clientsRoute && (
-              <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
+            {/* Footer on Table / Account / Reports. Hidden during large sandbox. */}
+            {!sandboxFooterHidden && (
+              <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 text-center text-xs text-zinc-400 sm:pb-8">
                 {brand.fullName} · admin@solaroperator.org ·{" "}
                 <a
                   href={`${brand.marketingUrl}/privacy`}
