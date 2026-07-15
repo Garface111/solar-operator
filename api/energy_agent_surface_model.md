@@ -178,10 +178,13 @@ See `surface_resources`. Same Analysis segment control.
 **Hash:** `#ops` · **Panel:** `#panelOps` · **Label:** Repairs (never “Operations”).
 
 ### MACRO
-**Automated O&M healing.** Energy Agent detects dead/fault hardware, drafts outreach
-to the owner’s repair team, coordinates until live vendor data shows recovery, then
-closes the case. Multiple cases run in parallel. This is **not** a ticket desk the
-owner adminstrates by hand — it is a conversation + a “what I’m working on” strip.
+**Automated O&M healing.** Energy Agent opens cases when fleet status is
+**dead**, **fault**, or **underperforming** (peer-flagged money leaks count — not
+only hard failures). It drafts outreach to the owner’s repair team, coordinates
+until live vendor data returns to **ok**, then closes the case. Multiple cases run
+in parallel. This is **not** a ticket desk the owner administers by hand — it is a
+conversation + a “what I’m working on” strip. Orphan manual tickets with no site
+are cancelled once a real roster exists so only fleet-linked cases show.
 
 ### MESO
 - First visit (or empty roster): **hungrily** complete the O&M roster in chat — never

@@ -34,10 +34,13 @@ from .models import (
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-# Hardware states that auto-open a repair ticket (same warrantable set + comm_gap
-# as a softer ops signal when a contact is assigned).
-AUTO_OPEN_FAILS = ("dead", "fault")
-SOFT_OPEN_FAILS = ("comm_gap",)  # only if contact assigned and auto_open on
+# Hardware states that auto-open a repair ticket when a service contact is known.
+# underperforming is intentional (Ford 2026-07-15): peer-flagged units should
+# appear as active repair cases, not only dead/fault.
+AUTO_OPEN_FAILS = ("dead", "fault", "underperforming")
+SOFT_OPEN_FAILS = ("comm_gap",)  # open only when contact assigned (same contact gate)
+# Statuses that mean "still a problem" — do not auto-close while in this set.
+PROBLEM_STATUSES = AUTO_OPEN_FAILS + SOFT_OPEN_FAILS
 
 ACTIVE_TICKET_STATUSES = (
     "open", "waiting_reply", "scheduled", "in_progress",
@@ -582,11 +585,18 @@ def build_checkin_draft(
     fail = ticket.fail_type or "issue"
     n = sequence if sequence is not None else ((ticket.checkin_count or 0) + 1)
 
+    fail_plain = {
+        "underperforming": "underperforming vs peer inverters (possible string/shade/soiling issue)",
+        "dead": "no production while peers kept producing",
+        "fault": "a fault / error state",
+        "comm_gap": "a communication gap (not reporting)",
+    }.get(fail, fail)
+
     if n <= 1:
         subject = f"Repair needed — {site} ({fail})"
         opener = (
             f"Hi {contact.name.split()[0] if contact and contact.name else 'there'},\n\n"
-            f"This is {owner}'s monitoring agent. We detected a {fail} on "
+            f"This is {owner}'s monitoring agent. We flagged {fail_plain} on "
             f"{site} ({inv}"
             f"{', serial ' + ticket.serial if ticket.serial else ''}"
             f"{', ' + ticket.vendor if ticket.vendor else ''}).\n\n"
@@ -793,8 +803,14 @@ def open_ticket(
 
     fail_type = (fail_type or "other").strip().lower()
     severity = severity if severity in ("critical", "warning", "info") else "critical"
+    fail_label = {
+        "underperforming": "Underperforming",
+        "dead": "Dead",
+        "fault": "Fault",
+        "comm_gap": "Comm gap",
+    }.get(fail_type, (fail_type or "issue").replace("_", " ").title())
     title = (title or "").strip() or (
-        f"{fail_type.title()} — {site_name or 'site'}"
+        f"{fail_label} — {site_name or 'site'}"
         + (f" / {inv_name or serial}" if (inv_name or serial) else "")
     )
 
@@ -1304,23 +1320,38 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
                 "status": (inv.get("status") or "ok").lower(),
             }
 
-    # Close recovered
+    # Close recovered — only when live status is healthy (ok), not merely
+    # "not in the open set" (underperforming must stay open until ok).
     active = list_tickets(db, tenant.id, active_only=True, limit=300)
     for ticket in active:
         if not ticket.inverter_id:
+            # Orphan manual tickets with no site/inverter: cancel once we have a
+            # real contact + fleet (they block the "what I'm working on" story).
+            if (
+                not ticket.array_id
+                and (ticket.source or "") == "manual"
+                and resolve_contact_for_array(db, tenant.id, None) is not None
+            ):
+                ticket.status = "cancelled"
+                ticket.cancelled_at = now()
+                ticket.next_checkin_at = None
+                note = "[auto] cancelled orphan ticket with no site — fleet-linked cases replace it"
+                ticket.tech_note = (
+                    (ticket.tech_note + "\n" + note) if ticket.tech_note else note
+                )
+                closed += 1
             continue
         info = live.get(int(ticket.inverter_id))
         if info is None:
             continue
         st = info["status"]
-        if st in ("ok",) or st not in AUTO_OPEN_FAILS + SOFT_OPEN_FAILS:
-            # Recovered enough to clear if never contacted, else resolve
+        if st == "ok":
             if (ticket.checkin_count or 0) == 0 and ticket.status == "open":
                 ticket.status = "cleared"
                 ticket.cleared_at = now()
                 ticket.next_checkin_at = None
                 closed += 1
-            elif st == "ok" and ticket.status in ACTIVE_TICKET_STATUSES:
+            elif ticket.status in ACTIVE_TICKET_STATUSES:
                 ticket.status = "resolved"
                 ticket.resolved_at = now()
                 ticket.next_checkin_at = None
@@ -1329,7 +1360,7 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
                 )
                 closed += 1
 
-    # Open new
+    # Open new cases for problem inverters (dead / fault / underperforming)
     for iid, info in live.items():
         st = info["status"]
         if st not in AUTO_OPEN_FAILS:
@@ -1341,6 +1372,11 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             continue  # no ops person known — don't open an orphan ticket
         existing = _active_ticket_for_inverter(db, tenant.id, iid, array_id)
         if existing:
+            # Refresh site snapshot if an old ticket lost its name
+            if not existing.site_name and info.get("site_name"):
+                existing.site_name = info.get("site_name")
+            if not existing.inv_name and inv.get("name"):
+                existing.inv_name = inv.get("name")
             continue
         evidence = {
             "status": st,

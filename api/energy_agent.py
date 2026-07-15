@@ -923,10 +923,13 @@ TOOL_DEFS = [
         "function": {
             "name": "repair_ops_overview",
             "description": (
-                "O&M healing overview: service contacts (ops/installer team), array "
-                "assignments, open repair tickets, and sites currently down that need "
-                "a tech. Use when the user asks who fixes their arrays, repair status, "
-                "or 'check in with the electrician'."
+                "O&M healing overview: service contacts, array assignments, open repair "
+                "tickets (including underperforming + dead/fault units auto-opened from "
+                "the fleet), and agent activity. When the user asks what you're working "
+                "on or about the repair system, CALL THIS and describe each open case by "
+                "site + inverter + fail_type (e.g. Tannery Brook #1 underperforming — "
+                "drafting outreach to Rex). Never invent open cases; never ignore "
+                "underperforming tickets."
             ),
             "parameters": {
                 "type": "object",
