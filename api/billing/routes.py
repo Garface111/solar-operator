@@ -12,6 +12,7 @@ same session bearer used everywhere else (account.tenant_from_session).
   POST   /subscriptions/{id}/send-now    test/manual send (test=1 forces to_me)
   GET    /subscriptions/{id}/preview     stream invoice|summary as pdf|xlsx
   GET    /subscriptions/{id}/trends      multi-year billing trends (JSON, CONTRACT 1)
+  GET    /portfolio-gains                offtaker $ gains for Invoices → Trends
 
 THREE SPREADSHEET SYSTEMS — keep them straight (they're easy to conflate):
   1. api/writers/gmcs_writer.py        WRITES the NEPOOL-GIS *GMCS filing*
@@ -128,6 +129,8 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         # The exactly-once period stamp — the redesign's provider progress bars
         # compare it against the pipeline's last period for an exact sent count.
         "last_sent_period_end": getattr(s, "last_sent_period_end", None),
+        # Dollars on the last delivered invoice — Invoice Trends / portfolio gains.
+        "last_sent_amount_usd": getattr(s, "last_sent_amount_usd", None),
         "last_invoice_number": s.last_invoice_number,
         "invoice_number_start": getattr(s, "invoice_number_start", None),
         "invoice_number_next": getattr(s, "invoice_number_next", None),
@@ -5026,6 +5029,193 @@ def _next_quarter_first(now: datetime) -> datetime:
         if cand > now:
             return cand
     return datetime(now.year + 1, 1, 1, 9, 0)
+
+
+def _annualize_usd(amount: Optional[float], cadence: Optional[str]) -> Optional[float]:
+    """Turn one invoice/budget amount into an annual run-rate by cadence."""
+    if amount is None:
+        return None
+    try:
+        a = float(amount)
+    except (TypeError, ValueError):
+        return None
+    if a <= 0:
+        return None
+    c = (cadence or "monthly").lower()
+    if c in ("monthly", "month", "m"):
+        return round(a * 12, 2)
+    if c in ("quarterly", "quarter", "q"):
+        return round(a * 4, 2)
+    if c in ("annual", "yearly", "year", "a", "y"):
+        return round(a, 2)
+    if c in ("semi", "semiannual", "semi-annual", "biannual"):
+        return round(a * 2, 2)
+    return round(a * 12, 2)  # default monthly posture
+
+
+def _period_end_year_month(period_label: Optional[str],
+                           sent_at: Optional[datetime] = None):
+    """Parse period_label 'YYYY-MM-DD → YYYY-MM-DD' → (year, ym). Fallback sent_at."""
+    if period_label:
+        dates = _re.findall(r"(\d{4})-(\d{2})-(\d{2})", period_label)
+        if dates:
+            y, m, _d = dates[-1]
+            return int(y), f"{y}-{m}"
+    if sent_at is not None:
+        return sent_at.year, sent_at.strftime("%Y-%m")
+    return None, None
+
+
+@router.get("/portfolio-gains")
+def portfolio_gains(authorization: Optional[str] = Header(default=None)):
+    """Offtaker financial gains for the Invoices → Trends tab.
+
+    Pure money view (no production kWh): last invoice $, estimated annual
+    run-rate, pending draft pipeline, and year/month totals from delivered
+    drafts. Built for operators who want to see what they make from offtakers.
+    """
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        subs = db.execute(
+            select(BillingReportSubscription)
+            .where(BillingReportSubscription.tenant_id == t.id,
+                   BillingReportSubscription.deleted_at.is_(None))
+            .order_by(BillingReportSubscription.customer_name.asc())
+        ).scalars().all()
+        drafts = db.execute(
+            select(ReportDraft)
+            .where(ReportDraft.tenant_id == t.id,
+                   ReportDraft.amount_usd.isnot(None))
+        ).scalars().all()
+
+    # Per-sub pending $ (latest pending draft only, avoid double-count versions)
+    pending_by_sub: dict[int, float] = {}
+    sent_life_by_sub: dict[int, float] = {}
+    by_year: dict[int, dict] = {}
+    by_month: dict[str, dict] = {}
+    for d in drafts:
+        amt = float(d.amount_usd or 0)
+        if amt <= 0:
+            continue
+        sid = d.subscription_id
+        st = (d.status or "").lower()
+        if st == "pending":
+            # Keep max pending amount per sub (multiple versions possible)
+            prev = pending_by_sub.get(sid, 0.0)
+            if amt > prev:
+                pending_by_sub[sid] = amt
+        if st == "sent":
+            sent_life_by_sub[sid] = sent_life_by_sub.get(sid, 0.0) + amt
+            y, ym = _period_end_year_month(d.period_label, d.sent_at)
+            if y is not None:
+                cell = by_year.setdefault(y, {"sent_usd": 0.0, "sent_count": 0})
+                cell["sent_usd"] += amt
+                cell["sent_count"] += 1
+            if ym:
+                mcell = by_month.setdefault(ym, {"sent_usd": 0.0, "sent_count": 0})
+                mcell["sent_usd"] += amt
+                mcell["sent_count"] += 1
+
+    offtakers = []
+    enabled_n = 0
+    with_last = 0
+    last_total = 0.0
+    est_annual = 0.0
+    for s in subs:
+        en = bool(s.enabled)
+        if en:
+            enabled_n += 1
+        last_amt = getattr(s, "last_sent_amount_usd", None)
+        try:
+            last_amt_f = float(last_amt) if last_amt is not None else None
+        except (TypeError, ValueError):
+            last_amt_f = None
+        budget = getattr(s, "budget_amount_usd", None)
+        try:
+            budget_f = float(budget) if budget is not None else None
+        except (TypeError, ValueError):
+            budget_f = None
+        base = last_amt_f if last_amt_f and last_amt_f > 0 else budget_f
+        ann = _annualize_usd(base, s.cadence) if en else None
+        if en and last_amt_f and last_amt_f > 0:
+            with_last += 1
+            last_total += last_amt_f
+        if en and ann:
+            est_annual += ann
+        offtakers.append({
+            "id": s.id,
+            "customer_name": s.customer_name,
+            "enabled": en,
+            "cadence": s.cadence or "monthly",
+            "last_sent_amount_usd": round(last_amt_f, 2) if last_amt_f is not None else None,
+            "last_sent_period_end": getattr(s, "last_sent_period_end", None),
+            "last_sent_at": s.last_sent_at.isoformat() if s.last_sent_at else None,
+            "budget_amount_usd": round(budget_f, 2) if budget_f is not None else None,
+            "est_annual_usd": ann,
+            "pending_amount_usd": round(pending_by_sub[s.id], 2) if s.id in pending_by_sub else None,
+            "sent_lifetime_usd": round(sent_life_by_sub[s.id], 2) if s.id in sent_life_by_sub else None,
+        })
+
+    # Sort offtakers by money impact (last invoice, then est annual, then name)
+    def _rank(o):
+        return (
+            -(o["last_sent_amount_usd"] or 0),
+            -(o["est_annual_usd"] or 0),
+            (o["customer_name"] or "").lower(),
+        )
+    offtakers.sort(key=_rank)
+
+    # Share of last-invoice portfolio (enabled with last $ only)
+    share_base = last_total or 0.0
+    for o in offtakers:
+        if share_base > 0 and o.get("last_sent_amount_usd"):
+            o["share_pct"] = round(100.0 * o["last_sent_amount_usd"] / share_base, 1)
+        else:
+            o["share_pct"] = None
+
+    years = sorted(by_year.keys())
+    for y in by_year:
+        by_year[y]["sent_usd"] = round(by_year[y]["sent_usd"], 2)
+    months = sorted(by_month.keys())
+    for ym in by_month:
+        by_month[ym]["sent_usd"] = round(by_month[ym]["sent_usd"], 2)
+
+    lifetime_sent = round(sum(sent_life_by_sub.values()), 2)
+    pending_usd = round(sum(pending_by_sub.values()), 2)
+
+    # YoY deltas when 2+ years of sent history exist
+    yoy = []
+    for i, y in enumerate(years):
+        cur = by_year[y]["sent_usd"]
+        prior = by_year[years[i - 1]]["sent_usd"] if i > 0 else None
+        delta_pct = (round(100.0 * (cur - prior) / prior, 1)
+                     if prior and prior > 0 else None)
+        yoy.append({
+            "year": y,
+            "sent_usd": cur,
+            "sent_count": by_year[y]["sent_count"],
+            "delta_pct": delta_pct,
+        })
+
+    return {
+        "ok": True,
+        "kpis": {
+            "enabled_offtakers": enabled_n,
+            "total_offtakers": len(subs),
+            "with_last_invoice": with_last,
+            "last_invoice_total_usd": round(last_total, 2),
+            "pending_drafts": len(pending_by_sub),
+            "pending_draft_usd": pending_usd,
+            "est_annual_usd": round(est_annual, 2),
+            "lifetime_sent_usd": lifetime_sent,
+        },
+        "years": years,
+        "by_year": {str(y): by_year[y] for y in years},
+        "yoy": yoy,
+        "months": months,
+        "by_month": {ym: by_month[ym] for ym in months},
+        "offtakers": offtakers,
+    }
 
 
 @router.get("/send-pipeline")
