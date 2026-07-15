@@ -8,6 +8,7 @@ import {
   type UtilityAccount,
 } from './mockData';
 import { restoreArray } from '../../lib/api';
+import { notifyFleetChanged } from '../../lib/fleetEvents';
 import { FuelBadge } from '../FuelControls';
 import { useToast } from '../../ui/Toast';
 
@@ -803,7 +804,7 @@ function DeletedArrayRow({
     onRestored(arr);
     try {
       await restoreArray(cid, aid);
-      window.dispatchEvent(new CustomEvent('so:arrays-changed'));
+      notifyFleetChanged('array-edit');
     } catch (err: unknown) {
       // Revert optimistic state
       setOptimisticRestored(false);

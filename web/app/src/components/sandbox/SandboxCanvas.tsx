@@ -35,6 +35,7 @@ import {
   type CanvasResponse,
   type CanvasClientData,
 } from '../../lib/api';
+import { notifyFleetChanged, FLEET_CHANGED, fleetChangeSource } from '../../lib/fleetEvents';
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
 
@@ -570,9 +571,9 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
         : built;
       setNodes(finalNodes);
       setOriginLookup(data.clients_index ?? {});
-      // Notify peers (e.g. the ClientsTable below) that canvas state changed
-      // so they can refetch without polling. Fires AFTER nodes are committed.
-      window.dispatchEvent(new CustomEvent('so:sandbox:mutated'));
+      // Notify peers (Table, billing, Account counts) after nodes commit.
+      // source=canvas so this component ignores its own broadcast.
+      notifyFleetChanged('canvas');
       // Bruce Jun 6: always center cards on the initial load (non-silent),
       // regardless of any previously persisted viewport. The "Fit to view"
       // toolbar button is one click away if the operator wants to recenter
@@ -590,6 +591,28 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
   }, [setNodes, fitView]);
 
   useEffect(() => { void loadCanvas(); }, [loadCanvas]);
+
+  // External mutations (Table delete, array delete in list view, etc.) must
+  // re-sync the canvas without a full page refresh. Ignore our own 'canvas'
+  // broadcasts to avoid reload loops.
+  useEffect(() => {
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const onFleet = (e: Event) => {
+      const src = fleetChangeSource(e);
+      if (src === 'canvas' || src === 'sandbox-delete' || src === 'sandbox-mutate') return;
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        void loadCanvas({ silent: true });
+      }, 150);
+    };
+    window.addEventListener(FLEET_CHANGED, onFleet);
+    window.addEventListener('so:arrays-changed', onFleet);
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      window.removeEventListener(FLEET_CHANGED, onFleet);
+      window.removeEventListener('so:arrays-changed', onFleet);
+    };
+  }, [loadCanvas]);
 
   // First-visit race fix: if a capture landed BEFORE this canvas mounted
   // (e.g. user just finished onboarding → got redirected → extension fired
@@ -1091,6 +1114,9 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
         deleteClient(numId)
           .then((res) => {
             currentToken = res.undo_token;
+            // Optimistic canvas update is already applied — broadcast so Table,
+            // Account counts, billing, and NEPOOL banner update immediately.
+            notifyFleetChanged('sandbox-delete');
             toast.show(`Deleted ${removedName}. Cmd+Z to undo.`, 'info');
             pushUndo({
               label: `Delete client "${removedName}"`,
@@ -1100,7 +1126,10 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
                 const tok = currentToken;
                 currentToken = null;
                 undoDelete(tok)
-                  .then(() => restoreViaReload())
+                  .then(() => {
+                    restoreViaReload();
+                    notifyFleetChanged('sandbox-mutate');
+                  })
                   .catch(() => {
                     toast.show('Undo failed — 5-minute window may have expired.', 'error');
                     restoreViaReload();
@@ -1109,7 +1138,10 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
               redo: () => {
                 setNodes((ns) => ns.filter((n) => n.id !== nodeId));
                 deleteClient(numId)
-                  .then((res2) => { currentToken = res2.undo_token; })
+                  .then((res2) => {
+                    currentToken = res2.undo_token;
+                    notifyFleetChanged('sandbox-delete');
+                  })
                   .catch(() => {
                     toast.show('Redo delete failed.', 'error');
                     restoreViaReload();
@@ -1178,25 +1210,27 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
       const numId = parseInt(accountId.replace('account_', ''), 10);
       const clientNumId = parseInt(clientId.replace('client_', ''), 10);
       if (!isNaN(numId)) {
-        reassignAccount(numId, null).catch(() => {
-          setNodes(snapshot);
-          toast.show('Detach failed — reverted.', 'error');
-        });
+        reassignAccount(numId, null)
+          .then(() => notifyFleetChanged('sandbox-mutate'))
+          .catch(() => {
+            setNodes(snapshot);
+            toast.show('Detach failed — reverted.', 'error');
+          });
         if (!isNaN(clientNumId)) {
           pushUndo({
             label: `Detach ${detached.utility} · ${detached.account_number}`,
             timestamp: Date.now(),
             undo: () => {
               setNodes(snapshot);
-              reassignAccount(numId, clientNumId).catch(() =>
-                toast.show('Undo detach failed.', 'error'),
-              );
+              reassignAccount(numId, clientNumId)
+                .then(() => notifyFleetChanged('sandbox-mutate'))
+                .catch(() => toast.show('Undo detach failed.', 'error'));
             },
             redo: () => {
               applyDetach();
-              reassignAccount(numId, null).catch(() =>
-                toast.show('Redo detach failed.', 'error'),
-              );
+              reassignAccount(numId, null)
+                .then(() => notifyFleetChanged('sandbox-mutate'))
+                .catch(() => toast.show('Redo detach failed.', 'error'));
             },
           });
         }

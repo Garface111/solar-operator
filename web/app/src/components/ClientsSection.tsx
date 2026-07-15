@@ -33,6 +33,7 @@ import {
   getNepoolStats,
   UnauthorizedError,
 } from "../lib/api";
+import { notifyFleetChanged } from "../lib/fleetEvents";
 import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 import { useDashboardContext } from "../screens/DashboardLayout";
 
@@ -114,6 +115,7 @@ export function ClientsSection({ expandClientId }: Props) {
       }
       clearUndo();
       loadClients();
+      notifyFleetChanged("table-delete");
       toast.success("Restored");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Undo failed");
@@ -382,6 +384,8 @@ export function ClientsSection({ expandClientId }: Props) {
       setBulkConfirm(false);
       const n = res.soft_deleted;
       scheduleUndo(res.undo_token, `Deleted ${n} client${n === 1 ? "" : "s"}`);
+      // Keep Sandbox + Account counts in sync without a page refresh.
+      notifyFleetChanged("table-delete");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't delete clients");
     } finally {
@@ -594,12 +598,14 @@ export function ClientsSection({ expandClientId }: Props) {
           onDeleted={(id, token, msg) => {
             removeClientLocal(id);
             scheduleUndo(token, msg, "delete");
+            notifyFleetChanged("table-delete");
           }}
           onUndo={scheduleUndo}
           onOpenAddByLogin={() => setAddingByLogin(true)}
           allClients={clients}
           onMerged={(dst, _srcId, undoToken) => {
             scheduleUndo(undoToken, `Merged into "${dst.name}"`, "merge");
+            notifyFleetChanged("table-delete");
           }}
         />
       )}
