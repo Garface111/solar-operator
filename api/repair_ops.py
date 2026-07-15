@@ -756,6 +756,32 @@ def send_checkin(
             ticket, tenant, contact, sequence=(ticket.checkin_count or 0) + 1,
         )
         _schedule_next_checkin(tenant, ticket, first=False)
+        # Notify open Energy Agent chat that outreach went out
+        try:
+            from .energy_agent_mind import _emit
+            who = (contact.name if contact else None) or go_to
+            site = ticket.site_name or "the site"
+            inv = ticket.inv_name or ticket.serial or "the inverter"
+            _emit(
+                db,
+                tenant.id,
+                "repair_outbound",
+                f"Emailed {who} on ticket #{ticket.id}",
+                ref_id=str(ticket.id),
+                payload={
+                    "origin": "repair",
+                    "importance": 80,
+                    "ticket_id": ticket.id,
+                    "to": go_to,
+                    "site_name": ticket.site_name,
+                },
+                speak_as_mind=(
+                    f"I emailed {who} about {site} / {inv}. "
+                    f"When they reply to Energy Agent, I'll update you here."
+                ),
+            )
+        except Exception:
+            log.exception("repair outbound: mind emit failed ticket=%s", ticket.id)
     db.flush()
     if not ok:
         log.warning("repair check-in send failed ticket=%s tenant=%s", ticket.id, tenant.id)
@@ -1193,6 +1219,33 @@ def ingest_inbound_email(
         sent_to=from_email,
         sent_ok=True,
     )
+
+    # Push into Energy Agent chat (mind event stream) so an open session sees
+    # the tech reply without the owner prompting.
+    speak = _repair_reply_speak_line(ticket, from_email=from_email, body=cleaned)
+    try:
+        from .energy_agent_mind import _emit
+        _emit(
+            db,
+            ticket.tenant_id,
+            "repair_inbound",
+            f"Tech reply on ticket #{ticket.id}",
+            ref_id=str(ticket.id),
+            payload={
+                "origin": "repair",
+                "importance": 90,
+                "ticket_id": ticket.id,
+                "from_email": from_email,
+                "site_name": ticket.site_name,
+                "inv_name": ticket.inv_name,
+                "status": ticket.status,
+                "preview": cleaned[:400],
+            },
+            speak_as_mind=speak,
+        )
+    except Exception:
+        log.exception("repair inbound: failed to emit mind event ticket=%s", ticket.id)
+
     db.commit()
     return {
         "ok": True,
@@ -1201,7 +1254,42 @@ def ingest_inbound_email(
         "tenant_id": ticket.tenant_id,
         "status": ticket.status,
         "checkin_id": row.id,
+        "speak": speak,
     }
+
+
+def _repair_reply_speak_line(
+    ticket: RepairTicket,
+    *,
+    from_email: str | None,
+    body: str,
+) -> str:
+    """One chat-ready line when a tech replies (shown unprompted in EA)."""
+    site = ticket.site_name or "the site"
+    inv = ticket.inv_name or ticket.serial or "the inverter"
+    who = "the repair team"
+    if ticket.contact_id:
+        # contact may not be loaded; use email local-part as soft name
+        pass
+    if from_email:
+        local = from_email.split("@", 1)[0].replace(".", " ").strip()
+        if local:
+            who = local.title() if len(local) < 24 else from_email
+    preview = re.sub(r"\s+", " ", (body or "")).strip()
+    if len(preview) > 180:
+        preview = preview[:177].rsplit(" ", 1)[0] + "…"
+    st = ticket.status or "open"
+    status_bit = ""
+    if st == "scheduled":
+        status_bit = " I marked the case scheduled."
+    elif st == "in_progress":
+        status_bit = " I marked the repair in progress."
+    elif st == "resolved":
+        status_bit = " I marked the case resolved from their reply."
+    return (
+        f"Update from {who} on {site} / {inv}: \"{preview}\"."
+        f"{status_bit}"
+    )
 
 
 # ── warranty claim link ───────────────────────────────────────────────────────
