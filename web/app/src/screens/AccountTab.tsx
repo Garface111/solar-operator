@@ -74,9 +74,9 @@ export default function AccountTab() {
       {/* SpongeProgressCard is Array Operator only — never on NEPOOL SPA. */}
       <UtilityConnectionsCard account={account} />
 
-      {/* Capture mode: cloud vault vs on-device extension (AO dual-path). */}
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm shadow-sm">
-        <span className="font-medium text-zinc-800">Bill capture:</span>
+      {/* Capture mode (AO dual-path) — sits above Auto-refresh like AO Account. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm shadow-sm">
+        <span className="font-semibold text-zinc-800">How we keep bills fresh</span>
         <button
           type="button"
           disabled={modeBusy || isCloud}
@@ -87,7 +87,7 @@ export default function AccountTab() {
               : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
           }`}
         >
-          Cloud Capture
+          Store it with us
         </button>
         <button
           type="button"
@@ -99,25 +99,26 @@ export default function AccountTab() {
               : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
           }`}
         >
-          On my computer
+          Keep it on my computer
         </button>
         <span className="text-xs text-zinc-500">
           {isCloud
-            ? "Passwords encrypted on our servers · bills refresh 24/7"
-            : "Passwords stay in the browser extension · never leave your device"}
+            ? "Encrypted on our servers · live 24/7 · no tab needed"
+            : "Passwords stay in the browser extension · refreshes while a tab is open"}
         </span>
       </div>
 
       {isCloud ? (
         <>
+          {/* AO-style Auto-refresh: utility grid + search + multi-login */}
           <CloudCaptureCard />
           <details className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
             <summary className="cursor-pointer font-medium text-zinc-800">
               Prefer on-device capture instead?
             </summary>
             <p className="mt-2 text-xs text-zinc-500">
-              Switch to &quot;On my computer&quot; above, then use the portal roster
-              below with the EnergyAgent extension.
+              Switch to &quot;Keep it on my computer&quot; above, then use the portal
+              roster with the EnergyAgent extension.
             </p>
             <div className="mt-3">
               <PortalAccessCard />
@@ -129,7 +130,7 @@ export default function AccountTab() {
           <PortalAccessCard />
           <details className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
             <summary className="cursor-pointer font-medium text-zinc-800">
-              Switch to Cloud Capture (no extension needed)
+              Switch to cloud Auto-refresh (no extension needed)
             </summary>
             <p className="mt-2 text-xs text-zinc-500">
               Store utility logins encrypted on our servers and we pull bills around
