@@ -866,11 +866,21 @@ def ship_building_features(db, *, limit: int = 15, also_code_hire: bool = True) 
     return {"ok": True, "count": len(items), "items": items}
 
 
-def requeue_repo_failed_jobs(db, *, limit: int = 40) -> dict:
-    from .energy_agent_sovereign_worker import requeue_failed_jobs, ensure_all_repos
+def requeue_repo_failed_jobs(db, *, limit: int = 50) -> dict:
+    """Requeue failed sovereign jobs + warm both product repos (clone/push rights)."""
+    from .energy_agent_sovereign_worker import (
+        requeue_failed_jobs, ensure_all_repos, repo_access_enabled, code_push_enabled,
+    )
     repos = ensure_all_repos()
-    rq = requeue_failed_jobs(db, limit=limit, only_repo_errors=True)
-    return {"ok": True, "repos": repos, **rq}
+    # Ford: requeue everything retryable (not only missing-repo errors)
+    rq = requeue_failed_jobs(db, limit=limit, only_repo_errors=False)
+    return {
+        "ok": True,
+        "repos": repos,
+        "repo_access": repo_access_enabled(),
+        "code_push": code_push_enabled(),
+        **rq,
+    }
 
 
 # ── Jobs ────────────────────────────────────────────────────────────────────

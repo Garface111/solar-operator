@@ -113,7 +113,7 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "act.portal_signoff": {"tier": "T3"},  # production portal sign-off
     "act.job_queue": {"tier": "T3"},
     "act.code_hire": {"tier": "T3"},
-    "act.repo_access": {"tier": "T3"},  # clone/pull/push product repos for jobs
+    "act.repo_access": {"tier": "T3"},  # clone/pull/push BOTH product repos (Ford full grant)
     "act.deploy_stage": {"tier": "T3"},  # Ford: staged deploy authority (succession)
     "act.deploy": {"tier": "T4", "autonomous": False},  # raw unrestricted deploy still gated
     "act.memory_agenda": {"tier": "T2"},  # memory writes + goal reprioritization
