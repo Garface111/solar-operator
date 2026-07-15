@@ -409,7 +409,7 @@ export default function VerifyAccuracy() {
               <p className="mt-1 text-sm text-amber-700">{soError}</p>
               <p className="mt-1 text-xs text-amber-600">
                 This usually means no bill data has been captured for this client yet.
-                Log into the utility portal with the extension to pull their data, then try again.
+                Save their utility login under Master account → Auto-refresh (or open the portal if you use on-device capture), then try again.
               </p>
             </div>
           )}

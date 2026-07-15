@@ -341,8 +341,8 @@ export function PlanBillingCard({ account }: Props) {
               ) : (
                 <span className="text-zinc-400">
                   {account.capture_mode === "cloud"
-                    ? "soon — Cloud Capture keeps bills fresh on our servers"
-                    : "soon — add a utility login (Cloud Capture) or use the browser helper"}
+                    ? "soon — Auto-refresh keeps bills fresh on our servers"
+                    : "soon — add a utility login under Auto-refresh, or switch to on-device capture"}
                 </span>
               )}
             </li>

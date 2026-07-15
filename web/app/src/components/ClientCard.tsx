@@ -231,7 +231,7 @@ export function ClientCard({
       const msg = err instanceof Error ? err.message : "Couldn't send report";
       if (msg.toLowerCase().includes("no bills")) {
         toast.error(
-          `No bills captured yet — log into your utility portal as ${client.name} so the extension can pull their data.`,
+          `No bills captured yet for ${client.name} — add their utility login under Master account → Auto-refresh (or open their portal if you use on-device capture).`,
         );
       } else {
         toast.error(msg);
@@ -250,7 +250,7 @@ export function ClientCard({
       const msg = err instanceof Error ? err.message : "Couldn't download report";
       if (msg.toLowerCase().includes("no bills")) {
         toast.error(
-          `No bills captured yet — log into your utility portal as ${client.name} so the extension can pull their data.`,
+          `No bills captured yet for ${client.name} — add their utility login under Master account → Auto-refresh (or open their portal if you use on-device capture).`,
         );
       } else {
         toast.error(msg);
