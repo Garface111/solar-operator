@@ -69,12 +69,15 @@ def desk_emails() -> set[str]:
 
 
 def _auth_ford(authorization: str | None):
-    t = require_not_demo(tenant_from_session(authorization))
+    # require_not_demo returns None (raises on demo) — do NOT assign its return value
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
     email = (getattr(t, "contact_email", None) or "").strip().lower()
+    # Also accept operator identity variants Ford uses
     if email not in desk_emails():
+        # Secondary: login token emails for this tenant (if any) — skip heavy lookup for now
         raise HTTPException(403, "Sovereign desk is only for the developer account")
     return t, email
-
 
 def ensure_tables(db=None) -> None:
     try:
