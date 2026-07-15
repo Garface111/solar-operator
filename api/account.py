@@ -2000,12 +2000,14 @@ def _billing_summary_kwh(t: Tenant) -> dict:
     # meter; invoicing-only → the invoicing line.
     from .stripe_helpers import is_ao_monitoring
     _prod, _plan = getattr(t, "product", None), getattr(t, "billing_plan", None)
+    # Jul 2026: regular AO always bills monitoring + offtakers (plan split retired).
     _mon_active = is_ao_monitoring(_prod, _plan)
     _inv_active = is_ao_invoicing(_prod, _plan)
-    active = ("both" if (_mon_active and _inv_active)
-              else "invoicing" if _inv_active else "kwh")
-    combined_total_cents = ((monitoring_total_cents if _mon_active else 0.0)
-                            + (invoicing_total_cents if _inv_active else 0.0))
+    active = "regular"
+    combined_total_cents = (
+        (monitoring_total_cents if _mon_active else 0.0)
+        + (invoicing_total_cents if _inv_active else 0.0)
+    )
     # Unified commercial model (Account Billing section) + AI freemium
     from .pricing_ao_unified import build_unified_bill, tenant_has_ai_pro
     ai_pro = tenant_has_ai_pro(t)
@@ -2014,8 +2016,8 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         nameplate_kw=float(nameplate_kw or 0),
         offtaker_count=int(offtaker_count or 0),
         ai_pro=ai_pro,
-        include_monitoring=_mon_active,
-        include_invoicing=_inv_active,
+        include_monitoring=True,
+        include_invoicing=True,
     )
     # Product lines + AI Pro when active
     total_with_ai = float(unified.get("total_cents") or combined_total_cents)

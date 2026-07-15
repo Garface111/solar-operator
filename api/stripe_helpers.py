@@ -136,68 +136,51 @@ def _ao_invoicing_setup_price_id() -> str:
     return os.getenv("STRIPE_AO_INVOICING_SETUP_PRICE_ID", "")
 
 
-# The three Array Operator plans the operator picks at login. null/"" = not chosen
-# yet (the plan-picker prompts). "monitoring" = live vendor data, "invoicing" =
-# offtaker invoices, "both" = both.
+# Legacy plan labels (monitoring / invoicing / both) — retired Jul 2026.
+# Array Operator is ONE regular product: nameplate kW + offtaker count.
+# AI Pro is the only paid add-on. billing_plan is ignored for AO billing.
 _AO_PLANS = {"monitoring", "invoicing", "both"}
 
 
-def is_ao_invoicing(product: str | None, billing_plan: str | None) -> bool:
-    """True when a tenant bills on the Array Operator per-OFFTAKER invoicing LINE —
-    plan 'invoicing' OR 'both'. A LICENSED line whose Stripe quantity = the tenant's
-    offtaker count."""
-    return is_array_operator(product) and (billing_plan or "").strip().lower() in ("invoicing", "both")
+def is_ao_invoicing(product: str | None, billing_plan: str | None = None) -> bool:
+    """True when Array Operator should bill the per-OFFTAKER line.
+
+    Jul 2026: always on for every AO tenant (regular product = capacity + offtakers).
+    ``billing_plan`` is accepted for call-site compatibility and ignored.
+    """
+    return is_array_operator(product)
 
 
-def is_ao_monitoring(product: str | None, billing_plan: str | None) -> bool:
-    """True when a tenant bills on the Array Operator per-kWh MONITORING meter —
-    plan 'monitoring', 'both', or the AO default when no plan is chosen yet (null)."""
-    if not is_array_operator(product):
-        return False
-    return (billing_plan or "").strip().lower() in ("monitoring", "both", "")
+def is_ao_monitoring(product: str | None, billing_plan: str | None = None) -> bool:
+    """True when Array Operator should bill fleet monitoring (nameplate kW).
+
+    Jul 2026: always on for every AO tenant. ``billing_plan`` ignored.
+    """
+    return is_array_operator(product)
 
 
-def ao_plan_features(product: str | None, billing_plan: str | None) -> dict:
-    """What an Array Operator tenant can ACCESS, derived from its chosen plan.
+def ao_plan_features(product: str | None, billing_plan: str | None = None) -> dict:
+    """What a tenant can ACCESS. AO always has full product surface (no plan picker).
 
-    Returns {plan, plan_chosen, vendor_data, invoicing}. NEPOOL (non-AO) tenants get
-    everything True with plan_chosen True — the plan-picker + tab gating are AO-only.
+    Returns {plan, plan_chosen, vendor_data, invoicing}. plan is always "regular"
+    for AO (legacy both-equivalent). NEPOOL gets everything True.
     """
     if not is_array_operator(product):
         return {"plan": None, "plan_chosen": True, "vendor_data": True, "invoicing": True}
-    p = (billing_plan or "").strip().lower()
-    chosen = p in _AO_PLANS
-    if not chosen:
-        # No plan picked yet (fresh trial): default to FULL functionality — both
-        # vendor monitoring AND offtaker invoicing — and treat it as "chosen" so we
-        # never block a trialing operator behind a forced plan-picker. The trial is
-        # meant to show everything. They can narrow their plan anytime in Master
-        # Account. NOTE: this is ENTITLEMENT only — Stripe billing reads billing_plan
-        # directly (is_ao_invoicing/is_ao_monitoring), where unset still bills the
-        # conservative monitoring default until they explicitly choose, so this can
-        # never over-charge anyone.
-        return {"plan": "both", "plan_chosen": True, "vendor_data": True, "invoicing": True}
     return {
-        "plan": p,
+        "plan": "regular",
         "plan_chosen": True,
-        "vendor_data": p in ("monitoring", "both"),
-        "invoicing": p in ("invoicing", "both"),
+        "vendor_data": True,
+        "invoicing": True,
     }
 
 
-def ao_gets_vendor_emails(product: str | None, billing_plan: str | None) -> bool:
-    """Whether a tenant should receive VENDOR-DATA emails — the morning fleet-health
-    digest and the inverter down/underperformance alerts.
+def ao_gets_vendor_emails(product: str | None, billing_plan: str | None = None) -> bool:
+    """Whether a tenant should receive VENDOR-DATA emails (fleet-health digests).
 
-    Suppressed ONLY for an Array Operator account explicitly on the invoicing-ONLY
-    plan: they bought offtaker invoicing, not fleet monitoring, so vendor-health
-    email is noise to them. Everyone else keeps receiving it — 'monitoring', 'both',
-    a not-yet-chosen plan (null), and all non-AO (NEPOOL) tenants. We deliberately do
-    NOT key this off ao_plan_features()['vendor_data'] (which is False for null) so a
-    legacy monitoring customer who never re-picked a plan is never silenced."""
-    if not is_array_operator(product):
-        return True
-    return (billing_plan or "").strip().lower() != "invoicing"
+    Always on for AO (no invoicing-only plan anymore) and all NEPOOL tenants.
+    """
+    return True
 
 
 def billable_offtaker_count(db, tenant_id: str) -> int:
@@ -317,40 +300,35 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         monitoring_item = ao_monitoring_item(db, t.id)
 
     ao = is_array_operator(product)
-    has_invoicing = is_ao_invoicing(product, billing_plan)    # plan 'invoicing' or 'both'
-    has_monitoring = is_ao_monitoring(product, billing_plan)  # plan 'monitoring', 'both', or AO default
+    # AO regular product: ALWAYS nameplate capacity + offtaker count (no plan split).
+    has_invoicing = is_ao_invoicing(product, billing_plan)
+    has_monitoring = is_ao_monitoring(product, billing_plan)
 
     quantity = max(int(array_count), 1)
     items: list[dict] = []
     add_invoice_items: list[dict] = []
     if ao:
-        # Array Operator — bill the line(s) the chosen plan grants. "both" = BOTH
-        # lines (per-offtaker invoicing + per-kWh monitoring). Default (no plan
-        # chosen yet) bills the monitoring meter so a card-on-file never bills $0.
-        if has_invoicing:
-            # Per-OFFTAKER LICENSED line — quantity = offtaker count. REFUSE rather
-            # than fall back to a wrong price (mis-billing is worse than failing).
+        # Regular AO = fleet monitoring (nameplate kW) + offtaker invoices (count).
+        # AI Pro is a separate add-on subscription (see account.ai_pro_checkout).
+        if has_monitoring and monitoring_item:
+            items.append(monitoring_item)
+        if has_invoicing and int(offtaker_count or 0) > 0:
             inv_price = _ao_invoicing_price_id()
             if not inv_price:
                 send_internal_alert(
                     "⚠️ AO invoicing price id missing",
-                    f"Tenant {tenant_id} ({email}) is on a plan with invoicing "
-                    f"(billing_plan={billing_plan!r}) but STRIPE_AO_INVOICING_PRICE_ID "
-                    "is not set. Run scripts/create_ao_invoicing_price.py and set the "
-                    "env var. No subscription created (refusing to mis-bill).",
+                    f"Tenant {tenant_id} ({email}) has offtakers but "
+                    "STRIPE_AO_INVOICING_PRICE_ID is not set. Run "
+                    "scripts/create_ao_invoicing_price.py and set the env var.",
                 )
                 return {"ok": False, "error": "ao-invoicing-price-missing"}
-            items.append({"price": inv_price, "quantity": max(int(offtaker_count), 1)})
-            # Optional one-time $250 setup — leave STRIPE_AO_INVOICING_SETUP_PRICE_ID
-            # unset to WAIVE it (e.g. grandfathered early customers like Paul).
+            items.append({"price": inv_price, "quantity": int(offtaker_count)})
             inv_setup = _ao_invoicing_setup_price_id()
             if inv_setup:
                 add_invoice_items.append({"price": inv_setup, "quantity": 1})
-        if has_monitoring or not has_invoicing:
-            # Per-kW NAMEPLATE monitoring line (quantity = registered nameplate kW;
-            # the daily nameplate-sync job keeps it current). No setup fee.
-            if monitoring_item:
-                items.append(monitoring_item)
+        if not items and monitoring_item:
+            # No offtakers yet and no nameplate — still need a line; monitoring covers it.
+            items.append(monitoring_item)
     else:
         array_price_id = array_price_id_for_product(product)
         if array_price_id:
@@ -392,13 +370,10 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
 
     if ao:
         _parts = []
-        if has_invoicing:
-            _parts.append(f"per-offtaker qty {max(int(offtaker_count), 1)}")
-        if has_monitoring or not has_invoicing:
-            if monitoring_item and "quantity" in monitoring_item:
-                _parts.append(f"per-kW nameplate qty {monitoring_item['quantity']}")
-            else:
-                _parts.append("per-kWh (metered)")
+        if monitoring_item and "quantity" in monitoring_item:
+            _parts.append(f"per-kW nameplate qty {monitoring_item['quantity']}")
+        if int(offtaker_count or 0) > 0:
+            _parts.append(f"per-offtaker qty {int(offtaker_count)}")
         meter = " + ".join(_parts) or "per-kW nameplate"
     else:
         meter = f"per-array qty {quantity}"
@@ -406,12 +381,12 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         f"✅ Subscription resumed: {tenant_id}",
         f"Tenant {tenant_id} ({email}) added a card and resumed. "
         f"Arrays: {array_count}, offtakers: {offtaker_count}, "
-        f"plan: {billing_plan or '(default)'}, billed: {meter}. Subscription: {sub_id}"
+        f"plan: regular, billed: {meter}. Subscription: {sub_id}"
     )
     return {"ok": True, "subscription_id": sub_id, "array_count": int(array_count),
             "offtaker_count": int(offtaker_count), "metered": ao,
             "has_invoicing": has_invoicing, "has_monitoring": has_monitoring,
-            "billing_plan": (billing_plan or None)}
+            "billing_plan": "regular"}
 
 
 def reconcile_subscription_quantity(
@@ -537,14 +512,12 @@ def reconcile_subscription_quantity(
 
 
 def reconcile_offtaker_quantity(tenant_id: str) -> None:
-    """Bring an AO INVOICING subscription's licensed line to the tenant's current
-    offtaker count (call after a BillingReportSubscription is added or removed).
+    """Sync the AO offtaker Stripe line to the current offtaker count.
 
-    Mirrors reconcile_subscription_quantity but for the per-offtaker invoicing plan:
-    matches the invoicing price (NOT the per-array set) and uses the offtaker count.
-    Kept SEPARATE so an array-count reconcile can never touch an invoicing line and
-    vice-versa. Best-effort — never raises. No-op unless the tenant is on the
-    invoicing plan with a live subscription and the invoicing price id is set.
+    - offtakers > 0: create or update the licensed invoicing line quantity
+    - offtakers == 0: remove the invoicing line (bill $0 for offtakers)
+
+    Best-effort — never raises. No-op for non-AO or no live subscription.
     """
     from .db import SessionLocal
     from .models import Tenant
@@ -563,6 +536,7 @@ def reconcile_offtaker_quantity(tenant_id: str) -> None:
     if not os.getenv("STRIPE_SECRET_KEY"):
         return
     stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+    n = int(offtaker_count or 0)
 
     try:
         sub = stripe.Subscription.retrieve(subscription_id)
@@ -571,19 +545,31 @@ def reconcile_offtaker_quantity(tenant_id: str) -> None:
             if item["price"]["id"] == inv_price:
                 line = item
                 break
+        if n <= 0:
+            if line is not None:
+                stripe.SubscriptionItem.delete(
+                    line["id"], proration_behavior="create_prorations")
+                logger.info(
+                    "Removed AO invoicing line on %s for tenant %s (0 offtakers)",
+                    subscription_id, tenant_id)
+            return
         if line is None:
-            raise RuntimeError(
-                f"no invoicing line ({inv_price}) on subscription {subscription_id}")
-        target_qty = max(int(offtaker_count), 1)   # Stripe requires quantity >= 1
-        if line.get("quantity") == target_qty:
+            stripe.SubscriptionItem.create(
+                subscription=subscription_id, price=inv_price,
+                quantity=n, proration_behavior="create_prorations")
+            logger.info(
+                "Added AO invoicing line on %s for tenant %s: offtakers=%d",
+                subscription_id, tenant_id, n)
+            return
+        if line.get("quantity") == n:
             return
         stripe.SubscriptionItem.modify(
-            line["id"], quantity=target_qty,
+            line["id"], quantity=n,
             proration_behavior="create_prorations",
         )
         logger.info(
             "Reconciled AO invoicing subscription %s for tenant %s: offtakers → %d",
-            subscription_id, tenant_id, target_qty)
+            subscription_id, tenant_id, n)
     except Exception as e:  # noqa: BLE001 — must never block callers
         logger.exception(
             "AO invoicing reconciliation FAILED for tenant %s (sub %s, "
@@ -626,54 +612,61 @@ def migrate_ao_subscription_lines(tenant_id: str) -> None:
     if not subscription_id:
         return   # trialing — no live sub; lines are set when they first add a card
 
-    want_invoicing = is_ao_invoicing(product, billing_plan)    # 'invoicing' or 'both'
-    want_monitoring = is_ao_monitoring(product, billing_plan)  # 'monitoring', 'both', or default
+    # Regular AO product: always monitoring (nameplate) + offtakers when count > 0.
+    want_invoicing = is_ao_invoicing(product, billing_plan) and int(offtaker_count or 0) > 0
+    want_monitoring = is_ao_monitoring(product, billing_plan)
     inv_price = _ao_invoicing_price_id()
-    kwh_price = _ao_kwh_price_id()
+    np_price = _ao_nameplate_price_id()
+    kwh_price = _ao_kwh_price_id()  # legacy metered fallback
+    mon_price = np_price or kwh_price
     stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 
     try:
         sub = stripe.Subscription.retrieve(subscription_id)
         items = sub["items"]["data"]
         inv_line = next((i for i in items if i["price"]["id"] == inv_price), None) if inv_price else None
-        kwh_line = next((i for i in items if i["price"]["id"] == kwh_price), None) if kwh_price else None
+        mon_line = None
+        if mon_price:
+            mon_line = next((i for i in items if i["price"]["id"] == mon_price), None)
+            if mon_line is None and np_price and kwh_price:
+                mon_line = next((i for i in items if i["price"]["id"] == kwh_price), None)
 
-        # ADD required-but-missing lines FIRST — a subscription must always keep at
-        # least one item, so we never leave it empty between a remove and an add.
+        # ADD required-but-missing lines FIRST.
         if want_invoicing and inv_line is None:
             if not inv_price:
                 send_internal_alert(
-                    "⚠️ AO invoicing price id missing (plan change)",
-                    f"Tenant {tenant_id} ({email}) changed to a plan with invoicing but "
-                    "STRIPE_AO_INVOICING_PRICE_ID is unset — invoicing line NOT added. "
-                    "Run scripts/create_ao_invoicing_price.py and set the env var.")
+                    "⚠️ AO invoicing price id missing (line sync)",
+                    f"Tenant {tenant_id} ({email}) needs offtaker line but "
+                    "STRIPE_AO_INVOICING_PRICE_ID is unset.")
             else:
                 stripe.SubscriptionItem.create(
                     subscription=subscription_id, price=inv_price,
-                    quantity=max(int(offtaker_count), 1),
+                    quantity=int(offtaker_count),
                     proration_behavior="create_prorations")
-        if want_monitoring and kwh_line is None and kwh_price:
-            # Metered price — no quantity (Stripe rejects it); usage-report drives volume.
-            stripe.SubscriptionItem.create(
-                subscription=subscription_id, price=kwh_price,
-                proration_behavior="create_prorations")
+        if want_monitoring and mon_line is None and mon_price:
+            if np_price:
+                with SessionLocal() as db:
+                    qty = max(tenant_nameplate_kw(db, tenant_id), 1)
+                stripe.SubscriptionItem.create(
+                    subscription=subscription_id, price=np_price,
+                    quantity=qty, proration_behavior="create_prorations")
+            elif kwh_price:
+                stripe.SubscriptionItem.create(
+                    subscription=subscription_id, price=kwh_price,
+                    proration_behavior="create_prorations")
 
-        # REMOVE lines the new plan no longer includes.
+        # REMOVE offtaker line when roster is empty (not "plan change" anymore).
         if not want_invoicing and inv_line is not None:
             stripe.SubscriptionItem.delete(
                 inv_line["id"], proration_behavior="create_prorations")
-        if not want_monitoring and kwh_line is not None:
-            stripe.SubscriptionItem.delete(
-                kwh_line["id"], proration_behavior="create_prorations")
 
         logger.info(
-            "Migrated AO subscription %s lines for tenant %s: plan=%s "
-            "(invoicing=%s, monitoring=%s)", subscription_id, tenant_id,
-            billing_plan, want_invoicing, want_monitoring)
-    except Exception as e:  # noqa: BLE001 — must never block the plan selection
+            "Synced AO subscription %s lines for tenant %s "
+            "(invoicing=%s offtakers=%s, monitoring=%s)",
+            subscription_id, tenant_id, want_invoicing, offtaker_count, want_monitoring)
+    except Exception as e:  # noqa: BLE001 — must never block callers
         logger.exception("AO subscription line migration FAILED for tenant %s", tenant_id)
         send_internal_alert(
-            "⚠️ AO plan-change line migration failed",
-            f"Tenant {tenant_id} ({email}) changed plan to {billing_plan!r} but updating "
-            f"subscription {subscription_id} lines failed: {e}\n\nFix manually in Stripe "
-            "(add/remove the metered + invoicing lines, proration_behavior=create_prorations).")
+            "⚠️ AO subscription line sync failed",
+            f"Tenant {tenant_id} ({email}) line sync failed for "
+            f"subscription {subscription_id}: {e}\n\nFix manually in Stripe.")

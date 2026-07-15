@@ -71,36 +71,20 @@ def test_unified_bill_ai_pro_adds_fifty():
     assert ai["amount_cents"] == 5000
 
 
-def test_invoicing_only_shows_monitoring_unbilled():
-    """Account always surfaces both product lines; only active plan lines are charged."""
+def test_regular_always_bills_both_meters():
+    """Regular AO product always charges nameplate + offtakers (plan split gone)."""
     bill = build_unified_bill(
-        billing_plan="invoicing",
-        nameplate_kw=500,
-        offtaker_count=2,
-        ai_pro=False,
-    )
-    mon = next(ln for ln in bill["lines"] if ln["id"] == "monitoring")
-    inv = next(ln for ln in bill["lines"] if ln["id"] == "invoicing")
-    assert mon["billed"] is False
-    assert inv["billed"] is True
-    assert inv["amount_cents"] == 3000  # 2 × $15
-    # Total = invoicing only
-    assert bill["total_cents"] == 3000
-
-
-def test_monitoring_only_still_shows_offtaker_line():
-    """The bug Ford hit: monitoring/default plan hid offtaker pricing on Your Bill."""
-    bill = build_unified_bill(
-        billing_plan="monitoring",
+        billing_plan="monitoring",  # legacy label ignored
         nameplate_kw=100,
         offtaker_count=4,
         ai_pro=False,
     )
+    mon = next(ln for ln in bill["lines"] if ln["id"] == "monitoring")
     inv = next(ln for ln in bill["lines"] if ln["id"] == "invoicing")
-    assert inv["quantity"] == 4
-    assert inv["full_unit_cents"] == 1500
+    assert mon["billed"] is True
+    assert inv["billed"] is True
     assert inv["amount_cents"] == 6000
-    assert inv["billed"] is False
-    # Monitoring still charged; offtaker estimate not in total
-    assert bill["total_cents"] == 1500  # 100 kW × $0.15
+    assert bill["total_cents"] == 1500 + 6000
+    assert bill["plan"] == "regular"
     assert any(ln["id"] == "collection_fee" for ln in bill["lines"])
+

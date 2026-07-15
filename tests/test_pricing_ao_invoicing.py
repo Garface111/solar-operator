@@ -89,50 +89,35 @@ def test_stripe_tiers_shape():
 
 
 def test_is_ao_invoicing_detection():
-    # invoicing line billed on plan 'invoicing' OR 'both'.
+    # Jul 2026: every AO tenant bills offtakers (plan split retired).
     assert is_ao_invoicing("array_operator", "invoicing") is True
     assert is_ao_invoicing("array_operator", "both") is True
-    assert is_ao_invoicing("array_operator", "INVOICING") is True   # case-insensitive
-    assert is_ao_invoicing("array_operator", " invoicing ") is True  # trimmed
-    # monitoring / default / unknown — no invoicing line.
-    assert is_ao_invoicing("array_operator", "monitoring") is False
-    assert is_ao_invoicing("array_operator", None) is False
-    assert is_ao_invoicing("array_operator", "") is False
-    # NEPOOL is never invoicing, regardless of billing_plan.
+    assert is_ao_invoicing("array_operator", "monitoring") is True
+    assert is_ao_invoicing("array_operator", None) is True
+    assert is_ao_invoicing("array_operator", "") is True
     assert is_ao_invoicing("nepool", "invoicing") is False
     assert is_ao_invoicing(None, "both") is False
     assert is_array_operator("array_operator") is True
 
 
 def test_is_ao_monitoring_detection():
-    # per-kWh meter on 'monitoring', 'both', or the AO default (null/"").
+    # Every AO tenant bills nameplate monitoring.
     assert is_ao_monitoring("array_operator", "monitoring") is True
     assert is_ao_monitoring("array_operator", "both") is True
-    assert is_ao_monitoring("array_operator", None) is True   # AO default
-    assert is_ao_monitoring("array_operator", "") is True
-    # invoicing-only → no monitoring meter.
-    assert is_ao_monitoring("array_operator", "invoicing") is False
-    # NEPOOL never bills on the AO meter.
+    assert is_ao_monitoring("array_operator", None) is True
+    assert is_ao_monitoring("array_operator", "invoicing") is True
     assert is_ao_monitoring("nepool", "monitoring") is False
 
 
 def test_ao_plan_features_entitlements():
     def f(plan):
         return ao_plan_features("array_operator", plan)
-    # monitoring → vendor data only
-    assert f("monitoring") == {"plan": "monitoring", "plan_chosen": True,
-                               "vendor_data": True, "invoicing": False}
-    # invoicing → offtaker only
-    assert f("invoicing") == {"plan": "invoicing", "plan_chosen": True,
-                              "vendor_data": False, "invoicing": True}
-    # both → everything
-    assert f("both") == {"plan": "both", "plan_chosen": True,
-                         "vendor_data": True, "invoicing": True}
-    # not chosen yet → defaults to FULL functionality
-    assert f(None) == {"plan": "both", "plan_chosen": True,
-                       "vendor_data": True, "invoicing": True}
-    assert f("") == {"plan": "both", "plan_chosen": True,
-                     "vendor_data": True, "invoicing": True}
-    # NEPOOL tenants are ungated (no AO plan-picker).
+    full = {"plan": "regular", "plan_chosen": True,
+            "vendor_data": True, "invoicing": True}
+    assert f("monitoring") == full
+    assert f("invoicing") == full
+    assert f("both") == full
+    assert f(None) == full
+    assert f("") == full
     nep = ao_plan_features("nepool", None)
     assert nep["plan_chosen"] is True and nep["vendor_data"] is True and nep["invoicing"] is True
