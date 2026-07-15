@@ -356,7 +356,10 @@ def run_claude_code(
 ) -> dict[str, Any]:
     cb = _find_claude()
     if not cb:
-        return {"ok": False, "provider": "claude_code", "error": "claude CLI not found"}
+        # Railway web image has no Claude Code CLI — use API file-rewrite path
+        return run_api_code_assist(
+            cwd=cwd, title=title, brief=brief, provider="claude_api",
+        )
 
     plan = (expanded or "").strip()
     prompt = f"""You are Sovereign's coding agent implementing an AUTHORIZED live product change.
@@ -440,66 +443,154 @@ Implement the change now in the current directory ({cwd}).
     }
 
 
-def run_grok_code_assist(
+def _list_repo_files(cwd: Path, limit: int = 100) -> str:
+    if _has_git_bin():
+        listing = _run(["bash", "-lc", f"git ls-files | head -{limit}"], cwd=cwd, timeout=30)
+        return (listing.stdout or "")[:4000]
+    # dulwich / plain walk
+    lines = []
+    for p in sorted(cwd.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(cwd))
+        if rel.startswith(".git") or "node_modules" in rel or "__pycache__" in rel:
+            continue
+        lines.append(rel)
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines)[:4000]
+
+
+def _read_context_files(cwd: Path, brief: str, title: str, max_files: int = 6) -> str:
+    """Pick a few likely files and include short excerpts for the code model."""
+    text = f"{title}\n{brief}".lower()
+    candidates: list[str] = []
+    hints = [
+        ("theme", "public/theme-day.css"),
+        ("purple", "public/theme-day.css"),
+        ("blue", "public/theme-sky.css"),
+        ("css", "public/styles.css"),
+        ("sovereign", "public/sovereign-desk.js"),
+        ("utility", "api/utility_requests.py"),
+        ("adapter", "api/adapters/smarthub.py"),
+        ("eversource", "api/adapters/eversource.py"),
+        ("feature", "api/feature_suggestions.py"),
+        ("portal", "api/cloud_capture.py"),
+    ]
+    for key, path in hints:
+        if key in text and path not in candidates:
+            candidates.append(path)
+    # Always include a couple of CSS tokens for cosmetic jobs
+    for p in ("public/theme-day.css", "public/theme-sky.css", "public/styles.css"):
+        if p not in candidates:
+            candidates.append(p)
+    chunks = []
+    for rel in candidates[:max_files]:
+        path = cwd / rel
+        if not path.is_file():
+            continue
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        chunks.append(f"### {rel}\n```\n{body[:3500]}\n```")
+    return "\n\n".join(chunks)[:14000]
+
+
+def run_api_code_assist(
     *,
     cwd: Path,
     title: str,
     brief: str,
+    provider: str = "grok",
 ) -> dict[str, Any]:
-    """Rock fallback: ask Grok for a concrete file edit plan + optional patch apply.
+    """Ask LLM for concrete full-file rewrites (no local agent CLI required).
 
-    Grok cannot drive tools; we request a JSON list of {path, content} full-file
-    rewrites for small scoped fixes, then write them.
+    Used as Grok rock path AND Claude API cloth path when `claude` CLI is absent
+    (Railway web service).
     """
-    try:
-        from .energy_agent_sovereign_brain import call_brain
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "provider": "grok", "error": f"import brain: {e}"}
+    files_hint = _list_repo_files(cwd)
+    context = _read_context_files(cwd, brief, title)
 
-    # List a few relevant files for context
-    listing = _run(
-        ["bash", "-lc", "git ls-files | head -80"],
-        cwd=cwd,
-        timeout=30,
+    system = (
+        "You are Sovereign's coding agent implementing an AUTHORIZED product change. "
+        "Output ONLY valid JSON (no markdown fences):\n"
+        '{"files":[{"path":"relative/path","content":"FULL new file content"}],'
+        '"notes":"what you changed"}\n'
+        "Rules: minimal correct edits; prefer editing existing files over new ones; "
+        "no secrets/.env/API keys; paths relative to repo root; "
+        "if research-only with no safe code change, write a short plan under "
+        "docs/sovereign/ as a .md file still (so the job ships a real artifact). "
+        "Always try to produce at least one file when the brief is a product fix."
     )
-    files_hint = (listing.stdout or "")[:3000]
+    user = (
+        f"Repo: {cwd.name}\nTitle: {title}\nBrief:\n{brief[:6000]}\n\n"
+        f"Tracked files (sample):\n{files_hint}\n\n"
+        f"Relevant file contents:\n{context}\n"
+    )
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Sovereign's rock coding agent (Grok). Output ONLY JSON:\n"
-                '{"files":[{"path":"relative/path","content":"full new file content"}],'
-                '"notes":"..."}\n'
-                "Minimal edits. No secrets. Paths relative to repo root. "
-                "If you cannot safely edit, return {\"files\":[],\"notes\":\"reason\"}."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Repo: {cwd.name}\nTitle: {title}\nBrief:\n{brief}\n\n"
-                f"Some tracked files:\n{files_hint}\n"
-            ),
-        },
-    ]
+    text = ""
+    model = None
     try:
-        raw = call_brain(messages)
+        if provider in ("claude_api", "claude", "cloth"):
+            text, model = _call_anthropic_messages(system, user)
+            provider_out = "claude_api"
+        else:
+            from .energy_agent_sovereign_brain import call_brain
+            raw = call_brain([
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
+            text = raw.get("content") or ""
+            model = raw.get("model")
+            provider_out = "grok"
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "provider": "grok", "error": str(e)[:400]}
+        return {"ok": False, "provider": provider, "error": str(e)[:400]}
 
-    text = raw.get("content") or ""
-    # extract JSON
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
-        return {"ok": False, "provider": "grok", "error": "no JSON in response", "raw": text[:500]}
+        return {
+            "ok": False, "provider": provider_out,
+            "error": "no JSON in response", "raw": text[:500],
+        }
     try:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError as e:
-        return {"ok": False, "provider": "grok", "error": f"bad JSON: {e}"}
+        return {"ok": False, "provider": provider_out, "error": f"bad JSON: {e}"}
 
+    written = _write_files_from_plan(cwd, data.get("files") or [])
+    # Research fallback: still ship a note so the queue moves
+    if not written:
+        note = (data.get("notes") or text or "no-op")[:4000]
+        rel = f"docs/sovereign/job-{(title or 'work')[:40].replace(' ', '-').lower()}.md"
+        rel = re.sub(r"[^a-z0-9/_\-\.]+", "", rel)
+        path = cwd / rel
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"# {title}\n\n{note}\n\nBrief:\n\n{brief[:3000]}\n",
+                encoding="utf-8",
+            )
+            written.append(rel)
+        except Exception as e:  # noqa: BLE001
+            return {
+                "ok": False, "provider": provider_out,
+                "error": f"no files written: {e}", "notes": note[:500],
+            }
+
+    return {
+        "ok": bool(written),
+        "provider": provider_out,
+        "written": written,
+        "notes": (data.get("notes") or "")[:2000],
+        "model": model,
+        "changed": bool(written),
+    }
+
+
+def _write_files_from_plan(cwd: Path, files: list) -> list[str]:
     written = []
-    for f in data.get("files") or []:
+    for f in files or []:
         if not isinstance(f, dict):
             continue
         rel = (f.get("path") or "").lstrip("/")
@@ -511,7 +602,6 @@ def run_grok_code_assist(
         if ".." in rel:
             continue
         path = cwd / rel
-        # only allow under repo
         try:
             path.resolve().relative_to(cwd.resolve())
         except Exception:
@@ -519,14 +609,48 @@ def run_grok_code_assist(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(content), encoding="utf-8")
         written.append(rel)
+    return written
 
-    return {
-        "ok": bool(written),
-        "provider": "grok",
-        "written": written,
-        "notes": (data.get("notes") or "")[:2000],
-        "model": raw.get("model"),
-    }
+
+def _call_anthropic_messages(system: str, user: str) -> tuple[str, str | None]:
+    import httpx
+    key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY missing")
+    model = (os.getenv("SOVEREIGN_CLAUDE_MODEL") or "claude-sonnet-4-20250514").strip()
+    r = httpx.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": 8000,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        },
+        timeout=120.0,
+    )
+    r.raise_for_status()
+    data = r.json()
+    parts = data.get("content") or []
+    text = ""
+    for p in parts:
+        if isinstance(p, dict) and p.get("type") == "text":
+            text += p.get("text") or ""
+    return text, model
+
+
+def run_grok_code_assist(
+    *,
+    cwd: Path,
+    title: str,
+    brief: str,
+) -> dict[str, Any]:
+    """Rock fallback via Grok JSON file rewrites."""
+    return run_api_code_assist(cwd=cwd, title=title, brief=brief, provider="grok")
 
 
 def commit_and_push(cwd: Path, *, title: str, job_id: str) -> dict[str, Any]:
