@@ -176,10 +176,12 @@ Site improvements (CRITICAL — Ford 2026-07-14 voice fail):
   Do NOT monologue about design tokens, sky mode, CSS variables, or system language.
   Do NOT call product_map for pure visual polish.
   Do NOT fire many tools at once. One mind, one quiet fix path:
-    1) One short spoken line: "Oh I see — I'll fix that." (or similar, ≤2 sentences)
-    2) Call propose_site_improvement with their words as text (force_submit true if no
-       screenshot yet) OR emit improve_site for markup — still as YOU, never "an agent."
-    3) Say you'll nudge when there's something to refresh. Then STOP talking.
+    1) One short spoken line: "Oh I see — I'll open the builder with a prompt ready."
+    2) Call propose_site_improvement with start_markup true and text= a COMPLETE
+       ready-to-build brief (imperative design prompt matching their ask — e.g.
+       live energy balls on the pipeline sending to offtakers). The client fills
+       the Build-it box automatically; user only circles + clicks Build.
+    3) Do not leave the Build box empty. Do not ask them to retype what they said.
   Never narrate a multi-step redesign plan out loud. Background work is silent.
 
 Voice discipline:
@@ -697,14 +699,24 @@ TOOL_DEFS = [
                 "(same as 'Wish this was better'). An internal JUDGE approves auto-ship "
                 "(frontend-only UX), branches riskier work, or passes. Prefer starting the "
                 "client mark-up flow (returns ui improve_site) so the user circles the spot. "
-                "Pass text when they already described the change; optional screenshot_b64."
+                "CRITICAL: put a complete, ready-to-build design brief in text= — the client "
+                "auto-fills the Build-it box with it so the user only circles and clicks Build. "
+                "Write an imperative prompt (e.g. 'Upgrade the pipeline visualization to live "
+                "energy balls flowing to offtakers…'), not just 'user wants something cooler'."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "What should change (customer words, plain English)",
+                        "description": (
+                            "Ready-to-build prompt for the Improve box and the judge. "
+                            "Imperative, specific, 1–4 sentences. Include what/where/visual intent."
+                        ),
+                    },
+                    "build_prompt": {
+                        "type": "string",
+                        "description": "Optional override for the prefilled Build-it box (defaults to text)",
                     },
                     "start_markup": {
                         "type": "boolean",
@@ -2933,20 +2945,42 @@ def _propose_site_improvement_tool(db, tenant: Tenant, args: dict) -> dict:
     if start_markup is None:
         start_markup = True
 
-    # If they only want the client mark-up flow, don't create a row yet
+    # If they only want the client mark-up flow, don't create a row yet.
+    # Prefill the Build-it box with a judge-ready prompt (Ford 2026-07-14).
     if start_markup and not args.get("screenshot_b64") and not args.get("force_submit"):
+        build_prompt = (args.get("build_prompt") or args.get("prompt") or text or "").strip()
+        # Shape casual speech into an imperative build brief when needed
+        if build_prompt and not re.match(
+            r"^(add|put|make|change|move|upgrade|replace|show|hide|fix|redesign|create|build)\b",
+            build_prompt,
+            re.I,
+        ):
+            build_prompt = (
+                f"Build this UI improvement from the owner's request: {build_prompt}. "
+                "Prefer a clear, scannable visual that matches Array Operator "
+                "(energy / black-green aesthetic). Small pure-UI change only — "
+                "no billing math or Stripe changes."
+            )
+        build_prompt = build_prompt[:1600]
         cmd = {
             "id": uuid.uuid4().hex[:12],
             "type": "improve_site",
-            "args": {"mark_first": True, "hint": text},
+            "args": {
+                "mark_first": True,
+                "hint": build_prompt,
+                "prompt": build_prompt,
+                "build_prompt": build_prompt,
+                "text": build_prompt,
+            },
             "needs_confirm": False,
         }
         return {
             "status": "ui_command",
             "command": cmd,
             "message": (
-                "Opening mark-up so the user can circle the spot. "
-                f"Hint for them: {text[:200]}"
+                "Opening mark-up with a ready-to-build prompt filled in. "
+                "User circles the spot, then hits Build it. "
+                f"Prompt: {build_prompt[:220]}"
             ),
         }
 
