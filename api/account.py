@@ -705,6 +705,32 @@ def password_login(body: PasswordLoginBody, request: Request):
         if not matches:
             raise HTTPException(401, _GENERIC_ERROR)
 
+        # Product-scoped login page (NEPOOL SPA sends product=nepool; AO sends
+        # array_operator): never mint a session for the other product. That used
+        # to silently open Array Operator data inside the NEPOOL shell (and vice
+        # versa). If the password only matches the other brand, tell them where
+        # to sign in instead of "Invalid email or password".
+        if want_product:
+            product_matches = [
+                t for t in matches
+                if (t.product or "nepool") == want_product
+            ]
+            if not product_matches:
+                other = sorted(matches, key=lambda t: (0 if t.active else 1))[0]
+                other_prod = other.product or "nepool"
+                if other_prod == "array_operator":
+                    raise HTTPException(
+                        401,
+                        "That password is for Array Operator — sign in at "
+                        "https://arrayoperator.com (this page is NEPOOL Operator only).",
+                    )
+                raise HTTPException(
+                    401,
+                    "That password is for NEPOOL Operator — sign in at "
+                    "https://nepooloperator.com/accounts (this page is Array Operator only).",
+                )
+            matches = product_matches
+
         def _rank(t: Tenant):
             return (
                 0 if (want_product and (t.product or "nepool") == want_product) else 1,
