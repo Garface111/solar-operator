@@ -6,7 +6,13 @@ Owns Array Operator as a product: monitor health/queues, coordinate expansion,
 protect UX, draft repairs, and speak as Energy Agent into any owner chat
 (under flags + rate limits + audit).
 
-Default: ENABLED for sense + soft act + dogfood speak.
+Brain (independent mind):
+  • Primary: Grok / xAI ("rock agent")
+  • Fallback: Claude Anthropic (+ optional Claude Code CLI for code briefs)
+  • Private monologue, self-notes, durable memory, agendas/goals
+  • Ivory-tower observe → think → act; rule engine only if both brains fail
+
+Default: ENABLED for sense + soft act + dogfood speak + brain.
 Kill: SOVEREIGN_ENABLED=0. Never autonomous: money/identity/deploy.
 """
 from __future__ import annotations
@@ -195,6 +201,30 @@ class EaSovereignMessageOutbox(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class EaSovereignNote(Base):
+    """Private internal dialogue — monologue, observations, decisions (not owner-facing)."""
+    __tablename__ = "ea_sovereign_notes"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    kind: Mapped[str] = mapped_column(String(24), default="thought", index=True)
+    # thought|memory|observation|decision|agenda|system
+    title: Mapped[str] = mapped_column(String(240), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    provider: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    tick_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    meta_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EaSovereignMemory(Base):
+    """Durable key/value self-memory the mind writes to itself across ticks."""
+    __tablename__ = "ea_sovereign_memory"
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    source: Mapped[str] = mapped_column(String(40), default="brain")  # brain|system|admin
 
 
 def _default_world() -> dict[str, Any]:
@@ -766,6 +796,17 @@ def act_code_hire(
     )
     if n >= MAX_JOBS_PER_DAY:
         return {"ok": False, "denied": True, "denied_reason": "daily job budget"}
+
+    expanded = None
+    expand_meta: dict[str, Any] = {}
+    try:
+        from .energy_agent_sovereign_brain import try_expand_code_brief
+        expand_meta = try_expand_code_brief(title=title, brief=brief) or {}
+        if expand_meta.get("ok") and expand_meta.get("expanded_brief"):
+            expanded = expand_meta["expanded_brief"]
+    except Exception as e:  # noqa: BLE001
+        expand_meta = {"ok": False, "error": str(e)[:300]}
+
     job = EaSovereignJob(
         id=_id("job"),
         kind=kind[:40],
@@ -774,10 +815,12 @@ def act_code_hire(
         brief_json=json.dumps({
             "title": title,
             "brief": brief,
+            "expanded_brief": expanded,
+            "expand_provider": expand_meta.get("provider"),
             "created_by": "sovereign",
             "instructions": (
-                "Human or Hermes: implement this scoped change in array-operator "
-                "and/or solar-operator. Do not auto-merge. Open a PR for Ford."
+                "Human or Hermes/Claude Code: implement this scoped change in "
+                "array-operator and/or solar-operator. Do not auto-merge. Open a PR for Ford."
             ),
         }, default=str)[:50_000],
     )
@@ -785,15 +828,23 @@ def act_code_hire(
     db.flush()
     audit(
         db, capability="act.code_hire", decision="act",
-        rationale=title[:400], targets={"job_id": job.id},
+        rationale=title[:400], targets={"job_id": job.id, "expand": expand_meta.get("provider")},
         result="ok", correlation_id=job.id,
     )
-    email_ford(
-        f"[Sovereign] Code-hire job queued: {title[:80]}",
-        f"Job id: {job.id}\nKind: {kind}\n\n{brief[:4000]}\n\n"
-        "Status=queued — pick up with Hermes/Claude Code; do not auto-merge.",
+    body = (
+        f"Job id: {job.id}\nKind: {kind}\nExpand: {expand_meta.get('provider') or 'none'}\n\n"
+        f"{brief[:2500]}\n\n"
     )
-    return {"ok": True, "job_id": job.id, "status": "queued"}
+    if expanded:
+        body += f"--- Expanded plan ---\n{expanded[:3500]}\n\n"
+    body += "Status=queued — pick up with Hermes/Claude Code; do not auto-merge."
+    email_ford(f"[Sovereign] Code-hire job queued: {title[:80]}", body)
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "status": "queued",
+        "expand_provider": expand_meta.get("provider"),
+    }
 
 
 def ensure_default_goals(db) -> None:
@@ -805,6 +856,7 @@ def ensure_default_goals(db) -> None:
         ("g_ux_friction", "Convert UX friction into shipped improvements", 80),
         ("g_product_health", "Keep Array Operator healthy and truthful", 100),
         ("g_expansion", "Expand vendor/utility coverage from owner asks", 70),
+        ("g_independence", "Remain an independent mind: notes, memory, agenda", 95),
     ]
     for gid, title, pri in defaults:
         db.add(EaSovereignGoal(
@@ -812,6 +864,196 @@ def ensure_default_goals(db) -> None:
             detail_json="{}",
         ))
     db.flush()
+
+
+def write_note(
+    db,
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    provider: str | None = None,
+    tick_id: str | None = None,
+    meta: dict | None = None,
+) -> EaSovereignNote:
+    row = EaSovereignNote(
+        id=_id("note"),
+        kind=(kind or "thought")[:24],
+        title=(title or "")[:240],
+        body=(body or "")[:20000],
+        provider=(provider or None) and str(provider)[:24],
+        tick_id=tick_id,
+        meta_json=json.dumps(meta or {}, default=str)[:4000],
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def memory_get_all(db, *, limit: int = 80) -> list[dict]:
+    rows = db.execute(
+        select(EaSovereignMemory).order_by(EaSovereignMemory.updated_at.desc()).limit(limit)
+    ).scalars().all()
+    return [
+        {
+            "key": r.key,
+            "value": r.value,
+            "updated_at": r.updated_at.isoformat() + "Z" if r.updated_at else None,
+            "source": r.source,
+        }
+        for r in rows
+    ]
+
+
+def memory_set(db, key: str, value: str, *, source: str = "brain") -> None:
+    key = (key or "").strip()[:120]
+    if not key:
+        return
+    row = db.get(EaSovereignMemory, key)
+    if not row:
+        row = EaSovereignMemory(key=key, value="", source=source[:40])
+        db.add(row)
+    row.value = (value or "")[:8000]
+    row.updated_at = _now()
+    row.source = (source or "brain")[:40]
+    db.flush()
+
+
+def recent_notes(db, *, limit: int = 20) -> list[dict]:
+    rows = db.execute(
+        select(EaSovereignNote).order_by(EaSovereignNote.created_at.desc()).limit(limit)
+    ).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "kind": r.kind,
+            "title": r.title,
+            "body": (r.body or "")[:1500],
+            "provider": r.provider,
+            "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+def apply_agenda(db, agenda: list[dict]) -> int:
+    """Upsert goals from brain agenda list."""
+    n = 0
+    for item in agenda or []:
+        if not isinstance(item, dict):
+            continue
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        gid = (item.get("id") or _id("goal"))[:40]
+        row = db.get(EaSovereignGoal, gid)
+        if not row:
+            row = EaSovereignGoal(id=gid)
+            db.add(row)
+        row.title = title[:240]
+        row.priority = int(item.get("priority") or 50)
+        row.status = (item.get("status") or "open")[:16]
+        detail = {"note": item.get("note"), "from_brain": True}
+        row.detail_json = json.dumps(detail, default=str)[:8000]
+        row.updated_at = _now()
+        n += 1
+    if n:
+        db.flush()
+    return n
+
+
+def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict]:
+    """Run structured actions from the brain (capped)."""
+    out: list[dict] = []
+    budget = TICK_ACTION_BUDGET
+    for raw in actions or []:
+        if budget <= 0:
+            break
+        if not isinstance(raw, dict):
+            continue
+        atype = (raw.get("type") or "wait").strip().lower()
+        if atype in ("wait", "noop", "none", ""):
+            write_note(
+                db, kind="decision", title="wait",
+                body=str(raw.get("rationale") or "brain chose wait"),
+                tick_id=tick_id, provider="brain",
+            )
+            out.append({"kind": "wait", "ok": True, "rationale": raw.get("rationale")})
+            continue
+
+        res: dict[str, Any]
+        if atype == "utility_triage":
+            res = act_triage_utility_queue(db)
+        elif atype == "stage_feature":
+            res = act_stage_feature(
+                db,
+                text=raw.get("text") or raw.get("rationale") or "Sovereign-staged improvement",
+                tenant_id=raw.get("tenant_id"),
+            )
+        elif atype == "promote_feature" and raw.get("feature_id"):
+            res = act_promote_feature_building(db, int(raw["feature_id"]))
+        elif atype == "code_hire":
+            res = act_code_hire(
+                db,
+                title=raw.get("title") or "Sovereign code hire",
+                brief=raw.get("text") or raw.get("brief") or raw.get("rationale") or "",
+                kind=raw.get("kind") or "draft_pr_brief",
+            )
+        elif atype == "speak":
+            tids = raw.get("tenant_ids") or []
+            if not tids:
+                # Prefer open dogfood sessions
+                samples = []
+                try:
+                    dig = observe_product(db)
+                    samples = (dig.get("sessions") or {}).get("samples") or []
+                except Exception:
+                    samples = []
+                for s in samples:
+                    if s.get("tenant_id") and _may_speak_to_tenant(db, s["tenant_id"]):
+                        tids = [s["tenant_id"]]
+                        break
+            speak = (raw.get("text") or raw.get("speak") or "").strip()
+            if not speak or not tids:
+                res = {"ok": False, "denied": True, "denied_reason": "no speak/target"}
+            else:
+                results = [
+                    inject_session(
+                        db,
+                        tenant_id=tid,
+                        speak=speak,
+                        importance=int(raw.get("importance") or 65),
+                    )
+                    for tid in tids[:5]
+                ]
+                res = {"ok": any(r.get("ok") for r in results), "results": results}
+        elif atype == "email_ford":
+            ok = email_ford(
+                raw.get("subject") or "[Sovereign brain]",
+                raw.get("body") or raw.get("text") or raw.get("rationale") or "",
+            )
+            res = {"ok": ok}
+            audit(
+                db, capability="speak.email_ford", decision="speak",
+                rationale=(raw.get("subject") or "")[:200],
+                result="ok" if ok else "failed",
+                correlation_id=tick_id,
+            )
+        else:
+            res = {"ok": False, "denied": True, "denied_reason": f"unknown action {atype}"}
+
+        write_note(
+            db,
+            kind="decision",
+            title=f"action:{atype}",
+            body=json.dumps({"action": raw, "result": res}, default=str)[:8000],
+            tick_id=tick_id,
+            provider="brain",
+        )
+        out.append({"kind": atype, "result": res})
+        if res.get("ok") or res.get("triaged") or res.get("feature_id") or res.get("job_id"):
+            budget -= 1
+    return out
 
 
 # ── Decision engine ─────────────────────────────────────────────────────────
@@ -948,20 +1190,175 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
 
     with SessionLocal() as db:
         try:
+            # Ensure new note/memory tables exist (idempotent)
+            try:
+                from .db import engine
+                Base.metadata.create_all(
+                    bind=engine,
+                    tables=[
+                        EaSovereignState.__table__,
+                        EaSovereignAction.__table__,
+                        EaSovereignGoal.__table__,
+                        EaSovereignJob.__table__,
+                        EaSovereignMessageOutbox.__table__,
+                        EaSovereignNote.__table__,
+                        EaSovereignMemory.__table__,
+                    ],
+                )
+            except Exception:
+                pass
+
             ensure_default_goals(db)
             digests = observe_product(db) if sovereign_sense_enabled() else {}
-            decisions = decide_and_act(db, digests) if digests else []
-
             state = world_get(db)
+
+            goals_rows = db.execute(
+                select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+            ).scalars().all()
+            goals_payload = [
+                {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
+                for g in goals_rows
+            ]
+            notes_payload = recent_notes(db, limit=16)
+            mem_payload = memory_get_all(db, limit=40)
+            jobs_rows = db.execute(
+                select(EaSovereignJob).where(EaSovereignJob.status == "queued")
+                .order_by(EaSovereignJob.created_at.desc()).limit(10)
+            ).scalars().all()
+            jobs_payload = [
+                {"id": j.id, "title": j.title, "kind": j.kind, "status": j.status}
+                for j in jobs_rows
+            ]
+
+            brain_plan: dict[str, Any] = {}
+            decisions: list[dict] = []
+            brain_provider = None
+
+            # ── Independent mind: think (Grok → Claude fallback) ──────────
+            try:
+                from .energy_agent_sovereign_brain import think_cycle
+                brain_plan = think_cycle(
+                    digests=digests,
+                    world=state,
+                    goals=goals_payload,
+                    recent_notes=notes_payload,
+                    memories=mem_payload,
+                    open_jobs=jobs_payload,
+                )
+            except Exception as e:  # noqa: BLE001
+                brain_plan = {
+                    "ok": False,
+                    "error": str(e)[:400],
+                    "fallback_to_rules": True,
+                    "actions": [],
+                    "monologue": f"(think import/run failed) {e}",
+                }
+
+            brain_provider = brain_plan.get("provider")
+            monologue = brain_plan.get("monologue") or ""
+
+            # Persist self-notes + memory + agenda from the brain
+            for sn in brain_plan.get("self_notes") or []:
+                if not isinstance(sn, dict):
+                    continue
+                write_note(
+                    db,
+                    kind=str(sn.get("kind") or "thought")[:24],
+                    title=str(sn.get("title") or "note")[:240],
+                    body=str(sn.get("body") or "")[:20000],
+                    provider=brain_provider,
+                    tick_id=tick_id,
+                )
+            if monologue and not any(
+                (n.get("kind") == "thought" and monologue[:80] in (n.get("body") or ""))
+                for n in (brain_plan.get("self_notes") or [])
+                if isinstance(n, dict)
+            ):
+                write_note(
+                    db, kind="thought", title="monologue",
+                    body=monologue[:20000], provider=brain_provider, tick_id=tick_id,
+                )
+            for mw in brain_plan.get("memory_writes") or []:
+                if isinstance(mw, dict) and mw.get("key"):
+                    memory_set(db, str(mw["key"]), str(mw.get("value") or ""), source="brain")
+            if brain_plan.get("agenda"):
+                apply_agenda(db, brain_plan["agenda"])
+
+            # Ivory-tower observation log (structured digests snapshot)
+            write_note(
+                db,
+                kind="observation",
+                title=f"ivory tower · {reason}",
+                body=json.dumps({
+                    "queues": digests.get("queues"),
+                    "fleet_global": digests.get("fleet_global"),
+                    "ux": digests.get("ux"),
+                    "sessions_open": (digests.get("sessions") or {}).get("open_count"),
+                    "mood": brain_plan.get("mood"),
+                    "confidence": brain_plan.get("confidence"),
+                    "provider": brain_provider,
+                }, default=str)[:12000],
+                provider=brain_provider or "system",
+                tick_id=tick_id,
+            )
+
+            # Execute brain actions, or fall back to rule engine if brain failed
+            if brain_plan.get("ok") and (brain_plan.get("actions") or brain_plan.get("speak_product")):
+                actions = list(brain_plan.get("actions") or [])
+                if brain_plan.get("speak_product"):
+                    actions.append({
+                        "type": "speak",
+                        "text": brain_plan["speak_product"],
+                        "importance": 62,
+                        "rationale": "speak_product from monologue",
+                    })
+                decisions = execute_brain_actions(db, actions, tick_id=tick_id)
+                audit(
+                    db, capability="sense.product_health", decision="observe",
+                    rationale=f"brain think via {brain_provider}",
+                    targets={
+                        "provider": brain_provider,
+                        "model": brain_plan.get("model"),
+                        "mood": brain_plan.get("mood"),
+                        "n_actions": len(actions),
+                    },
+                    result="ok",
+                    correlation_id=tick_id,
+                )
+            else:
+                # Self-repair path: rule engine when both LLM providers fail
+                write_note(
+                    db, kind="system", title="fallback rules",
+                    body=str(brain_plan.get("error") or brain_plan.get("denied_reason") or "no brain plan"),
+                    provider="rules", tick_id=tick_id,
+                )
+                decisions = decide_and_act(db, digests) if digests else []
+                brain_provider = brain_provider or "rules"
+
+            # Memory: last tick meta for continuity
+            memory_set(
+                db, "last_tick",
+                json.dumps({
+                    "at": _now().isoformat() + "Z",
+                    "reason": reason,
+                    "provider": brain_provider,
+                    "mood": brain_plan.get("mood"),
+                    "decisions": [d.get("kind") for d in decisions][:8],
+                }, default=str),
+                source="system",
+            )
+
             state["health"] = digests.get("health") or state.get("health") or {}
             state["queues"] = digests.get("queues") or {}
             state["fleet_global"] = digests.get("fleet_global") or {}
             state["ux"] = digests.get("ux") or {}
             state["sessions"] = {
                 "open_count": (digests.get("sessions") or {}).get("open_count"),
-                # do not persist full tenant id list long-term in world — keep count only
             }
             state["last_tick_at"] = _now().isoformat() + "Z"
+            state["last_brain_provider"] = brain_provider
+            state["last_mood"] = brain_plan.get("mood")
+            state["last_monologue_excerpt"] = (monologue or "")[:500]
             state["last_decisions"] = [
                 {"kind": d.get("kind"), "ok": (d.get("result") or {}).get("ok", d.get("ok"))}
                 for d in decisions
@@ -982,6 +1379,15 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 "mode": "live",
                 "reason": reason,
                 "enabled": True,
+                "brain": {
+                    "provider": brain_provider,
+                    "model": brain_plan.get("model"),
+                    "mood": brain_plan.get("mood"),
+                    "confidence": brain_plan.get("confidence"),
+                    "ok": brain_plan.get("ok"),
+                    "fallback_to_rules": brain_plan.get("fallback_to_rules") or brain_provider == "rules",
+                    "monologue_excerpt": (monologue or "")[:400],
+                },
                 "digests": {
                     "queues": digests.get("queues"),
                     "fleet_global": digests.get("fleet_global"),
@@ -1135,9 +1541,14 @@ def sovereign_state(authorization: str | None = Header(default=None)):
     _require_sovereign_or_admin(authorization)
     world = _default_world()
     jobs, goals, actions = [], [], []
+    notes_payload: list[dict] = []
+    mem_payload: list[dict] = []
+    try:
+        from . import energy_agent_sovereign_brain as brain_mod
+    except Exception:
+        brain_mod = None  # type: ignore
     try:
         with SessionLocal() as db:
-            # Ensure tables exist (create_all is idempotent; cheap if already there)
             try:
                 from .db import engine
                 Base.metadata.create_all(
@@ -1148,6 +1559,8 @@ def sovereign_state(authorization: str | None = Header(default=None)):
                         EaSovereignGoal.__table__,
                         EaSovereignJob.__table__,
                         EaSovereignMessageOutbox.__table__,
+                        EaSovereignNote.__table__,
+                        EaSovereignMemory.__table__,
                     ],
                 )
             except Exception:
@@ -1163,6 +1576,8 @@ def sovereign_state(authorization: str | None = Header(default=None)):
                 actions = db.execute(
                     select(EaSovereignAction).order_by(EaSovereignAction.created_at.desc()).limit(30)
                 ).scalars().all()
+                notes_payload = recent_notes(db, limit=12)
+                mem_payload = memory_get_all(db, limit=30)
             except Exception:
                 pass
     except Exception as e:  # noqa: BLE001
@@ -1204,7 +1619,18 @@ def sovereign_state(authorization: str | None = Header(default=None)):
             }
             for a in actions
         ],
+        "notes_recent": notes_payload,
+        "memory": mem_payload,
         "tenant_mind": "api/energy_agent_mind.py",
+        "brain": {
+            "module": "api/energy_agent_sovereign_brain.py",
+            "primary": brain_mod.primary_provider() if brain_mod else "grok",
+            "fallback": brain_mod.fallback_provider() if brain_mod else "claude",
+            "enabled": brain_mod.brain_enabled() if brain_mod else False,
+            "last_provider": world.get("last_brain_provider"),
+            "last_mood": world.get("last_mood"),
+            "monologue_excerpt": world.get("last_monologue_excerpt"),
+        },
     }
 
 
@@ -1312,11 +1738,74 @@ def sovereign_goals_upsert(body: GoalIn, authorization: str | None = Header(defa
 def sovereign_mode(body: ModeIn, authorization: str | None = Header(default=None)):
     """Report mode; runtime flags remain env-based."""
     _require_sovereign_or_admin(authorization)
+    from . import energy_agent_sovereign_brain as brain
     return {
         "ok": True,
         "enabled": sovereign_enabled(),
         "sense": sovereign_sense_enabled(),
         "speak": sovereign_speak_enabled(),
         "act": sovereign_act_enabled(),
+        "brain_enabled": brain.brain_enabled(),
+        "brain_primary": brain.primary_provider(),
+        "brain_fallback": brain.fallback_provider(),
         "note": body.note or "Toggle via Railway env SOVEREIGN_* flags",
     }
+
+
+@router.get("/admin/sovereign/notes")
+def sovereign_notes(
+    authorization: str | None = Header(default=None),
+    limit: int = Query(default=40, ge=1, le=200),
+    kind: str | None = Query(default=None),
+):
+    """Private internal dialogue (ivory-tower monologue + decisions)."""
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        q = select(EaSovereignNote).order_by(EaSovereignNote.created_at.desc()).limit(limit)
+        if kind:
+            q = select(EaSovereignNote).where(EaSovereignNote.kind == kind).order_by(
+                EaSovereignNote.created_at.desc()
+            ).limit(limit)
+        rows = db.execute(q).scalars().all()
+        return {
+            "notes": [
+                {
+                    "id": r.id,
+                    "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                    "kind": r.kind,
+                    "title": r.title,
+                    "body": r.body,
+                    "provider": r.provider,
+                    "tick_id": r.tick_id,
+                }
+                for r in rows
+            ]
+        }
+
+
+@router.get("/admin/sovereign/memory")
+def sovereign_memory(authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        return {"memory": memory_get_all(db, limit=100)}
+
+
+class MemoryIn(BaseModel):
+    key: str
+    value: str
+
+
+@router.post("/admin/sovereign/memory")
+def sovereign_memory_set(body: MemoryIn, authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        memory_set(db, body.key, body.value, source="admin")
+        db.commit()
+        return {"ok": True, "key": body.key}
+
+
+@router.post("/admin/sovereign/think")
+def sovereign_think(authorization: str | None = Header(default=None)):
+    """Force a full ivory-tower think cycle (same as tick with brain)."""
+    _require_sovereign_or_admin(authorization)
+    return sovereign_tick(reason="admin_think")

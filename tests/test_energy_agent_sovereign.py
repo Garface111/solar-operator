@@ -1,6 +1,7 @@
 """Sovereign Mind — full runtime tests (observe, audit, gates, admin API)."""
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -207,3 +208,77 @@ def test_admin_api(monkeypatch):
     assert body["enabled"] is True
     assert "capabilities" in body
     assert "act.money_identity" in body["capabilities"]
+    assert "brain" in body
+
+
+def test_brain_think_with_fallback(monkeypatch):
+    """Primary Grok fails → Claude succeeds; monologue + notes persisted."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_BRAIN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_BRAIN_PRIMARY", "grok")
+    monkeypatch.setenv("SOVEREIGN_BRAIN_FALLBACK", "claude")
+    monkeypatch.setenv("SOVEREIGN_SENSE_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_ACT_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_SPEAK_ENABLED", "0")
+    monkeypatch.setenv("XAI_API_KEY", "fake-xai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-ant")
+
+    import api.energy_agent_sovereign as sov
+    import api.energy_agent_sovereign_brain as brain
+    from api.models import Base
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(sov, "SessionLocal", Session)
+    monkeypatch.setattr(sov, "email_ford", lambda *a, **k: True)
+
+    def boom(*a, **k):
+        raise RuntimeError("grok down")
+
+    def ok_claude(messages, temperature=0.35):
+        return {
+            "content": json.dumps({
+                "monologue": "Ivory tower: queues look busy; I will triage utilities.",
+                "observations": ["utility backlog"],
+                "agenda": [{"id": "g_utility_backlog", "title": "Clear utility backlog", "priority": 95, "status": "open"}],
+                "self_notes": [{"kind": "observation", "title": "queue", "body": "new utilities waiting"}],
+                "memory_writes": [{"key": "utility_pressure", "value": "elevated"}],
+                "actions": [{"type": "utility_triage", "rationale": "clear backlog"}],
+                "speak_product": None,
+                "mood": "watchful",
+                "confidence": 0.7,
+            }),
+            "usage": {},
+            "provider": "claude",
+            "model": "claude-sonnet-4-5",
+        }
+
+    monkeypatch.setattr(brain, "call_grok", boom)
+    monkeypatch.setattr(brain, "call_claude", ok_claude)
+
+    with Session() as db:
+        from api.utility_requests import UtilityRequest
+        db.add(UtilityRequest(name="Test Co-op", product="array_operator", status="new"))
+        db.commit()
+
+    out = sov.sovereign_tick(reason="unit_brain")
+    assert out["ok"] is True
+    assert out.get("brain", {}).get("provider") == "claude"
+    assert out["brain"].get("fallback_to_rules") is not True
+
+    with Session() as db:
+        notes = db.query(sov.EaSovereignNote).all()
+        assert len(notes) >= 1
+        assert any("Ivory tower" in (n.body or "") or n.kind == "thought" for n in notes)
+        mem = db.get(sov.EaSovereignMemory, "utility_pressure")
+        assert mem is not None
+        assert "elevated" in (mem.value or "")
+
+
+# json import for brain test
+import json  # noqa: E402
