@@ -1,6 +1,6 @@
-# Central Maine Power (CMP) adapter plan
+# Central Main Power adapter plan
 
-- Portal family: unknown (no SmartHub evidence in providers/*.csv or smarthub.py registry).
-- Next: capture real HAR/login flow before any adapter code.
-- Do not promote to registry or mark 'added'.
-- Status remains 'researching' per utility_requests.py lifecycle.
+- Research confirms bespoke (non-SmartHub) portal (no smarthub.coop host evidence).
+- No fabricated endpoints or adapter code.
+- Next: capture real HAR via operator login for analysis before any adapter work.
+- Status remains 'researching' until evidence obtained. Do not promote to registry or mark 'added'.
