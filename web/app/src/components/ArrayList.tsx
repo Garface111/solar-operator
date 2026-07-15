@@ -12,7 +12,6 @@ import { DEFAULT_FUEL, type FuelType } from "../lib/fuel";
 import {
   type ArrayRow as ArrayRowT,
   type Provider,
-  type SolarEdgeSite,
   listArrays,
   createArray,
   updateArray,
@@ -22,10 +21,8 @@ import {
   removeUtilityAccount,
   listProviders,
   uploadDailyCsv,
-  setupSolarEdge,
-  previewSolarEdge,
-  disconnectSolarEdge,
 } from "../lib/api";
+import { notifyFleetChanged } from "../lib/fleetEvents";
 
 interface Props {
   clientId: number;
@@ -118,7 +115,7 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
       onCountChange?.(next.length);
       return next;
     });
-    window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+    notifyFleetChanged("array-edit");
   }
 
   function removeArrayLocal(id: number) {
@@ -128,7 +125,7 @@ export function ArrayList({ clientId, refreshSignal, onCountChange, onUndo, reve
       return next;
     });
     setSelectedIds((s) => { const n = new Set(s); n.delete(id); return n; });
-    window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+    notifyFleetChanged("array-delete");
   }
 
   function toggleSelect(id: number, event?: React.MouseEvent) {
@@ -428,23 +425,13 @@ function ArrayRow({
   const [uploadedDays, setUploadedDays] = useState<number | null>(null);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
 
-  // SolarEdge modal state
-  const [seModalOpen, setSeModalOpen] = useState(false);
-  const [seApiKey, setSeApiKey] = useState("");
-  const [seSaving, setSeSaving] = useState(false);
-  const [seSites, setSeSites] = useState<SolarEdgeSite[] | null>(null);
-  const [seSelectedSiteId, setSeSelectedSiteId] = useState<number | "">("");
-  const [sePreview, setSePreview] = useState<{ days_pulled: number; sample: { day: string; kwh: number }[] } | null>(null);
-  const [seConnected, setSeConnected] = useState(array.solaredge_connected);
-  const [seDisconnecting, setSeDisconnecting] = useState(false);
-
   async function save(patch: Partial<ArrayRowT>) {
     const updated = await updateArray(clientId, array.id, patch as any);
     onChange(updated);
     // Bruce Jun 6: inline NEPOOL-ID save didn't clear the "Add NEPOOL ID" banner
     // until refresh. ClientsSection listens for so:arrays-changed to refetch
     // /nepool-stats; bulk-delete + merge + spreadsheet-assign already fire it.
-    window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+    notifyFleetChanged("array-edit");
   }
 
   async function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -479,66 +466,12 @@ function ArrayRow({
       const res = await deleteArray(clientId, array.id);
       onDelete(array.id, res.undo_token, array.name);
       setConfirmDelete(false);
+      // NEPOOL is utility-bill only — keep sandbox + account counts in sync.
+      notifyFleetChanged("array-delete");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't delete array");
       setDeleting(false);
       setConfirmDelete(false);
-    }
-  }
-
-  function openSeModal() {
-    setSeApiKey("");
-    setSeSites(null);
-    setSeSelectedSiteId("");
-    setSePreview(null);
-    setSeModalOpen(true);
-  }
-
-  async function handleSeConnect() {
-    if (seSaving) return;
-    const key = seApiKey.trim();
-    if (!key) { toast.error("Paste your SolarEdge API key first"); return; }
-    setSeSaving(true);
-    try {
-      const siteId = seSelectedSiteId !== "" ? (seSelectedSiteId as number) : undefined;
-      const result = await setupSolarEdge(clientId, array.id, key, siteId);
-      if (result.needs_site_selection) {
-        if (result.sites && result.sites.length > 0) {
-          setSeSites(result.sites);
-          setSeSelectedSiteId(result.sites[0].site_id);
-        } else {
-          setSeSites([]);
-        }
-        return;
-      }
-      // Connected — fire preview
-      setSeConnected(true);
-      toast.success(`Connected to SolarEdge site "${result.site_name}" (${result.peak_kw} kW)`);
-      try {
-        const preview = await previewSolarEdge(clientId, array.id);
-        setSePreview(preview);
-      } catch {
-        // Preview failure is non-fatal
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "SolarEdge connection failed");
-    } finally {
-      setSeSaving(false);
-    }
-  }
-
-  async function handleSeDisconnect() {
-    if (seDisconnecting) return;
-    setSeDisconnecting(true);
-    try {
-      await disconnectSolarEdge(clientId, array.id);
-      setSeConnected(false);
-      setSeModalOpen(false);
-      toast.success("SolarEdge disconnected. Historical data is preserved.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't disconnect SolarEdge");
-    } finally {
-      setSeDisconnecting(false);
     }
   }
 
@@ -610,7 +543,7 @@ function ArrayRow({
             onMerged={() => {
               // Signal the list to refresh so the merged-away row
               // disappears + UA counts update.
-              window.dispatchEvent(new CustomEvent("so:arrays-changed"));
+              notifyFleetChanged("array-edit");
             }}
           />
 
@@ -675,14 +608,7 @@ function ArrayRow({
                 className="hidden"
                 onChange={handleCsvUpload}
               />
-              <button
-                type="button"
-                onClick={openSeModal}
-                className="rounded text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-1"
-                title={seConnected ? "SolarEdge connected — manage connection" : "Connect SolarEdge for automatic daily data"}
-              >
-                {seConnected ? "📡 SolarEdge connected" : "Connect SolarEdge"}
-              </button>
+              {/* NEPOOL Operator is utility-bill only — no inverter-vendor connect UI. */}
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
@@ -718,117 +644,8 @@ function ArrayRow({
           <span className="font-medium text-zinc-800">{array.name}</span> will be
           removed along with its {array.accounts.length} linked utility account
           {array.accounts.length === 1 ? "" : "s"}.{" "}
-          <span className="font-medium text-zinc-800">You'll have 5 minutes to undo.</span>
+          <span className="font-medium text-zinc-800">You&apos;ll have 5 minutes to undo.</span>
         </p>
-      </Modal>
-
-      {/* SolarEdge connect modal */}
-      <Modal
-        open={seModalOpen}
-        onClose={() => !seSaving && setSeModalOpen(false)}
-        title={seConnected ? "SolarEdge connection" : "Connect SolarEdge"}
-        footer={
-          seConnected ? (
-            <>
-              <Button variant="ghost" onClick={() => setSeModalOpen(false)} disabled={seDisconnecting}>
-                Close
-              </Button>
-              <Button variant="danger" onClick={handleSeDisconnect} disabled={seDisconnecting}>
-                {seDisconnecting ? <><Spinner /> Disconnecting…</> : "Disconnect"}
-              </Button>
-            </>
-          ) : seSites !== null ? (
-            <>
-              <Button variant="ghost" onClick={() => setSeSites(null)} disabled={seSaving}>
-                Back
-              </Button>
-              <Button variant="primary" onClick={handleSeConnect} disabled={seSaving || seSelectedSiteId === ""}>
-                {seSaving ? <><Spinner /> Connecting…</> : "Connect this site"}
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="ghost" onClick={() => setSeModalOpen(false)} disabled={seSaving}>
-                Cancel
-              </Button>
-              <Button variant="primary" onClick={handleSeConnect} disabled={seSaving || !seApiKey.trim()}>
-                {seSaving ? <><Spinner /> Connecting…</> : "Connect"}
-              </Button>
-            </>
-          )
-        }
-      >
-        {seConnected ? (
-          <div className="space-y-3">
-            <p>
-              This array is connected to SolarEdge site ID{" "}
-              <span className="font-medium text-zinc-900">{array.solaredge_site_id}</span>.
-              Daily generation is pulled automatically at 03:00 UTC.
-            </p>
-            {sePreview && (
-              <p className="text-xs text-zinc-500">
-                Last pull: {sePreview.days_pulled} days ·{" "}
-                {sePreview.sample.slice(0, 3).map((s) => `${s.day}: ${s.kwh} kWh`).join(", ")}
-              </p>
-            )}
-            <p className="text-xs text-zinc-400">
-              Disconnecting removes the API key but keeps all historical data.
-            </p>
-          </div>
-        ) : seSites !== null ? (
-          <div className="space-y-3">
-            {seSites.length === 0 ? (
-              <>
-                <p>
-                  Your key appears to be a site-level key. Enter the SolarEdge site ID manually:
-                </p>
-                <Input
-                  type="number"
-                  placeholder="e.g. 1234567"
-                  value={seSelectedSiteId === "" ? "" : String(seSelectedSiteId)}
-                  onChange={(e) => setSeSelectedSiteId(e.target.value ? Number(e.target.value) : "")}
-                  autoFocus
-                />
-              </>
-            ) : (
-              <>
-                <p>Your account has {seSites.length} sites. Pick the one for this array:</p>
-                <select
-                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-                  value={seSelectedSiteId}
-                  onChange={(e) => setSeSelectedSiteId(Number(e.target.value))}
-                >
-                  {seSites.map((s) => (
-                    <option key={s.site_id} value={s.site_id}>
-                      {s.name} ({s.peak_kw} kW) — {s.address || "no address"}
-                    </option>
-                  ))}
-                </select>
-              </>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <p>
-              Paste your SolarEdge API key. You can generate it in the SolarEdge portal
-              under <span className="font-medium">Admin → Site Access</span> (site key) or{" "}
-              <span className="font-medium">Account Settings</span> (account key covering all sites).
-            </p>
-            <Input
-              type="text"
-              placeholder="Paste API key here"
-              value={seApiKey}
-              onChange={(e) => setSeApiKey(e.target.value)}
-              autoFocus
-            />
-            {sePreview && (
-              <p className="rounded-lg bg-green-50 px-3 py-2 text-xs text-green-800">
-                Pulled {sePreview.days_pulled} days ·{" "}
-                {sePreview.sample.slice(0, 3).map((s) => `${s.day}: ${s.kwh} kWh`).join(", ")}
-              </p>
-            )}
-          </div>
-        )}
       </Modal>
     </div>
   );

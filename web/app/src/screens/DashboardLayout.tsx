@@ -71,6 +71,35 @@ export default function DashboardLayout({ onSignOut }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadKey]);
 
+  // Keep Master Account counts (clients / utility accounts / plan) in sync when
+  // the sandbox or table mutates the fleet — no full-page refresh required.
+  useEffect(() => {
+    let cancelled = false;
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const refresh = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        getAccount()
+          .then((a) => {
+            if (!cancelled) setAccount(a);
+          })
+          .catch(() => {
+            /* leave existing account snapshot; non-fatal */
+          });
+      }, 200);
+    };
+    window.addEventListener("so:fleet-changed", refresh);
+    window.addEventListener("so:sandbox:mutated", refresh);
+    window.addEventListener("so:arrays-changed", refresh);
+    return () => {
+      cancelled = true;
+      if (debounce) clearTimeout(debounce);
+      window.removeEventListener("so:fleet-changed", refresh);
+      window.removeEventListener("so:sandbox:mutated", refresh);
+      window.removeEventListener("so:arrays-changed", refresh);
+    };
+  }, []);
+
   function patchAccount(patch: Partial<Account>) {
     setAccount((a) => (a ? { ...a, ...patch } : a));
   }
