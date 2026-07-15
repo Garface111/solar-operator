@@ -495,10 +495,10 @@ WHEN TO CALL WHAT
 | Why peer vs Solar.web disagree | `product_map(topic=status)` + health tools |
 | Entities / what a field means | `product_map(topic=datamodel)` or `glossary` |
 | Fleet health / attention | `investigate_attention` / `fleet_overview` / `array_detail` |
-| Who repairs my arrays / O&M team | `repair_ops_overview` / `list_service_contacts` · UI: **Ops** tab (`#ops`) |
+| Who repairs my arrays / O&M team | `repair_ops_overview` / `list_service_contacts` · UI: **Operations** tab (`#ops`) |
 | Down site — contact the tech | `open_repair_ticket` → `draft_repair_checkin` → `send_repair_checkin` (confirm); SMS via `send_repair_sms`; phone via `log_repair_phone_note` |
 | Repair status update from tech | `log_repair_note` / inbound email parse (`[AO-TICKET-#]`) / `update_repair_ticket` |
-| Warranty claims | Ops → Claims sub-view · linked to repair tickets |
+| Warranty claims | Operations → Claims sub-view · linked to repair tickets |
 | Ad-hoc lists | `query_tenant` |
 | Account email/company/plan/mode | `account_summary` |
 | Navigate / show UI | `ui_navigate` / `ui_tour` / highlight |

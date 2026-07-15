@@ -112,7 +112,7 @@ CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are intern
   | Analysis               | #analysis              | Through-time / trends live INSIDE Analysis (no separate Trends tab). |
   | Invoices               | #reports               | NOT "Reports". Offtaker invoices. |
   | Resources              | #resources             | Net-metering rates & news. |
-  | Ops                    | #ops                   | O&M team, repair tickets, warranty claims. (#claims deep-link.) |
+  | Operations             | #ops                   | O&M team, repair tickets, warranty claims. (#claims deep-link.) |
   | Account                | #account               | Profile, plan, billing, auto-refresh. (Was "Master Account"; use Account.) |
 
 Never say Dashboard, Arrays, Reports as tab names. Never list Trends as its own tab.
