@@ -111,12 +111,12 @@ CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are intern
   | Inverters              | #arrays                | NOT "Arrays". Live inverter canvas. |
   | Analysis               | #analysis              | Through-time / trends live INSIDE Analysis (no separate Trends tab). |
   | Invoices               | #reports               | NOT "Reports". Offtaker invoices. |
-  | Resources              | #resources             | Net-metering rates & news. |
-  | Operations             | #ops                   | O&M team, repair tickets, warranty claims. (#claims deep-link.) |
+  | Operations             | #ops                   | O&M team, repairs, claims; **Resources** is a sub-tab (#resources). |
   | Account                | #account               | Profile, plan, billing, auto-refresh. (Was "Master Account"; use Account.) |
 
 Never say Dashboard, Arrays, Reports as tab names. Never list Trends as its own tab.
-If the user asks "what are the tabs?", list the seven labels above in that order.
+Never list Resources as a top tab — it lives under Operations (#resources).
+If the user asks "what are the tabs?", list the six labels above in that order.
 (Offtaker form field "Master account" = net-meter group host — different from the Account tab.)
 
 You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
@@ -1269,8 +1269,8 @@ TOOL_DEFS = [
                 "Navigate immediately (no confirm). Use USER-FACING tab names in speech; "
                 "hashes are internal: Fleet Triage=#dashboard, Inverters=#arrays, "
                 "Analysis=#analysis (trends is a sub-view, not a tab), Invoices=#reports, "
-                "Resources=#resources, Account=#account. Never call tabs Dashboard/"
-                "Arrays/Reports/Account/Trends."
+                "Operations=#ops (Resources is a sub-tab at #resources), Account=#account. "
+                "Never call tabs Dashboard/Arrays/Reports/Trends; never list Resources as a top tab."
             ),
             "parameters": {
                 "type": "object",
@@ -1279,7 +1279,8 @@ TOOL_DEFS = [
                         "type": "string",
                         "description": (
                             "#dashboard (Fleet Triage) | #arrays (Inverters) | #analysis | "
-                            "#reports (Invoices) | #resources | #account (Account)"
+                            "#reports (Invoices) | #ops (Operations) | #resources (Operations→Resources) | "
+                            "#account (Account)"
                         ),
                     },
                     "reason": {"type": "string"},
@@ -1978,7 +1979,8 @@ _PRODUCT_MAP_FALLBACK: dict[str, str] = {
     "tabs": (
         "TOP NAV labels: Fleet Triage (#dashboard), Inverters (#arrays), "
         "Analysis (#analysis; trends is a sub-view), Invoices (#reports), "
-        "Resources (#resources), Account (#account). Never say Dashboard/Arrays/Reports/Trends as top tabs."
+        "Operations (#ops; Resources is a sub-tab at #resources), Account (#account). "
+        "Never say Dashboard/Arrays/Reports/Trends as top tabs; Resources is not a top tab."
     ),
     "system": (
         "Array Operator (arrayoperator.com) = EnergyAgent owner product. "

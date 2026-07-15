@@ -26,10 +26,10 @@ TOP NAV — use EXACTLY these labels when speaking to the owner (hashes are inte
 | Inverters | `#arrays` | Live inverter canvas; **Sandbox** (spatial fleet tree) + **Spreadsheet** sub-views (NOT “Arrays”). This is the default landing tab. |
 | Analysis | `#analysis` | Fleet NOC: production vs expected, sites, health, hardware. **Trends / through-time is a sub-view** (`#trends`), NOT a separate top tab |
 | Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”) |
-| Resources | `#resources` | VT/New England net-metering rates, rate cases, news |
+| Operations | `#ops` | O&M team, repairs, claims; **Resources** is a sub-tab (`#resources` — rates, news, REC context) |
 | Account | `#account` | Profile, plan/card, Auto-refresh vault (was “Master Account”; use **Account**) |
 
-Never say Dashboard, Arrays, Reports, or Trends as top-tab names. `#trends` routes into Analysis as a sub-view only. The offtaker invoice form field **Master account** is a different concept (net-meter group host — see `offtakers`).
+Never say Dashboard, Arrays, Reports, or Trends as top-tab names. `#trends` routes into Analysis as a sub-view only. **Resources is not a top tab** — it lives under Operations (`#resources`). The offtaker invoice form field **Master account** is a different concept (net-meter group host — see `offtakers`).
 
 APP SHELL (how the SPA works, for accurate “where do I click” answers):
 - Static frontend; scripts load in order (`session-tabscope.js` first, then `fleet-store.js`, `app.js`, `sandbox.js`, view modules, `energy-agent.js`). The router lives in `sandbox.js`: `hashchange` → toggles the matching panel + lazy-loads that view. Empty/unknown hash → `#arrays`.
