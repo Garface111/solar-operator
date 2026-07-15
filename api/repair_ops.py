@@ -84,12 +84,75 @@ def serialize_contact(c: ServiceContact) -> dict:
     }
 
 
+# Pipeline stages for the Repairs Command Center (owner-facing battle cards).
+# Flow: detect → draft outreach → coordinate with tech → verify → close.
+PIPELINE_STAGES = (
+    "detected",
+    "draft_ready",
+    "coordinating",
+    "scheduled",
+    "in_progress",
+    "closed",
+)
+PIPELINE_LABELS = {
+    "detected": "Detected",
+    "draft_ready": "Outreach ready",
+    "coordinating": "Coordinating",
+    "scheduled": "Visit scheduled",
+    "in_progress": "Repair underway",
+    "closed": "Closed",
+}
+
+
+def pipeline_stage(t: RepairTicket) -> str:
+    """Map ticket status + check-in history onto the owner pipeline."""
+    st = (t.status or "open").lower()
+    if st in TERMINAL_STATUSES:
+        return "closed"
+    if st == "in_progress":
+        return "in_progress"
+    if st == "scheduled":
+        return "scheduled"
+    if st == "waiting_reply" or (t.checkin_count or 0) > 0:
+        return "coordinating"
+    draft = t.draft_checkin or {}
+    if draft.get("body") or draft.get("subject"):
+        return "draft_ready"
+    return "detected"
+
+
+def pipeline_next_action(t: RepairTicket, contact: ServiceContact | None = None) -> str:
+    stage = pipeline_stage(t)
+    if stage == "closed":
+        return "Case closed"
+    if stage == "detected":
+        return "Add a service contact so EnergyAgent can draft outreach"
+    if stage == "draft_ready":
+        who = (contact.name if contact else None) or "your repair team"
+        return f"Approve & send outreach to {who}"
+    if stage == "coordinating":
+        return "Waiting on the repair team — log a reply or follow up"
+    if stage == "scheduled":
+        return "Visit scheduled — EnergyAgent will verify when hardware recovers"
+    if stage == "in_progress":
+        return "Repair underway — watching live vendor data for recovery"
+    return "Review case"
+
+
 def serialize_ticket(
     t: RepairTicket,
     *,
     contact: ServiceContact | None = None,
     claim: dict | None = None,
 ) -> dict:
+    stage = pipeline_stage(t)
+    evidence = t.evidence or {}
+    diagnosis = (
+        evidence.get("diagnosis")
+        or evidence.get("why")
+        or t.description
+        or t.title
+    )
     return {
         "id": t.id,
         "array_id": t.array_id,
@@ -104,10 +167,18 @@ def serialize_ticket(
         "fail_type": t.fail_type,
         "title": t.title,
         "description": t.description,
+        "diagnosis": diagnosis,
         "status": t.status,
         "severity": t.severity,
         "source": t.source,
-        "evidence": t.evidence or {},
+        "pipeline_stage": stage,
+        "pipeline_label": PIPELINE_LABELS.get(stage, stage),
+        "pipeline_index": PIPELINE_STAGES.index(stage) if stage in PIPELINE_STAGES else 0,
+        "pipeline_stages": [
+            {"id": s, "label": PIPELINE_LABELS[s]} for s in PIPELINE_STAGES
+        ],
+        "next_action": pipeline_next_action(t, contact),
+        "evidence": evidence,
         "draft_checkin": t.draft_checkin or {},
         "next_checkin_at": _iso(t.next_checkin_at),
         "last_checkin_at": _iso(t.last_checkin_at),
@@ -130,6 +201,133 @@ def serialize_ticket(
             if contact and (contact.phone or "").strip() else None
         ),
     }
+
+
+def recent_agent_activity(
+    db,
+    tenant_id: str,
+    tickets_by_id: dict[int, RepairTicket] | None = None,
+    *,
+    limit: int = 50,
+) -> list[dict]:
+    """Running log of what EnergyAgent / the owner has done across repair cases."""
+    rows = list(
+        db.execute(
+            select(RepairCheckIn)
+            .where(RepairCheckIn.tenant_id == tenant_id)
+            .order_by(RepairCheckIn.created_at.desc())
+            .limit(limit)
+        ).scalars().all()
+    )
+    if tickets_by_id is None:
+        tids = {r.ticket_id for r in rows if r.ticket_id}
+        tickets_by_id = {}
+        if tids:
+            for t in db.execute(
+                select(RepairTicket).where(RepairTicket.id.in_(tids))
+            ).scalars().all():
+                tickets_by_id[t.id] = t
+
+    out: list[dict] = []
+    for c in rows:
+        t = tickets_by_id.get(c.ticket_id) if c.ticket_id else None
+        site = (t.site_name if t else None) or ""
+        inv = (t.inv_name if t else None) or (t.serial if t else None) or ""
+        channel = (c.channel or "email").lower()
+        direction = (c.direction or "outbound").lower()
+        via = (c.via or "agent").lower()
+        if direction == "inbound":
+            verb = "Repair team replied"
+        elif channel in ("phone_note", "phone"):
+            verb = "Phone note logged"
+        elif channel == "sms":
+            verb = "SMS logged"
+        elif direction == "note" or channel == "internal":
+            verb = "Internal note"
+        elif via == "auto":
+            verb = "Auto check-in sent"
+        elif via == "owner":
+            verb = "You approved outreach"
+        else:
+            verb = "Outreach sent"
+        who = c.sent_to or ""
+        summary = verb
+        if site:
+            summary += f" · {site}"
+        if inv:
+            summary += f" / {inv}"
+        if who and direction != "inbound":
+            summary += f" → {who}"
+        out.append({
+            "id": c.id,
+            "ticket_id": c.ticket_id,
+            "at": _iso(c.created_at),
+            "verb": verb,
+            "summary": summary,
+            "channel": channel,
+            "direction": direction,
+            "via": via,
+            "body_preview": (c.body or "")[:240],
+            "site_name": site or None,
+            "sent_ok": bool(c.sent_ok),
+        })
+
+    recent_tickets = list(
+        db.execute(
+            select(RepairTicket)
+            .where(RepairTicket.tenant_id == tenant_id)
+            .order_by(RepairTicket.updated_at.desc())
+            .limit(30)
+        ).scalars().all()
+    )
+    for t in recent_tickets:
+        site = t.site_name or "site"
+        inv = t.inv_name or t.serial or "inverter"
+        if t.opened_at and t.source in ("auto", "agent"):
+            out.append({
+                "id": f"open-{t.id}",
+                "ticket_id": t.id,
+                "at": _iso(t.opened_at),
+                "verb": "Issue detected",
+                "summary": f"Issue detected · {site} / {inv} ({t.fail_type or 'fault'})",
+                "channel": "system",
+                "direction": "note",
+                "via": t.source or "auto",
+                "body_preview": t.title or "",
+                "site_name": t.site_name,
+                "sent_ok": True,
+            })
+        if t.resolved_at:
+            out.append({
+                "id": f"resolve-{t.id}",
+                "ticket_id": t.id,
+                "at": _iso(t.resolved_at),
+                "verb": "Case closed",
+                "summary": f"Case closed · {site} / {inv} — repair verified or marked done",
+                "channel": "system",
+                "direction": "note",
+                "via": "agent",
+                "body_preview": (t.tech_note or "")[:240],
+                "site_name": t.site_name,
+                "sent_ok": True,
+            })
+        elif t.cleared_at:
+            out.append({
+                "id": f"clear-{t.id}",
+                "ticket_id": t.id,
+                "at": _iso(t.cleared_at),
+                "verb": "Auto-cleared",
+                "summary": f"Auto-cleared · {site} / {inv} — hardware recovered before outreach",
+                "channel": "system",
+                "direction": "note",
+                "via": "auto",
+                "body_preview": "",
+                "site_name": t.site_name,
+                "sent_ok": True,
+            })
+
+    out.sort(key=lambda x: x.get("at") or "", reverse=True)
+    return out[:limit]
 
 
 def serialize_checkin(c: RepairCheckIn) -> dict:
@@ -1373,15 +1571,26 @@ def ops_overview(
             }
 
     ticket_rows = []
+    tickets_by_id: dict[int, RepairTicket] = {}
     for t in tickets:
+        tickets_by_id[t.id] = t
         if t.status == "cleared":
             continue
+        contact = contact_by_id.get(t.contact_id) if t.contact_id else None
+        # Ensure a draft is always available for Approve & send on battle cards
+        if t.status in ACTIVE_TICKET_STATUSES and not (t.draft_checkin or {}).get("body"):
+            try:
+                t.draft_checkin = build_checkin_draft(t, tenant, contact)
+            except Exception:
+                pass
         claim = claims_by_id.get(t.warranty_claim_id) if t.warranty_claim_id else None
         ticket_rows.append(serialize_ticket(
             t,
-            contact=contact_by_id.get(t.contact_id) if t.contact_id else None,
+            contact=contact,
             claim=claim,
         ))
+
+    activity = recent_agent_activity(db, tenant.id, tickets_by_id, limit=50)
 
     # Warranty claims rollup — one query for claims + one for linked tickets
     claims_payload = {"claims": [], "summary": {}}
@@ -1422,6 +1631,12 @@ def ops_overview(
     except Exception as exc:
         log.debug("ops overview claims rollup skipped: %s", exc)
 
+    active_rows = [r for r in ticket_rows if r.get("status") in ACTIVE_TICKET_STATUSES]
+    closed_rows = [
+        r for r in ticket_rows
+        if r.get("status") in ("resolved", "cancelled")
+    ][:12]
+
     return {
         "settings": {
             "checkin_mode": effective_checkin_mode(tenant),
@@ -1434,6 +1649,12 @@ def ops_overview(
         "assignments": assigns,
         "arrays": arrays,
         "tickets": ticket_rows,
+        "active_cases": active_rows,
+        "recently_closed": closed_rows,
+        "activity": activity,
+        "pipeline_stages": [
+            {"id": s, "label": PIPELINE_LABELS[s]} for s in PIPELINE_STAGES
+        ],
         "summary": summarize_tickets(tickets),
         "sites_needing_repair": needs,
         "warranty_claims": claims_payload,

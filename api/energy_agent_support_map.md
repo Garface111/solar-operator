@@ -26,10 +26,10 @@ TOP NAV — use EXACTLY these labels when speaking to the owner (hashes are inte
 | Inverters | `#arrays` | Live inverter canvas; **Sandbox** (spatial fleet tree) + **Spreadsheet** sub-views (NOT “Arrays”). This is the default landing tab. |
 | Analysis | `#analysis` | Fleet NOC: production vs expected, sites, health, hardware. **Trends / through-time is a sub-view** (`#trends`), NOT a separate top tab |
 | Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”) |
-| Operations | `#ops` | O&M team, repairs, claims; **Resources** is a sub-tab (`#resources` — rates, news, REC context) |
+| Repairs | `#ops` | **Command center** for parallel repair pipelines (detect → draft outreach → coordinate → verify → close). Sub-views: Command / Team / Settings. **Resources** is a sibling main sub-view (`#resources` — rates, news, REC) |
 | Account | `#account` | Profile, plan/card, Auto-refresh vault (was “Master Account”; use **Account**) |
 
-Never say Dashboard, Arrays, Reports, or Trends as top-tab names. `#trends` routes into Analysis as a sub-view only. **Resources is not a top tab** — it lives under Operations (`#resources`). The offtaker invoice form field **Master account** is a different concept (net-meter group host — see `offtakers`).
+Never say Dashboard, Arrays, Reports, Operations, or Trends as top-tab names (Operations was renamed **Repairs**). `#trends` routes into Analysis as a sub-view only. **Resources is not a top tab** — it lives under Repairs (`#resources`). The offtaker invoice form field **Master account** is a different concept (net-meter group host — see `offtakers`).
 
 APP SHELL (how the SPA works, for accurate “where do I click” answers):
 - Static frontend; scripts load in order (`session-tabscope.js` first, then `fleet-store.js`, `app.js`, `sandbox.js`, view modules, `energy-agent.js`). The router lives in `sandbox.js`: `hashchange` → toggles the matching panel + lazy-loads that view. Empty/unknown hash → `#arrays`.
@@ -495,10 +495,11 @@ WHEN TO CALL WHAT
 | Why peer vs Solar.web disagree | `product_map(topic=status)` + health tools |
 | Entities / what a field means | `product_map(topic=datamodel)` or `glossary` |
 | Fleet health / attention | `investigate_attention` / `fleet_overview` / `array_detail` |
-| Who repairs my arrays / O&M team | `repair_ops_overview` / `list_service_contacts` · UI: **Operations** tab (`#ops`) |
-| Down site — contact the tech | `open_repair_ticket` → `draft_repair_checkin` → `send_repair_checkin` (confirm); SMS via `send_repair_sms`; phone via `log_repair_phone_note` |
-| Repair status update from tech | `log_repair_note` / inbound email parse (`[AO-TICKET-#]`) / `update_repair_ticket` |
-| Warranty claims | Operations → Claims sub-view · linked to repair tickets |
+| Who repairs my arrays / O&M team | `repair_ops_overview` / `list_service_contacts` · UI: **Repairs** tab → Team (`#ops`) |
+| Down site — contact the tech | Command center battle card → **Approve & send** (`send_repair_checkin` with confirm); SMS / phone notes on the same card |
+| Repair pipeline status | Battle cards show Detected → Drafted → Coordinating → Scheduled → In progress → Closed; agent log lists every outreach/step |
+| Repair status update from tech | `log_repair_note` / inbound email parse (`[AO-TICKET-#]`) / auto-close when vendor data recovers |
+| Warranty claims | Linked on the case card when present (no separate Claims sub-tab) |
 | Ad-hoc lists | `query_tenant` |
 | Account email/company/plan/mode | `account_summary` |
 | Navigate / show UI | `ui_navigate` / `ui_tour` / highlight |
