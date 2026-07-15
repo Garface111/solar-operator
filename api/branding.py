@@ -85,6 +85,19 @@ def magic_link_url(product: str | None, token: str) -> str:
     return f"{_AO_APP_URL}/login?token={token}"
 
 
+def _valid_from(value: str | None) -> str | None:
+    """Return value only if it looks like a Resend-acceptable From header.
+
+    Resend requires a real address (with @). A bare display name like
+    ``NEPOOL Operator`` (which once landed in MAIL_FROM by mistake) makes
+    every transactional email fail silently — magic links never arrive.
+    """
+    v = (value or "").strip()
+    if not v or "@" not in v:
+        return None
+    return v
+
+
 def from_address(product: str | None) -> str:
     """Product-correct email From header (display name + sender).
 
@@ -94,11 +107,20 @@ def from_address(product: str | None) -> str:
         (confirmed via the Resend /domains API). Override with MAIL_FROM_AO.
     Replies are routed to the monitored inbox via reply_to_address() regardless
     of the From domain, so changing the From never strands a customer reply.
+
+    Env values that are display-name-only (no @) are ignored so a bad Railway
+    var can never black-hole magic links again.
     """
     if _key(product) == "array_operator":
-        return os.getenv("MAIL_FROM_AO", "Array Operator <hello@arrayoperator.com>")
-    return (os.getenv("MAIL_FROM_NEPOOL")
-            or os.getenv("MAIL_FROM", "NEPOOL Operator <hello@nepooloperator.com>"))
+        return (
+            _valid_from(os.getenv("MAIL_FROM_AO"))
+            or "Array Operator <hello@arrayoperator.com>"
+        )
+    return (
+        _valid_from(os.getenv("MAIL_FROM_NEPOOL"))
+        or _valid_from(os.getenv("MAIL_FROM"))
+        or "NEPOOL Operator <admin@nepooloperator.com>"
+    )
 
 
 def reply_to_address(product: str | None = None) -> str:
