@@ -15,7 +15,7 @@ import '@xyflow/react/dist/style.css';
 import { CanvasActionsContext, type CanvasActions, type Density } from './canvasContext';
 import { ClientNodeComponent, type ClientNodeData } from './ClientNode';
 import { UnclassifiedNodeComponent, type UnclassifiedNodeData } from './UnclassifiedAccountNode';
-import { type ClientData, type UtilityAccount, type Utility, clientArrayCount } from './mockData';
+import { type ClientData, type Utility, clientArrayCount } from './mockData';
 import {
   getCanvasData,
   mergeClientInto,
@@ -219,13 +219,11 @@ function buildNodesFromApi(
   data: CanvasResponse,
   layoutMode: LayoutMode,
   sortedPositions: Map<number, { x: number; y: number }>,
-  density: Density,
+  _density: Density,
   initiallyExpanded: boolean = false,
 ): Node[] {
   const nodes: Node[] = [];
-  const { COL_W } = GRID[density];
-  const cols = DENSITY_COLS[density];
-  let autoAccIdx = 0;
+  void _density;
 
   data.clients.forEach((client, i) => {
     // Dedupe accounts that share the same array_id (sub-meter detection).
@@ -323,41 +321,10 @@ function buildNodesFromApi(
     });
   });
 
-  data.unclassified.forEach((acc, i) => {
-    const accountData: UtilityAccount = {
-      id: `account_${acc.id}`,
-      utility: normalizeProvider(acc.provider),
-      account_number: acc.account_number,
-      owner_name: (acc.service_address as Record<string, string> | null)?.street ?? '',
-      arrays: acc.array_name != null
-        ? [{
-            id: acc.array_id != null ? `arr_${acc.array_id}` : `arr_u_${acc.id}`,
-            name: acc.array_name,
-            nepool_gis_id: acc.nepool_gis_id ?? '',
-            fuel_type: acc.fuel_type ?? null,
-            mwh_per_qtr: 0,
-            reassigned_at: (acc as unknown as Record<string, unknown>).array_reassigned_at as string | null ?? null,
-            deleted_at: acc.array_deleted_at ?? null,
-          }]
-        : [],
-    };
-
-    const hasPos = acc.canvas_x != null && acc.canvas_y != null;
-    let position: { x: number; y: number };
-    if (hasPos) {
-      position = { x: acc.canvas_x!, y: acc.canvas_y! };
-    } else {
-      const idx = autoAccIdx++;
-      position = { x: cols * COL_W + 80, y: idx * 240 + 40 };
-    }
-
-    nodes.push({
-      id: `account_${acc.id}`,
-      type: 'unclassified',
-      position,
-      data: { account: accountData, entryDelay: (data.clients.length + i) * 30 } as UnclassifiedNodeData,
-    });
-  });
+  // Orphan utility accounts (unclassified floaters like "GMP · 6334330000")
+  // are intentionally NOT rendered — they cluttered the sandbox and reappeared
+  // after cleanup. Detach/delete now soft-deletes them server-side.
+  void data.unclassified;
 
   return nodes;
 }
@@ -1186,26 +1153,27 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
 
       const snapshot = current;
 
-      const applyDetach = () =>
-        setNodes((ns) => {
-          const updatedClient: ClientData = {
-            ...d.client,
-            accounts: d.client.accounts.filter((a) => a.id !== accountId),
-          };
-          const unclNode: Node = {
-            id: accountId,
-            type: 'unclassified',
-            position: { x: clientNode.position.x + 360, y: clientNode.position.y },
-            data: { account: detached, entryDelay: 0 } as UnclassifiedNodeData,
-          };
-          return [
-            ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
-            unclNode,
-          ];
-        });
+      // Soft-delete via reassign(null) — do NOT spawn a free-floating GMP card.
+      const applyRemove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id !== clientId) return n;
+            const cd = n.data as ClientNodeData;
+            return {
+              ...n,
+              data: {
+                ...cd,
+                client: {
+                  ...cd.client,
+                  accounts: cd.client.accounts.filter((a) => a.id !== accountId),
+                },
+              },
+            };
+          }),
+        );
 
-      applyDetach();
-      toast.show(`${detached.utility} · ${detached.account_number} detached.`, 'info');
+      applyRemove();
+      toast.show(`${detached.utility} · ${detached.account_number} removed.`, 'info');
 
       const numId = parseInt(accountId.replace('account_', ''), 10);
       const clientNumId = parseInt(clientId.replace('client_', ''), 10);
@@ -1214,23 +1182,23 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
           .then(() => notifyFleetChanged('sandbox-mutate'))
           .catch(() => {
             setNodes(snapshot);
-            toast.show('Detach failed — reverted.', 'error');
+            toast.show('Remove failed — reverted.', 'error');
           });
         if (!isNaN(clientNumId)) {
           pushUndo({
-            label: `Detach ${detached.utility} · ${detached.account_number}`,
+            label: `Remove ${detached.utility} · ${detached.account_number}`,
             timestamp: Date.now(),
             undo: () => {
               setNodes(snapshot);
               reassignAccount(numId, clientNumId)
                 .then(() => notifyFleetChanged('sandbox-mutate'))
-                .catch(() => toast.show('Undo detach failed.', 'error'));
+                .catch(() => toast.show('Undo failed.', 'error'));
             },
             redo: () => {
-              applyDetach();
+              applyRemove();
               reassignAccount(numId, null)
                 .then(() => notifyFleetChanged('sandbox-mutate'))
-                .catch(() => toast.show('Redo detach failed.', 'error'));
+                .catch(() => toast.show('Redo failed.', 'error'));
             },
           });
         }
@@ -1696,29 +1664,28 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
 
       const snapshot = current;
 
-      const applyDetach = () =>
-        setNodes((ns) => {
-          const updatedClient: ClientData = {
-            ...d.client,
-            accounts: d.client.accounts.filter((a) => !detachedAccounts.includes(a)),
-          };
-          const baseX = clientNode.position.x + 360;
-          const baseY = clientNode.position.y;
-          const newNodes: Node[] = detachedAccounts.map((acc, i) => ({
-            id: acc.id,
-            type: 'unclassified',
-            position: { x: baseX + (i % 2) * 200, y: baseY + Math.floor(i / 2) * 110 },
-            data: { account: acc, entryDelay: i * 25 } as UnclassifiedNodeData,
-          }));
-          return [
-            ...ns.map((n) => n.id === clientId ? { ...n, data: { ...d, client: updatedClient } } : n),
-            ...newNodes,
-          ];
-        });
+      // Soft-delete each account — do NOT spawn free-floating GMP cards.
+      const applyRemove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id !== clientId) return n;
+            const cd = n.data as ClientNodeData;
+            return {
+              ...n,
+              data: {
+                ...cd,
+                client: {
+                  ...cd.client,
+                  accounts: cd.client.accounts.filter((a) => !detachedAccounts.includes(a)),
+                },
+              },
+            };
+          }),
+        );
 
-      applyDetach();
+      applyRemove();
       toast.show(
-        `${utility} login (${detachedAccounts.length} ${detachedAccounts.length === 1 ? 'account' : 'accounts'}) detached.`,
+        `${utility} login (${detachedAccounts.length} ${detachedAccounts.length === 1 ? 'account' : 'accounts'}) removed.`,
         'info',
       );
 
@@ -1728,14 +1695,16 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
           if (isNaN(numId)) return Promise.resolve();
           return reassignAccount(numId, null);
         }),
-      ).catch(() => {
-        setNodes(snapshot);
-        toast.show('Detach failed — reverted.', 'error');
-      });
+      )
+        .then(() => notifyFleetChanged('sandbox-mutate'))
+        .catch(() => {
+          setNodes(snapshot);
+          toast.show('Remove failed — reverted.', 'error');
+        });
 
       if (ownNumId !== null) {
         pushUndo({
-          label: `Detach ${utility} login (${detachedAccounts.length} account${detachedAccounts.length === 1 ? '' : 's'})`,
+          label: `Remove ${utility} login (${detachedAccounts.length} account${detachedAccounts.length === 1 ? '' : 's'})`,
           timestamp: Date.now(),
           undo: () => {
             setNodes(snapshot);
@@ -1745,17 +1714,21 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
                 if (isNaN(numId)) return Promise.resolve();
                 return reassignAccount(numId, ownNumId);
               }),
-            ).catch(() => toast.show('Undo detach login failed.', 'error'));
+            )
+              .then(() => notifyFleetChanged('sandbox-mutate'))
+              .catch(() => toast.show('Undo failed.', 'error'));
           },
           redo: () => {
-            applyDetach();
+            applyRemove();
             Promise.all(
               detachedAccounts.map((acc) => {
                 const numId = parseInt(acc.id.replace('account_', ''), 10);
                 if (isNaN(numId)) return Promise.resolve();
                 return reassignAccount(numId, null);
               }),
-            ).catch(() => toast.show('Redo detach login failed.', 'error'));
+            )
+              .then(() => notifyFleetChanged('sandbox-mutate'))
+              .catch(() => toast.show('Redo failed.', 'error'));
           },
         });
       }
