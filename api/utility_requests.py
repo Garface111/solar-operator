@@ -125,6 +125,22 @@ def submit_requests(body: RequestsIn, authorization: str | None = Header(default
             names.append(name)
     if not ids:
         raise HTTPException(400, "No valid requests")
+    # Wake Sovereign (subconscious + maybe cortex) — product touch reflex
+    try:
+        from .energy_agent_sovereign_subconscious import fire_and_forget_wake
+        fire_and_forget_wake(
+            "utility_request",
+            {
+                "ids": ids[:20],
+                "names": names[:10],
+                "count": len(ids),
+                "product": product,
+                "tenant_id": tenant_id,
+            },
+            source="utility_requests",
+        )
+    except Exception:
+        pass
     # Email Ford on EVERY request (his explicit ask). Never let a mail hiccup lose the
     # notification silently — log it loudly so a missed alert is always traceable.
     notified = False

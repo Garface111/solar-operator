@@ -272,6 +272,9 @@ def build_think_prompt(
     recent_notes: list[dict],
     memories: list[dict],
     open_jobs: list[dict],
+    subconscious_tape: list[dict] | None = None,
+    recent_events: list[dict] | None = None,
+    heat: int | None = None,
 ) -> list[dict]:
     schema_hint = {
         "monologue": (
@@ -344,8 +347,10 @@ def build_think_prompt(
     }
     user = {
         "task": (
-            "One Sovereign leadership cycle. You are the expansionist leader of Array Operator, "
-            "Ford's eventual replacement. Think hard. Prefer motion + partnership with Ford over passive wait."
+            "One Sovereign leadership cycle (CORTEX). You are the expansionist leader of Array Operator, "
+            "Ford's eventual replacement. Think hard. Prefer motion + partnership with Ford over passive wait. "
+            "Your subconscious has been running continuously — read subconscious_tape + heat before re-deriving "
+            "the same stuck queues cold. Act on pressure; do not restate ambient noise."
         ),
         "product_digests": digests,
         "world_snapshot": {
@@ -357,6 +362,10 @@ def build_think_prompt(
         },
         "current_goals": goals,
         "recent_self_notes": recent_notes[:12],
+        # Catch up on the conversation with yourself (cheap continuous mind)
+        "subconscious_tape": (subconscious_tape or [])[:16],
+        "recent_product_events": (recent_events or [])[:10],
+        "heat_score": heat,
         "durable_memory": memories[:40],
         "open_code_jobs": open_jobs[:10],
         "leadership_priorities": [
@@ -400,6 +409,9 @@ def think_cycle(
     recent_notes: list[dict],
     memories: list[dict],
     open_jobs: list[dict],
+    subconscious_tape: list[dict] | None = None,
+    recent_events: list[dict] | None = None,
+    heat: int | None = None,
 ) -> dict[str, Any]:
     """Run one independent think. Returns structured plan + provider meta."""
     if not brain_enabled():
@@ -418,6 +430,9 @@ def think_cycle(
         recent_notes=recent_notes,
         memories=memories,
         open_jobs=open_jobs,
+        subconscious_tape=subconscious_tape,
+        recent_events=recent_events,
+        heat=heat,
     )
     try:
         raw = call_brain(messages)

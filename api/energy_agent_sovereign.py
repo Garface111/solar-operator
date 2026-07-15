@@ -6,13 +6,19 @@ Owns Array Operator as a product: monitor health/queues, coordinate expansion,
 protect UX, draft repairs, and speak as Energy Agent into any owner chat
 (under flags + rate limits + audit).
 
-Brain (independent mind):
+Three-layer mind (2026-07-15):
+  • Subconscious — cheap, ~45s / on-event: monologue + heat + needs_cortex
+    (api/energy_agent_sovereign_subconscious.py) — notes only, never hard acts
+  • Cortex — this module's sovereign_tick (Grok→Claude) + actuators
+  • Reflexes — wake_sovereign(reason, payload) on product touches
+
+Brain (cortex):
   • Primary: Grok / xAI ("rock agent")
   • Fallback: Claude Anthropic (+ optional Claude Code CLI for code briefs)
   • Private monologue, self-notes, durable memory, agendas/goals
-  • Ivory-tower observe → think → act; rule engine only if both brains fail
+  • Reads subconscious tape so it catches up with itself between expensive ticks
 
-Default: ENABLED for sense + soft act + dogfood speak + brain.
+Default: ENABLED for sense + soft act + dogfood speak + brain + subconscious.
 Kill: SOVEREIGN_ENABLED=0. Never autonomous: money/identity/deploy.
 """
 from __future__ import annotations
@@ -1342,6 +1348,7 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                         EaSovereignNote.__table__,
                         EaSovereignMemory.__table__,
                         __import__("api.energy_agent_sovereign_desk", fromlist=["EaSovereignDeskMessage"]).EaSovereignDeskMessage.__table__,
+                        __import__("api.energy_agent_sovereign_subconscious", fromlist=["EaSovereignEvent"]).EaSovereignEvent.__table__,
                     ],
                 )
             except Exception:
@@ -1369,11 +1376,48 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 for j in jobs_rows
             ]
 
+            # Subconscious tape + event stream (continuity between cortex ticks)
+            subconscious_tape: list[dict] = []
+            recent_events_payload: list[dict] = []
+            heat_score: int | None = None
+            try:
+                sub_rows = db.execute(
+                    select(EaSovereignNote)
+                    .where(EaSovereignNote.kind == "subconscious")
+                    .order_by(EaSovereignNote.created_at.desc())
+                    .limit(16)
+                ).scalars().all()
+                subconscious_tape = [
+                    {
+                        "title": r.title,
+                        "body": (r.body or "")[:600],
+                        "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                        "meta": r.meta_json,
+                    }
+                    for r in sub_rows
+                ]
+            except Exception:
+                subconscious_tape = []
+            try:
+                from .energy_agent_sovereign_subconscious import recent_events
+                recent_events_payload = recent_events(db, limit=10)
+            except Exception:
+                recent_events_payload = []
+            try:
+                raw_heat = next(
+                    (m.get("value") for m in mem_payload if m.get("key") == "heat_score"),
+                    None,
+                )
+                if raw_heat is not None:
+                    heat_score = int(str(raw_heat).strip() or 0)
+            except Exception:
+                heat_score = state.get("heat") if isinstance(state.get("heat"), int) else None
+
             brain_plan: dict[str, Any] = {}
             decisions: list[dict] = []
             brain_provider = None
 
-            # ── Independent mind: think (Grok → Claude fallback) ──────────
+            # ── Cortex: independent mind (Grok → Claude fallback) ──────────
             try:
                 from .energy_agent_sovereign_brain import think_cycle
                 brain_plan = think_cycle(
@@ -1383,6 +1427,9 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                     recent_notes=notes_payload,
                     memories=mem_payload,
                     open_jobs=jobs_payload,
+                    subconscious_tape=subconscious_tape,
+                    recent_events=recent_events_payload,
+                    heat=heat_score,
                 )
             except Exception as e:  # noqa: BLE001
                 brain_plan = {
@@ -1533,6 +1580,18 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 }, default=str),
                 source="system",
             )
+            memory_set(db, "last_cortex_at", _now().isoformat() + "Z", source="system")
+            # Cortex consumed the handoff bit
+            memory_set(
+                db, "needs_cortex",
+                json.dumps({
+                    "value": False,
+                    "why": "cortex_ran",
+                    "at": _now().isoformat() + "Z",
+                    "reason": reason,
+                }),
+                source="system",
+            )
 
             state["health"] = digests.get("health") or state.get("health") or {}
             state["queues"] = digests.get("queues") or {}
@@ -1542,9 +1601,13 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 "open_count": (digests.get("sessions") or {}).get("open_count"),
             }
             state["last_tick_at"] = _now().isoformat() + "Z"
+            state["last_cortex_at"] = _now().isoformat() + "Z"
             state["last_brain_provider"] = brain_provider
             state["last_mood"] = brain_plan.get("mood")
             state["last_monologue_excerpt"] = (monologue or "")[:500]
+            if heat_score is not None:
+                state["heat"] = heat_score
+            state["needs_cortex"] = False
             state["last_decisions"] = [
                 {"kind": d.get("kind"), "ok": (d.get("result") or {}).get("ok", d.get("ok"))}
                 for d in decisions
@@ -1574,6 +1637,9 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                     "fallback_to_rules": brain_plan.get("fallback_to_rules") or brain_provider == "rules",
                     "monologue_excerpt": (monologue or "")[:400],
                 },
+                "layer": "cortex",
+                "heat": heat_score,
+                "subconscious_tape_n": len(subconscious_tape),
                 "digests": {
                     "queues": digests.get("queues"),
                     "fleet_global": digests.get("fleet_global"),
@@ -1747,6 +1813,7 @@ def sovereign_state(authorization: str | None = Header(default=None)):
                         EaSovereignNote.__table__,
                         EaSovereignMemory.__table__,
                         __import__("api.energy_agent_sovereign_desk", fromlist=["EaSovereignDeskMessage"]).EaSovereignDeskMessage.__table__,
+                        __import__("api.energy_agent_sovereign_subconscious", fromlist=["EaSovereignEvent"]).EaSovereignEvent.__table__,
                     ],
                 )
             except Exception:
@@ -1822,8 +1889,35 @@ def sovereign_state(authorization: str | None = Header(default=None)):
 
 @router.post("/admin/sovereign/wake")
 def sovereign_wake(body: WakeIn, authorization: str | None = Header(default=None)):
+    """Event-driven wake: append event → subconscious → cortex if hot."""
     _require_sovereign_or_admin(authorization)
-    return sovereign_tick(reason=body.reason or "wake")
+    from .energy_agent_sovereign_subconscious import wake_sovereign
+    return wake_sovereign(
+        body.reason or "admin_wake",
+        {"source": "admin"},
+        source="admin",
+        force_cortex=True,
+    )
+
+
+@router.post("/admin/sovereign/subconscious")
+def sovereign_subconscious_ep(authorization: str | None = Header(default=None)):
+    """Run one subconscious tick only (notes/heat, no hard acts)."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_subconscious import subconscious_tick
+    return subconscious_tick(reason="admin_subconscious", force=True)
+
+
+@router.get("/admin/sovereign/events")
+def sovereign_events_ep(
+    authorization: str | None = Header(default=None),
+    limit: int = Query(default=30, ge=1, le=100),
+):
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_subconscious import recent_events, ensure_event_tables
+    ensure_event_tables()
+    with SessionLocal() as db:
+        return {"ok": True, "events": recent_events(db, limit=limit)}
 
 
 @router.post("/admin/sovereign/tick")

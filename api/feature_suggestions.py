@@ -121,6 +121,21 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
         db.refresh(fs)
         sid = fs.id
     try:
+        from .energy_agent_sovereign_subconscious import fire_and_forget_wake
+        fire_and_forget_wake(
+            "feature_suggestion",
+            {
+                "id": sid,
+                "product": product,
+                "tenant_id": tenant_id,
+                "text_excerpt": (text or "")[:200],
+                "has_screenshot": bool(shot),
+            },
+            source="feature_suggestions",
+        )
+    except Exception:
+        pass
+    try:
         send_internal_alert(
             subject=f"New {product} feature suggestion (#{sid})",
             body=(f"From: {email or 'anonymous'}\nTenant: {tenant_id or '-'}\n"

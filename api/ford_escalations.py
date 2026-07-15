@@ -306,6 +306,25 @@ def process_open_escalations(limit: int | None = None) -> dict:
                     row.resolved_at = _now()
                 db.commit()
 
+                # Wake Sovereign when escalation needs Ford / resolved
+                try:
+                    from .energy_agent_sovereign_subconscious import fire_and_forget_wake
+                    fire_and_forget_wake(
+                        "needs_ford" if needs_ford else "ford_escalation",
+                        {
+                            "escalation_id": row.id,
+                            "status": row.status,
+                            "priority": priority,
+                            "kind": kind,
+                            "one_line": one_line[:160],
+                            "needs_ford": needs_ford,
+                        },
+                        source="ford_escalations",
+                        force_cortex=needs_ford,
+                    )
+                except Exception:
+                    pass
+
                 # Notify Ford when human attention needed (not every quiet auto-esc)
                 should_notify = needs_ford and not bool(row.quiet)
                 if should_notify:

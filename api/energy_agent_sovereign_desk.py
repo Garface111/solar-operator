@@ -229,6 +229,18 @@ def desk_turn(db, t, ford_message: str) -> dict:
     db.add(ford_row)
     db.flush()
 
+    # Event bus: desk is the highest-heat human touch (cortex is this turn)
+    try:
+        from .energy_agent_sovereign_subconscious import append_event
+        append_event(
+            db, "desk_message",
+            {"tenant_id": t.id, "message_id": ford_row.id, "excerpt": msg[:160]},
+            source="desk",
+            heat=95,
+        )
+    except Exception:
+        pass
+
     hist = history(db, limit=30)
     digests = observe_product(db)
     goals = [

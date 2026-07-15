@@ -756,6 +756,23 @@ def process_job(db, job) -> dict[str, Any]:
         f"[Sovereign] Code job {job.status.upper()}: {title[:80]}",
         summary + "\n" + (agent_result.get("result_text") or "")[:2000],
     )
+    # Reflex: job terminal state → subconscious tape (+ cortex if failed/hot)
+    try:
+        from .energy_agent_sovereign_subconscious import fire_and_forget_wake
+        fire_and_forget_wake(
+            "job_done" if job.status == "done" else "job_failed",
+            {
+                "job_id": job.id,
+                "title": title[:120],
+                "status": job.status,
+                "repo": repo_name,
+                "deploy_ok": bool((deploy or {}).get("ok")),
+            },
+            source="code_worker",
+            force_cortex=(job.status == "failed"),
+        )
+    except Exception:
+        pass
     return {
         "ok": job.status == "done",
         "job_id": job.id,

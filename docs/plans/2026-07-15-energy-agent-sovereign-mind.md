@@ -9,6 +9,9 @@
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `SOVEREIGN_ENABLED` | **1** | Master switch (set `0` to kill) |
+| `SOVEREIGN_SUBCONSCIOUS` | **1** | Cheap continuous monologue + heat (45s + event wakes) |
+| `SOVEREIGN_SUBCONSCIOUS_LLM` | **0** | Optional cheap LLM monologue (rules-only by default) |
+| `SOVEREIGN_CORTEX_HEAT_THRESHOLD` | **70** | Heat ≥ this → wake cortex (coalesced) |
 | `SOVEREIGN_SENSE_ENABLED` | **1** | Product digests every 5 min |
 | `SOVEREIGN_ACT_ENABLED` | **1** | Soft exec: utility triage, stage features, code-hire jobs |
 | `SOVEREIGN_OPS_AUTHORITY` | **1** | Full product ops: features/utilities/escalations/jobs/memory/deploy_stage |
@@ -19,7 +22,16 @@
 | `SOVEREIGN_SPEAK_ALL` | **0** | Inject only dogfood emails until armed |
 | `SOVEREIGN_ARM_T4_T5` | **0** | Unrestricted deploy + money still never autonomous |
 
-Module: `api/energy_agent_sovereign.py` + `energy_agent_sovereign_ops.py` · Desk: `/v1/sovereign/desk/*` · Scheduler: `energy_agent_sovereign_tick` (5 min)
+Module: `api/energy_agent_sovereign.py` + `energy_agent_sovereign_ops.py` + **`energy_agent_sovereign_subconscious.py`** · Desk: `/v1/sovereign/desk/*` · Scheduler: `energy_agent_sovereign_subconscious` (45s) + `energy_agent_sovereign_tick` (5m cortex backstop)
+
+### Three-layer mind (built 2026-07-15)
+| Layer | Job | Cadence |
+|-------|-----|---------|
+| **Subconscious** | Monologue + heat + `needs_cortex` (notes/memory only) | ~45s + every `wake_sovereign` |
+| **Cortex** | Grok/Claude full plan + hard acts | On heat / desk / admin + 5m backstop |
+| **Reflex** | `wake_sovereign(reason, payload)` event bus | Utility request, feature suggestion, desk, job done/fail, needs_ford |
+
+Subconscious never emails Ford, never deploys, never triages alone. Cortex reads the subconscious tape so it catches up with itself.
 
 ### Full ops authority (Ford 2026-07-15)
 No per-ticket sign-off. Sovereign owns:

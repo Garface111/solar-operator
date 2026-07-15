@@ -1646,8 +1646,17 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
-    # Sovereign Mind (product executive): observe queues/health, soft acts, desk.
+    # Sovereign Mind (product executive) — three layers:
+    #   subconscious (cheap, ~45s) → cortex (expensive, 5m backstop + event wakes)
+    #   event bus: wake_sovereign from product touchpoints
     # Kill with SOVEREIGN_ENABLED=0. See docs/plans/2026-07-15-energy-agent-sovereign-mind.md
+    scheduler.add_job(
+        _run_energy_agent_sovereign_subconscious,
+        "interval", seconds=45, id="energy_agent_sovereign_subconscious",
+        replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=40),
+    )
     scheduler.add_job(
         _run_energy_agent_sovereign_tick,
         "interval", minutes=5, id="energy_agent_sovereign_tick", replace_existing=True,
@@ -1785,17 +1794,56 @@ def _run_energy_agent_long_term_mind() -> None:
             pass
 
 
+def _run_energy_agent_sovereign_subconscious() -> None:
+    """Cheap continuous mind: monologue + heat + needs_cortex (notes only)."""
+    try:
+        from .energy_agent_sovereign_subconscious import (
+            subconscious_enabled,
+            subconscious_tick,
+            _run_cortex_if_needed,
+        )
+        if not subconscious_enabled():
+            return
+        res = subconscious_tick(reason="scheduler")
+        if res.get("needs_cortex"):
+            cortex = _run_cortex_if_needed(res, reason="subconscious_hot")
+            if cortex and not cortex.get("deferred"):
+                logger.info(
+                    "sovereign_subconscious→cortex heat=%s why=%s decisions=%s",
+                    res.get("heat"),
+                    res.get("why"),
+                    len(cortex.get("decisions") or []),
+                )
+        elif res.get("mode") == "live":
+            logger.debug(
+                "sovereign_subconscious heat=%s needs=%s",
+                res.get("heat"), res.get("needs_cortex"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("energy_agent_sovereign_subconscious crashed: %s", exc)
+
+
 def _run_energy_agent_sovereign_tick() -> None:
-    """Product executive mind: observe queues/health, soft acts, desk."""
+    """Cortex backstop (5m): full digests + Grok/Claude + hard acts."""
     try:
         from .energy_agent_sovereign import sovereign_enabled, sovereign_tick
         if not sovereign_enabled():
             return
+        # Light subconscious first so cortex always has fresh tape
+        try:
+            from .energy_agent_sovereign_subconscious import (
+                subconscious_enabled, subconscious_tick,
+            )
+            if subconscious_enabled():
+                subconscious_tick(reason="pre_cortex", force=True, skip_llm=True)
+        except Exception as sub_exc:  # noqa: BLE001
+            logger.debug("pre_cortex subconscious: %s", sub_exc)
         res = sovereign_tick(reason="scheduler")
         if res.get("decisions"):
             logger.info(
-                "sovereign_tick: decisions=%s queues=%s",
+                "sovereign_cortex: decisions=%s heat=%s queues=%s",
                 len(res.get("decisions") or []),
+                res.get("heat"),
                 (res.get("digests") or {}).get("queues"),
             )
     except Exception as exc:  # noqa: BLE001
