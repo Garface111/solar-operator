@@ -83,6 +83,35 @@ def reconcile_warranty_claims() -> dict:
     return result
 
 
+def reconcile_repair_ops() -> dict:
+    """O&M healing: open repair tickets for dead/fault units with a known
+    service contact, clear recovered tickets, fire due auto check-ins."""
+    from . import repair_ops
+    opened = closed = sent = touched = 0
+    errors = 0
+    with SessionLocal() as db:
+        tenants = db.execute(
+            select(Tenant).where(Tenant.active == True, Tenant.product == "array_operator")
+        ).scalars().all()
+    for t in tenants:
+        try:
+            with SessionLocal() as db:
+                tenant = db.get(Tenant, t.id)
+                tally = repair_ops.reconcile(db, tenant)
+                sent += repair_ops.process_due(db, tenant)
+                opened += tally.get("opened", 0) or 0
+                closed += tally.get("closed", 0) or 0
+                touched += 1
+        except Exception as exc:
+            errors += 1
+            logger.warning("repair ops reconcile failed for %s: %s", t.id, exc)
+    result = {"tenants": touched, "opened": opened, "closed": closed,
+              "auto_checkins": sent, "errors": errors}
+    if opened or sent:
+        logger.info("repair ops: %s", result)
+    return result
+
+
 def _build_audit_for_tenant(db, tenant_id: str) -> dict:
     """Run the settlement audit across one tenant's fleet → the same summary
     shape the Audit tab uses. Read-only; never fabricates a verdict."""
@@ -1334,6 +1363,12 @@ def start():
     scheduler.add_job(
         reconcile_warranty_claims,
         "interval", minutes=15, id="reconcile_warranty_claims", replace_existing=True,
+    )
+    # Every 15 min: O&M healing — open repair tickets for dead/fault with a
+    # known service contact, clear recovered, fire due tech check-ins.
+    scheduler.add_job(
+        reconcile_repair_ops,
+        "interval", minutes=15, id="reconcile_repair_ops", replace_existing=True,
     )
     # RE-ENABLED 2026-07-08 (was briefly paused same day: "too many real accounts
     # stale" turned out to be Ford's own test tenants, since is_demo was never

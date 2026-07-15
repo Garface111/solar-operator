@@ -1338,6 +1338,36 @@ def main():
         print(f"  {'✓' if inspect(conn).has_table('offtaker_payments') else '✗ MISSING'} "
               f"table offtaker_payments")
 
+        # 2026-07-15 Ops / repair healing — service contacts + repair tickets.
+        # New tables (service_contacts, array_service_assignments, repair_tickets,
+        # repair_checkins) come free via create_all. Tenant policy columns need ALTER.
+        if not column_exists(conn, "tenants", "repair_checkin_mode"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN repair_checkin_mode "
+                "VARCHAR(16) DEFAULT 'manual' NOT NULL"
+            ))
+            added.append("repair_checkin_mode")
+            print("  + tenants.repair_checkin_mode")
+        if not column_exists(conn, "tenants", "repair_checkin_hours"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN repair_checkin_hours "
+                "INTEGER DEFAULT 48 NOT NULL"
+            ))
+            added.append("repair_checkin_hours")
+            print("  + tenants.repair_checkin_hours")
+        if not column_exists(conn, "tenants", "repair_auto_open"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN repair_auto_open "
+                "BOOLEAN DEFAULT true NOT NULL"
+            ))
+            added.append("repair_auto_open")
+            print("  + tenants.repair_auto_open")
+        for tbl in (
+            "service_contacts", "array_service_assignments",
+            "repair_tickets", "repair_checkins",
+        ):
+            print(f"  {'✓' if inspect(conn).has_table(tbl) else '✗ MISSING'} table {tbl}")
+
     print("=== Migration complete ===")
 
 

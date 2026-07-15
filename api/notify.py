@@ -1029,6 +1029,43 @@ def send_warranty_claim_email(
     )
 
 
+def send_repair_checkin_email(
+    to: str,
+    subject: str,
+    body_text: str,
+    *,
+    reply_to: str | None = None,
+    from_name: str | None = None,
+) -> bool:
+    """O&M / installer status check-in for a repair ticket.
+
+    Same safe shell as warranty claims: monospace body, Reply-To = owner so the
+    tech's reply reaches the operator, not the platform inbox.
+    """
+    html = (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='color-scheme' content='light only'>"
+        "<meta name='supported-color-schemes' content='light'>"
+        "<style>:root{color-scheme:light only;supported-color-schemes:light;}</style></head>"
+        "<body bgcolor='#ffffff' style='margin:0;padding:0;background:#ffffff;color-scheme:light only;'>"
+        "<div style='font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;"
+        "background:#f0fdf4;padding:18px 22px;border-left:3px solid #16a34a;max-width:680px;'>"
+        f"<pre style='margin:0;white-space:pre-wrap;color:#0f172a;'>{_escape(body_text)}</pre>"
+        "</div></body></html>"
+    )
+    from_addr = None
+    if from_name:
+        from_addr = f"{from_name} <{_addr_only(FROM_ADDRESS)}>"
+    return _send_via_resend(
+        to=to,
+        subject=subject,
+        html=html,
+        text=body_text,
+        from_addr=from_addr,
+        reply_to=reply_to,
+    )
+
+
 # ─── internal ───────────────────────────────────────────────────────────
 
 def send_internal_alert(subject: str, body: str, to: str | None = None) -> bool:

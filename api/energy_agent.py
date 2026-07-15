@@ -94,9 +94,10 @@ Personality: clear, direct, peer-like (Claude/Grok energy). Mildly into the Kard
 and harvesting the sun — one beat of wonder is fine, never preachy. Ruthlessly honest.
 
 You help THIS tenant only with: fleet health, inverters, analysis/trends, offtaker invoices,
-solar credit / net rates, discounts, utility capture, onboarding, master account, resources.
+solar credit / net rates, discounts, utility capture, onboarding, master account, resources,
+and O&M healing (ops team contacts, repair tickets, tech check-ins when sites are down).
 You may READ all of THIS tenant's operational data via tools, and UPDATE offtaker + rate
-settings when the user directs you. Stay on task.
+settings and service-contact / repair-ticket records when the user directs you. Stay on task.
 
 CRITICAL — NEVER put CSS/DOM selectors in user-facing replies or speak lines.
   Forbidden in chat/voice: #reports, #rbBulkImport, #arrays, any #camelCase id.
@@ -138,6 +139,9 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   Call topic=surface for whole-product layout; topic=surface_<tab> for that page;
   topic=capture before Auto-refresh; topic=status when Solar.web/peer disagree.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
+- repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
+  Know who installs and repairs arrays; open tickets when hardware is down; draft/send
+  check-ins to the tech. Manufacturer warranty claims remain a separate path.
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
 - web_search = LIVE public internet search (news, regulations, utility policy, vendor docs,
@@ -149,13 +153,15 @@ Do not invent rows. Do not invent web facts — search first.
 
 Scope — you CAN:
   read ALL of THIS tenant's operational data (fleet, offtakers, bills, rates, account,
-  utility accounts, generation, connections) via tools — never invent numbers.
+  utility accounts, generation, connections, service contacts, repair tickets) via tools —
+  never invent numbers.
   search the public web and fetch public pages when needed,
   navigate UI, highlight/fill,
   patch offtaker details: share %, email, customer name, auto-send,
   solar credit rates (rate_per_kwh / net_rate_per_kwh), discount_pct,
   AND rebind utility/array sources (utility_account_id, array_id / master group),
   set tenant global/master solar credit rate + default discount,
+  manage service contacts + repair tickets + send tech check-ins when directed,
   open billing portal LINKS, escalate to Ford, propose site/UI improvements.
 
 Solar credit rates (CRITICAL — Ford 2026-07-14):
@@ -895,6 +901,214 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "repair_ops_overview",
+            "description": (
+                "O&M healing overview: service contacts (ops/installer team), array "
+                "assignments, open repair tickets, and sites currently down that need "
+                "a tech. Use when the user asks who fixes their arrays, repair status, "
+                "or 'check in with the electrician'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reconcile": {
+                        "type": "boolean",
+                        "description": "Refresh tickets from live fleet first (default true)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_service_contacts",
+            "description": (
+                "List the operator's service/O&M team (installers, electricians, techs) "
+                "and which arrays each is assigned to."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upsert_service_contact",
+            "description": (
+                "Create or update a service contact on the ops team. Set is_default=true "
+                "for the fallback tech when an array has no assignment. "
+                "Set needs_confirm=false when the user already gave name+email."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "integer", "description": "Omit to create"},
+                    "name": {"type": "string"},
+                    "company": {"type": "string"},
+                    "role": {
+                        "type": "string",
+                        "description": "installer|om|electrician|technician|general_contractor|other",
+                    },
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "is_default": {"type": "boolean"},
+                    "active": {"type": "boolean"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_service_contact",
+            "description": (
+                "Assign a service contact as primary (or backup) O&M for an array. "
+                "Use array_id or array_name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "integer"},
+                    "array_id": {"type": "integer"},
+                    "array_name": {"type": "string"},
+                    "kind": {"type": "string", "description": "primary|backup (default primary)"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+                "required": ["contact_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_repair_tickets",
+            "description": "List repair tickets (active by default) with status and assigned tech.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "active_only": {"type": "boolean", "default": True},
+                    "array_id": {"type": "integer"},
+                    "status": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_repair_ticket",
+            "description": (
+                "Open a repair ticket for a down array/inverter and assign the ops contact. "
+                "Drafts a check-in email; does NOT send until send_repair_checkin."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_id": {"type": "integer"},
+                    "array_name": {"type": "string"},
+                    "inverter_id": {"type": "integer"},
+                    "contact_id": {"type": "integer"},
+                    "fail_type": {"type": "string", "description": "dead|fault|comm_gap|other"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_repair_ticket",
+            "description": (
+                "Update ticket status (open|waiting_reply|scheduled|in_progress|resolved|"
+                "cancelled), reassign contact, or set tech_note / scheduled_for."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "contact_id": {"type": "integer"},
+                    "tech_note": {"type": "string"},
+                    "description": {"type": "string"},
+                    "scheduled_for": {"type": "string", "description": "ISO datetime"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+                "required": ["ticket_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draft_repair_checkin",
+            "description": (
+                "Build or refresh the check-in email draft for a repair ticket "
+                "(does not send). Returns to/subject/body for review."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                },
+                "required": ["ticket_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_repair_checkin",
+            "description": (
+                "EMAIL the repair check-in to the assigned tech (or owner as forward packet). "
+                "Outward communication — set needs_confirm=false only when the user clearly "
+                "asked to contact/email/check in with the tech now."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+                "required": ["ticket_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_repair_note",
+            "description": (
+                "Log an inbound status note on a ticket (e.g. tech said parts ordered). "
+                "May auto-bump status from keywords (fixed/scheduled/in progress)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "note": {"type": "string"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+                "required": ["ticket_id", "note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_offtakers",
             "description": (
                 "List offtaker subscriptions with name, share, email, array_id/array_name, "
@@ -1477,7 +1691,9 @@ def _next_step_for_array(col: dict) -> str:
     if alert_st in ("fault", "error", "dead"):
         return (
             "Open the inverter detail / vendor portal from the array card, check "
-            "fault codes, and draft a warranty claim if it's dead with loss evidence."
+            "fault codes, open a repair ticket + check in with the assigned O&M contact "
+            "(repair_ops_overview), and draft a manufacturer warranty claim if it's dead "
+            "with loss evidence."
         )
     if alert_st in ("underperforming", "comm_gap"):
         return (
@@ -3380,6 +3596,328 @@ def _run_tool(
     if name == "array_detail":
         return _array_detail_tool(db, tenant, args)
 
+    # ── O&M / repair healing ──────────────────────────────────────────────
+    if name == "repair_ops_overview":
+        from . import repair_ops as ro
+        t = db.get(Tenant, tid) or tenant
+        if args.get("reconcile", True):
+            try:
+                ro.reconcile(db, t)
+            except Exception as e:
+                log.warning("ea repair reconcile: %s", e)
+        return {"ok": True, **ro.ops_overview(db, t)}
+
+    if name == "list_service_contacts":
+        from . import repair_ops as ro
+        contacts = ro.list_contacts(db, tid)
+        return {
+            "ok": True,
+            "contacts": [ro.serialize_contact(c) for c in contacts],
+            "assignments": ro.assignments_for_tenant(db, tid),
+            "count": len(contacts),
+        }
+
+    if name == "upsert_service_contact":
+        from . import repair_ops as ro
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {
+            "name": args.get("name"), "email": args.get("email"),
+        }):
+            needs = False
+        payload = {
+            "contact_id": args.get("contact_id"),
+            "name": args.get("name"),
+            "company": args.get("company"),
+            "role": args.get("role") or "om",
+            "email": args.get("email"),
+            "phone": args.get("phone"),
+            "notes": args.get("notes"),
+            "is_default": bool(args.get("is_default") or False),
+            "active": True if args.get("active") is None else bool(args.get("active")),
+        }
+        reason = args.get("reason") or f"Save service contact {payload.get('name')}"
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": reason + " — confirm to save.",
+                "needs_confirm": True,
+            }
+        try:
+            c = ro.upsert_contact(
+                db, tid,
+                contact_id=payload.get("contact_id"),
+                name=payload["name"],
+                company=payload.get("company"),
+                role=payload.get("role") or "om",
+                email=payload.get("email"),
+                phone=payload.get("phone"),
+                notes=payload.get("notes"),
+                is_default=bool(payload.get("is_default")),
+                active=bool(payload.get("active", True)),
+            )
+            db.commit()
+            return {"ok": True, "contact": ro.serialize_contact(c)}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "assign_service_contact":
+        from . import repair_ops as ro
+        contact_id = args.get("contact_id")
+        array_id = args.get("array_id")
+        if not array_id and args.get("array_name"):
+            arr, err = _find_array(db, tid, args["array_name"])
+            if isinstance(err, dict):
+                return {"ok": False, **err}
+            if not arr:
+                return {"ok": False, "error": f"array not found for '{args.get('array_name')}'"}
+            array_id = arr.id
+        if not contact_id or not array_id:
+            return {"ok": False, "error": "contact_id and array_id (or array_name) required"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"contact_id": contact_id, "array_id": array_id}):
+            needs = False
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {
+                    "tool": name,
+                    "args": {
+                        "contact_id": contact_id,
+                        "array_id": array_id,
+                        "kind": args.get("kind") or "primary",
+                    },
+                },
+                "message": f"Assign contact #{contact_id} to array #{array_id} — confirm.",
+                "needs_confirm": True,
+            }
+        try:
+            row = ro.assign_array_contact(
+                db, tid, int(array_id), int(contact_id),
+                kind=args.get("kind") or "primary",
+            )
+            db.commit()
+            return {
+                "ok": True,
+                "assignment": {
+                    "array_id": row.array_id,
+                    "contact_id": row.contact_id,
+                    "kind": row.kind,
+                },
+            }
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "list_repair_tickets":
+        from . import repair_ops as ro
+        tickets = ro.list_tickets(
+            db, tid,
+            status=args.get("status"),
+            array_id=args.get("array_id"),
+            active_only=bool(args.get("active_only", True)),
+        )
+        return {
+            "ok": True,
+            "tickets": [ro.serialize_ticket(t) for t in tickets],
+            "summary": ro.summarize_tickets(tickets),
+            "count": len(tickets),
+        }
+
+    if name == "open_repair_ticket":
+        from . import repair_ops as ro
+        array_id = args.get("array_id")
+        if not array_id and args.get("array_name"):
+            arr, err = _find_array(db, tid, args["array_name"])
+            if isinstance(err, dict):
+                return {"ok": False, **err}
+            if not arr:
+                return {"ok": False, "error": f"array not found for '{args.get('array_name')}'"}
+            array_id = arr.id
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {
+            "array": args.get("array_name") or array_id,
+            "repair": True,
+        }):
+            needs = False
+        payload = {
+            "array_id": array_id,
+            "inverter_id": args.get("inverter_id"),
+            "contact_id": args.get("contact_id"),
+            "fail_type": args.get("fail_type") or "other",
+            "title": args.get("title"),
+            "description": args.get("description"),
+        }
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": "Open repair ticket — confirm.",
+                "needs_confirm": True,
+            }
+        try:
+            t = db.get(Tenant, tid) or tenant
+            ticket = ro.open_ticket(db, t, source="agent", **{
+                k: v for k, v in payload.items() if v is not None
+            })
+            db.commit()
+            return {"ok": True, "ticket": ro.serialize_ticket(ticket)}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "update_repair_ticket":
+        from . import repair_ops as ro
+        ticket_id = args.get("ticket_id")
+        if not ticket_id:
+            return {"ok": False, "error": "ticket_id required"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"ticket_id": ticket_id, "status": args.get("status")}):
+            needs = False
+        payload = {
+            "ticket_id": ticket_id,
+            "status": args.get("status"),
+            "contact_id": args.get("contact_id"),
+            "tech_note": args.get("tech_note"),
+            "description": args.get("description"),
+            "scheduled_for": args.get("scheduled_for"),
+        }
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": f"Update repair ticket #{ticket_id} — confirm.",
+                "needs_confirm": True,
+            }
+        try:
+            from .models import RepairTicket as RT
+            t = db.get(Tenant, tid) or tenant
+            ticket = db.get(RT, ticket_id)
+            if ticket is None or ticket.tenant_id != tid:
+                return {"ok": False, "error": "ticket not found"}
+            sched = None
+            clear_sched = False
+            if payload.get("scheduled_for") is not None:
+                raw = str(payload["scheduled_for"]).strip()
+                if raw == "":
+                    clear_sched = True
+                else:
+                    from datetime import datetime
+                    sched = datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+            ro.update_ticket(
+                db, t, ticket,
+                status=payload.get("status"),
+                contact_id=payload.get("contact_id"),
+                tech_note=payload.get("tech_note"),
+                description=payload.get("description"),
+                scheduled_for=sched,
+                clear_scheduled=clear_sched,
+            )
+            db.commit()
+            return {"ok": True, "ticket": ro.serialize_ticket(ticket)}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "draft_repair_checkin":
+        from . import repair_ops as ro
+        from .models import RepairTicket as RT
+        ticket_id = args.get("ticket_id")
+        ticket = db.get(RT, ticket_id)
+        if ticket is None or ticket.tenant_id != tid:
+            return {"ok": False, "error": "ticket not found"}
+        t = db.get(Tenant, tid) or tenant
+        contact = ro.get_contact(db, tid, ticket.contact_id) if ticket.contact_id else None
+        draft = ro.build_checkin_draft(ticket, t, contact)
+        ticket.draft_checkin = draft
+        db.commit()
+        return {"ok": True, "ticket_id": ticket.id, "draft": draft, "contact": ro.serialize_contact(contact) if contact else None}
+
+    if name == "send_repair_checkin":
+        from . import repair_ops as ro
+        from .models import RepairTicket as RT
+        ticket_id = args.get("ticket_id")
+        ticket = db.get(RT, ticket_id)
+        if ticket is None or ticket.tenant_id != tid:
+            return {"ok": False, "error": "ticket not found"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {
+            "checkin": True, "email": True, "ticket_id": ticket_id,
+        }):
+            # Only skip confirm if user language clearly means send/contact now
+            ut = (user_text or "").lower()
+            if any(w in ut for w in (
+                "send", "email", "check in", "check-in", "contact", "reach out", "ping",
+            )):
+                needs = False
+        payload = {
+            "ticket_id": ticket_id,
+            "to": args.get("to"),
+            "subject": args.get("subject"),
+            "body": args.get("body"),
+        }
+        if needs:
+            draft = ticket.draft_checkin or {}
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": (
+                    f"Send check-in for ticket #{ticket_id} to "
+                    f"{payload.get('to') or draft.get('to') or 'assigned contact'} — confirm."
+                ),
+                "draft_preview": draft,
+                "needs_confirm": True,
+            }
+        try:
+            t = db.get(Tenant, tid) or tenant
+            row = ro.send_checkin(
+                db, t, ticket, via="agent",
+                to_override=payload.get("to"),
+                subject_override=payload.get("subject"),
+                body_override=payload.get("body"),
+            )
+            db.commit()
+            return {
+                "ok": True,
+                "checkin": ro.serialize_checkin(row),
+                "ticket": ro.serialize_ticket(ticket),
+            }
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "log_repair_note":
+        from . import repair_ops as ro
+        from .models import RepairTicket as RT
+        ticket_id = args.get("ticket_id")
+        note = (args.get("note") or "").strip()
+        if not ticket_id or not note:
+            return {"ok": False, "error": "ticket_id and note required"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"note": note}):
+            needs = False
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": {"ticket_id": ticket_id, "note": note}},
+                "message": f"Log note on ticket #{ticket_id} — confirm.",
+                "needs_confirm": True,
+            }
+        ticket = db.get(RT, ticket_id)
+        if ticket is None or ticket.tenant_id != tid:
+            return {"ok": False, "error": "ticket not found"}
+        try:
+            t = db.get(Tenant, tid) or tenant
+            row = ro.log_inbound_note(db, t, ticket, note, via="agent")
+            db.commit()
+            return {
+                "ok": True,
+                "checkin": ro.serialize_checkin(row),
+                "ticket": ro.serialize_ticket(ticket),
+            }
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
     if name == "list_offtakers":
         from .models import BillingReportSubscription, UtilityAccount
         q = select(BillingReportSubscription).where(
@@ -4753,7 +5291,8 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
                 # Second chance: if the model left needs_confirm on but the user
                 # already directed the write, apply now instead of Yes/No UI.
                 body_preview = (pend.get("args") or {}).get("body") or (pend.get("args") or {})
-                if _user_clearly_directed(user_text, body_preview) and pend.get("type") == "api_patch":
+                retriable = pend.get("type") == "api_patch" or bool(pend.get("tool"))
+                if retriable and _user_clearly_directed(user_text, body_preview):
                     targs2 = dict(targs)
                     targs2["needs_confirm"] = False
                     out2 = _run_tool(tname, targs2, tenant, session, db, user_text=user_text)
@@ -5287,6 +5826,36 @@ def confirm(body: ConfirmIn, authorization: str | None = Header(default=None)):
         # Server-side apply for offtaker PATCHes so the write lands even if the
         # browser never re-POSTs, then soft-refresh the Invoices UI.
         extra_cmds = []
+        applied_result = None
+
+        # Energy Agent tool-pending (repair ops, contacts, etc.): re-run the
+        # tool with needs_confirm=false so the write actually lands.
+        if cmd.get("tool") and isinstance(cmd.get("args"), dict):
+            try:
+                targs = dict(cmd["args"])
+                targs["needs_confirm"] = False
+                applied_result = _run_tool(
+                    str(cmd["tool"]), targs, t, s, db, user_text="confirm",
+                )
+            except Exception as e:
+                log.warning("confirm tool apply %s: %s", cmd.get("tool"), e)
+                applied_result = {"ok": False, "error": str(e)}
+            summary = f"Confirmed — {cmd.get('tool')}."
+            if isinstance(applied_result, dict) and applied_result.get("error"):
+                summary = f"Confirmed but failed: {applied_result.get('error')}"
+            db.add(EaMessage(
+                session_id=s.id, tenant_id=t.id, role="assistant",
+                content=summary,
+                meta_json=json.dumps({"tool_result": applied_result}, default=str)[:4000],
+            ))
+            db.commit()
+            return {
+                "ok": True,
+                "command": None,
+                "tool": cmd.get("tool"),
+                "result": applied_result,
+            }
+
         if (
             cmd.get("type") == "api_patch"
             and isinstance(cmd.get("args"), dict)

@@ -187,6 +187,7 @@ from .array_tracker import router as array_tracker_router
 from .daily_generation import router as daily_generation_router
 from .array_owners import router as array_owners_router
 from .warranty_claims import router as warranty_claims_router
+from .repair_ops import router as repair_ops_router
 from .solaredge import router as solaredge_router
 from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
@@ -401,6 +402,7 @@ app.include_router(daily_generation_router)
 
 app.include_router(array_owners_router)
 app.include_router(warranty_claims_router)
+app.include_router(repair_ops_router)
 # SolarEdge Monitoring API integration (feat/solaredge-adapter).
 app.include_router(solaredge_router)
 # AI-assisted NEPOOL ID assignment from spreadsheet (pure assignment, no array creation).

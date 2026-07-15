@@ -165,6 +165,25 @@ class Tenant(Base):
         Integer, default=24, server_default="24", nullable=False
     )
 
+    # ── Ops / repair healing (Array Operator, July 2026) ──────────────────
+    # Energy Agent learns the O&M / installer team and check-ins on down sites.
+    #   repair_checkin_mode:
+    #     "off"    → open tickets only; never auto-email techs
+    #     "manual" → draft check-ins; owner/agent approves each send (default)
+    #     "auto"   → send scheduled check-ins when next_checkin_at is due
+    #     "delay"  → first outward check-in waits repair_checkin_hours after open
+    #   repair_auto_open: when True, dead/fault fleet rows mint RepairTickets
+    #     (still need a ServiceContact assigned or a tenant default contact).
+    repair_checkin_mode: Mapped[str] = mapped_column(
+        String(16), default="manual", server_default="manual", nullable=False
+    )
+    repair_checkin_hours: Mapped[int] = mapped_column(
+        Integer, default=48, server_default="48", nullable=False
+    )
+    repair_auto_open: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+
     # ── Billing rate (Array Operator, Jun 2026) ──────────────────────────
     # The operator's GLOBAL default $/kWh used to price a customer's produced
     # generation when that customer has no per-customer override
@@ -1906,4 +1925,133 @@ class HarvestRun(Base):
 
     __table_args__ = (
         Index("ix_harvest_run_lookup", "tenant_id", "provider", "started_at"),
+    )
+
+
+class ServiceContact(Base):
+    """A person/company on the operator's O&M / repair team.
+
+    Energy Agent "healing": know who fixes the arrays, assign them to sites,
+    open repair tickets when hardware is down, and check in on status.
+    Distinct from WarrantyClaim (manufacturer paperwork) — this is the human
+    ops network around the fleet.
+    """
+    __tablename__ = "service_contacts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    company: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # installer | om | electrician | technician | general_contractor | other
+    role: Mapped[str] = mapped_column(String(32), default="om")
+    email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When True, this contact is used for arrays without an explicit assignment.
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+    __table_args__ = (
+        Index("ix_service_contacts_tenant_active", "tenant_id", "active"),
+    )
+
+
+class ArrayServiceAssignment(Base):
+    """Which service contact is primary for a given array/site."""
+    __tablename__ = "array_service_assignments"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    contact_id: Mapped[int] = mapped_column(Integer, ForeignKey("service_contacts.id"), index=True)
+    # primary | backup | monitoring_only
+    kind: Mapped[str] = mapped_column(String(24), default="primary")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("array_id", "contact_id", name="uq_array_service_contact"),
+        Index("ix_array_service_tenant_array", "tenant_id", "array_id"),
+    )
+
+
+class RepairTicket(Base):
+    """A field-repair / O&M work item for a down or faulted site.
+
+    Opened by Energy Agent or auto-reconcile when the fleet shows dead/fault
+    and a service contact is known. Check-ins email the tech for status; when
+    the inverter recovers (or the owner marks resolved), the ticket closes.
+
+    Lifecycle (`status`):
+        open           — newly opened, no outward check-in yet
+        waiting_reply  — check-in sent; waiting on tech
+        scheduled      — tech reported a visit date
+        in_progress    — repair underway
+        resolved       — fixed / replaced
+        cancelled      — owner waved off / false alarm
+        cleared        — hardware recovered before any outward contact
+    """
+    __tablename__ = "repair_tickets"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    inverter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("inverters.id"), nullable=True, index=True)
+    contact_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("service_contacts.id"), nullable=True, index=True)
+    warranty_claim_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("warranty_claims.id"), nullable=True, index=True
+    )
+
+    # Snapshots so renames don't blank history
+    site_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    inv_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    serial: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    vendor: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    fail_type: Mapped[str] = mapped_column(String(24), default="dead")  # dead|fault|comm_gap|underperforming|other
+
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="critical")  # critical|warning|info
+    source: Mapped[str] = mapped_column(String(16), default="auto")  # auto|agent|manual
+
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    draft_checkin: Mapped[dict] = mapped_column(JSON, default=dict)  # {to, subject, body}
+
+    next_checkin_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_checkin_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    checkin_count: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tech_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    opened_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_repair_tickets_tenant_status", "tenant_id", "status"),
+        Index("ix_repair_tickets_next_checkin", "status", "next_checkin_at"),
+    )
+
+
+class RepairCheckIn(Base):
+    """One outward (or internal) status touch on a RepairTicket."""
+    __tablename__ = "repair_checkins"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    ticket_id: Mapped[int] = mapped_column(Integer, ForeignKey("repair_tickets.id"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("service_contacts.id"), nullable=True)
+    channel: Mapped[str] = mapped_column(String(16), default="email")  # email|phone_note|internal
+    direction: Mapped[str] = mapped_column(String(12), default="outbound")  # outbound|inbound|note
+    subject: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_to: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sent_ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    via: Mapped[str] = mapped_column(String(16), default="agent")  # agent|auto|manual|owner
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        Index("ix_repair_checkins_ticket", "ticket_id", "created_at"),
     )
