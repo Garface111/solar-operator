@@ -226,23 +226,27 @@ def _tenant_contact_email(db, tenant_id: str) -> str | None:
 
 
 def _merge_profile(db, tenant_id: str, stored: dict | None) -> dict:
-    """Defaults + stored prefs, then HARD gate: non-Ford never gets owner email flags on."""
+    """Defaults + stored prefs. Email flags only True if *explicitly* stored True.
+
+    Never auto-enable email for anyone (including Ford). User must ask / opt in.
+    Non-allowlisted contacts can never receive owner mail at send time either.
+    """
     base = dict((_default_world().get("profile") or {}))
     stored = dict(stored or {})
     base.update(stored)
+    # Coerce: only explicit True counts as opted in
+    base["email_insights"] = stored.get("email_insights") is True
+    base["email_ux_approvals"] = stored.get("email_ux_approvals") is True
     email = _tenant_contact_email(db, tenant_id)
-    if _owner_email_allowed(email):
-        # Ford dogfood: enable email prefs unless explicitly stored as False
-        if "email_insights" not in stored:
-            base["email_insights"] = True
-        if "email_ux_approvals" not in stored:
-            base["email_ux_approvals"] = True
-        base["_ford_dogfood"] = True
-    else:
-        base["email_insights"] = False
-        base["email_ux_approvals"] = False
-        base["_ford_dogfood"] = False
+    base["_ford_dogfood"] = _owner_email_allowed(email)
+    base["_email_eligible"] = bool(base["_ford_dogfood"])  # allowlist only for now
     return base
+
+
+def _wants_owner_email(world: dict, flag: str) -> bool:
+    """True only when profile flag is explicitly True (opt-in)."""
+    prof = (world or {}).get("profile") or {}
+    return prof.get(flag) is True
 
 
 def _world_get(db, tenant_id: str) -> dict:
@@ -539,6 +543,42 @@ def classify_and_plan(
         return None
     ctx = context or {}
     world = _world_get(db, tenant_id)
+
+    # Explicit opt-in / opt-out for email updates (never email unless asked).
+    # Opt-out first so "stop email updates" does not match opt-in "email updates".
+    low = text.lower()
+    if re.search(
+        r"\b(stop email|no more emails?|don'?t email|do not email|unsubscribe|"
+        r"fewer emails?|turn off email|no email updates|stop (the )?updates)\b",
+        low,
+    ):
+        prof = dict(world.get("profile") or {})
+        prof["email_insights"] = False
+        prof["email_ux_approvals"] = False
+        _world_patch(db, tenant_id, {"profile": prof})
+        _emit(
+            db, tenant_id, "mind_note",
+            "User opted out of email updates",
+            session_id=session_id,
+            payload={"email_insights": False, "email_ux_approvals": False},
+        )
+    elif re.search(
+        r"\b(email me|send me (emails?|updates)|"
+        r"keep me (posted|updated) by email|proactive emails?|"
+        r"more updates by email|notify me by email|"
+        r"please email (me )?updates|email updates please)\b",
+        low,
+    ):
+        prof = dict(world.get("profile") or {})
+        prof["email_insights"] = True
+        prof["email_ux_approvals"] = True
+        _world_patch(db, tenant_id, {"profile": prof})
+        _emit(
+            db, tenant_id, "mind_note",
+            "User opted in to email updates",
+            session_id=session_id,
+            payload={"email_insights": True, "email_ux_approvals": True},
+        )
 
     plan_kind = None
     objectives: list[str] = []
@@ -929,17 +969,23 @@ def _email_owner_and_ford(
     subject: str,
     body: str,
     html: str | None = None,
-    owner: bool = True,
-    ford: bool = True,
+    owner: bool = False,
+    ford: bool = False,
 ) -> dict:
-    """Notify Ford (ops) and optionally the owner — owner only if allowlisted.
+    """Outbound mind email — opt-in only. Never spam random tenants.
 
-    Random tenants NEVER get proactive mind email even if profile flags are on.
-    Ford always can get internal alerts so dogfood/ops stay visible.
+    - owner: only if caller set owner=True AND contact is allowlisted
+      (caller must also check profile.email_* opt-in)
+    - ford: internal ops — caller should only set for user-directed actions
+      or when owner opted into the related email category
     """
     from .notify import send_internal_alert, _send_via_resend
 
-    out = {"owner": False, "ford": False, "owner_blocked": False}
+    out = {"owner": False, "ford": False, "owner_blocked": False, "skipped": False}
+    if not owner and not ford:
+        out["skipped"] = True
+        return out
+
     owner_email = (getattr(tenant, "contact_email", None) or "").strip()
     if ford:
         try:
@@ -955,8 +1001,7 @@ def _email_owner_and_ford(
         if not _owner_email_allowed(owner_email):
             out["owner_blocked"] = True
             log.info(
-                "mind owner email blocked (not allowlisted): %s tenant=%s",
-                owner_email[:3] + "…",
+                "mind owner email blocked (not allowlisted): tenant=%s",
                 getattr(tenant, "id", None),
             )
         else:
@@ -977,6 +1022,8 @@ def _email_owner_and_ford(
                 )
             except Exception as e:
                 log.warning("mind email owner failed: %s", e)
+    elif owner:
+        out["owner_blocked"] = True
     return out
 
 
@@ -1037,7 +1084,6 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
         sid = fs.id
 
         world = _world_get(db, tenant_id)
-        prof = world.get("profile") or {}
         approval = {
             "id": sid,
             "kind": "ux_change",
@@ -1049,26 +1095,39 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
         pending = list(world.get("pending_approvals") or [])
         pending = [approval] + pending[:19]
 
-        email_bits = _email_owner_and_ford(
-            tenant,
-            subject=(
-                f"Mind auto-prepared UX change #{sid}"
-                if auto
-                else f"Mind UI proposal #{sid}"
-            ),
-            body=(
-                f"Your Energy Agent prepared a UI improvement for this account.\n\n"
-                f"Suggestion id: {sid}\n"
-                f"Tenant: {tenant.id}\n"
-                f"Mode: {'proactive/auto-prepared' if auto else 'user-directed'}\n"
-                f"Clarification: {clarification or 'n/a'}\n\n"
-                f"{composed}\n\n"
-                f"Pipeline: feature_suggestion judge (same as in-app improve).\n"
-                f"Status: /v1/feature-suggestion/{sid}/status\n"
-            ),
-            owner=bool(prof.get("email_ux_approvals", False)),
-            ford=True,  # ops only — Ford sees every prepared change
+        # Email ONLY if opted in (or user-directed confirm — they asked).
+        # Proactive offline prep stays silent unless email_ux_approvals is True.
+        user_directed = not auto and bool(
+            payload.get("user_confirm") or payload.get("user_directed")
         )
+        wants_mail = _wants_owner_email(world, "email_ux_approvals") or user_directed
+        email_bits = {"owner": False, "ford": False, "skipped": True}
+        if wants_mail:
+            email_bits = _email_owner_and_ford(
+                tenant,
+                subject=(
+                    f"Mind auto-prepared UX change #{sid}"
+                    if auto
+                    else f"Mind UI proposal #{sid}"
+                ),
+                body=(
+                    f"Your Energy Agent prepared a UI improvement for this account.\n\n"
+                    f"Suggestion id: {sid}\n"
+                    f"Tenant: {tenant.id}\n"
+                    f"Mode: {'proactive/auto-prepared' if auto else 'user-directed'}\n"
+                    f"Clarification: {clarification or 'n/a'}\n\n"
+                    f"{composed}\n\n"
+                    f"Pipeline: feature_suggestion judge (same as in-app improve).\n"
+                    f"Status: /v1/feature-suggestion/{sid}/status\n"
+                    f"\n(You get this because you asked for updates, or confirmed a change.)\n"
+                ),
+                owner=_wants_owner_email(world, "email_ux_approvals")
+                or (user_directed and _owner_email_allowed(
+                    getattr(tenant, "contact_email", None)
+                )),
+                # Ford ops copy only when owner opted into UX emails or directed the change
+                ford=True,
+            )
 
         _world_patch(db, tenant_id, {
             "last_proposal_id": sid,
@@ -1093,7 +1152,12 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
             "status_url": f"/v1/feature-suggestion/{sid}/status",
             "message": (
                 f"Queued improvement #{sid}. "
-                "You were emailed. When live: refresh and tell me if it feels better."
+                + (
+                    "I emailed you about it. "
+                    if email_bits.get("owner") or email_bits.get("ford")
+                    else ""
+                )
+                + "When live: refresh and tell me if it feels better."
             ),
         }
     except Exception as e:
@@ -1167,7 +1231,12 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
     if friction_n >= 2 and (world.get("profile") or {}).get("auto_prepare_ux", True):
         ux_note = (
             f"You've hit UX friction {friction_n}× recently — "
-            "I can prepare a layout fix offline and email you."
+            "I can prepare a layout fix offline in the app"
+            + (
+                " (and email you, since you asked for updates)."
+                if _wants_owner_email(world, "email_ux_approvals")
+                else " (say if you want email updates)."
+            )
         )
         importance = max(importance, 70)
 
@@ -1191,9 +1260,13 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
 
     emailed = {"owner": False, "ford": False}
     prof = world.get("profile") or {}
-    # Owner-facing email: opt-in profile AND allowlist (defaults off for everyone)
-    can_email = bool(prof.get("email_insights", False)) and importance >= 60
-    # Cooldown
+    # Proactive email ONLY if user explicitly opted in (email_insights=True).
+    # No allowlist auto-enable, no silent Ford spam on schedule.
+    can_email = (
+        _wants_owner_email(world, "email_insights")
+        and importance >= 60
+        and (spiked or attn >= 2 or bool(ux_note))
+    )
     last_em = world.get("last_proactive_email_at")
     if can_email and last_em:
         try:
@@ -1203,21 +1276,21 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
         except Exception:
             pass
 
-    if (spiked or attn >= 2 or ux_note) and (can_email or ux_note):
+    if can_email:
         body = (
             f"Proactive note from your Energy Agent\n\n"
             f"{headline}\n{detail}\n"
             + (f"\n{ux_note}\n" if ux_note else "\n")
             + f"Reason: {reason}\nTenant: {tenant_id}\n"
             "Open arrayoperator.com → Fleet Triage (or ask me in the app).\n"
+            "\nYou asked for email updates. Reply or say in-app if you want fewer.\n"
         )
-        # Owner mail only if allowlisted + opted in; Ford ops mail on UX staging
         emailed = _email_owner_and_ford(
             tenant,
             subject=headline[:80],
             body=body,
-            owner=bool(can_email),
-            ford=bool(ux_note),  # Ford ops only when UX work may follow
+            owner=True,
+            ford=False,  # no ops spam on routine fleet notes
         )
 
     patch = {
@@ -1536,9 +1609,13 @@ def run_task(db, task: EaTask) -> None:
         elif task.kind == "propose_ui":
             result = _propose_ui_worker(db, task.tenant_id, payload)
             if result.get("ok") and result.get("suggestion_id"):
+                mailed = (result.get("emailed") or {}).get("owner") or (
+                    result.get("emailed") or {}
+                ).get("ford")
                 speak = speak or (
-                    "Quick update: the improvement is queued for review — I emailed you too. "
-                    "When it ships, refresh and tell me if it feels easier to scan."
+                    "Quick update: the improvement is queued for review"
+                    + (" — I emailed you too" if mailed else "")
+                    + ". When it ships, refresh and tell me if it feels easier to scan."
                 )
             else:
                 speak = None
@@ -1547,18 +1624,21 @@ def run_task(db, task: EaTask) -> None:
             result = _proactive_insight_worker(db, task.tenant_id, payload)
             speak = result.get("speak") or speak
             if result.get("emailed", {}).get("owner"):
-                # Don't double-speak a full email; short in-app note only
                 speak = speak or (
-                    "I left a proactive note for this account (also emailed). "
+                    "I left a proactive note for this account (also emailed, since you asked for updates). "
                     "Ask me about fleet attention anytime."
                 )
 
         elif task.kind == "prepare_ux_approval":
             result = _prepare_ux_approval_worker(db, task.tenant_id, payload)
             if result.get("ok") and result.get("suggestion_id"):
+                mailed = (result.get("emailed") or {}).get("owner") or (
+                    result.get("emailed") or {}
+                ).get("ford")
                 speak = speak or (
-                    "I prepared a UX change offline and emailed you. "
-                    "Say yes in the app if you want me to walk it when it lands."
+                    "I prepared a UX change offline"
+                    + (" and emailed you" if mailed else " in the app")
+                    + ". Say yes if you want me to walk it when it lands."
                 )
             else:
                 speak = None
