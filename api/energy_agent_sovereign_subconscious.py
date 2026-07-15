@@ -381,30 +381,60 @@ def decide_needs_cortex(
     force: bool = False,
     last_cortex_age_sec: float | None = None,
     digests: dict | None = None,
+    unconsumed_events: int = 0,
 ) -> tuple[bool, str]:
-    """Cortex handoff bit. High heat / desk / admin always; ambient needs threshold + cooldown."""
+    """Cortex handoff bit.
+
+    Event wakes + hard reasons escalate. Ambient scheduler monologue does NOT
+    re-fire expensive cortex every cycle just because feature_reviewed stays high
+    forever — the 5m cortex backstop owns steady-state queues.
+    """
     if force:
         return True, "forced"
     r = (reason or "").lower()
-    # Hard wakes — always want cortex (cooldown may still defer)
+    thr = cortex_heat_threshold()
+    q = (digests or {}).get("queues") or {}
+
+    # Hard human / failure wakes
     hard = (
-        r in ("desk_message", "admin_think", "admin_tick", "admin_wake", "needs_ford", "ford_escalation")
+        r in (
+            "desk_message", "admin_think", "admin_tick", "admin_wake",
+            "needs_ford", "ford_escalation", "job_failed", "sentry_critical",
+        )
         or r.startswith("desk")
         or "sentry" in r
     )
-    thr = cortex_heat_threshold()
-    q = (digests or {}).get("queues") or {}
-    # Absolute hot: escalations or brand-new utilities
-    if int(q.get("escalation_needs_ford") or 0) > 0:
-        hard = True
-    if heat >= thr or hard:
+    # Fresh product touches (not pure scheduler ambient)
+    event_wake = r in (
+        "utility_request", "feature_suggestion", "job_done", "job_failed",
+        "deploy_finished", "capture_spike", "owner_signup", "wake",
+    ) or r.startswith("wake:")
+
+    # Absolute product emergencies still break through ambient
+    emergency = (
+        int(q.get("escalation_needs_ford") or 0) > 0
+        or int(q.get("utility_new") or 0) > 0
+    )
+
+    # Pure scheduler / pre_cortex: only escalate on emergency or brand-new events
+    if r in ("scheduler", "subconscious", "pre_cortex", "admin_subconscious"):
+        if emergency and heat >= thr:
+            pass  # fall through to coalesce check
+        elif unconsumed_events > 0 and heat >= thr:
+            pass
+        else:
+            return False, f"ambient heat={heat} (5m backstop owns steady queues)"
+
+    if heat >= thr or hard or event_wake:
         # Cooldown: unless super-hot (>=90) or hard desk/admin, respect min interval
         if last_cortex_age_sec is not None and last_cortex_age_sec < cortex_min_interval_sec():
-            if heat < 90 and r not in ("desk_message", "admin_think", "admin_wake"):
+            if heat < 90 and not hard:
                 return False, f"coalesce heat={heat} age={int(last_cortex_age_sec)}s"
-        return True, f"heat={heat}>={thr}" if heat >= thr else f"hard_wake:{r}"
-    # Safety net: if cortex has not run for 5+ minutes, let scheduler cortex handle it
-    # (subconscious does not force cortex just for staleness — 5m job does)
+        if hard:
+            return True, f"hard_wake:{r}"
+        if event_wake:
+            return True, f"event_wake:{r} heat={heat}"
+        return True, f"heat={heat}>={thr}"
     return False, f"cool heat={heat}<{thr}"
 
 
@@ -509,6 +539,7 @@ def subconscious_tick(
                 force=False,
                 last_cortex_age_sec=age,
                 digests=digests,
+                unconsumed_events=len(unconsumed),
             )
             if llm_needs is True and heat >= max(40, cortex_heat_threshold() - 20):
                 needs = True

@@ -89,9 +89,18 @@ def test_score_heat_and_rule_monologue():
     assert "utility new=2" in mono
     assert "heat=" in mono
 
-    needs, why = decide_needs_cortex(heat=h, reason="scheduler", digests=digests)
-    assert needs is True  # escalations force hard wake
-    assert "heat" in why or "hard" in why or "ford" in why
+    # Ambient scheduler + emergency queues + heat over threshold → escalate
+    needs, why = decide_needs_cortex(heat=max(h, 75), reason="scheduler", digests=digests)
+    assert needs is True
+    # Steady backlog alone does NOT escalate on pure scheduler
+    quiet = {"queues": {"feature_reviewed": 20, "utility_new": 0, "escalation_needs_ford": 0}}
+    needs_q, why_q = decide_needs_cortex(heat=80, reason="scheduler", digests=quiet)
+    assert needs_q is False
+    assert "ambient" in why_q or "backstop" in why_q
+    # Event wake still escalates
+    needs_e, why_e = decide_needs_cortex(heat=50, reason="utility_request", digests=quiet)
+    assert needs_e is True
+    assert "event" in why_e
 
 
 def test_subconscious_writes_note_and_memory(monkeypatch):
