@@ -664,23 +664,34 @@ def build_checkin_draft(
 
 
 def _schedule_next_checkin(tenant: Tenant, ticket: RepairTicket, *, first: bool = False) -> None:
+    """Schedule next auto check-in. NEVER schedule immediate first-send.
+
+    First outreach is always owner/agent-approved (Approve & send). Auto mode
+    only follows up after a prior send, on the configured interval.
+    """
     mode = effective_checkin_mode(tenant)
     hours = checkin_interval_hours(tenant)
-    if mode == "off":
+    if mode in ("off", "manual") or first:
+        # No auto fire on create — wait for explicit Approve & send
         ticket.next_checkin_at = None
         return
-    if mode == "manual":
-        # Ready for agent/owner to send; no auto fire
-        ticket.next_checkin_at = None
-        return
-    if mode == "delay" and first:
+    if mode in ("auto", "delay"):
         ticket.next_checkin_at = now() + timedelta(hours=hours)
         return
-    if mode == "auto":
-        ticket.next_checkin_at = now() + timedelta(hours=hours if not first else 0)
-        return
-    if mode == "delay":
-        ticket.next_checkin_at = now() + timedelta(hours=hours)
+    ticket.next_checkin_at = None
+
+
+def _prior_successful_outbound(db, ticket_id: int) -> int:
+    """How many successful outbound emails already logged for this ticket."""
+    rows = db.execute(
+        select(RepairCheckIn).where(
+            RepairCheckIn.ticket_id == ticket_id,
+            RepairCheckIn.channel == "email",
+            RepairCheckIn.direction == "outbound",
+            RepairCheckIn.sent_ok.is_(True),
+        )
+    ).scalars().all()
+    return len(rows)
 
 
 def send_checkin(
@@ -692,10 +703,58 @@ def send_checkin(
     to_override: str | None = None,
     subject_override: str | None = None,
     body_override: str | None = None,
+    force: bool = False,
 ) -> RepairCheckIn:
-    """Send the drafted check-in email and log a RepairCheckIn row."""
+    """Send the drafted check-in email and log a RepairCheckIn row.
+
+    Guardrails:
+    - Never send the same first-contact letter twice (unless force=True).
+    - Auto follow-ups only after at least one prior outbound email.
+    - Body is always the clean professional draft — no "forward ready" wrapper
+      when the recipient is the tech (even if they share the owner email).
+    """
     contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
-    draft = ticket.draft_checkin or build_checkin_draft(ticket, tenant, contact)
+    prior = _prior_successful_outbound(db, ticket.id)
+    # Sequence from real sends, not a possibly-stale counter
+    seq = prior + 1
+
+    # Auto path must never re-send the opening letter
+    if via == "auto" and prior == 0 and not force:
+        ticket.next_checkin_at = None
+        db.flush()
+        raise ValueError("auto check-in skipped: first outreach requires Approve & send")
+
+    # Never blast the opening letter twice (hard-refresh / double-click)
+    if prior >= 1 and seq == 1 and not force:
+        seq = prior + 1  # force follow-up sequence
+
+    # Don't spam auto follow-ups too soon after last outbound
+    if prior >= 1 and not force and via == "auto":
+        last = db.execute(
+            select(RepairCheckIn)
+            .where(
+                RepairCheckIn.ticket_id == ticket.id,
+                RepairCheckIn.channel == "email",
+                RepairCheckIn.direction == "outbound",
+                RepairCheckIn.sent_ok.is_(True),
+            )
+            .order_by(RepairCheckIn.created_at.desc())
+        ).scalars().first()
+        if last and last.created_at:
+            age_h = (now() - last.created_at).total_seconds() / 3600.0
+            min_h = max(6, checkin_interval_hours(tenant) * 0.5)
+            if age_h < min_h:
+                ticket.next_checkin_at = now() + timedelta(hours=max(1, min_h - age_h))
+                db.flush()
+                raise ValueError(
+                    f"auto check-in skipped: last outbound {age_h:.1f}h ago (min {min_h:.0f}h)"
+                )
+
+    draft = ticket.draft_checkin or {}
+    # Always rebuild sequence-correct draft unless caller overrode body
+    if not body_override:
+        draft = build_checkin_draft(ticket, tenant, contact, sequence=seq)
+        ticket.draft_checkin = draft
     if subject_override:
         draft["subject"] = subject_override
     if body_override:
@@ -709,32 +768,28 @@ def send_checkin(
     if not body:
         raise ValueError("check-in body is empty")
 
-    # Prefer tech email; fall back to owner only if contact has no email.
-    # Never wrap as "Forward to tech" when contact email == owner email (common
-    # in demos) — that confuses Reply and inbound matching.
+    # Strip any legacy forward wrappers if a stale draft still has them
+    for junk_prefix in (
+        "Forward-ready check-in for ",
+        "Please forward this to ",
+    ):
+        if body.startswith(junk_prefix) or "\n---\n\n" in body[:400]:
+            # Prefer rebuilt clean body
+            body = build_checkin_draft(ticket, tenant, contact, sequence=seq)["body"]
+            subject = build_checkin_draft(ticket, tenant, contact, sequence=seq)["subject"]
+            break
+    if subject.lower().startswith("[forward to tech]") or subject.lower().startswith("[please forward]"):
+        subject = build_checkin_draft(ticket, tenant, contact, sequence=seq)["subject"]
+
     owner_email = getattr(tenant, "contact_email", None)
     go_to = to if _email_ok(to) else (owner_email or "")
     if not _email_ok(go_to):
         raise ValueError("no valid recipient email (contact or owner)")
 
+    # Always send the letter as-is to go_to. The tech IS the recipient when
+    # contact.email is set (including when it equals the owner email for testing).
     send_body = body
-    # Only use forward packaging when sending to the OWNER as a proxy because
-    # the tech has a DIFFERENT email we couldn't deliver to.
-    tech_email = (contact.email or "").strip().lower() if contact else ""
-    if (
-        owner_email
-        and go_to.lower() == owner_email.lower()
-        and tech_email
-        and tech_email != owner_email.lower()
-    ):
-        send_body = (
-            f"Please forward this to {contact.name}"
-            f"{' at ' + contact.company if contact.company else ''}"
-            f" <{contact.email}>:\n\n---\n\n{body}"
-        )
-        subject = f"[Please forward] {subject}"
 
-    # From + Reply-To = same Energy Agent mailbox (see notify.send_repair_checkin_email)
     ok = notify.send_repair_checkin_email(
         to=go_to,
         subject=subject,
@@ -757,11 +812,12 @@ def send_checkin(
 
     if ok:
         ticket.last_checkin_at = now()
-        ticket.checkin_count = (ticket.checkin_count or 0) + 1
+        ticket.checkin_count = prior + 1
         if ticket.status == "open":
             ticket.status = "waiting_reply"
+        # Next draft is a follow-up (#2+), never another first-contact letter
         ticket.draft_checkin = build_checkin_draft(
-            ticket, tenant, contact, sequence=(ticket.checkin_count or 0) + 1,
+            ticket, tenant, contact, sequence=ticket.checkin_count + 1,
         )
         _schedule_next_checkin(tenant, ticket, first=False)
         # Notify open Energy Agent chat that outreach went out
@@ -1670,7 +1726,11 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
 
 
 def process_due(db, tenant: Tenant) -> int:
-    """Fire auto check-ins whose next_checkin_at is due (mode auto|delay only)."""
+    """Fire auto *follow-up* check-ins when due (mode auto|delay only).
+
+    Never sends the first outreach — that is always Approve & send.
+    Never re-sends if we are still waiting on a reply with no new inbound.
+    """
     mode = effective_checkin_mode(tenant)
     if mode not in ("auto", "delay"):
         return 0
@@ -1684,19 +1744,22 @@ def process_due(db, tenant: Tenant) -> int:
     ).scalars().all()
     sent = 0
     for ticket in due:
+        # First letter is never auto
+        if (ticket.checkin_count or 0) < 1 and _prior_successful_outbound(db, ticket.id) < 1:
+            ticket.next_checkin_at = None
+            continue
         try:
             send_checkin(db, tenant, ticket, via="auto")
             sent += 1
+        except ValueError as exc:
+            # Expected skips (too soon, first outreach) — already rescheduled inside
+            log.info("auto repair check-in skipped ticket=%s: %s", ticket.id, exc)
         except Exception as exc:
             log.warning(
                 "auto repair check-in failed ticket=%s: %s", ticket.id, exc,
             )
-            # Push next attempt out so we don't tight-loop
             ticket.next_checkin_at = now() + timedelta(hours=checkin_interval_hours(tenant))
-    if sent:
-        db.commit()
-    else:
-        db.commit()
+    db.commit()
     return sent
 
 
@@ -2064,7 +2127,7 @@ def ops_overview_ep(
         if reconcile_first:
             try:
                 tally = reconcile(db, t)
-                process_due(db, t)
+                # Do not process_due here — hard-refresh must never send mail
                 tree = (tally or {}).get("tree")
             except Exception as exc:
                 log.warning("ops reconcile failed for %s: %s", t.id, exc)
@@ -2079,18 +2142,27 @@ def ops_overview_ep(
 
 @router.post("/v1/array-owners/ops/reconcile")
 def ops_reconcile_ep(authorization: str | None = Header(default=None)) -> dict:
-    """Background-friendly reconcile (open/close tickets from fleet). Not on tab paint."""
+    """Open/close fleet-linked tickets only. Does NOT send email.
+
+    Auto follow-ups run on the scheduler (process_due), never on hard-refresh.
+    """
     tenant = _tenant(authorization)
     with SessionLocal() as db:
         t = db.get(Tenant, tenant.id)
         try:
             tally = reconcile(db, t)
-            sent = process_due(db, t)
+            # Clear any accidental "send now" timers left by older code so a
+            # refresh cannot blast opening letters again.
+            active = list_tickets(db, t.id, active_only=True, limit=300)
+            for ticket in active:
+                if (ticket.checkin_count or 0) < 1 and _prior_successful_outbound(db, ticket.id) < 1:
+                    ticket.next_checkin_at = None
+            db.commit()
             return {
                 "ok": True,
                 "opened": tally.get("opened", 0),
                 "closed": tally.get("closed", 0),
-                "auto_checkins": sent,
+                "auto_checkins": 0,
                 "error": tally.get("error"),
             }
         except Exception as exc:
