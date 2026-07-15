@@ -190,7 +190,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
           48 * 60 * 60 * 1000
       : false;
 
-  const brand = brandFor(account?.product);
+  // This SPA is NEPOOL Operator (nepooloperator.com). Force NEPOOL chrome even
+  // if a tenant was mis-tagged array_operator (that leak showed offtaker
+  // billing + renamed "Automatic Reports" to "Billing").
+  const brand = brandFor("nepool");
   const tabs: Tab[] = [
     { ...BASE_TABS[0], label: brand.accountTabLabel },
     { ...BASE_TABS[1], label: brand.clientsTabLabel },
@@ -289,7 +292,11 @@ export default function DashboardLayout({ onSignOut }: Props) {
       </footer>
 
       {/* Mobile-only bottom tab bar — hidden on sm+ where the top TabBar handles navigation. */}
-      <BottomTabBar />
+      <BottomTabBar
+        clientsLabel={brand.clientsTabLabel}
+        reportsLabel={brand.reportsTabLabel}
+        accountLabel="Account"
+      />
 
       {/* Mind button — position via CSS var that lifts it above BottomTabBar on mobile. */}
       <MindButton account={account} />

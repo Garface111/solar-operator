@@ -1,27 +1,19 @@
 import { Suspense } from "react";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { Spinner } from "../ui/Spinner";
-import { useDashboardContext } from "./DashboardLayout";
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Reports — product dispatcher
+// Reports — NEPOOL Operator SPA (nepooloperator.com/accounts)
 //
-// The /reports route is shared by TWO products that happen to ride the same
-// backend + dashboard shell:
+// This React SPA is the NEPOOL Operator product. Array Operator offtaker
+// billing lives on arrayoperator.com — never in this shell.
 //
-//   • NEPOOL Operator  → quarterly NEPOOL-GIS net-metering credit reports
-//                         (the original "Automatic Reports" surface).
-//   • Array Operator   → the per-period customer "Billing Run" (offtaker
-//                         invoices, allocation %, Review drawer, etc.).
-//
-// They are isolated UIs. Branch on account.product so a NEPOOL tenant never
-// sees the Array Operator billing layout and vice-versa. (The Jun-17 billing
-// redesign had replaced the NEPOOL surface outright — this dispatcher restores
-// the separation.)
+// Always render Automatic Reports (NepoolReportsTab): cadence, send-now,
+// NEPOOL-GIS directory, email templates. Do NOT branch on account.product
+// here; a mis-tagged tenant must not swap in AO "Billing / offtakers".
 // ═══════════════════════════════════════════════════════════════════════════
 
 const NepoolReportsTab = lazyWithRetry(() => import("./NepoolReportsTab"));
-const BillingReportsTab = lazyWithRetry(() => import("./BillingReportsTab"));
 
 function TabSpinner() {
   return (
@@ -32,12 +24,9 @@ function TabSpinner() {
 }
 
 export default function ReportsTab() {
-  const { account } = useDashboardContext();
-  const isArrayOperator = account?.product === "array_operator";
-
   return (
     <Suspense fallback={<TabSpinner />}>
-      {isArrayOperator ? <BillingReportsTab /> : <NepoolReportsTab />}
+      <NepoolReportsTab />
     </Suspense>
   );
 }

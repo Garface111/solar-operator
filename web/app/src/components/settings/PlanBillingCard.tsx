@@ -66,6 +66,10 @@ export function PlanBillingCard({ account }: Props) {
   const [nextInvoice, setNextInvoice] = useState<NextInvoice | null>(null);
   const [openingPortal, setOpeningPortal] = useState(false);
   const [addingCard, setAddingCard] = useState(false);
+  // This SPA is NEPOOL Operator (nepooloperator.com). Offtaker / per-kWh AO
+  // plan cards must NEVER show for NEPOOL tenants — product is the hard gate,
+  // not billing_basis alone (stale basis once leaked offtaker copy into NEPOOL).
+  const isArrayOperator = account.product === "array_operator";
 
   useEffect(() => {
     let cancelled = false;
@@ -225,9 +229,9 @@ export function PlanBillingCard({ account }: Props) {
             <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
               Billing
             </p>
-            {billing.billing_basis === "kwh" || billing.billing_basis === "invoicing" ? (
-              /* ARRAY OPERATOR — dual model: both plans shown, the active one
-                 highlighted. Monitoring (per-kWh) + Invoicing (per-offtaker). */
+            {isArrayOperator &&
+            (billing.billing_basis === "kwh" || billing.billing_basis === "invoicing") ? (
+              /* ARRAY OPERATOR ONLY — dual model. Never shown for NEPOOL. */
               <div className="space-y-2.5">
                 <PlanRow
                   active={billing.billing_basis === "kwh"}
@@ -305,11 +309,11 @@ export function PlanBillingCard({ account }: Props) {
               </p>
             )}
             <p className="mt-2 text-xs text-zinc-500">
-              {billing.billing_basis === "invoicing"
+              {isArrayOperator && billing.billing_basis === "invoicing"
                 ? "Offtakers count toward your bill as soon as they’re added."
-                : billing.billing_basis === "kwh"
+                : isArrayOperator && billing.billing_basis === "kwh"
                   ? "Your generation is metered automatically."
-                  : "Arrays count toward your bill as soon as they’re added."}{" "}
+                  : "Arrays count toward your subscription automatically. Client NEPOOL reports send on your schedule."}{" "}
               We sync with Stripe automatically; you&apos;ll see the change on your next
               statement.
             </p>
@@ -327,17 +331,23 @@ export function PlanBillingCard({ account }: Props) {
               {nextPullAt ? (
                 <>
                   {relativeTime(nextPullAt, "soon")}{" "}
-                  <span className="text-xs text-zinc-400">(every 6 hours)</span>
+                  <span className="text-xs text-zinc-400">
+                    {account.capture_mode === "cloud"
+                      ? "(Cloud Capture, automatic)"
+                      : "(every 6 hours while capture is active)"}
+                  </span>
                 </>
               ) : (
                 <span className="text-zinc-400">
-                  soon — the extension will begin pulling automatically
+                  {account.capture_mode === "cloud"
+                    ? "soon — Cloud Capture keeps bills fresh on our servers"
+                    : "soon — add a utility login (Cloud Capture) or use the browser helper"}
                 </span>
               )}
             </li>
             <li>
               <span className="font-medium">
-                Next {account.report_frequency ?? "quarterly"} report:
+                Next automatic {account.report_frequency ?? "quarterly"} client report:
               </span>{" "}
               {nextReport.toLocaleDateString(undefined, {
                 month: "long",

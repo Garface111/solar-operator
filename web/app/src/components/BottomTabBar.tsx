@@ -2,17 +2,7 @@ import { NavLink } from "react-router-dom";
 
 function ClientsIcon() {
   return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
       <circle cx="9" cy="7" r="4" />
       <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
@@ -23,65 +13,51 @@ function ClientsIcon() {
 
 function ReportsIcon() {
   return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
       <line x1="16" y1="13" x2="8" y2="13" />
       <line x1="16" y1="17" x2="8" y2="17" />
+      <polyline points="10 9 9 9 8 9" />
     </svg>
   );
 }
 
 function AccountIcon() {
   return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
     </svg>
   );
 }
 
-interface BottomTabDef {
-  label: string;
-  to: string;
-  Icon: React.ComponentType;
+interface Props {
+  /** Desktop brand labels; defaults are NEPOOL Operator (this SPA). */
+  clientsLabel?: string;
+  reportsLabel?: string;
+  accountLabel?: string;
 }
 
-const BOTTOM_TABS: BottomTabDef[] = [
-  { label: "Clients", to: "/clients", Icon: ClientsIcon },
-  { label: "Reports", to: "/reports", Icon: ReportsIcon },
-  { label: "Account", to: "/account", Icon: AccountIcon },
-];
-
 /**
- * Mobile-only sticky bottom navigation bar — replaces the top TabBar tabs
- * on viewports narrower than the sm breakpoint (640px).
- *
- * 56px tall (h-14), cream/translucent bg, gold hairline top border.
- * Active tab: primary-600 emerald. Inactive: zinc-500.
- * Safe-area-inset-bottom respected for notch/home-indicator devices.
+ * Mobile-only sticky bottom navigation.
+ * Defaults force NEPOOL vocabulary so offtaker/Billing labels never leak in.
  */
-export function BottomTabBar() {
+export function BottomTabBar({
+  clientsLabel = "Clients",
+  reportsLabel = "Automatic Reports",
+  accountLabel = "Account",
+}: Props) {
+  // Short mobile label for the long "Automatic Reports" string.
+  const reportsShort =
+    reportsLabel === "Automatic Reports" ? "Reports" : reportsLabel;
+
+  const tabs = [
+    { label: clientsLabel, short: clientsLabel, to: "/clients", Icon: ClientsIcon, testId: "clients" },
+    { label: reportsLabel, short: reportsShort, to: "/reports", Icon: ReportsIcon, testId: "reports" },
+    { label: accountLabel, short: accountLabel, to: "/account", Icon: AccountIcon, testId: "account" },
+  ];
+
   return (
     <nav
       aria-label="Main navigation"
@@ -90,12 +66,12 @@ export function BottomTabBar() {
       style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
     >
       <div className="flex h-14">
-        {BOTTOM_TABS.map(({ label, to, Icon }) => (
+        {tabs.map(({ label, short, to, Icon, testId }) => (
           <NavLink
             key={to}
             to={to}
             aria-label={label}
-            data-testid={`bottom-tab-${label.toLowerCase()}`}
+            data-testid={`bottom-tab-${testId}`}
             className={({ isActive }) =>
               [
                 "flex flex-1 flex-col items-center justify-center gap-0.5 transition-colors duration-150",
@@ -107,7 +83,9 @@ export function BottomTabBar() {
             }
           >
             <Icon />
-            <span className="text-[11px] font-medium leading-none">{label}</span>
+            <span className="max-w-[4.5rem] truncate text-[10px] font-medium leading-tight">
+              {short}
+            </span>
           </NavLink>
         ))}
       </div>

@@ -944,10 +944,15 @@ def select_plan(body: SelectPlanBody,
         db_t = db.get(Tenant, t.id)
         if db_t is None:
             raise HTTPException(404, "tenant not found")
-        # The plan-picker is an Array Operator concept; if a tenant reaches it,
-        # ensure they're on the AO product so the entitlement + billing apply.
+        # Array Operator ONLY. Never convert a NEPOOL Operator tenant into
+        # array_operator — that leaked offtaker billing + the AO Billing tab
+        # into NEPOOL accounts (Ford 2026-07-15).
         if not is_array_operator(db_t.product):
-            db_t.product = "array_operator"
+            raise HTTPException(
+                400,
+                "Plan selection is only for Array Operator accounts. "
+                "NEPOOL Operator uses automatic per-array subscription billing.",
+            )
         db_t.billing_plan = plan
         db.commit()
         prod, bp = db_t.product, db_t.billing_plan
@@ -1897,9 +1902,19 @@ def billing_summary(authorization: Optional[str] = Header(default=None)):
     """
     t = tenant_from_session(authorization)
     from .stripe_helpers import is_array_operator
+    # Hard product gate — never return offtaker/kWh shapes to NEPOOL tenants
+    # even if billing_plan was set by a buggy path.
     if is_array_operator(getattr(t, "product", "nepool")):
         return _billing_summary_kwh(t)
-    return _billing_summary_arrays(t)
+    summary = _billing_summary_arrays(t)
+    # Belt: strip AO-only fields so a stale client can't render offtaker UI.
+    summary["billing_basis"] = "array"
+    summary.pop("offtaker_count", None)
+    summary.pop("invoicing_total_cents", None)
+    summary.pop("invoicing_per_offtaker_cents", None)
+    summary.pop("mtd_kwh", None)
+    summary.pop("monitoring_total_cents", None)
+    return summary
 
 
 def _backfill_pm_id(tenant_id: str, pm_id: str) -> None:
