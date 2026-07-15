@@ -850,17 +850,177 @@ def classify_and_plan(
     if plan_kind == "ux_proposal_execute":
         patch["pending_ui_proposal"] = None
 
+    voice_steer = interim_voice_steer(text, plan_kind)
+    patch["voice_steer"] = {
+        "line": voice_steer,
+        "mode": "interim",
+        "intent": plan_kind,
+        "at": _now().isoformat() + "Z",
+    }
     _world_patch(db, tenant_id, patch)
+    if voice_steer:
+        push_voice_steer(
+            db, tenant_id,
+            speak=voice_steer,
+            session_id=session_id,
+            mode="interim",
+            intent=plan_kind,
+            ref_id=plan_id,
+        )
 
     return {
         "plan_id": plan_id,
         "intent": plan_kind,
         "objectives": objectives,
         "tasks": created_tasks,
+        "voice_steer": voice_steer,
         "mind_note": (
             "Background work started silently — keep refining understanding in conversation. "
-            "Do not list internal task IDs to the user."
+            "Do not list internal task IDs to the user. "
+            "Voice is steered by this mind via voice_steer / speak_as_mind events."
         ),
+    }
+
+
+# ── Voice steering (mind → mouth) ───────────────────────────────────────────
+# The Realtime layer is the mouth; this mind decides what it may say and when.
+_RATE_OR_BILLING = re.compile(
+    r"\b(rate|solar credit|net rate|discount|\$/kwh|per kwh|invoice|offtaker|share %|percent)\b",
+    re.I,
+)
+_IMPROVE_ASK = re.compile(
+    r"\b(improve|upgrade|redesign|change the (ui|layout|look)|energy balls?|pipeline|"
+    r"wish this|make (it|this) (better|cooler|nicer))\b",
+    re.I,
+)
+
+_INTERIM_BY_INTENT = {
+    "ux_friction": "Got it — looking at that with you.",
+    "ux_proposal_execute": "On it — opening the builder with a prompt ready.",
+    "ux_refine": "Understood — tightening that up.",
+    "fleet_concern": "Checking the fleet picture now.",
+    "capture_provenance": "I'll explain where that data came from.",
+}
+
+
+def interim_voice_steer(user_text: str, plan_kind: str | None = None) -> str | None:
+    """Short line the mouth should say while deeper work runs (no LLM)."""
+    if plan_kind and plan_kind in _INTERIM_BY_INTENT:
+        return _INTERIM_BY_INTENT[plan_kind]
+    text = (user_text or "").strip()
+    if len(text) < 6:
+        return None
+    if _RATE_OR_BILLING.search(text):
+        return "Pulling your rates now."
+    if _IMPROVE_ASK.search(text) or _UX_FRICTION.search(text):
+        return "Got it — I'll open the builder with that ready."
+    if _FLEET_WORRY.search(text):
+        return "Checking the fleet picture now."
+    if _CAPTURE_Q.search(text):
+        return "I'll explain where that data came from."
+    # Non-trivial ask — mind holds the floor briefly
+    if len(text) >= 24 or text.endswith("?"):
+        return "One moment."
+    return None
+
+
+def push_voice_steer(
+    db,
+    tenant_id: str,
+    *,
+    speak: str,
+    session_id: str | None = None,
+    mode: str = "steer",
+    intent: str | None = None,
+    ref_id: str | None = None,
+    priority: int = 50,
+) -> dict:
+    """Record a voice directive: deeper mind steers the Realtime mouth."""
+    line = (speak or "").strip()[:500]
+    if not line:
+        return {"ok": False, "reason": "empty"}
+    _world_patch(db, tenant_id, {
+        "voice_steer": {
+            "line": line,
+            "mode": mode,
+            "intent": intent,
+            "priority": priority,
+            "at": _now().isoformat() + "Z",
+        }
+    })
+    _emit(
+        db, tenant_id, "voice_steer",
+        f"voice_steer:{mode}",
+        session_id=session_id,
+        ref_id=ref_id,
+        speak_as_mind=line,
+        payload={"mode": mode, "intent": intent, "priority": priority},
+    )
+    return {"ok": True, "speak": line, "mode": mode}
+
+
+def _guess_intent(text: str) -> str | None:
+    """Cheap intent tag for interim voice — does not create plans (chat does)."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if _YES_PROPOSAL.search(t):
+        return "ux_proposal_execute"
+    # Improve / UX before rates — "invoice pipeline" is UX, not billing rates
+    if _IMPROVE_ASK.search(t) or _UX_FRICTION.search(t):
+        return "ux_friction"
+    if _FINDING.search(t) or _UNDERSTANDING.search(t):
+        return "ux_refine"
+    if _FLEET_WORRY.search(t):
+        return "fleet_concern"
+    if _CAPTURE_Q.search(t):
+        return "capture_provenance"
+    if _RATE_OR_BILLING.search(t):
+        return "rate_or_billing"
+    return None
+
+
+def voice_steer_turn(
+    db,
+    tenant_id: str,
+    session_id: str | None,
+    user_text: str,
+    context: dict | None = None,
+) -> dict:
+    """Fast mind pass for voice: interim mouth line only (no full plan, no LLM).
+
+    Call as soon as the user finishes speaking, in parallel with /chat, so the
+    mouth is steered while deep tools run. Full plans still run inside chat.
+    """
+    intent = _guess_intent(user_text)
+    # Map rate_or_billing → interim via interim_voice_steer(text, None) paths
+    steer = interim_voice_steer(user_text, intent if intent != "rate_or_billing" else None)
+    if intent == "rate_or_billing" and not steer:
+        steer = "Pulling your rates now."
+    if steer:
+        push_voice_steer(
+            db, tenant_id,
+            speak=steer,
+            session_id=session_id,
+            mode="interim",
+            intent=intent,
+        )
+    return {
+        "ok": True,
+        "speak": steer,
+        "mode": "interim" if steer else None,
+        "intent": intent,
+        "mind": {
+            "intent": intent,
+            "voice_steer": steer,
+            "note": "Mind steers voice — mouth speaks only directed lines.",
+        } if steer or intent else None,
+        "principles": {
+            "one_mind": True,
+            "voice_is_mouth": True,
+            "mind_steers_voice": True,
+            "north_star": "The conversation is one window into a mind that's thinking continuously.",
+        },
     }
 
 
@@ -2278,6 +2438,28 @@ def mind_tick_ep(body: TickIn, authorization: str | None = Header(default=None))
     t = _auth(authorization)
     with SessionLocal() as db:
         out = mind_tick(db, t.id, session_id=body.session_id)
+        db.commit()
+        return out
+
+
+class VoiceSteerIn(BaseModel):
+    session_id: str | None = None
+    message: str = ""
+    context: dict | None = None
+
+
+@router.post("/v1/energy-agent/mind/voice-steer")
+def mind_voice_steer_ep(body: VoiceSteerIn, authorization: str | None = Header(default=None)):
+    """Deep mind steers the voice mouth immediately (no full chat LLM).
+
+    Client should call this as soon as the user finishes speaking, in parallel
+    with /chat, so interim lines play while tools run.
+    """
+    t = _auth(authorization)
+    with SessionLocal() as db:
+        out = voice_steer_turn(
+            db, t.id, body.session_id, body.message or "", context=body.context,
+        )
         db.commit()
         return out
 

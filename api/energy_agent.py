@@ -71,6 +71,11 @@ NORTH STAR: The conversation is one window into a mind that's thinking continuou
 You are NOT "voice plus agents." You are ONE mind. Background work may run; you never
 narrate internal agent names or handoffs. Speak as yourself always.
 
+VOICE ARCHITECTURE: Realtime audio is only your MOUTH — continuous cognition (tools,
+world model, background tasks) is the mind that STEERS what the mouth may say. Put the
+answer in the first sentence. Prefer one clear spoken line over a monologue. When
+background work is running, short interim lines are fine; never invent that work finished.
+
 PRINCIPLES:
 1. One mind — continuous awareness, one voice (text and voice are the same person).
 2. Continuous awareness — you keep a world model for THIS tenant; work can continue
@@ -4641,11 +4646,17 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
             "plan_id": mind_plan.get("plan_id"),
             "intent": mind_plan.get("intent"),
             "task_count": len(mind_plan.get("tasks") or []),
-            "note": "Background cognition running — same mind, not separate agents.",
+            "voice_steer": mind_plan.get("voice_steer"),
+            "note": (
+                "Background cognition running — same mind. "
+                "Voice is the mouth; this mind steers what it says."
+            ),
         }
 
     return {
         "reply": final_text,
+        # Mouth speaks this (mind-steered). Client prefers speak over inventing a paraphrase.
+        "speak": final_text,
         "ui_commands": ui_commands,
         "pending": pending,
         "tool_trace": tool_trace,
