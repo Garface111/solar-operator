@@ -263,6 +263,13 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
         claim.draft = build_draft(claim, tenant)
         _apply_policy(db, tenant, claim)
         db.add(claim)
+        db.flush()
+        # Link / open a field-repair ticket when an O&M contact is known
+        try:
+            from . import repair_ops
+            repair_ops.ensure_linked_to_claim(db, tenant, claim)
+        except Exception as exc:
+            log.debug("repair link on claim open skipped: %s", exc)
         opened += 1
 
     # CLOSE — recovered / vanished
@@ -417,7 +424,7 @@ def update_draft(db, claim: WarrantyClaim, to=None, subject=None, body=None) -> 
 
 # ── serialization ─────────────────────────────────────────────────────────────
 
-def serialize(claim: WarrantyClaim) -> dict:
+def serialize(claim: WarrantyClaim, *, repair_ticket_id=None, repair_ticket_status=None) -> dict:
     def iso(dt):
         return dt.replace(microsecond=0).isoformat() + "Z" if dt else None
     return {
@@ -444,6 +451,8 @@ def serialize(claim: WarrantyClaim) -> dict:
         "sentAt": iso(claim.sent_at),
         "resolvedAt": iso(claim.resolved_at),
         "createdAt": iso(claim.created_at),
+        "repair_ticket_id": repair_ticket_id,
+        "repair_ticket_status": repair_ticket_status,
     }
 
 
@@ -476,14 +485,33 @@ def _get_claim(db, tenant: Tenant, claim_id: int) -> WarrantyClaim:
 
 
 def _payload(db, tenant: Tenant) -> dict:
+    from .models import RepairTicket
     claims = db.execute(
         select(WarrantyClaim)
         .where(WarrantyClaim.tenant_id == tenant.id)
         .order_by(WarrantyClaim.created_at.desc())
     ).scalars().all()
     visible = [c for c in claims if c.stage != "cleared"]
+    # Map warranty_claim_id → repair ticket for tighter UI linking
+    linked = {}
+    if visible:
+        ids = [c.id for c in visible]
+        for t in db.execute(
+            select(RepairTicket).where(
+                RepairTicket.tenant_id == tenant.id,
+                RepairTicket.warranty_claim_id.in_(ids),
+            )
+        ).scalars().all():
+            linked[t.warranty_claim_id] = t
     return {
-        "claims": [serialize(c) for c in visible],
+        "claims": [
+            serialize(
+                c,
+                repair_ticket_id=(linked[c.id].id if c.id in linked else None),
+                repair_ticket_status=(linked[c.id].status if c.id in linked else None),
+            )
+            for c in visible
+        ],
         "settings": {
             "sendMode": tenant.claim_send_mode if tenant.claim_send_mode in VALID_MODES else "manual",
             "graceHours": int(tenant.claim_grace_hours or 24),

@@ -1029,6 +1029,45 @@ def send_warranty_claim_email(
     )
 
 
+def send_repair_sms(to: str, body: str) -> bool:
+    """Optional Twilio SMS for O&M check-ins.
+
+    Requires TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER.
+    Returns True only when Twilio accepts the message. Callers should treat
+    False as "use sms: URI fallback" rather than a hard failure.
+    """
+    sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    from_num = (os.getenv("TWILIO_FROM_NUMBER") or "").strip()
+    if not (sid and token and from_num):
+        return False
+    to = (to or "").strip()
+    body = (body or "").strip()
+    if not to or not body:
+        return False
+    try:
+        import base64
+        import urllib.parse
+        data = urllib.parse.urlencode({
+            "To": to,
+            "From": from_num,
+            "Body": body[:1500],
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            data=data,
+            method="POST",
+        )
+        auth = base64.b64encode(f"{sid}:{token}".encode()).decode()
+        req.add_header("Authorization", f"Basic {auth}")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except Exception as exc:
+        logger.warning("twilio sms failed: %s", exc)
+        return False
+
+
 def send_repair_checkin_email(
     to: str,
     subject: str,

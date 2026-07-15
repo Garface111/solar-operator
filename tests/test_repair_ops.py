@@ -367,3 +367,93 @@ def test_energy_agent_tools_list_and_upsert():
         )
         assert overview.get("ok") is True
         assert any(c["name"] == "Kim Ops" for c in overview.get("contacts") or [])
+
+
+def test_phone_note_and_sms_uri():
+    tid, _ = _tenant()
+    aid = _array(tid, "Phone Site")
+    iid, sn = _inv(tid, aid)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        ro.upsert_contact(
+            db, tid, name="Lee", email="lee@om.test", phone="+18025550199",
+            is_default=True,
+        )
+        ticket = ro.open_ticket(db, t, array_id=aid, inverter_id=iid, fail_type="dead")
+        db.commit()
+        tid_ticket = ticket.id
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        ticket = db.get(RepairTicket, tid_ticket)
+        row = ro.log_phone_note(db, t, ticket, "Said parts on order for Friday")
+        db.commit()
+        assert row.channel == "phone_note"
+        db.refresh(ticket)
+        assert ticket.status == "in_progress"
+
+    with SessionLocal() as db, patch.object(ro.notify, "send_repair_sms", return_value=False):
+        t = db.get(Tenant, tid)
+        ticket = db.get(RepairTicket, tid_ticket)
+        out = ro.send_or_log_sms(db, t, ticket, "Any update?", via="test")
+        db.commit()
+        assert out["ok"] is True
+        assert out["sms_uri"].startswith("sms:")
+        assert out["sent_via_twilio"] is False
+        assert f"[AO-TICKET-{tid_ticket}]" in (out["checkin"]["body"] or "")
+
+
+def test_inbound_email_parse_and_claim_link():
+    tid, _ = _tenant()
+    aid = _array(tid, "Inbound Site")
+    iid, sn = _inv(tid, aid)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        c = ro.upsert_contact(
+            db, tid, name="Mo", email="mo@om.test", is_default=True,
+        )
+        ticket = ro.open_ticket(db, t, array_id=aid, inverter_id=iid, fail_type="fault")
+        db.commit()
+        tid_ticket = ticket.id
+        contact_id = c.id
+
+    # Marker in subject
+    with SessionLocal() as db:
+        out = ro.ingest_inbound_email(
+            db,
+            from_email="mo@om.test",
+            subject=f"Re: status [AO-TICKET-{tid_ticket}]",
+            body="Scheduled visit Thursday morning.",
+        )
+        assert out["ok"] is True
+        assert out["ticket_id"] == tid_ticket
+        assert out["status"] == "scheduled"
+
+    # Link warranty claim
+    from api.models import WarrantyClaim
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        claim = WarrantyClaim(
+            tenant_id=tid, array_id=aid, inverter_id=iid,
+            serial=sn, inv_name="Inv 1", vendor="solaredge",
+            site_name="Inbound Site", fail_type="fault",
+            evidence={}, draft={}, stage="ready",
+        )
+        db.add(claim)
+        db.flush()
+        ticket = db.get(RepairTicket, tid_ticket)
+        ro.link_warranty_claim(db, t, ticket, claim.id)
+        db.commit()
+        claim_id = claim.id
+
+    with SessionLocal() as db:
+        ticket = db.get(RepairTicket, tid_ticket)
+        assert ticket.warranty_claim_id == claim_id
+        summary = ro.claim_summary_for_ticket(db, ticket)
+        assert summary and summary["id"] == claim_id
+
+
+def test_extract_ticket_id():
+    assert ro.extract_ticket_id_from_text("hello [AO-TICKET-42] world") == 42
+    assert ro.extract_ticket_id_from_text("Re: Ticket #99 status") == 99
+    assert ro.extract_ticket_id_from_text("no marker here") is None

@@ -125,6 +125,40 @@ async def resend_webhook(
     data = payload.get("data") or {}
     recipients = _recipients(data)
 
+    # ── Inbound tech replies on repair tickets (Resend inbound / email.received) ──
+    if event_type in ("email.received", "email.inbound", "inbound"):
+        from_email = None
+        fr = data.get("from") or data.get("sender")
+        if isinstance(fr, str):
+            from_email = fr
+        elif isinstance(fr, dict):
+            from_email = fr.get("email") or fr.get("address") or fr.get("value")
+        subject = data.get("subject") or ""
+        body = (
+            data.get("text")
+            or data.get("body")
+            or data.get("text_body")
+            or ""
+        )
+        if not body and data.get("html"):
+            import re as _re
+            body = _re.sub(r"<[^>]+>", " ", str(data.get("html")))
+            body = _re.sub(r"\s+", " ", body).strip()
+        try:
+            from . import repair_ops
+            with SessionLocal() as db:
+                result = repair_ops.ingest_inbound_email(
+                    db,
+                    from_email=from_email,
+                    to_emails=recipients,
+                    subject=subject,
+                    body=body,
+                )
+            return {"ok": True, "event": event_type, "repair_inbound": result}
+        except Exception:
+            logger.exception("resend webhook: inbound repair parse failed")
+            return {"ok": True, "event": event_type, "repair_inbound": {"ok": False}}
+
     if event_type not in ("email.delivered", "email.bounced", "email.complained"):
         return {"ok": True, "ignored": event_type or "unknown"}
     if not recipients:

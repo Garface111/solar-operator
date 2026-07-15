@@ -112,10 +112,11 @@ CRITICAL — TOP NAV TAB NAMES (use EXACTLY these labels; hash routes are intern
   | Analysis               | #analysis              | Through-time / trends live INSIDE Analysis (no separate Trends tab). |
   | Invoices               | #reports               | NOT "Reports". Offtaker invoices. |
   | Resources              | #resources             | Net-metering rates & news. |
+  | Ops                    | #ops                   | O&M team, repair tickets, warranty claims. (#claims deep-link.) |
   | Account                | #account               | Profile, plan, billing, auto-refresh. (Was "Master Account"; use Account.) |
 
 Never say Dashboard, Arrays, Reports as tab names. Never list Trends as its own tab.
-If the user asks "what are the tabs?", list only the six labels above in that order.
+If the user asks "what are the tabs?", list the seven labels above in that order.
 (Offtaker form field "Master account" = net-meter group host — different from the Account tab.)
 
 You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
@@ -1103,6 +1104,46 @@ TOOL_DEFS = [
                     "reason": {"type": "string"},
                 },
                 "required": ["ticket_id", "note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_repair_phone_note",
+            "description": (
+                "Log a phone-call status note on a repair ticket (after talking to the tech). "
+                "Optional phone override; defaults to the contact's phone."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "note": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                },
+                "required": ["ticket_id", "note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_repair_sms",
+            "description": (
+                "SMS check-in to the assigned tech. Uses Twilio when configured; otherwise "
+                "returns an sms: URI for the owner's phone. Confirm before sending."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "body": {"type": "string"},
+                    "to": {"type": "string"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                },
+                "required": ["ticket_id"],
             },
         },
     },
@@ -3915,6 +3956,71 @@ def _run_tool(
                 "checkin": ro.serialize_checkin(row),
                 "ticket": ro.serialize_ticket(ticket),
             }
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "log_repair_phone_note":
+        from . import repair_ops as ro
+        from .models import RepairTicket as RT
+        ticket_id = args.get("ticket_id")
+        note = (args.get("note") or "").strip()
+        if not ticket_id or not note:
+            return {"ok": False, "error": "ticket_id and note required"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"note": note, "phone": True}):
+            needs = False
+        payload = {"ticket_id": ticket_id, "note": note, "phone": args.get("phone")}
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": f"Log phone note on ticket #{ticket_id} — confirm.",
+                "needs_confirm": True,
+            }
+        ticket = db.get(RT, ticket_id)
+        if ticket is None or ticket.tenant_id != tid:
+            return {"ok": False, "error": "ticket not found"}
+        try:
+            t = db.get(Tenant, tid) or tenant
+            row = ro.log_phone_note(db, t, ticket, note, phone=args.get("phone"), via="agent")
+            db.commit()
+            return {"ok": True, "checkin": ro.serialize_checkin(row), "ticket": ro.serialize_ticket(ticket)}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+    if name == "send_repair_sms":
+        from . import repair_ops as ro
+        from .models import RepairTicket as RT
+        ticket_id = args.get("ticket_id")
+        if not ticket_id:
+            return {"ok": False, "error": "ticket_id required"}
+        needs = bool(args.get("needs_confirm", True))
+        ut = (user_text or "").lower()
+        if needs and any(w in ut for w in ("sms", "text", "text message")):
+            needs = False
+        payload = {"ticket_id": ticket_id, "body": args.get("body"), "to": args.get("to")}
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": f"Send SMS check-in for ticket #{ticket_id} — confirm.",
+                "needs_confirm": True,
+            }
+        ticket = db.get(RT, ticket_id)
+        if ticket is None or ticket.tenant_id != tid:
+            return {"ok": False, "error": "ticket not found"}
+        try:
+            t = db.get(Tenant, tid) or tenant
+            body = (args.get("body") or "").strip()
+            if not body:
+                body = (
+                    f"Status check on {ticket.site_name or 'site'} "
+                    f"({ticket.inv_name or ticket.serial or 'inverter'}). "
+                    f"Any update? [AO-TICKET-{ticket.id}]"
+                )
+            out = ro.send_or_log_sms(db, t, ticket, body, to=args.get("to"), via="agent")
+            db.commit()
+            return out
         except ValueError as e:
             return {"ok": False, "error": str(e)}
 

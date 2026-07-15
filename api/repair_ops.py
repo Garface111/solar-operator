@@ -84,13 +84,19 @@ def serialize_contact(c: ServiceContact) -> dict:
     }
 
 
-def serialize_ticket(t: RepairTicket, *, contact: ServiceContact | None = None) -> dict:
+def serialize_ticket(
+    t: RepairTicket,
+    *,
+    contact: ServiceContact | None = None,
+    claim: dict | None = None,
+) -> dict:
     return {
         "id": t.id,
         "array_id": t.array_id,
         "inverter_id": t.inverter_id,
         "contact_id": t.contact_id,
         "warranty_claim_id": t.warranty_claim_id,
+        "warranty_claim": claim,
         "site_name": t.site_name,
         "inv_name": t.inv_name,
         "serial": t.serial,
@@ -115,6 +121,14 @@ def serialize_ticket(t: RepairTicket, *, contact: ServiceContact | None = None) 
         "created_at": _iso(t.created_at),
         "updated_at": _iso(t.updated_at),
         "contact": serialize_contact(contact) if contact else None,
+        "tel_uri": (
+            f"tel:{(contact.phone or '').strip()}"
+            if contact and (contact.phone or "").strip() else None
+        ),
+        "sms_uri_base": (
+            f"sms:{(contact.phone or '').strip()}"
+            if contact and (contact.phone or "").strip() else None
+        ),
     }
 
 
@@ -409,7 +423,7 @@ def build_checkin_draft(
         + "  3) Repair completed\n"
         + "  4) Needs owner action (access, warranty RMA, etc.)\n\n"
         + (f"Reply-to / owner contact: {owner_email}\n" if owner_email else "")
-        + f"Ticket #{ticket.id} · site: {site}\n"
+        + f"Ticket #{ticket.id} · [AO-TICKET-{ticket.id}] · site: {site}\n"
         + "— Array Operator Energy Agent\n"
     )
     to = (contact.email if contact and contact.email else None) or owner_email
@@ -687,6 +701,30 @@ def list_tickets(
     return list(db.execute(q).scalars().all())
 
 
+def _apply_status_heuristics(ticket: RepairTicket, text: str) -> None:
+    """Bump ticket status from free-text (tech reply, phone note, SMS)."""
+    low = (text or "").lower()
+    if any(w in low for w in (
+        "fixed", "replaced", "repaired", "back online", "resolved",
+        "completed", "all good", "working again",
+    )):
+        if ticket.status in ACTIVE_TICKET_STATUSES:
+            ticket.status = "resolved"
+            ticket.resolved_at = now()
+            ticket.next_checkin_at = None
+    elif any(w in low for w in (
+        "scheduled", "will visit", "on site", "appointment", "coming by", "eta",
+    )):
+        if ticket.status in ("open", "waiting_reply"):
+            ticket.status = "scheduled"
+    elif any(w in low for w in (
+        "working on", "in progress", "parts ordered", "parts on order",
+        "ordered parts", "en route",
+    )):
+        if ticket.status in ("open", "waiting_reply", "scheduled"):
+            ticket.status = "in_progress"
+
+
 def log_inbound_note(
     db,
     tenant: Tenant,
@@ -694,6 +732,11 @@ def log_inbound_note(
     note: str,
     *,
     via: str = "agent",
+    channel: str = "internal",
+    direction: str = "note",
+    subject: str | None = None,
+    sent_to: str | None = None,
+    sent_ok: bool = True,
 ) -> RepairCheckIn:
     note = (note or "").strip()
     if not note:
@@ -702,31 +745,322 @@ def log_inbound_note(
         tenant_id=tenant.id,
         ticket_id=ticket.id,
         contact_id=ticket.contact_id,
-        channel="internal",
-        direction="note",
-        subject="Status note",
+        channel=channel if channel in ("email", "phone_note", "sms", "internal") else "internal",
+        direction=direction if direction in ("outbound", "inbound", "note") else "note",
+        subject=subject or ("Phone note" if channel == "phone_note" else "Status note"),
         body=note,
-        sent_to=None,
-        sent_ok=True,
+        sent_to=sent_to,
+        sent_ok=bool(sent_ok),
         via=via,
     )
     db.add(row)
     ticket.tech_note = note
-    # Heuristic status bumps from note keywords
-    low = note.lower()
-    if any(w in low for w in ("fixed", "replaced", "repaired", "back online", "resolved")):
-        if ticket.status in ACTIVE_TICKET_STATUSES:
-            ticket.status = "resolved"
-            ticket.resolved_at = now()
-            ticket.next_checkin_at = None
-    elif any(w in low for w in ("scheduled", "will visit", "on site", "appointment")):
-        if ticket.status in ("open", "waiting_reply"):
-            ticket.status = "scheduled"
-    elif any(w in low for w in ("working on", "in progress", "parts ordered")):
-        if ticket.status in ("open", "waiting_reply", "scheduled"):
-            ticket.status = "in_progress"
+    _apply_status_heuristics(ticket, note)
     db.flush()
     return row
+
+
+def log_phone_note(
+    db,
+    tenant: Tenant,
+    ticket: RepairTicket,
+    note: str,
+    *,
+    phone: str | None = None,
+    via: str = "manual",
+) -> RepairCheckIn:
+    """Record a phone call / voice status note (no carrier required)."""
+    contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+    phone = (phone or (contact.phone if contact else None) or "").strip() or None
+    prefix = f"[call {phone}] " if phone else "[call] "
+    return log_inbound_note(
+        db, tenant, ticket, prefix + note,
+        via=via, channel="phone_note", direction="note",
+        subject="Phone note", sent_to=phone, sent_ok=True,
+    )
+
+
+def send_or_log_sms(
+    db,
+    tenant: Tenant,
+    ticket: RepairTicket,
+    body: str,
+    *,
+    to: str | None = None,
+    via: str = "manual",
+) -> dict:
+    """Send SMS via Twilio when configured; otherwise return an sms: URI and log a draft.
+
+    Returns {ok, checkin, sms_uri, sent_via_twilio}.
+    """
+    body = (body or "").strip()
+    if not body:
+        raise ValueError("SMS body is required")
+    contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+    phone = (to or (contact.phone if contact else None) or "").strip()
+    if not phone:
+        raise ValueError("no phone number on the assigned contact — add a phone first")
+
+    # Always stamp ticket ref for reply parsing if they email instead
+    if f"[AO-TICKET-{ticket.id}]" not in body:
+        body = f"{body}\n\n[AO-TICKET-{ticket.id}]"
+
+    sent_via_twilio = False
+    sent_ok = False
+    twilio_err = None
+    try:
+        sent_ok = bool(notify.send_repair_sms(to=phone, body=body))
+        sent_via_twilio = sent_ok
+    except Exception as exc:
+        twilio_err = str(exc)[:200]
+        sent_ok = False
+
+    # sms: URI always available as fallback / primary without Twilio
+    from urllib.parse import quote
+    sms_uri = f"sms:{phone}?body={quote(body[:400])}"
+
+    row = RepairCheckIn(
+        tenant_id=tenant.id,
+        ticket_id=ticket.id,
+        contact_id=ticket.contact_id,
+        channel="sms",
+        direction="outbound",
+        subject="SMS check-in",
+        body=body,
+        sent_to=phone,
+        sent_ok=sent_ok,
+        via=via if sent_ok else "draft",
+    )
+    db.add(row)
+    if sent_ok:
+        ticket.last_checkin_at = now()
+        ticket.checkin_count = (ticket.checkin_count or 0) + 1
+        if ticket.status == "open":
+            ticket.status = "waiting_reply"
+        _schedule_next_checkin(tenant, ticket, first=False)
+    db.flush()
+    return {
+        "ok": True,
+        "checkin": serialize_checkin(row),
+        "sms_uri": sms_uri,
+        "sent_via_twilio": sent_via_twilio,
+        "twilio_error": twilio_err,
+        "ticket": serialize_ticket(ticket),
+    }
+
+
+# ── inbound email parse ───────────────────────────────────────────────────────
+
+_TICKET_RE = re.compile(
+    r"(?:\[AO-TICKET-(\d+)\]|Ticket\s*#\s*(\d+)|ticket_id[=\s:]+(\d+))",
+    re.I,
+)
+
+
+def extract_ticket_id_from_text(*parts: str | None) -> int | None:
+    blob = "\n".join(p for p in parts if p)
+    m = _TICKET_RE.search(blob or "")
+    if not m:
+        return None
+    for g in m.groups():
+        if g:
+            try:
+                return int(g)
+            except ValueError:
+                continue
+    return None
+
+
+def find_ticket_for_inbound(
+    db,
+    *,
+    ticket_id: int | None = None,
+    from_email: str | None = None,
+    subject: str | None = None,
+    body: str | None = None,
+) -> RepairTicket | None:
+    """Resolve a ticket from explicit id, subject/body markers, or contact email."""
+    tid = ticket_id or extract_ticket_id_from_text(subject, body)
+    if tid:
+        t = db.get(RepairTicket, tid)
+        if t and t.status in ACTIVE_TICKET_STATUSES + ("resolved",):
+            return t
+        if t:
+            return t
+
+    email = (from_email or "").strip().lower()
+    if email:
+        # Active tickets whose contact email matches the sender (tenant-scoped via contact)
+        contacts = db.execute(
+            select(ServiceContact).where(
+                ServiceContact.deleted_at.is_(None),
+                ServiceContact.active.is_(True),
+                ServiceContact.email.isnot(None),
+            )
+        ).scalars().all()
+        cids = [c.id for c in contacts if (c.email or "").strip().lower() == email]
+        if cids:
+            t = db.execute(
+                select(RepairTicket)
+                .where(
+                    RepairTicket.contact_id.in_(cids),
+                    RepairTicket.status.in_(ACTIVE_TICKET_STATUSES),
+                )
+                .order_by(RepairTicket.opened_at.desc())
+            ).scalars().first()
+            if t:
+                return t
+    return None
+
+
+def ingest_inbound_email(
+    db,
+    *,
+    from_email: str | None,
+    to_emails: list[str] | None = None,
+    subject: str | None = None,
+    body: str | None = None,
+    ticket_id: int | None = None,
+    tenant_id: str | None = None,
+) -> dict:
+    """Parse a tech reply email into a RepairCheckIn. Used by Resend inbound webhook."""
+    ticket = find_ticket_for_inbound(
+        db, ticket_id=ticket_id, from_email=from_email, subject=subject, body=body,
+    )
+    if ticket is None:
+        return {"ok": False, "matched": False, "reason": "no_ticket"}
+    if tenant_id and ticket.tenant_id != tenant_id:
+        return {"ok": False, "matched": False, "reason": "tenant_mismatch"}
+
+    tenant = db.get(Tenant, ticket.tenant_id)
+    if tenant is None:
+        return {"ok": False, "matched": False, "reason": "no_tenant"}
+
+    text = (body or "").strip() or (subject or "").strip()
+    if not text:
+        return {"ok": False, "matched": True, "reason": "empty_body", "ticket_id": ticket.id}
+
+    # Strip quoted reply noise (common "On ... wrote:") lightly
+    cleaned = re.split(r"\nOn .+wrote:\n", text, maxsplit=1)[0].strip()
+    cleaned = re.split(r"\n-{2,}\s*Original Message\s*", cleaned, maxsplit=1)[0].strip()
+    cleaned = cleaned[:4000]
+
+    row = log_inbound_note(
+        db, tenant, ticket, cleaned,
+        via="inbound_email",
+        channel="email",
+        direction="inbound",
+        subject=(subject or "")[:300] or "Inbound reply",
+        sent_to=from_email,
+        sent_ok=True,
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "matched": True,
+        "ticket_id": ticket.id,
+        "tenant_id": ticket.tenant_id,
+        "status": ticket.status,
+        "checkin_id": row.id,
+    }
+
+
+# ── warranty claim link ───────────────────────────────────────────────────────
+
+def link_warranty_claim(
+    db,
+    tenant: Tenant,
+    ticket: RepairTicket,
+    claim_id: int,
+) -> RepairTicket:
+    from .models import WarrantyClaim
+    claim = db.get(WarrantyClaim, claim_id)
+    if claim is None or claim.tenant_id != tenant.id:
+        raise ValueError("warranty claim not found")
+    ticket.warranty_claim_id = claim.id
+    # Keep evidence snapshots loosely aligned
+    if claim.inverter_id and not ticket.inverter_id:
+        ticket.inverter_id = claim.inverter_id
+    if claim.array_id and not ticket.array_id:
+        ticket.array_id = claim.array_id
+    db.flush()
+    return ticket
+
+
+def ensure_linked_to_claim(
+    db,
+    tenant: Tenant,
+    claim,
+) -> RepairTicket | None:
+    """When a warranty claim opens, ensure a repair ticket exists and is linked.
+
+    Creates a ticket if a service contact is known; otherwise leaves claim alone.
+    """
+    from .models import WarrantyClaim
+    if not isinstance(claim, WarrantyClaim):
+        return None
+    # Already linked?
+    existing = db.execute(
+        select(RepairTicket).where(
+            RepairTicket.tenant_id == tenant.id,
+            RepairTicket.warranty_claim_id == claim.id,
+        )
+    ).scalars().first()
+    if existing:
+        return existing
+
+    # Active ticket on same inverter?
+    if claim.inverter_id:
+        t = _active_ticket_for_inverter(db, tenant.id, claim.inverter_id, claim.array_id)
+        if t:
+            t.warranty_claim_id = claim.id
+            db.flush()
+            return t
+
+    contact = resolve_contact_for_array(db, tenant.id, claim.array_id)
+    if contact is None and not claim.inverter_id:
+        return None
+    # Prefer contact even if only default
+    if contact is None:
+        contact = resolve_contact_for_array(db, tenant.id, None)
+    if contact is None:
+        return None
+
+    ticket = open_ticket(
+        db, tenant,
+        array_id=claim.array_id,
+        inverter_id=claim.inverter_id,
+        contact_id=contact.id,
+        fail_type=claim.fail_type or "dead",
+        title=f"Field repair · {claim.site_name or 'site'} / {claim.inv_name or claim.serial or 'inverter'}",
+        description="Auto-linked to manufacturer warranty claim.",
+        severity="critical",
+        source="auto",
+        evidence=claim.evidence or {},
+        site_name=claim.site_name,
+        inv_name=claim.inv_name,
+        serial=claim.serial,
+        vendor=claim.vendor,
+        warranty_claim_id=claim.id,
+    )
+    return ticket
+
+
+def claim_summary_for_ticket(db, ticket: RepairTicket) -> dict | None:
+    if not ticket.warranty_claim_id:
+        return None
+    from .models import WarrantyClaim
+    c = db.get(WarrantyClaim, ticket.warranty_claim_id)
+    if c is None:
+        return None
+    return {
+        "id": c.id,
+        "stage": c.stage,
+        "fail_type": c.fail_type,
+        "site": c.site_name,
+        "inv": c.inv_name,
+        "serial": c.serial,
+    }
 
 
 # ── reconcile against fleet ───────────────────────────────────────────────────
@@ -814,7 +1148,7 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             "window_kwh": inv.get("window_kwh"),
             "nameplate_kw": inv.get("nameplate_kw"),
         }
-        open_ticket(
+        ticket = open_ticket(
             db,
             tenant,
             array_id=array_id,
@@ -829,6 +1163,20 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             serial=inv.get("sn") or inv.get("serial"),
             vendor=inv.get("vendor"),
         )
+        # Link matching open warranty claim if any
+        try:
+            from .models import WarrantyClaim
+            claim = db.execute(
+                select(WarrantyClaim).where(
+                    WarrantyClaim.tenant_id == tenant.id,
+                    WarrantyClaim.inverter_id == iid,
+                    WarrantyClaim.stage.in_(("ready", "queued", "sent")),
+                )
+            ).scalars().first()
+            if claim and not ticket.warranty_claim_id:
+                ticket.warranty_claim_id = claim.id
+        except Exception:
+            pass
         opened += 1
 
     db.commit()
@@ -948,20 +1296,65 @@ def ops_overview(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             if c:
                 contact_by_id[c.id] = c
 
+    ticket_rows = []
+    for t in tickets:
+        if t.status == "cleared":
+            continue
+        claim = claim_summary_for_ticket(db, t)
+        ticket_rows.append(serialize_ticket(
+            t,
+            contact=contact_by_id.get(t.contact_id) if t.contact_id else None,
+            claim=claim,
+        ))
+
+    # Warranty claims rollup for the Ops Claims sub-view
+    claims_payload = {"claims": [], "summary": {}}
+    try:
+        from .models import WarrantyClaim
+        from .warranty_claims import serialize as ser_claim, summarize as sum_claims
+        claims = db.execute(
+            select(WarrantyClaim)
+            .where(WarrantyClaim.tenant_id == tenant.id)
+            .order_by(WarrantyClaim.created_at.desc())
+            .limit(100)
+        ).scalars().all()
+        claim_list = []
+        for c in claims:
+            if c.stage == "cleared":
+                continue
+            linked = db.execute(
+                select(RepairTicket).where(
+                    RepairTicket.tenant_id == tenant.id,
+                    RepairTicket.warranty_claim_id == c.id,
+                )
+            ).scalars().first()
+            d = ser_claim(
+                c,
+                repair_ticket_id=linked.id if linked else None,
+                repair_ticket_status=linked.status if linked else None,
+            )
+            claim_list.append(d)
+        claims_payload = {
+            "claims": claim_list,
+            "summary": sum_claims(claims),
+        }
+    except Exception as exc:
+        log.debug("ops overview claims rollup skipped: %s", exc)
+
     return {
         "settings": {
             "checkin_mode": effective_checkin_mode(tenant),
             "checkin_hours": checkin_interval_hours(tenant),
             "auto_open": bool(getattr(tenant, "repair_auto_open", True)),
+            "claim_send_mode": getattr(tenant, "claim_send_mode", "manual") or "manual",
+            "claim_grace_hours": int(getattr(tenant, "claim_grace_hours", 24) or 24),
         },
         "contacts": [serialize_contact(c) for c in contacts],
         "assignments": assigns,
-        "tickets": [
-            serialize_ticket(t, contact=contact_by_id.get(t.contact_id) if t.contact_id else None)
-            for t in tickets if t.status != "cleared"
-        ],
+        "tickets": ticket_rows,
         "summary": summarize_tickets(tickets),
         "sites_needing_repair": needs,
+        "warranty_claims": claims_payload,
     }
 
 
@@ -1022,6 +1415,30 @@ class CheckInSendBody(BaseModel):
 
 class NoteBody(BaseModel):
     note: str
+
+
+class PhoneNoteBody(BaseModel):
+    note: str
+    phone: Optional[str] = None
+
+
+class SmsBody(BaseModel):
+    body: Optional[str] = None
+    to: Optional[str] = None
+
+
+class LinkClaimBody(BaseModel):
+    claim_id: int
+
+
+class InboundEmailBody(BaseModel):
+    from_email: Optional[str] = None
+    to: Optional[list[str]] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    text: Optional[str] = None
+    html: Optional[str] = None
+    ticket_id: Optional[int] = None
 
 
 class SettingsBody(BaseModel):
@@ -1265,6 +1682,104 @@ def note_ep(
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         return {"ok": True, "checkin": serialize_checkin(row), "ticket": serialize_ticket(ticket)}
+
+
+@router.post("/v1/array-owners/ops/tickets/{ticket_id}/phone-note")
+def phone_note_ep(
+    ticket_id: int,
+    body: PhoneNoteBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Log a phone-call status note (and expose tel: for click-to-call)."""
+    tenant = _tenant(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant.id)
+        ticket = _get_ticket(db, t, ticket_id)
+        try:
+            row = log_phone_note(db, t, ticket, body.note, phone=body.phone, via="manual")
+            db.commit()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        contact = get_contact(db, t.id, ticket.contact_id) if ticket.contact_id else None
+        return {
+            "ok": True,
+            "checkin": serialize_checkin(row),
+            "ticket": serialize_ticket(ticket, contact=contact),
+        }
+
+
+@router.post("/v1/array-owners/ops/tickets/{ticket_id}/sms")
+def sms_ep(
+    ticket_id: int,
+    body: SmsBody = SmsBody(),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """SMS check-in: Twilio when configured, else sms: URI + logged draft."""
+    tenant = _tenant(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant.id)
+        ticket = _get_ticket(db, t, ticket_id)
+        contact = get_contact(db, t.id, ticket.contact_id) if ticket.contact_id else None
+        draft_body = (body.body or "").strip()
+        if not draft_body:
+            draft = ticket.draft_checkin or build_checkin_draft(ticket, t, contact)
+            draft_body = (
+                f"Hi — status check on {ticket.site_name or 'your site'} "
+                f"({ticket.inv_name or ticket.serial or 'inverter'}). "
+                f"Any update on the repair? Reply with ETA or status. "
+                f"[AO-TICKET-{ticket.id}]"
+            )
+            if draft.get("subject"):
+                draft_body = f"{draft['subject']}\n\n{draft_body}"
+        try:
+            out = send_or_log_sms(db, t, ticket, draft_body, to=body.to, via="manual")
+            db.commit()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return out
+
+
+@router.post("/v1/array-owners/ops/tickets/{ticket_id}/link-claim")
+def link_claim_ep(
+    ticket_id: int,
+    body: LinkClaimBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    tenant = _tenant(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant.id)
+        ticket = _get_ticket(db, t, ticket_id)
+        try:
+            link_warranty_claim(db, t, ticket, body.claim_id)
+            db.commit()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        claim = claim_summary_for_ticket(db, ticket)
+        return {"ok": True, "ticket": serialize_ticket(ticket, claim=claim)}
+
+
+@router.post("/v1/array-owners/ops/inbound-email")
+def inbound_email_ep(body: InboundEmailBody) -> dict:
+    """Ingest a tech reply (Resend inbound / forwarding webhook).
+
+    Auth: optional shared secret header not required when called from our own
+    resend_webhook after Svix verify. External callers should only hit this via
+    the verified webhook path in production.
+    """
+    text = body.body or body.text or ""
+    if not text and body.html:
+        # crude strip
+        text = re.sub(r"<[^>]+>", " ", body.html)
+        text = re.sub(r"\s+", " ", text).strip()
+    with SessionLocal() as db:
+        return ingest_inbound_email(
+            db,
+            from_email=body.from_email,
+            to_emails=body.to,
+            subject=body.subject,
+            body=text,
+            ticket_id=body.ticket_id,
+        )
 
 
 @router.get("/v1/array-owners/ops/tickets/{ticket_id}/checkins")
