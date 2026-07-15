@@ -1,11 +1,8 @@
-// Dispatcher tests for the shared /reports route.
+// NEPOOL Operator SPA isolation tests for /reports.
 //
-// /reports is rendered for BOTH products on a shared backend. The ReportsTab
-// dispatcher must show:
-//   • the NEPOOL quarterly surface for a "nepool" (or product-less) tenant, and
-//   • the Array Operator "Billing Run" for an "array_operator" tenant,
-// never the wrong one. This guards against a repeat of the Jun-17 regression
-// where the billing redesign replaced the NEPOOL surface outright.
+// This bundle is served at nepooloperator.com/accounts. The Reports tab MUST
+// always be Automatic Reports (NepoolReportsTab) — never Array Operator
+// offtaker Billing, even if account.product is mis-tagged array_operator.
 
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -13,8 +10,6 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "../ui/Toast";
 
-// Stub both concrete surfaces so the test asserts ONLY the routing decision,
-// not their internals (which have their own tests).
 vi.mock("../screens/NepoolReportsTab", () => ({
   default: () => <div data-testid="nepool-surface">NEPOOL quarterly reports</div>,
 }));
@@ -50,8 +45,8 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("ReportsTab product dispatcher", () => {
-  it("renders the NEPOOL surface for a nepool tenant", async () => {
+describe("ReportsTab — NEPOOL SPA isolation", () => {
+  it("renders Automatic Reports for a nepool tenant", async () => {
     mockProduct("nepool");
     render(<ReportsTab />, { wrapper: Wrapper });
     await waitFor(() =>
@@ -60,7 +55,7 @@ describe("ReportsTab product dispatcher", () => {
     expect(screen.queryByTestId("billing-surface")).toBeNull();
   });
 
-  it("defaults to the NEPOOL surface when product is unset", async () => {
+  it("defaults to Automatic Reports when product is unset", async () => {
     mockProduct(null);
     render(<ReportsTab />, { wrapper: Wrapper });
     await waitFor(() =>
@@ -69,12 +64,12 @@ describe("ReportsTab product dispatcher", () => {
     expect(screen.queryByTestId("billing-surface")).toBeNull();
   });
 
-  it("renders the Array Operator billing surface for an array_operator tenant", async () => {
+  it("never swaps in offtaker Billing for a mis-tagged array_operator tenant", async () => {
     mockProduct("array_operator");
     render(<ReportsTab />, { wrapper: Wrapper });
     await waitFor(() =>
-      expect(screen.getByTestId("billing-surface")).toBeTruthy(),
+      expect(screen.getByTestId("nepool-surface")).toBeTruthy(),
     );
-    expect(screen.queryByTestId("nepool-surface")).toBeNull();
+    expect(screen.queryByTestId("billing-surface")).toBeNull();
   });
 });

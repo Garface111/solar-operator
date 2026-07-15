@@ -7,7 +7,6 @@ import { AccountProfileCard } from "../components/settings/AccountProfileCard";
 import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
 import { PortalAccessCard } from "../components/settings/PortalAccessCard";
 import { CloudCaptureCard } from "../components/settings/CloudCaptureCard";
-import { SpongeProgressCard } from "../components/settings/SpongeProgressCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
 import { DangerZoneCard } from "../components/settings/DangerZoneCard";
 import { setCaptureMode } from "../lib/api";
@@ -72,7 +71,7 @@ export default function AccountTab() {
         </p>
       </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
-      {account.product === "array_operator" && <SpongeProgressCard />}
+      {/* SpongeProgressCard is Array Operator only — never on NEPOOL SPA. */}
       <UtilityConnectionsCard account={account} />
 
       {/* Capture mode: cloud vault vs on-device extension (AO dual-path). */}

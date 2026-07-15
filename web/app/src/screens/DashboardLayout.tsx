@@ -49,11 +49,18 @@ export default function DashboardLayout({ onSignOut }: Props) {
     setLoadKey((k) => k + 1);
   }, []);
 
+  // This SPA is NEPOOL Operator only (nepooloperator.com/accounts). Never let a
+  // mis-tagged array_operator tenant flip chrome/billing into offtaker mode.
+  const asNepoolAccount = useCallback((a: Account): Account => {
+    if (a.product === "nepool" || a.product == null) return a;
+    return { ...a, product: "nepool" };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     getAccount()
       .then((a) => {
-        if (!cancelled) setAccount(a);
+        if (!cancelled) setAccount(asNepoolAccount(a));
       })
       .catch((err) => {
         // 401s are handled globally (UNAUTHORIZED_EVENT bounces to login).
@@ -81,7 +88,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
       debounce = setTimeout(() => {
         getAccount()
           .then((a) => {
-            if (!cancelled) setAccount(a);
+            if (!cancelled) setAccount(asNepoolAccount(a));
           })
           .catch(() => {
             /* leave existing account snapshot; non-fatal */
