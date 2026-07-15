@@ -39,6 +39,7 @@ from .models import Client, now
 logger = logging.getLogger(__name__)
 
 RESEND_WEBHOOK_SECRET = os.getenv("RESEND_WEBHOOK_SECRET", "")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 # True when running on Railway (prod). Used to FAIL CLOSED if the signing secret
 # is unset — never accept unsigned events in production.
 _ON_RAILWAY = bool(
@@ -47,6 +48,43 @@ _ON_RAILWAY = bool(
 )
 
 router = APIRouter()
+
+
+def _fetch_received_email_text(email_id: str) -> str | None:
+    """Pull plain-text (or stripped HTML) body for an inbound message by id."""
+    if not email_id or not RESEND_API_KEY:
+        return None
+    try:
+        import urllib.request
+        import json as _json
+        import re as _re
+
+        req = urllib.request.Request(
+            f"https://api.resend.com/emails/receiving/{email_id}",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "User-Agent": "solar-operator-inbound/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = _json.loads(resp.read().decode("utf-8"))
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        text = (
+            data.get("text")
+            or data.get("text_body")
+            or data.get("body")
+            or ""
+        )
+        if text:
+            return str(text)
+        html = data.get("html") or data.get("html_body") or ""
+        if html:
+            text = _re.sub(r"<[^>]+>", " ", str(html))
+            text = _re.sub(r"\s+", " ", text).strip()
+            return text or None
+    except Exception:
+        logger.exception("resend: failed to fetch received email %s", email_id)
+    return None
 
 
 def _verify_signature(secret: str, svix_id: str | None, svix_ts: str | None,
@@ -126,6 +164,8 @@ async def resend_webhook(
     recipients = _recipients(data)
 
     # ── Inbound tech replies on repair tickets (Resend inbound / email.received) ──
+    # Resend does NOT put body in the webhook — only metadata + email_id.
+    # Fetch content via Received Emails API: GET /emails/receiving/{email_id}
     if event_type in ("email.received", "email.inbound", "inbound"):
         from_email = None
         fr = data.get("from") or data.get("sender")
@@ -133,6 +173,12 @@ async def resend_webhook(
             from_email = fr
         elif isinstance(fr, dict):
             from_email = fr.get("email") or fr.get("address") or fr.get("value")
+        # "Name <addr@x.com>" → addr@x.com
+        if from_email and "<" in from_email and ">" in from_email:
+            try:
+                from_email = from_email.split("<", 1)[1].split(">", 1)[0].strip()
+            except Exception:
+                pass
         subject = data.get("subject") or ""
         body = (
             data.get("text")
@@ -140,21 +186,36 @@ async def resend_webhook(
             or data.get("text_body")
             or ""
         )
+        email_id = data.get("email_id") or data.get("id")
+        if (not body) and email_id:
+            body = _fetch_received_email_text(email_id) or ""
         if not body and data.get("html"):
             import re as _re
             body = _re.sub(r"<[^>]+>", " ", str(data.get("html")))
             body = _re.sub(r"\s+", " ", body).strip()
+        # Prefer received_for (actual inbound address) when present
+        to_list = recipients
+        rf = data.get("received_for") or data.get("to")
+        if isinstance(rf, list) and rf:
+            to_list = [str(x).strip().lower() for x in rf if x]
+        elif isinstance(rf, str) and rf.strip():
+            to_list = [rf.strip().lower()]
         try:
             from . import repair_ops
             with SessionLocal() as db:
                 result = repair_ops.ingest_inbound_email(
                     db,
                     from_email=from_email,
-                    to_emails=recipients,
+                    to_emails=to_list,
                     subject=subject,
                     body=body,
                 )
-            return {"ok": True, "event": event_type, "repair_inbound": result}
+            return {
+                "ok": True,
+                "event": event_type,
+                "repair_inbound": result,
+                "email_id": email_id,
+            }
         except Exception:
             logger.exception("resend webhook: inbound repair parse failed")
             return {"ok": True, "event": event_type, "repair_inbound": {"ok": False}}

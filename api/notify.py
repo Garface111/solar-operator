@@ -1068,6 +1068,19 @@ def send_repair_sms(to: str, body: str) -> bool:
         return False
 
 
+# Energy Agent mailbox — send + receive on agent.arrayoperator.com (Resend).
+# Replies from the repair team land on this address → webhook email.received
+# → repair_ops.ingest_inbound_email. Override with REPAIR_MAIL_FROM if needed.
+REPAIR_MAIL_FROM = os.getenv(
+    "REPAIR_MAIL_FROM",
+    "Energy Agent <repairs@agent.arrayoperator.com>",
+)
+REPAIR_MAIL_REPLY_TO = os.getenv(
+    "REPAIR_MAIL_REPLY_TO",
+    "Energy Agent <repairs@agent.arrayoperator.com>",
+)
+
+
 def send_repair_checkin_email(
     to: str,
     subject: str,
@@ -1078,30 +1091,41 @@ def send_repair_checkin_email(
 ) -> bool:
     """O&M / installer status check-in for a repair ticket.
 
-    Same safe shell as warranty claims: monospace body, Reply-To = owner so the
-    tech's reply reaches the operator, not the platform inbox.
+    Plain professional text (no brand chrome). From + Reply-To are the Energy
+    Agent mailbox so the tech replies straight back into the agent.
     """
+    # Minimal HTML mirror of plain text — system fonts, white page, no color bars.
+    paras = []
+    for block in (body_text or "").split("\n\n"):
+        block = block.strip("\n")
+        if not block:
+            continue
+        paras.append(
+            "<p style='margin:0 0 1em 0;font-family:Georgia,\"Times New Roman\",serif;"
+            "font-size:15px;line-height:1.55;color:#111111;'>"
+            + _escape(block).replace("\n", "<br>\n")
+            + "</p>"
+        )
     html = (
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
-        "<meta name='color-scheme' content='light only'>"
-        "<meta name='supported-color-schemes' content='light'>"
-        "<style>:root{color-scheme:light only;supported-color-schemes:light;}</style></head>"
-        "<body bgcolor='#ffffff' style='margin:0;padding:0;background:#ffffff;color-scheme:light only;'>"
-        "<div style='font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;"
-        "background:#f0fdf4;padding:18px 22px;border-left:3px solid #16a34a;max-width:680px;'>"
-        f"<pre style='margin:0;white-space:pre-wrap;color:#0f172a;'>{_escape(body_text)}</pre>"
-        "</div></body></html>"
+        "<meta name='color-scheme' content='light only'></head>"
+        "<body style='margin:0;padding:24px;background:#ffffff;color:#111111;'>"
+        f"{''.join(paras) or '<p></p>'}"
+        "</body></html>"
     )
-    from_addr = None
-    if from_name:
-        from_addr = f"{from_name} <{_addr_only(FROM_ADDRESS)}>"
+    from_addr = REPAIR_MAIL_FROM
+    if from_name and "<" not in from_addr:
+        # Keep the agent address; only rename display if caller insists
+        addr = _addr_only(from_addr) or "repairs@agent.arrayoperator.com"
+        from_addr = f"Energy Agent <{addr}>"
     return _send_via_resend(
         to=to,
         subject=subject,
         html=html,
         text=body_text,
         from_addr=from_addr,
-        reply_to=reply_to,
+        reply_to=reply_to or REPAIR_MAIL_REPLY_TO,
+        product="array_operator",
     )
 
 

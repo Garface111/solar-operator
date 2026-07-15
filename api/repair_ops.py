@@ -572,67 +572,92 @@ def build_checkin_draft(
     *,
     sequence: int | None = None,
 ) -> dict:
-    """Plain-English status check-in email for the assigned tech."""
+    """Professional plain-text status check-in for the assigned tech.
+
+    No HTML chrome, no marketing voice — adult ops email. Threading token
+    [AO-TICKET-N] is required so inbound replies match this case.
+    """
     owner = (
         getattr(tenant, "company_name", None)
         or getattr(tenant, "operator_name", None)
         or getattr(tenant, "name", None)
-        or "the array owner"
+        or "the site owner"
     )
     owner_email = getattr(tenant, "contact_email", None) or ""
-    site = ticket.site_name or (f"Array #{ticket.array_id}" if ticket.array_id else "a site")
+    site = ticket.site_name or (f"Array #{ticket.array_id}" if ticket.array_id else "the site")
     inv = ticket.inv_name or ticket.serial or "inverter"
-    fail = ticket.fail_type or "issue"
+    fail = (ticket.fail_type or "issue").lower()
     n = sequence if sequence is not None else ((ticket.checkin_count or 0) + 1)
+    first = (contact.name.split()[0] if contact and contact.name else "there")
 
     fail_plain = {
-        "underperforming": "underperforming vs peer inverters (possible string/shade/soiling issue)",
-        "dead": "no production while peers kept producing",
-        "fault": "a fault / error state",
-        "comm_gap": "a communication gap (not reporting)",
-    }.get(fail, fail)
+        "underperforming": (
+            "this unit is underperforming relative to peer inverters on the same site "
+            "(possible string, shading, soiling, or hardware issue)"
+        ),
+        "dead": "this unit shows no production while peer inverters continued producing",
+        "fault": "this unit is reporting a fault or error state",
+        "comm_gap": "this unit has stopped reporting (communication gap)",
+    }.get(fail, f"an issue was detected ({fail})")
 
-    if n <= 1:
-        subject = f"Repair needed — {site} ({fail})"
-        opener = (
-            f"Hi {contact.name.split()[0] if contact and contact.name else 'there'},\n\n"
-            f"This is {owner}'s monitoring agent. We flagged {fail_plain} on "
-            f"{site} ({inv}"
-            f"{', serial ' + ticket.serial if ticket.serial else ''}"
-            f"{', ' + ticket.vendor if ticket.vendor else ''}).\n\n"
-        )
-    else:
-        subject = f"Status check-in #{n} — {site} repair"
-        opener = (
-            f"Hi {contact.name.split()[0] if contact and contact.name else 'there'},\n\n"
-            f"Quick check-in from {owner}'s monitoring agent on the open repair at "
-            f"{site} ({inv}). This is follow-up #{n}.\n\n"
-        )
+    # Equipment line — plain, scannable
+    equip_bits = [site, inv]
+    if ticket.serial and ticket.serial not in inv:
+        equip_bits.append(f"serial {ticket.serial}")
+    if ticket.vendor:
+        equip_bits.append(str(ticket.vendor).upper())
+    equip = ", ".join(equip_bits)
 
     evidence = ticket.evidence or {}
-    evid_lines = []
+    detail_lines = []
     if evidence.get("diagnosis"):
-        evid_lines.append(f"Diagnosis: {evidence['diagnosis']}")
-    if evidence.get("status"):
-        evid_lines.append(f"Inverter status: {evidence['status']}")
-    if evidence.get("lost_kwh_window") is not None:
-        evid_lines.append(f"Lost energy (window): ~{evidence['lost_kwh_window']} kWh")
-    if evidence.get("lost_usd_yr") is not None:
-        evid_lines.append(f"At-stake (annualized): ~${evidence['lost_usd_yr']}")
+        detail_lines.append(str(evidence["diagnosis"]).strip())
+    if evidence.get("peer_index") is not None:
+        try:
+            detail_lines.append(f"Peer index: {float(evidence['peer_index']):.2f}")
+        except (TypeError, ValueError):
+            detail_lines.append(f"Peer index: {evidence['peer_index']}")
+    if evidence.get("window_kwh") is not None:
+        detail_lines.append(f"Recent window production: ~{evidence['window_kwh']} kWh")
     if ticket.description:
-        evid_lines.append(f"Notes: {ticket.description}")
+        detail_lines.append(str(ticket.description).strip())
 
-    body = (
-        opener
-        + ("What we're seeing:\n- " + "\n- ".join(evid_lines) + "\n\n" if evid_lines else "")
-        + "Could you reply with a short status?\n"
-        + "  1) Acknowledged / scheduled visit date\n"
-        + "  2) Parts on order\n"
-        + "  3) Repair completed\n"
-        + "  4) Needs owner action (access, warranty RMA, etc.)\n\n"
-        + (f"Reply-to / owner contact: {owner_email}\n" if owner_email else "")
-        + f"Ticket #{ticket.id} · [AO-TICKET-{ticket.id}] · site: {site}\n"
-        + "— Array Operator Energy Agent\n"
+    if n <= 1:
+        subject = f"{site} — repair request ({inv})"
+        body = (
+            f"Hello {first},\n\n"
+            f"I am Energy Agent, writing on behalf of {owner} regarding their solar "
+            f"fleet. Monitoring has flagged a unit that needs attention.\n\n"
+            f"Site / equipment: {equip}\n"
+            f"Issue: {fail_plain}.\n"
+        )
+    else:
+        subject = f"Re: {site} — repair status check-in ({inv})"
+        body = (
+            f"Hello {first},\n\n"
+            f"Following up on the open repair for {owner} at {site} ({inv}). "
+            f"This is check-in #{n}.\n\n"
+        )
+
+    if detail_lines:
+        body += "\nDetails:\n" + "\n".join(f"  • {line}" for line in detail_lines) + "\n"
+
+    body += (
+        "\nWhen you have a moment, please reply to this email with a brief status:\n"
+        "  • Acknowledged, with an expected site-visit date if known\n"
+        "  • Parts on order (and ETA if available)\n"
+        "  • Repair completed\n"
+        "  • Needs owner action (access, warranty RMA, etc.)\n\n"
+        "You can reply directly to this message; it reaches Energy Agent and is "
+        "logged on the case.\n"
+    )
+    if owner_email:
+        body += f"\nOwner contact (if you need them directly): {owner_email}\n"
+    body += (
+        f"\nReference: [AO-TICKET-{ticket.id}]\n"
+        f"\nThank you,\n"
+        f"Energy Agent\n"
+        f"on behalf of {owner}\n"
     )
     to = (contact.email if contact and contact.email else None) or owner_email
     return {"to": to, "subject": subject, "body": body}
@@ -700,12 +725,12 @@ def send_checkin(
         )
         subject = f"[Forward to tech] {subject}"
 
+    # From + Reply-To = Energy Agent mailbox (agent.arrayoperator.com) so the
+    # tech replies to the agent, not the owner's personal inbox.
     ok = notify.send_repair_checkin_email(
         to=go_to,
         subject=subject,
         body_text=send_body,
-        reply_to=owner_email,
-        from_name=(getattr(tenant, "company_name", None) or tenant.name or "Array Operator"),
     )
 
     row = RepairCheckIn(
@@ -1613,12 +1638,21 @@ def ops_overview(
         if t.status == "cleared":
             continue
         contact = contact_by_id.get(t.contact_id) if t.contact_id else None
-        # Ensure a draft is always available for Approve & send on battle cards
-        if t.status in ACTIVE_TICKET_STATUSES and not (t.draft_checkin or {}).get("body"):
-            try:
-                t.draft_checkin = build_checkin_draft(t, tenant, contact)
-            except Exception:
-                pass
+        # Keep drafts fresh: missing body OR legacy marketing/chrome copy
+        if t.status in ACTIVE_TICKET_STATUSES:
+            draft = t.draft_checkin or {}
+            body = (draft.get("body") or "")
+            stale = (
+                not body
+                or "monitoring agent" in body.lower()
+                or "Array Operator Energy Agent" in body
+                or "Forward-ready check-in" in body
+            )
+            if stale:
+                try:
+                    t.draft_checkin = build_checkin_draft(t, tenant, contact)
+                except Exception:
+                    pass
         claim = claims_by_id.get(t.warranty_claim_id) if t.warranty_claim_id else None
         ticket_rows.append(serialize_ticket(
             t,
