@@ -1,9 +1,13 @@
-# Alaska Utility Research Plan
+# Alaska Utility Adapter Plan
 
-- Name: alaska (state=unknown, url=unknown)
-- Status: research-only; no login evidence or portal family identified.
-- Action: Inspect api/data/providers/AK.csv for any SmartHub host entry.
-- If SmartHub host present: promote via SMARTHUB_HOSTS registry (no new adapter).
-- If bespoke/unknown: require real HAR capture before any adapter code; do not fabricate endpoints.
-- Do not update utility_requests or mark 'added' without verified evidence.
-- Next: agent to confirm AK.csv contents and report findings.
+**Request**: alaska (state=AK, url=-)
+
+**Status**: Research only — no evidence of SmartHub host or login flow.
+
+**Next steps (no code change)**:
+- Query AK.csv providers for smarthub_host column.
+- If any match *.smarthub.coop, add to SMARTHUB_UTILITIES via CSV (edit api/adapters/smarthub.py only after evidence).
+- If bespoke: capture real HAR; draft adapter plan only.
+- Do not promote to 'added' or invent endpoints.
+
+**Evidence required**: Live login trace or confirmed SmartHub subdomain before any adapter edit.
