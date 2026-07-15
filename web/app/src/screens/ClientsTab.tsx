@@ -23,15 +23,17 @@ export default function ClientsTab() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const toggleFullscreen = useCallback(() => setIsFullscreen((v) => !v), []);
 
-  // Sub-tab: the spatial canvas vs the dense list/spreadsheet — TOGGLED, not stacked,
-  // mirroring Array Operator's Sandbox/Spreadsheet switch (Ford 2026-07-11). Both stay
-  // MOUNTED (hidden, never unmounted) so the canvas keeps its ReactFlow / undo / walkthrough
-  // state across switches. Persisted so the operator's choice sticks.
+  // Sub-tab: Table (default, left) vs Sandbox (optional spatial view).
+  // Both stay MOUNTED (hidden, never unmounted) so the canvas keeps its
+  // ReactFlow / undo / walkthrough state across switches. Persisted.
+  // Ford 2026-07-15: Table is the default; Sandbox is opt-in.
   const [subtab, setSubtab] = useState<"sandbox" | "spreadsheet">(() => {
     try {
-      return localStorage.getItem("so:clients:subtab") === "spreadsheet" ? "spreadsheet" : "sandbox";
+      const v = localStorage.getItem("so:clients:subtab");
+      if (v === "sandbox") return "sandbox";
+      return "spreadsheet";
     } catch {
-      return "sandbox";
+      return "spreadsheet";
     }
   });
   const selectSubtab = useCallback((v: "sandbox" | "spreadsheet") => {
@@ -80,7 +82,7 @@ export default function ClientsTab() {
           aria-label="Clients view"
           className="flex w-full items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
         >
-          {(["sandbox", "spreadsheet"] as const).map((v) => (
+          {(["spreadsheet", "sandbox"] as const).map((v) => (
             <button
               key={v}
               type="button"
@@ -96,7 +98,7 @@ export default function ClientsTab() {
                   : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900",
               ].join(" ")}
             >
-              {v === "sandbox" ? "Sandbox" : "Table"}
+              {v === "spreadsheet" ? "Table" : "Sandbox"}
             </button>
           ))}
         </div>

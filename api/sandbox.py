@@ -128,22 +128,21 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
             acc_id: round(k / 1000.0, 3) for acc_id, k in kwh_by_account.items()
         }
 
-        # Group accounts by which array they belong to
+        # Group accounts by which array they belong to.
+        # Orphan UAs (no array / array soft-deleted / array with no client) are
+        # NEVER surfaced as free-floating "GMP · …" cards (Ford 2026-07-15 —
+        # Bruce cleanup: those little cards kept reappearing and cluttering the
+        # sandbox). They remain in the DB for undo/history, but the canvas only
+        # shows accounts attached to a live client-owned array.
         accs_by_array: dict[int, list[UtilityAccount]] = defaultdict(list)
-        unclassified: list[UtilityAccount] = []
 
         for acc in accounts:
-            # Only live accounts reach here (the query filters deleted_at IS
-            # NULL). An account with no array, or one whose array is gone /
-            # detached from any client, is a legitimate "needs attaching" card.
             if acc.array_id is None:
-                unclassified.append(acc)
                 continue
             arr = array_map.get(acc.array_id)
             if arr is None or arr.client_id is None:
-                unclassified.append(acc)
-            else:
-                accs_by_array[arr.id].append(acc)
+                continue
+            accs_by_array[arr.id].append(acc)
 
         # Group arrays by client
         arrays_by_client: dict[int, list[Array]] = defaultdict(list)
@@ -174,24 +173,14 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
                 },
             })
 
-        # Build unclassified output
-        unclassified_out = [
-            _fmt_account(acc, array_map.get(acc.array_id) if acc.array_id else None)
-            for acc in unclassified
-        ]
-
         # Origin client lookup — any client referenced by a non-null
         # login_origin_client_id, even if soft-deleted, so the sandbox can
-        # label a moved login with "from <origin client name>". Includes the
-        # currently-listed clients too for convenience.
+        # label a moved login with "from <origin client name>".
         origin_ids: set[int] = set()
         for c in clients_out:
             for a in c["accounts"]:
                 if a.get("login_origin_client_id") is not None:
                     origin_ids.add(a["login_origin_client_id"])
-        for a in unclassified_out:
-            if a.get("login_origin_client_id") is not None:
-                origin_ids.add(a["login_origin_client_id"])
         clients_index: dict[int, dict] = {}
         if origin_ids:
             for c in db.execute(
@@ -212,7 +201,9 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
 
     return {
         "clients": clients_out,
-        "unclassified": unclassified_out,
+        # Always empty — orphan floaters retired (see above). Key kept so older
+        # frontends that read `unclassified` don't break.
+        "unclassified": [],
         "clients_index": clients_index,
     }
 
@@ -384,13 +375,15 @@ def sandbox_account_reassign(
             if prior_arr is not None and prior_arr.tenant_id == tenant.id:
                 prior_client_id = prior_arr.client_id
 
-        # Detach path: clear the array link AND the origin tag (a free-floating
-        # account isn't part of any login group yet).
+        # Detach path: soft-delete the utility account so it does NOT reappear
+        # as a free-floating "GMP · …" card on the canvas (Ford 2026-07-15).
         if target_client is None:
-            acc.array_id = None
+            from datetime import datetime as _dt
+            acc.deleted_at = _dt.utcnow()
             acc.login_origin_client_id = None
             db.commit()
-            return {"ok": True, "account_id": acc.id, "client_id": None, "array_id": None}
+            return {"ok": True, "account_id": acc.id, "client_id": None, "array_id": None,
+                    "soft_deleted": True}
 
         # Attach path: ensure the account has an array owned by target_client.
         # Strategy: if the account currently has its own array (1:1 holder) that
@@ -521,10 +514,14 @@ def sandbox_array_reassign(
 
         prior_client_id: Optional[int] = arr.client_id
 
+        # Detach/unclassify path: soft-delete the array + its utility accounts
+        # instead of leaving orphan "GMP · …" floaters on the canvas.
         if body.client_id is None:
+            from datetime import datetime as _dt
+            now_ts = _dt.utcnow()
+            arr.deleted_at = now_ts
             arr.client_id = None
             arr.reassigned_at = now()
-            # Free-floating accounts aren't part of any login group — clear origin.
             attached = db.execute(
                 select(UtilityAccount).where(
                     UtilityAccount.tenant_id == tenant.id,
@@ -533,6 +530,7 @@ def sandbox_array_reassign(
                 )
             ).scalars().all()
             for acct in attached:
+                acct.deleted_at = now_ts
                 acct.login_origin_client_id = None
             db.commit()
             return {
@@ -540,6 +538,7 @@ def sandbox_array_reassign(
                 "array_id": arr.id,
                 "client_id": None,
                 "prior_client_id": prior_client_id,
+                "soft_deleted": True,
             }
 
         target_client = db.execute(
