@@ -335,7 +335,13 @@ def test_rest_contacts_and_ops_overview():
 
     r6 = client.get("/v1/array-owners/ops?reconcile_first=0", headers=headers)
     assert r6.status_code == 200, r6.text
-    assert r6.json()["summary"]["open"] >= 1
+    body6 = r6.json()
+    assert body6["summary"]["open"] >= 1
+    assert "arrays" in body6
+    assert body6.get("fleet_needs_included") is False
+    # Fast path must not require fleet-tree; default reconcile_first is 0
+    r7 = client.get("/v1/array-owners/ops", headers=headers)
+    assert r7.status_code == 200, r7.text
 
 
 def test_energy_agent_tools_list_and_upsert():

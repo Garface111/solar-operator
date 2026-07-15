@@ -1071,10 +1071,13 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
     Requires repair_auto_open (default True) and a resolvable service contact
     (assignment or tenant default) — never emails on its own unless mode=auto
     and process_due runs.
+
+    Returns {opened, closed, tree?} — when a tree was built/passed, include it
+    so callers can reuse it (avoid a second fleet-tree build in ops_overview).
     """
     opened = closed = 0
     if not getattr(tenant, "repair_auto_open", True):
-        return {"opened": 0, "closed": 0, "skipped": "auto_open_off"}
+        return {"opened": 0, "closed": 0, "skipped": "auto_open_off", "tree": tree}
 
     if tree is None:
         try:
@@ -1084,7 +1087,7 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             )
         except Exception as exc:
             log.warning("repair reconcile fleet tree failed for %s: %s", tenant.id, exc)
-            return {"opened": 0, "closed": 0, "error": str(exc)}
+            return {"opened": 0, "closed": 0, "error": str(exc), "tree": None}
 
     columns = list((tree or {}).get("columns") or [])
     # Map inverter_id → current status + context
@@ -1180,7 +1183,7 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
         opened += 1
 
     db.commit()
-    return {"opened": opened, "closed": closed}
+    return {"opened": opened, "closed": closed, "tree": tree}
 
 
 def process_due(db, tenant: Tenant) -> int:
@@ -1232,15 +1235,40 @@ def summarize_tickets(tickets: list[RepairTicket]) -> dict:
     }
 
 
-def ops_overview(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
-    """One-shot: contacts, assignments, active tickets, down arrays needing help."""
+def _arrays_light(db, tenant_id: str) -> list[dict]:
+    """Cheap array list for assign dropdowns — no fleet-tree / vendor APIs."""
+    rows = db.execute(
+        select(Array.id, Array.name)
+        .where(Array.tenant_id == tenant_id, Array.deleted_at.is_(None))
+        .order_by(Array.name.asc())
+        .limit(500)
+    ).all()
+    return [{"id": r[0], "name": r[1]} for r in rows]
+
+
+def ops_overview(
+    db,
+    tenant: Tenant,
+    tree: Optional[dict] = None,
+    *,
+    include_fleet_needs: bool = False,
+) -> dict:
+    """One-shot: contacts, assignments, active tickets, claims.
+
+    FAST PATH (default): pure DB — no SolarEdge / fleet-tree. Scheduler already
+    reconciles tickets every 15 min. Pass tree= or include_fleet_needs=True only
+    when the caller already paid for a fleet-tree (or explicitly wants it).
+    """
     contacts = list_contacts(db, tenant.id)
     tickets = list_tickets(db, tenant.id, limit=100)
     active = [t for t in tickets if t.status in ACTIVE_TICKET_STATUSES]
     assigns = assignments_for_tenant(db, tenant.id)
+    arrays = _arrays_light(db, tenant.id)
 
     needs: list[dict] = []
-    if tree is None:
+    # Only build / walk fleet-tree when asked or already provided — never on the
+    # hot tab-open path (that was hanging Operations for 30–120s+).
+    if include_fleet_needs and tree is None:
         try:
             from . import inverter_fleet
             tree = inverter_fleet.build_fleet_tree(
@@ -1249,65 +1277,113 @@ def ops_overview(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
         except Exception as exc:
             tree = {"error": str(exc), "columns": []}
 
-    for col in (tree or {}).get("columns") or []:
-        bad = [
-            inv for inv in (col.get("inverters") or [])
-            if (inv.get("status") or "ok") in AUTO_OPEN_FAILS + ("underperforming", "comm_gap")
-        ]
-        if not bad and (col.get("alert") or {}).get("status") not in (
-            "fault", "error", "dead", "critical",
-        ):
-            continue
-        aid = col.get("array_id")
-        contact = resolve_contact_for_array(db, tenant.id, aid)
-        open_here = [t for t in active if t.array_id == aid]
-        needs.append({
-            "array_id": aid,
-            "array_name": col.get("array_name"),
-            "alert": col.get("alert"),
-            "problem_inverters": [
-                {
-                    "inverter_id": i.get("inverter_id"),
-                    "name": i.get("name"),
-                    "sn": i.get("sn"),
-                    "status": i.get("status"),
-                    "diagnosis": i.get("diagnosis"),
-                }
-                for i in bad[:12]
-            ],
-            "contact": serialize_contact(contact) if contact else None,
-            "open_tickets": [serialize_ticket(t) for t in open_here],
-            "next_step": (
-                "Send check-in to assigned tech"
-                if contact and open_here
-                else (
-                    "Open repair ticket + assign tech"
+    if tree is not None:
+        for col in (tree or {}).get("columns") or []:
+            bad = [
+                inv for inv in (col.get("inverters") or [])
+                if (inv.get("status") or "ok") in AUTO_OPEN_FAILS + ("underperforming", "comm_gap")
+            ]
+            if not bad and (col.get("alert") or {}).get("status") not in (
+                "fault", "error", "dead", "critical",
+            ):
+                continue
+            aid = col.get("array_id")
+            contact = resolve_contact_for_array(db, tenant.id, aid)
+            open_here = [t for t in active if t.array_id == aid]
+            needs.append({
+                "array_id": aid,
+                "array_name": col.get("array_name"),
+                "alert": col.get("alert"),
+                "problem_inverters": [
+                    {
+                        "inverter_id": i.get("inverter_id"),
+                        "name": i.get("name"),
+                        "sn": i.get("sn"),
+                        "status": i.get("status"),
+                        "diagnosis": i.get("diagnosis"),
+                    }
+                    for i in bad[:12]
+                ],
+                "contact": serialize_contact(contact) if contact else None,
+                "open_tickets": [serialize_ticket(t) for t in open_here],
+                "next_step": (
+                    "Send check-in to assigned tech"
+                    if contact and open_here
+                    else (
+                        "Open repair ticket + assign tech"
+                        if contact
+                        else "Add a service contact (installer / O&M) then open a ticket"
+                    )
+                ),
+            })
+    else:
+        # DB-only stand-in: open tickets already encode "needs attention"
+        by_array: dict[int | None, list] = {}
+        for t in active:
+            by_array.setdefault(t.array_id, []).append(t)
+        for aid, ts in by_array.items():
+            contact = resolve_contact_for_array(db, tenant.id, aid) if aid else None
+            if not contact and ts[0].contact_id:
+                contact = get_contact(db, tenant.id, ts[0].contact_id)
+            needs.append({
+                "array_id": aid,
+                "array_name": ts[0].site_name or (f"Array #{aid}" if aid else "Unassigned"),
+                "alert": {"status": ts[0].fail_type or "open"},
+                "problem_inverters": [
+                    {
+                        "inverter_id": t.inverter_id,
+                        "name": t.inv_name,
+                        "sn": t.serial,
+                        "status": t.fail_type,
+                        "diagnosis": t.title,
+                    }
+                    for t in ts[:12]
+                ],
+                "contact": serialize_contact(contact) if contact else None,
+                "open_tickets": [serialize_ticket(t) for t in ts],
+                "next_step": (
+                    "Send check-in to assigned tech"
                     if contact
-                    else "Add a service contact (installer / O&M) then open a ticket"
-                )
-            ),
-        })
+                    else "Add a service contact then check in"
+                ),
+            })
 
     contact_by_id = {c.id: c for c in contacts}
-    # also load contacts referenced by tickets that might be inactive
     for t in active:
         if t.contact_id and t.contact_id not in contact_by_id:
             c = get_contact(db, tenant.id, t.contact_id)
             if c:
                 contact_by_id[c.id] = c
 
+    # Batch claim summaries (avoid N+1)
+    claim_ids = [t.warranty_claim_id for t in tickets if t.warranty_claim_id]
+    claims_by_id: dict = {}
+    if claim_ids:
+        from .models import WarrantyClaim
+        for c in db.execute(
+            select(WarrantyClaim).where(WarrantyClaim.id.in_(claim_ids))
+        ).scalars().all():
+            claims_by_id[c.id] = {
+                "id": c.id,
+                "stage": c.stage,
+                "fail_type": c.fail_type,
+                "site": c.site_name,
+                "inv": c.inv_name,
+                "serial": c.serial,
+            }
+
     ticket_rows = []
     for t in tickets:
         if t.status == "cleared":
             continue
-        claim = claim_summary_for_ticket(db, t)
+        claim = claims_by_id.get(t.warranty_claim_id) if t.warranty_claim_id else None
         ticket_rows.append(serialize_ticket(
             t,
             contact=contact_by_id.get(t.contact_id) if t.contact_id else None,
             claim=claim,
         ))
 
-    # Warranty claims rollup for the Ops Claims sub-view
+    # Warranty claims rollup — one query for claims + one for linked tickets
     claims_payload = {"claims": [], "summary": {}}
     try:
         from .models import WarrantyClaim
@@ -1318,22 +1394,27 @@ def ops_overview(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             .order_by(WarrantyClaim.created_at.desc())
             .limit(100)
         ).scalars().all()
+        cids = [c.id for c in claims if c.stage != "cleared"]
+        linked_by_claim: dict[int, RepairTicket] = {}
+        if cids:
+            for rt in db.execute(
+                select(RepairTicket).where(
+                    RepairTicket.tenant_id == tenant.id,
+                    RepairTicket.warranty_claim_id.in_(cids),
+                )
+            ).scalars().all():
+                if rt.warranty_claim_id is not None:
+                    linked_by_claim[rt.warranty_claim_id] = rt
         claim_list = []
         for c in claims:
             if c.stage == "cleared":
                 continue
-            linked = db.execute(
-                select(RepairTicket).where(
-                    RepairTicket.tenant_id == tenant.id,
-                    RepairTicket.warranty_claim_id == c.id,
-                )
-            ).scalars().first()
-            d = ser_claim(
+            linked = linked_by_claim.get(c.id)
+            claim_list.append(ser_claim(
                 c,
                 repair_ticket_id=linked.id if linked else None,
                 repair_ticket_status=linked.status if linked else None,
-            )
-            claim_list.append(d)
+            ))
         claims_payload = {
             "claims": claim_list,
             "summary": sum_claims(claims),
@@ -1351,10 +1432,12 @@ def ops_overview(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
         },
         "contacts": [serialize_contact(c) for c in contacts],
         "assignments": assigns,
+        "arrays": arrays,
         "tickets": ticket_rows,
         "summary": summarize_tickets(tickets),
         "sites_needing_repair": needs,
         "warranty_claims": claims_payload,
+        "fleet_needs_included": bool(tree is not None),
     }
 
 
@@ -1449,19 +1532,55 @@ class SettingsBody(BaseModel):
 
 @router.get("/v1/array-owners/ops")
 def ops_overview_ep(
-    reconcile_first: int = 1,
+    reconcile_first: int = 0,
+    include_fleet_needs: int = 0,
     authorization: str | None = Header(default=None),
 ) -> dict:
+    """Operations tab data.
+
+    Default is FAST (DB only). Reconcile + fleet-tree are opt-in because they
+    hit vendor APIs and routinely took 30–120s (or hung) on tab open.
+    Background scheduler already reconciles every 15 min.
+    """
     tenant = _tenant(authorization)
     with SessionLocal() as db:
         t = db.get(Tenant, tenant.id)
+        tree = None
         if reconcile_first:
             try:
-                reconcile(db, t)
+                tally = reconcile(db, t)
                 process_due(db, t)
+                tree = (tally or {}).get("tree")
             except Exception as exc:
                 log.warning("ops reconcile failed for %s: %s", t.id, exc)
-        return {"ok": True, **ops_overview(db, t)}
+        return {
+            "ok": True,
+            **ops_overview(
+                db, t, tree=tree,
+                include_fleet_needs=bool(include_fleet_needs) and tree is None,
+            ),
+        }
+
+
+@router.post("/v1/array-owners/ops/reconcile")
+def ops_reconcile_ep(authorization: str | None = Header(default=None)) -> dict:
+    """Background-friendly reconcile (open/close tickets from fleet). Not on tab paint."""
+    tenant = _tenant(authorization)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant.id)
+        try:
+            tally = reconcile(db, t)
+            sent = process_due(db, t)
+            return {
+                "ok": True,
+                "opened": tally.get("opened", 0),
+                "closed": tally.get("closed", 0),
+                "auto_checkins": sent,
+                "error": tally.get("error"),
+            }
+        except Exception as exc:
+            log.warning("ops reconcile ep failed for %s: %s", t.id, exc)
+            return {"ok": False, "error": str(exc)[:300]}
 
 
 @router.get("/v1/array-owners/ops/contacts")
