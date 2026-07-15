@@ -4,7 +4,6 @@ import { Spinner } from "../ui/Spinner";
 import { ScreenLayout } from "../ui/ScreenLayout";
 import { useDashboardContext } from "./DashboardLayout";
 import { AccountProfileCard } from "../components/settings/AccountProfileCard";
-import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
 import { PortalAccessCard } from "../components/settings/PortalAccessCard";
 import { CloudCaptureCard } from "../components/settings/CloudCaptureCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
@@ -12,8 +11,10 @@ import { DangerZoneCard } from "../components/settings/DangerZoneCard";
 import { setCaptureMode } from "../lib/api";
 
 // Bruce Jun 6: Email + schedule prefs moved to /reports ("Automatic reports")
-// where they semantically belong. AccountTab now owns only operator identity
-// (profile, utility logins, plan/billing, danger zone).
+// where they semantically belong. AccountTab owns operator identity, Auto-refresh
+// (cloud utility vault) OR on-device portal roster, plan/billing, danger zone.
+// UtilityConnectionsCard removed (Ford 2026-07-15) — it duplicated Auto-refresh
+// (live portals / logins by client / re-auth) and confused operators.
 
 export default function AccountTab() {
   const { account, failed, patchAccount, retryLoad } = useDashboardContext();
@@ -71,10 +72,10 @@ export default function AccountTab() {
         </p>
       </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
-      {/* SpongeProgressCard is Array Operator only — never on NEPOOL SPA. */}
-      <UtilityConnectionsCard account={account} />
 
-      {/* Capture mode (AO dual-path) — sits above Auto-refresh like AO Account. */}
+      {/* Capture mode (AO dual-path) — sits above Auto-refresh like AO Account.
+          Cloud: Auto-refresh vault is the single place for utility logins.
+          Device: PortalAccessCard is the extension roster. */}
       <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm shadow-sm">
         <span className="font-semibold text-zinc-800">How we keep bills fresh</span>
         <button
