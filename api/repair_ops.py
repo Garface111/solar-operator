@@ -6,13 +6,21 @@ and check-ins when something is down.
 
 Promise: Energy Agent knows the ops team, can contact them, and follows up on
 repair status without the owner babysitting every ticket.
+
+When a tech (or anyone) replies by email, Energy Agent continues an open-ended
+but purposeful conversation on that thread until the repair is coordinated
+(scheduled, in progress, resolved, or needs owner action).
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import urllib.error
+import urllib.request
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
@@ -33,6 +41,48 @@ from .models import (
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _safe_mind_emit(
+    db,
+    tenant_id: str,
+    kind: str,
+    summary: str,
+    *,
+    ref_id: str | None = None,
+    payload: dict | None = None,
+    speak_as_mind: str | None = None,
+) -> None:
+    """Emit a mind event without poisoning the caller's DB transaction.
+
+    Uses a SAVEPOINT so missing ea_* tables (tests) or emit errors never
+    roll back the repair check-in / ticket update already in flight.
+    """
+    try:
+        from .energy_agent_mind import _emit
+        try:
+            with db.begin_nested():
+                _emit(
+                    db,
+                    tenant_id,
+                    kind,
+                    summary,
+                    ref_id=ref_id,
+                    payload=payload,
+                    speak_as_mind=speak_as_mind,
+                )
+        except Exception:
+            # Nested rollback already happened; outer txn still clean
+            log.exception(
+                "mind emit failed kind=%s tenant=%s ref=%s",
+                kind, tenant_id, ref_id,
+            )
+    except Exception:
+        log.exception(
+            "mind emit import/setup failed kind=%s tenant=%s",
+            kind, tenant_id,
+        )
+
 
 # Hardware states that auto-open a repair ticket when a service contact is known.
 # underperforming is intentional (Ford 2026-07-15): peer-flagged units should
@@ -821,31 +871,27 @@ def send_checkin(
         )
         _schedule_next_checkin(tenant, ticket, first=False)
         # Notify open Energy Agent chat that outreach went out
-        try:
-            from .energy_agent_mind import _emit
-            who = (contact.name if contact else None) or go_to
-            site = ticket.site_name or "the site"
-            inv = ticket.inv_name or ticket.serial or "the inverter"
-            _emit(
-                db,
-                tenant.id,
-                "repair_outbound",
-                f"Emailed {who} on ticket #{ticket.id}",
-                ref_id=str(ticket.id),
-                payload={
-                    "origin": "repair",
-                    "importance": 80,
-                    "ticket_id": ticket.id,
-                    "to": go_to,
-                    "site_name": ticket.site_name,
-                },
-                speak_as_mind=(
-                    f"I emailed {who} about {site} / {inv}. "
-                    f"When they reply to Energy Agent, I'll update you here."
-                ),
-            )
-        except Exception:
-            log.exception("repair outbound: mind emit failed ticket=%s", ticket.id)
+        who = (contact.name if contact else None) or go_to
+        site = ticket.site_name or "the site"
+        inv = ticket.inv_name or ticket.serial or "the inverter"
+        _safe_mind_emit(
+            db,
+            tenant.id,
+            "repair_outbound",
+            f"Emailed {who} on ticket #{ticket.id}",
+            ref_id=str(ticket.id),
+            payload={
+                "origin": "repair",
+                "importance": 80,
+                "ticket_id": ticket.id,
+                "to": go_to,
+                "site_name": ticket.site_name,
+            },
+            speak_as_mind=(
+                f"I emailed {who} about {site} / {inv}. "
+                f"When they reply to Energy Agent, I'll update you here."
+            ),
+        )
     db.flush()
     if not ok:
         log.warning("repair check-in send failed ticket=%s tenant=%s", ticket.id, tenant.id)
@@ -1200,6 +1246,568 @@ def extract_ticket_id_from_text(*parts: str | None) -> int | None:
     return None
 
 
+# ── email conversation with whoever replies ───────────────────────────────────
+
+# Agent mailbox addresses — never reply to ourselves.
+_AGENT_MAIL_LOCALS = (
+    "repairs@",
+    "agent@",
+    "noreply@",
+    "no-reply@",
+)
+_OOO_MARKERS = (
+    "out of office",
+    "automatic reply",
+    "auto-reply",
+    "autoreply",
+    "auto response",
+    "away from the office",
+    "on vacation",
+    "ooo:",
+    "this is an automated",
+    "delivery status notification",
+    "mailer-daemon",
+    "undeliverable",
+)
+# Cap conversation auto-replies per ticket (calendar day) to prevent loops.
+_MAX_CONVO_REPLIES_PER_DAY = 12
+_MIN_CONVO_GAP_SECONDS = 25
+
+_REPAIR_CONVO_SYSTEM = """You are Energy Agent — an ops coordinator for solar array owners.
+You email the O&M tech / installer / electrician (or whoever replied) about an open repair.
+
+PURPOSE (always drive toward one of these):
+1. Get a concrete site-visit date or ETA
+2. Confirm parts ordered + ETA if needed
+3. Confirm repair complete / unit back online
+4. Surface owner action needed (access, warranty RMA, payment) clearly
+5. Keep the case current — never leave a reply unacknowledged when work remains
+
+VOICE:
+- Plain professional adult email (not marketing, not chatbot)
+- Address what they actually said — open-ended conversation is fine
+- Always end with a clear next step or confirmation of understanding
+- Short paragraphs; no HTML; no markdown fences
+- Sign as "Energy Agent" on behalf of the site owner
+- ALWAYS include the reference token exactly: [AO-TICKET-{ticket_id}]
+
+RULES:
+- Do NOT invent site visits, parts, or fixes they did not claim
+- Do NOT promise payment or legal outcomes
+- If they only said thanks after a resolved case, set send=false
+- If this is an auto-reply / OOO / bounce, set send=false
+- If the unit is fixed, thank them, confirm you'll close monitoring, set status=resolved
+- If they proposed a date, acknowledge it and set status=scheduled
+- If they need the owner, say you'll notify the owner and set needs_owner=true
+- Reply TO the person who wrote — conversational, not a form letter
+
+Respond ONLY with JSON (no markdown fences):
+{
+  "send": true,
+  "subject": "Re: ...",
+  "body": "full plain-text email body including sign-off and [AO-TICKET-N]",
+  "status": null or "scheduled" or "in_progress" or "resolved" or "waiting_reply",
+  "needs_owner": false,
+  "owner_chat": "one sentence for the owner about what happened and what you replied (or null)",
+  "reason": "brief internal why"
+}
+"""
+
+
+def _is_agent_mailbox(email: str | None) -> bool:
+    e = (email or "").strip().lower()
+    if not e:
+        return False
+    if "agent.arrayoperator.com" in e:
+        return True
+    return any(tok in e for tok in _AGENT_MAIL_LOCALS)
+
+
+def _looks_like_auto_reply(subject: str | None, body: str | None) -> bool:
+    blob = f"{subject or ''}\n{body or ''}".lower()
+    return any(m in blob for m in _OOO_MARKERS)
+
+
+def _recent_checkins(db, ticket_id: int, *, limit: int = 16) -> list[RepairCheckIn]:
+    rows = db.execute(
+        select(RepairCheckIn)
+        .where(RepairCheckIn.ticket_id == ticket_id)
+        .order_by(RepairCheckIn.created_at.desc())
+        .limit(limit)
+    ).scalars().all()
+    return list(reversed(rows))
+
+
+def _convo_reply_count_today(db, ticket_id: int) -> int:
+    since = now() - timedelta(hours=24)
+    rows = db.execute(
+        select(RepairCheckIn).where(
+            RepairCheckIn.ticket_id == ticket_id,
+            RepairCheckIn.direction == "outbound",
+            RepairCheckIn.channel == "email",
+            RepairCheckIn.via == "conversation",
+            RepairCheckIn.sent_ok.is_(True),
+            RepairCheckIn.created_at >= since,
+        )
+    ).scalars().all()
+    return len(rows)
+
+
+def _last_outbound_too_soon(db, ticket_id: int) -> bool:
+    last = db.execute(
+        select(RepairCheckIn)
+        .where(
+            RepairCheckIn.ticket_id == ticket_id,
+            RepairCheckIn.direction == "outbound",
+            RepairCheckIn.channel == "email",
+            RepairCheckIn.sent_ok.is_(True),
+        )
+        .order_by(RepairCheckIn.created_at.desc())
+    ).scalars().first()
+    if not last or not last.created_at:
+        return False
+    return (now() - last.created_at).total_seconds() < _MIN_CONVO_GAP_SECONDS
+
+
+def _repair_llm_complete(messages: list[dict], *, temperature: float = 0.35) -> str:
+    """Plain chat completion (no tools) via xAI Grok, then Anthropic. Returns text."""
+    xai_key = (os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY") or "").strip()
+    anth_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    xai_base = (os.getenv("XAI_API_BASE") or "https://api.x.ai/v1").rstrip("/")
+    xai_model = os.getenv("ENERGY_AGENT_MODEL", "grok-4-1-fast-reasoning")
+    anth_model = os.getenv("EA_ANTHROPIC_MODEL", "claude-sonnet-4-5")
+
+    def _http(url: str, headers: dict, body: dict, timeout: int = 75) -> dict:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", "replace")[:600]
+            raise RuntimeError(f"LLM HTTP {e.code}: {err}") from e
+
+    if xai_key:
+        try:
+            out = _http(
+                f"{xai_base}/chat/completions",
+                {
+                    "Authorization": f"Bearer {xai_key}",
+                    "Content-Type": "application/json",
+                },
+                {
+                    "model": xai_model,
+                    "messages": messages,
+                    "temperature": temperature,
+                },
+            )
+            msg = ((out.get("choices") or [{}])[0].get("message") or {})
+            text = (msg.get("content") or "").strip()
+            if text:
+                return text
+        except Exception as exc:
+            log.warning("repair convo xAI failed: %s", exc)
+
+    if anth_key:
+        sys = ""
+        a_msgs = []
+        for m in messages:
+            if m.get("role") == "system":
+                sys += (m.get("content") or "") + "\n"
+            else:
+                a_msgs.append({"role": m["role"], "content": m.get("content") or ""})
+        out = _http(
+            "https://api.anthropic.com/v1/messages",
+            {
+                "x-api-key": anth_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            {
+                "model": anth_model,
+                "max_tokens": 1400,
+                "system": sys.strip() or "You are Energy Agent.",
+                "messages": a_msgs or [{"role": "user", "content": "Respond."}],
+            },
+        )
+        parts = []
+        for block in out.get("content") or []:
+            if block.get("type") == "text":
+                parts.append(block.get("text") or "")
+        return "\n".join(parts).strip()
+
+    raise RuntimeError("no LLM keys for repair conversation")
+
+
+def _parse_llm_json(raw: str) -> dict:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rstrip("`").strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    # salvage first {...}
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def _build_convo_context(
+    ticket: RepairTicket,
+    tenant: Tenant,
+    contact: ServiceContact | None,
+    history: list[RepairCheckIn],
+    *,
+    from_email: str | None,
+    inbound_body: str,
+    inbound_subject: str | None,
+) -> str:
+    owner = (
+        getattr(tenant, "company_name", None)
+        or getattr(tenant, "operator_name", None)
+        or getattr(tenant, "name", None)
+        or "the site owner"
+    )
+    owner_email = getattr(tenant, "contact_email", None) or ""
+    site = ticket.site_name or "the site"
+    inv = ticket.inv_name or ticket.serial or "inverter"
+    evidence = ticket.evidence or {}
+    lines = [
+        f"ticket_id: {ticket.id}",
+        f"owner: {owner}",
+        f"owner_email: {owner_email}",
+        f"site: {site}",
+        f"equipment: {inv}",
+        f"serial: {ticket.serial or ''}",
+        f"vendor: {ticket.vendor or ''}",
+        f"fail_type: {ticket.fail_type or ''}",
+        f"ticket_status: {ticket.status}",
+        f"scheduled_for: {_iso(ticket.scheduled_for)}",
+        f"contact_name: {(contact.name if contact else '') or ''}",
+        f"contact_email: {(contact.email if contact else '') or ''}",
+        f"reply_from: {from_email or ''}",
+        f"inbound_subject: {inbound_subject or ''}",
+    ]
+    if evidence.get("diagnosis"):
+        lines.append(f"diagnosis: {evidence.get('diagnosis')}")
+    if evidence.get("peer_index") is not None:
+        lines.append(f"peer_index: {evidence.get('peer_index')}")
+    if ticket.description:
+        lines.append(f"ticket_description: {ticket.description}")
+    lines.append("thread (oldest→newest):")
+    for row in history[-12:]:
+        who = row.direction or "note"
+        via = row.via or ""
+        body_prev = re.sub(r"\s+", " ", (row.body or "")[:500]).strip()
+        lines.append(f"  [{who}/{via}] {body_prev}")
+    lines.append("--- latest inbound to answer ---")
+    lines.append(inbound_body[:3500])
+    lines.append(
+        f"Remember: include [AO-TICKET-{ticket.id}] in the body. "
+        "Drive toward schedule / fix / owner action."
+    )
+    return "\n".join(lines)
+
+
+def _fallback_convo_reply(
+    ticket: RepairTicket,
+    tenant: Tenant,
+    contact: ServiceContact | None,
+    *,
+    inbound_body: str,
+    from_email: str | None,
+) -> dict:
+    """Deterministic reply when LLM unavailable — still continues the thread."""
+    owner = (
+        getattr(tenant, "company_name", None)
+        or getattr(tenant, "operator_name", None)
+        or getattr(tenant, "name", None)
+        or "the site owner"
+    )
+    site = ticket.site_name or "the site"
+    inv = ticket.inv_name or ticket.serial or "the inverter"
+    first = "there"
+    if contact and contact.name:
+        first = contact.name.split()[0]
+    elif from_email:
+        first = from_email.split("@", 1)[0].replace(".", " ").strip() or "there"
+    preview = re.sub(r"\s+", " ", (inbound_body or "")).strip()
+    if len(preview) > 220:
+        preview = preview[:217].rsplit(" ", 1)[0] + "…"
+    body = (
+        f"Hello {first},\n\n"
+        f"Thanks for the update on {site} / {inv}. I've logged your note:\n"
+        f"  \"{preview}\"\n\n"
+    )
+    st = ticket.status or "open"
+    if st == "resolved":
+        body += (
+            "I'll treat this case as complete on our side unless monitoring "
+            "flags the unit again.\n\n"
+        )
+        send = True
+        status = "resolved"
+    elif st == "scheduled":
+        body += (
+            "Please reply with any change to the visit time, or confirm once "
+            "you're on site / the work is done.\n\n"
+        )
+        send = True
+        status = "scheduled"
+    else:
+        body += (
+            "When you can, please reply with one of:\n"
+            "  • Expected site-visit date (or confirm if already set)\n"
+            "  • Parts status / ETA if needed\n"
+            "  • Repair completed\n"
+            "  • Owner action needed (access, warranty, etc.)\n\n"
+        )
+        send = True
+        status = "waiting_reply" if st == "open" else st
+    body += (
+        f"You can reply to this email anytime — it reaches Energy Agent and "
+        f"is logged on the case.\n\n"
+        f"Reference: [AO-TICKET-{ticket.id}]\n\n"
+        f"Thank you,\n"
+        f"Energy Agent\n"
+        f"on behalf of {owner}\n"
+    )
+    subject = f"Re: {site} — repair ({inv})"
+    return {
+        "send": send,
+        "subject": subject,
+        "body": body,
+        "status": status,
+        "needs_owner": False,
+        "owner_chat": (
+            f"I replied to their update on {site} / {inv} and asked for next steps."
+        ),
+        "reason": "fallback_no_llm",
+    }
+
+
+def plan_repair_email_reply(
+    db,
+    tenant: Tenant,
+    ticket: RepairTicket,
+    *,
+    from_email: str | None,
+    inbound_body: str,
+    inbound_subject: str | None = None,
+) -> dict:
+    """LLM (or fallback) plan for the next email in the tech conversation."""
+    contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+    history = _recent_checkins(db, ticket.id)
+    ctx = _build_convo_context(
+        ticket, tenant, contact, history,
+        from_email=from_email,
+        inbound_body=inbound_body,
+        inbound_subject=inbound_subject,
+    )
+    system = _REPAIR_CONVO_SYSTEM.replace("{ticket_id}", str(ticket.id))
+    try:
+        raw = _repair_llm_complete([
+            {"role": "system", "content": system},
+            {"role": "user", "content": ctx},
+        ])
+        plan = _parse_llm_json(raw)
+    except Exception as exc:
+        log.warning("repair convo LLM plan failed ticket=%s: %s", ticket.id, exc)
+        plan = {}
+
+    if not plan or not plan.get("body"):
+        plan = _fallback_convo_reply(
+            ticket, tenant, contact,
+            inbound_body=inbound_body, from_email=from_email,
+        )
+    else:
+        # Normalize
+        plan["send"] = bool(plan.get("send", True))
+        body = str(plan.get("body") or "").strip()
+        ref = f"[AO-TICKET-{ticket.id}]"
+        if ref not in body:
+            body = body.rstrip() + f"\n\nReference: {ref}\n"
+        plan["body"] = body
+        subj = (plan.get("subject") or "").strip()
+        if not subj:
+            site = ticket.site_name or "site"
+            inv = ticket.inv_name or ticket.serial or "inverter"
+            subj = f"Re: {site} — repair ({inv})"
+        if not subj.lower().startswith("re:"):
+            subj = f"Re: {subj}"
+        plan["subject"] = subj[:220]
+        st = plan.get("status")
+        if st and st not in VALID_TICKET_STATUSES:
+            plan["status"] = None
+
+    return plan
+
+
+def continue_repair_email_conversation(
+    db,
+    tenant: Tenant,
+    ticket: RepairTicket,
+    *,
+    from_email: str | None,
+    inbound_body: str,
+    inbound_subject: str | None = None,
+) -> dict:
+    """After a tech (or anyone) replies by email: plan + send purposeful reply.
+
+    Open-ended conversation with direction: schedule, progress, resolve, or
+    escalate owner action. Logs outbound as via=conversation.
+    """
+    result: dict[str, Any] = {
+        "attempted": True,
+        "sent": False,
+        "skipped": None,
+        "ticket_id": ticket.id,
+    }
+
+    # Guardrails
+    if ticket.status in ("cancelled", "cleared"):
+        result["skipped"] = "terminal_status"
+        return result
+    if _is_agent_mailbox(from_email):
+        result["skipped"] = "agent_mailbox"
+        return result
+    if _looks_like_auto_reply(inbound_subject, inbound_body):
+        result["skipped"] = "auto_reply"
+        return result
+    if not (inbound_body or "").strip():
+        result["skipped"] = "empty"
+        return result
+    if _convo_reply_count_today(db, ticket.id) >= _MAX_CONVO_REPLIES_PER_DAY:
+        result["skipped"] = "daily_cap"
+        return result
+    if _last_outbound_too_soon(db, ticket.id):
+        result["skipped"] = "too_soon"
+        return result
+
+    # Prefer replying to the person who wrote (open-ended: whoever responds)
+    to = (from_email or "").strip()
+    contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+    if not _email_ok(to):
+        to = (contact.email if contact else None) or getattr(tenant, "contact_email", None) or ""
+    if not _email_ok(to):
+        result["skipped"] = "no_recipient"
+        return result
+
+    plan = plan_repair_email_reply(
+        db, tenant, ticket,
+        from_email=from_email,
+        inbound_body=inbound_body,
+        inbound_subject=inbound_subject,
+    )
+    result["plan_reason"] = plan.get("reason")
+    if not plan.get("send"):
+        result["skipped"] = "llm_no_send"
+        result["owner_chat"] = plan.get("owner_chat")
+        return result
+
+    body = (plan.get("body") or "").strip()
+    subject = (plan.get("subject") or f"Re: repair ticket #{ticket.id}").strip()
+    if not body:
+        result["skipped"] = "empty_body"
+        return result
+
+    # Apply status from plan (LLM) then heuristics on inbound already applied
+    desired = plan.get("status")
+    if desired in VALID_TICKET_STATUSES and ticket.status not in TERMINAL_STATUSES:
+        if desired == "resolved":
+            ticket.status = "resolved"
+            ticket.resolved_at = now()
+            ticket.next_checkin_at = None
+        elif desired == "scheduled" and ticket.status in ("open", "waiting_reply", "in_progress"):
+            ticket.status = "scheduled"
+        elif desired == "in_progress" and ticket.status in (
+            "open", "waiting_reply", "scheduled",
+        ):
+            ticket.status = "in_progress"
+        elif desired == "waiting_reply" and ticket.status == "open":
+            ticket.status = "waiting_reply"
+
+    try:
+        ok = notify.send_repair_checkin_email(
+            to=to,
+            subject=subject,
+            body_text=body,
+        )
+    except Exception as exc:
+        log.exception("repair convo send failed ticket=%s", ticket.id)
+        result["skipped"] = "send_error"
+        result["error"] = str(exc)[:200]
+        return result
+
+    row = RepairCheckIn(
+        tenant_id=tenant.id,
+        ticket_id=ticket.id,
+        contact_id=ticket.contact_id,
+        channel="email",
+        direction="outbound",
+        subject=subject,
+        body=body,
+        sent_to=to,
+        sent_ok=bool(ok),
+        via="conversation",
+    )
+    db.add(row)
+    if ok:
+        ticket.last_checkin_at = now()
+        ticket.checkin_count = (ticket.checkin_count or 0) + 1
+        if ticket.status == "open":
+            ticket.status = "waiting_reply"
+        # Push next auto follow-up later; conversation owns the near term
+        _schedule_next_checkin(tenant, ticket, first=False)
+        owner_chat = (plan.get("owner_chat") or "").strip()
+        if not owner_chat:
+            who = to
+            if contact and contact.name:
+                who = contact.name
+            site = ticket.site_name or "the site"
+            inv = ticket.inv_name or "the inverter"
+            owner_chat = (
+                f"I emailed {who} back about {site} / {inv} to keep the repair moving."
+            )
+        _safe_mind_emit(
+            db,
+            tenant.id,
+            "repair_outbound",
+            f"Conversation reply on ticket #{ticket.id}",
+            ref_id=str(ticket.id),
+            payload={
+                "origin": "repair",
+                "importance": 85,
+                "ticket_id": ticket.id,
+                "to": to,
+                "site_name": ticket.site_name,
+                "via": "conversation",
+                "needs_owner": bool(plan.get("needs_owner")),
+                "preview": body[:300],
+            },
+            speak_as_mind=owner_chat[:500],
+        )
+        result["sent"] = True
+        result["checkin_id"] = row.id
+        result["to"] = to
+        result["owner_chat"] = owner_chat
+        result["needs_owner"] = bool(plan.get("needs_owner"))
+        result["status"] = ticket.status
+    else:
+        result["skipped"] = "send_failed"
+    db.flush()
+    return result
+
+
 def find_ticket_for_inbound(
     db,
     *,
@@ -1315,29 +1923,45 @@ def ingest_inbound_email(
     # Push into Energy Agent chat (mind event stream) so an open session sees
     # the tech reply without the owner prompting.
     speak = _repair_reply_speak_line(ticket, from_email=from_email, body=cleaned)
+    _safe_mind_emit(
+        db,
+        ticket.tenant_id,
+        "repair_inbound",
+        f"Tech reply on ticket #{ticket.id}",
+        ref_id=str(ticket.id),
+        payload={
+            "origin": "repair",
+            "importance": 90,
+            "ticket_id": ticket.id,
+            "from_email": from_email,
+            "site_name": ticket.site_name,
+            "inv_name": ticket.inv_name,
+            "status": ticket.status,
+            "preview": cleaned[:400],
+            "resend_email_id": resend_email_id,
+        },
+        speak_as_mind=speak,
+    )
+
+    # Continue the email conversation with whoever replied — purposeful,
+    # open-ended, directed at scheduling / fix / owner action. First outreach
+    # still requires Approve & send; *replies* auto-converse.
+    convo: dict = {"attempted": False}
     try:
-        from .energy_agent_mind import _emit
-        _emit(
+        convo = continue_repair_email_conversation(
             db,
-            ticket.tenant_id,
-            "repair_inbound",
-            f"Tech reply on ticket #{ticket.id}",
-            ref_id=str(ticket.id),
-            payload={
-                "origin": "repair",
-                "importance": 90,
-                "ticket_id": ticket.id,
-                "from_email": from_email,
-                "site_name": ticket.site_name,
-                "inv_name": ticket.inv_name,
-                "status": ticket.status,
-                "preview": cleaned[:400],
-                "resend_email_id": resend_email_id,
-            },
-            speak_as_mind=speak,
+            tenant,
+            ticket,
+            from_email=from_email,
+            inbound_body=cleaned,
+            inbound_subject=subject,
         )
+        if convo.get("sent") and convo.get("owner_chat"):
+            # Prefer a combined chat line when we already replied
+            speak = f"{speak} {convo['owner_chat']}".strip()
     except Exception:
-        log.exception("repair inbound: failed to emit mind event ticket=%s", ticket.id)
+        log.exception("repair inbound: conversation reply failed ticket=%s", ticket.id)
+        convo = {"attempted": True, "sent": False, "skipped": "exception"}
 
     db.commit()
     return {
@@ -1348,6 +1972,13 @@ def ingest_inbound_email(
         "status": ticket.status,
         "checkin_id": row.id,
         "speak": speak,
+        "conversation": {
+            "sent": bool(convo.get("sent")),
+            "skipped": convo.get("skipped"),
+            "to": convo.get("to"),
+            "checkin_id": convo.get("checkin_id"),
+            "needs_owner": convo.get("needs_owner"),
+        },
     }
 
 

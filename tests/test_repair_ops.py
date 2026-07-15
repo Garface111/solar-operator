@@ -240,6 +240,7 @@ def test_send_checkin_and_note_status_bump():
 
 
 def test_process_due_auto_mode():
+    """Auto follow-ups only — first outreach still needs Approve & send."""
     tid, _ = _tenant(repair_checkin_mode="auto", repair_checkin_hours=24)
     aid = _array(tid, "Auto Site")
     iid, sn = _inv(tid, aid)
@@ -247,10 +248,36 @@ def test_process_due_auto_mode():
         t = db.get(Tenant, tid)
         ro.upsert_contact(db, tid, name="Hank", email="hank@om.test", is_default=True)
         ticket = ro.open_ticket(db, t, array_id=aid, inverter_id=iid, fail_type="fault")
-        # due now
+        # Force due — must still skip: no prior outbound
         ticket.next_checkin_at = now() - timedelta(minutes=5)
         db.commit()
         tid_ticket = ticket.id
+
+    with SessionLocal() as db, patch.object(
+        ro.notify, "send_repair_checkin_email", return_value=True,
+    ) as mock_send:
+        t = db.get(Tenant, tid)
+        n = ro.process_due(db, t)
+        assert n == 0
+        assert not mock_send.called
+
+    # First approved send, age outbound, then auto follow-up
+    with SessionLocal() as db, patch.object(
+        ro.notify, "send_repair_checkin_email", return_value=True,
+    ):
+        t = db.get(Tenant, tid)
+        ticket = db.get(RepairTicket, tid_ticket)
+        ro.send_checkin(db, t, ticket, via="agent")
+        rows = db.execute(
+            select(RepairCheckIn).where(
+                RepairCheckIn.ticket_id == tid_ticket,
+                RepairCheckIn.direction == "outbound",
+            )
+        ).scalars().all()
+        for r in rows:
+            r.created_at = now() - timedelta(hours=48)
+        ticket.next_checkin_at = now() - timedelta(minutes=5)
+        db.commit()
 
     with SessionLocal() as db, patch.object(
         ro.notify, "send_repair_checkin_email", return_value=True,
@@ -259,7 +286,7 @@ def test_process_due_auto_mode():
         n = ro.process_due(db, t)
         assert n == 1
         ticket = db.get(RepairTicket, tid_ticket)
-        assert ticket.checkin_count == 1
+        assert (ticket.checkin_count or 0) >= 2
 
 
 def test_manual_mode_does_not_auto_send():
@@ -423,8 +450,10 @@ def test_inbound_email_parse_and_claim_link():
         tid_ticket = ticket.id
         contact_id = c.id
 
-    # Marker in subject
-    with SessionLocal() as db:
+    # Marker in subject — inbound also auto-continues email conversation
+    with SessionLocal() as db, patch.object(
+        ro.notify, "send_repair_checkin_email", return_value=True,
+    ) as send_mock:
         out = ro.ingest_inbound_email(
             db,
             from_email="mo@om.test",
@@ -434,6 +463,19 @@ def test_inbound_email_parse_and_claim_link():
         assert out["ok"] is True
         assert out["ticket_id"] == tid_ticket
         assert out["status"] == "scheduled"
+        # Conversation reply went out to the person who wrote
+        assert out.get("conversation", {}).get("sent") is True
+        assert send_mock.called
+        kwargs = send_mock.call_args.kwargs if send_mock.call_args.kwargs else {}
+        # positional or kw — accept either
+        to_arg = kwargs.get("to") or (
+            send_mock.call_args.args[0] if send_mock.call_args.args else None
+        )
+        assert to_arg == "mo@om.test"
+        body_arg = kwargs.get("body_text") or ""
+        if not body_arg and len(send_mock.call_args.args) >= 3:
+            body_arg = send_mock.call_args.args[2]
+        assert f"[AO-TICKET-{tid_ticket}]" in (body_arg or "")
 
     # Link warranty claim
     from api.models import WarrantyClaim
@@ -463,3 +505,94 @@ def test_extract_ticket_id():
     assert ro.extract_ticket_id_from_text("hello [AO-TICKET-42] world") == 42
     assert ro.extract_ticket_id_from_text("Re: Ticket #99 status") == 99
     assert ro.extract_ticket_id_from_text("no marker here") is None
+
+
+def test_conversation_skips_auto_reply_and_agent_mailbox():
+    tid, _ = _tenant()
+    aid = _array(tid, "OOO Site")
+    iid, _ = _inv(tid, aid)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        ro.upsert_contact(db, tid, name="Tech", email="tech@om.test", is_default=True)
+        ticket = ro.open_ticket(db, t, array_id=aid, inverter_id=iid, fail_type="dead")
+        db.commit()
+        tid_ticket = ticket.id
+
+    with SessionLocal() as db, patch.object(
+        ro.notify, "send_repair_checkin_email", return_value=True,
+    ) as send_mock:
+        out = ro.ingest_inbound_email(
+            db,
+            from_email="tech@om.test",
+            subject=f"Out of Office [AO-TICKET-{tid_ticket}]",
+            body="I am out of the office until Monday. This is an automatic reply.",
+        )
+        assert out["ok"] is True
+        assert out.get("conversation", {}).get("sent") is False
+        assert out.get("conversation", {}).get("skipped") == "auto_reply"
+        assert not send_mock.called
+
+    with SessionLocal() as db, patch.object(
+        ro.notify, "send_repair_checkin_email", return_value=True,
+    ) as send_mock:
+        out = ro.ingest_inbound_email(
+            db,
+            from_email="repairs@agent.arrayoperator.com",
+            subject=f"Re: loop [AO-TICKET-{tid_ticket}]",
+            body="Should not reply to ourselves.",
+            resend_email_id="test-agent-loop-1",
+        )
+        # May or may not match ticket; if matched, conversation must skip
+        if out.get("matched"):
+            assert out.get("conversation", {}).get("sent") is False
+            assert out.get("conversation", {}).get("skipped") == "agent_mailbox"
+        assert not send_mock.called
+
+
+def test_conversation_uses_llm_plan_when_provided():
+    tid, _ = _tenant()
+    aid = _array(tid, "LLM Site")
+    iid, _ = _inv(tid, aid)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        ro.upsert_contact(db, tid, name="Rex", email="rex@om.test", is_default=True)
+        ticket = ro.open_ticket(db, t, array_id=aid, inverter_id=iid, fail_type="underperforming")
+        db.commit()
+        tid_ticket = ticket.id
+
+    plan = {
+        "send": True,
+        "subject": "Re: LLM Site — visit Thursday",
+        "body": (
+            "Hello Rex,\n\nThursday at 10am works — I'll note it on the case.\n\n"
+            f"Reference: [AO-TICKET-{tid_ticket}]\n\nThank you,\nEnergy Agent\n"
+        ),
+        "status": "scheduled",
+        "needs_owner": False,
+        "owner_chat": "Rex can do Thursday 10am; I confirmed.",
+        "reason": "ack_schedule",
+    }
+    with SessionLocal() as db, \
+            patch.object(ro, "plan_repair_email_reply", return_value=plan), \
+            patch.object(ro.notify, "send_repair_checkin_email", return_value=True) as send_mock:
+        t = db.get(Tenant, tid)
+        ticket = db.get(RepairTicket, tid_ticket)
+        out = ro.continue_repair_email_conversation(
+            db, t, ticket,
+            from_email="rex@om.test",
+            inbound_body="I can be there Thursday morning around 10.",
+            inbound_subject="Re: underperforming",
+        )
+        db.commit()
+        assert out["sent"] is True
+        assert out["to"] == "rex@om.test"
+        assert "Thursday" in (send_mock.call_args.kwargs.get("body_text") or "")
+        ticket2 = db.get(RepairTicket, tid_ticket)
+        assert ticket2.status == "scheduled"
+        rows = db.execute(
+            select(RepairCheckIn).where(
+                RepairCheckIn.ticket_id == tid_ticket,
+                RepairCheckIn.via == "conversation",
+            )
+        ).scalars().all()
+        assert len(rows) == 1
