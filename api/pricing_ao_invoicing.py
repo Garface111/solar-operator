@@ -9,49 +9,50 @@ Array Operator bills two different jobs on two different meters:
     auto-generate + send offtaker invoices. Value scales with how many billing
     relationships they run, not how much they generate.
 
-Pricing shape (Ford, Jun 2026 — bulk-discounted, replacing the earlier flat
-$20/offtaker): a GRADUATED volume discount, mirroring the SAME 0% / 10% / 20% /
-30% curve NEPOOL already uses for per-array pricing (api/pricing.py) and AO
-monitoring now uses for per-kW pricing (api/pricing_ao_nameplate.py) — just
-re-keyed to offtaker count, sized for muni / property-manager-scale portfolios:
+Pricing shape (Ford, Jul 2026 — Path A growth reprice from $20 → $15 headline):
+a GRADUATED volume discount, mirroring the SAME 0% / 10% / 20% / 30% curve
+NEPOOL uses for per-array pricing and AO monitoring uses for per-kW pricing:
 
-  1 – 10 offtakers    $20.00/mo   (full)
-  11 – 25 offtakers   $18.00/mo   (10% off)
-  26 – 50 offtakers   $16.00/mo   (20% off)
-  51+ offtakers       $14.00/mo   (30% off)
+  1 – 10 offtakers    $15.00/mo   (full)
+  11 – 25 offtakers   $13.50/mo   (10% off)
+  26 – 50 offtakers   $12.00/mo   (20% off)
+  51+ offtakers       $10.50/mo   (30% off)
 
   monthly  = graduated sum across bands (each offtaker priced per its own band)
   setup    = $250.00 one-time (waivable per-customer; not part of the monthly bill)
 
-  4 offtakers → $80    12 → $236    30 → $436    60 → $780
+  4 offtakers → $60    12 → $177    30 → $412.50    60 → $757.50
+
+Separate from the monthly line: when offtakers pay invoices online via Stripe
+Connect, the platform keeps a small collection fee (default 0.5% — see
+api/billing/payments.py). That fee is NOT a monthly SaaS charge; Account Billing
+shows it for transparency only.
 
 On the "both" plan the operator pays this offtaker line PLUS the per-kW
-monitoring meter; the bill shows them itemized (generation × rate, offtakers ×
-rate, summed).
+monitoring meter; the bill shows them itemized.
 
 Stripe: a LICENSED price (billing_scheme='tiered', tiers_mode='graduated',
 quantity = offtaker count). To change pricing edit TIERS here ONLY, then mint a
-NEW Stripe price (prices are immutable — tiers can't be edited in place) via
-scripts/create_ao_invoicing_tiered_price.py, point
-STRIPE_AO_INVOICING_PRICE_ID at it, and migrate any live subscription's
-invoicing item to the new price id (quantity/mechanism unchanged).
+NEW Stripe price via scripts/create_ao_invoicing_price.py, point
+STRIPE_AO_INVOICING_PRICE_ID at it, and migrate live subscription items
+(scripts/migrate_ao_bulk_tiers_live.py --old-invoicing …).
 """
 from __future__ import annotations
 
 # Each tier: (up_to_offtakers, unit_amount_cents). `up_to_offtakers` is the
 # inclusive offtaker-count boundary at which this tier's unit price stops
 # applying; the final tier uses None for "infinity". Ordered ascending. Whole
-# cents (this plan is in whole dollars).
+# cents (this plan is in whole dollars / half-dollars).
 TIERS: list[tuple[int | None, int]] = [
-    (10, 2_000),   # 1–10 offtakers    @ $20.00/mo  (full)
-    (25, 1_800),   # 11–25 offtakers   @ $18.00/mo  (10% off)
-    (50, 1_600),   # 26–50 offtakers   @ $16.00/mo  (20% off)
-    (None, 1_400), # 51+ offtakers     @ $14.00/mo  (30% off)
+    (10, 1_500),   # 1–10 offtakers    @ $15.00/mo  (full)
+    (25, 1_350),   # 11–25 offtakers   @ $13.50/mo  (10% off)
+    (50, 1_200),   # 26–50 offtakers   @ $12.00/mo  (20% off)
+    (None, 1_050), # 51+ offtakers     @ $10.50/mo  (30% off)
 ]
 
-# The headline per-offtaker price an operator sees ("$20/offtaker"): the first
+# The headline per-offtaker price an operator sees ("$15/offtaker"): the first
 # (full) tier. Whole cents.
-PER_OFFTAKER_CENTS: int = TIERS[0][1]   # $20.00/mo (back-compat name/value)
+PER_OFFTAKER_CENTS: int = TIERS[0][1]   # $15.00/mo
 SETUP_CENTS: int = 25_000               # $250.00 one-time setup (waivable per-customer)
 
 # Back-compat shims for older callers (no base/floor in this model).
@@ -65,7 +66,7 @@ def compute_monthly_cents(offtakers: int | None) -> int:
     Mirrors Stripe tiers_mode="graduated": each tier's unit price applies only
     to the offtakers that fall within that tier's band (no revenue cliff).
 
-      0 -> 0    4 -> 8000 ($80)    12 -> 23600 ($236)    60 -> 78000 ($780)
+      0 -> 0    4 -> 6000 ($60)    12 -> 17700 ($177)    60 -> 75750 ($757.50)
     """
     n = int(offtakers or 0)
     if n <= 0:

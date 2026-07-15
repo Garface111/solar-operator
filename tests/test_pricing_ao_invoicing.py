@@ -2,13 +2,11 @@
 
 Pins the offtaker tier boundaries + the plan-detection logic so a future edit can't
 silently change what an invoicing customer is billed. These numbers must match the
-live Stripe graduated LICENSED price built by
-scripts/create_ao_invoicing_tiered_price.py.
+live Stripe graduated LICENSED price built by scripts/create_ao_invoicing_price.py.
 
-Plan (Ford, Jun 2026 — bulk-discounted, replaces the earlier flat $20/offtaker):
-graduated volume tiers mirroring NEPOOL's 0/10/20/30% discount curve, re-keyed to
-offtaker count: 1-10 @ $20, 11-25 @ $18 (10% off), 26-50 @ $16 (20% off), 51+ @ $14
-(30% off). $250 setup.
+Plan (Ford, Jul 2026 — Path A growth reprice): graduated volume tiers with 0/10/20/30%
+discount curve, headline $15/offtaker: 1-10 @ $15, 11-25 @ $13.50, 26-50 @ $12,
+51+ @ $10.50. $250 setup. Online pay skim is separate (0.5% default).
 """
 from api.pricing_ao_invoicing import (
     compute_monthly_cents,
@@ -28,7 +26,7 @@ from api.stripe_helpers import (
 
 
 def test_constants():
-    assert PER_OFFTAKER_CENTS == 2_000    # $20/offtaker headline (first tier)
+    assert PER_OFFTAKER_CENTS == 1_500    # $15/offtaker headline (first tier)
     assert SETUP_CENTS == 25_000          # $250 one-time setup (waivable)
     assert BASE_CENTS == 0                # no base/floor in this model
     assert BASE_INCLUDES_OFFTAKERS == 0
@@ -41,28 +39,28 @@ def test_zero_is_free():
 
 
 def test_graduated_within_first_tier():
-    # 1-10 offtakers: flat $20 each, same as the pre-discount behavior.
-    assert compute_monthly_cents(1) == 2_000     # $20
-    assert compute_monthly_cents(2) == 4_000     # $40
-    assert compute_monthly_cents(4) == 8_000     # $80 (Paul's 4)
-    assert compute_monthly_cents(10) == 20_000   # $200 (last full-price offtaker)
+    # 1-10 offtakers: flat $15 each.
+    assert compute_monthly_cents(1) == 1_500     # $15
+    assert compute_monthly_cents(2) == 3_000     # $30
+    assert compute_monthly_cents(4) == 6_000     # $60
+    assert compute_monthly_cents(10) == 15_000   # $150 (last full-price offtaker)
 
 
 def test_graduated_across_tiers_no_cliff():
-    # 11th offtaker: first 10 @ $20 + 1 @ $18 (10% off) = $218, not 11×$18.
-    assert compute_monthly_cents(11) == 20_000 + 1_800
-    # 12 offtakers → $236 (10 @ $20 + 2 @ $18).
-    assert compute_monthly_cents(12) == 20_000 + 2 * 1_800
-    # 25 offtakers: 10 @ $20 + 15 @ $18 = $470.
-    assert compute_monthly_cents(25) == 20_000 + 15 * 1_800
-    # 26th offtaker crosses into the 20%-off band: + 1 @ $16.
-    assert compute_monthly_cents(26) == 20_000 + 15 * 1_800 + 1_600
-    # 50 offtakers: 10@$20 + 15@$18 + 25@$16 = $200+$270+$400 = $870.
-    assert compute_monthly_cents(50) == 20_000 + 15 * 1_800 + 25 * 1_600
-    # 51st offtaker crosses into the 30%-off band: + 1 @ $14.
-    assert compute_monthly_cents(51) == 20_000 + 15 * 1_800 + 25 * 1_600 + 1_400
-    # 60 offtakers: prior 50-offtaker total + 10 @ $14 = $870 + $140 = $1,010.
-    assert compute_monthly_cents(60) == (20_000 + 15 * 1_800 + 25 * 1_600) + 10 * 1_400
+    # 11th offtaker: first 10 @ $15 + 1 @ $13.50 (10% off) = $163.50
+    assert compute_monthly_cents(11) == 15_000 + 1_350
+    # 12 offtakers → $177 (10 @ $15 + 2 @ $13.50).
+    assert compute_monthly_cents(12) == 15_000 + 2 * 1_350
+    # 25 offtakers: 10 @ $15 + 15 @ $13.50 = $352.50
+    assert compute_monthly_cents(25) == 15_000 + 15 * 1_350
+    # 26th offtaker crosses into the 20%-off band: + 1 @ $12.
+    assert compute_monthly_cents(26) == 15_000 + 15 * 1_350 + 1_200
+    # 50 offtakers: 10@$15 + 15@$13.50 + 25@$12 = $150+$202.50+$300 = $652.50
+    assert compute_monthly_cents(50) == 15_000 + 15 * 1_350 + 25 * 1_200
+    # 51st offtaker crosses into the 30%-off band: + 1 @ $10.50.
+    assert compute_monthly_cents(51) == 15_000 + 15 * 1_350 + 25 * 1_200 + 1_050
+    # 60 offtakers: prior 50 + 10 @ $10.50 = $652.50 + $105 = $757.50
+    assert compute_monthly_cents(60) == (15_000 + 15 * 1_350 + 25 * 1_200) + 10 * 1_050
 
 
 def test_blended_rate_reproduces_total():
@@ -83,10 +81,10 @@ def test_no_revenue_cliff_at_breakpoints():
 
 def test_stripe_tiers_shape():
     assert stripe_tiers() == [
-        {"up_to": 10, "unit_amount": 2_000},
-        {"up_to": 25, "unit_amount": 1_800},
-        {"up_to": 50, "unit_amount": 1_600},
-        {"up_to": "inf", "unit_amount": 1_400},
+        {"up_to": 10, "unit_amount": 1_500},
+        {"up_to": 25, "unit_amount": 1_350},
+        {"up_to": 50, "unit_amount": 1_200},
+        {"up_to": "inf", "unit_amount": 1_050},
     ]
 
 
@@ -130,10 +128,7 @@ def test_ao_plan_features_entitlements():
     # both → everything
     assert f("both") == {"plan": "both", "plan_chosen": True,
                          "vendor_data": True, "invoicing": True}
-    # not chosen yet → defaults to FULL functionality (commit 342a8ac removed the
-    # forced plan-picker: a fresh trial shows everything, treated as "chosen" so the
-    # operator is never blocked; billing still reads billing_plan directly and bills
-    # the conservative monitoring default until they explicitly narrow their plan).
+    # not chosen yet → defaults to FULL functionality
     assert f(None) == {"plan": "both", "plan_chosen": True,
                        "vendor_data": True, "invoicing": True}
     assert f("") == {"plan": "both", "plan_chosen": True,

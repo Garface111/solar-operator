@@ -30,6 +30,32 @@ from .pricing_ao_nameplate import (
     compute_monthly_cents as nameplate_monthly_cents,
 )
 
+
+def _collection_fee_info() -> dict:
+    """Online offtaker pay-link platform skim (not a monthly SaaS line)."""
+    try:
+        from .billing.payments import fee_bps
+        bps = int(fee_bps())
+    except Exception:
+        bps = 50
+    bps = max(0, bps)
+    pct = bps / 100.0  # 50 bps → 0.5
+    return {
+        "id": "collection_fee",
+        "kind": "Online offtaker payments",
+        "basis": "percent_of_collected",
+        "fee_bps": bps,
+        "fee_percent": pct,
+        "amount_cents": None,  # not a fixed monthly charge
+        "included_in_monthly_total": False,
+        "desc": (
+            f"When an offtaker pays an invoice online (card/bank via Stripe), "
+            f"we keep {pct:g}% of that payment as a platform fee. "
+            f"The rest goes to you. Check and offline payments: no fee. "
+            f"This is not part of your monthly bill above."
+        ),
+    }
+
 # ── Energy Agent freemium ────────────────────────────────────────────────────
 # Free weekly sample (thinking + voice). Pro = unlimited for a flat monthly fee.
 AI_FREE_WEEKLY_BUDGET_USD: float = float(
@@ -129,8 +155,8 @@ def build_unified_bill(
             "full_unit_cents": full,
             "amount_cents": round(inv, 2),
             "desc": (
-                "Automatic offtaker solar-credit invoices. "
-                "Volume discounts apply as your roster grows."
+                f"Automatic offtaker solar-credit invoices — "
+                f"${full / 100:.0f}/offtaker·mo headline, volume discounts as your roster grows."
             ),
         })
 
@@ -153,6 +179,27 @@ def build_unified_bill(
         total += float(AI_PRO_MONTHLY_CENTS)
     lines.append(ai_line)
 
+    # Transparency only — never added to total_cents (not a fixed monthly charge).
+    collection = _collection_fee_info()
+    # Always show when invoicing is on the plan (pay links are an invoicing feature).
+    # Also show on "both"/empty so Account always explains the skim for AO owners.
+    show_collection = bool(include_invoicing) or p in ("both", "invoicing", "")
+    if show_collection:
+        lines.append({
+            "id": collection["id"],
+            "kind": collection["kind"],
+            "basis": collection["basis"],
+            "quantity": 0,
+            "unit_label": f"{collection['fee_percent']:g}% of online payments",
+            "unit_cents": 0,
+            "full_unit_cents": 0,
+            "amount_cents": None,
+            "included_in_monthly_total": False,
+            "fee_bps": collection["fee_bps"],
+            "fee_percent": collection["fee_percent"],
+            "desc": collection["desc"],
+        })
+
     return {
         "plan": p or "both",
         "plan_label": PLAN_LABELS.get(p or "both", "Array Operator"),
@@ -164,9 +211,13 @@ def build_unified_bill(
             "free_weekly_usd": AI_FREE_WEEKLY_BUDGET_USD,
             "stripe_price_ready": bool(AI_PRO_PRICE_ID),
         },
+        "collection_fee": collection if show_collection else None,
         "model_note": (
-            "Three independent lines: monitoring (kW), offtaker invoices (count), "
-            "and optional Energy Agent Pro ($50/mo unlimited AI). "
-            "Free accounts keep a small weekly AI sample so you can try the agent."
+            "Monthly bill: monitoring (kW) + offtaker invoices ($"
+            f"{OFFTAKER_FULL_CENTS / 100:.0f}/offtaker headline) + optional Energy Agent Pro "
+            f"(${AI_PRO_MONTHLY_USD:.0f}/mo). "
+            f"Separately, when offtakers pay online we keep "
+            f"{collection['fee_percent']:g}% of that payment — not part of the monthly total. "
+            "Free accounts keep a small weekly AI sample."
         ),
     }

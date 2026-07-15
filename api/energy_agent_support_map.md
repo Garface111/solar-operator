@@ -307,7 +307,8 @@ Three independent product lines + freemium AI (source: `api/pricing_ao_unified.p
 | Line | What it bills | Typical rate |
 |------|----------------|--------------|
 | **Fleet monitoring** | Registered nameplate kW | ~$0.15/kW·mo (graduated volume discount) |
-| **Offtaker invoices** | Count of offtakers you invoice | ~$20/offtaker·mo (graduated) |
+| **Offtaker invoices** | Count of offtakers you invoice | ~$15/offtaker·mo (graduated) |
+| **Online pay fee** | When offtakers pay an invoice online | **0.5%** of that payment only (not monthly) |
 | **Energy Agent Pro** | Flat add-on | **$50/mo unlimited AI** |
 
 - **Plan choice** (`billing_plan` = monitoring | invoicing | both) turns monitoring / offtaker lines on/off (tab entitlements). AI Pro is **orthogonal** — optional on any plan.
@@ -328,7 +329,7 @@ THREE AO PLANS (`billing_plan` = `monitoring` | `invoicing` | `both`) drive both
 
 - A **not-yet-chosen** plan defaults to full “both” functionality so a trialing operator is never blocked, while Stripe still bills the conservative monitoring default. NEPOOL tenants get everything unconditionally.
 - **monitoring** bills per **kW of registered inverter nameplate** (graduated ~$0.150 → $0.105/kW) — deterministic and immune to capture gaps (not metered kWh). Gates the Fleet Triage / Inverters / Analysis tabs (needs the `vendor_data` entitlement).
-- **invoicing** bills per **licensed offtaker** (graduated ~$20 → $14/mo, plus a waivable setup fee). Gates the Invoices tab.
+- **invoicing** bills per **licensed offtaker** (graduated ~$15 → $10.50/mo, plus a waivable setup fee). Gates the Invoices tab. Online offtaker payments take a **0.5%** platform fee (shown on Account Billing, not in the monthly total).
 - **both** pays both lines, itemized.
 - **Graduated volume discounts** (0 / 10 / 20 / 30%) mirror NEPOOL’s per-array curve.
 

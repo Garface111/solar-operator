@@ -39,11 +39,21 @@ def test_unified_bill_both_lines_plus_ai_sample():
     assert "monitoring" in ids
     assert "invoicing" in ids
     assert "ai_pro" in ids
+    assert "collection_fee" in ids
     ai = next(ln for ln in bill["lines"] if ln["id"] == "ai_pro")
     assert ai["included"] is False
     assert ai["amount_cents"] == 0
-    # 100 kW × $0.15 = $15 = 1500¢; 4 offtakers × $20 = $80 = 8000¢
-    assert bill["total_cents"] >= 1500
+    # 100 kW × $0.15 = $15 = 1500¢; 4 offtakers × $15 = $60 = 6000¢
+    inv = next(ln for ln in bill["lines"] if ln["id"] == "invoicing")
+    assert inv["amount_cents"] == 6000
+    assert inv["full_unit_cents"] == 1500
+    # Collection fee is transparency-only — not in monthly total
+    cf = next(ln for ln in bill["lines"] if ln["id"] == "collection_fee")
+    assert cf["amount_cents"] is None
+    assert cf.get("included_in_monthly_total") is False
+    assert abs(float(cf["fee_percent"]) - 0.5) < 0.001
+    assert bill["total_cents"] == 1500 + 6000  # mon + inv, no AI, no skim
+    assert bill["collection_fee"]["fee_bps"] == 50
     assert bill["ai"]["pro"] is False
     assert bill["ai"]["free_weekly_usd"] == AI_FREE_WEEKLY_BUDGET_USD
 
