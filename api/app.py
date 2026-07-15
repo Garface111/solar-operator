@@ -451,6 +451,9 @@ from .energy_agent import router as energy_agent_router
 app.include_router(energy_agent_router)
 from .energy_agent_mind import router as energy_agent_mind_router
 app.include_router(energy_agent_mind_router)
+# Sovereign Mind (product executive) — architecture only; SOVEREIGN_ENABLED=0 default
+from .energy_agent_sovereign import router as energy_agent_sovereign_router
+app.include_router(energy_agent_sovereign_router)
 from .ford_escalations import router as ford_escalations_router
 app.include_router(ford_escalations_router)
 if _SO_DEV_ENABLED:

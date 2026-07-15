@@ -214,4 +214,19 @@ POST /v1/energy-agent/chat                 unchanged URL; planner side-effects e
 
 ---
 
+## 11. Successor — Sovereign Mind (product executive, future)
+
+Tenant Operating Mind (this doc, A–E) cares for **one owner**.
+
+The **Sovereign Mind** is the next scope: an independent mind that **owns Array Operator**
+as a product — monitors system health, coordinates expansion, protects UX, repairs
+issues, holds executive control under kill switches, and can speak through **any**
+owner chat window.
+
+- Architecture: [`2026-07-15-energy-agent-sovereign-mind.md`](./2026-07-15-energy-agent-sovereign-mind.md)
+- Runtime skeleton (dark): `api/energy_agent_sovereign.py` — `SOVEREIGN_ENABLED=0` default
+- **Not live.** Do not enable without Ford go on Phase F+.
+
+---
+
 *Conversation is the window. The mind keeps working when the window is closed.*
