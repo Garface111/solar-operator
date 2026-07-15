@@ -52,7 +52,7 @@ KIND_IMPORTANCE: dict[str, int] = {
     "analyze_focus": 68,
     "mark_improvement": 90,
     # Phase E — long-term / proactive
-    "proactive_insight": 72,
+    "proactive_insight": 48,  # quiet by default; only speak on spike / first notice
     "prepare_ux_approval": 78,
     "profile_sync": 12,
 }
@@ -73,6 +73,10 @@ WORKER_COST_USD: dict[str, float] = {
 
 # How often the long-term mind may email the owner (proactive insights)
 PROACTIVE_EMAIL_COOLDOWN_HOURS = 20
+# How often the same fleet insight may interrupt in-app (spam guard)
+PROACTIVE_SPEAK_COOLDOWN_HOURS = 8
+# Min hours between proactive_insight *runs* unless attention count changes
+PROACTIVE_RUN_COOLDOWN_HOURS = 6
 # Attention spike threshold to wake proactive insight
 ATTENTION_SPIKE_DELTA = 1
 
@@ -350,9 +354,14 @@ def score_importance(kind: str, result: dict | None, speak: str | None) -> int:
             boost += 15
     elif kind == "proactive_insight":
         ins = result.get("insight") or {}
-        boost += max(0, int(ins.get("importance") or 0) - 55)
+        if result.get("silent") or result.get("duplicate"):
+            boost -= 80  # never interrupt repeats
+        elif result.get("attention_spike"):
+            boost += 30
+        else:
+            boost += max(0, int(ins.get("importance") or 0) - 70)
         if result.get("emailed", {}).get("owner"):
-            boost -= 15  # already emailed — softer in-app interrupt
+            boost -= 20
     elif kind == "prepare_ux_approval":
         if result.get("suggestion_id"):
             boost += 10
@@ -1202,6 +1211,8 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
     reason = payload.get("reason") or "scheduled"
     prev = world.get("last_attention_count")
     spiked = prev is not None and attn > int(prev) + (ATTENTION_SPIKE_DELTA - 1)
+    # First time we ever record attention (prev is None) is a soft "notice", not a nag
+    first_notice = prev is None and attn > 0
 
     # Build plain-language insight (no invented kWh)
     if attn <= 0:
@@ -1211,7 +1222,7 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
             f"{(dig or {}).get('inverters') or '—'} inverters. "
             "Nothing needs attention right now."
         )
-        importance = 30
+        importance = 25
     else:
         first = top[0] if top else {}
         name = first.get("name") or "a site"
@@ -1223,9 +1234,10 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
             + ("Attention increased since last check. " if spiked else "")
             + "Open Fleet Triage for the full queue."
         )
-        importance = 75 if spiked or attn >= 2 else 60
+        # Only "loud" when things got worse or first time we notice
+        importance = 72 if spiked else (58 if first_notice else 40)
 
-    # UX keep-good: if repeated friction notes, nudge prepare
+    # UX keep-good: if repeated friction notes, nudge prepare (quiet unless new)
     friction_n = _count_recent_ux_friction(db, tenant_id)
     ux_note = None
     if friction_n >= 2 and (world.get("profile") or {}).get("auto_prepare_ux", True):
@@ -1238,7 +1250,30 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
                 else " (say if you want email updates)."
             )
         )
-        importance = max(importance, 70)
+        if spiked or first_notice:
+            importance = max(importance, 65)
+
+    # Fingerprint: same fleet story should not re-speak every wake/tick
+    top_key = ",".join(
+        f"{t.get('name') or ''}:{(t.get('why') or '')[:40]}" for t in (top or [])[:3]
+    )
+    fingerprint = f"{attn}|{top_key}|{headline}"
+    last_fp = world.get("last_insight_fingerprint")
+    last_speak_at = world.get("last_insight_speak_at")
+    same_story = last_fp == fingerprint
+    within_speak_cd = False
+    if last_speak_at:
+        try:
+            ls = datetime.fromisoformat(str(last_speak_at).replace("Z", ""))
+            within_speak_cd = (_now() - ls).total_seconds() < PROACTIVE_SPEAK_COOLDOWN_HOURS * 3600
+        except Exception:
+            within_speak_cd = False
+
+    # Silent refresh of world model — no chat spam
+    silent = bool(payload.get("silent"))
+    duplicate = same_story and within_speak_cd and not spiked
+    if attn <= 0 and not first_notice and same_story:
+        silent = True  # don't re-announce "all clear" either
 
     insight = {
         "id": "ins_" + uuid.uuid4().hex[:12],
@@ -1249,23 +1284,28 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
         "ux_note": ux_note,
         "attention_count": attn,
         "importance": importance,
+        "fingerprint": fingerprint,
     }
     insights = [insight] + list(world.get("insights") or [])[:14]
 
     speak = None
-    if importance >= MIN_IMPORTANCE_TO_SPEAK:
+    if (
+        not silent
+        and not duplicate
+        and importance >= MIN_IMPORTANCE_TO_SPEAK
+        and (spiked or first_notice)
+    ):
         speak = f"{headline}. {detail}"
         if ux_note:
             speak = f"{speak} {ux_note}"
 
     emailed = {"owner": False, "ford": False}
-    prof = world.get("profile") or {}
     # Proactive email ONLY if user explicitly opted in (email_insights=True).
-    # No allowlist auto-enable, no silent Ford spam on schedule.
     can_email = (
         _wants_owner_email(world, "email_insights")
         and importance >= 60
-        and (spiked or attn >= 2 or bool(ux_note))
+        and (spiked or (first_notice and attn >= 2))
+        and not duplicate
     )
     last_em = world.get("last_proactive_email_at")
     if can_email and last_em:
@@ -1298,7 +1338,10 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
         "last_proactive_at": _now().isoformat() + "Z",
         "last_attention_count": attn,
         "last_wake_reason": reason,
+        "last_insight_fingerprint": fingerprint,
     }
+    if speak:
+        patch["last_insight_speak_at"] = _now().isoformat() + "Z"
     if emailed.get("owner") or emailed.get("ford"):
         patch["last_proactive_email_at"] = _now().isoformat() + "Z"
     _world_patch(db, tenant_id, patch)
@@ -1345,6 +1388,9 @@ def _proactive_insight_worker(db, tenant_id: str, payload: dict) -> dict:
         "emailed": emailed,
         "staged_ux": staged,
         "speak": speak,
+        "silent": silent or not speak,
+        "duplicate": duplicate,
+        "attention_spike": spiked,
     }
 
 
@@ -1387,6 +1433,7 @@ def wake_mind(
 
     Call from capture success, alert sweeps, bill settlement, chat, scheduler.
     Never narrates multi-agent — one mind, internal tasks only.
+    session_open is quiet (pulse only) so opening chat does not re-spam insights.
     """
     reason = (reason or "event")[:80]
     pl = payload or {}
@@ -1402,10 +1449,34 @@ def wake_mind(
     )
     actions: list[str] = ["woke"]
 
-    # Always refresh fleet awareness on significant wakes
+    # Quiet open: refresh digest only — no chatty insight every panel open
+    if reason == "session_open":
+        already = db.execute(
+            select(func.count()).select_from(EaTask).where(
+                EaTask.tenant_id == tenant_id,
+                EaTask.kind == "fleet_pulse",
+                EaTask.status == "queued",
+            )
+        ).scalar() or 0
+        if not int(already):
+            db.add(EaTask(
+                id="tk_" + uuid.uuid4().hex[:16],
+                tenant_id=tenant_id,
+                kind="fleet_pulse",
+                status="queued",
+                priority=55,
+                title="Quiet fleet pulse on open",
+                payload_json="{}",
+                session_id=session_id,
+            ))
+            actions.append("queued_fleet_pulse_quiet")
+        ran = drain_tasks(db, tenant_id, limit=3)
+        actions.append(f"drained_{ran}")
+        return {"ok": True, "reason": reason, "actions": actions, "tasks_ran": ran}
+
     if reason in (
         "fleet_attention", "capture", "alert", "bill", "scheduled_proactive",
-        "inverter_flag", "session_open",
+        "inverter_flag",
     ):
         already = db.execute(
             select(func.count()).select_from(EaTask).where(
@@ -1427,7 +1498,19 @@ def wake_mind(
             ))
             actions.append("queued_fleet_pulse")
 
+    # Insight only when requested and not in run-cooldown with unchanged story
     if enqueue_insight:
+        world = _world_get(db, tenant_id)
+        skip_insight = False
+        last_pro = world.get("last_proactive_at")
+        if last_pro and reason == "scheduled_proactive":
+            try:
+                lp = datetime.fromisoformat(str(last_pro).replace("Z", ""))
+                if (_now() - lp).total_seconds() < PROACTIVE_RUN_COOLDOWN_HOURS * 3600:
+                    skip_insight = True
+                    actions.append("insight_cooldown")
+            except Exception:
+                pass
         already_i = db.execute(
             select(func.count()).select_from(EaTask).where(
                 EaTask.tenant_id == tenant_id,
@@ -1435,7 +1518,7 @@ def wake_mind(
                 EaTask.status == "queued",
             )
         ).scalar() or 0
-        if not int(already_i):
+        if not skip_insight and not int(already_i):
             db.add(EaTask(
                 id="tk_" + uuid.uuid4().hex[:16],
                 tenant_id=tenant_id,
@@ -1445,7 +1528,7 @@ def wake_mind(
                 title=f"Proactive insight ({reason})",
                 payload_json=json.dumps({"reason": reason, **pl}, default=str)[:4000],
                 session_id=session_id,
-                speak_hint=None,  # worker sets speak via interrupt policy
+                speak_hint=None,
             ))
             actions.append("queued_proactive_insight")
 
@@ -1768,13 +1851,13 @@ def observe_and_reprioritize(db, tenant_id: str) -> dict:
         ))
         actions.append("queued_fleet_pulse")
 
-    # Proactive insight if never run or attention may have drifted (long-term mind)
+    # Proactive insight at most every PROACTIVE_RUN_COOLDOWN_HOURS (silent refresh OK)
     last_pro = world.get("last_proactive_at")
     need_insight = not last_pro
     if last_pro:
         try:
             lp = datetime.fromisoformat(str(last_pro).replace("Z", ""))
-            if (_now() - lp).total_seconds() > 12 * 3600:
+            if (_now() - lp).total_seconds() > PROACTIVE_RUN_COOLDOWN_HOURS * 3600:
                 need_insight = True
         except Exception:
             need_insight = True
@@ -1793,7 +1876,7 @@ def observe_and_reprioritize(db, tenant_id: str) -> dict:
             tenant_id=tenant_id,
             kind="proactive_insight",
             status="queued",
-            priority=65,
+            priority=70,  # lower urgency than user-directed work
             title="Long-term proactive insight",
             payload_json=json.dumps({"reason": "observe_tick"}),
         ))

@@ -175,7 +175,7 @@ def test_proactive_insight_worker_quiet_fleet(db):
     assert w.get("last_proactive_at")
 
 
-def test_proactive_insight_attention(db):
+def test_proactive_insight_attention_first_notice_speaks(db):
     tid = "ten_lt4"
     fake_tenant = MagicMock(spec=Tenant)
     fake_tenant.id = tid
@@ -219,4 +219,43 @@ def test_proactive_insight_attention(db):
     assert r["ok"] is True
     assert r["insight"]["attention_count"] == 2
     assert "Cover" in r["insight"]["headline"] or "Cover" in r["insight"]["detail"]
-    assert r.get("speak")  # high enough to speak
+    # First notice may speak once
+    assert r.get("speak") or r.get("silent") is False
+
+
+def test_proactive_insight_same_story_is_silent(db):
+    tid = "ten_lt5"
+    fake_tenant = MagicMock(spec=Tenant)
+    fake_tenant.id = tid
+    fake_tenant.contact_email = "owner@example.com"
+    real_get = db.get
+
+    def smart_get(model, ident):
+        if model is Tenant or getattr(model, "__name__", "") == "Tenant":
+            return fake_tenant
+        return real_get(model, ident)
+
+    att = {
+        "count": 2,
+        "brief": "2 flagged",
+        "problems": [
+            {
+                "name": "Tannery Brook",
+                "why": "underperforming",
+                "next_step": "Check peers",
+            }
+        ],
+    }
+    with patch.object(db, "get", side_effect=smart_get), \
+         patch("api.energy_agent._tenant_census_tool",
+               return_value={"totals": {"arrays": 8, "inverters": 63}}), \
+         patch("api.energy_agent._investigate_attention_tool", return_value=att), \
+         patch("api.energy_agent_mind._email_owner_and_ford",
+               return_value={"owner": False, "ford": False}), \
+         patch("api.energy_agent_mind._count_recent_ux_friction", return_value=0):
+        r1 = _proactive_insight_worker(db, tid, {"reason": "first"})
+        r2 = _proactive_insight_worker(db, tid, {"reason": "again"})
+
+    assert r1["ok"] and r2["ok"]
+    # Second run same fleet story should not speak again
+    assert r2.get("duplicate") is True or r2.get("silent") is True or not r2.get("speak")
