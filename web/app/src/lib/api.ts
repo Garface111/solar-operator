@@ -688,15 +688,55 @@ export interface SendReportResult {
 export async function sendReportNow(
   clientIds?: number[],
   sendMode?: string,
-): Promise<SendReportResult> {
+): Promise<SendReportResult & { directory?: { ok?: boolean; sheet_count?: number; recipient?: string; reason?: string } }> {
   const payload: Record<string, unknown> = {};
   if (clientIds && clientIds.length > 0) payload.client_ids = clientIds;
   if (sendMode) payload.send_mode = sendMode;
   const hasPayload = Object.keys(payload).length > 0;
-  return request<SendReportResult>("/v1/account/send-report", {
+  return request("/v1/account/send-report", {
     method: "POST",
     ...(hasPayload ? { body: payload } : {}),
   });
+}
+
+/** Download the operator NEPOOL-GIS directory (all clients × arrays). */
+export async function downloadDirectoryReport(quarter?: string): Promise<void> {
+  const token = getSession();
+  const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
+  const res = await fetchWithTimeout(
+    `/v1/account/directory-report.xlsx${qs}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (res.status === 401) {
+    notifyUnauthorizedOnce();
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the directory (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof msg === "string" ? msg : "Couldn't build the directory");
+  }
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  const label = quarter ? quarter.replace(/[^A-Za-z0-9]+/g, "-") : "latest";
+  link.download = `NEPOOL-directory-${label}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
+/** Email the operator their NEPOOL-GIS directory workbook. */
+export async function sendDirectoryReport(
+  quarter?: string,
+): Promise<{ ok: boolean; sheet_count?: number; recipient?: string }> {
+  const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
+  return request(`/v1/account/directory-report/send${qs}`, { method: "POST" });
 }
 
 export interface ResendReportResult {

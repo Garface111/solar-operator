@@ -96,20 +96,27 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
       const allSelected = clientList !== null && ids.length === clientList.length;
       const res = await sendReportNow(allSelected ? undefined : ids, sendMode);
       setConfirmOpen(false);
-      const failures = res.results.filter((r) => !r.ok);
+      const failures = (res.results || []).filter((r) => !r.ok);
+      const dir = res.directory;
+      const dirNote =
+        dir?.ok && dir.sheet_count
+          ? ` Your NEPOOL directory (${dir.sheet_count} arrays) was emailed to you for GIS upload.`
+          : dir && !dir.ok && dir.reason
+            ? ` Directory email: ${dir.reason}.`
+            : "";
       if (res.client_count === 0) {
         toast.error("No active clients to send to — add a client first.");
       } else if (failures.length === 0) {
         toast.success(
-          res.delivered === 1
+          (res.delivered === 1
             ? "Report sent to 1 client."
-            : `Reports sent to ${res.delivered} clients.`,
+            : `Reports sent to ${res.delivered} clients.`) + dirNote,
         );
       } else if (res.delivered === 0) {
-        toast.error(`All ${res.client_count} deliveries failed.`);
+        toast.error(`All ${res.client_count} deliveries failed.${dirNote}`);
       } else {
         toast.error(
-          `Sent to ${res.delivered} of ${res.client_count}. ${failures.length} failed.`,
+          `Sent to ${res.delivered} of ${res.client_count}. ${failures.length} failed.${dirNote}`,
         );
       }
       onSent?.();
@@ -254,7 +261,9 @@ export function NextRunCard({ data: prefetched, onSent }: Props) {
         ) : (
           <div className="space-y-3">
             <p className="text-sm text-zinc-600">
-              Each selected client gets this quarter's workbook by email.
+              Each selected client gets this quarter&apos;s workbook by email.
+              You also get a <b>NEPOOL-GIS directory</b> — one sheet per array
+              across those clients — for upload to the NEPOOL site.
             </p>
             <div className="flex items-center justify-between border-b border-zinc-100 pb-2 text-xs">
               <button

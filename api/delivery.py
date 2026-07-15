@@ -282,10 +282,124 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
     }
 
 
+def deliver_operator_directory(
+    tenant_id: str,
+    *,
+    client_ids: Optional[list[int]] = None,
+    reference_date: Optional[date] = None,
+    triggered_by: str = "manual",
+) -> dict:
+    """Email the operator a single NEPOOL-GIS directory workbook covering
+    every (selected) client's arrays — same GMCS form as client reports, all
+    sheets in one file for bulk upload to the NEPOOL site.
+
+    Always goes ONLY to the tenant's contact_email (never to clients).
+    Best-effort: failures are logged and returned; callers should not fail
+    client delivery because the directory email missed.
+    """
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            return {"ok": False, "reason": "tenant not found", "tenant": tenant_id}
+        if getattr(tenant, "product", "nepool") == "array_operator":
+            return {"ok": False, "reason": "not a NEPOOL tenant", "tenant": tenant_id}
+        tenant_email = (tenant.contact_email or "").strip()
+        tenant_name = tenant.company_name or tenant.name or "Operator"
+        operator_name = tenant.operator_name or tenant_name
+        if not tenant_email:
+            return {"ok": False, "reason": "no operator email on file",
+                    "tenant": tenant_id}
+
+    from .writers.gmcs_writer import (
+        build_directory_workbook,
+        default_reporting_reference_date,
+    )
+    from .email_templates import quarter_context
+
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
+    qc = quarter_context(ref)
+    quarter_label = qc.get("quarter") or "current window"
+
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"so-dir-{tenant_id[:8]}-") as tmpdir:
+            out = pathlib.Path(tmpdir) / "NEPOOL-directory.xlsx"
+            path = build_directory_workbook(
+                tenant_id,
+                client_ids=client_ids,
+                reference_date=ref,
+                out_path=out,
+            )
+            # Count real array sheets (exclude empty stub)
+            sheet_count = 0
+            try:
+                from openpyxl import load_workbook
+                _wb = load_workbook(path, read_only=True)
+                sheet_count = sum(1 for s in _wb.sheetnames if s != "(no data)")
+                _wb.close()
+            except Exception:
+                sheet_count = 0
+
+            if sheet_count == 0:
+                return {
+                    "ok": False,
+                    "reason": "no generation data in directory window",
+                    "tenant": tenant_id,
+                    "recipient": tenant_email,
+                    "sheet_count": 0,
+                }
+
+            subject = (
+                f"Your NEPOOL-GIS directory — {quarter_label} "
+                f"({sheet_count} array{'s' if sheet_count != 1 else ''})"
+            )
+            html = (
+                f"<p>Hi {operator_name},</p>"
+                f"<p>Client reports for <b>{quarter_label}</b> have been processed. "
+                f"Attached is your <b>NEPOOL-GIS directory</b> — one sheet per array "
+                f"across all your clients, in the same NEPOOL report form, so you can "
+                f"upload the whole book to the NEPOOL-GIS site.</p>"
+                f"<p><b>{sheet_count}</b> array sheet"
+                f"{'s' if sheet_count != 1 else ''} included "
+                f"(arrays with no generation in the window are omitted).</p>"
+                f"<p>Each sheet title is <code>Client — Array</code>.</p>"
+            )
+            text = (
+                f"Hi {operator_name},\n\n"
+                f"Client reports for {quarter_label} have been processed. "
+                f"Attached is your NEPOOL-GIS directory ({sheet_count} arrays) "
+                f"for upload to the NEPOOL-GIS site.\n"
+            )
+            filename = f"NEPOOL-directory-{quarter_label.replace(' ', '-')}.xlsx"
+            sent = send_workbook_email(
+                to=tenant_email, subject=subject, html=html, text=text,
+                workbook_path=str(path), filename=filename,
+            )
+            return {
+                "ok": bool(sent),
+                "tenant": tenant_id,
+                "recipient": tenant_email,
+                "sheet_count": sheet_count,
+                "email_sent": bool(sent),
+                "triggered_by": triggered_by,
+                "quarter": quarter_label,
+            }
+    except Exception as e:
+        logger.exception("Operator directory failed for tenant %s", tenant_id)
+        return {
+            "ok": False,
+            "reason": str(e),
+            "tenant": tenant_id,
+            "recipient": tenant_email,
+        }
+
+
 def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
                        triggered_by: str = "manual",
-                       skip_if_empty: bool = True) -> dict:
+                       skip_if_empty: bool = True,
+                       reference_date: Optional[date] = None,
+                       send_directory: bool = True) -> dict:
     """Build & email a workbook for EVERY active client under a tenant.
 
     Returns an aggregate result with one entry per client. This is the
@@ -300,6 +414,10 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
     the UI can tell the operator. An ops force-send passing override_to still
     delivers per-client because override_to wins; set skip_if_empty=False to
     force-send blanks deliberately.
+
+    After client fan-out, the operator also receives a NEPOOL-GIS directory
+    workbook (all clients' arrays, one sheet each) for upload to the NEPOOL
+    site — unless send_directory=False.
     """
     with SessionLocal() as db:
         tenant = db.get(Tenant, tenant_id)
@@ -324,7 +442,8 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
         try:
             results.append(deliver_for_client(
                 cid, year=year, override_to=override_to,
-                triggered_by=triggered_by, skip_if_empty=effective_skip))
+                triggered_by=triggered_by, skip_if_empty=effective_skip,
+                reference_date=reference_date))
         except Exception as e:
             logger.exception("Delivery failed for client %s", cid)
             results.append({"ok": False, "client_id": cid,
@@ -332,6 +451,29 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
                             "reason": "unexpected error", "error": str(e)})
     ok_count = sum(1 for r in results if r.get("ok"))
     skipped_empty = [r.get("client_id") for r in results if r.get("skipped_empty")]
+
+    directory = None
+    # Send the operator directory whenever at least one client report was
+    # generated successfully (or even if all skipped — still useful if some
+    # arrays have data under other clients). Always try when send_directory.
+    if send_directory:
+        try:
+            delivered_ids = [
+                r.get("client_id") for r in results
+                if r.get("ok") and r.get("client_id") is not None
+            ]
+            # Prefer arrays from clients we actually mailed; fall back to all.
+            dir_ids = delivered_ids if delivered_ids else client_ids
+            directory = deliver_operator_directory(
+                tenant_id,
+                client_ids=dir_ids or None,
+                reference_date=reference_date,
+                triggered_by=f"{triggered_by}-directory",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("directory send failed for %s: %s", tenant_id, e)
+            directory = {"ok": False, "reason": str(e), "tenant": tenant_id}
+
     return {
         "ok": ok_count > 0,
         "tenant": tenant_id,
@@ -340,4 +482,5 @@ def deliver_for_tenant(tenant_id: str, *, year: Optional[int] = None,
         "skipped_empty": skipped_empty,
         "results": results,
         "triggered_by": triggered_by,
+        "directory": directory,
     }

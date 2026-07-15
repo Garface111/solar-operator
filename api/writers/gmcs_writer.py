@@ -492,3 +492,223 @@ def build_workbook(tenant_id: Optional[str] = None,
 
     wb.save(out_path)
     return out_path
+
+
+def build_directory_workbook(
+    tenant_id: str,
+    *,
+    client_ids: Optional[list[int]] = None,
+    year: Optional[int] = None,
+    out_path: Optional[pathlib.Path] = None,
+    quarters: int = 6,
+    reference_date: Optional[date] = None,
+) -> pathlib.Path:
+    """NEPOOL-GIS upload directory: one sheet per producing array across ALL
+    (or selected) clients of a tenant — same GMCS layout as the per-client
+    reports. Sheet titles are ``Client — Array`` so collisions across clients
+    stay unique. Used so the operator can bulk-upload the whole book to
+    NEPOOL-GIS after client reports go out.
+    """
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
+    qlist = _rolling_quarters(ref, count=quarters)
+    last_y, last_q = qlist[-1]
+    if year is None:
+        year = last_y
+
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, tenant_id)
+        if not tenant:
+            raise ValueError(f"unknown tenant {tenant_id}")
+
+        cq = select(Client).where(
+            Client.tenant_id == tenant_id,
+            Client.active == True,  # noqa: E712
+            Client.deleted_at.is_(None),
+        ).order_by(Client.name.asc())
+        clients = db.execute(cq).scalars().all()
+        if client_ids is not None:
+            want = set(client_ids)
+            clients = [c for c in clients if c.id in want]
+        clients_by_id = {c.id: c for c in clients}
+        if not clients:
+            raise ValueError(f"Tenant {tenant_id} has no active clients for directory")
+
+        if out_path is None:
+            out_path = (REPORTS_DIR / tenant.id / "directory"
+                        / f"{last_y}-Q{last_q}-NEPOOL-directory.xlsx")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant_id,
+                Array.client_id.in_(list(clients_by_id.keys())),
+                Array.excluded.is_(False),
+                Array.deleted_at.is_(None),
+            ).order_by(Array.name.asc())
+        ).scalars().all()
+
+        # Unique display group per array: "Client — Array"
+        arrays_by_id: dict[int, Array] = {}
+        group_meta: dict[str, Optional[Array]] = {}
+        array_to_group: dict[int, str] = {}
+        for a in arrays:
+            c = clients_by_id.get(a.client_id) if a.client_id else None
+            cname = (c.name if c else "Unassigned").strip() or "Client"
+            aname = (a.name or f"Array {a.id}").strip()
+            base = f"{cname} — {aname}"
+            grp = base
+            n = 2
+            while grp in group_meta:
+                grp = f"{base} ({n})"
+                n += 1
+            arrays_by_id[a.id] = a
+            group_meta[grp] = a
+            array_to_group[a.id] = grp
+
+        array_ids = list(arrays_by_id.keys())
+        if array_ids:
+            accounts = db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id.in_(array_ids),
+                    UtilityAccount.deleted_at.is_(None),
+                )
+            ).scalars().all()
+        else:
+            accounts = []
+
+        group_of: dict[int, str] = {}
+        for acc in accounts:
+            if acc.array_id and acc.array_id in array_to_group:
+                group_of[acc.id] = array_to_group[acc.array_id]
+
+        if accounts:
+            account_ids = [a.id for a in accounts]
+            bills = db.execute(
+                select(Bill).where(Bill.account_id.in_(account_ids))
+            ).scalars().all()
+        else:
+            bills = []
+
+        per_group: dict[str, dict[tuple[int, int], float]] = defaultdict(
+            lambda: defaultdict(float))
+        for b in bills:
+            grp = group_of.get(b.account_id)
+            if not grp:
+                continue
+            for (yy, mm), kwh in distribute_kwh_by_calendar_day(b).items():
+                per_group[grp][(yy, mm)] += kwh
+
+        groups = sorted(set(group_of.values()) | set(group_meta.keys()))
+
+        start_year, start_q = qlist[0]
+        report_start = date(start_year, (start_q - 1) * 3 + 1, 1)
+        end_year, end_q = qlist[-1]
+        end_month = end_q * 3
+        if end_month == 12:
+            report_end = date(end_year, 12, 31)
+        else:
+            report_end = date(end_year, end_month + 1, 1) - timedelta(days=1)
+
+        daily_gen_by_group: dict[str, dict[tuple[int, int], float]] = {}
+        for grp_name, arr in group_meta.items():
+            if arr is not None:
+                dg = _daily_generation_by_month(db, arr.id, report_start, report_end)
+                if dg:
+                    daily_gen_by_group[grp_name] = dg
+
+    window_months = {m for (qy, qq) in qlist for m in _quarter_months(qy, qq)}
+    groups = [
+        grp for grp in groups
+        if any(
+            {**per_group.get(grp, {}), **daily_gen_by_group.get(grp, {})}
+            .get(m, 0.0) > 0
+            for m in window_months
+        )
+    ]
+
+    wb = Workbook()
+    default_sheet = wb.active
+
+    TITLE_FONT = Font(bold=True, size=14, color="1F4E2A")
+    HDR_FONT = Font(bold=True, size=14, color="FFFFFF")
+    HDR_FILL = PatternFill("solid", fgColor="064E3B")
+    QUARTER_FONT = Font(bold=True, size=11, color="1F4E2A")
+    FOOTNOTE_FONT = Font(italic=True, size=9, color="666666")
+    BORDER = Border(*[Side(style="thin", color="E8E2D9")] * 4)
+    GOLD_SIDE = Side(style="medium", color="E6B470")
+
+    used_names: set[str] = set()
+    if not groups:
+        groups = ["(no data)"]
+
+    for grp_idx, grp in enumerate(groups):
+        sheet_title = _sheet_name_for_array(grp, used_names)
+        if grp_idx == 0:
+            sh = default_sheet
+            sh.title = sheet_title
+        else:
+            sh = wb.create_sheet(title=sheet_title)
+
+        arr = group_meta.get(grp)
+        nepool_id = getattr(arr, "nepool_gis_id", None) if arr else None
+        # A1 title keeps Client — Array (+ NEPOOL id) so ownership is clear
+        # even after Excel truncates the sheet tab to 31 chars.
+        title = f"{grp} ({nepool_id})" if nepool_id else grp
+        sh["A1"] = title
+        sh["A1"].font = TITLE_FONT
+        sh["A1"].alignment = Alignment(horizontal="left", vertical="center")
+        sh.merge_cells("A1:C1")
+
+        for col, label in enumerate(
+            ["Quarter", "Generation (MWh)", "Reporting Amount", "RECs†"],
+            start=1,
+        ):
+            c = sh.cell(5, col, label)
+            c.font = HDR_FONT
+            c.fill = HDR_FILL
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = BORDER
+
+        for col in range(1, 5):
+            sh.cell(6, col).border = Border(bottom=GOLD_SIDE)
+
+        row = 7
+        bill_months = per_group.get(grp, {})
+        daily_months = daily_gen_by_group.get(grp, {})
+        gen_by_month: dict[tuple[int, int], float] = {**bill_months, **daily_months}
+        for (qy, qq) in qlist:
+            for i, (my, mm) in enumerate(_quarter_months(qy, qq)):
+                if i == 0:
+                    qc = sh.cell(row, 1, f"Q{qq} {qy}")
+                    qc.font = QUARTER_FONT
+                    qc.alignment = Alignment(horizontal="left", vertical="center")
+                kwh = gen_by_month.get((my, mm), 0.0)
+                mwh = round(kwh / 1000.0, 3)
+                recs = int(mwh)
+                gc = sh.cell(row, 2, mwh if kwh else None)
+                gc.number_format = "General"
+                gc.alignment = Alignment(horizontal="right")
+                rc = sh.cell(row, 3, mwh if kwh else None)
+                rc.number_format = "General"
+                rc.alignment = Alignment(horizontal="right")
+                ec = sh.cell(row, 4, recs if kwh else None)
+                ec.number_format = "General"
+                ec.alignment = Alignment(horizontal="right")
+                row += 1
+            row += 1
+
+        foot_row = row + (31 - row) if row <= 31 else row
+        fc = sh.cell(foot_row, 1, FOOTNOTE_TEXT)
+        fc.font = FOOTNOTE_FONT
+        fc.alignment = Alignment(horizontal="left", vertical="center")
+        sh.merge_cells(start_row=foot_row, start_column=1,
+                       end_row=foot_row, end_column=4)
+
+        sh.column_dimensions["A"].width = 24.0
+        sh.column_dimensions["B"].width = 24.0
+        sh.column_dimensions["C"].width = 24.0
+        sh.column_dimensions["D"].width = 24.0
+
+    wb.save(out_path)
+    return out_path
