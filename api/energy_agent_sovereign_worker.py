@@ -1158,7 +1158,10 @@ def requeue_failed_jobs(
 
 
 def drain_jobs(db, *, limit: int = 2) -> dict[str, Any]:
-    """Process queued sovereign jobs (oldest first)."""
+    """Process queued sovereign jobs (oldest first).
+
+    Each job is isolated: failure/rollback of one never aborts the batch.
+    """
     from .energy_agent_sovereign import EaSovereignJob
     from sqlalchemy import select
 
@@ -1172,34 +1175,63 @@ def drain_jobs(db, *, limit: int = 2) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         repo_status = {"error": str(e)[:200]}
 
-    rows = db.execute(
-        select(EaSovereignJob)
-        .where(EaSovereignJob.status == "queued")
-        .order_by(EaSovereignJob.created_at.asc())
-        .limit(limit)
-    ).scalars().all()
+    # Snapshot IDs first so we can re-load each job after rollbacks
+    try:
+        job_ids = list(
+            db.execute(
+                select(EaSovereignJob.id)
+                .where(EaSovereignJob.status == "queued")
+                .order_by(EaSovereignJob.created_at.asc())
+                .limit(limit)
+            ).scalars().all()
+        )
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        return {
+            "ok": False,
+            "error": f"list queued failed: {e}"[:300],
+            "processed": 0,
+            "repos": repo_status,
+        }
 
     results = []
-    for job in rows:
+    for jid in job_ids:
         try:
+            # Clean session state before every job
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            job = db.get(EaSovereignJob, jid)
+            if not job or job.status != "queued":
+                continue
             results.append(process_job(db, job))
             db.commit()
         except Exception as e:  # noqa: BLE001
-            log.exception("process_job crashed %s", job.id)
+            log.exception("process_job crashed %s", jid)
             try:
                 db.rollback()
-                job2 = db.get(EaSovereignJob, job.id)
+            except Exception:
+                pass
+            try:
+                job2 = db.get(EaSovereignJob, jid)
                 if job2:
                     job2.status = "failed"
                     job2.error = str(e)[:800]
                     job2.finished_at = _now()
                     db.commit()
             except Exception:
-                db.rollback()
-            results.append({"ok": False, "job_id": job.id, "error": str(e)[:300]})
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            results.append({"ok": False, "job_id": jid, "error": str(e)[:300]})
     return {
         "ok": True,
         "processed": len(results),
         "results": results,
         "repos": repo_status,
+        "repo_access": repo_access_enabled(),
+        "git_bin": _has_git_bin(),
+        "token_present": bool(_github_token()),
     }
