@@ -3,15 +3,12 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "../ui/Button";
 import UtilitySearch from "../components/UtilitySearch";
 
-const CHROME_STORE_URL =
-  "https://chromewebstore.google.com/detail/solar-operator-sync/ocohbimolfpnkjcjhiodopjjlhclinpl";
-
 /* ─── Slide visuals ─────────────────────────────────────────────────────────
    Each slide is a self-contained <Slide /> component so the layout per slide
    stays opinionated and tight — visuals on the left, text on the right at
    sm+, stacked on mobile. Ford Jun 8'26: "big clean visuals, slide show, sample
    first." Slide 1 = the artifact (calibrates trust). Slide 2 = the problem.
-   Slide 3 = the mechanism. Slide 4 = the install pre-req. Slide 5 = CTA.
+   Slide 3 = the mechanism. Slide 4 = Cloud Capture. Slide 5 = CTA.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /** A miniature, faithful preview of the GMCS workbook one sheet — mirrors
@@ -122,8 +119,7 @@ function TimeSinkVisual() {
   );
 }
 
-/** Pipeline visual — utility logo → extension → Excel — shows the mechanism in
- *  three nodes connected by arrows. */
+/** Pipeline visual — utility portal → cloud refresh → Excel. */
 function PipelineVisual() {
   const Node = ({
     label,
@@ -157,49 +153,49 @@ function PipelineVisual() {
       <div className="flex items-center gap-2 sm:gap-3">
         <Node label="Your utility" sub="Hundreds, US-wide" icon="⚡" tone="neutral" />
         <span className="shrink-0 text-2xl text-zinc-300" aria-hidden>→</span>
-        <Node label="Chrome extension" sub="Captures bills" icon="🧩" tone="accent" />
+        <Node label="Cloud Capture" sub="Bills 24/7" icon="☁️" tone="accent" />
         <span className="shrink-0 text-2xl text-zinc-300" aria-hidden>→</span>
         <Node label="NEPOOL workbook" sub="Auto-built" icon="📊" tone="neutral" />
       </div>
       <div className="mt-4 rounded-lg bg-zinc-50 px-4 py-3 text-center text-xs text-zinc-500">
-        <span className="font-semibold text-zinc-700">2-minute install.</span>{" "}
-        Done once. Reports go out every quarter on autopilot.
+        <span className="font-semibold text-zinc-700">Connect once.</span>{" "}
+        Nothing to keep open. Reports go out every quarter on autopilot.
       </div>
     </div>
   );
 }
 
-/** Chrome install visual — a single big "install" tile. */
-function ChromeInstallVisual() {
+/** Cloud Capture visual — store a login, we refresh. */
+function CloudCaptureVisual() {
   return (
     <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-[0_10px_30px_-12px_rgba(0,0,0,0.18)]">
       <div className="flex items-center gap-4">
         <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary-50 to-primary-100 text-3xl">
-          🧩
+          ☁️
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-primary-700">
-            Chrome Web Store
+            Cloud Capture
           </p>
           <p className="mt-1 text-sm font-semibold text-zinc-900">
-            NEPOOL Operator Sync
+            Store a utility login once
           </p>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Verified by NEPOOL Operator · free
+            Encrypted on our servers · remove anytime
           </p>
         </div>
       </div>
       <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
         <span className="rounded-full bg-zinc-100 px-2 py-1 font-medium text-zinc-700">
-          1. Click Add
+          1. Add login
         </span>
         <span aria-hidden>→</span>
         <span className="rounded-full bg-zinc-100 px-2 py-1 font-medium text-zinc-700">
-          2. Sign into your utility
+          2. We pull bills
         </span>
         <span aria-hidden>→</span>
         <span className="rounded-full bg-primary-50 px-2 py-1 font-medium text-primary-700">
-          3. Done
+          3. Reports build
         </span>
       </div>
     </div>
@@ -268,8 +264,8 @@ const slides: SlideDef[] = [
         text: "NEPOOL Operator pulls every utility bill and builds the workbook for you — hundreds of utilities supported, coast to coast.",
       },
       {
-        icon: "🧩",
-        text: "One Chrome install, about two minutes. Then it runs without you.",
+        icon: "☁️",
+        text: "Connect a utility login once. We keep bills fresh — nothing to keep open.",
       },
     ],
     visual: <SampleReportVisual />,
@@ -287,17 +283,16 @@ const slides: SlideDef[] = [
     kicker: "How NEPOOL Operator solves it",
     headline: "Connect once. Reports build themselves.",
     body:
-      "NEPOOL Operator hooks into your utility logins — hundreds of utilities supported coast to coast — captures each bill the moment it posts, and renders the NEPOOL-GIS workbook on autopilot every quarter, formatted exactly the way ISO-NE expects.",
+      "NEPOOL Operator connects to the utility portals your clients already use — hundreds supported coast to coast — pulls each bill on a schedule, and renders the NEPOOL-GIS workbook on autopilot every quarter, formatted exactly the way ISO-NE expects.",
     visual: <PipelineVisual />,
   },
-  // 4 — Granularity on the install.
+  // 4 — Cloud Capture (primary path).
   {
     kicker: "What you do, exactly once",
-    headline: "Install the Chrome extension.",
+    headline: "We keep your bills fresh.",
     body:
-      "A lightweight extension captures your utility data securely from your own logged-in session — no passwords ever leave your browser. Install once, sign into your utility portal the way you normally would, and the rest happens on its own.",
-    visual: <ChromeInstallVisual />,
-    cta: { label: "Preview the Chrome extension", href: CHROME_STORE_URL },
+      "Hand us a utility portal login once (encrypted on our servers) and Cloud Capture signs in and pulls bills around the clock — no install, no tab to keep open. Prefer passwords only on your computer? You can use the free browser extension instead.",
+    visual: <CloudCaptureVisual />,
   },
   // 5 — Future state + primary CTA.
   {

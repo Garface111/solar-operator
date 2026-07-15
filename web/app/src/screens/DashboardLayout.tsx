@@ -147,15 +147,19 @@ export default function DashboardLayout({ onSignOut }: Props) {
   // know so they can reconnect the extension.
   // Only fire for accounts older than 2 days — new operators who haven't
   // finished setting up the extension yet shouldn't see this immediately.
+  // Cloud Capture operators don't need the extension at all — skip the banner
+  // when capture_mode is cloud (server-side harvester keeps bills fresh).
   const accountAgeMs = account?.created_at
     ? Date.now() - new Date(account.created_at).getTime()
     : 0;
   const accountMature = accountAgeMs > 2 * 24 * 60 * 60 * 1000;
-  const heartbeatStale = account && accountMature
-    ? !account.extension_heartbeat_at ||
-      Date.now() - new Date(account.extension_heartbeat_at).getTime() >
-        48 * 60 * 60 * 1000
-    : false;
+  const usesCloudCapture = account?.capture_mode === "cloud";
+  const heartbeatStale =
+    account && accountMature && !usesCloudCapture
+      ? !account.extension_heartbeat_at ||
+        Date.now() - new Date(account.extension_heartbeat_at).getTime() >
+          48 * 60 * 60 * 1000
+      : false;
 
   const brand = brandFor(account?.product);
   const tabs: Tab[] = [

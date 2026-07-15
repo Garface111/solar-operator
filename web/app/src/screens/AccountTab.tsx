@@ -6,18 +6,20 @@ import { useDashboardContext } from "./DashboardLayout";
 import { AccountProfileCard } from "../components/settings/AccountProfileCard";
 import { UtilityConnectionsCard } from "../components/settings/UtilityConnectionsCard";
 import { PortalAccessCard } from "../components/settings/PortalAccessCard";
+import { CloudCaptureCard } from "../components/settings/CloudCaptureCard";
 import { SpongeProgressCard } from "../components/settings/SpongeProgressCard";
 import { PlanBillingCard } from "../components/settings/PlanBillingCard";
 import { DangerZoneCard } from "../components/settings/DangerZoneCard";
+import { setCaptureMode } from "../lib/api";
 
 // Bruce Jun 6: Email + schedule prefs moved to /reports ("Automatic reports")
 // where they semantically belong. AccountTab now owns only operator identity
-// (profile, utility logins, plan/billing, danger zone) — the things that
-// describe *who you are*, not *how reports go out*.
+// (profile, utility logins, plan/billing, danger zone).
 
 export default function AccountTab() {
   const { account, failed, patchAccount, retryLoad } = useDashboardContext();
   const [cancelled, setCancelled] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
 
   if (account === null) {
     return (
@@ -44,6 +46,21 @@ export default function AccountTab() {
     );
   }
 
+  // Cloud is primary when explicitly chosen. Legacy null / device keep the
+  // extension vault as primary so existing operators aren't forced to migrate.
+  const isCloud = account.capture_mode === "cloud";
+
+  const switchMode = async (mode: "cloud" | "device") => {
+    setModeBusy(true);
+    try {
+      await setCaptureMode(mode);
+      patchAccount({ capture_mode: mode });
+    } catch {
+      /* toast optional — patch only on success */
+    }
+    setModeBusy(false);
+  };
+
   return (
     <ScreenLayout>
       <div className="mb-6">
@@ -55,15 +72,77 @@ export default function AccountTab() {
         </p>
       </div>
       <AccountProfileCard account={account} onAccountChange={patchAccount} />
-      {/* Energy history ("data sponge") belongs to Array Operator only — its
-          multi-year absorbed history is a core AO feature. NEPOOL operators
-          don't surface it on their master account. */}
       {account.product === "array_operator" && <SpongeProgressCard />}
       <UtilityConnectionsCard account={account} />
-      {/* Per-client portal automation roster (v1.9.112 multi-login vault):
-          which client logins are hands-off, failing, or still to collect.
-          NEPOOL-agent feature — status only, passwords live in the extension. */}
-      <PortalAccessCard />
+
+      {/* Capture mode: cloud vault vs on-device extension (AO dual-path). */}
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm shadow-sm">
+        <span className="font-medium text-zinc-800">Bill capture:</span>
+        <button
+          type="button"
+          disabled={modeBusy || isCloud}
+          onClick={() => void switchMode("cloud")}
+          className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+            isCloud
+              ? "bg-primary-500 text-white"
+              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+          }`}
+        >
+          Cloud Capture
+        </button>
+        <button
+          type="button"
+          disabled={modeBusy || !isCloud}
+          onClick={() => void switchMode("device")}
+          className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+            !isCloud
+              ? "bg-primary-500 text-white"
+              : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+          }`}
+        >
+          On my computer
+        </button>
+        <span className="text-xs text-zinc-500">
+          {isCloud
+            ? "Passwords encrypted on our servers · bills refresh 24/7"
+            : "Passwords stay in the browser extension · never leave your device"}
+        </span>
+      </div>
+
+      {isCloud ? (
+        <>
+          <CloudCaptureCard />
+          <details className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+            <summary className="cursor-pointer font-medium text-zinc-800">
+              Prefer on-device capture instead?
+            </summary>
+            <p className="mt-2 text-xs text-zinc-500">
+              Switch to &quot;On my computer&quot; above, then use the portal roster
+              below with the EnergyAgent extension.
+            </p>
+            <div className="mt-3">
+              <PortalAccessCard />
+            </div>
+          </details>
+        </>
+      ) : (
+        <>
+          <PortalAccessCard />
+          <details className="mb-6 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">
+            <summary className="cursor-pointer font-medium text-zinc-800">
+              Switch to Cloud Capture (no extension needed)
+            </summary>
+            <p className="mt-2 text-xs text-zinc-500">
+              Store utility logins encrypted on our servers and we pull bills around
+              the clock. Switch mode above, then add logins in the vault.
+            </p>
+            <div className="mt-3">
+              <CloudCaptureCard compact />
+            </div>
+          </details>
+        </>
+      )}
+
       <PlanBillingCard account={account} />
       {account.subscription_status === "trialing" && (
         <DangerZoneCard onCancelled={() => setCancelled(true)} />

@@ -255,6 +255,8 @@ export interface Account {
   last_pull_at: string | null;
   last_delivery_at: string | null;
   extension_heartbeat_at: string | null;
+  /** Server-side Auto-refresh preference: "cloud" | "device" | null (legacy). */
+  capture_mode?: string | null;
   created_at: string | null;
   trial_ends_at: string | null;
   /** No-upfront-payment: true once the operator has added a card. A live
@@ -447,6 +449,80 @@ export async function getProviders(): Promise<ProviderEntry[]> {
 export async function getBillingPortalUrl(): Promise<string> {
   const res = await request<{ url: string }>("/v1/account/billing-portal");
   return res.url;
+}
+
+// ── Cloud Capture (server-side portal harvesting) ───────────────────────────
+// Product-agnostic backend; NEPOOL uses this for utility-bill vault + harvest.
+// Passwords are write-only — no endpoint ever returns them.
+export interface CloudCredential {
+  provider: string;
+  username: string;
+  enabled: boolean;
+  login_host: string | null;
+  last_harvest_at: string | null;
+  last_harvest_ok: boolean | null;
+  /** Newest HarvestRun status for this login (ok | login_failed | scrape_failed | …). */
+  last_harvest_status?: string | null;
+  harvest_fails: number;
+  has_session?: boolean;
+}
+export interface CloudCaptureStatus {
+  encryption_ready?: boolean;
+  collection_enabled?: boolean;
+  harvesting_enabled?: boolean;
+  credentials: CloudCredential[];
+}
+export async function getCloudCaptureStatus(): Promise<CloudCaptureStatus> {
+  return request<CloudCaptureStatus>("/v1/cloud-capture/status");
+}
+export interface CloudCredentialInput {
+  provider: string;
+  username: string;
+  password?: string;
+  login_host?: string | null;
+  enable?: boolean;
+  consent?: boolean;
+}
+export async function setCloudCredential(
+  input: CloudCredentialInput,
+): Promise<{ ok: boolean; provider?: string; username?: string }> {
+  return request<{ ok: boolean; provider?: string; username?: string }>(
+    "/v1/cloud-capture/credentials",
+    { method: "POST", body: input },
+  );
+}
+export async function deleteCloudCredential(
+  provider: string,
+  username: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/v1/cloud-capture/credentials", {
+    method: "DELETE",
+    body: { provider, username },
+  });
+}
+export async function toggleCloudCredential(
+  provider: string,
+  username: string,
+  enable: boolean,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/v1/cloud-capture/toggle", {
+    method: "POST",
+    body: { provider, username, enable },
+  });
+}
+export async function refreshCloudCapture(): Promise<{ ok: boolean; queued: number }> {
+  return request<{ ok: boolean; queued: number }>("/v1/cloud-capture/refresh", {
+    method: "POST",
+    body: {},
+  });
+}
+export async function setCaptureMode(
+  mode: "cloud" | "device",
+): Promise<{ ok: boolean; capture_mode: string }> {
+  return request<{ ok: boolean; capture_mode: string }>("/v1/account/capture-mode", {
+    method: "POST",
+    body: { mode },
+  });
 }
 
 export interface BillingSummary {
