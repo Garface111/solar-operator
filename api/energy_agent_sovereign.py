@@ -67,7 +67,9 @@ def sovereign_act_enabled() -> bool:
 
 
 def sovereign_speak_enabled() -> bool:
-    return sovereign_enabled() and _flag("SOVEREIGN_SPEAK_ENABLED", "1")
+    # Default OFF — Sovereign talks on the Ford desk, not Energy Agent chat
+    # (Ford 2026-07-15: EA inject was confusing left/right threads).
+    return sovereign_enabled() and _flag("SOVEREIGN_SPEAK_ENABLED", "0")
 
 
 def sovereign_sense_enabled() -> bool:
@@ -1010,33 +1012,27 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 kind=raw.get("kind") or "draft_pr_brief",
             )
         elif atype == "speak":
-            tids = raw.get("tenant_ids") or []
-            if not tids:
-                # Prefer open dogfood sessions
-                samples = []
-                try:
-                    dig = observe_product(db)
-                    samples = (dig.get("sessions") or {}).get("samples") or []
-                except Exception:
-                    samples = []
-                for s in samples:
-                    if s.get("tenant_id") and _may_speak_to_tenant(db, s["tenant_id"]):
-                        tids = [s["tenant_id"]]
-                        break
+            # Route to Sovereign Desk (Ford only) — never Energy Agent chat
             speak = (raw.get("text") or raw.get("speak") or "").strip()
-            if not speak or not tids:
-                res = {"ok": False, "denied": True, "denied_reason": "no speak/target"}
+            if not speak:
+                res = {"ok": False, "denied": True, "denied_reason": "no speak text"}
             else:
-                results = [
-                    inject_session(
-                        db,
-                        tenant_id=tid,
-                        speak=speak,
-                        importance=int(raw.get("importance") or 65),
+                try:
+                    from .energy_agent_sovereign_desk import push_sovereign_message
+                    row = push_sovereign_message(
+                        db, speak,
+                        meta={"from": "brain_action", "rationale": raw.get("rationale")},
+                        provider="brain",
                     )
-                    for tid in tids[:5]
-                ]
-                res = {"ok": any(r.get("ok") for r in results), "results": results}
+                    res = {"ok": True, "channel": "desk", "message_id": row.id}
+                    audit(
+                        db, capability="speak.session_inject", decision="speak",
+                        rationale="desk instead of EA: " + speak[:300],
+                        targets={"channel": "desk", "message_id": row.id},
+                        result="ok", correlation_id=tick_id,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    res = {"ok": False, "error": str(e)[:300]}
         elif atype == "email_ford":
             ok = email_ford(
                 raw.get("subject") or "[Sovereign brain]",
@@ -1089,28 +1085,20 @@ def decide_and_act(db, digests: dict) -> list[dict]:
                 "capability": "expand.utility_research",
                 "result": res,
             })
-            # Optional dogfood speak about product work (not customer PII)
-            if (
-                budget > 0
-                and res.get("triaged")
-                and capability_allowed("speak.session_inject")
-            ):
-                for sample in (sessions.get("samples") or [])[:2]:
-                    tid = sample.get("tenant_id")
-                    if tid and _may_speak_to_tenant(db, tid):
-                        inj = inject_session(
-                            db,
-                            tenant_id=tid,
-                            session_id=sample.get("session_id"),
-                            speak=(
-                                "Quick update from me: I'm working through new utility "
-                                "connection requests so more portals get supported. "
-                                "Nothing you need to do — just keeping the product moving."
-                            ),
-                            importance=58,
-                        )
-                        take({"kind": "speak_utility_progress", "result": inj})
-                        break
+            # Tell Ford on the Sovereign Desk (never Energy Agent chat)
+            if budget > 0 and res.get("triaged"):
+                try:
+                    from .energy_agent_sovereign_desk import push_sovereign_message
+                    row = push_sovereign_message(
+                        db,
+                        "Ford — I triaged new utility requests into researching. "
+                        "Open the Sovereign desk if you want the list or next unlocks.",
+                        meta={"from": "rules_utility_triage"},
+                        provider="rules",
+                    )
+                    take({"kind": "desk_utility_progress", "result": {"ok": True, "id": row.id}})
+                except Exception as e:  # noqa: BLE001
+                    take({"kind": "desk_utility_progress", "result": {"ok": False, "error": str(e)[:120]}})
 
     # 2) Escalations needing Ford → email digest once per tick if any
     if budget > 0 and (q.get("escalation_needs_ford") or 0) > 0:
@@ -1213,6 +1201,7 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                         EaSovereignMessageOutbox.__table__,
                         EaSovereignNote.__table__,
                         EaSovereignMemory.__table__,
+                        __import__("api.energy_agent_sovereign_desk", fromlist=["EaSovereignDeskMessage"]).EaSovereignDeskMessage.__table__,
                     ],
                 )
             except Exception:
@@ -1328,14 +1317,20 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             )
 
             # Execute brain actions, or fall back to rule engine if brain failed
-            if brain_plan.get("ok") and (brain_plan.get("actions") or brain_plan.get("speak_product")):
+            if brain_plan.get("ok") and (brain_plan.get("actions") or brain_plan.get("speak_product") or brain_plan.get("ford_ask")):
                 actions = list(brain_plan.get("actions") or [])
-                if brain_plan.get("speak_product"):
+                # Prefer desk channel for anything meant for Ford (not EA chat)
+                desk_line = brain_plan.get("speak_product")
+                if not desk_line and brain_plan.get("ford_ask"):
+                    desk_line = (
+                        "Ford — need you on this: " + str(brain_plan["ford_ask"])
+                    )
+                if desk_line:
                     actions.append({
                         "type": "speak",
-                        "text": brain_plan["speak_product"],
-                        "importance": 62,
-                        "rationale": "speak_product from monologue",
+                        "text": desk_line,
+                        "importance": 72,
+                        "rationale": "sovereign desk message (not Energy Agent)",
                     })
                 decisions = execute_brain_actions(db, actions, tick_id=tick_id)
                 audit(
@@ -1449,24 +1444,23 @@ def plan_inject(
     importance: int = 70,
     force: bool = False,
 ) -> dict[str, Any]:
-    if not capability_allowed("speak.session_inject"):
-        return {
-            "ok": False,
-            "denied": True,
-            "denied_reason": "speak.session_inject not allowed",
-            "tenant_ids": tenant_ids,
-        }
+    """Admin inject now lands on the Sovereign Desk (not Energy Agent)."""
+    del tenant_ids, importance, force  # EA multi-tenant inject retired
+    if not (speak or "").strip():
+        return {"ok": False, "denied": True, "denied_reason": "empty speak"}
     with SessionLocal() as db:
-        results = []
-        for tid in (tenant_ids or [])[:50]:
-            results.append(
-                inject_session(
-                    db, tenant_id=tid, speak=speak,
-                    importance=importance, force=force,
-                )
+        try:
+            from .energy_agent_sovereign_desk import push_sovereign_message
+            row = push_sovereign_message(
+                db, speak.strip(),
+                meta={"from": "admin_inject", "legacy": "plan_inject"},
+                provider="admin",
             )
-        db.commit()
-        return {"ok": True, "results": results}
+            db.commit()
+            return {"ok": True, "channel": "desk", "message_id": row.id}
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            return {"ok": False, "error": str(e)[:300]}
 
 
 def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
@@ -1586,6 +1580,7 @@ def sovereign_state(authorization: str | None = Header(default=None)):
                         EaSovereignMessageOutbox.__table__,
                         EaSovereignNote.__table__,
                         EaSovereignMemory.__table__,
+                        __import__("api.energy_agent_sovereign_desk", fromlist=["EaSovereignDeskMessage"]).EaSovereignDeskMessage.__table__,
                     ],
                 )
             except Exception:

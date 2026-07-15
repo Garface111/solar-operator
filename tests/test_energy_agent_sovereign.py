@@ -176,18 +176,13 @@ def test_inject_dogfood_only(monkeypatch):
         ))
         db.commit()
 
-    denied = sov.plan_inject(
-        tenant_ids=["ten_other"],
-        speak="Hello product update",
-    )
-    assert denied["ok"] is True
-    assert denied["results"][0].get("denied") is True
-
+    # Speak inject now lands on Sovereign Desk (not EA), for any admin inject
     ok = sov.plan_inject(
         tenant_ids=["ten_ford"],
-        speak="Hello Ford — sovereign is live.",
+        speak="Hello Ford — sovereign is live on the desk.",
     )
-    assert ok["results"][0].get("ok") is True
+    assert ok.get("ok") is True
+    assert ok.get("channel") == "desk" or ok.get("message_id")
 
 
 def test_admin_api(monkeypatch):
