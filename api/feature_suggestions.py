@@ -8,6 +8,7 @@ The model is defined here (on the shared Base) so create_all picks it up at star
 """
 import hmac
 import os
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Header, HTTPException, Query
@@ -200,15 +201,28 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
         detail = "Auto-ship failed a safety gate (file allowlist / size / checks)."
         outcome = "failed_ship"
     if not detail:
-        detail = (
-            "The AI reviewed it but did not auto-ship (not BUILD NOW, or needs a human). "
-            "Nothing was lost — we still have your request."
-        )
+        # Weekly-limit / empty reviews used to land here and wrongly offered
+        # "escalate to developer" for pure UI bugs (Ford 2026-07-15 #22).
+        if re.search(r"weekly limit|rate.?limit|try again|no agent output", review, re.I):
+            detail = (
+                "Review queue is temporarily busy — your request is still open and "
+                "will retry. Clear UI bugs auto-ship when the reviewer is free; "
+                "no need to escalate a simple display fix."
+            )
+            outcome = "queued_retry"
+        else:
+            detail = (
+                "The AI reviewed it but did not auto-ship (not BUILD NOW, or needs a human). "
+                "Nothing was lost — we still have your request. Pure display bugs "
+                "should auto-ship; if this was one, it will be fixed without a "
+                "developer hand-off."
+            )
     return {
         "status": "reviewed",
         "outcome": outcome,
         "detail": detail[:320],
-        "can_escalate": True,
+        # Don't push escalate for transient queue issues
+        "can_escalate": outcome != "queued_retry",
     }
 
 

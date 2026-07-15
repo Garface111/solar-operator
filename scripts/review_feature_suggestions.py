@@ -339,24 +339,38 @@ _UX_AUTO_RE = re.compile(
     r"font|spacing|padding|margin|radius|shadow|opacity|tint|accent)\b",
     re.I,
 )
+# Clear frontend display bugs (inconsistent status labels, wrong chip, etc.)
+# must auto-ship — not escalate to Ford as "needs developer" (Ford 2026-07-15).
+_BUG_AUTO_RE = re.compile(
+    r"\b(bug|broken|wrong|inconsistent|contradict|contradiction|mismatch|"
+    r"shouldn.?t (show|say|read)|shows both|double.?cod|incorrect label|"
+    r"status (says|shows|reads)|pulling its weight|error and|"
+    r"look into that|fix this|glitch)\b",
+    re.I,
+)
 _HARD_BLOCK_RE = re.compile(
     r"\b(auth|login|password|credential|session.?token|stripe|payment|"
     r"checkout|pricing|webhook|api.?key|secret|migration|schema|backend|"
     r"database|sql|money.?math|invoice.?amount|pay.?amount)\b",
     re.I,
 )
+_REVIEW_TRANSIENT_RE = re.compile(
+    r"weekly limit|rate.?limit|overloaded|capacity|try again|"
+    r"no agent output|api.?error|timed? ?out|temporarily unavailable",
+    re.I,
+)
 
 
 def _maybe_promote_auto(s, review, verdict):
-    """Promote over-conservative branch judgments to auto for clear frontend UX."""
+    """Promote over-conservative branch judgments to auto for clear frontend UX/bugs."""
     if not verdict or verdict.get("tier") != "branch":
         return verdict
     if not re.search(r"\bBUILD NOW\b", review or ""):
         return verdict
-    blob = f"{s.get('text') or ''}\n{review or ''}"
-    if _HARD_BLOCK_RE.search(s.get("text") or ""):
+    cust = s.get("text") or ""
+    if _HARD_BLOCK_RE.search(cust):
         return verdict  # customer asked for something hard — leave branch
-    if not _UX_AUTO_RE.search(s.get("text") or ""):
+    if not (_UX_AUTO_RE.search(cust) or _BUG_AUTO_RE.search(cust)):
         return verdict
     # Reviewer claimed backend needed? only promote when review also looks frontend-capable
     if re.search(r"\b(frontend-only|client-side|public/|no api|no backend)\b", review or "", re.I) \
@@ -364,7 +378,7 @@ def _maybe_promote_auto(s, review, verdict):
         return {
             "tier": "auto",
             "reason": (
-                "harness promote: BUILD NOW frontend UX defaults to auto "
+                "harness promote: BUILD NOW frontend UX/bug defaults to auto "
                 f"(judge had branch: {str(verdict.get('reason', ''))[:160]})"
             ),
         }
@@ -697,22 +711,35 @@ def main():
               f"{'[+screenshot]' if s.get('has_screenshot') else ''}...")
         shot_path = _fetch_shot(s)
         review = review_one(s, shot_path)
+        # Transient agent failures must NOT close the ticket as "reviewed" —
+        # leave status=new so the next cron tick retries (Ford 2026-07-15:
+        # Claude weekly limit left #22 as reviewed with no auto-ship).
+        if _REVIEW_TRANSIENT_RE.search(review or "") and not re.search(
+                r"\b(BUILD NOW|BACKLOG|PASS|tier:\s*(auto|branch|pass))\b",
+                review or "", re.I):
+            print(f"  ⚠️ transient review failure for #{s['id']} — leaving status=new "
+                  f"for retry: {str(review)[:120]!r}")
+            continue
         final_status = "reviewed"
         build_now = bool(re.search(r"\bBUILD NOW\b", review))
         # Ford 2026-07-13: pure color/CSS/layout asks must not die as BACKLOG/PASS.
         # If the customer text is clearly frontend UX and not a hard block, force
         # the BUILD NOW path so the judge/auto-ship can still land it live.
+        # Ford 2026-07-15: clear display bugs (inconsistent labels) also BUILD NOW.
         cust = s.get("text") or ""
+        is_ux = bool(_UX_AUTO_RE.search(cust))
+        is_bug = bool(_BUG_AUTO_RE.search(cust))
         if (not build_now and IMPLEMENT
-                and _UX_AUTO_RE.search(cust)
+                and (is_ux or is_bug)
                 and not _HARD_BLOCK_RE.search(cust)
                 and not re.search(r"\bPASS\b", review or "")):
             build_now = True
+            kind = "display-bug" if is_bug and not is_ux else "frontend UX"
             review += (
-                "\n\n=== HARNESS NOTE ===\nTreating as BUILD NOW: customer ask matches "
-                "frontend UX signals (color/css/layout/copy) without hard-block terms."
+                f"\n\n=== HARNESS NOTE ===\nTreating as BUILD NOW: customer ask matches "
+                f"{kind} signals without hard-block terms. Clear UI bugs auto-ship."
             )
-            print(f"  harness: forced BUILD NOW for frontend UX ask #{s['id']}")
+            print(f"  harness: forced BUILD NOW for {kind} ask #{s['id']}")
         if build_now and IMPLEMENT:
             verdict = judge_one(s, review)
             review += "\n\n=== JUDGE ===\ntier: {tier} — {reason}".format(**verdict)
