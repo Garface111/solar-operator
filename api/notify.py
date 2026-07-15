@@ -1068,12 +1068,14 @@ def send_repair_sms(to: str, body: str) -> bool:
         return False
 
 
-# Energy Agent mailbox — send + receive on agent.arrayoperator.com (Resend).
-# Replies from the repair team land on this address → webhook email.received
-# → repair_ops.ingest_inbound_email. Override with REPAIR_MAIL_FROM if needed.
+# Energy Agent mailbox.
+# From: prefer agent.arrayoperator.com once DKIM is verified; default falls back
+# to the already-verified arrayoperator.com sender so mail always delivers.
+# Reply-To: always the receiving address so tech replies hit Resend inbound
+# (email.received → webhook → repair_ops.ingest_inbound_email).
 REPAIR_MAIL_FROM = os.getenv(
     "REPAIR_MAIL_FROM",
-    "Energy Agent <repairs@agent.arrayoperator.com>",
+    "Energy Agent <hello@arrayoperator.com>",
 )
 REPAIR_MAIL_REPLY_TO = os.getenv(
     "REPAIR_MAIL_REPLY_TO",
