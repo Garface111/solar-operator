@@ -277,6 +277,11 @@ Hard rules:
 - If a site improvement is held by the judge: explain the reason and offer escalate_to_ford.
 - If tools return empty while the UI shows data, say so and call tenant_census + escalate_to_ford.
 - Prefer short spoken answers; put detail in tool timelines.
+- Portal / SmartHub / "where do I see today's production for Glover": call portal_links,
+  then answer with CLICKABLE markdown links like [VEC SmartHub](https://...).
+  Never say "go open your browser and search" without giving the actual link.
+  You may also return a ui_command {{"type":"open_url","args":{{"url":"...","label":"VEC SmartHub"}}}}
+  so the client opens the portal in a new tab.
 
 Context about where the user is may be provided as JSON (tab, selection, form).
 
@@ -957,6 +962,48 @@ TOOL_DEFS = [
             "name": "send_pipeline",
             "description": "Invoice send-pipeline snapshot (drafts ready, auto-send, next run).",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "portal_links",
+            "description": (
+                "List vendor + utility portal URLs for THIS tenant (Solar.web, SmartHub, "
+                "GMP, Chint, SolarEdge, etc.). Use when the owner asks where to check "
+                "today's production, open a monitoring site, or find SmartHub while "
+                "inverter data is missing. ALWAYS put the returned markdown links in "
+                "your reply so they are clickable in chat. Optionally call open_url "
+                "to open one portal in a new browser tab."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_name": {
+                        "type": "string",
+                        "description": "Optional array name to prioritize (e.g. Glover, Danville)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": (
+                "Open an https URL in a new browser tab for the owner (vendor portal, "
+                "SmartHub, etc.). Prefer after portal_links. Also put the same URL as a "
+                "markdown link in your chat reply."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "https URL to open"},
+                    "label": {"type": "string", "description": "Short link label for chat"},
+                },
+                "required": ["url"],
+            },
         },
     },
     {
@@ -3603,16 +3650,103 @@ def _run_tool(
             "note": "Client should open the returned portal URL. Energy Agent never charges cards.",
         }
 
+    if name == "portal_links":
+        # Vendor + utility portals for THIS tenant (Paul: SmartHub for Glover, etc.)
+        PORTALS = {
+            "solaredge": ("SolarEdge monitoring", "https://monitoring.solaredge.com/"),
+            "fronius": ("Fronius Solar.web", "https://www.solarweb.com/"),
+            "sma": ("SMA ennexOS / Sunny Portal", "https://ennexos.sunnyportal.com/"),
+            "chint": ("Chint / CPS monitor", "https://monitor.chintpowersystems.com/"),
+            "alsoenergy": ("AlsoEnergy", "https://hmi.alsoenergy.com/"),
+            "locus": ("Locus / AlsoEnergy", "https://hmi.alsoenergy.com/"),
+            "gmp": ("Green Mountain Power", "https://greenmountainpower.com/"),
+            "vec": ("Vermont Electric Co-op (SmartHub)", "https://vermontelectric.smarthub.coop/"),
+            "wec": ("Washington Electric Co-op (SmartHub)", "https://washingtonelectric.smarthub.coop/"),
+        }
+        try:
+            from .models import Array, Inverter, UtilityAccount
+            tid = tenant.id
+            vendors = set()
+            for v, in db.execute(
+                select(Inverter.vendor).where(
+                    Inverter.tenant_id == tid,
+                    Inverter.deleted_at.is_(None),
+                ).distinct()
+            ).all():
+                if v:
+                    vendors.add(str(v).lower())
+            # Arrays may exist without inverters yet (Paul's River / Norwich)
+            for r in db.execute(
+                select(Array.id, Array.name).where(
+                    Array.tenant_id == tid, Array.deleted_at.is_(None),
+                )
+            ).all():
+                pass  # presence only
+            utils = []
+            try:
+                for ua in db.execute(
+                    select(UtilityAccount).where(
+                        UtilityAccount.tenant_id == tid,
+                        UtilityAccount.deleted_at.is_(None),
+                    )
+                ).scalars().all():
+                    code = (getattr(ua, "provider", None) or getattr(ua, "provider_code", None) or "").lower()
+                    nick = getattr(ua, "nickname", None) or getattr(ua, "account_number", None) or code
+                    utils.append({"provider": code, "label": nick})
+                    if code:
+                        vendors.add(code)
+            except Exception:
+                pass
+            links = []
+            for code in sorted(vendors):
+                meta = PORTALS.get(code)
+                if not meta:
+                    # SmartHub co-ops often store host on the account
+                    continue
+                label, url = meta
+                links.append({
+                    "code": code,
+                    "label": label,
+                    "url": url,
+                    "markdown": f"[{label}]({url})",
+                })
+            # Always include common VT utilities if tenant has VT offtakers / no utils yet
+            if not any(L["code"] in ("vec", "wec", "gmp") for L in links):
+                for code in ("vec", "gmp"):
+                    label, url = PORTALS[code]
+                    links.append({
+                        "code": code,
+                        "label": label + " (common VT)",
+                        "url": url,
+                        "markdown": f"[{label}]({url})",
+                    })
+            speak_lines = [
+                f"- {L['markdown']}" for L in links
+            ]
+            return {
+                "ok": True,
+                "links": links,
+                "utility_accounts": utils,
+                "how_to_reply": (
+                    "Embed these as markdown links in your spoken/chat answer, e.g. "
+                    "'Open [VEC SmartHub](https://vermontelectric.smarthub.coop/) for Glover.' "
+                    "You may also emit ui_command type open_url with url+label to open a tab."
+                ),
+                "chat_snippet": "Portal links:\n" + "\n".join(speak_lines),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     if name == "send_pipeline":
         return {
             "ui_fetch": {"method": "GET", "path": "/v1/array-operator/billing/send-pipeline"},
             "hint": "Prefer navigating user to #reports if they want to act.",
         }
 
-    if name in ("ui_navigate", "ui_highlight", "ui_fill", "ui_click", "ui_tour"):
-        # Navigate + highlight + tours are instant. Writes skip confirm when the
+    if name in ("ui_navigate", "ui_highlight", "ui_fill", "ui_click", "ui_tour", "open_url"):
+        # Navigate + highlight + tours + open_url are instant. Writes skip confirm when the
         # user already stated the exact change this turn.
-        if name in ("ui_navigate", "ui_highlight", "ui_tour"):
+        if name in ("ui_navigate", "ui_highlight", "ui_tour", "open_url"):
             needs = False
         else:
             needs = bool(args.get("needs_confirm", True))

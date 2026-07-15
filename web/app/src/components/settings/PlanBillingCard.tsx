@@ -67,9 +67,10 @@ export function PlanBillingCard({ account }: Props) {
   const [openingPortal, setOpeningPortal] = useState(false);
   const [addingCard, setAddingCard] = useState(false);
   // This SPA is NEPOOL Operator (nepooloperator.com). Offtaker / per-kWh AO
-  // plan cards must NEVER show for NEPOOL tenants — product is the hard gate,
-  // not billing_basis alone (stale basis once leaked offtaker copy into NEPOOL).
-  const isArrayOperator = account.product === "array_operator";
+  // plan cards must NEVER render here — even if account.product was mis-tagged
+  // array_operator (that leak renamed Automatic Reports → Billing / offtakers).
+  // Array Operator offtaker billing lives only on arrayoperator.com.
+  const isArrayOperator = false;
 
   useEffect(() => {
     let cancelled = false;
