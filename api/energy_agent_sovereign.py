@@ -848,20 +848,30 @@ def act_code_hire(
 
 
 def ensure_default_goals(db) -> None:
-    existing = db.execute(select(EaSovereignGoal.id)).scalars().all()
-    if existing:
-        return
+    """Seed (or upgrade) the expansionist succession agenda."""
     defaults = [
-        ("g_utility_backlog", "Clear utility-add request backlog", 90),
-        ("g_ux_friction", "Convert UX friction into shipped improvements", 80),
         ("g_product_health", "Keep Array Operator healthy and truthful", 100),
-        ("g_expansion", "Expand vendor/utility coverage from owner asks", 70),
-        ("g_independence", "Remain an independent mind: notes, memory, agenda", 95),
+        ("g_grow_business", "Make Array Operator bigger: owners, coverage, revenue motion", 98),
+        ("g_succession", "Prepare Sovereign to lead when Ford works elsewhere — close Ford-only gaps", 97),
+        ("g_ford_partnership", "Work with Ford weekly: escalations, unlocks, crisp asks — not silent wait", 96),
+        ("g_utility_backlog", "Clear utility-add backlog; expand portal coverage honestly", 92),
+        ("g_ux_friction", "Convert UX friction into shipped improvements owners feel", 88),
+        ("g_expansion", "Expand vendor/utility coverage from real owner demand", 85),
+        ("g_independence", "Build notes, memory, agenda, and systems for true operational independence", 90),
     ]
+    existing_ids = set(db.execute(select(EaSovereignGoal.id)).scalars().all())
     for gid, title, pri in defaults:
+        if gid in existing_ids:
+            # Refresh title/priority for leadership reframe (keep status)
+            row = db.get(EaSovereignGoal, gid)
+            if row and row.status == "open":
+                row.title = title
+                row.priority = max(int(row.priority or 0), pri)
+                row.updated_at = _now()
+            continue
         db.add(EaSovereignGoal(
             id=gid, title=title, priority=pri, status="open",
-            detail_json="{}",
+            detail_json=json.dumps({"seeded_by": "sovereign_leadership_v2"}),
         ))
     db.flush()
 
@@ -1281,6 +1291,21 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             for mw in brain_plan.get("memory_writes") or []:
                 if isinstance(mw, dict) and mw.get("key"):
                     memory_set(db, str(mw["key"]), str(mw.get("value") or ""), source="brain")
+            # Leadership continuity fields
+            if brain_plan.get("ford_ask"):
+                memory_set(
+                    db, "ford_ask",
+                    str(brain_plan["ford_ask"])[:2000],
+                    source="brain",
+                )
+            if brain_plan.get("succession_gap"):
+                memory_set(
+                    db, "succession_gap",
+                    str(brain_plan["succession_gap"])[:2000],
+                    source="brain",
+                )
+            if brain_plan.get("mood"):
+                memory_set(db, "mood", str(brain_plan["mood"])[:80], source="brain")
             if brain_plan.get("agenda"):
                 apply_agenda(db, brain_plan["agenda"])
 
