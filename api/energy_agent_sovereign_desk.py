@@ -387,3 +387,183 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
             db.rollback()
             log.exception("desk_chat failed")
             raise HTTPException(500, f"Desk turn failed: {str(e)[:200]}") from e
+
+
+# ── Ops control surface (Ford desk) ─────────────────────────────────────────
+class OpsActionIn(BaseModel):
+    action: str = Field(..., description="ops action name")
+    payload: dict = Field(default_factory=dict)
+
+
+@router.get("/v1/sovereign/desk/ops")
+def desk_ops_summary(authorization: str | None = Header(default=None)):
+    """Queues + authority snapshot for the desk UI."""
+    t, email = _auth_ford(authorization)
+    del t, email
+    with SessionLocal() as db:
+        from .energy_agent_sovereign_ops import (
+            ops_summary, list_features, list_utilities, list_escalations, list_jobs,
+            list_credential_inventory, ops_enabled,
+        )
+        from .energy_agent_sovereign import memory_get_all, recent_notes
+        from .energy_agent_sovereign import EaSovereignGoal
+        goals = db.execute(
+            select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+            .order_by(EaSovereignGoal.priority.desc())
+        ).scalars().all()
+        return {
+            "ok": True,
+            "ops_authority": ops_enabled(),
+            "summary": ops_summary(db),
+            "features_reviewed": list_features(db, status="reviewed", limit=25),
+            "utilities_active": list_utilities(db, status="all", limit=25),
+            "escalations_needs_ford": list_escalations(db, status="needs_ford", limit=20),
+            "jobs_queued": list_jobs(db, status="queued", limit=15),
+            "credentials": list_credential_inventory(db, limit=40),
+            "goals": [
+                {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
+                for g in goals
+            ],
+            "memory": memory_get_all(db, limit=40),
+            "notes_recent": recent_notes(db, limit=8),
+        }
+
+
+@router.post("/v1/sovereign/desk/ops")
+def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(default=None)):
+    """Execute ops authority actions from the desk UI or Sovereign itself."""
+    t, email = _auth_ford(authorization)
+    del email
+    action = (body.action or "").strip().lower()
+    p = body.payload or {}
+    with SessionLocal() as db:
+        from .energy_agent_sovereign_ops import (
+            set_feature_status, bulk_feature_status, ship_reviewed_features,
+            mark_feature_shipped, set_utility_status, advance_utility_queue,
+            mark_utility_added, resolve_escalation, auto_resolve_needs_ford,
+            stage_credential_harvest, list_credential_inventory,
+            cancel_job, execute_jobs_now, autonomous_ops_sweep, ops_enabled,
+            triage_feature_queue, assign_feature, stage_deploy,
+            own_memory_write, own_agenda, reprioritize_goals,
+        )
+        from .energy_agent_sovereign import (
+            memory_set, apply_agenda, act_code_hire, audit, write_note,
+        )
+        if not ops_enabled() and action not in ("summary", "memory_set", "goal_upsert"):
+            raise HTTPException(403, "SOVEREIGN_OPS_AUTHORITY is off")
+
+        out: dict[str, Any]
+        if action in ("sweep", "ops_sweep", "run_all"):
+            out = autonomous_ops_sweep(db)
+        elif action in ("feature_status",):
+            out = set_feature_status(
+                db, int(p["feature_id"]), p.get("status") or "building",
+                review_note=p.get("note"),
+            )
+        elif action in ("feature_bulk",):
+            out = bulk_feature_status(
+                db, list(p.get("feature_ids") or []), p.get("status") or "building",
+                review_note=p.get("note"),
+            )
+        elif action in ("feature_ship_batch", "ship_reviewed"):
+            out = ship_reviewed_features(
+                db, limit=int(p.get("limit") or 10),
+                also_code_hire=p.get("also_code_hire", True) is not False,
+            )
+        elif action in ("feature_ship",):
+            out = mark_feature_shipped(db, int(p["feature_id"]), note=p.get("note"))
+        elif action in ("feature_triage", "triage_features"):
+            out = triage_feature_queue(db, limit=int(p.get("limit") or 20))
+        elif action in ("feature_assign", "assign_feature"):
+            out = assign_feature(
+                db, int(p["feature_id"]),
+                assignee=p.get("assignee") or "sovereign",
+                priority_note=p.get("note"),
+                status=p.get("status") or "building",
+            )
+        elif action in ("utility_status",):
+            if (p.get("status") or "") == "added":
+                out = mark_utility_added(
+                    db, int(p["utility_id"]),
+                    evidence=p.get("evidence") or p.get("note") or "",
+                )
+            else:
+                out = set_utility_status(
+                    db, int(p["utility_id"]), p.get("status") or "researching",
+                    result_note=p.get("note"),
+                )
+        elif action in ("utility_advance",):
+            out = advance_utility_queue(db, limit=int(p.get("limit") or 5))
+        elif action in ("escalation_resolve",):
+            out = resolve_escalation(
+                db, str(p["escalation_id"]),
+                status=p.get("status") or "done",
+                note=p.get("note"),
+                propose_only=bool(p.get("propose_only")),
+            )
+        elif action in ("escalation_sweep",):
+            out = auto_resolve_needs_ford(db, limit=int(p.get("limit") or 8))
+        elif action in ("credentials", "credential_inventory"):
+            out = list_credential_inventory(db)
+        elif action in ("credentials_stage", "stage_harvest"):
+            out = stage_credential_harvest(
+                db, tenant_id=p.get("tenant_id"), provider=p.get("provider"),
+            )
+        elif action in ("deploy_stage", "stage_deploy"):
+            out = stage_deploy(
+                db,
+                repo=p.get("repo") or "both",
+                reason=p.get("reason") or p.get("note") or "desk staged deploy",
+                execute_now=bool(p.get("execute_now")),
+            )
+        elif action in ("jobs_drain", "execute_jobs"):
+            out = execute_jobs_now(db, limit=int(p.get("limit") or 2))
+        elif action in ("job_cancel",):
+            out = cancel_job(db, str(p["job_id"]))
+        elif action in ("code_hire",):
+            out = act_code_hire(
+                db,
+                title=p.get("title") or "Desk code hire",
+                brief=p.get("brief") or p.get("text") or "",
+                kind=p.get("kind") or "desk_job",
+            )
+        elif action in ("memory_set",):
+            out = own_memory_write(
+                db, str(p.get("key") or ""), str(p.get("value") or ""), source="desk_ops",
+            )
+        elif action in ("goal_upsert", "agenda"):
+            out = own_agenda(db, p.get("agenda") or [p])
+        elif action in ("reprioritize_goals",):
+            out = reprioritize_goals(db, p.get("updates") or p.get("agenda") or [])
+        elif action in ("block_escalation",):
+            # Ford explicit block list
+            from .energy_agent_sovereign import memory_get_all
+            blocked = []
+            for m in memory_get_all(db, limit=50):
+                if m.get("key") == "escalation_blocklist":
+                    try:
+                        blocked = list(json.loads(m.get("value") or "[]"))
+                    except Exception:
+                        blocked = []
+            eid = str(p.get("escalation_id") or "")
+            if eid and eid not in blocked:
+                blocked.append(eid)
+            memory_set(db, "escalation_blocklist", json.dumps(blocked), source="ford")
+            out = {"ok": True, "blocked": blocked}
+        else:
+            raise HTTPException(400, f"Unknown ops action: {action}")
+
+        write_note(
+            db, kind="decision", title=f"desk ops: {action}",
+            body=json.dumps({"payload": p, "result": out}, default=str)[:8000],
+            provider="desk_ops",
+            meta={"tenant_id": t.id},
+        )
+        audit(
+            db, capability="act.product_queue", decision="act",
+            rationale=f"desk ops {action}",
+            targets={"action": action, "ok": out.get("ok")},
+            result="ok" if out.get("ok") is not False else "failed",
+        )
+        db.commit()
+        return out

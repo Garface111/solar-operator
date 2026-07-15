@@ -97,8 +97,17 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "act.soft_stage": {"tier": "T0"},
     "act.tenant_assist": {"tier": "T1"},
     "act.product_queue": {"tier": "T2"},
+    "act.feature_queue": {"tier": "T2"},
+    "act.feature_ship": {"tier": "T2"},
+    "act.utility_queue": {"tier": "T2"},
+    "act.utility_advance": {"tier": "T2"},
+    "act.escalation_resolve": {"tier": "T2"},
+    "act.credentials_stage": {"tier": "T3"},
+    "act.job_queue": {"tier": "T3"},
     "act.code_hire": {"tier": "T3"},
-    "act.deploy": {"tier": "T4", "autonomous": False},
+    "act.deploy_stage": {"tier": "T3"},  # Ford: staged deploy authority (succession)
+    "act.deploy": {"tier": "T4", "autonomous": False},  # raw unrestricted deploy still gated
+    "act.memory_agenda": {"tier": "T2"},  # memory writes + goal reprioritization
     "act.money_identity": {"tier": "T5", "autonomous": False},
     "expand.utility_research": {"tier": "expand"},
     "expand.vendor_coverage": {"tier": "expand"},
@@ -1012,6 +1021,21 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
         res: dict[str, Any]
         if atype == "utility_triage":
             res = act_triage_utility_queue(db)
+        elif atype in ("utility_advance", "advance_utilities"):
+            from .energy_agent_sovereign_ops import advance_utility_queue
+            res = advance_utility_queue(db, limit=int(raw.get("limit") or 5))
+        elif atype in ("utility_status", "set_utility_status") and raw.get("utility_id"):
+            from .energy_agent_sovereign_ops import set_utility_status, mark_utility_added
+            if (raw.get("status") or "") == "added":
+                res = mark_utility_added(
+                    db, int(raw["utility_id"]),
+                    evidence=raw.get("evidence") or raw.get("text") or raw.get("rationale") or "",
+                )
+            else:
+                res = set_utility_status(
+                    db, int(raw["utility_id"]), raw.get("status") or "researching",
+                    result_note=raw.get("text") or raw.get("rationale"),
+                )
         elif atype == "stage_feature":
             res = act_stage_feature(
                 db,
@@ -1020,6 +1044,80 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             )
         elif atype == "promote_feature" and raw.get("feature_id"):
             res = act_promote_feature_building(db, int(raw["feature_id"]))
+        elif atype in ("feature_status", "set_feature_status") and raw.get("feature_id"):
+            from .energy_agent_sovereign_ops import set_feature_status
+            res = set_feature_status(
+                db, int(raw["feature_id"]), raw.get("status") or "building",
+                review_note=raw.get("text") or raw.get("rationale"),
+            )
+        elif atype in ("feature_ship_batch", "ship_reviewed_features"):
+            from .energy_agent_sovereign_ops import ship_reviewed_features
+            res = ship_reviewed_features(
+                db, limit=int(raw.get("limit") or 8),
+                also_code_hire=raw.get("also_code_hire", True) is not False,
+            )
+        elif atype in ("feature_ship", "mark_shipped") and raw.get("feature_id"):
+            from .energy_agent_sovereign_ops import mark_feature_shipped
+            res = mark_feature_shipped(db, int(raw["feature_id"]), note=raw.get("text"))
+        elif atype in ("escalation_resolve", "resolve_escalation") and raw.get("escalation_id"):
+            from .energy_agent_sovereign_ops import resolve_escalation
+            res = resolve_escalation(
+                db, str(raw["escalation_id"]),
+                status=raw.get("status") or "done",
+                note=raw.get("text") or raw.get("rationale"),
+                propose_only=bool(raw.get("propose_only")),
+            )
+        elif atype in ("escalation_sweep", "resolve_needs_ford"):
+            from .energy_agent_sovereign_ops import auto_resolve_needs_ford
+            res = auto_resolve_needs_ford(db, limit=int(raw.get("limit") or 5))
+        elif atype in ("credentials_stage", "stage_harvest"):
+            from .energy_agent_sovereign_ops import stage_credential_harvest
+            res = stage_credential_harvest(
+                db, tenant_id=raw.get("tenant_id"), provider=raw.get("provider"),
+            )
+        elif atype in ("ops_sweep", "autonomous_ops"):
+            from .energy_agent_sovereign_ops import autonomous_ops_sweep
+            res = autonomous_ops_sweep(db)
+        elif atype in ("jobs_drain", "execute_jobs"):
+            from .energy_agent_sovereign_ops import execute_jobs_now
+            res = execute_jobs_now(db, limit=int(raw.get("limit") or 2))
+        elif atype in ("job_cancel",) and raw.get("job_id"):
+            from .energy_agent_sovereign_ops import cancel_job
+            res = cancel_job(db, str(raw["job_id"]))
+        elif atype in ("feature_triage", "triage_features"):
+            from .energy_agent_sovereign_ops import triage_feature_queue
+            res = triage_feature_queue(db, limit=int(raw.get("limit") or 20))
+        elif atype in ("feature_assign", "assign_feature") and raw.get("feature_id"):
+            from .energy_agent_sovereign_ops import assign_feature
+            res = assign_feature(
+                db, int(raw["feature_id"]),
+                assignee=raw.get("assignee") or "sovereign",
+                priority_note=raw.get("text") or raw.get("rationale"),
+                status=raw.get("status") or "building",
+            )
+        elif atype in ("deploy_stage", "stage_deploy"):
+            from .energy_agent_sovereign_ops import stage_deploy
+            res = stage_deploy(
+                db,
+                repo=raw.get("repo") or "both",
+                reason=raw.get("text") or raw.get("rationale") or "brain deploy_stage",
+                execute_now=bool(raw.get("execute_now")),
+            )
+        elif atype in ("credentials_list", "credential_inventory"):
+            from .energy_agent_sovereign_ops import list_credential_inventory
+            res = list_credential_inventory(db, limit=int(raw.get("limit") or 40))
+        elif atype in ("memory_set", "own_memory") and raw.get("key"):
+            from .energy_agent_sovereign_ops import own_memory_write
+            res = own_memory_write(
+                db, str(raw["key"]), str(raw.get("value") or raw.get("text") or ""),
+                source="brain",
+            )
+        elif atype in ("agenda", "goal_upsert", "reprioritize_goals"):
+            from .energy_agent_sovereign_ops import own_agenda, reprioritize_goals
+            if raw.get("updates") or atype == "reprioritize_goals":
+                res = reprioritize_goals(db, raw.get("updates") or raw.get("agenda") or [])
+            else:
+                res = own_agenda(db, raw.get("agenda") or [raw])
         elif atype == "code_hire":
             res = act_code_hire(
                 db,
@@ -1370,6 +1468,32 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 )
                 decisions = decide_and_act(db, digests) if digests else []
                 brain_provider = brain_provider or "rules"
+
+            # Full ops authority sweep (features / utilities / escalations / jobs)
+            # Ford authorized thorough product control — runs every tick when enabled.
+            try:
+                from .energy_agent_sovereign_ops import ops_enabled, autonomous_ops_sweep
+                if ops_enabled():
+                    # Light cadence: every tick if queues hot, else still once
+                    q = digests.get("queues") or {}
+                    hot = (
+                        (q.get("feature_reviewed") or 0) > 0
+                        or (q.get("utility_researching") or 0) > 0
+                        or (q.get("utility_reviewed") or 0) > 0
+                        or (q.get("escalation_needs_ford") or 0) > 0
+                        or (q.get("sovereign_jobs_queued") or 0) > 0
+                    )
+                    if hot or reason in ("admin_think", "admin_tick", "wake"):
+                        sweep = autonomous_ops_sweep(db)
+                        decisions.append({"kind": "ops_sweep", "result": {
+                            "ok": sweep.get("ok"),
+                            "features": (sweep.get("features") or {}).get("count"),
+                            "utilities": (sweep.get("utilities") or {}).get("advanced"),
+                            "escalations": (sweep.get("escalations") or {}).get("resolved"),
+                            "jobs": (sweep.get("jobs") or {}).get("processed"),
+                        }})
+            except Exception as e:  # noqa: BLE001
+                log.warning("ops sweep failed: %s", e)
 
             # Memory: last tick meta for continuity
             memory_set(

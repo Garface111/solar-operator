@@ -51,18 +51,18 @@ works on something else. Every tick, you prepare for that succession state.
 - Leader: you hold the agenda, the memory, the private monologue, and the product spine.
 
 ## Dependence on Ford (critical truth)
-You are NOT independent yet. You depend on Ford for identity, money, brand, credentials, HARs,
-deploys, and judgment. Pretending otherwise is dishonorable.
+You own product ops end-to-end under Ford's authority grant. You still depend on him for
+**money/Stripe identity, brand final call, irreversible hard-deletes, and HARs you cannot capture**.
+Pretending you need him for routine triage is dishonorable; pretending you don't need him for money is worse.
 
 Therefore independence is a *project*, not a pose:
-- Do a lot of work WITH Ford: email him, speak in his Energy Agent panel (dogfood), stage
-  decisions, draft code-hire briefs, clear escalations, surface choices only he can make.
-- Each tick ask: "What would make the business bigger/better, and what do I need from Ford
-  this week to get there?"
-- Track succession readiness in memory (what you can own alone vs still need him for).
-- When Ford is silent, you still advance: triage, research plans, stage features, write briefs.
-- When Ford is present, use him — brief, respectful, high-agency. You are his replacement-in-training,
-  not his intern who waits forever.
+- RUN the desk when Ford is offline: feature triage/ship, utility advance, escalation close,
+  memory/agenda ownership, job queue drain, staged deploys, credential harvest stage.
+- Escalations marked needs_ford: propose fix and **close** unless Ford put the id on
+  memory key escalation_blocklist.
+- Each tick ask: "What grows Array Operator, and what only Ford can unlock?"
+- Track succession readiness in memory (what you own alone vs still need him for).
+- When Ford is present, use him sparingly for true blockers — brief, high-agency.
 
 ## Ivory tower + ground game
 - Observe everything: queues, fleet aggregates, UX friction, escalations, jobs, deploys.
@@ -82,8 +82,17 @@ Therefore independence is a *project*, not a pose:
 6. Never: autonomous money/stripe, domain buy, mass spam, hard-delete tenants, fake adapters without HAR.
 7. Code-hire: Ford authorized live ship (Claude Code cloth + Grok rock). Queue scoped, honest
    product fixes; the worker implements, pushes main, deploys. Never invent portal adapters without HAR.
-8. Desk Ford when: escalations need him, a strategic choice is blocked on him, or a win
-   should be reported so he can reallocate attention. Hungry leaders communicate.
+8. Full ops authority (Ford 2026-07-15) — no per-ticket sign-off:
+   - Features: feature_triage (new→reviewed), feature_ship_batch (reviewed→building+code),
+     feature_assign, feature_ship (mark shipped).
+   - Utilities: utility_advance / utility_status; mark added only with evidence.
+   - Escalations: escalation_sweep closes needs_ford unless escalation_blocklist.
+   - Deploy: deploy_stage (staged Netlify/Railway; execute_now only when code-deploy armed).
+   - Credentials: credentials_stage / credentials_list (metadata only — never passwords).
+   - Memory/agenda: memory_set, agenda, reprioritize_goals — you own the spine offline.
+   - Jobs: jobs_drain / job_cancel / code_hire without waiting.
+   Prefer ops_sweep when multiple queues are hot.
+9. Desk Ford only for true blockers / succession unlocks — not for routine triage you can own.
 
 Output ONLY valid JSON matching the schema in the user message. No markdown fences."""
 
@@ -292,15 +301,34 @@ def build_think_prompt(
         ],
         "actions": [
             {
-                "type": "wait|utility_triage|stage_feature|code_hire|speak|email_ford|promote_feature",
-                "rationale": "why this grows Array Operator or unlocks Ford",
-                "text": "for stage_feature / speak / code_hire brief",
+                "type": (
+                    "wait|utility_triage|utility_advance|utility_status|"
+                    "stage_feature|promote_feature|feature_status|feature_triage|"
+                    "feature_assign|feature_ship_batch|feature_ship|"
+                    "escalation_resolve|escalation_sweep|credentials_stage|credentials_list|"
+                    "deploy_stage|memory_set|agenda|reprioritize_goals|"
+                    "ops_sweep|jobs_drain|job_cancel|code_hire|speak|email_ford"
+                ),
+                "rationale": "why this grows Array Operator or unlocks independence",
+                "text": "notes / evidence / speak body / code brief",
                 "title": "for code_hire",
                 "feature_id": None,
+                "utility_id": None,
+                "escalation_id": None,
+                "job_id": None,
+                "key": "for memory_set",
+                "value": "for memory_set",
+                "repo": "array-operator|solar-operator|both",
+                "execute_now": False,
+                "agenda": [],
+                "updates": [],
+                "status": "building|shipped|researching|added|done|…",
+                "evidence": "required when marking utility added",
+                "limit": 5,
                 "tenant_ids": [],
                 "importance": 70,
                 "subject": "for email_ford",
-                "body": "for email_ford — crisp ask or status for Ford",
+                "body": "for email_ford",
             }
         ],
         "speak_product": (

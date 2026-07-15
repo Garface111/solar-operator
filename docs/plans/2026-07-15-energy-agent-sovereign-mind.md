@@ -11,11 +11,27 @@
 | `SOVEREIGN_ENABLED` | **1** | Master switch (set `0` to kill) |
 | `SOVEREIGN_SENSE_ENABLED` | **1** | Product digests every 5 min |
 | `SOVEREIGN_ACT_ENABLED` | **1** | Soft exec: utility triage, stage features, code-hire jobs |
-| `SOVEREIGN_SPEAK_ENABLED` | **1** | Session inject as Energy Agent |
+| `SOVEREIGN_OPS_AUTHORITY` | **1** | Full product ops: features/utilities/escalations/jobs/memory/deploy_stage |
+| `SOVEREIGN_CODE_LIVE` | **1** | Worker may implement + push scoped jobs |
+| `SOVEREIGN_CODE_PUSH` | **1** | Push to main allowed for code worker |
+| `SOVEREIGN_CODE_DEPLOY` | **1** | Staged Netlify/Railway deploy after ship |
+| `SOVEREIGN_SPEAK_ENABLED` | **0** | EA session inject (desk is the Ford channel) |
 | `SOVEREIGN_SPEAK_ALL` | **0** | Inject only dogfood emails until armed |
-| `SOVEREIGN_ARM_T4_T5` | **0** | Deploy/money still never autonomous |
+| `SOVEREIGN_ARM_T4_T5` | **0** | Unrestricted deploy + money still never autonomous |
 
-Module: `api/energy_agent_sovereign.py` · Scheduler: `energy_agent_sovereign_tick` (5 min)
+Module: `api/energy_agent_sovereign.py` + `energy_agent_sovereign_ops.py` · Desk: `/v1/sovereign/desk/*` · Scheduler: `energy_agent_sovereign_tick` (5 min)
+
+### Full ops authority (Ford 2026-07-15)
+No per-ticket sign-off. Sovereign owns:
+
+1. **Feature queue** — triage new→reviewed, assign/prioritize, reviewed→building+code hire, mark shipped  
+2. **Utility queue** — advance researching/reviewed into honest adapter jobs; mark added only with evidence  
+3. **Staged deploy + credentials** — `deploy_stage`, credential metadata + harvest re-arm (never dump passwords)  
+4. **Escalations `needs_ford`** — propose fix and close unless id in memory `escalation_blocklist`  
+5. **Memory / goals / agenda** — durable writes + goal reprioritization for offline desk ownership  
+6. **Job queue** — stage (code_hire) + `jobs_drain` without manual intervention  
+
+Still blocked: money/Stripe identity, unrestricted raw deploy without stage path, hard-delete tenants.
 
 ---
 
