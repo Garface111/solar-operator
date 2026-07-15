@@ -72,15 +72,27 @@ export default function ClientsTab() {
     return () => window.removeEventListener("keydown", handler);
   }, [isFullscreen]);
 
+  // Sandbox should fill nearly the whole window under the top nav + Table/Sandbox
+  // toggle (Ford 2026-07-15) — no 560px box with dead cream space below.
+  // ~3.5rem top TabBar + ~0.75rem main pad + ~3rem subtab + gaps ≈ 7.5rem.
+  const sandboxFillClass =
+    "relative rounded-2xl h-[calc(100dvh-7.5rem)] min-h-[28rem] w-full";
+
   return (
-    <div className="space-y-4">
+    <div
+      className={
+        subtab === "sandbox" && !isFullscreen
+          ? "flex flex-col gap-3"
+          : "space-y-4"
+      }
+    >
       {/* Sub-tab toggle — Sandbox (canvas) vs Spreadsheet (list), like AO's vendor
           sheet. Hidden in fullscreen (the canvas owns the whole viewport there). */}
       {!isFullscreen && (
         <div
           role="tablist"
           aria-label="Clients view"
-          className="flex w-full items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
+          className="flex w-full shrink-0 items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
         >
           {(["spreadsheet", "sandbox"] as const).map((v) => (
             <button
@@ -104,8 +116,7 @@ export default function ClientsTab() {
         </div>
       )}
 
-      {/* Spatial canvas — full 560px on sm+; on mobile an overlay replaces the
-          canvas with a gentle notice (the list view below is the mobile UX).
+      {/* Spatial canvas — fills remaining viewport under the two top bars.
           Fullscreen swaps the rounded inline box for a fixed full-viewport
           overlay (no remount — just different classes). */}
       <section
@@ -117,9 +128,7 @@ export default function ClientsTab() {
           "overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
           // Sub-tab: hide (don't unmount) when the Spreadsheet view is active.
           subtab === "sandbox" || isFullscreen ? "" : "hidden",
-          isFullscreen
-            ? "fixed inset-0 z-[100]"
-            : "relative rounded-2xl h-[220px] sm:h-[560px]",
+          isFullscreen ? "fixed inset-0 z-[100]" : sandboxFillClass,
         ].join(" ")}
       >
         {/* Mobile notice — overlays the canvas below 640px. The canvas still

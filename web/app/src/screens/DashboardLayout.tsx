@@ -277,28 +277,47 @@ export default function DashboardLayout({ onSignOut }: Props) {
 
       <AllSetCelebration account={account} />
 
-      {/* pb-24 on mobile clears the 56px bottom tab bar + safe area. */}
-      <main className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8">
-        {cancelled ? (
-          <CancelledGate onSignOut={onSignOut} />
-        ) : pausedNoCard ? (
-          <TrialEndedGate onSignOut={onSignOut} />
-        ) : (
-          <Outlet context={ctx} />
-        )}
-      </main>
+      {/* Clients tab (sandbox + table) is full-bleed so the canvas can own the
+          viewport under the top bars — no max-w-4xl dead gutters. Other tabs
+          keep the tighter reading column. */}
+      {(() => {
+        const clientsRoute = location.pathname.startsWith("/clients");
+        return (
+          <>
+            <main
+              className={
+                clientsRoute
+                  ? "mx-auto w-full max-w-none px-3 pt-3 pb-20 sm:px-4 sm:pt-3 sm:pb-3"
+                  : "mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8"
+              }
+            >
+              {cancelled ? (
+                <CancelledGate onSignOut={onSignOut} />
+              ) : pausedNoCard ? (
+                <TrialEndedGate onSignOut={onSignOut} />
+              ) : (
+                <Outlet context={ctx} />
+              )}
+            </main>
 
-      <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
-        {brand.fullName} · admin@solaroperator.org ·{" "}
-        <a
-          href={`${brand.marketingUrl}/privacy`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="underline-offset-2 hover:text-zinc-600 hover:underline"
-        >
-          Privacy &amp; Data
-        </a>
-      </footer>
+            {/* Footer sits under Account/Reports; Clients hides it so sandbox
+                can fill to the bottom of the window. */}
+            {!clientsRoute && (
+              <footer className="mx-auto max-w-4xl px-4 pt-8 pb-24 sm:pb-8 text-center text-xs text-zinc-400">
+                {brand.fullName} · admin@solaroperator.org ·{" "}
+                <a
+                  href={`${brand.marketingUrl}/privacy`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline-offset-2 hover:text-zinc-600 hover:underline"
+                >
+                  Privacy &amp; Data
+                </a>
+              </footer>
+            )}
+          </>
+        );
+      })()}
 
       {/* Mobile-only bottom tab bar — hidden on sm+ where the top TabBar handles navigation. */}
       <BottomTabBar
