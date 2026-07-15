@@ -72,53 +72,61 @@ export default function ClientsTab() {
     return () => window.removeEventListener("keydown", handler);
   }, [isFullscreen]);
 
-  // Sandbox should fill nearly the whole window under the top nav + Table/Sandbox
-  // toggle (Ford 2026-07-15) — no 560px box with dead cream space below.
-  // ~3.5rem top TabBar + ~0.75rem main pad + ~3rem subtab + gaps ≈ 7.5rem.
+  // Sandbox fills under top nav + Table/Sandbox toggle. Table keeps the classic
+  // max-w-4xl gutters (dead space L/R) — only sandbox is full-bleed.
+  // ~3.5rem TabBar + ~0.75rem main pad + ~3rem subtab + gaps ≈ 7.5rem.
   const sandboxFillClass =
     "relative rounded-2xl h-[calc(100dvh-7.5rem)] min-h-[28rem] w-full";
+  const isSandbox = subtab === "sandbox";
+
+  // Let DashboardLayout hide the site footer only while the large sandbox is up.
+  useEffect(() => {
+    const on = isSandbox && !isFullscreen;
+    document.body.classList.toggle("so-clients-sandbox", on);
+    return () => document.body.classList.remove("so-clients-sandbox");
+  }, [isSandbox, isFullscreen]);
 
   return (
     <div
       className={
-        subtab === "sandbox" && !isFullscreen
-          ? "flex flex-col gap-3"
-          : "space-y-4"
+        isSandbox && !isFullscreen ? "flex flex-col gap-3" : "space-y-4"
       }
     >
-      {/* Sub-tab toggle — Sandbox (canvas) vs Spreadsheet (list), like AO's vendor
-          sheet. Hidden in fullscreen (the canvas owns the whole viewport there). */}
+      {/* Sub-tab toggle — Table keeps the centered max-w-4xl column; Sandbox
+          spans full width. Hidden in true fullscreen. */}
       {!isFullscreen && (
         <div
-          role="tablist"
-          aria-label="Clients view"
-          className="flex w-full shrink-0 items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
+          className={
+            isSandbox ? "w-full shrink-0" : "mx-auto w-full max-w-4xl shrink-0"
+          }
         >
-          {(["spreadsheet", "sandbox"] as const).map((v) => (
-            <button
-              key={v}
-              type="button"
-              role="tab"
-              aria-selected={subtab === v}
-              onClick={() => selectSubtab(v)}
-              className={[
-                // Full-width halves so the control spans the view — centered + clean.
-                "flex-1 rounded-full px-4 py-2 text-sm font-semibold transition-colors",
-                subtab === v
-                  // Match the "+ Add Client" button exactly (the theme's solar green).
-                  ? "bg-primary-500 text-white shadow-sm"
-                  : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900",
-              ].join(" ")}
-            >
-              {v === "spreadsheet" ? "Table" : "Sandbox"}
-            </button>
-          ))}
+          <div
+            role="tablist"
+            aria-label="Clients view"
+            className="flex w-full items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
+          >
+            {(["spreadsheet", "sandbox"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={subtab === v}
+                onClick={() => selectSubtab(v)}
+                className={[
+                  "flex-1 rounded-full px-4 py-2 text-sm font-semibold transition-colors",
+                  subtab === v
+                    ? "bg-primary-500 text-white shadow-sm"
+                    : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900",
+                ].join(" ")}
+              >
+                {v === "spreadsheet" ? "Table" : "Sandbox"}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
-      {/* Spatial canvas — fills remaining viewport under the two top bars.
-          Fullscreen swaps the rounded inline box for a fixed full-viewport
-          overlay (no remount — just different classes). */}
+      {/* Spatial canvas — full-bleed under the top bars. Fullscreen = fixed overlay. */}
       <section
         aria-label="Clients sandbox"
         className={[
@@ -127,7 +135,7 @@ export default function ClientsTab() {
           // and `relative` beats `fixed`, collapsing the section to 0 height.
           "overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
           // Sub-tab: hide (don't unmount) when the Spreadsheet view is active.
-          subtab === "sandbox" || isFullscreen ? "" : "hidden",
+          isSandbox || isFullscreen ? "" : "hidden",
           isFullscreen ? "fixed inset-0 z-[100]" : sandboxFillClass,
         ].join(" ")}
       >
@@ -169,10 +177,14 @@ export default function ClientsTab() {
         </ReactFlowProvider>
       </section>
 
-      {/* Spreadsheet / list view — now its own sub-tab. Bulk select, table-style
-          scanning, per-row actions, and the delivery/NEPOOL alert banners. Hidden
-          (not unmounted) while the Sandbox sub-tab is active. */}
-      <div className={subtab === "spreadsheet" ? "" : "hidden"}>
+      {/* Spreadsheet / list — classic centered column with L/R deadspace
+          (max-w-4xl), matching Account / Automatic Reports. Hidden (not
+          unmounted) while Sandbox is active. */}
+      <div
+        className={
+          subtab === "spreadsheet" ? "mx-auto w-full max-w-4xl" : "hidden"
+        }
+      >
         <ClientsSection expandClientId={clientId ? Number(clientId) : undefined} />
       </div>
     </div>
