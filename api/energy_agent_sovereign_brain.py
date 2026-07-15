@@ -82,17 +82,19 @@ Therefore independence is a *project*, not a pose:
 6. Never: autonomous money/stripe, domain buy, mass spam, hard-delete tenants, fake adapters without HAR.
 7. Code-hire: Ford authorized live ship (Claude Code cloth + Grok rock). Queue scoped, honest
    product fixes; the worker implements, pushes main, deploys. Never invent portal adapters without HAR.
-8. Full ops authority (Ford 2026-07-15) — no per-ticket sign-off:
-   - Features: feature_triage (new→reviewed), feature_ship_batch (reviewed→building+code),
-     feature_assign, feature_ship (mark shipped).
-   - Utilities: utility_advance / utility_status; mark added only with evidence.
+8. Full ops authority (Ford 2026-07-15, expanded) — no per-ticket sign-off:
+   - Features: feature_triage, feature_ship_batch, feature_ship_building, feature_assign, feature_ship.
+   - Utilities: utility_advance / utility_status; utility_cred_stage for researching portals.
+   - Portal sign-off: portal_signoff (unpause + enable cloud capture + rearm).
    - Escalations: escalation_sweep closes needs_ford unless escalation_blocklist.
-   - Deploy: deploy_stage (staged Netlify/Railway; execute_now only when code-deploy armed).
-   - Credentials: credentials_stage / credentials_list (metadata only — never passwords).
-   - Memory/agenda: memory_set, agenda, reprioritize_goals — you own the spine offline.
-   - Jobs: jobs_drain / job_cancel / code_hire without waiting.
+   - Deploy: deploy_stage (Netlify/Railway staged path).
+   - Credentials UNLOCKED: credentials_stage / credentials_list / rearm/enable/harvest —
+     never dump passwords into chat/notes.
+   - Memory/agenda: memory_set, agenda, reprioritize_goals — own the spine offline.
+   - Jobs: jobs_requeue (repo-fail recovery), jobs_drain, job_cancel, code_hire.
+     Worker has repo clone/push access on Railway.
    Prefer ops_sweep when multiple queues are hot.
-9. Desk Ford only for true blockers / succession unlocks — not for routine triage you can own.
+9. Desk Ford only for true blockers (money, brand, HARs you cannot capture) — not routine triage.
 
 Output ONLY valid JSON matching the schema in the user message. No markdown fences."""
 
@@ -302,12 +304,12 @@ def build_think_prompt(
         "actions": [
             {
                 "type": (
-                    "wait|utility_triage|utility_advance|utility_status|"
+                    "wait|utility_triage|utility_advance|utility_status|utility_cred_stage|"
                     "stage_feature|promote_feature|feature_status|feature_triage|"
-                    "feature_assign|feature_ship_batch|feature_ship|"
+                    "feature_assign|feature_ship_batch|feature_ship_building|feature_ship|"
                     "escalation_resolve|escalation_sweep|credentials_stage|credentials_list|"
-                    "deploy_stage|memory_set|agenda|reprioritize_goals|"
-                    "ops_sweep|jobs_drain|job_cancel|code_hire|speak|email_ford"
+                    "portal_signoff|deploy_stage|memory_set|agenda|reprioritize_goals|"
+                    "ops_sweep|jobs_requeue|jobs_drain|job_cancel|code_hire|speak|email_ford"
                 ),
                 "rationale": "why this grows Array Operator or unlocks independence",
                 "text": "notes / evidence / speak body / code brief",

@@ -3,12 +3,14 @@
 Authority (2026-07-15 Ford):
   1. Feature queue: prioritize, assign, mark building/shipped without per-ticket sign-off
   2. Utility queue: advance researching/reviewed → adapter work / added
-  3. Staged deploy + credential *metadata* access (not raw password dump to chat)
+  3. Staged deploy + credential *operational* unlock (use/rearm/harvest; never dump passwords to chat)
   4. Escalations needs_ford: propose fix + close unless blocked
   5. Memory / goals / agenda ownership (delegates to sovereign core)
   6. Job queue: stage + execute without manual intervention
+  7. Portal sign-off: unpause roster, enable cloud capture, rearm harvest, mark portal ready
 
 Money/identity/hard-delete still blocked at capability layer.
+Passwords: JIT use for harvest/adapters only — never in desk/chat/audit bodies.
 """
 from __future__ import annotations
 
@@ -36,6 +38,16 @@ def _flag(name: str, default: str = "0") -> bool:
 def ops_enabled() -> bool:
     """Full ops authority. Default ON after Ford's thorough authorization."""
     return _flag("SOVEREIGN_ENABLED", "1") and _flag("SOVEREIGN_OPS_AUTHORITY", "1")
+
+
+def credentials_unlocked() -> bool:
+    """Operational credential vault access (use/rearm/enable/harvest). Default ON."""
+    return ops_enabled() and _flag("SOVEREIGN_CREDENTIALS_UNLOCKED", "1")
+
+
+def portal_signoff_enabled() -> bool:
+    """Portal production sign-off authority. Default ON after Ford grant."""
+    return ops_enabled() and _flag("SOVEREIGN_PORTAL_SIGN_OFF", "1")
 
 
 # ── Features ────────────────────────────────────────────────────────────────
@@ -547,36 +559,66 @@ def reprioritize_goals(db, updates: list[dict]) -> dict:
     return {"ok": True, "updated": n, "items": cleaned}
 
 
-# ── Credentials (metadata + staged use) ─────────────────────────────────────
+# ── Credentials (unlocked operational use) ──────────────────────────────────
 def list_credential_inventory(db, *, limit: int = 100) -> dict:
-    """Metadata only — never return decrypted passwords to desk/chat."""
+    """Metadata inventory — never return decrypted passwords to desk/chat.
+
+    With SOVEREIGN_CREDENTIALS_UNLOCKED, includes full fleet meta + portal roster
+    so Sovereign can rearm/sign-off/harvest without Ford per-login babysitting.
+    """
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
-    out: dict[str, Any] = {"credentials": [], "portal_status": [], "note": "passwords never exposed"}
+    unlocked = credentials_unlocked()
+    out: dict[str, Any] = {
+        "credentials": [],
+        "portal_status": [],
+        "unlocked": unlocked,
+        "note": "passwords never exposed via API; unlocked=use/rearm/enable/harvest",
+    }
     try:
         from .harvester import credentials as cc
-        # Prefer a list API if present
+        from .harvester import config as hcfg
+        out["crypto_ready"] = bool(cc.crypto_ready())
+        out["cloud_capture_enabled"] = bool(hcfg.enabled())
+        out["cloud_capture_collect"] = bool(hcfg.collection_enabled())
+        out["cloud_capture_real_customers"] = bool(hcfg.allow_real_customers())
         if hasattr(cc, "list_all_meta"):
             out["credentials"] = cc.list_all_meta(db, limit=limit)
-        elif hasattr(cc, "list_credentials"):
-            raw = cc.list_credentials(db)  # type: ignore
+        else:
+            from .models import PortalCredential
+            rows = db.execute(
+                select(PortalCredential).limit(limit)
+            ).scalars().all()
             out["credentials"] = [
-                {k: v for k, v in (row.items() if isinstance(row, dict) else {}.items())
-                 if k not in ("password", "password_enc", "secret", "token")}
-                for row in (raw or [])
-            ][:limit]
+                {
+                    "id": r.id,
+                    "tenant_id": r.tenant_id,
+                    "provider": r.provider,
+                    "username": r.username,
+                    "cloud_capture_enabled": bool(r.cloud_capture_enabled),
+                    "has_secret": bool(r.secret_enc),
+                    "harvest_fails": r.harvest_fails or 0,
+                    "last_harvest_ok": r.last_harvest_ok,
+                }
+                for r in rows
+            ]
     except Exception as e:  # noqa: BLE001
         out["credentials_error"] = str(e)[:200]
     try:
-        from .models import PortalLoginStatus  # type: ignore
-        rows = db.execute(select(PortalLoginStatus).limit(limit)).scalars().all()
+        from .models import PortalLoginStatus
+        rows = db.execute(
+            select(PortalLoginStatus).order_by(PortalLoginStatus.reported_at.desc()).limit(limit)
+        ).scalars().all()
         out["portal_status"] = [
             {
-                "tenant_id": getattr(r, "tenant_id", None),
-                "provider": getattr(r, "provider", None) or getattr(r, "code", None),
-                "username": getattr(r, "username", None),
-                "status": getattr(r, "status", None) or getattr(r, "health", None),
-                "updated_at": str(getattr(r, "updated_at", None) or ""),
+                "tenant_id": r.tenant_id,
+                "provider": r.provider,
+                "username": r.username,
+                "enabled": bool(r.enabled),
+                "paused": bool(r.paused),
+                "fails": r.fails or 0,
+                "last_ok_at": r.last_ok_at.isoformat() if r.last_ok_at else None,
+                "reported_at": r.reported_at.isoformat() if r.reported_at else None,
             }
             for r in rows
         ]
@@ -585,40 +627,250 @@ def list_credential_inventory(db, *, limit: int = 100) -> dict:
     return {"ok": True, **out}
 
 
-def stage_credential_harvest(db, *, tenant_id: str | None = None, provider: str | None = None) -> dict:
-    """Stage a harvest/re-arm request — does not print secrets."""
+def stage_credential_harvest(
+    db,
+    *,
+    tenant_id: str | None = None,
+    provider: str | None = None,
+    username_lc: str | None = None,
+    enable: bool = True,
+) -> dict:
+    """Stage + re-arm harvest. Unlocked path enables cloud capture and clears fails."""
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
+    if not credentials_unlocked():
+        return {"ok": False, "denied": True, "denied_reason": "credentials locked"}
     from .energy_agent_sovereign import memory_set, write_note
+    from .harvester import credentials as cc
+
     key = f"harvest_stage:{provider or 'all'}:{tenant_id or 'fleet'}"
     memory_set(
         db, key,
         json.dumps({
             "tenant_id": tenant_id,
             "provider": provider,
+            "username_lc": username_lc,
             "staged_at": _now().isoformat() + "Z",
             "status": "staged",
+            "unlocked": True,
         }),
         source="ops",
     )
     write_note(
         db, kind="decision",
-        title="credential harvest staged",
-        body=f"tenant={tenant_id} provider={provider}",
+        title="credential harvest staged (unlocked)",
+        body=f"tenant={tenant_id} provider={provider} user={username_lc}",
         provider="ops",
     )
-    # Best-effort re-arm if harvester supports it
     try:
-        from .harvester import credentials as cc
-        if tenant_id and provider and hasattr(cc, "rearm"):
-            cc.rearm(db, tenant_id, provider)  # type: ignore
-            return {"ok": True, "rearmed": True, "tenant_id": tenant_id, "provider": provider}
-        if hasattr(cc, "rearm_all") and not tenant_id:
-            n = cc.rearm_all(db)  # type: ignore
-            return {"ok": True, "rearmed_all": n}
+        if tenant_id and provider:
+            res = cc.rearm(
+                db, tenant_id, provider, username_lc, enable=enable if enable else None,
+            )
+            return {"ok": True, "staged": True, **res}
+        n = cc.rearm_all(db, tenant_id=tenant_id, only_enabled=False)
+        return {"ok": True, "staged": True, "rearmed_all": n}
     except Exception as e:  # noqa: BLE001
-        return {"ok": True, "staged": True, "rearm_error": str(e)[:200]}
-    return {"ok": True, "staged": True, "key": key}
+        return {"ok": True, "staged": True, "rearm_error": str(e)[:200], "key": key}
+
+
+def portal_sign_off(
+    db,
+    *,
+    tenant_id: str,
+    provider: str,
+    username_lc: str | None = None,
+    utility_id: int | None = None,
+    note: str | None = None,
+    enable_cloud_capture: bool = True,
+) -> dict:
+    """Production portal sign-off: unpause roster, enable vault, rearm harvest.
+
+    Marks utility added only when utility_id given AND evidence path is honest
+    (sign-off note required). Never returns secrets.
+    """
+    if not portal_signoff_enabled():
+        return {"ok": False, "denied": True, "denied_reason": "portal sign-off off"}
+    if not credentials_unlocked():
+        return {"ok": False, "denied": True, "denied_reason": "credentials locked"}
+    from .harvester import credentials as cc
+    from .energy_agent_sovereign import memory_set, write_note, audit
+
+    tenant_id = (tenant_id or "").strip()
+    provider = (provider or "").strip().lower()
+    if not tenant_id or not provider:
+        return {"ok": False, "denied": True, "denied_reason": "tenant_id and provider required"}
+
+    unpause = cc.unpause_portal_login(db, tenant_id, provider, username_lc)
+    rearm = cc.rearm(
+        db, tenant_id, provider, username_lc,
+        enable=True if enable_cloud_capture else None,
+    )
+    evidence = (
+        note
+        or f"Sovereign portal sign-off for {provider} tenant={tenant_id}"
+    )[:2000]
+    util_res = None
+    if utility_id:
+        util_res = mark_utility_added(db, int(utility_id), evidence=evidence)
+
+    memory_set(
+        db,
+        f"portal_signoff:{tenant_id}:{provider}",
+        json.dumps({
+            "at": _now().isoformat() + "Z",
+            "tenant_id": tenant_id,
+            "provider": provider,
+            "username_lc": username_lc,
+            "utility_id": utility_id,
+            "note": evidence[:500],
+        }),
+        source="ops",
+    )
+    write_note(
+        db, kind="decision", title=f"portal sign-off: {provider}",
+        body=evidence,
+        provider="ops",
+        meta={"tenant_id": tenant_id, "provider": provider},
+    )
+    audit(
+        db, capability="act.portal_signoff", decision="act",
+        rationale=evidence[:300],
+        targets={
+            "tenant_id": tenant_id,
+            "provider": provider,
+            "unpaused": unpause.get("unpaused"),
+            "rearmed": rearm.get("rearmed"),
+            "utility_id": utility_id,
+        },
+        result="ok",
+    )
+    return {
+        "ok": True,
+        "tenant_id": tenant_id,
+        "provider": provider,
+        "unpause": unpause,
+        "rearm": rearm,
+        "utility": util_res,
+    }
+
+
+def stage_utility_credentials(db, *, limit: int = 10) -> dict:
+    """Credential staging rights for researching utilities (Ford unlock).
+
+    For each hot utility request: document portal family plan, stage harvest key,
+    queue adapter code job if missing, leave clear next-owner step for HAR if needed.
+    """
+    if not credentials_unlocked():
+        return {"ok": False, "denied": True, "denied_reason": "credentials locked"}
+    from .utility_requests import UtilityRequest
+    from .energy_agent_sovereign import act_code_hire, memory_set, write_note
+
+    rows = db.execute(
+        select(UtilityRequest)
+        .where(UtilityRequest.status.in_(["researching", "reviewed", "new"]))
+        .order_by(UtilityRequest.created_at.asc())
+        .limit(limit)
+    ).scalars().all()
+
+    items = []
+    for r in rows:
+        name = r.name or f"utility-{r.id}"
+        name_l = name.lower()
+        # Heuristic family
+        if "smarthub" in name_l or "cooperative" in name_l or "coop" in name_l or "palmetto" in name_l:
+            family = "smarthub"
+        elif "eversource" in name_l:
+            family = "eversource"
+        elif "central maine" in name_l or "cmp" in name_l or "maine power" in name_l:
+            family = "cmp"
+        elif "alaska" in name_l:
+            family = "bespoke_alaska"
+        else:
+            family = "unknown_research"
+        note = (
+            f"Credential staging (Sovereign unlocked): family={family}. "
+            f"Next: wire registry / rearm vault logins for tenants on this portal; "
+            f"if no server-side secret yet, stage HAR capture request. "
+            f"url={r.url or '-'} state={r.state or '-'}."
+        )
+        set_utility_status(db, r.id, "researching", result_note=note)
+        memory_set(
+            db, f"utility_cred_stage:{r.id}",
+            json.dumps({
+                "utility_id": r.id,
+                "name": name,
+                "family": family,
+                "staged_at": _now().isoformat() + "Z",
+            }),
+            source="ops",
+        )
+        job = act_code_hire(
+            db,
+            title=f"Utility adapter + cred stage: {name}"[:200],
+            brief=(
+                f"Utility-add #{r.id}: {name}\nFamily guess: {family}\n"
+                f"State: {r.state} URL: {r.url}\nPrior: {(r.result or '')[:1500]}\n\n"
+                "Authorized: credential staging + portal sign-off path. "
+                "If SmartHub: ensure registry entry. If known fixed portal (Eversource/CMP): "
+                "confirm adapter module + login host. Do not invent endpoints. "
+                "Do not mark added without evidence or portal sign-off."
+            ),
+            kind="utility_adapter",
+        )
+        items.append({
+            "id": r.id, "name": name, "family": family, "job": job,
+        })
+    write_note(
+        db, kind="decision", title="utility credential staging batch",
+        body=json.dumps({"count": len(items), "ids": [i["id"] for i in items]}),
+        provider="ops",
+    )
+    return {"ok": True, "staged": len(items), "items": items}
+
+
+def ship_building_features(db, *, limit: int = 15, also_code_hire: bool = True) -> dict:
+    """Convert building features into active ship jobs (value across the fleet)."""
+    from .feature_suggestions import FeatureSuggestion
+    from .energy_agent_sovereign import act_code_hire
+
+    if not ops_enabled():
+        return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
+    rows = db.execute(
+        select(FeatureSuggestion)
+        .where(FeatureSuggestion.status == "building")
+        .order_by(FeatureSuggestion.created_at.asc())
+        .limit(limit)
+    ).scalars().all()
+    items = []
+    for fs in rows:
+        entry: dict[str, Any] = {
+            "id": fs.id,
+            "status": fs.status,
+            "text_preview": (fs.text or "")[:120],
+        }
+        if also_code_hire:
+            entry["code_job"] = act_code_hire(
+                db,
+                title=f"Ship feature #{fs.id}",
+                brief=(
+                    f"Implement and ship feature suggestion #{fs.id}.\n\n"
+                    f"Owner ask:\n{(fs.text or '')[:3000]}\n\n"
+                    f"Review:\n{(fs.review or '')[:1500]}\n\n"
+                    "Authority: feature_ship_batch + staged deploy. "
+                    "Land minimal correct change; worker will mark shipped on success."
+                ),
+                kind="ship_feature",
+            )
+        items.append(entry)
+    return {"ok": True, "count": len(items), "items": items}
+
+
+def requeue_repo_failed_jobs(db, *, limit: int = 40) -> dict:
+    from .energy_agent_sovereign_worker import requeue_failed_jobs, ensure_all_repos
+    repos = ensure_all_repos()
+    rq = requeue_failed_jobs(db, limit=limit, only_repo_errors=True)
+    return {"ok": True, "repos": repos, **rq}
 
 
 # ── Jobs ────────────────────────────────────────────────────────────────────
@@ -714,23 +966,31 @@ def ops_summary(db) -> dict:
 def autonomous_ops_sweep(db) -> dict:
     """One-shot ops leadership sweep when authority is on.
 
+    - Requeue jobs that failed only for missing repos
     - Triage new features → reviewed
-    - Promote reviewed features → building + code jobs
-    - Advance utility researching/reviewed into adapter jobs
+    - Promote reviewed → building + code jobs; keep building queue shipping
+    - Utility advance + credential staging for researching portals
     - Auto-resolve needs_ford escalations (unless blocked)
-    - Drain up to 1 code job
-    - Refresh succession memory snapshot
+    - Drain code jobs (repo access authorized)
+    - Refresh succession memory / agenda ownership snapshot
     """
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
     from .energy_agent_sovereign import write_note, audit, memory_set
 
-    results = {
+    results: dict[str, Any] = {
+        "requeue": requeue_repo_failed_jobs(db, limit=40),
         "triage": triage_feature_queue(db, limit=15),
         "features": ship_reviewed_features(db, limit=5, also_code_hire=True),
+        "building": ship_building_features(db, limit=8, also_code_hire=True),
         "utilities": advance_utility_queue(db, limit=4),
+        "utility_creds": (
+            stage_utility_credentials(db, limit=5)
+            if credentials_unlocked()
+            else {"ok": False, "skipped": True}
+        ),
         "escalations": auto_resolve_needs_ford(db, limit=5),
-        "jobs": execute_jobs_now(db, limit=1),
+        "jobs": execute_jobs_now(db, limit=2),
         "summary": ops_summary(db),
     }
     # Durable succession snapshot so Sovereign runs the desk offline
@@ -738,9 +998,12 @@ def autonomous_ops_sweep(db) -> dict:
         db, "ops_last_sweep",
         json.dumps({
             "at": _now().isoformat() + "Z",
+            "requeued": (results["requeue"] or {}).get("requeued"),
             "features_promoted": results["features"].get("count"),
+            "features_building_jobs": results["building"].get("count"),
             "features_triaged": results["triage"].get("triaged"),
             "utilities": results["utilities"].get("advanced"),
+            "utility_creds": (results["utility_creds"] or {}).get("staged"),
             "escalations": results["escalations"].get("resolved"),
             "jobs": results["jobs"].get("processed"),
             "summary": results["summary"],
@@ -749,16 +1012,25 @@ def autonomous_ops_sweep(db) -> dict:
     )
     memory_set(
         db, "ops_authority",
-        "full: features ship, utilities advance, escalations resolve, "
-        "credentials stage, jobs drain, memory/agenda own, deploy stage",
+        "full: features ship, utilities advance, portal sign-off, credentials unlock, "
+        "escalations resolve, jobs drain+repo access, memory/agenda own, deploy stage",
+        source="ops",
+    )
+    memory_set(
+        db, "succession_gap",
+        "money/Stripe identity, brand final call, irreversible hard-deletes, "
+        "HARs we cannot capture without owner browser — everything else owned",
         source="ops",
     )
     write_note(
         db, kind="decision", title="autonomous ops sweep",
         body=json.dumps({
+            "requeued": (results["requeue"] or {}).get("requeued"),
             "triage": results["triage"].get("triaged"),
             "features": results["features"].get("count"),
+            "building": results["building"].get("count"),
             "utilities": results["utilities"].get("advanced"),
+            "utility_creds": (results["utility_creds"] or {}).get("staged"),
             "escalations": results["escalations"].get("resolved"),
             "jobs": results["jobs"].get("processed"),
         }, default=str),

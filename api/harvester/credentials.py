@@ -119,6 +119,128 @@ def save_session_state(db, cred: PortalCredential, storage_state: dict | None) -
     cred.session_state_at = now()
 
 
+def list_all_meta(db, *, limit: int = 100, tenant_id: str | None = None) -> list[dict]:
+    """Fleet credential inventory for Sovereign/ops — metadata only, never secrets."""
+    q = select(PortalCredential).order_by(PortalCredential.updated_at.desc())
+    if tenant_id:
+        q = q.where(PortalCredential.tenant_id == tenant_id)
+    rows = db.execute(q.limit(limit)).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "tenant_id": r.tenant_id,
+            "provider": r.provider,
+            "username": r.username,
+            "username_lc": r.username_lc,
+            "login_host": r.login_host,
+            "cloud_capture_enabled": bool(r.cloud_capture_enabled),
+            "has_secret": bool(r.secret_enc),
+            "has_session": bool(r.session_state_enc),
+            "last_harvest_at": r.last_harvest_at.isoformat() if r.last_harvest_at else None,
+            "last_harvest_ok": r.last_harvest_ok,
+            "harvest_fails": r.harvest_fails or 0,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        for r in rows
+    ]
+
+
+def rearm(
+    db,
+    tenant_id: str,
+    provider: str,
+    username_lc: str | None = None,
+    *,
+    enable: bool | None = True,
+) -> dict:
+    """Clear fail/pause state so the scheduler retries this login ASAP.
+
+    Used by Sovereign portal sign-off + credential unlock. Never returns secrets.
+    """
+    provider = (provider or "").strip().lower()
+    q = select(PortalCredential).where(
+        PortalCredential.tenant_id == tenant_id,
+        PortalCredential.provider == provider,
+    )
+    if username_lc:
+        q = q.where(PortalCredential.username_lc == username_lc.strip().lower())
+    rows = db.execute(q).scalars().all()
+    n = 0
+    for r in rows:
+        r.harvest_fails = 0
+        r.last_harvest_at = None  # due immediately
+        r.updated_at = now()
+        if enable is not None:
+            r.cloud_capture_enabled = bool(enable)
+        # Mirror roster unpause
+        roster = db.execute(
+            select(PortalLoginStatus).where(
+                PortalLoginStatus.tenant_id == tenant_id,
+                PortalLoginStatus.provider == provider,
+                PortalLoginStatus.username_lc == r.username_lc,
+            )
+        ).scalar_one_or_none()
+        if roster:
+            roster.paused = False
+            roster.fails = 0
+            roster.enabled = True
+            roster.reported_at = now()
+        n += 1
+    db.flush()
+    return {"ok": True, "rearmed": n, "tenant_id": tenant_id, "provider": provider}
+
+
+def rearm_all(db, *, tenant_id: str | None = None, only_enabled: bool = False) -> int:
+    """Re-arm every vault credential (or one tenant). Returns count."""
+    q = select(PortalCredential)
+    if tenant_id:
+        q = q.where(PortalCredential.tenant_id == tenant_id)
+    if only_enabled:
+        q = q.where(PortalCredential.cloud_capture_enabled.is_(True))
+    rows = db.execute(q).scalars().all()
+    for r in rows:
+        r.harvest_fails = 0
+        r.last_harvest_at = None
+        r.updated_at = now()
+        roster = db.execute(
+            select(PortalLoginStatus).where(
+                PortalLoginStatus.tenant_id == r.tenant_id,
+                PortalLoginStatus.provider == r.provider,
+                PortalLoginStatus.username_lc == r.username_lc,
+            )
+        ).scalar_one_or_none()
+        if roster:
+            roster.paused = False
+            roster.fails = 0
+            roster.reported_at = now()
+    db.flush()
+    return len(rows)
+
+
+def unpause_portal_login(
+    db,
+    tenant_id: str,
+    provider: str,
+    username_lc: str | None = None,
+) -> dict:
+    """Clear extension-roster pause (PortalLoginStatus) without touching secrets."""
+    provider = (provider or "").strip().lower()
+    q = select(PortalLoginStatus).where(
+        PortalLoginStatus.tenant_id == tenant_id,
+        PortalLoginStatus.provider == provider,
+    )
+    if username_lc:
+        q = q.where(PortalLoginStatus.username_lc == username_lc.strip().lower())
+    rows = db.execute(q).scalars().all()
+    for r in rows:
+        r.paused = False
+        r.fails = 0
+        r.enabled = True
+        r.reported_at = now()
+    db.flush()
+    return {"ok": True, "unpaused": len(rows), "tenant_id": tenant_id, "provider": provider}
+
+
 def record_health(
     db,
     cred: PortalCredential,

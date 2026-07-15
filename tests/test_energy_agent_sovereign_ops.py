@@ -214,3 +214,27 @@ def test_execute_brain_actions_ops_types(db_session):
     assert "agenda" in kinds
     assert "deploy_stage" in kinds
     assert all(o.get("result", {}).get("ok") is not False or o["kind"] == "wait" for o in out if o["kind"] != "wait")
+
+
+def test_worker_ensure_repos_local():
+    from api.energy_agent_sovereign_worker import ensure_all_repos, pick_repo
+    repos = ensure_all_repos()
+    assert "ERROR" not in repos.get("solar-operator", "ERROR")
+    assert "ERROR" not in repos.get("array-operator", "ERROR")
+    name, path = pick_repo("Utility adapter: Eversource portal", "Utility adapter")
+    assert name == "solar-operator"
+    assert path.is_dir()
+
+
+def test_utility_cred_stage_and_ship_building(db_session, monkeypatch):
+    monkeypatch.setenv("SOVEREIGN_CREDENTIALS_UNLOCKED", "1")
+    db, ops, fs_mod, ur_mod, esc_mod, sov = db_session
+    db.add(ur_mod.UtilityRequest(name="Palmetto Electric Cooperative", status="researching", state="SC"))
+    db.add(ur_mod.UtilityRequest(name="Eversource", status="researching", state="MA"))
+    db.add(fs_mod.FeatureSuggestion(text="Building ship me", status="building"))
+    db.commit()
+    staged = ops.stage_utility_credentials(db, limit=5)
+    assert staged["ok"] and staged["staged"] >= 2
+    building = ops.ship_building_features(db, limit=5, also_code_hire=True)
+    assert building["ok"] and building["count"] >= 1
+    assert building["items"][0].get("code_job")

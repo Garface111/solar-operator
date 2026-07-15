@@ -103,8 +103,11 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "act.utility_advance": {"tier": "T2"},
     "act.escalation_resolve": {"tier": "T2"},
     "act.credentials_stage": {"tier": "T3"},
+    "act.credentials_unlock": {"tier": "T3"},  # use/rearm/enable vault (no password dump)
+    "act.portal_signoff": {"tier": "T3"},  # production portal sign-off
     "act.job_queue": {"tier": "T3"},
     "act.code_hire": {"tier": "T3"},
+    "act.repo_access": {"tier": "T3"},  # clone/pull/push product repos for jobs
     "act.deploy_stage": {"tier": "T3"},  # Ford: staged deploy authority (succession)
     "act.deploy": {"tier": "T4", "autonomous": False},  # raw unrestricted deploy still gated
     "act.memory_agenda": {"tier": "T2"},  # memory writes + goal reprioritization
@@ -1074,6 +1077,20 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             from .energy_agent_sovereign_ops import stage_credential_harvest
             res = stage_credential_harvest(
                 db, tenant_id=raw.get("tenant_id"), provider=raw.get("provider"),
+                username_lc=raw.get("username_lc"),
+            )
+        elif atype in ("utility_cred_stage", "stage_utility_credentials"):
+            from .energy_agent_sovereign_ops import stage_utility_credentials
+            res = stage_utility_credentials(db, limit=int(raw.get("limit") or 8))
+        elif atype in ("portal_signoff", "portal_sign_off") and raw.get("tenant_id") and raw.get("provider"):
+            from .energy_agent_sovereign_ops import portal_sign_off
+            res = portal_sign_off(
+                db,
+                tenant_id=str(raw["tenant_id"]),
+                provider=str(raw["provider"]),
+                username_lc=raw.get("username_lc"),
+                utility_id=int(raw["utility_id"]) if raw.get("utility_id") else None,
+                note=raw.get("text") or raw.get("rationale"),
             )
         elif atype in ("ops_sweep", "autonomous_ops"):
             from .energy_agent_sovereign_ops import autonomous_ops_sweep
@@ -1081,6 +1098,9 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
         elif atype in ("jobs_drain", "execute_jobs"):
             from .energy_agent_sovereign_ops import execute_jobs_now
             res = execute_jobs_now(db, limit=int(raw.get("limit") or 2))
+        elif atype in ("jobs_requeue", "requeue_jobs"):
+            from .energy_agent_sovereign_ops import requeue_repo_failed_jobs
+            res = requeue_repo_failed_jobs(db, limit=int(raw.get("limit") or 40))
         elif atype in ("job_cancel",) and raw.get("job_id"):
             from .energy_agent_sovereign_ops import cancel_job
             res = cancel_job(db, str(raw["job_id"]))
@@ -1094,6 +1114,12 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 assignee=raw.get("assignee") or "sovereign",
                 priority_note=raw.get("text") or raw.get("rationale"),
                 status=raw.get("status") or "building",
+            )
+        elif atype in ("feature_ship_building", "ship_building"):
+            from .energy_agent_sovereign_ops import ship_building_features
+            res = ship_building_features(
+                db, limit=int(raw.get("limit") or 15),
+                also_code_hire=raw.get("also_code_hire", True) is not False,
             )
         elif atype in ("deploy_stage", "stage_deploy"):
             from .energy_agent_sovereign_ops import stage_deploy
@@ -1971,12 +1997,25 @@ def sovereign_think(authorization: str | None = Header(default=None)):
     return sovereign_tick(reason="admin_think")
 
 
+@router.post("/admin/sovereign/jobs/requeue")
+def sovereign_jobs_requeue(authorization: str | None = Header(default=None)):
+    """Re-queue jobs that failed for missing repo access (after worker unlock)."""
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        from .energy_agent_sovereign_ops import requeue_repo_failed_jobs
+        out = requeue_repo_failed_jobs(db, limit=50)
+        db.commit()
+        return out
+
+
 @router.post("/admin/sovereign/jobs/drain")
 def sovereign_jobs_drain(authorization: str | None = Header(default=None)):
     """Run queued code jobs now (Claude Code / Grok → push/deploy)."""
     _require_sovereign_or_admin(authorization)
     with SessionLocal() as db:
         from .energy_agent_sovereign_worker import drain_jobs
-        out = drain_jobs(db, limit=2)
+        # Ford: drain more when repo access is unlocked
+        limit = int(os.getenv("SOVEREIGN_JOB_DRAIN_LIMIT", "3") or 3)
+        out = drain_jobs(db, limit=max(1, min(limit, 8)))
         db.commit()
         return out

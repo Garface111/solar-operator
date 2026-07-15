@@ -411,14 +411,21 @@ def desk_ops_summary(authorization: str | None = Header(default=None)):
             select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
             .order_by(EaSovereignGoal.priority.desc())
         ).scalars().all()
+        from .energy_agent_sovereign_ops import (
+            credentials_unlocked, portal_signoff_enabled,
+        )
         return {
             "ok": True,
             "ops_authority": ops_enabled(),
+            "credentials_unlocked": credentials_unlocked(),
+            "portal_signoff": portal_signoff_enabled(),
             "summary": ops_summary(db),
             "features_reviewed": list_features(db, status="reviewed", limit=25),
+            "features_building": list_features(db, status="building", limit=25),
             "utilities_active": list_utilities(db, status="all", limit=25),
             "escalations_needs_ford": list_escalations(db, status="needs_ford", limit=20),
             "jobs_queued": list_jobs(db, status="queued", limit=15),
+            "jobs_failed": list_jobs(db, status="failed", limit=10),
             "credentials": list_credential_inventory(db, limit=40),
             "goals": [
                 {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
@@ -445,6 +452,8 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
             cancel_job, execute_jobs_now, autonomous_ops_sweep, ops_enabled,
             triage_feature_queue, assign_feature, stage_deploy,
             own_memory_write, own_agenda, reprioritize_goals,
+            portal_sign_off, stage_utility_credentials, ship_building_features,
+            requeue_repo_failed_jobs, credentials_unlocked, portal_signoff_enabled,
         )
         from .energy_agent_sovereign import (
             memory_set, apply_agenda, act_code_hire, audit, write_note,
@@ -468,6 +477,11 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
         elif action in ("feature_ship_batch", "ship_reviewed"):
             out = ship_reviewed_features(
                 db, limit=int(p.get("limit") or 10),
+                also_code_hire=p.get("also_code_hire", True) is not False,
+            )
+        elif action in ("feature_ship_building", "ship_building"):
+            out = ship_building_features(
+                db, limit=int(p.get("limit") or 15),
                 also_code_hire=p.get("also_code_hire", True) is not False,
             )
         elif action in ("feature_ship",):
@@ -508,6 +522,18 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
         elif action in ("credentials_stage", "stage_harvest"):
             out = stage_credential_harvest(
                 db, tenant_id=p.get("tenant_id"), provider=p.get("provider"),
+                username_lc=p.get("username_lc"),
+            )
+        elif action in ("utility_cred_stage", "stage_utility_credentials"):
+            out = stage_utility_credentials(db, limit=int(p.get("limit") or 8))
+        elif action in ("portal_signoff", "portal_sign_off"):
+            out = portal_sign_off(
+                db,
+                tenant_id=str(p.get("tenant_id") or ""),
+                provider=str(p.get("provider") or ""),
+                username_lc=p.get("username_lc"),
+                utility_id=int(p["utility_id"]) if p.get("utility_id") else None,
+                note=p.get("note"),
             )
         elif action in ("deploy_stage", "stage_deploy"):
             out = stage_deploy(
@@ -517,7 +543,9 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
                 execute_now=bool(p.get("execute_now")),
             )
         elif action in ("jobs_drain", "execute_jobs"):
-            out = execute_jobs_now(db, limit=int(p.get("limit") or 2))
+            out = execute_jobs_now(db, limit=int(p.get("limit") or 3))
+        elif action in ("jobs_requeue", "requeue_jobs"):
+            out = requeue_repo_failed_jobs(db, limit=int(p.get("limit") or 40))
         elif action in ("job_cancel",):
             out = cancel_job(db, str(p["job_id"]))
         elif action in ("code_hire",):
