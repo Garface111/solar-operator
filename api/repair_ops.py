@@ -709,24 +709,32 @@ def send_checkin(
     if not body:
         raise ValueError("check-in body is empty")
 
-    # Prefer tech email; fall back to owner as forward packet (safe default)
+    # Prefer tech email; fall back to owner only if contact has no email.
+    # Never wrap as "Forward to tech" when contact email == owner email (common
+    # in demos) — that confuses Reply and inbound matching.
     owner_email = getattr(tenant, "contact_email", None)
     go_to = to if _email_ok(to) else (owner_email or "")
     if not _email_ok(go_to):
         raise ValueError("no valid recipient email (contact or owner)")
 
-    # If we only have owner email and draft.to was tech-less, wrap as forward packet
     send_body = body
-    if owner_email and go_to.lower() == owner_email.lower() and contact and contact.email:
+    # Only use forward packaging when sending to the OWNER as a proxy because
+    # the tech has a DIFFERENT email we couldn't deliver to.
+    tech_email = (contact.email or "").strip().lower() if contact else ""
+    if (
+        owner_email
+        and go_to.lower() == owner_email.lower()
+        and tech_email
+        and tech_email != owner_email.lower()
+    ):
         send_body = (
-            f"Forward-ready check-in for {contact.name}"
+            f"Please forward this to {contact.name}"
             f"{' at ' + contact.company if contact.company else ''}"
             f" <{contact.email}>:\n\n---\n\n{body}"
         )
-        subject = f"[Forward to tech] {subject}"
+        subject = f"[Please forward] {subject}"
 
-    # From + Reply-To = Energy Agent mailbox (agent.arrayoperator.com) so the
-    # tech replies to the agent, not the owner's personal inbox.
+    # From + Reply-To = same Energy Agent mailbox (see notify.send_repair_checkin_email)
     ok = notify.send_repair_checkin_email(
         to=go_to,
         subject=subject,
@@ -1187,13 +1195,33 @@ def ingest_inbound_email(
     body: str | None = None,
     ticket_id: int | None = None,
     tenant_id: str | None = None,
+    resend_email_id: str | None = None,
 ) -> dict:
-    """Parse a tech reply email into a RepairCheckIn. Used by Resend inbound webhook."""
+    """Parse a tech reply email into a RepairCheckIn. Used by Resend inbound webhook + poller."""
+    # Dedupe by Resend id (webhook + poller may both see the same message)
+    if resend_email_id:
+        marker = f"resend:{resend_email_id}"
+        already = db.execute(
+            select(RepairCheckIn).where(
+                RepairCheckIn.direction == "inbound",
+                RepairCheckIn.channel == "email",
+                RepairCheckIn.subject.contains(marker),  # type: ignore[attr-defined]
+            )
+        ).scalars().first()
+        if already:
+            return {
+                "ok": True,
+                "matched": True,
+                "deduped": True,
+                "ticket_id": already.ticket_id,
+                "checkin_id": already.id,
+            }
+
     ticket = find_ticket_for_inbound(
         db, ticket_id=ticket_id, from_email=from_email, subject=subject, body=body,
     )
     if ticket is None:
-        return {"ok": False, "matched": False, "reason": "no_ticket"}
+        return {"ok": False, "matched": False, "reason": "no_ticket", "subject": (subject or "")[:120]}
     if tenant_id and ticket.tenant_id != tenant_id:
         return {"ok": False, "matched": False, "reason": "tenant_mismatch"}
 
@@ -1207,15 +1235,23 @@ def ingest_inbound_email(
 
     # Strip quoted reply noise (common "On ... wrote:") lightly
     cleaned = re.split(r"\nOn .+wrote:\n", text, maxsplit=1)[0].strip()
+    cleaned = re.split(r"\nOn .+wrote:\r?\n", cleaned, maxsplit=1)[0].strip()
     cleaned = re.split(r"\n-{2,}\s*Original Message\s*", cleaned, maxsplit=1)[0].strip()
+    # Gmail often uses "On Wed, Jul 15, 2026 at 3:03 PM Energy Agent"
+    cleaned = re.split(r"\nOn \w{3},.+?wrote:\s*\n", cleaned, maxsplit=1, flags=re.I | re.S)[0].strip()
     cleaned = cleaned[:4000]
+
+    subj_out = (subject or "Inbound reply")[:220]
+    if resend_email_id:
+        tag = f" · resend:{resend_email_id}"
+        subj_out = (subj_out[: 300 - len(tag)] + tag)[:300]
 
     row = log_inbound_note(
         db, tenant, ticket, cleaned,
         via="inbound_email",
         channel="email",
         direction="inbound",
-        subject=(subject or "")[:300] or "Inbound reply",
+        subject=subj_out,
         sent_to=from_email,
         sent_ok=True,
     )
@@ -1240,6 +1276,7 @@ def ingest_inbound_email(
                 "inv_name": ticket.inv_name,
                 "status": ticket.status,
                 "preview": cleaned[:400],
+                "resend_email_id": resend_email_id,
             },
             speak_as_mind=speak,
         )
@@ -1255,6 +1292,105 @@ def ingest_inbound_email(
         "status": ticket.status,
         "checkin_id": row.id,
         "speak": speak,
+    }
+
+
+def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = None) -> dict:
+    """Pull recent Resend receiving inbox and ingest any unreplied tech mail.
+
+    Safety net when webhooks are delayed/missed. Safe to call repeatedly (deduped).
+    """
+    import os
+    import urllib.request
+    import json as _json
+
+    key = os.getenv("RESEND_API_KEY", "")
+    if not key:
+        return {"ok": False, "error": "RESEND_API_KEY not set", "processed": 0}
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.resend.com/emails/receiving?limit={int(limit)}",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "User-Agent": "solar-operator-inbound-sync/1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            listing = _json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        log.exception("resend receiving list failed")
+        return {"ok": False, "error": str(exc)[:200], "processed": 0}
+
+    items = listing.get("data") or []
+    results = []
+    for item in items:
+        eid = item.get("id")
+        if not eid:
+            continue
+        # Fetch full body
+        text = ""
+        subject = item.get("subject") or ""
+        from_email = item.get("from") or ""
+        to_emails = item.get("to") or []
+        try:
+            req2 = urllib.request.Request(
+                f"https://api.resend.com/emails/receiving/{eid}",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "User-Agent": "solar-operator-inbound-sync/1.0",
+                },
+            )
+            with urllib.request.urlopen(req2, timeout=20) as resp2:
+                full = _json.loads(resp2.read().decode("utf-8"))
+            data = full.get("data") if isinstance(full.get("data"), dict) else full
+            text = data.get("text") or data.get("text_body") or data.get("body") or ""
+            if not text and data.get("html"):
+                text = re.sub(r"<[^>]+>", " ", str(data.get("html")))
+                text = re.sub(r"\s+", " ", text).strip()
+            subject = data.get("subject") or subject
+            from_email = data.get("from") or from_email
+            to_emails = data.get("to") or to_emails
+        except Exception:
+            log.exception("resend receiving get failed id=%s", eid)
+            continue
+
+        if from_email and "<" in str(from_email):
+            try:
+                from_email = str(from_email).split("<", 1)[1].split(">", 1)[0].strip()
+            except Exception:
+                pass
+
+        result = ingest_inbound_email(
+            db,
+            from_email=from_email,
+            to_emails=to_emails if isinstance(to_emails, list) else [to_emails],
+            subject=subject,
+            body=text,
+            tenant_id=tenant_id,
+            resend_email_id=str(eid),
+        )
+        # If tenant-scoped and no match for this tenant, still count
+        if tenant_id and result.get("matched") and result.get("tenant_id") != tenant_id:
+            continue
+        if tenant_id and not result.get("matched"):
+            # Ticket might belong to another tenant — skip noise
+            tid = extract_ticket_id_from_text(subject, text)
+            if tid:
+                t = db.get(RepairTicket, tid)
+                if t and t.tenant_id != tenant_id:
+                    continue
+        results.append({"email_id": eid, **result})
+
+    matched = sum(1 for r in results if r.get("matched") and not r.get("deduped"))
+    deduped = sum(1 for r in results if r.get("deduped"))
+    return {
+        "ok": True,
+        "scanned": len(items),
+        "processed": len(results),
+        "matched_new": matched,
+        "deduped": deduped,
+        "results": results[:20],
     }
 
 
@@ -2278,6 +2414,18 @@ def inbound_email_ep(body: InboundEmailBody) -> dict:
             body=text,
             ticket_id=body.ticket_id,
         )
+
+
+@router.post("/v1/array-owners/ops/inbound-sync")
+def inbound_sync_ep(authorization: str | None = Header(default=None)) -> dict:
+    """Pull Resend receiving inbox and ingest unreplied tech mail for this tenant.
+
+    Safety net when email.received webhooks are delayed. Called when opening Repairs.
+    """
+    tenant = _tenant(authorization)
+    with SessionLocal() as db:
+        out = sync_inbound_from_resend(db, limit=30, tenant_id=tenant.id)
+        return out
 
 
 @router.get("/v1/array-owners/ops/tickets/{ticket_id}/checkins")

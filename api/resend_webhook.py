@@ -209,7 +209,15 @@ async def resend_webhook(
                     to_emails=to_list,
                     subject=subject,
                     body=body,
+                    resend_email_id=str(email_id) if email_id else None,
                 )
+            logger.info(
+                "resend inbound repair: email_id=%s matched=%s ticket=%s reason=%s",
+                email_id,
+                result.get("matched"),
+                result.get("ticket_id"),
+                result.get("reason"),
+            )
             return {
                 "ok": True,
                 "event": event_type,
