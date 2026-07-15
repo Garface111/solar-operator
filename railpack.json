@@ -1,6 +1,13 @@
 {
   "$schema": "https://schema.railpack.com",
   "deploy": {
-    "aptPackages": ["libreoffice-calc", "fonts-liberation", "fonts-dejavu-core"]
+    "aptPackages": [
+      "libreoffice-calc",
+      "fonts-liberation",
+      "fonts-dejavu-core",
+      "git",
+      "ca-certificates",
+      "openssh-client"
+    ]
   }
 }

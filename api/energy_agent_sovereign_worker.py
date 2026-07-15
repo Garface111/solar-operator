@@ -127,8 +127,30 @@ def _run(
     )
 
 
+def _has_git_bin() -> bool:
+    return bool(shutil.which("git"))
+
+
 def _git(cwd: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    if not _has_git_bin():
+        # Synthesize a failed result — callers that need git should use ensure_repo
+        # (dulwich) or the dulwich helpers below.
+        return subprocess.CompletedProcess(
+            args=["git", *args], returncode=127,
+            stdout="", stderr="git binary not found",
+        )
     return _run(["git", *args], cwd=cwd, timeout=timeout)
+
+
+def _dulwich():
+    """Lazy import dulwich (pure-Python git) — Railway web image may lack git binary."""
+    try:
+        from dulwich import porcelain
+        return porcelain
+    except ImportError as e:
+        raise RuntimeError(
+            "dulwich not installed and git binary missing — cannot access repos"
+        ) from e
 
 
 def _github_token() -> str | None:
@@ -183,20 +205,34 @@ def ensure_repo(name: str) -> Path:
     if dest.exists() and not (dest / ".git").exists():
         shutil.rmtree(dest, ignore_errors=True)
     url = _authed_clone_url(REPO_GITHUB[name])
-    log.info("cloning sovereign repo %s → %s", name, dest)
-    p = _run(
-        ["git", "clone", "--depth", "50", url, str(dest)],
-        timeout=300,
-    )
-    if p.returncode != 0 or not (dest / ".git").exists():
-        raise FileNotFoundError(
-            f"no sovereign repos available: clone {name} failed: "
-            f"{(p.stderr or p.stdout or '')[:300]}"
+    log.info("cloning sovereign repo %s → %s (git_bin=%s)", name, dest, _has_git_bin())
+    if _has_git_bin():
+        p = _run(
+            ["git", "clone", "--depth", "50", url, str(dest)],
+            timeout=300,
         )
-    _configure_remote_auth(dest, name)
-    # local identity
-    _git(dest, "config", "user.email", "sovereign@arrayoperator.com")
-    _git(dest, "config", "user.name", "Sovereign")
+        if p.returncode != 0 or not (dest / ".git").exists():
+            raise FileNotFoundError(
+                f"no sovereign repos available: clone {name} failed: "
+                f"{(p.stderr or p.stdout or '')[:300]}"
+            )
+        _configure_remote_auth(dest, name)
+        _git(dest, "config", "user.email", "sovereign@arrayoperator.com")
+        _git(dest, "config", "user.name", "Sovereign")
+    else:
+        # Pure-Python clone (Railway web image historically had no git binary)
+        porcelain = _dulwich()
+        try:
+            porcelain.clone(url, str(dest), depth=50)
+        except TypeError:
+            porcelain.clone(url, str(dest))
+        except Exception as e:  # noqa: BLE001
+            raise FileNotFoundError(
+                f"no sovereign repos available: dulwich clone {name} failed: {e}"
+            ) from e
+        if not (dest / ".git").exists():
+            raise FileNotFoundError(f"dulwich clone missing .git for {name}")
+        _configure_remote_auth(dest, name)
     return dest
 
 
@@ -271,10 +307,37 @@ def brief_is_denied(title: str, brief: str) -> str | None:
     return None
 
 
+def _status_porcelain(cwd: Path) -> str:
+    if _has_git_bin():
+        return _git(cwd, "status", "--porcelain").stdout or ""
+    porcelain = _dulwich()
+    try:
+        st = porcelain.status(str(cwd))
+    except Exception as e:  # noqa: BLE001
+        log.warning("dulwich status failed: %s", e)
+        return ""
+    lines = []
+    # st is a namedtuple-ish: staged, unstaged, untracked
+    for group, prefix in (
+        (getattr(st, "staged", {}) or {}, "M"),
+        (getattr(st, "unstaged", []) or [], " M"),
+        (getattr(st, "untracked", []) or [], "??"),
+    ):
+        if isinstance(group, dict):
+            for paths in group.values():
+                for p in paths or []:
+                    rel = p.decode() if isinstance(p, bytes) else str(p)
+                    lines.append(f"{prefix} {rel}")
+        else:
+            for p in group:
+                rel = p.decode() if isinstance(p, bytes) else str(p)
+                lines.append(f"{prefix} {rel}")
+    return "\n".join(lines)
+
+
 def _denied_paths_changed(cwd: Path) -> list[str]:
-    st = _git(cwd, "status", "--porcelain")
     bad = []
-    for line in (st.stdout or "").splitlines():
+    for line in _status_porcelain(cwd).splitlines():
         path = line[3:].strip() if len(line) > 3 else line
         for frag in DENY_PATH_FRAGMENTS:
             if frag in path:
@@ -365,8 +428,7 @@ Implement the change now in the current directory ({cwd}).
     except json.JSONDecodeError:
         result_text = out[:4000] or err[:2000]
 
-    dirty = _git(cwd, "status", "--porcelain")
-    changed = bool((dirty.stdout or "").strip())
+    changed = bool(_status_porcelain(cwd).strip())
     return {
         "ok": p.returncode == 0 or changed,  # success if files changed even on nonzero
         "provider": "claude_code",
@@ -470,21 +532,26 @@ def run_grok_code_assist(
 def commit_and_push(cwd: Path, *, title: str, job_id: str) -> dict[str, Any]:
     bad = _denied_paths_changed(cwd)
     if bad:
-        for p in bad:
-            _git(cwd, "checkout", "--", p)
+        if _has_git_bin():
+            for p in bad:
+                _git(cwd, "checkout", "--", p)
         return {"ok": False, "error": "denied paths touched", "paths": bad}
 
-    st = _git(cwd, "status", "--porcelain")
-    if not (st.stdout or "").strip():
+    if not _status_porcelain(cwd).strip():
         return {"ok": False, "error": "no file changes to commit"}
 
+    msg = f"sovereign: {title[:180]}\n\nJob: {job_id}\nAuthorized live ship by Ford 2026-07-15."
+    branch = f"sov/{job_id[:12]}"
+
+    if not _has_git_bin():
+        return _commit_and_push_dulwich(cwd, branch=branch, msg=msg, job_id=job_id)
+
     branch_r = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
-    branch = (branch_r.stdout or "").strip() or f"sov/{job_id[:12]}"
+    branch = (branch_r.stdout or "").strip() or branch
     _git(cwd, "add", "-A")
     # identity for commits in headless env
     _git(cwd, "config", "user.email", "sovereign@arrayoperator.com")
     _git(cwd, "config", "user.name", "Sovereign")
-    msg = f"sovereign: {title[:180]}\n\nJob: {job_id}\nAuthorized live ship by Ford 2026-07-15."
     c = _git(cwd, "commit", "-m", msg)
     if c.returncode != 0 and "nothing to commit" not in ((c.stdout or "") + (c.stderr or "")):
         return {
@@ -525,6 +592,58 @@ def commit_and_push(cwd: Path, *, title: str, job_id: str) -> dict[str, Any]:
     else:
         out["ok"] = False
         out["error"] = "merge to main failed"
+    return out
+
+
+def _commit_and_push_dulwich(
+    cwd: Path, *, branch: str, msg: str, job_id: str,
+) -> dict[str, Any]:
+    """Commit + push via dulwich when system git is absent (Railway web image)."""
+    porcelain = _dulwich()
+    from dulwich.repo import Repo
+
+    repo = Repo(str(cwd))
+    # Stage all changes
+    try:
+        porcelain.add(str(cwd), ".")
+    except Exception:
+        # add each dirty path
+        for line in _status_porcelain(cwd).splitlines():
+            rel = line[3:].strip() if len(line) > 3 else line
+            if rel:
+                try:
+                    porcelain.add(str(cwd), rel)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("dulwich add %s: %s", rel, e)
+
+    author = b"Sovereign <sovereign@arrayoperator.com>"
+    try:
+        porcelain.commit(str(cwd), message=msg.encode(), author=author, committer=author)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"dulwich commit failed: {e}", "backend": "dulwich"}
+
+    out: dict[str, Any] = {
+        "ok": True, "branch": "main", "committed": True, "backend": "dulwich",
+    }
+    if not code_push_enabled():
+        out["pushed"] = False
+        out["note"] = "SOVEREIGN_CODE_PUSH off — committed locally only"
+        return out
+
+    # Push main directly (dulwich path skips feature-branch merge dance)
+    name = cwd.name  # array-operator | solar-operator
+    remote = _authed_clone_url(REPO_GITHUB.get(name) or "")
+    if not remote:
+        return {"ok": False, "error": "no remote url", "backend": "dulwich"}
+    try:
+        porcelain.push(str(cwd), remote, b"refs/heads/main")
+        out["push_main"] = {"ok": True}
+        out["push_branch"] = {"ok": True, "note": "direct main via dulwich"}
+        out["merge_main"] = {"ok": True, "note": "committed on main"}
+    except Exception as e:  # noqa: BLE001
+        out["ok"] = False
+        out["error"] = f"dulwich push failed: {e}"
+        out["push_main"] = {"ok": False, "stderr": str(e)[:400]}
     return out
 
 
@@ -623,17 +742,25 @@ def process_job(db, job) -> dict[str, Any]:
         job.finished_at = _now()
         return {"ok": False, "error": str(e)[:300]}
 
-    # Start from latest main on an isolated branch
+    # Start from latest main (git binary or dulwich)
     _configure_remote_auth(repo_path, repo_name)
-    _git(repo_path, "fetch", "origin", "main", timeout=120)
-    _git(repo_path, "checkout", "main")
-    pull = _git(repo_path, "pull", "--ff-only", "origin", "main", timeout=120)
-    if pull.returncode != 0:
-        # shallow clone recovery
-        _git(repo_path, "fetch", "--depth", "50", "origin", "main", timeout=120)
-        _git(repo_path, "reset", "--hard", "origin/main")
-    branch = f"sov/{job.id[:12]}"
-    _git(repo_path, "checkout", "-B", branch)
+    if _has_git_bin():
+        _git(repo_path, "fetch", "origin", "main", timeout=120)
+        _git(repo_path, "checkout", "main")
+        pull = _git(repo_path, "pull", "--ff-only", "origin", "main", timeout=120)
+        if pull.returncode != 0:
+            _git(repo_path, "fetch", "--depth", "50", "origin", "main", timeout=120)
+            _git(repo_path, "reset", "--hard", "origin/main")
+        branch = f"sov/{job.id[:12]}"
+        _git(repo_path, "checkout", "-B", branch)
+    else:
+        # Dulwich: pull main; work on main working tree (push commits to main)
+        try:
+            porcelain = _dulwich()
+            remote = _authed_clone_url(REPO_GITHUB[repo_name])
+            porcelain.pull(str(repo_path), remote_location=remote)
+        except Exception as e:  # noqa: BLE001
+            log.warning("dulwich pull: %s", e)
 
     # Prefer Claude Code; fall back to Grok file rewrites
     agent_result = run_claude_code(
@@ -643,6 +770,9 @@ def process_job(db, job) -> dict[str, Any]:
         expanded=expanded,
         job_id=job.id,
     )
+    # Detect dirty tree via git or dulwich
+    if not agent_result.get("changed"):
+        agent_result["changed"] = bool(_status_porcelain(repo_path).strip())
     if not agent_result.get("ok") or not agent_result.get("changed"):
         grok = run_grok_code_assist(cwd=repo_path, title=title, brief=brief)
         agent_result = {
@@ -650,7 +780,7 @@ def process_job(db, job) -> dict[str, Any]:
             "provider": "claude_code+grok" if agent_result.get("provider") else "grok",
             "claude": agent_result,
             "grok": grok,
-            "changed": bool(grok.get("written")),
+            "changed": bool(grok.get("written")) or bool(_status_porcelain(repo_path).strip()),
             "result_text": (agent_result.get("result_text") or "")
             + "\n"
             + (grok.get("notes") or ""),
@@ -806,7 +936,12 @@ def requeue_failed_jobs(
     ids = []
     for job in rows:
         err = (job.error or "").lower()
-        if only_repo_errors and "no sovereign repos" not in err and "clone" not in err:
+        if only_repo_errors and not any(
+            x in err for x in (
+                "no sovereign repos", "clone", "git binary", "dulwich",
+                "no such file or directory: 'git'",
+            )
+        ):
             continue
         job.status = "queued"
         job.error = None
