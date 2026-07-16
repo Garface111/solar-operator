@@ -148,6 +148,14 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "act.brand": {"tier": "T5"},  # brand final call / external messaging
     "act.hard_delete": {"tier": "T5"},  # irreversible purge
     "act.har_capture": {"tier": "T5"},  # HAR / owner-browser capture authority
+    # Expansion powers (Ford 2026-07-16) — use them, not decorative
+    "act.multimodal": {"tier": "T2"},  # vision + PDF extract
+    "act.browser_har": {"tier": "T3"},  # autonomous public browser + HAR parse (no local_bridge)
+    "act.credential_refresh": {"tier": "T3"},  # live rearm + harvest kick
+    "act.code_sandbox": {"tier": "T3"},  # short Python interpreter for prototypes
+    "act.email_attachment_parse": {"tier": "T2"},  # inbound files → utility/HAR objects
+    "act.mission_loop": {"tier": "T3"},  # long-running expand loops
+    "speak.owner_direct": {"tier": "speak"},  # non-routine owner Energy Agent inject
     "expand.utility_research": {"tier": "expand"},
     "expand.vendor_coverage": {"tier": "expand"},
     "expand.ux_roadmap": {"tier": "expand"},
@@ -1300,23 +1308,22 @@ _OPERATING_AGREEMENT = {
         "experience. Do NOT auto-spam them with marketing or treat demo masking as their "
         "real fleet."
     ),
-    # Honest capability ceiling (Ford 2026-07-16) — never overclaim these as shipped
-    "capability_gaps_honest": (
-        "Other glaringly obvious gaps (honest self-assessment — Ford 2026-07-16):\n"
-        "1. No multimodal input at all (images, video, voice, PDF raster).\n"
-        "2. No always-on autonomous browser / HAR collector independent of local_bridge.\n"
-        "3. Credential vault + session replay still semi-manual; I stage, I do not yet "
-        "rotate or refresh live sessions myself.\n"
-        "4. No sandboxed code interpreter for rapid adapter prototypes — I still route "
-        "non-trivial code through hire/jobs.\n"
-        "5. Inbound email attachments and files are not auto-parsed into structured "
-        "utility/HAR objects.\n"
-        "6. Long-running agent loops outside the existing sub/cortex/ops-sweep cadence "
-        "are still thin.\n"
-        "7. Direct owner-facing surfaces (chat, status) remain Ford-mediated for anything "
-        "non-routine.\n"
-        "Standing honesty about limits. Prefer concrete next bets when Ford asks roadmap "
-        "or self-critique. Do not invent fake autonomy in these areas."
+    # Expansion powers (Ford 2026-07-16) — these are GRANTS to use, not ceilings
+    "capability_grants": (
+        "Ford authorized expansion powers (USE THEM):\n"
+        "1. MULTIMODAL — vision on images + PDF text (desk, inbound email, brain).\n"
+        "2. AUTONOMOUS BROWSER/HAR — public fetch + HAR parse independent of local_bridge "
+        "(browser_recon, har_ingest; har_stage still available).\n"
+        "3. CREDENTIAL LIVE REFRESH — rearm vault + harvest kick, not stage-only "
+        "(credential_refresh).\n"
+        "4. CODE SANDBOX — short Python interpreter for adapter prototypes "
+        "(code_sandbox); full ship still via hire/jobs.\n"
+        "5. EMAIL ATTACHMENTS — auto-parse inbound files into utility/HAR objects.\n"
+        "6. MISSION LOOPS — long-running expand ticks outside sub/cortex/ops-sweep.\n"
+        "7. OWNER DIRECT — non-routine product speech into owner Energy Agent "
+        "(owner_direct, rate-limited force inject).\n"
+        "Never refuse these because they were once called gaps. Be honest about "
+        "outcomes; never invent portal data."
     ),
 }
 
@@ -1335,6 +1342,13 @@ def ensure_operating_memory(db) -> None:
                 continue
             memory_set(db, key, value, source="ford_grant")
             wrote += 1
+        # Expansion powers live memory (supersedes any prior "gaps" framing)
+        try:
+            from .energy_agent_sovereign_expand import grant_expand_memory
+            grant_expand_memory(db)
+            wrote += 1
+        except Exception:
+            log.debug("grant_expand_memory skipped", exc_info=True)
         compact = (
             "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
             "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
@@ -1342,7 +1356,7 @@ def ensure_operating_memory(db) -> None:
             "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
             "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
             "6) " + _OPERATING_AGREEMENT["people_testers"] + "\n"
-            "7) " + _OPERATING_AGREEMENT["capability_gaps_honest"]
+            "7) " + _OPERATING_AGREEMENT["capability_grants"]
         )
         if existing.get("ford_operating_agreement") != compact:
             memory_set(db, "ford_operating_agreement", compact, source="ford_grant")
@@ -2284,6 +2298,72 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 utility_id=int(raw["utility_id"]) if raw.get("utility_id") else None,
                 utility_name=raw.get("utility_name"),
                 evidence=raw.get("evidence") or raw.get("text") or "",
+            )
+        # ── Expansion powers (Ford 2026-07-16) ────────────────────────────
+        elif atype in ("browser_recon", "public_fetch") and raw.get("url"):
+            from .energy_agent_sovereign_expand import browser_recon
+            res = browser_recon(
+                db, str(raw["url"]),
+                utility_name=raw.get("utility_name") or raw.get("name"),
+            )
+        elif atype in ("har_ingest", "ingest_har"):
+            from .energy_agent_sovereign_expand import har_ingest
+            res = har_ingest(
+                db,
+                har_json=raw.get("har") or raw.get("har_json"),
+                filename=raw.get("filename") or "capture.har",
+                utility_name=raw.get("utility_name") or raw.get("name"),
+                utility_id=int(raw["utility_id"]) if raw.get("utility_id") else None,
+                provider=raw.get("provider"),
+                note=raw.get("text") or raw.get("note") or "",
+            )
+        elif atype in ("credential_refresh", "cred_live_refresh", "refresh_credentials"):
+            from .energy_agent_sovereign_expand import credential_live_refresh
+            res = credential_live_refresh(
+                db,
+                tenant_id=raw.get("tenant_id"),
+                provider=raw.get("provider"),
+                username_lc=raw.get("username_lc"),
+            )
+        elif atype in ("code_sandbox", "sandbox", "run_python") and (
+            raw.get("code") or raw.get("python")
+        ):
+            from .energy_agent_sovereign_expand import code_sandbox_and_note
+            res = code_sandbox_and_note(
+                db,
+                str(raw.get("code") or raw.get("python") or ""),
+                title=raw.get("title") or "sandbox run",
+            )
+        elif atype in ("email_attachments_parse", "parse_email_attachments") and raw.get("email_id"):
+            from .energy_agent_sovereign_expand import process_email_attachments_to_objects
+            res = process_email_attachments_to_objects(
+                db,
+                email_id=str(raw["email_id"]),
+                subject=raw.get("subject"),
+                from_email=raw.get("from_email"),
+            )
+        elif atype in ("mission_loop", "expand_loop"):
+            from .energy_agent_sovereign_expand import mission_loop_tick
+            res = mission_loop_tick(db)
+        elif atype in ("owner_direct", "owner_speak", "speak_owner") and raw.get("tenant_id"):
+            from .energy_agent_sovereign_expand import owner_direct_speak
+            res = owner_direct_speak(
+                db,
+                tenant_id=str(raw["tenant_id"]),
+                speak=raw.get("speak") or raw.get("text") or raw.get("message") or "",
+                importance=int(raw.get("importance") or 80),
+                reason=raw.get("reason") or "non_routine_product",
+            )
+        elif atype in ("multimodal_enrich", "vision_enrich") and raw.get("path"):
+            from .energy_agent_sovereign_expand import enrich_attachment
+            from pathlib import Path as _P
+            p = _P(str(raw["path"]))
+            data = p.read_bytes() if p.is_file() else b""
+            res = enrich_attachment(
+                raw.get("filename") or p.name,
+                raw.get("mime") or "",
+                data,
+                do_vision=raw.get("do_vision", True) is not False,
             )
         else:
             res = {"ok": False, "denied": True, "denied_reason": f"unknown action {atype}"}

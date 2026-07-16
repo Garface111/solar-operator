@@ -1663,6 +1663,15 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=2),
     )
+    # Sovereign expansion mission loop (outside sub/cortex cadence).
+    # HAR recon, cred live refresh, light job drain. Kill: SOVEREIGN_EXPAND=0
+    scheduler.add_job(
+        _run_energy_agent_sovereign_mission_loop,
+        "interval", minutes=2, id="energy_agent_sovereign_mission_loop",
+        replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(minutes=3),
+    )
     # Sovereign code worker: Claude Code / Grok implement queued jobs + push/deploy.
     # Ford authorized live ship 2026-07-15. Kill: SOVEREIGN_CODE_LIVE=0
     scheduler.add_job(
@@ -1919,6 +1928,22 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             note_primary("sub", ok=False, detail={"error": str(exc)[:200]})
         except Exception:
             pass
+
+
+def _run_energy_agent_sovereign_mission_loop() -> None:
+    """Long-running expand missions (HAR recon, cred refresh) every ~2m."""
+    try:
+        from .energy_agent_sovereign_expand import expand_enabled, mission_loop_tick
+        from .db import SessionLocal
+        if not expand_enabled():
+            return
+        with SessionLocal() as db:
+            res = mission_loop_tick(db)
+            db.commit()
+            if res.get("steps"):
+                logger.info("sovereign_mission_loop steps=%s", res.get("steps"))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("energy_agent_sovereign_mission_loop crashed: %s", exc)
 
 
 def _run_energy_agent_sovereign_tick() -> None:

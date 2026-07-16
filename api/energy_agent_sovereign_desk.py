@@ -165,12 +165,31 @@ def ensure_tables(db=None) -> None:
 
 
 def _extract_text(filename: str, mime: str, data: bytes) -> str:
-    """Best-effort text extract for LLM context (no heavy PDF parsers required)."""
+    """Multimodal extract: PDF text, vision on images, HAR structure, plain text.
+
+    Expansion power (Ford 2026-07-16): Sovereign has eyes — not binary placeholders.
+    """
     name = (filename or "file").lower()
     ext = Path(name).suffix
     mime = (mime or "").lower()
     if not data:
         return ""
+    # Prefer expand multimodal pipeline when available
+    try:
+        from .energy_agent_sovereign_expand import enrich_attachment, expand_enabled
+        if expand_enabled():
+            enr = enrich_attachment(filename, mime, data, do_vision=True)
+            text = (enr.get("text") or enr.get("vision") or "").strip()
+            if enr.get("structured") and enr.get("kind") in ("har", "json", "pdf"):
+                extra = json.dumps(enr["structured"], default=str)[:8000]
+                if text:
+                    text = f"{text}\n\n[structured]\n{extra}"
+                else:
+                    text = extra
+            if text:
+                return text[:_MAX_TEXT_EXTRACT]
+    except Exception:
+        log.debug("multimodal enrich failed; falling back", exc_info=True)
     if ext in _TEXT_EXTS or mime.startswith("text/") or mime in (
         "application/json", "application/javascript", "application/xml",
         "application/x-yaml", "application/toml",
@@ -182,7 +201,13 @@ def _extract_text(filename: str, mime: str, data: bytes) -> str:
                 continue
         return ""
     if ext == ".pdf" or "pdf" in mime:
-        # Lightweight: try raw text streams (not full PDF parse)
+        try:
+            from .energy_agent_sovereign_expand import extract_pdf_text
+            text = extract_pdf_text(data)
+            if text:
+                return text[:_MAX_TEXT_EXTRACT]
+        except Exception:
+            pass
         try:
             raw = data.decode("latin-1", errors="ignore")
             chunks = re.findall(r"\(([^)]{4,200})\)", raw)
@@ -1783,11 +1808,39 @@ def ingest_sovereign_inbound(
                 return {"ok": True, "matched": True, "deduped": True, "message_id": m.get("id")}
 
     text = _strip_email_reply(body or "") or (subject or "").strip()
-    if not text:
+
+    # Expansion: auto-parse inbound attachments → utility/HAR objects + desk context
+    attach_ctx = ""
+    attach_parse: dict | None = None
+    if resend_email_id:
+        try:
+            from .energy_agent_sovereign_expand import process_email_attachments_to_objects
+            attach_parse = process_email_attachments_to_objects(
+                db,
+                email_id=str(resend_email_id),
+                subject=subject,
+                from_email=email,
+            )
+            objs = (attach_parse or {}).get("objects") or []
+            if objs:
+                parts = ["## Auto-parsed email attachments"]
+                for o in objs[:8]:
+                    parts.append(
+                        f"### {o.get('filename')} ({o.get('kind')})\n"
+                        f"{(o.get('text_preview') or '')[:3000]}\n"
+                        f"structured: {json.dumps(o.get('structured') or {}, default=str)[:2000]}"
+                    )
+                attach_ctx = "\n\n".join(parts)[:20000]
+        except Exception:
+            log.exception("sovereign inbound attachment parse failed")
+
+    if not text and not attach_ctx:
         return {"ok": False, "matched": True, "reason": "empty_body"}
 
     # Prefix so desk history shows channel; model still gets the text
-    turn_text = text
+    turn_text = text or "(attachments only — see parse below)"
+    if attach_ctx:
+        turn_text = f"{turn_text}\n\n{attach_ctx}"
     try:
         out = desk_turn(db, t, turn_text)
     except Exception as e:  # noqa: BLE001
