@@ -1150,6 +1150,45 @@ export async function downloadClientReport(
   URL.revokeObjectURL(link.href);
 }
 
+/** Download a client's RAW GMP generation workbook for a quarter — a Monthly
+ *  Summary (projects × the quarter's 3 months) plus per-project daily interval
+ *  detail. GMP data only. `quarter` like 'Q1-2026'; omit for the latest. */
+export async function downloadGmpGeneration(
+  clientId: number,
+  clientName: string,
+  quarter?: string,
+): Promise<void> {
+  const token = getSession();
+  const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
+  const res = await fetchWithTimeout(
+    `/v1/account/clients/${clientId}/gmp-generation.xlsx${qs}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (res.status === 401) {
+    notifyUnauthorizedOnce();
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the GMP generation export (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  const safeName = clientName.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  const label = quarter ? quarter.replace(/[^A-Za-z0-9]/g, "-") : "latest";
+  link.download = `${safeName}-GMP-${label}-generation.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
 /** Stream the all-time aggregated fleet report (Excel or PDF) and trigger a
  *  browser download. Session-authed (Bearer token); the server reads the DB
  *  live so the file always reflects the latest absorbed month. */

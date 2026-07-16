@@ -29,6 +29,7 @@ import {
   refreshCapture,
   sendClientReportToMe,
   downloadClientReport,
+  downloadGmpGeneration,
   mergeClientInto,
   recentReportQuarters,
 } from "../lib/api";
@@ -1091,6 +1092,7 @@ function ExpandedPanel({
   const toast = useToast();
   const [sendingToMe, setSendingToMe] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingGmp, setDownloadingGmp] = useState(false);
   const [reportQuarter, setReportQuarter] = useState(REPORT_QUARTERS[0]?.value ?? "");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -1151,6 +1153,18 @@ function ExpandedPanel({
       );
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function handleDownloadGmp() {
+    if (downloadingGmp) return;
+    setDownloadingGmp(true);
+    try {
+      await downloadGmpGeneration(client.id, client.name, reportQuarter || undefined);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't download GMP generation");
+    } finally {
+      setDownloadingGmp(false);
     }
   }
 
@@ -1330,6 +1344,15 @@ function ExpandedPanel({
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
               >
                 {downloading ? <><Spinner /> Downloading…</> : "Download .xlsx"}
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadGmp}
+                disabled={downloadingGmp}
+                title="Raw GMP generation for the selected quarter — monthly per project, plus daily interval detail where available."
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+              >
+                {downloadingGmp ? <><Spinner /> Downloading…</> : "Download GMP generation .xlsx"}
               </button>
               <Link
                 to={`/verify/${client.id}`}

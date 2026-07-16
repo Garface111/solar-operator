@@ -3622,6 +3622,52 @@ def download_client_report(
     )
 
 
+@router.get("/v1/account/clients/{client_id}/gmp-generation.xlsx")
+def download_gmp_generation(
+    client_id: int,
+    quarter: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Raw GMP generation workbook for a client + quarter (Ford 2026-07-16):
+    a Monthly Summary (projects × the quarter's 3 months, GMP interval meter or
+    the GMP bill where no interval exists) plus a per-project daily-interval
+    detail sheet where we have the meter feed. GMP data only. `quarter` like
+    'Q1-2026'; omit for the latest complete quarter."""
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        c = db.get(Client, client_id)
+        if not c or c.tenant_id != t.id:
+            raise HTTPException(404, "Client not found")
+        client_name = c.name
+
+    if quarter:
+        try:
+            qy, qq = _parse_quarter_str(quarter)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    else:
+        from .writers.gmcs_writer import default_reporting_reference_date, _rolling_quarters
+        qy, qq = _rolling_quarters(default_reporting_reference_date(datetime.utcnow().date()))[-1]
+
+    from .writers.gmp_raw_writer import build_gmp_generation_workbook
+    tmpdir = tempfile.mkdtemp(prefix=f"so-gmp-c{client_id}-")
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", client_name)
+    fname = f"{safe_name}-GMP-Q{qq}-{qy}-generation.xlsx"
+    out_path = Path(tmpdir) / fname
+    try:
+        build_gmp_generation_workbook(client_id, out_path, year=qy, quarter=qq)
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.exception("download_gmp_generation failed for client_id=%s", client_id)
+        raise HTTPException(500, f"Couldn't build the GMP generation export: {e}")
+    return FileResponse(
+        str(out_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=fname,
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
+
+
 # ─── Quarterly readiness ────────────────────────────────────────────────
 
 @router.get("/v1/account/clients/{client_id}/quarterly_progress")
