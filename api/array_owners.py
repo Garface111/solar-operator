@@ -70,10 +70,10 @@ def _is_non_inverter_device(name, model) -> bool:
 def _safe_create_array(db, tenant_id, name, **kw):
     """Create an Array, surviving a concurrent capture that inserted the same
     (tenant_id, name) first. The extension fires several capture POSTs per login,
-    so two requests can both miss an existing array and race the INSERT —
-    uq_array_per_tenant then 500s the loser. Roll back ONLY the failed insert (a
-    SAVEPOINT, not the whole capture) and reuse/revive the row that won.
-    Returns (array, created)."""
+    so two requests can both miss an existing array and race the INSERT — the
+    partial unique index uq_array_per_tenant_live then 500s the loser. Roll back
+    ONLY the failed insert (a SAVEPOINT, not the whole capture) and reuse the
+    LIVE row that won. Returns (array, created)."""
     arr = Array(tenant_id=tenant_id, name=name, **kw)
     try:
         with db.begin_nested():          # SAVEPOINT around just this insert
@@ -85,9 +85,18 @@ def _safe_create_array(db, tenant_id, name, **kw):
             db.expunge(arr)              # drop the rolled-back instance, if still attached
         except Exception:
             pass
+        # The index only spans LIVE rows, so the winner of the race is a live
+        # array — grab it. (Fall back to any same-name row and revive it.)
         won = db.execute(
-            select(Array).where(Array.tenant_id == tenant_id, Array.name == name)
+            select(Array).where(
+                Array.tenant_id == tenant_id, Array.name == name,
+                Array.deleted_at.is_(None),
+            )
         ).scalars().first()
+        if won is None:
+            won = db.execute(
+                select(Array).where(Array.tenant_id == tenant_id, Array.name == name)
+            ).scalars().first()
         if won is None:
             raise
         if won.deleted_at is not None:
@@ -4044,13 +4053,19 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
 
     with SessionLocal() as db:
         # Match by name across ALL arrays, including soft-deleted ones:
-        # uq_array_per_tenant spans (tenant_id, name) with no deleted_at, so a
-        # soft-deleted array still owns its name. Filtering deleted rows out here
-        # made us INSERT a colliding name → UniqueViolation on every retry.
+        # Match by name across ALL arrays (a soft-deleted twin can be revived on
+        # reuse). Names are unique only among LIVE rows now (partial index
+        # uq_array_per_tenant_live), so a live + soft-deleted array can share a
+        # name — always prefer the LIVE one so it isn't shadowed by a ghost.
         existing = db.execute(
             select(Array).where(Array.tenant_id == tenant.id)
         ).scalars().all()
-        by_name = {a.name.strip().lower(): a for a in existing}
+        by_name = {}
+        for _a in existing:
+            _k = _a.name.strip().lower()
+            if _k not in by_name or (by_name[_k].deleted_at is not None
+                                     and _a.deleted_at is None):
+                by_name[_k] = _a
         by_id = {a.id: a for a in existing}
 
         # STABLE SITE ANCHOR (fixes "inverters in the wrong array after a rename").
@@ -4748,10 +4763,18 @@ def _persist_meter_accounts(
     # to INSERT a colliding name → psycopg2 UniqueViolation → 500 ("couldn't grab
     # your GMP account"). Include them and revive on reuse (mirrors the Fronius
     # inverter-capture path).
+    # Names are unique only among LIVE rows now (partial index), so a live +
+    # soft-deleted array can share a name — always prefer the LIVE one so it
+    # isn't shadowed by a ghost.
     existing = db.execute(
         select(Array).where(Array.tenant_id == tenant.id)
     ).scalars().all()
-    by_name = {a.name.strip().lower(): a for a in existing}
+    by_name = {}
+    for _a in existing:
+        _k = _a.name.strip().lower()
+        if _k not in by_name or (by_name[_k].deleted_at is not None
+                                 and _a.deleted_at is None):
+            by_name[_k] = _a
 
     # Match by the array's LINKED utility account number too — far more stable
     # than the display name. NEPOOL arrays are created by the bill-capture path

@@ -1520,13 +1520,16 @@ def rename_array(db, tenant: Tenant, array_id: int, name: str) -> Array:
         raise FleetError("Name cannot be empty")
     if new_name == arr.name:
         return arr                                  # no-op
+    # Only a LIVE array reserves a name — a soft-deleted one no longer blocks
+    # renaming to that name (uniqueness is a partial index over live rows).
     clash = db.execute(
         select(Array).where(
             Array.tenant_id == tenant.id,
             Array.name == new_name,
             Array.id != arr.id,
+            Array.deleted_at.is_(None),
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
     if clash is not None:
         raise FleetError("Another array already has that name")
     arr.name = new_name
@@ -1574,29 +1577,43 @@ def create_array(db, tenant: Tenant, name: str) -> Array:
     """Create a new owner-defined array (empty group to drag inverters into).
     No utility/connection — purely an owner grouping that inverters reference.
 
-    Array names are unique per tenant (uq_array_per_tenant), so if the requested
-    name collides we auto-suffix (" 2", " 3", …) rather than 500. Also revives a
-    soft-deleted array of the same name instead of colliding with its row."""
+    Array names are unique per tenant among LIVE rows (partial index
+    uq_array_per_tenant_live), so if a LIVE array already has the requested name
+    we auto-suffix (" 2", " 3", …) rather than 500. A soft-deleted array of the
+    same name is revived (only when no live one exists) instead of orphaned."""
     nm = (name or "").strip() or "New array"
 
-    # Revive a soft-deleted same-name array if one exists (the unique constraint
-    # spans deleted rows too, so we can't just insert a duplicate).
-    existing = db.execute(
-        select(Array).where(Array.tenant_id == tenant.id, Array.name == nm)
-    ).scalar_one_or_none()
-    if existing is not None:
-        if existing.deleted_at is not None:
-            existing.deleted_at = None
+    # A live array owns the name → keep the new group distinct by auto-suffixing.
+    live = db.execute(
+        select(Array).where(
+            Array.tenant_id == tenant.id, Array.name == nm,
+            Array.deleted_at.is_(None),
+        )
+    ).scalars().first()
+    if live is None:
+        # No live array by this name — revive a soft-deleted same-name array if
+        # one exists (preserves history) rather than spawning a duplicate row.
+        ghost = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.name == nm,
+                Array.deleted_at.is_not(None),
+            ).limit(1)
+        ).scalars().first()
+        if ghost is not None:
+            ghost.deleted_at = None
             db.commit()
-            db.refresh(existing)
-            return existing
-        # live array already has this name — auto-suffix to keep it unique
+            db.refresh(ghost)
+            return ghost
+    else:
         base = nm
         for i in range(2, 100):
             cand = f"{base} {i}"
             clash = db.execute(
-                select(Array).where(Array.tenant_id == tenant.id, Array.name == cand)
-            ).scalar_one_or_none()
+                select(Array).where(
+                    Array.tenant_id == tenant.id, Array.name == cand,
+                    Array.deleted_at.is_(None),
+                )
+            ).scalars().first()
             if clash is None:
                 nm = cand
                 break

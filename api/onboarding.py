@@ -727,9 +727,13 @@ def add_clients(clients: list[ClientInput], token: str = Query(...)):
                 aname = ai.name.strip()
                 if not aname:
                     continue
+                # Only a LIVE array reserves a name (partial unique index).
                 arr_dupe = db.execute(
-                    select(Array).where(Array.tenant_id == t.id, Array.name == aname)
-                ).scalar_one_or_none()
+                    select(Array).where(
+                        Array.tenant_id == t.id, Array.name == aname,
+                        Array.deleted_at.is_(None),
+                    )
+                ).scalars().first()
                 if arr_dupe:
                     raise HTTPException(409, f"An array named '{aname}' already exists")
                 db.add(Array(

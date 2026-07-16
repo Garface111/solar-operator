@@ -131,6 +131,25 @@ def main():
             conn.execute(text("ALTER TABLE arrays ADD COLUMN reminder TEXT"))
             print("  + arrays.reminder")
 
+        # 2026-07-16: array-name uniqueness must IGNORE soft-deleted rows.
+        # The old uq_array_per_tenant UNIQUE(tenant_id, name) constraint spanned
+        # deleted rows, so a soft-deleted array still RESERVED its name — an
+        # operator who deleted a "sibling" array (e.g. a SolarEdge-captured twin)
+        # could no longer rename a live array to that clean name (409 / 500
+        # UniqueViolation). Swap the constraint for a PARTIAL unique index scoped
+        # to live rows. Idempotent + safe on existing data: the old constraint
+        # already guaranteed live rows are unique among themselves, so building
+        # the partial index cannot violate. (Postgres only — SQLite dev/test DBs
+        # get the partial index from Base.metadata via create_all.)
+        if engine.dialect.name == "postgresql":
+            conn.execute(text(
+                "ALTER TABLE arrays DROP CONSTRAINT IF EXISTS uq_array_per_tenant"))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_array_per_tenant_live "
+                "ON arrays (tenant_id, name) WHERE deleted_at IS NULL"))
+            print("  ↪ arrays: uq_array_per_tenant → partial uq_array_per_tenant_live "
+                  "(live rows only)")
+
         # 2026-06-03 Phase-1 expansion: Client layer
         # Idempotency: create_all() above already created `clients` table
         # via Base.metadata, so we only need to (a) add arrays.client_id and

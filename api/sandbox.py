@@ -414,10 +414,11 @@ def sandbox_account_reassign(
             cur_array.client_id = target_client.id
             new_array_id = cur_array.id
         else:
-            # Create new holder array under target client. The arrays table
-            # has UNIQUE (tenant_id, name) — including soft-deleted rows — so
-            # we de-dupe the name against any existing array with the same
-            # base, suffixing " (2)", " (3)", etc. until we find a free slot.
+            # Create new holder array under target client. Array names are
+            # unique per tenant among LIVE rows (partial index), so we de-dupe
+            # the name against any LIVE array with the same base, suffixing
+            # " (2)", " (3)", etc. until we find a free slot. A soft-deleted
+            # array no longer reserves its name.
             base_name = acc.nickname or f"{acc.provider.upper()} {acc.account_number}"
             candidate = base_name
             attempt = 2
@@ -425,8 +426,9 @@ def sandbox_account_reassign(
                 select(Array).where(
                     Array.tenant_id == tenant.id,
                     Array.name == candidate,
+                    Array.deleted_at.is_(None),
                 )
-            ).scalar_one_or_none() is not None:
+            ).scalars().first() is not None:
                 candidate = f"{base_name} ({attempt})"
                 attempt += 1
                 if attempt > 50:

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, date
 from sqlalchemy import (
     String, Integer, Float, Boolean, DateTime, Date, ForeignKey, JSON, Text,
-    LargeBinary, UniqueConstraint, Index
+    LargeBinary, UniqueConstraint, Index, text
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -619,7 +619,17 @@ class Array(Base):
     client: Mapped["Client | None"] = relationship(back_populates="arrays")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="array")
 
-    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_array_per_tenant"),)
+    # Array names are unique per tenant — but ONLY among LIVE (non-soft-deleted)
+    # rows. A partial unique index (not a plain UNIQUE constraint) lets an
+    # operator reuse the name of an array they deleted: deleting a "sibling"
+    # array (e.g. a SolarEdge-captured twin) must NOT leave a ghost that blocks
+    # renaming a live array to that clean name. Migration swaps the old
+    # uq_array_per_tenant constraint for this index; see api/migrate.py.
+    __table_args__ = (
+        Index("uq_array_per_tenant_live", "tenant_id", "name", unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+    )
 
 
 class UtilityAccount(Base):

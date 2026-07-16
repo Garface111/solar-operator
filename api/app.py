@@ -1092,16 +1092,36 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             if owner.is_placeholder:
                                 owner.is_placeholder = False
                             continue
-                        # Resurrect a soft-deleted Array with the same
-                        # (tenant_id, name) — the uq_array_per_tenant
-                        # unique constraint doesn't exclude deleted_at.
+                        # A LIVE array may already own this exact name (names are
+                        # unique among live rows). Link to it rather than colliding
+                        # on INSERT / reviving a ghost into a duplicate.
+                        live_twin = db.execute(
+                            select(Array).where(
+                                Array.tenant_id == tenant.id,
+                                Array.name == arr_name,
+                                Array.deleted_at.is_(None),
+                            ).limit(1)
+                        ).scalars().first()
+                        if live_twin is not None:
+                            acct.array_id = live_twin.id
+                            ctx.add("array_linked",
+                                    decision=f"linked account {acct_no} to existing array "
+                                             f"{live_twin.name!r} (id {live_twin.id})")
+                            if not acct.captured_client_name:
+                                acct.captured_client_name = (owner.name or "")[:200]
+                            if owner.is_placeholder:
+                                owner.is_placeholder = False
+                            continue
+                        # Resurrect a soft-deleted Array with the same name
+                        # (revive rather than orphan it). Safe now that no live
+                        # array owns the name.
                         ghost_arr = db.execute(
                             select(Array).where(
                                 Array.tenant_id == tenant.id,
                                 Array.name == arr_name,
                                 Array.deleted_at.is_not(None),
                             ).limit(1)
-                        ).scalar_one_or_none()
+                        ).scalars().first()
                         if ghost_arr is not None:
                             ghost_arr.deleted_at = None
                             ghost_arr.client_id = owner.id
@@ -1336,13 +1356,31 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 if not acct.captured_client_name:
                                     acct.captured_client_name = (target.name or "")[:200]
                                 continue
+                            # A LIVE array may already own this exact name (names
+                            # are unique among live rows). Link to it rather than
+                            # colliding on INSERT / reviving a ghost into a dup.
+                            live_twin = db.execute(
+                                select(Array).where(
+                                    Array.tenant_id == tenant.id,
+                                    Array.name == arr_name,
+                                    Array.deleted_at.is_(None),
+                                ).limit(1)
+                            ).scalars().first()
+                            if live_twin is not None:
+                                acct.array_id = live_twin.id
+                                ctx.add("array_linked",
+                                        decision=f"linked account {acct_no} to existing array "
+                                                 f"{live_twin.name!r} (id {live_twin.id})")
+                                if not acct.captured_client_name:
+                                    acct.captured_client_name = (target.name or "")[:200]
+                                continue
                             ghost_arr = db.execute(
                                 select(Array).where(
                                     Array.tenant_id == tenant.id,
                                     Array.name == arr_name,
                                     Array.deleted_at.is_not(None),
                                 ).limit(1)
-                            ).scalar_one_or_none()
+                            ).scalars().first()
                             if ghost_arr is not None:
                                 ghost_arr.deleted_at = None
                                 ghost_arr.client_id = target.id

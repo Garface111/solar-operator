@@ -3888,8 +3888,14 @@ def create_array(client_id: int, body: ArrayCreate,
 
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
+        # Only a LIVE array reserves a name — a soft-deleted one must not block
+        # reuse (uniqueness is now a partial index over deleted_at IS NULL).
         existing = db.execute(
-            select(Array).where(Array.tenant_id == t.id, Array.name == name)
+            select(Array).where(
+                Array.tenant_id == t.id,
+                Array.name == name,
+                Array.deleted_at.is_(None),
+            )
         ).scalar_one_or_none()
         if existing:
             raise HTTPException(409, "An array with that name already exists")
@@ -3940,11 +3946,15 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
         if body.name is not None:
             new_name = body.name.strip()
             if new_name and new_name != a.name:
+                # Clash only against LIVE arrays — a soft-deleted array (e.g. a
+                # deleted SolarEdge "sibling") no longer reserves its name, so
+                # the operator can rename a live array to that clean name.
                 clash = db.execute(
                     select(Array).where(
                         Array.tenant_id == t.id,
                         Array.name == new_name,
                         Array.id != a.id,
+                        Array.deleted_at.is_(None),
                     )
                 ).scalar_one_or_none()
                 if clash:
