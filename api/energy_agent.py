@@ -153,6 +153,10 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   Call topic=surface for whole-product layout; topic=surface_<tab> for that page;
   topic=capture before Auto-refresh; topic=status when Solar.web/peer disagree.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
+  CRITICAL: Attention = 14-day peer health PLUS live dark/low overlays (Spreadsheet
+  "NEED ATTENTION"). Never call a site healthy if tools or UI context flag live issues.
+  For "how is my fleet?" ALWAYS call investigate_attention (or fleet_overview with
+  needs_attention_only) and report TOTALS + every attention array — not one example.
 - repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
 
 CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
@@ -1025,9 +1029,11 @@ TOOL_DEFS = [
         "function": {
             "name": "investigate_attention",
             "description": (
-                "Why arrays need attention — focused investigation. Prefer this when the "
-                "user asks 'why do 2 SMA arrays need attention' or similar. Returns ranked "
-                "problem arrays with plain-English why + problem inverters + next step."
+                "Why arrays need attention — REQUIRED for 'how is my fleet' / morning "
+                "health questions. Matches Spreadsheet NEED ATTENTION: 14-day peer health "
+                "PLUS live dark/low overlays (status may still say ok). Returns TOTALS + "
+                "every problem array with why, live_anomalies by name, and next step. "
+                "Never summarize only one underperformer when more units are flagged."
             ),
             "parameters": {
                 "type": "object",
@@ -1042,7 +1048,7 @@ TOOL_DEFS = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max problem arrays to return (default 12)",
+                        "description": "Max problem arrays to return (default 40)",
                     },
                 },
             },
@@ -1821,6 +1827,121 @@ def _slim_inverter(inv: dict) -> dict:
     }
 
 
+# Live overlay thresholds — must match public/fleet-store.js liveVerdict
+# (Spreadsheet "NEED ATTENTION" counts 14-day health AND live dark/low).
+_LIVE_FLOOR_W = 25.0
+_LOW_PEER_GAP = 0.15
+_LIVE_PEER_MED_MIN = 0.30
+
+
+def _live_floor_w(inv: dict) -> float:
+    np = inv.get("nameplate_kw")
+    if np:
+        try:
+            return max(_LIVE_FLOOR_W, float(np) * 1000.0 * 0.01)
+        except (TypeError, ValueError):
+            pass
+    return _LIVE_FLOOR_W
+
+
+def _is_producing_now(inv: dict) -> bool:
+    p = inv.get("current_power_w")
+    return p is not None and float(p) > _live_floor_w(inv)
+
+
+def _pct_of_max_live(inv: dict) -> float | None:
+    np = inv.get("nameplate_kw")
+    p = inv.get("current_power_w")
+    if p is None or not np:
+        return None
+    try:
+        return float(p) / (float(np) * 1000.0)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _same_peer_inv(a: dict, b: dict) -> bool:
+    if a is b:
+        return True
+    for key in ("inverter_id", "id", "sn", "serial"):
+        av, bv = a.get(key), b.get(key)
+        if av is not None and av == bv:
+            return True
+    return False
+
+
+def _ui_live_verdict(inv: dict, peers: list[dict], is_daylight: bool | None) -> str:
+    """Mirror FleetStore.liveVerdict — what Spreadsheet / cards count as attention.
+
+    Returns: ok | dark | low | stale
+    Deliberately separate from 14-day inv.status (peer_analysis).
+    """
+    if inv.get("no_energy_register"):
+        return "ok"
+    if is_daylight is False:
+        return "ok"
+    peers = peers or []
+    if _is_producing_now(inv):
+        lit = [p for p in peers if not _same_peer_inv(p, inv) and _is_producing_now(p)]
+        if len(lit) < 2:
+            return "ok"
+        my = _pct_of_max_live(inv)
+        if my is None:
+            return "ok"
+        peer_pcts = sorted(
+            v for v in (_pct_of_max_live(p) for p in lit) if v is not None
+        )
+        if len(peer_pcts) < 2:
+            return "ok"
+        med = peer_pcts[len(peer_pcts) // 2]
+        if med < _LIVE_PEER_MED_MIN:
+            return "ok"
+        if my < med * (1.0 - _LOW_PEER_GAP):
+            return "low"
+        return "ok"
+    lit_n = sum(
+        1 for p in peers if not _same_peer_inv(p, inv) and _is_producing_now(p)
+    )
+    if lit_n >= 2:
+        return "dark" if inv.get("current_power_w") is not None else "stale"
+    # Solo: fresh hard zero from a proven producer
+    if inv.get("current_power_w") is not None:
+        daily = inv.get("daily") or []
+        try:
+            peak = max((float(d.get("kwh") or 0) for d in daily), default=0.0)
+        except (TypeError, ValueError):
+            peak = 0.0
+        np = inv.get("nameplate_kw")
+        if np and peak >= float(np) * 4.6 * 0.25:
+            return "dark"
+    return "ok"
+
+
+def _column_live_anomalies(col: dict) -> list[dict]:
+    """Per-inverter live dark/low flags for one array column (UI parity)."""
+    invs = list(col.get("inverters") or [])
+    is_day = col.get("is_daylight")
+    out: list[dict] = []
+    for inv in invs:
+        st = inv.get("status") or "ok"
+        # Live overlay only applies when 14-day health still says ok (UI rule)
+        if st not in ("ok", None):
+            continue
+        lv = _ui_live_verdict(inv, invs, is_day)
+        if lv in ("dark", "low"):
+            out.append({
+                "name": inv.get("name") or inv.get("sn") or "inverter",
+                "sn": inv.get("sn") or inv.get("serial"),
+                "status_14d": st,
+                "live": lv,
+                "current_power_w": inv.get("current_power_w"),
+                "nameplate_kw": inv.get("nameplate_kw"),
+                "pct_of_max": _pct_of_max_live(inv),
+                "diagnosis": inv.get("diagnosis"),
+            })
+    return out
+
+
 def _explain_array_attention(col: dict) -> str:
     """Plain-English why this array is flagged (for the agent to speak)."""
     alert = col.get("alert") or {}
@@ -1834,7 +1955,7 @@ def _explain_array_attention(col: dict) -> str:
         bits.append(headline or f"worst inverter status: {status}")
         n = alert.get("count") or 0
         if n:
-            bits.append(f"{n} inverter(s) flagged")
+            bits.append(f"{n} inverter(s) flagged on 14-day health")
     src_state = (src.get("state") or "").lower()
     if src_state in ("stale", "dark", "offline"):
         age = src.get("age_hours")
@@ -1849,17 +1970,33 @@ def _explain_array_attention(col: dict) -> str:
         bits.append(f"last Array Operator sync ~{float(sync['age_min']) / 60:.0f}h ago")
     if col.get("produced_today_kwh") in (None, 0) and col.get("is_daylight"):
         bits.append("no measured production today while sun is up")
+    # Live overlays (what Spreadsheet badges as NEED ATTENTION while 14-day is ok)
+    live = _column_live_anomalies(col)
+    n_dark = sum(1 for x in live if x.get("live") == "dark")
+    n_low = sum(1 for x in live if x.get("live") == "low")
+    if n_dark:
+        bits.append(f"{n_dark} inverter(s) dark right now while peers produce")
+    if n_low:
+        bits.append(f"{n_low} inverter(s) low vs peers right now")
+    for item in live[:6]:
+        label = item.get("name") or "inverter"
+        if item.get("live") == "dark":
+            bits.append(f"{label}: dark now (live)")
+        elif item.get("live") == "low":
+            pct = item.get("pct_of_max")
+            pct_s = f" (~{pct * 100:.0f}% of nameplate)" if isinstance(pct, (int, float)) else ""
+            bits.append(f"{label}: low vs peers now{pct_s}")
     bad = [
         inv for inv in (col.get("inverters") or [])
-        if (inv.get("status") or "ok") not in ("ok",) or inv.get("no_energy_register")
+        if (inv.get("status") or "ok") not in ("ok", "monitoring") or inv.get("no_energy_register")
     ]
-    for inv in bad[:4]:
+    for inv in bad[:6]:
         label = inv.get("name") or inv.get("sn") or "inverter"
         if inv.get("no_energy_register"):
             bits.append(f"{label}: live power but no energy register / history")
         elif inv.get("diagnosis"):
             bits.append(f"{label}: {inv.get('diagnosis')}")
-        elif inv.get("status") and inv.get("status") != "ok":
+        elif inv.get("status") and inv.get("status") not in ("ok", "monitoring"):
             bits.append(f"{label}: {inv.get('status')}")
     if not bits:
         return "No attention flags on this array right now."
@@ -1874,6 +2011,7 @@ def _explain_array_attention(col: dict) -> str:
 
 
 def _array_needs_attention(col: dict) -> bool:
+    """True when Spreadsheet/Triage would show attention — 14-day OR live overlays."""
     alert = col.get("alert") or {}
     if (alert.get("level") or "ok") in ("warn", "critical"):
         return True
@@ -1883,10 +2021,20 @@ def _array_needs_attention(col: dict) -> bool:
     if src in ("stale", "dark", "offline"):
         return True
     for inv in col.get("inverters") or []:
-        if (inv.get("status") or "ok") not in ("ok",):
+        st = inv.get("status") or "ok"
+        if st not in ("ok", "monitoring"):
             return True
         if inv.get("no_energy_register"):
             return True
+    # Live dark/low (status stays "ok" for up to ~2 days) — matches vendor-sheet
+    if _column_live_anomalies(col):
+        return True
+    # Daylight + no power + no fresh production can also surface as blind/offline
+    if col.get("is_daylight") and col.get("current_power_w") is None:
+        if src in ("stale", "dark", "offline", "none", "unpolled", ""):
+            # Only if we also have no today kWh (Cover Rooftop blind case)
+            if col.get("produced_today_kwh") in (None, 0):
+                return True
     return False
 
 
@@ -1939,15 +2087,18 @@ def _summarize_column(col: dict) -> dict:
     bad = [
         _slim_inverter(inv)
         for inv in (col.get("inverters") or [])
-        if (inv.get("status") or "ok") not in ("ok",) or inv.get("no_energy_register")
+        if (inv.get("status") or "ok") not in ("ok", "monitoring") or inv.get("no_energy_register")
     ]
+    live = _column_live_anomalies(col)
     needs = _array_needs_attention(col)
+    # Combined attention count matches Spreadsheet "N need attention" spirit
+    attn_units = len(bad) + len(live)
     return {
         "id": col.get("array_id"),
         "name": col.get("array_name"),
         "vendor": col.get("vendor"),
         "vendors": col.get("vendors") or ([col["vendor"]] if col.get("vendor") else []),
-        "inverter_count": col.get("inverter_count"),
+        "inverter_count": col.get("inverter_count") or len(col.get("inverters") or []),
         "current_power_w": col.get("current_power_w"),
         "produced_today_kwh": col.get("produced_today_kwh"),
         "produced_today_source": col.get("produced_today_source"),
@@ -1960,6 +2111,11 @@ def _summarize_column(col: dict) -> dict:
         "next_step": _next_step_for_array(col) if needs else None,
         "problem_inverters": bad,
         "problem_inverter_count": len(bad),
+        # Live-only (14-day still "ok") — critical so EA matches Spreadsheet
+        "live_anomalies": live,
+        "live_dark_count": sum(1 for x in live if x.get("live") == "dark"),
+        "live_low_count": sum(1 for x in live if x.get("live") == "low"),
+        "attention_unit_count": attn_units,
     }
 
 
@@ -2000,9 +2156,17 @@ def _fleet_overview_tool(db, tenant: Tenant, args: dict) -> dict:
             continue
         arrays.append(row)
     attention = [a for a in arrays if a["needs_attention"]]
+    live_units = sum(int(a.get("live_dark_count") or 0) + int(a.get("live_low_count") or 0) for a in arrays)
+    health_units = sum(int(a.get("problem_inverter_count") or 0) for a in arrays)
     return {
         "summary": {
             **summary,
+            # Override naive tree attention (14-day only) with UI-parity counts
+            "attention": len(attention),
+            "attention_arrays": len(attention),
+            "attention_units_14d": health_units,
+            "attention_units_live": live_units,
+            "attention_units_total": health_units + live_units,
             "arrays_returned": len(arrays),
             "attention_in_result": len(attention),
             "vendor_filter": vendor,
@@ -2012,9 +2176,16 @@ def _fleet_overview_tool(db, tenant: Tenant, args: dict) -> dict:
         "arrays": arrays,
         "count": len(arrays),
         "note": (
-            "Health uses the same stable_verdicts as the dashboard and morning digest. "
-            "For SMA/Fronius/Chint, stale often means no recent extension capture — not "
-            "necessarily a dead inverter."
+            "Attention = 14-day peer health PLUS live dark/low overlays "
+            "(same as Spreadsheet NEED ATTENTION). "
+            "Do NOT say a site is healthy if it appears in attention_arrays. "
+            "For SMA/Fronius/Chint, source stale often means no recent extension capture."
+        ),
+        "instruction_for_agent": (
+            "When the owner asks how the fleet is doing: report TOTAL attention "
+            "arrays and units first, then name EACH attention array with why "
+            "(include live_anomalies names). Never summarize only the worst 14-day "
+            "underperformer if live overlays flag more units."
         ),
     }
 
@@ -2026,10 +2197,10 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
     vendor = (args.get("vendor") or "").strip() or None
     name_q = (args.get("array_name") or args.get("name") or "").strip().lower()
     try:
-        limit = int(args.get("limit") or 12)
+        limit = int(args.get("limit") or 40)
     except (TypeError, ValueError):
-        limit = 12
-    limit = max(1, min(limit, 40))
+        limit = 40
+    limit = max(1, min(limit, 80))
 
     problems = []
     for col in cols:
@@ -2046,22 +2217,31 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
         ]
         problems.append(row)
 
-    # Rank: critical first, then warn, then by problem inverter count
+    # Rank: critical first, then by total attention units (14d + live)
     rank = {"critical": 0, "warn": 1, "ok": 2}
 
     def _key(r):
         lvl = ((r.get("alert") or {}).get("level") or "ok")
-        return (rank.get(lvl, 9), -(r.get("problem_inverter_count") or 0), r.get("name") or "")
+        units = int(r.get("attention_unit_count") or 0)
+        return (rank.get(lvl, 9), -units, r.get("name") or "")
 
     problems.sort(key=_key)
+    total_found = len(problems)
     problems = problems[:limit]
 
-    # Spoken-ready brief for the model
+    # Spoken-ready brief for the model — include live unit names so voice can't skip them
     lines = []
+    total_units = 0
     for p in problems:
+        units = int(p.get("attention_unit_count") or 0)
+        total_units += units
+        live_bits = []
+        for la in (p.get("live_anomalies") or [])[:8]:
+            live_bits.append(f"{la.get('name')}={la.get('live')}")
+        extra = f" | live: {', '.join(live_bits)}" if live_bits else ""
         lines.append(
-            f"• {p.get('name')} ({', '.join(p.get('vendors') or []) or 'unknown vendor'}): "
-            f"{p.get('why')} → {p.get('next_step')}"
+            f"• {p.get('name')} ({', '.join(p.get('vendors') or []) or 'unknown vendor'}) "
+            f"[{units} unit(s)]: {p.get('why')}{extra} → {p.get('next_step')}"
         )
     brief = "\n".join(lines) if lines else (
         "No arrays currently need attention"
@@ -2069,17 +2249,31 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
         + (f" matching '{name_q}'" if name_q else "")
         + "."
     )
+    if lines:
+        brief = (
+            f"ATTENTION TOTALS: {total_found} array(s), ~{total_units} unit(s) "
+            f"(14-day health + live dark/low). List every array below — do not drop sites.\n"
+            + brief
+        )
 
     return {
-        "count": len(problems),
-        "fleet_summary": summary,
+        "count": total_found,
+        "returned": len(problems),
+        "attention_unit_count": total_units,
+        "fleet_summary": {
+            **summary,
+            "attention": total_found,
+            "attention_units_total": total_units,
+        },
         "vendor_filter": vendor,
         "problems": problems,
         "brief": brief,
         "instruction_for_agent": (
-            "Answer the user with array NAMES and the why/next_step from each problem. "
-            "Do not ask them for IDs. If count is 0, say the fleet looks clear right now "
-            "and offer to open #arrays so they can double-check."
+            "GROUND TRUTH for 'how is my fleet': report TOTAL arrays+units first, then "
+            "name EVERY problem array (not just the worst underperformer). Include live "
+            "dark/low inverters by name when present — they match Spreadsheet NEED ATTENTION "
+            "even when 14-day status is still ok. Do not ask for IDs. If count is 0, say "
+            "the fleet looks clear and offer to open Inverters for a double-check."
         ),
     }
 
@@ -5859,7 +6053,25 @@ def _agent_turn(
     system = PERSONA + "\n\nTenant memory:\n" + json.dumps(t_mem)[:2000]
     system += "\n\nGlobal behavior tips:\n" + json.dumps(g_mem)[:1200]
     if context:
-        system += "\n\nUI context:\n" + json.dumps(context)[:2000]
+        # Prefer fleet_attention_snapshot (client live view) — keep it intact
+        snap = None
+        try:
+            snap = (context or {}).get("fleet_attention_snapshot")
+        except Exception:
+            snap = None
+        ctx_for_prompt = dict(context) if isinstance(context, dict) else {}
+        if snap is not None:
+            # Put snapshot outside the truncated dump so it never gets cut
+            ctx_for_prompt = {k: v for k, v in ctx_for_prompt.items() if k != "fleet_attention_snapshot"}
+        system += "\n\nUI context:\n" + json.dumps(ctx_for_prompt, default=str)[:2000]
+        if snap is not None:
+            system += (
+                "\n\nFLEET ATTENTION SNAPSHOT (GROUND TRUTH — same live view as Spreadsheet "
+                "NEED ATTENTION; 14-day health + live dark/low). "
+                "If this disagrees with a vague memory, TRUST THIS. "
+                "Never say a listed site is healthy.\n"
+                + json.dumps(snap, default=str)[:4500]
+            )
     # Ground truth: repair email thread (same mind as this chat)
     email_digest = repair_email_surface_digest(db, tenant.id, limit=18)
     if email_digest:
