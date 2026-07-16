@@ -36,6 +36,18 @@ from .notify import (
 scheduler = BackgroundScheduler(timezone="UTC")
 
 
+def scheduler_enabled() -> bool:
+    """Whether this process should own APScheduler + Sovereign ticks.
+
+    RUN_SCHEDULER defaults to **on** (1/true/yes/on) so a single-process
+    deploy keeps working until ops split roles:
+      - web:    RUN_SCHEDULER=0
+      - worker: RUN_SCHEDULER=1  (or unset — default on)
+    """
+    v = (os.environ.get("RUN_SCHEDULER") or "1").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def enqueue_pull_for_all_tenants():
     with SessionLocal() as db:
         # Never enqueue a real-utility pull for the public demo tenant — its
@@ -1307,6 +1319,14 @@ def refresh_fleet_forecasts() -> dict:
 
 
 def start():
+    """Register all jobs and start BackgroundScheduler. Idempotent.
+
+    Safe to call once per process. If already running, no-ops so a double
+    import / re-entry cannot re-register or call scheduler.start() twice.
+    """
+    if scheduler.running:
+        logger.info("scheduler already running — skip re-register")
+        return
     # Every 6 hours, enqueue pull-bills jobs for each active tenant
     scheduler.add_job(
         enqueue_pull_for_all_tenants,

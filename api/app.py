@@ -468,7 +468,17 @@ if _SO_DEV_ENABLED:
 @app.on_event("startup")
 def _startup():
     init_db()
-    scheduler.start()
+    # Process split: web serves HTTP only when RUN_SCHEDULER=0; worker owns
+    # APScheduler + Sovereign. Default RUN_SCHEDULER=1 keeps single-process
+    # deploys working until ops set web→0 / worker→1.
+    from .scheduler import scheduler_enabled
+    if scheduler_enabled():
+        scheduler.start()
+    else:
+        logging.getLogger("uvicorn.error").info(
+            "scheduler disabled (web role) — RUN_SCHEDULER=%r",
+            os.environ.get("RUN_SCHEDULER"),
+        )
     # Raise the threadpool that FastAPI runs sync routes in (default 40). Sign-up
     # and most account routes are sync (blocking DB + Resend calls), so under a
     # burst they queue here; lift the ceiling so more run concurrently. They're
@@ -482,6 +492,11 @@ def _startup():
 
     # Sovereign durability: after deploy/restart, resume orphan desk turns so
     # Ford never loses a mid-flight "thinking" reply. Runs off the main thread.
+    # Only when this process owns the scheduler — avoids double recovery if both
+    # web and worker would otherwise race on the same orphan rows.
+    if not scheduler_enabled():
+        return
+
     def _sovereign_boot_recover() -> None:
         import logging
         import time
