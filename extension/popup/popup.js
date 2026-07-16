@@ -16,10 +16,12 @@
   const dashBtnEl     = document.getElementById("open-dashboard");
   const secondaryBtnEl= document.getElementById("open-secondary");
 
-  // Product dashboard hosts.
+  // Product dashboard hosts. Post-fold (v1.9.123) NEPOOL Operator lives inside
+  // Array Operator and both old domains are sunsetting — the NEPOOL surface is
+  // the /accounts SPA proxied on the folded home.
   const AO_DASHBOARD     = "https://arrayoperator.com";
-  const NEPOOL_DASHBOARD = "https://solaroperator.org/accounts";
-  const DEFAULT_API_BASE = "https://nepooloperator.com";
+  const NEPOOL_DASHBOARD = "https://arrayoperator.com/accounts";
+  const DEFAULT_API_BASE = "https://arrayoperator.com";
 
   // ── Load state from storage ───────────────────────────────────────────────
   const s = await chrome.storage.local.get([

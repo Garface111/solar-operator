@@ -33,7 +33,10 @@ try { importScripts("coop_hosts.js"); } catch (e) { console.warn("[EnergyAgent] 
 // v1.7.1: primary endpoint moved to nepooloperator.com (apex proxies /v1/* -> Railway,
 // same-origin with the dashboard). Railway public domain kept as fallback. The old
 // api.solaroperator.org never resolved, so traffic was running on the fallback anyway.
-const PROD_ENDPOINT = "https://nepooloperator.com/v1/sync";
+// v1.9.123: THE FOLD — nepooloperator.com is sunsetting, primary moved to
+// arrayoperator.com (its apex proxies /v1/* -> the same Railway backend).
+// Railway fallback unchanged, so captures survive any DNS/proxy transition.
+const PROD_ENDPOINT = "https://arrayoperator.com/v1/sync";
 const FALLBACK_ENDPOINT = "https://web-production-49c83.up.railway.app/v1/sync";
 
 // ── Whole-system error capture (v1.9.10) ─────────────────────────────────────

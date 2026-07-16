@@ -1,5 +1,8 @@
 (async function () {
-  const PROD_ENDPOINT = "https://api.solaroperator.org/v1/sync";
+  // v1.9.123: THE FOLD — must match background.js PROD_ENDPOINT. (Was the
+  // never-resolved api.solaroperator.org, which would have saved a DEAD
+  // endpoint for anyone hitting Save with no stored override.)
+  const PROD_ENDPOINT = "https://arrayoperator.com/v1/sync";
 
   const endpointEl = document.getElementById("endpoint");
   const tenantEl = document.getElementById("tenant_key");

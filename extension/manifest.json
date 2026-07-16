@@ -2,10 +2,10 @@
   "manifest_version": 3,
   "name": "EnergyAgent",
   "short_name": "EnergyAgent",
-  "version": "1.9.122",
+  "version": "1.9.123",
   "description": "Captures GMP + SmartHub co-op bills and solar production for NEPOOL/Array Operator; links SolarEdge, Fronius, SMA & Chint.",
   "author": "EnergyAgent",
-  "homepage_url": "https://nepooloperator.com",
+  "homepage_url": "https://arrayoperator.com",
   "permissions": [
     "storage",
     "alarms",

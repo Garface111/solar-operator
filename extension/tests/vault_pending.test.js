@@ -58,7 +58,7 @@ test("takePending decrypts once and removes the intent", { skip: !HAS_CRYPTO }, 
 });
 
 test("dismissPending drops the intent without committing", { skip: !HAS_CRYPTO }, async () => {
-  await SoVault.stashPending("gmp", "bruce@example.com", "gmp-pass", "https://nepooloperator.com/");
+  await SoVault.stashPending("gmp", "bruce@example.com", "gmp-pass", "https://arrayoperator.com/");
   assert.equal((await SoVault.listPending()).length, 1);
   assert.equal(await SoVault.dismissPending("gmp"), true);
   assert.equal((await SoVault.listPending()).length, 0);
