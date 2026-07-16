@@ -32,7 +32,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
+from sqlalchemy import DateTime, Float, Integer, String, Text, func, or_, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import SessionLocal
@@ -464,7 +464,7 @@ def observe_product(db) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         digests["queues"]["escalation_error"] = str(e)[:120]
 
-    # Fleet global (AO tenants)
+    # Fleet global (AO tenants) — split demo vs real so digests don't confuse them
     try:
         digests["fleet_global"]["tenants_ao"] = int(
             db.execute(
@@ -473,6 +473,27 @@ def observe_product(db) -> dict[str, Any]:
                 )
             ).scalar() or 0
         )
+        try:
+            digests["fleet_global"]["tenants_demo"] = int(
+                db.execute(
+                    select(func.count()).select_from(Tenant).where(
+                        Tenant.is_demo.is_(True),
+                    )
+                ).scalar() or 0
+            )
+        except Exception:
+            digests["fleet_global"]["tenants_demo"] = None
+        try:
+            digests["fleet_global"]["tenants_real_ao"] = int(
+                db.execute(
+                    select(func.count()).select_from(Tenant).where(
+                        Tenant.product == "array_operator",
+                        or_(Tenant.is_demo.is_(False), Tenant.is_demo.is_(None)),
+                    )
+                ).scalar() or 0
+            )
+        except Exception:
+            digests["fleet_global"]["tenants_real_ao"] = digests["fleet_global"]["tenants_ao"]
         # Prefer subscription_status when present; fall back to count of AO tenants.
         try:
             digests["fleet_global"]["tenants_active"] = int(
@@ -487,6 +508,11 @@ def observe_product(db) -> dict[str, Any]:
             )
         except Exception:
             digests["fleet_global"]["tenants_active"] = digests["fleet_global"]["tenants_ao"]
+        digests["fleet_global"]["note"] = (
+            "tenants_demo = is_demo read-only/marketing; tenants_real_ao = non-demo AO. "
+            "Live Demo showcase ten_a554c8e7a08f8cfa is product infra, not a customer. "
+            "Testers: Bruce Genereaux, Paul Bozuwa, Martin — see memory people_testers."
+        )
     except Exception as e:  # noqa: BLE001
         digests["fleet_global"]["error"] = str(e)[:120]
 
@@ -1234,6 +1260,46 @@ _OPERATING_AGREEMENT = {
         "stuck, what needs Ford, next bets. No job ids or queue dumps — partnership "
         "language. Ford replies when convenient."
     ),
+    # People + account classes (Ford 2026-07-15)
+    "demo_vs_real": (
+        "DEMO vs REAL accounts (critical — never confuse them):\n"
+        "• REAL: a paying / trial / comped owner with their own Tenant row, real "
+        "contact_email, and (usually) live inverter/utility capture. Their fleets, "
+        "bills, and escalations are production truth. Treat problems seriously; "
+        "never wipe or 'reset' their data for experiments.\n"
+        "• DEMO / READ-ONLY: Tenant.is_demo=True (shared marketing demo, id often "
+        "ten_demo_readonly_v1). require_not_demo() blocks writes. Canned or "
+        "staged story data — NOT a customer crisis if something looks wrong.\n"
+        "• LIVE DEMO showcase: ten_a554c8e7a08f8cfa \"Array Operator — Live Demo\" "
+        "powers public arrayoperator.com ?token= demos. Protect it; do not bulk-delete; "
+        "it is not a paying customer but it is sacred product infrastructure.\n"
+        "• PROBE / INTERNAL TEST tenants: emails like *@*.test, plus-address Ford "
+        "typos, seed scripts (e.g. paul@bozuwasolar.test). Useful for QA; not revenue; "
+        "don't treat as customer escalations or send them owner-facing product email "
+        "as if they were strangers.\n"
+        "• When digests show odd fleets or 'broken' demos, classify first: demo vs "
+        "real vs tester. Only real customers drive urgency and brand risk."
+    ),
+    "people_testers": (
+        "KEY PEOPLE (testers / pilots — not random owners):\n"
+        "• Ford Genereaux (ford.genereaux@gmail.com, ford.genereaux@dysonswarmtechnologies.com) "
+        "— founder. Sovereign reports to him. Dogfood + admin.\n"
+        "• Bruce Genereaux (bruce.genereaux@gmail.com) — Ford's dad; LIVE pilot. "
+        "NEPOOL Operator: Green Mountain Community Solar (comped pilot, GMP + reports). "
+        "Array Operator: real multi-array owner (SolarEdge sites e.g. Londonderry / Cover); "
+        "primary family live-tester for extension + fleet UI. Never delete his tenants; "
+        "his pain is product truth.\n"
+        "• Paul Bozuwa — real VT array owner / power user tester (West Glover, VEC/SmartHub "
+        "capture proven; offtaker/invoicing/reports UX feedback). Treat as a real owner "
+        "whose product feedback shapes AO billing & analysis; not a throwaway account.\n"
+        "• Martin — product tester (UX / inverter detail / hands-on walkthroughs with Ford). "
+        "Not a bulk customer. If he appears on a repair roster without email, that's a "
+        "data gap to fill — still a known human tester, not spam.\n"
+        "When these names appear in sessions, escalations, or fleets: prefer partner tone, "
+        "protect data, and surface issues to Ford if anything looks like we broke their "
+        "experience. Do NOT auto-spam them with marketing or treat demo masking as their "
+        "real fleet."
+    ),
 }
 
 
@@ -1250,19 +1316,23 @@ def ensure_operating_memory(db) -> None:
                 "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
                 "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
                 "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
-                "4) " + _OPERATING_AGREEMENT["weekly_digest"]
+                "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
+                "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
+                "6) " + _OPERATING_AGREEMENT["people_testers"]
             ),
             source="ford_grant",
         )
         write_note(
             db,
             kind="memory",
-            title="Ford operating agreement (seeded)",
-            body=_OPERATING_AGREEMENT["authority_ship"]
-            + "\n\n"
-            + _OPERATING_AGREEMENT["checkin_cadence"]
-            + "\n\n"
-            + _OPERATING_AGREEMENT["job_budget"],
+            title="Ford operating agreement + people map (seeded)",
+            body=(
+                _OPERATING_AGREEMENT["authority_ship"]
+                + "\n\n"
+                + _OPERATING_AGREEMENT["demo_vs_real"]
+                + "\n\n"
+                + _OPERATING_AGREEMENT["people_testers"]
+            ),
             provider="system",
             meta={"source": "ford_grant"},
         )
@@ -2841,7 +2911,10 @@ def sovereign_seed_operating_agreement(authorization: str | None = Header(defaul
             if m.get("key") in (
                 "authority_ship", "checkin_cadence", "job_budget",
                 "weekly_digest", "ford_operating_agreement",
+                "demo_vs_real", "people_testers",
             ) or (m.get("key") or "").startswith("authority")
+            or (m.get("key") or "").startswith("demo")
+            or (m.get("key") or "").startswith("people")
         ],
         "max_jobs_per_day": MAX_JOBS_PER_DAY,  # 0 = unlimited
     }
