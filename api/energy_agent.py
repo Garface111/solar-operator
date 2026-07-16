@@ -6536,8 +6536,8 @@ def _plain_for_speech(text: str) -> str:
 
 def _spoken_line(reply: str) -> str:
     """Deterministic spoken lead: the answer BEFORE the first list/heading,
-    cleaned + capped to ~2 sentences, with a natural spoken offer when detail
-    was left on screen. Never reads a list item aloud."""
+    cleaned, kept to WHOLE sentences (never cut mid-sentence), with a natural
+    spoken offer when detail was left on screen. Never reads a list item aloud."""
     text = (reply or "").strip()
     if not text:
         return ""
@@ -6550,29 +6550,36 @@ def _spoken_line(reply: str) -> str:
         lead_lines.append(ln)
     lead = _plain_for_speech(" ".join(l.strip() for l in lead_lines if l.strip()))
     if not lead:
-        # Whole reply was a list — speak just the count/gist, not the items.
+        # Whole reply was a list — speak the gist, not the items.
         lead = _plain_for_speech(text)
         dropped = True
-    parts = re.split(r"(?<=[.!?])\s+", lead)
-    spoken = " ".join(parts[:2]).strip() if parts else lead
-    cap = max(20, min(int(os.getenv("EA_VOICE_MAX_WORDS", "45") or 45), 80))
-    words = spoken.split()
-    if len(words) > cap:
-        spoken = " ".join(words[:cap]).rstrip(",;:—- ") + "."
-        dropped = True
+    # Keep COMPLETE sentences up to a generous cap — never slice mid-sentence
+    # (that was the "stops halfway through" cutoff). She should finish her thought.
+    cap = max(40, min(int(os.getenv("EA_VOICE_LEAD_MAX_WORDS", "90") or 90), 200))
+    parts = [p for p in re.split(r"(?<=[.!?])\s+", lead) if p.strip()]
+    out, count = [], 0
+    for p in parts:
+        wc = len(p.split())
+        if out and count + wc > cap:
+            break
+        out.append(p.strip())
+        count += wc
+    spoken = " ".join(out).strip() or lead
     if dropped and spoken and not spoken.rstrip().endswith(("?", "…")):
         spoken = spoken.rstrip() + " Want me to run through them?"
     return spoken or _plain_for_speech(text)
 
 
 _VOICE_SUMMARY_SYSTEM = (
-    "You turn an assistant's written answer into a natural SPOKEN reply — how a sharp "
-    "colleague says it out loud, not how a report reads. One or two short sentences, ~35 "
-    "words max. Lead with the headline: if there's a total count or total dollar figure, "
-    "keep it, then name the single biggest thing. Say numbers the human way ('about $170 a "
-    "month', not '$170.00/mo'; 'four sites', not '4'). No lists, no markdown, no reading "
-    "item-by-item or site-by-site. When there's more detail on screen, END with a short "
-    "spoken offer ('want the rundown?' / 'want to start there?'). Return ONLY the spoken words."
+    "Rewrite this assistant answer as natural SPOKEN words — what a sharp colleague would "
+    "actually say out loud in a real conversation. Keep the substance, but say it as flowing "
+    "connected speech: COMPLETE sentences, finish every thought, however many sentences it "
+    "genuinely takes — do not clip it to a caption. Lead with the headline (keep any total "
+    "count or dollar figure). Weave any lists into speech — never read bullets, headings, "
+    "symbols, or item-by-item. Say numbers the human way ('about $170 a month', not "
+    "'$170.00/mo'; 'four sites', not '4'). When there's a lot, cover the important parts "
+    "fully, then end by offering to go deeper ('want the rundown?'). No markdown, no stage "
+    "directions. Return ONLY the spoken words."
 )
 
 
@@ -6593,9 +6600,9 @@ def _spoken_summarize(reply: str) -> str | None:
             },
             {
                 "model": model,
-                "max_tokens": 90,
+                "max_tokens": int(os.getenv("EA_VOICE_SUMMARY_MAX_TOKENS", "500") or 500),
                 "system": _VOICE_SUMMARY_SYSTEM,
-                "messages": [{"role": "user", "content": _plain_for_speech(reply)[:2400]}],
+                "messages": [{"role": "user", "content": _plain_for_speech(reply)[:3000]}],
             },
             timeout=int(os.getenv("EA_VOICE_SUMMARY_TIMEOUT", "12") or 12),
         )
@@ -6720,15 +6727,17 @@ def _agent_turn(
     voice_turn = _is_voice_turn(source, context)
     if voice_turn:
         system += (
-            "\n\nCHANNEL=VOICE (Realtime mouth — keep it SHORT or it gets cut off):\n"
-            "- Reply in 1–2 short spoken sentences (about 25–50 words total).\n"
-            "- Lead with the answer. One optional detail. Then stop.\n"
-            "- No multi-paragraph setup guides, no tab inventory, no lecture.\n"
-            "- If they need a long walkthrough, give the first step only and ask "
-            "if they want the next.\n"
-            "- Lists: max 3 one-line bullets, or better: name the top item and "
-            "offer the rest.\n"
-            "- This is spoken aloud — write for the ear, not a manual."
+            "\n\nCHANNEL=VOICE (spoken aloud — a real, flowing conversation):\n"
+            "- Talk like a person, not a written report. FINISH your thoughts — never "
+            "trail off or clip yourself mid-sentence.\n"
+            "- Lead with the answer, then say as much as it genuinely takes to be useful. "
+            "It's fine to take several sentences; you're having a conversation, not reading "
+            "a caption. Don't pad, but don't cut yourself short either.\n"
+            "- NEVER read markdown, bullet symbols, headings, or lists item-by-item aloud — "
+            "weave the points into natural connected speech.\n"
+            "- When there's a lot to cover, hit the important parts fully, then ask if they "
+            "want you to go deeper — don't stop halfway through explaining.\n"
+            "- No stage directions, no 'as an AI'. Just talk, and complete every thought."
         )
     else:
         system += (
@@ -6784,15 +6793,16 @@ def _agent_turn(
     total_cost = 0.0
     provider = None
     final_text = ""
-    # Voice gets a tighter completion budget so the model can't ramble.
+    # Voice must be able to FINISH its thought and hold a real conversation —
+    # a tight token cap was clipping spoken answers mid-sentence (Ford 2026-07-16).
     try:
         default_max = int(os.getenv("EA_MAX_TOKENS", "1200") or 1200)
     except (TypeError, ValueError):
         default_max = 1200
     try:
-        voice_max = int(os.getenv("EA_VOICE_MAX_TOKENS", "700") or 700)
+        voice_max = int(os.getenv("EA_VOICE_MAX_TOKENS", "1500") or 1500)
     except (TypeError, ValueError):
-        voice_max = 700
+        voice_max = 1500
     llm_max_tokens = voice_max if voice_turn else default_max
 
     for _round in range(MAX_TOOL_ROUNDS):
