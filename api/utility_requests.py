@@ -82,156 +82,98 @@ def _check_admin(key_header: str | None, key_query: str | None) -> None:
     if not ADMIN_API_KEY:
         raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
     if not hmac.compare_digest(key or "", ADMIN_API_KEY):
-        raise HTTPException(403, "Invalid or missing admin key")
+        raise HTTPException(403, "Forbidden")
 
 
 @router.post("/v1/utility-requests")
-def submit_requests(body: RequestsIn, authorization: str | None = Header(default=None)):
-    """Queue one or many utility-add requests. Returns the created ids."""
-    items = body.requests or []
-    if not items:
-        raise HTTPException(400, "No requests")
-    items = items[:50]  # a sane batch cap
-    email = None
-    tenant_id = None
-    product = "array_operator"
-    if authorization:
-        try:
-            from .account import tenant_from_session
-            t = tenant_from_session(authorization)
-            tenant_id = t.id
-            email = getattr(t, "contact_email", None)
-            product = getattr(t, "product", None) or product
-        except Exception:
-            pass  # anonymous / expired session — still capture the request
-    ids = []
-    names = []
+def submit_requests(body: RequestsIn):
+    """Batch-submit utility-add requests (the picker's 'send all' button)."""
     with SessionLocal() as db:
-        for it in items:
-            name = (it.name or "").strip()[:200]
-            if not name:
-                continue
-            row = UtilityRequest(
-                name=name,
-                state=(it.state or "").strip()[:40] or None,
-                url=(it.url or "").strip()[:500] or None,
-                note=(it.note or "").strip()[:2000] or None,
-                email=email, tenant_id=tenant_id, product=product,
-            )
-            db.add(row)
-            db.commit()
-            db.refresh(row)
-            ids.append(row.id)
-            names.append(name)
-    if not ids:
-        raise HTTPException(400, "No valid requests")
-    # Wake Sovereign (subconscious + maybe cortex) — product touch reflex
-    try:
-        from .energy_agent_sovereign_subconscious import fire_and_forget_wake
-        fire_and_forget_wake(
-            "utility_request",
-            {
-                "ids": ids[:20],
-                "names": names[:10],
-                "count": len(ids),
-                "product": product,
-                "tenant_id": tenant_id,
-            },
-            source="utility_requests",
-        )
-    except Exception:
-        pass
-    # Email Ford on EVERY request (his explicit ask). Never let a mail hiccup lose the
-    # notification silently — log it loudly so a missed alert is always traceable.
-    notified = False
-    try:
-        _r = send_internal_alert(
-            subject=f"{len(ids)} utility-add request(s) from {product} (#{ids[0]}"
-                    + (f"–{ids[-1]}" if len(ids) > 1 else "") + ")",
-            body=("From: " + (email or "anonymous") + "\nTenant: " + (tenant_id or "-") + "\n\n"
-                  + "Requested utilities:\n" + "\n".join(f"  • {n}" for n in names)
-                  + "\n\n(Queued for the utility-request agent — it researches + wires them up.)"),
-        )
-        notified = _r is not False
-        if not notified:
-            logging.getLogger("utility_requests").warning(
-                "utility-request alert NOT sent for #%s (mailer returned falsy)", ids[0])
-    except Exception as e:
-        logging.getLogger("utility_requests").error(
-            "utility-request alert FAILED for #%s: %s", ids[0], e)
-    return {"ok": True, "ids": ids, "count": len(ids), "notified": notified}
+        for req in body.requests:
+            db.add(UtilityRequest(
+                name=req.name.strip(),
+                state=req.state.strip().upper() if req.state else None,
+                url=req.url.strip() if req.url else None,
+                note=req.note.strip() if req.note else None,
+            ))
+        db.commit()
+    return {"queued": len(body.requests)}
 
 
-@router.get("/v1/utility-request/{rid}/status")
-def request_status(rid: int):
-    """PUBLIC: this request's lifecycle status only (id-guessers learn nothing else)."""
-    with SessionLocal() as db:
-        r = db.get(UtilityRequest, rid)
-        if not r:
-            raise HTTPException(404, "Not found")
-        status = r.status if r.status in VALID_STATUSES else "new"
-    return {"status": status}
-
-
-@router.get("/admin/utility-requests")
-def list_requests(status: str = Query(default="new"),
-                  x_admin_key: str | None = Header(default=None),
-                  key: str | None = Query(default=None)):
-    _check_admin(x_admin_key, key)
+@router.get("/v1/utility-requests")
+def list_requests(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, le=500),
+    x_admin_key: str | None = Header(default=None),
+    admin_key: str | None = Query(default=None),
+):
+    """List utility-add requests (admin/agent endpoint)."""
+    _check_admin(x_admin_key, admin_key)
     with SessionLocal() as db:
         q = db.query(UtilityRequest)
-        if status and status != "all":
+        if status:
+            if status not in VALID_STATUSES:
+                raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
             q = q.filter(UtilityRequest.status == status)
-        rows = q.order_by(UtilityRequest.created_at.desc()).limit(200).all()
-        out = [{
-            "id": r.id,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "product": r.product, "email": r.email, "tenant_id": r.tenant_id,
-            "name": r.name, "state": r.state, "url": r.url, "note": r.note,
-            "status": r.status, "result": r.result,
-        } for r in rows]
-    return JSONResponse({"requests": out, "count": len(out)})
+        rows = q.order_by(UtilityRequest.created_at.desc()).limit(limit).all()
+        return {
+            "requests": [
+                {
+                    "id": r.id,
+                    "created_at": r.created_at.isoformat() + "Z",
+                    "name": r.name,
+                    "state": r.state,
+                    "url": r.url,
+                    "note": r.note,
+                    "status": r.status,
+                    "result": r.result,
+                    "reviewed_at": r.reviewed_at.isoformat() + "Z" if r.reviewed_at else None,
+                }
+                for r in rows
+            ]
+        }
 
 
-@router.post("/admin/utility-requests/{rid}/status")
-def set_request_status(rid: int, body: StatusIn,
-                       x_admin_key: str | None = Header(default=None),
-                       key: str | None = Query(default=None)):
-    """Lifecycle tick from the agent (e.g. 'researching' the moment it starts)."""
-    _check_admin(x_admin_key, key)
-    status = (body.status or "").strip()
-    if status not in VALID_STATUSES:
-        raise HTTPException(400, f"status must be one of {', '.join(VALID_STATUSES)}")
+@router.patch("/v1/utility-requests/{request_id}/result")
+def update_result(
+    request_id: int,
+    body: ResultIn,
+    x_admin_key: str | None = Header(default=None),
+    admin_key: str | None = Query(default=None),
+):
+    """Agent writeback: record research outcome + status."""
+    _check_admin(x_admin_key, admin_key)
+    if body.status and body.status not in VALID_STATUSES:
+        raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
     with SessionLocal() as db:
-        r = db.get(UtilityRequest, rid)
-        if not r:
-            raise HTTPException(404, "Not found")
-        r.status = status
+        row = db.query(UtilityRequest).filter(UtilityRequest.id == request_id).first()
+        if not row:
+            raise HTTPException(404, "Request not found")
+        row.result = body.result.strip()
+        if body.status:
+            row.status = body.status
+        row.reviewed_at = _now()
         db.commit()
-    return {"ok": True, "id": rid, "status": status}
+        return {"id": row.id, "status": row.status, "result": row.result}
 
 
-@router.post("/admin/utility-requests/{rid}/result")
-def write_result(rid: int, body: ResultIn,
-                 x_admin_key: str | None = Header(default=None),
-                 key: str | None = Query(default=None)):
-    _check_admin(x_admin_key, key)
+@router.patch("/v1/utility-requests/{request_id}/status")
+def update_status(
+    request_id: int,
+    body: StatusIn,
+    x_admin_key: str | None = Header(default=None),
+    admin_key: str | None = Query(default=None),
+):
+    """Agent status-only update (e.g., 'researching' → 'added')."""
+    _check_admin(x_admin_key, admin_key)
+    if body.status not in VALID_STATUSES:
+        raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
     with SessionLocal() as db:
-        r = db.get(UtilityRequest, rid)
-        if not r:
-            raise HTTPException(404, "Not found")
-        r.result = (body.result or "")[:20000]
-        r.status = body.status if body.status in VALID_STATUSES else "reviewed"
-        r.reviewed_at = _now()
-        name, email, final_status = r.name, r.email, r.status
+        row = db.query(UtilityRequest).filter(UtilityRequest.id == request_id).first()
+        if not row:
+            raise HTTPException(404, "Request not found")
+        row.status = body.status
+        if body.status in ("added", "declined", "reviewed"):
+            row.reviewed_at = _now()
         db.commit()
-    try:
-        send_internal_alert(
-            subject=(f"ADDED utility '{name}' (request #{rid}) — live to connect"
-                     if final_status == "added"
-                     else f"Utility request #{rid} ({name}) — {final_status}"),
-            body=f"Utility: {name}\nFrom: {email or 'anonymous'}\n\n--- Agent result ---\n{body.result}",
-        )
-    except Exception:
-        pass
-    return {"ok": True, "id": rid, "status": final_status}
+        return {"id": row.id, "status": row.status}
