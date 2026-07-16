@@ -17,12 +17,15 @@ def _clear_sovereign_env(monkeypatch):
         "SOVEREIGN_ENABLED",
         "SOVEREIGN_ACT_ENABLED",
         "SOVEREIGN_SPEAK_ENABLED",
+        "SOVEREIGN_EMAIL_ENABLED",
         "SOVEREIGN_SENSE_ENABLED",
         "SOVEREIGN_SPEAK_ALL",
         "SOVEREIGN_CAPABILITIES",
         "SOVEREIGN_ARM_T4_T5",
         "SOVEREIGN_SERVICE_KEY",
         "ADMIN_API_KEY",
+        "SOVEREIGN_MAIL_TO",
+        "MAIL_FROM_SOVEREIGN",
     ):
         monkeypatch.delenv(k, raising=False)
     yield
@@ -47,6 +50,71 @@ def test_money_never_autonomous(monkeypatch):
 
     out = plan_action("act.money_identity", {"do": "bad"})
     assert out["denied"] is True
+
+
+def test_email_ford_enabled_without_ea_speak(monkeypatch):
+    """Email channel is ON even when SOVEREIGN_SPEAK_ENABLED (EA inject) is off."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_SPEAK_ENABLED", "0")
+    monkeypatch.setenv("SOVEREIGN_EMAIL_ENABLED", "1")
+    monkeypatch.delenv("SOVEREIGN_CAPABILITIES", raising=False)
+    from api.energy_agent_sovereign import (
+        capability_allowed, sovereign_mail_from, sovereign_mail_recipients,
+    )
+
+    assert capability_allowed("speak.email_ford") is True
+    assert capability_allowed("speak.session_inject") is False
+    assert "sovereign@arrayoperator.com" in sovereign_mail_from().lower()
+    assert "ford.genereaux@gmail.com" in sovereign_mail_recipients()
+
+
+def test_email_ford_sends_from_sovereign_domain(monkeypatch):
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_EMAIL_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_SPEAK_ENABLED", "0")
+    monkeypatch.delenv("SOVEREIGN_CAPABILITIES", raising=False)
+
+    from api.models import Base
+    import api.energy_agent_sovereign as sov
+    import api.energy_agent_sovereign_desk  # noqa: F401
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(sov, "SessionLocal", Session)
+
+    captured = {}
+
+    def fake_send(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+
+    with Session() as db:
+        ok = sov.email_ford(
+            "Utility queue needs eyes",
+            "Three co-ops still researching. Want me to stage credentials?",
+            db=db,
+            note_desk=True,
+        )
+        db.commit()
+        assert ok is True
+        assert "sovereign@arrayoperator.com" in (captured.get("from_addr") or "").lower()
+        assert "Utility queue" in (captured.get("subject") or "") or "Sovereign" in (
+            captured.get("subject") or ""
+        )
+        to = captured.get("to")
+        if isinstance(to, list):
+            assert any("ford.genereaux@gmail.com" in str(x) for x in to)
+        else:
+            assert "ford" in str(to).lower()
+        n = db.query(sov.EaSovereignAction).filter_by(capability="speak.email_ford").count()
+        assert n >= 1
 
 
 def test_observe_and_tick_with_db(monkeypatch):

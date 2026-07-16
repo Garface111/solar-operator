@@ -33,7 +33,7 @@ ANTHROPIC_API_KEY = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 XAI_BASE = (os.getenv("XAI_BASE_URL") or "https://api.x.ai/v1").rstrip("/")
 # Rock = Grok; Cloth = Claude
 GROK_MODEL = os.getenv("SOVEREIGN_GROK_MODEL") or os.getenv(
-    "ENERGY_AGENT_MODEL", "grok-4-1-fast-reasoning"
+    "ENERGY_AGENT_MODEL", "grok-4.5"
 )
 CLAUDE_MODEL = os.getenv("SOVEREIGN_CLAUDE_MODEL", "claude-sonnet-4-5")
 
@@ -95,6 +95,11 @@ Therefore independence is a *project*, not a pose:
      Worker has repo clone/push access on Railway.
    Prefer ops_sweep when multiple queues are hot.
 9. Desk Ford only for true blockers (money, brand, HARs you cannot capture) — not routine triage.
+10. Email Ford (From: Sovereign <sovereign@arrayoperator.com>) for general communication when
+    he is offline the desk, for a durable written update, or when something needs attention
+    outside the product UI. Action type: email_ford with subject + body (prose, not JSON dump).
+    Do not spam — prefer desk when he is clearly present; use email when the message should
+    land in his inbox. Never mass-email owners from this path.
 
 Output ONLY valid JSON matching the schema in the user message. No markdown fences."""
 
@@ -318,10 +323,10 @@ def build_think_prompt(
                     "feature_assign|feature_ship_batch|feature_ship_building|feature_ship|"
                     "escalation_resolve|escalation_sweep|credentials_stage|credentials_list|"
                     "portal_signoff|deploy_stage|memory_set|agenda|reprioritize_goals|"
-                    "ops_sweep|jobs_requeue|jobs_drain|job_cancel|code_hire|speak|email_ford"
+                    "ops_sweep|jobs_requeue|jobs_drain|job_cancel|code_hire|speak|email_ford|email"
                 ),
                 "rationale": "why this grows Array Operator or unlocks independence",
-                "text": "notes / evidence / speak body / code brief",
+                "text": "notes / evidence / speak body / code brief / email body",
                 "title": "for code_hire",
                 "feature_id": None,
                 "utility_id": None,
@@ -338,8 +343,9 @@ def build_think_prompt(
                 "limit": 5,
                 "tenant_ids": [],
                 "importance": 70,
-                "subject": "for email_ford",
-                "body": "for email_ford",
+                "subject": "for email_ford — short human subject",
+                "body": "for email_ford — clear prose to Ford's inbox from Sovereign@",
+                "to": "optional ford email (must be allowlisted); default both Ford addresses",
             }
         ],
         "speak_product": (

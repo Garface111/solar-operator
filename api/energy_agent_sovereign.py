@@ -54,7 +54,15 @@ MAX_INJECT_PER_HOUR_TENANT = 4
 MAX_SOFT_ACTS_PER_HOUR = 20
 # Ford grant: autonomous ship of building features + utility adapters needs headroom
 MAX_JOBS_PER_DAY = int(os.getenv("SOVEREIGN_MAX_JOBS_PER_DAY", "100") or 100)
+MAX_EMAILS_PER_HOUR = int(os.getenv("SOVEREIGN_MAX_EMAILS_PER_HOUR", "12") or 12)
+MAX_EMAILS_PER_DAY = int(os.getenv("SOVEREIGN_MAX_EMAILS_PER_DAY", "40") or 40)
 TICK_ACTION_BUDGET = 5  # max decisions that act/speak per tick
+
+# Ford contact list for Sovereign outbound mail (general communication)
+_DEFAULT_FORD_MAIL = (
+    "ford.genereaux@gmail.com,"
+    "ford.genereaux@dysonswarmtechnologies.com"
+)
 
 
 # ── Flags ───────────────────────────────────────────────────────────────────
@@ -77,6 +85,16 @@ def sovereign_speak_enabled() -> bool:
     # Default OFF — Sovereign talks on the Ford desk, not Energy Agent chat
     # (Ford 2026-07-15: EA inject was confusing left/right threads).
     return sovereign_enabled() and _flag("SOVEREIGN_SPEAK_ENABLED", "0")
+
+
+def sovereign_email_enabled() -> bool:
+    """Email to Ford (and dogfood) from Sovereign@arrayoperator.com.
+
+    Separate from SOVEREIGN_SPEAK_ENABLED (EA session inject). Default ON so
+    Sovereign can communicate when Ford is offline the desk.
+    Kill: SOVEREIGN_EMAIL_ENABLED=0.
+    """
+    return sovereign_enabled() and _flag("SOVEREIGN_EMAIL_ENABLED", "1")
 
 
 def sovereign_sense_enabled() -> bool:
@@ -133,7 +151,11 @@ def capability_allowed(cap_id: str) -> bool:
         return False
     if cap_id in NEVER_AUTONOMOUS and not _flag("SOVEREIGN_ARM_T4_T5", "0"):
         return False
-    if cap_id.startswith("speak.") and not sovereign_speak_enabled():
+    # Email is its own channel (Sovereign@…) — not gated by EA-session speak flag
+    if cap_id in ("speak.email_ford", "speak.email_owner"):
+        if not sovereign_email_enabled():
+            return False
+    elif cap_id.startswith("speak.") and not sovereign_speak_enabled():
         return False
     if (cap_id.startswith("act.") or cap_id.startswith("expand.")) and not sovereign_act_enabled():
         return False
@@ -686,15 +708,195 @@ def broadcast_open_sessions(db, speak: str, *, importance: int = 65) -> dict:
     return {"ok": True, "attempted": len(results), "results": results}
 
 
-def email_ford(subject: str, body: str) -> bool:
+def sovereign_mail_from() -> str:
+    """Display From for Sovereign outbound mail (Resend-verified arrayoperator.com)."""
+    raw = (os.getenv("MAIL_FROM_SOVEREIGN") or os.getenv("SOVEREIGN_MAIL_FROM") or "").strip()
+    if raw and "@" in raw:
+        return raw
+    return "Sovereign <sovereign@arrayoperator.com>"
+
+
+def sovereign_mail_recipients() -> list[str]:
+    """Who Sovereign emails by default (Ford). Override: SOVEREIGN_MAIL_TO=a@x,b@y"""
+    raw = (os.getenv("SOVEREIGN_MAIL_TO") or _DEFAULT_FORD_MAIL).strip()
+    out: list[str] = []
+    for part in raw.split(","):
+        e = part.strip().lower()
+        if e and "@" in e and e not in out:
+            out.append(e)
+    return out or ["ford.genereaux@gmail.com"]
+
+
+def _email_rate_ok(db=None) -> tuple[bool, str]:
+    """Hourly + daily caps so Sovereign doesn't spam."""
+    try:
+        from .db import SessionLocal as _SL
+        close = False
+        if db is None:
+            db = _SL()
+            close = True
+        try:
+            hour_n = _count_actions_since(db, hours=1, decision="speak")
+            # Count only email_ford capability more tightly
+            since_h = _now() - timedelta(hours=1)
+            since_d = _now() - timedelta(hours=24)
+            n_h = int(
+                db.execute(
+                    select(func.count()).select_from(EaSovereignAction).where(
+                        EaSovereignAction.capability == "speak.email_ford",
+                        EaSovereignAction.created_at >= since_h,
+                        EaSovereignAction.result == "ok",
+                    )
+                ).scalar() or 0
+            )
+            n_d = int(
+                db.execute(
+                    select(func.count()).select_from(EaSovereignAction).where(
+                        EaSovereignAction.capability == "speak.email_ford",
+                        EaSovereignAction.created_at >= since_d,
+                        EaSovereignAction.result == "ok",
+                    )
+                ).scalar() or 0
+            )
+            del hour_n
+            if n_h >= MAX_EMAILS_PER_HOUR:
+                return False, f"email rate limit hour ({n_h}/{MAX_EMAILS_PER_HOUR})"
+            if n_d >= MAX_EMAILS_PER_DAY:
+                return False, f"email rate limit day ({n_d}/{MAX_EMAILS_PER_DAY})"
+            return True, "ok"
+        finally:
+            if close:
+                db.close()
+    except Exception as e:  # noqa: BLE001
+        log.warning("email rate check failed open: %s", e)
+        return True, "ok"  # fail open so critical alerts still try
+
+
+def email_ford(
+    subject: str,
+    body: str,
+    *,
+    to: str | list[str] | None = None,
+    html: str | None = None,
+    db=None,
+    note_desk: bool = True,
+) -> bool:
+    """Send Ford (or allowlisted recipients) mail as Sovereign@arrayoperator.com.
+
+    General communication channel — desk is for live chat; email is for when
+    Ford is offline or for a durable written update. Never mass-mail owners
+    through this helper (use speak.email_owner separately, still gated).
+    """
     if not capability_allowed("speak.email_ford"):
         return False
-    try:
-        from .notify import send_internal_alert
-        return bool(send_internal_alert(subject[:200], body[:8000]))
-    except Exception:
-        log.exception("sovereign email_ford failed")
+    ok_rate, why = _email_rate_ok(db)
+    if not ok_rate:
+        log.info("sovereign email skipped: %s", why)
         return False
+
+    subj = (subject or "Sovereign").strip()[:200]
+    if not subj.lower().startswith("sovereign") and not subj.startswith("["):
+        subj = f"Sovereign — {subj}"
+    text = (body or "").strip()[:12000]
+    if not text:
+        return False
+
+    # Resolve recipients — only Ford list (or explicit subset of it)
+    allowed = set(sovereign_mail_recipients())
+    if to is None:
+        recipients = list(allowed)
+    else:
+        raw_list = [to] if isinstance(to, str) else list(to)
+        recipients = []
+        for e in raw_list:
+            e = (e or "").strip().lower()
+            if e in allowed and e not in recipients:
+                recipients.append(e)
+        if not recipients:
+            recipients = list(allowed)
+
+    # Simple HTML if caller didn't supply — readable on phone
+    if html is None:
+        safe = (
+            text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
+        html = (
+            "<!DOCTYPE html><html><body style='margin:0;padding:0;background:#0a0e14;'>"
+            "<div style='font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;"
+            "max-width:560px;margin:0 auto;padding:28px 22px;color:#eaf0f7;'>"
+            "<div style='font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;"
+            "color:#3fd68a;margin-bottom:14px;'>Sovereign · Array Operator</div>"
+            f"<div style='font-size:15px;line-height:1.55;color:#eaf0f7;'>{safe}</div>"
+            "<div style='margin-top:28px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);"
+            "font-size:12px;color:#8b97a8;'>Reply in the Sovereign desk, or just reply to this email.</div>"
+            "</div></body></html>"
+        )
+
+    from_addr = sovereign_mail_from()
+    # Replies: prefer a monitored inbox if set; else Ford's primary so nothing is stranded
+    reply_to = (
+        (os.getenv("SOVEREIGN_MAIL_REPLY_TO") or "").strip()
+        or recipients[0]
+    )
+
+    try:
+        from .notify import _send_via_resend
+        sent = bool(
+            _send_via_resend(
+                to=recipients if len(recipients) > 1 else recipients[0],
+                subject=subj,
+                html=html,
+                text=text,
+                from_addr=from_addr,
+                reply_to=reply_to,
+                product="array_operator",
+            )
+        )
+    except Exception:
+        log.exception("sovereign email_ford send failed")
+        sent = False
+
+    # Audit + optional desk breadcrumb (not a worker dump)
+    try:
+        from .db import SessionLocal as _SL
+        close = False
+        if db is None:
+            db = _SL()
+            close = True
+        try:
+            audit(
+                db,
+                capability="speak.email_ford",
+                decision="speak",
+                rationale=subj[:240],
+                targets={"to": recipients, "from": from_addr, "chars": len(text)},
+                result="ok" if sent else "failed",
+            )
+            if sent and note_desk:
+                try:
+                    from .energy_agent_sovereign_desk import push_sovereign_message
+                    push_sovereign_message(
+                        db,
+                        f"Emailed you from sovereign@arrayoperator.com — **{subj}**\n\n"
+                        f"{text[:1500]}",
+                        provider="email",
+                        meta={"channel": "email", "subject": subj, "to": recipients},
+                    )
+                except Exception:
+                    pass
+            if close:
+                db.commit()
+        finally:
+            if close:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    except Exception:
+        log.exception("sovereign email audit failed")
+
+    return sent
 
 
 # ── Soft executive acts ─────────────────────────────────────────────────────
@@ -1192,18 +1394,15 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                     )
                 except Exception as e:  # noqa: BLE001
                     res = {"ok": False, "error": str(e)[:300]}
-        elif atype == "email_ford":
+        elif atype in ("email_ford", "email", "mail_ford"):
             ok = email_ford(
-                raw.get("subject") or "[Sovereign brain]",
+                raw.get("subject") or "[Sovereign]",
                 raw.get("body") or raw.get("text") or raw.get("rationale") or "",
+                to=raw.get("to") or raw.get("email"),
+                db=db,
             )
             res = {"ok": ok}
-            audit(
-                db, capability="speak.email_ford", decision="speak",
-                rationale=(raw.get("subject") or "")[:200],
-                result="ok" if ok else "failed",
-                correlation_id=tick_id,
-            )
+            # email_ford already audits + optional desk breadcrumb
         else:
             res = {"ok": False, "denied": True, "denied_reason": f"unknown action {atype}"}
 
@@ -1748,9 +1947,11 @@ def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
             elif capability == "speak.email_ford":
                 ok = email_ford(
                     payload.get("subject") or "[Sovereign]",
-                    payload.get("body") or "",
+                    payload.get("body") or payload.get("text") or "",
+                    to=payload.get("to") or payload.get("email"),
+                    db=db,
                 )
-                out = {"ok": ok}
+                out = {"ok": ok, "from": sovereign_mail_from()}
             elif capability == "speak.session_broadcast":
                 out = broadcast_open_sessions(
                     db,
