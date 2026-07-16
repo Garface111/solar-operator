@@ -461,7 +461,7 @@ def test_brain_think_with_fallback(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("grok down")
 
-    def ok_claude(messages, temperature=0.35):
+    def ok_claude(messages, temperature=0.35, timeout=None):
         return {
             "content": json.dumps({
                 "monologue": "Ivory tower: queues look busy; I will triage utilities.",
@@ -499,6 +499,32 @@ def test_brain_think_with_fallback(monkeypatch):
         mem = db.get(sov.EaSovereignMemory, "utility_pressure")
         assert mem is not None
         assert "elevated" in (mem.value or "")
+
+
+def test_brain_default_is_opus_cli(monkeypatch):
+    """Ford 2026-07-16: brain defaults to the Opus 4.8 Claude Code CLI, and gracefully
+    skips it to the next provider when the binary is absent (e.g. Railway)."""
+    for k in ("SOVEREIGN_BRAIN_PRIMARY", "SOVEREIGN_BRAIN_FALLBACK"):
+        monkeypatch.delenv(k, raising=False)
+    import api.energy_agent_sovereign_brain as brain
+
+    assert brain.primary_provider() == "claude_cli"
+    assert brain.CLAUDE_CLI_MODEL == "claude-opus-4-8"
+    assert brain.CLAUDE_MODEL == "claude-opus-4-8"
+
+    # CLI binary absent → call_claude_cli raises → call_brain falls through to grok
+    monkeypatch.setattr(brain, "_find_claude", lambda: None)
+    calls = {"grok": 0}
+
+    def ok_grok(messages, timeout=None):
+        calls["grok"] += 1
+        return {"content": "{}", "usage": {}, "provider": "grok", "model": "grok-4.5"}
+
+    monkeypatch.setattr(brain, "call_grok", ok_grok)
+    monkeypatch.setattr(brain, "call_claude", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no api")))
+    out = brain.call_brain([{"role": "user", "content": "hi"}], timeout=10)
+    assert out["provider"] == "grok"
+    assert calls["grok"] == 1
 
 
 # json import for brain test

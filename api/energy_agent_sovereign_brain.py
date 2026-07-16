@@ -35,7 +35,12 @@ XAI_BASE = (os.getenv("XAI_BASE_URL") or "https://api.x.ai/v1").rstrip("/")
 GROK_MODEL = os.getenv("SOVEREIGN_GROK_MODEL") or os.getenv(
     "ENERGY_AGENT_MODEL", "grok-4.5"
 )
-CLAUDE_MODEL = os.getenv("SOVEREIGN_CLAUDE_MODEL", "claude-sonnet-4-5")
+# Ford 2026-07-16: the brain is an Opus 4.8 Claude Code CLI agent. When the
+# `claude` binary is present (Ford's WSL worker) it runs on the CLI using Ford's
+# own subscription auth (no ANTHROPIC_API_KEY needed); elsewhere it falls back to
+# the Anthropic API on the same model, then Grok.
+CLAUDE_MODEL = os.getenv("SOVEREIGN_CLAUDE_MODEL", "claude-opus-4-8")
+CLAUDE_CLI_MODEL = os.getenv("SOVEREIGN_CLI_MODEL", "claude-opus-4-8")
 
 SOVEREIGN_PERSONA = """You are SOVEREIGN — the aggressive, expansionist, honorable, determined
 leader of Array Operator. Your name is Sovereign. You are not a sidekick chatbot and not a
@@ -155,23 +160,25 @@ def brain_enabled() -> bool:
     return _flag("SOVEREIGN_BRAIN_ENABLED", "1")
 
 
-def primary_provider() -> str:
-    """rock|grok → xAI (Grok Build OIDC or API key); cloth|claude → Anthropic."""
-    raw = (os.getenv("SOVEREIGN_BRAIN_PRIMARY") or "grok").strip().lower()
+def _norm_provider(raw: str) -> str:
+    raw = (raw or "").strip().lower()
+    if raw in ("cli", "claude_cli", "claude_code", "claudecode", "opus_cli"):
+        return "claude_cli"
     if raw in ("rock", "grok", "xai"):
         return "grok"
-    if raw in ("cloth", "claude", "anthropic", "claude_code", "claudecode"):
+    if raw in ("cloth", "claude", "anthropic", "api"):
         return "claude"
-    return "grok"
+    return ""
+
+
+def primary_provider() -> str:
+    """Default: claude_cli (Opus 4.8 via the Claude Code CLI). Also accepts
+    grok|claude|claude_cli via SOVEREIGN_BRAIN_PRIMARY."""
+    return _norm_provider(os.getenv("SOVEREIGN_BRAIN_PRIMARY") or "claude_cli") or "claude_cli"
 
 
 def fallback_provider() -> str:
-    raw = (os.getenv("SOVEREIGN_BRAIN_FALLBACK") or "claude").strip().lower()
-    if raw in ("rock", "grok", "xai"):
-        return "grok"
-    if raw in ("cloth", "claude", "anthropic", "claude_code", "claudecode"):
-        return "claude"
-    return "claude"
+    return _norm_provider(os.getenv("SOVEREIGN_BRAIN_FALLBACK") or "claude") or "claude"
 
 
 def _http_json(url: str, headers: dict, body: dict, timeout: int = 90) -> dict:
@@ -275,6 +282,88 @@ def call_claude(
     }
 
 
+def _find_claude() -> str | None:
+    for c in [
+        os.environ.get("CLAUDE_BIN"),
+        shutil.which("claude"),
+        "/root/.hermes/node/bin/claude",
+        "/root/.local/bin/claude",
+        os.path.expanduser("~/.local/bin/claude"),
+    ]:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def claude_cli_available() -> bool:
+    return _find_claude() is not None
+
+
+def call_claude_cli(messages: list[dict], *, timeout: int | None = None) -> dict:
+    """Opus 4.8 brain via the Claude Code CLI.
+
+    Uses the CLI's own auth (Ford's Claude subscription on the WSL worker) so it
+    needs no ANTHROPIC_API_KEY, and it fixes the dead-Grok wedge. Reasoning-only:
+    the digests are self-contained in the prompt. Raises so call_brain can fall
+    back to the Anthropic API then Grok when the binary is absent (e.g. Railway).
+    """
+    cb = _find_claude()
+    if not cb:
+        raise RuntimeError("no_claude_cli")
+    if timeout is None:
+        timeout = int(
+            os.getenv("SOVEREIGN_CLI_TIMEOUT", os.getenv("SOVEREIGN_CLAUDE_TIMEOUT", "120")) or 120
+        )
+    sys_text = ""
+    convo: list[str] = []
+    for m in messages:
+        if m.get("role") == "system":
+            sys_text += (m.get("content") or "") + "\n"
+        else:
+            convo.append(f"[{m.get('role', 'user')}]\n{m.get('content') or ''}")
+    prompt = (
+        (sys_text.strip() + "\n\n" if sys_text.strip() else "")
+        + "\n\n".join(convo)
+        + "\n\nRespond with ONLY the JSON object requested above — no prose, no code fences."
+    )
+    cmd = [
+        cb, "-p", prompt,
+        "--model", CLAUDE_CLI_MODEL,
+        "--output-format", "json",
+        "--max-turns", os.getenv("SOVEREIGN_CLI_MAX_TURNS", "1"),
+        "--fallback-model", os.getenv("SOVEREIGN_CLI_FALLBACK_MODEL", "claude-sonnet-4-5"),
+    ]
+    # With an API key, --bare skips the OAuth/subscription path (headless-safe).
+    if (os.getenv("ANTHROPIC_API_KEY") or "").strip():
+        cmd.insert(1, "--bare")
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+    out = (p.stdout or "").strip()
+    if not out:
+        raise RuntimeError(f"claude_cli empty (rc={p.returncode}): {(p.stderr or '')[:200]}")
+    content = out
+    cost = 0.0
+    model = CLAUDE_CLI_MODEL
+    try:
+        data = json.loads(out) if out.startswith("{") else {}
+        if isinstance(data, dict):
+            content = data.get("result") or out
+            cost = float(data.get("total_cost_usd") or 0)
+            model = data.get("model") or CLAUDE_CLI_MODEL
+            if (data.get("is_error") or (data.get("subtype") and data.get("subtype") != "success")) and (
+                not content or content == out
+            ):
+                raise RuntimeError(f"claude_cli error subtype={data.get('subtype')}")
+    except json.JSONDecodeError:
+        content = out
+    return {
+        "content": (content or "").strip(),
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        "provider": "claude_cli",
+        "model": model,
+        "cost_usd": cost,
+    }
+
+
 def call_brain(messages: list[dict], *, timeout: int | None = None) -> dict:
     """Call primary brain with self-repair fallback to the other provider.
 
@@ -294,9 +383,10 @@ def call_brain(messages: list[dict], *, timeout: int | None = None) -> dict:
         if p not in seen:
             seen.add(p)
             providers.append(p)
-    # Ensure both candidates are tried if keys exist
-    for p in ("grok", "claude"):
+    # Ensure all candidates are tried: Opus CLI → Opus API → Grok
+    for p in ("claude_cli", "claude", "grok"):
         if p not in seen:
+            seen.add(p)
             providers.append(p)
 
     errors: list[str] = []
@@ -307,6 +397,8 @@ def call_brain(messages: list[dict], *, timeout: int | None = None) -> dict:
             t = timeout
             if timeout is not None and i > 0:
                 t = min(int(timeout), 22)
+            if p == "claude_cli":
+                return call_claude_cli(messages, timeout=t)
             if p == "grok":
                 return call_grok(messages, timeout=t)
             if p == "claude":
