@@ -273,12 +273,14 @@ def rule_monologue(
 
 
 def subconscious_model() -> str:
-    """Grok model for subconscious monologue (default: same rock as cortex)."""
+    """Grok model for subconscious monologue.
+
+    Default: cheap non-reasoning (Ford 2026-07-15 — save weekly Grok quota).
+    Cortex stays on SOVEREIGN_GROK_MODEL / grok-4.5.
+    """
     return (
         (os.getenv("SOVEREIGN_SUBCONSCIOUS_MODEL") or "").strip()
-        or (os.getenv("SOVEREIGN_GROK_MODEL") or "").strip()
-        or (os.getenv("ENERGY_AGENT_MODEL") or "").strip()
-        or "grok-4.5"
+        or "grok-4-1-fast-non-reasoning"
     )
 
 
