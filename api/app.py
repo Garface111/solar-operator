@@ -451,6 +451,9 @@ from .energy_agent import router as energy_agent_router
 app.include_router(energy_agent_router)
 from .energy_agent_mind import router as energy_agent_mind_router
 app.include_router(energy_agent_mind_router)
+# Owner ⇄ Energy Agent email channel (weekly check-in + reply-to-act + opt-out)
+from .energy_agent_email import router as energy_agent_email_router
+app.include_router(energy_agent_email_router)
 # Sovereign Mind (product executive) + private Ford desk chat
 from .energy_agent_sovereign import router as energy_agent_sovereign_router
 app.include_router(energy_agent_sovereign_router)

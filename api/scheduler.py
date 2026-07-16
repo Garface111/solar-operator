@@ -1621,6 +1621,15 @@ def start():
         CronTrigger(hour=12, minute=0),
         id="morning_fleet_digest", replace_existing=True,
     )
+    # Mondays 13:00 UTC (~9am ET): the AGENTIC weekly check-in — Energy Agent
+    # writes each owner a first-person note (what I handled / what I noticed /
+    # reply and I act) composed from live fleet+repairs+invoice data. Opt-out
+    # per tenant via the signed footer link. See energy_agent_email.py.
+    scheduler.add_job(
+        _run_ea_weekly_checkin,
+        CronTrigger(day_of_week="mon", hour=13, minute=0),
+        id="ea_weekly_checkin", replace_existing=True,
+    )
     # Daily at 05:00 UTC: GMP daily-generation sponge top-up. Walks each GMP
     # meter's full multi-year history on first run, then incrementally tops up.
     # Feeds Trends + Reports with GMP data hands-free. Runs after the 03:xx
@@ -2444,6 +2453,25 @@ def _run_gmp_daily_backfill() -> None:
         send_internal_alert(
             "GMP daily backfill: unhandled exception",
             f"The scheduled GMP daily-generation backfill raised an error:\n{exc}",
+        )
+
+
+def _run_ea_weekly_checkin() -> None:
+    """Monday agentic owner check-in (Energy Agent writes each owner a
+    first-person weekly note; replies come back through the agent mailbox).
+    Wrapper so import/compose errors never crash the scheduler at fire time."""
+    try:
+        from .energy_agent_email import run_weekly_checkins
+        result = run_weekly_checkins()
+        logger.info(
+            "ea_weekly_checkin: sent=%d skipped=%d failed=%d",
+            len(result.get("sent", [])), len(result.get("skipped", [])),
+            len(result.get("failed", [])),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "EA weekly check-in: unhandled exception",
+            f"The weekly owner check-in job raised:\n{exc}",
         )
 
 

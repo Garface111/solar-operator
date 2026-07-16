@@ -228,6 +228,37 @@ async def resend_webhook(
         except Exception:
             logger.exception("resend webhook: sovereign inbound route failed")
 
+        # Owner ⇄ Energy Agent mailbox (weekly check-in replies, "hey can you…"
+        # emails). Repair mail carries an [AO-TICKET-N] token — anything to the
+        # agent mailbox WITHOUT one is an owner turn, answered by the same
+        # per-tenant agent (async: the turn can run multiple tool rounds).
+        try:
+            from .energy_agent_email import (
+                ingest_owner_email_async,
+                is_owner_agent_address,
+            )
+            from .repair_ops import extract_ticket_id_from_text
+            if is_owner_agent_address(to_list) and not extract_ticket_id_from_text(
+                f"{subject}\n{(body or '')[:2000]}"
+            ):
+                ingest_owner_email_async(
+                    from_email=from_email,
+                    subject=subject,
+                    body=body,
+                )
+                logger.info(
+                    "resend inbound owner-agent queued: email_id=%s from=%s",
+                    email_id, from_email,
+                )
+                return {
+                    "ok": True,
+                    "event": event_type,
+                    "owner_agent_inbound": {"queued": True},
+                    "email_id": email_id,
+                }
+        except Exception:
+            logger.exception("resend webhook: owner-agent route failed")
+
         try:
             from . import repair_ops
             with SessionLocal() as db:
