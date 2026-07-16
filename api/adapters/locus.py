@@ -31,6 +31,7 @@ import binascii
 import hashlib
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -376,3 +377,102 @@ def site_details(creds: dict, site_id: int) -> dict:
         "timezone": site.get("locationTimezone") or "",
         "address": _build_address(site),
     }
+
+
+# ─────────────────────── per-inverter (component) telemetry ───────────────────
+# A Locus site is a tree of components (GET /sites/{id}/components): a revenue
+# METER, N INVERTERs, and WEATHERSTATIONs. The INVERTER nodes are what the
+# fleet/Inverters view renders. Serial numbers are usually blank, so the stable
+# per-inverter identity is the component `id`. Per-component time series come
+# from the SAME /components/{id}/data endpoint the site uses (W_avg live, Wh_sum
+# daily), grounded live 2026-07-16.
+
+# First plausible kW figure in a model string (e.g. "Primo 15.0-1 208/240" → 15.0),
+# ignoring the trailing voltage pair. Best-effort — the owner can edit nameplate.
+_MODEL_KW = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def _nameplate_from_model(model: str | None) -> float | None:
+    if not model:
+        return None
+    m = _MODEL_KW.search(str(model))
+    if not m:
+        return None
+    try:
+        kw = float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    return kw if 0 < kw <= 1000 else None
+
+
+def list_inverter_components(creds: dict, site_id: int) -> list[dict]:
+    """Every INVERTER component under a site — the per-inverter fleet.
+
+    Returns [{component_id, name, oem, model, node_id, serial, nameplate_kw}, ...],
+    excluding the revenue meter and weather stations. `serial` is the OEM serial
+    when Locus has one, else "" (callers key on component_id).
+    """
+    body = _get(creds, f"/sites/{site_id}/components")
+    out: list[dict] = []
+    for c in body.get("components", []) or []:
+        if (c.get("nodeType") or "").upper() != "INVERTER":
+            continue
+        model = c.get("model") or ""
+        out.append({
+            "component_id": int(c.get("id") or 0),
+            "name": c.get("name") or "",
+            "oem": c.get("oem") or "",
+            "model": model,
+            "node_id": c.get("nodeId") or "",
+            "serial": c.get("serialNumber") or "",
+            "nameplate_kw": _nameplate_from_model(model),
+        })
+    return out
+
+
+def fetch_component_latest(creds: dict, component_id: int) -> dict:
+    """Latest AC power for one inverter component.
+
+    Returns {last_power_w, last_report} from GET /components/{id}/data
+    ?gran=latest&fields=W_avg. Missing data → both None.
+    """
+    body = _get(creds, f"/components/{component_id}/data",
+                params={"fields": "W_avg", "gran": "latest"})
+    data = body.get("data") or []
+    if not data:
+        return {"last_power_w": None, "last_report": None}
+    row = data[0]
+    w = row.get("W_avg")
+    return {
+        "last_power_w": float(w) if w is not None else None,
+        "last_report": row.get("ts"),
+    }
+
+
+def fetch_component_daily(
+    creds: dict, component_id: int, start: date, end: date, tz: str = "UTC"
+) -> list[dict]:
+    """Per-inverter daily kWh — GET /components/{id}/data?gran=daily&fields=Wh_sum.
+
+    Returns [{day: date, kwh: float}, ...]; days with 0/null Wh_sum are kept as
+    0.0 here (unlike the site roll-up, a per-inverter zero is a meaningful "this
+    unit produced nothing" signal for the fleet view). Wh → kWh (÷1000).
+    """
+    params = {
+        "fields": "Wh_sum",
+        "start": f"{start.isoformat()}T00:00:00",
+        "end": f"{end.isoformat()}T23:59:59",
+        "tz": tz or "UTC",
+        "gran": "daily",
+    }
+    body = _get(creds, f"/components/{component_id}/data", params=params)
+    out: list[dict] = []
+    for row in body.get("data", []) or []:
+        wh = row.get("Wh_sum")
+        raw_ts = row.get("ts") or ""
+        try:
+            day = date.fromisoformat(raw_ts[:10])
+        except (ValueError, TypeError):
+            continue
+        out.append({"day": day, "kwh": (float(wh) / 1000.0) if wh is not None else 0.0})
+    return out

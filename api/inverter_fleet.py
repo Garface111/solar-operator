@@ -308,19 +308,22 @@ def _resolve_connection(db, arr: Array):
 
 # ─────────────────────────── telemetry (by source) ───────────────────────────
 
-def _telemetry_for_site(vendor: str, api_key: str, site_id, *, force: bool = False) -> dict:
+def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = False) -> dict:
     """Return {serial: {name, model, nameplate_kw, daily, error_code, last_report,
-    last_mode, last_power_w}} for one source site. Cached 10 min. SolarEdge only
-    today; other vendors return {} until their per-inverter capture lands."""
+    last_mode, last_power_w}} for one source site. Cached 10 min. `config` is the
+    connection's full credential dict (SolarEdge reads api_key; Locus reads the
+    SolarNOC username/password). Vendors without a per-inverter branch return {}."""
     ck = f"{vendor}:{site_id}"
     if not force:
         hit = _site_cache.get(ck)
         if hit and (now() - hit[0]) < _SITE_TTL:
             return hit[1]
 
+    config = config or {}
     out: dict[str, dict] = {}
     if vendor == "solaredge":
         from .adapters import solaredge as _se
+        api_key = config.get("api_key")
         try:
             inv = _se.fetch_inventory(api_key, int(site_id))
         except _se.SolarEdgeError as exc:
@@ -341,6 +344,42 @@ def _telemetry_for_site(vendor: str, api_key: str, site_id, *, force: bool = Fal
                 "daily": tel["daily"], "error_code": tel["error_code"],
                 "last_report": tel["last_report"], "last_mode": tel.get("last_mode"),
                 "last_power_w": tel.get("last_power_w"),
+            }
+    elif vendor == "locus":
+        # Locus exposes each inverter as an INVERTER component; identity is the
+        # component id (serials are usually blank). One components call + per-unit
+        # latest power + 7-day daily. Cached 10 min like every source.
+        from .adapters import locus as _locus
+        creds = {"username": config.get("username"), "password": config.get("password")}
+        if config.get("cognito_client_id"):
+            creds["cognito_client_id"] = config["cognito_client_id"]
+        try:
+            comps = _locus.list_inverter_components(creds, int(site_id))
+        except _locus.LocusError as exc:
+            log.warning("fleet: locus components fetch failed for site %s: %s", site_id, exc)
+            return _site_cache.get(ck, (None, {}))[1] if ck in _site_cache else {}
+        end = now().date()
+        start = end - timedelta(days=7)
+        for c in comps:
+            cid = c["component_id"]
+            try:
+                latest = _locus.fetch_component_latest(creds, cid)
+            except _locus.LocusError:
+                latest = {"last_power_w": None, "last_report": None}
+            try:
+                daily = _locus.fetch_component_daily(creds, cid, start, end)
+            except _locus.LocusError:
+                daily = []
+            model = " ".join(x for x in (c.get("oem"), c.get("model")) if x) or None
+            out[str(cid)] = {
+                "name": c.get("name") or f"Inverter {cid}",
+                "model": model,
+                "nameplate_kw": c.get("nameplate_kw"),
+                "daily": [{"date": r["day"].isoformat(), "kwh": r["kwh"]} for r in daily],
+                "error_code": None,
+                "last_report": latest.get("last_report"),
+                "last_mode": None,
+                "last_power_w": latest.get("last_power_w"),
             }
     _site_cache[ck] = (now(), out)
     return out
@@ -488,10 +527,10 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
             continue
         vendor = conn.vendor
         cfg = conn.config or {}
-        api_key, site_id = cfg.get("api_key"), cfg.get("site_id")
-        if not (api_key and site_id):
+        site_id = cfg.get("site_id")
+        if not site_id:
             continue
-        tel = _telemetry_for_site(vendor, api_key, site_id, force=force_refresh)
+        tel = _telemetry_for_site(vendor, cfg, site_id, force=force_refresh)
         for serial, m in tel.items():
             key = (vendor, str(serial))
             iv = existing.get(key)
@@ -1104,8 +1143,8 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             src_arr = array_by_id.get(iv.source_array_id) or arr
             conn = _conn_for(src_arr)
             tel_map = {}
-            if conn is not None and (conn.config or {}).get("api_key") and (conn.config or {}).get("site_id"):
-                tel_map = _telemetry_for_site(conn_vendor, conn.config["api_key"],
+            if conn is not None and (conn.config or {}).get("site_id"):
+                tel_map = _telemetry_for_site(conn_vendor, conn.config or {},
                                               conn.config["site_id"], force=force_refresh)
             m = tel_map.get(iv.serial, {})
             # --- API-INDEPENDENT HISTORY STORE ---
