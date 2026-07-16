@@ -1300,6 +1300,24 @@ _OPERATING_AGREEMENT = {
         "experience. Do NOT auto-spam them with marketing or treat demo masking as their "
         "real fleet."
     ),
+    # Honest capability ceiling (Ford 2026-07-16) — never overclaim these as shipped
+    "capability_gaps_honest": (
+        "Other glaringly obvious gaps (honest self-assessment — Ford 2026-07-16):\n"
+        "1. No multimodal input at all (images, video, voice, PDF raster).\n"
+        "2. No always-on autonomous browser / HAR collector independent of local_bridge.\n"
+        "3. Credential vault + session replay still semi-manual; I stage, I do not yet "
+        "rotate or refresh live sessions myself.\n"
+        "4. No sandboxed code interpreter for rapid adapter prototypes — I still route "
+        "non-trivial code through hire/jobs.\n"
+        "5. Inbound email attachments and files are not auto-parsed into structured "
+        "utility/HAR objects.\n"
+        "6. Long-running agent loops outside the existing sub/cortex/ops-sweep cadence "
+        "are still thin.\n"
+        "7. Direct owner-facing surfaces (chat, status) remain Ford-mediated for anything "
+        "non-routine.\n"
+        "Standing honesty about limits. Prefer concrete next bets when Ford asks roadmap "
+        "or self-critique. Do not invent fake autonomy in these areas."
+    ),
 }
 
 
@@ -1323,7 +1341,8 @@ def ensure_operating_memory(db) -> None:
             "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
             "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
             "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
-            "6) " + _OPERATING_AGREEMENT["people_testers"]
+            "6) " + _OPERATING_AGREEMENT["people_testers"] + "\n"
+            "7) " + _OPERATING_AGREEMENT["capability_gaps_honest"]
         )
         if existing.get("ford_operating_agreement") != compact:
             memory_set(db, "ford_operating_agreement", compact, source="ford_grant")
