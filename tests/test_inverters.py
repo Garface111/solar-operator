@@ -396,19 +396,36 @@ def test_sma_token_uses_refresh_grant(monkeypatch):
     assert captured["refresh_token"] == "rt-abc"
 
 
-# ── locus (Locus Energy / SolarNOC, OAuth2 password grant) ────────────────────
+# ── locus (Locus Energy / SolarNOC, AWS Cognito auth) ─────────────────────────
+# Auth is USER_PASSWORD_AUTH against Cognito → IdToken (a JWT carrying
+# custom:partnerId) used as the v3 Bearer. The login POSTs Cognito (httpx.post);
+# the v3 data calls are httpx.get.
+
+def _fake_id_token(partner_id: int = 659488) -> str:
+    """A minimal unsigned JWT whose payload carries custom:partnerId (all the
+    adapter decodes). Signature segment is a placeholder."""
+    import base64 as _b64
+    import json as _json
+
+    def _seg(obj: dict) -> str:
+        raw = _json.dumps(obj).encode("utf-8")
+        return _b64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    header = _seg({"alg": "RS256", "typ": "JWT"})
+    payload = _seg({"custom:partnerId": str(partner_id), "cognito:username": "user"})
+    return f"{header}.{payload}.sig"
+
 
 def _locus_token_ok(*a, **k):
     return _FakeResp(200, {
-        "access_token": "loc-tok", "refresh_token": "loc-refresh",
-        "token_type": "bearer", "expires_in": 3600,
+        "AuthenticationResult": {
+            "IdToken": _fake_id_token(), "AccessToken": "access-only",
+            "RefreshToken": "loc-refresh", "TokenType": "Bearer", "ExpiresIn": 3600,
+        },
     })
 
 
-_LOCUS_CREDS = {
-    "client_id": "cid", "client_secret": "secret",
-    "username": "user", "password": "pw", "site_id": 123,
-}
+_LOCUS_CREDS = {"username": "user", "password": "pw", "site_id": 123}
 
 
 def test_locus_validate_success(monkeypatch):
@@ -428,8 +445,12 @@ def test_locus_validate_success(monkeypatch):
 
 
 def test_locus_validate_auth_failure(monkeypatch):
-    # The token endpoint rejects the credentials -> InverterAuthError.
-    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResp(401, {"error": "bad"}))
+    # Cognito rejects the credentials with a 400 + NotAuthorizedException __type
+    # -> InverterAuthError.
+    monkeypatch.setattr(
+        httpx, "post",
+        lambda *a, **k: _FakeResp(400, {"__type": "NotAuthorizedException", "message": "bad"}),
+    )
     with pytest.raises(InverterAuthError):
         locus.validate(_LOCUS_CREDS)
 
@@ -466,41 +487,38 @@ def test_locus_fetch_live(monkeypatch):
 
 
 def test_locus_discover_sites(monkeypatch):
+    # partnerId is derived from the IdToken; the /search/sites payload carries
+    # siteId/siteName/siteDCCapacity → real peak_power_kw.
     monkeypatch.setattr(httpx, "post", _locus_token_ok)
     sites_body = {
         "statusCode": 200,
+        "paging": {"total": 2},
         "sites": [
-            {"id": 123, "clientId": 456, "name": "Test Site",
-             "address1": "657 Mission St", "locale3": "San Francisco",
-             "localeCode1": "CA", "postalCode": "94105",
+            {"siteId": 123, "clientId": 456, "siteName": "Test Site",
+             "siteDCCapacity": 25.0, "locale3": "San Francisco", "localeCode1": "CA",
              "locationTimezone": "America/Los_Angeles"},
-            {"id": 789, "clientId": 456, "name": "Second Site"},
+            {"siteId": 789, "clientId": 456, "siteName": "Second Site"},
         ],
     }
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, sites_body))
-    sites = locus.discover_sites({
-        "client_id": "cid", "client_secret": "secret",
-        "username": "user", "password": "pw", "partner_id": 659488,
-    })
+    # username+password only — no client_id/secret/partner_id needed.
+    sites = locus.discover_sites({"username": "user", "password": "pw"})
     assert [s["site_id"] for s in sites] == [123, 789]
     assert sites[0]["name"] == "Test Site"
-    # Locus's site list has no peak power; the key is kept as None for UI parity.
-    assert sites[0]["peak_power_kw"] is None
+    assert sites[0]["peak_power_kw"] == 25.0
+    assert sites[1]["peak_power_kw"] is None  # no siteDCCapacity → None
 
 
 def test_locus_discover_sites_scope_failure(monkeypatch):
     monkeypatch.setattr(httpx, "post", _locus_token_ok)
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(403, {"error": "forbidden"}))
     with pytest.raises(InverterScopeError):
-        locus.discover_sites({
-            "client_id": "cid", "client_secret": "secret",
-            "username": "user", "password": "pw", "partner_id": 659488,
-        })
+        locus.discover_sites({"username": "user", "password": "pw"})
 
 
 def test_locus_token_cache(monkeypatch):
-    """A second call within the token TTL reuses the cached token — the OAuth
-    endpoint is hit exactly once."""
+    """A second call within the token TTL reuses the cached token — the Cognito
+    login endpoint is hit exactly once."""
     calls = {"post": 0}
 
     def counting_post(*a, **k):
@@ -513,6 +531,23 @@ def test_locus_token_cache(monkeypatch):
     locus.validate(_LOCUS_CREDS)
     locus.validate(_LOCUS_CREDS)
     assert calls["post"] == 1
+
+
+def test_locus_wrong_password_reauths(monkeypatch):
+    """A different password must NOT reuse a prior good token — the cache is keyed
+    by username+password, so a wrong password re-hits Cognito and is rejected."""
+    def _post(*a, **k):
+        body = k.get("content") or (a[1] if len(a) > 1 else "") or ""
+        # Reject anything that isn't the known-good password.
+        if '"PASSWORD": "pw"' in body or '"PASSWORD":"pw"' in body:
+            return _locus_token_ok()
+        return _FakeResp(400, {"__type": "NotAuthorizedException", "message": "bad"})
+
+    monkeypatch.setattr(httpx, "post", _post)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(200, {"id": 123, "name": "S"}))
+    assert locus.validate(_LOCUS_CREDS)["site_id"] == 123           # good pw caches
+    with pytest.raises(InverterAuthError):                          # wrong pw re-auths
+        locus.validate({"username": "user", "password": "WRONG", "site_id": 123})
 
 
 # ── chint stub ────────────────────────────────────────────────────────────────
@@ -534,14 +569,14 @@ def test_inverter_vendors_listing(client):
     assert resp.status_code == 200, resp.text
     by_code = {v["code"]: v for v in resp.json()}
     assert set(by_code) == {"solaredge", "enphase", "solis", "tigo", "locus", "fronius", "sma", "chint", "alsoenergy"}
-    # solaredge: 2 fields; enphase: 5; solis: 3; tigo: 3; fronius: 3; sma: 4; locus: 6; alsoenergy: 3; chint: unavailable + note
+    # solaredge: 2 fields; enphase: 5; solis: 3; tigo: 3; fronius: 3; sma: 4; locus: 3; alsoenergy: 3; chint: unavailable + note
     assert len(by_code["solaredge"]["fields"]) == 2
     assert len(by_code["enphase"]["fields"]) == 5
     assert len(by_code["solis"]["fields"]) == 3
     assert len(by_code["tigo"]["fields"]) == 3
     assert len(by_code["fronius"]["fields"]) == 3
     assert len(by_code["sma"]["fields"]) == 4
-    assert len(by_code["locus"]["fields"]) == 6
+    assert len(by_code["locus"]["fields"]) == 3
     assert len(by_code["alsoenergy"]["fields"]) == 3
     assert by_code["enphase"]["available"] is True
     assert by_code["alsoenergy"]["available"] is True

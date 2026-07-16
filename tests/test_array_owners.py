@@ -332,18 +332,16 @@ def test_connect_solaredge_401_returns_400_and_does_not_save(client, monkeypatch
         assert arr.solaredge_site_id is None
 
 
-def test_connect_locus_requires_api_credentials(client):
-    """The Locus connect endpoint 400s (saving nothing) when the API app creds are
-    missing — the SolarNOC *portal* login alone can't authenticate the Locus API,
-    so a request with only username/password (no client_id/secret) is rejected
-    before any Locus call is made."""
+def test_connect_locus_requires_login(client):
+    """The Locus connect endpoint 400s (saving nothing) when the SolarNOC login is
+    missing — auth is the portal username/password (fronted by AWS Cognito), so a
+    request with a blank username/password is rejected before any Locus call."""
     from api.models import InverterConnection
     tid, key = _make_tenant()
     array_id = _make_array(tid, "LocusArray")
     resp = client.post(
         f"/v1/array-owners/arrays/{array_id}/locus",
-        json={"client_id": "", "client_secret": "", "username": "Johnson",
-              "password": "z9ekr34jh", "site_id": 4321},
+        json={"username": "", "password": "", "site_id": 4321},
         headers=_auth(key),
     )
     assert resp.status_code == 400, resp.text

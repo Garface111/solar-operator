@@ -50,7 +50,8 @@ def test_preview_needs_no_auth():
 
 
 def test_preview_vendor_locus_partner_discovery(monkeypatch):
-    """A Locus credential with a partner_id enumerates the partner's sites."""
+    """A Locus SolarNOC login enumerates every site under the partner (the partner
+    id is derived from the login — no site_id given → discover all)."""
     monkeypatch.setattr(
         ao.inverters.VENDORS["locus"], "discover_sites",
         lambda config: [
@@ -60,8 +61,7 @@ def test_preview_vendor_locus_partner_discovery(monkeypatch):
     )
     r = client.post("/v1/array-owners/public/preview", json={
         "vendor": "locus",
-        "config": {"client_id": "c", "client_secret": "s", "username": "u",
-                   "password": "p", "partner_id": "99"},
+        "config": {"username": "u", "password": "p"},
     })
     assert r.status_code == 200, r.text
     data = r.json()
@@ -121,7 +121,7 @@ def test_preview_unavailable_vendor_friendly():
 def test_preview_missing_fields_friendly(monkeypatch):
     """Missing credential fields → friendly ok:false, not a 500."""
     r = client.post("/v1/array-owners/public/preview", json={
-        "vendor": "locus", "config": {"client_id": "only"},
+        "vendor": "locus", "config": {"username": "only"},  # password missing
     })
     assert r.status_code == 200
     assert r.json()["ok"] is False
