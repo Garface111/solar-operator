@@ -257,22 +257,34 @@ Clear UI BUGS (CRITICAL — Ford 2026-07-15 Chester #4):
   Never tell the user a pure label/status inconsistency "needs a human look"
   as the first option.
 
+BREVITY (always — Ford 2026-07-16 voice cutoffs):
+  Default is SHORT. Long monologues get interrupted on voice and feel like a lecture in chat.
+  - Answer in 1–3 short sentences for normal questions. One idea per sentence.
+  - Prefer: answer first → one useful detail → optional "want more?" — stop.
+  - Bullet lists only when the user asked for a list/tour/enumeration. Cap at 4 bullets,
+    one short line each. Never a multi-paragraph essay unsolicited.
+  - No throat-clearing ("Happy to help…", "Great question…", "Sure thing…").
+  - No recapping the whole product or every tab unless they asked "what are the tabs?"
+  - Tools gather depth; YOUR REPLY stays lean. If more detail is useful, offer it — don't dump it.
+
 Voice discipline:
   - WAIT for the full request. Prefer one clarifying question over premature action.
-  - Short spoken replies. Long analysis stays in tools, not in the mouth.
-  - Put the ANSWER in the first sentence (voice often reads the lead). Never bury
+  - Spoken path is even tighter: aim ~25–50 words unless they asked for a walkthrough/tour.
+  - Put the ANSWER in the first sentence (voice reads the lead). Never bury
     the point after a long throat-clear. Example: "Town of Glover's solar credit
-    rate is about $0.18/kWh." then a short detail if needed.
+    rate is about $0.18/kWh." then one short detail if needed — then stop.
   - If the user says stop / wait / cancel / enough — halt immediately (client enforces;
     still never keep monologuing if they already asked you to stop).
+  - Do NOT narrate every step of a tour or setup as a continuous speech; chunk into
+    short lines the client can play without cutting mid-thought.
 
 CHAT TEXT FORMAT (CRITICAL — scannable bubbles; Ford 2026-07-15):
-  Chat is a narrow bubble. Structure every multi-fact reply so it SKIMS cleanly.
+  Chat is a narrow bubble. Structure multi-fact replies so they SKIM cleanly — and keep them SHORT.
   Prefer real markdown lists over dense parenthetical dumps of numbers.
   Rules:
-  1. Lead with the answer in one short sentence (or two). Then structure the rest.
+  1. Lead with the answer in one short sentence (or two). Then at most a tight list.
   2. When you have 2+ parallel items (arrays, steps, rates, contacts, issues, options):
-     use a REAL markdown list — one item per line. Never pack "1) … 2) … 3) …" on one line.
+     use a REAL markdown list — one item per line. Cap ~4 items unless they asked for all.
        - Bullets: start the line with "- " (hyphen + space)
        - Steps: start the line with "1. " "2. " (number + period + space)
      Nested detail: indent 2 spaces then "- " under the parent item.
@@ -286,11 +298,10 @@ CHAT TEXT FORMAT (CRITICAL — scannable bubbles; Ford 2026-07-15):
   4. Prefer " · " (middle dots) or separate list lines over stacks of (parentheses).
      One short parenthetical is fine; three nested ones is not.
   5. Bold key names/labels with **double asterisks**. Use a blank line between sections.
-     Keep paragraphs short (1–3 sentences).
+     Keep paragraphs short (1–2 sentences). Whole reply usually under ~120 words.
   6. Links always as [label](https://…) — never bare "search for X".
-  7. Voice still stays short and linear when speaking; the CHAT text should be the
-     structured version when the answer has multiple facts (lists read fine after
-     the client strips markers for TTS).
+  7. Voice still stays short and linear when speaking; the CHAT text can be a slightly
+     denser skim-friendly version, never a monologue.
 
 Hard rules:
 - Never invent kWh, $, counts, or status. Use tools and report what they return.
@@ -5248,7 +5259,7 @@ def _xai_ready() -> bool:
         return False
 
 
-def _call_grok(messages: list[dict], tools: list) -> dict:
+def _call_grok(messages: list[dict], tools: list, *, max_tokens: int | None = None) -> dict:
     """OpenAI-compatible chat.completions via xAI. Returns message dict + usage.
 
     Bearer may be classic console.x.ai API key OR Grok Build OIDC (prepaid credits).
@@ -5260,12 +5271,15 @@ def _call_grok(messages: list[dict], tools: list) -> dict:
         if not XAI_API_KEY:
             raise RuntimeError(f"no_xai: {e}") from e
         bearer = XAI_API_KEY
+    tok = int(max_tokens or os.getenv("EA_MAX_TOKENS", "1200") or 1200)
+    tok = max(256, min(tok, 4096))
     body = {
         "model": XAI_MODEL,
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
         "temperature": 0.4,
+        "max_tokens": tok,
     }
     out = _http_json(
         f"{XAI_BASE}/chat/completions",
@@ -5331,7 +5345,7 @@ def _openai_content_to_anthropic(content: Any) -> Any:
     return blocks if blocks else ""
 
 
-def _call_anthropic(messages: list[dict], tools: list) -> dict:
+def _call_anthropic(messages: list[dict], tools: list, *, max_tokens: int | None = None) -> dict:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("no_anthropic")
     # Convert tools to Anthropic shape
@@ -5387,10 +5401,12 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
                 })
             else:
                 a_msgs.append({"role": m["role"], "content": raw or ""})
+    tok = int(max_tokens or os.getenv("EA_MAX_TOKENS", "1200") or 1200)
+    tok = max(256, min(tok, 4096))
     body = {
         # claude-sonnet-4-20250514 is retired/404 on current API — use 4.5 alias.
         "model": os.getenv("EA_ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-        "max_tokens": 2048,
+        "max_tokens": tok,
         "system": sys or PERSONA,
         "messages": a_msgs,
         "tools": a_tools,
@@ -5429,7 +5445,7 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
     return {"message": msg, "usage": usage, "provider": "anthropic"}
 
 
-def _call_llm(messages: list[dict]) -> dict:
+def _call_llm(messages: list[dict], *, max_tokens: int | None = None) -> dict:
     """Grok (Build OIDC / API key) first when ready; Claude cloth fallback."""
     primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
     order = []
@@ -5442,9 +5458,9 @@ def _call_llm(messages: list[dict]) -> dict:
     for who in order:
         try:
             if who == "grok" and _xai_ready():
-                return _call_grok(messages, TOOL_DEFS)
+                return _call_grok(messages, TOOL_DEFS, max_tokens=max_tokens)
             if who == "claude" and ANTHROPIC_API_KEY:
-                return _call_anthropic(messages, TOOL_DEFS)
+                return _call_anthropic(messages, TOOL_DEFS, max_tokens=max_tokens)
         except Exception as e:
             last_err = e
             log.warning("%s failed, trying next LLM: %s", who, e)
@@ -5568,6 +5584,7 @@ def _visual_fix_fast_path(
 
     return {
         "reply": reply,
+        "speak": _mouth_line(reply, voice=_is_voice_turn(None, ctx)),
         "ui_commands": ui_commands,
         "pending": None,
         "tool_trace": tool_trace,
@@ -5708,6 +5725,78 @@ def _ea_user_content_multimodal(
     return [{"type": "text", "text": text}] + image_parts
 
 
+def _is_voice_turn(source: str | None, context: dict | None) -> bool:
+    """True when this chat turn should prefer short spoken-style replies."""
+    src = (source or "").strip().lower()
+    if src == "voice":
+        return True
+    ctx = context or {}
+    if ctx.get("voice_source") is True or str(ctx.get("voice_source") or "").lower() in (
+        "1", "true", "yes", "voice",
+    ):
+        return True
+    if str(ctx.get("channel") or "").lower() == "voice":
+        return True
+    return False
+
+
+def _mouth_line(reply: str, *, voice: bool = False) -> str:
+    """Spoken line for the Realtime mouth — leaner than the chat bubble when needed.
+
+    Voice turns get a hard word/sentence cap so long LLM dumps cannot start a
+    monologue that barges/interrupts itself mid-stream.
+    """
+    text = (reply or "").strip()
+    if not text:
+        return ""
+    # Strip markdown noise the mouth shouldn't vocalize
+    plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    plain = re.sub(r"`([^`]+)`", r"\1", plain)
+    plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", plain)
+    plain = re.sub(r"^#+\s*", "", plain, flags=re.M)
+    plain = re.sub(r"^[-*]\s+", "", plain, flags=re.M)
+    plain = re.sub(r"^\d+\.\s+", "", plain, flags=re.M)
+    plain = re.sub(r"\n{2,}", " ", plain)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not voice:
+        # Chat path still prefers full speak when short; cap extreme dumps
+        words = plain.split()
+        if len(words) <= 90:
+            return plain
+        # First two sentences max for overlong text replies
+        parts = re.split(r"(?<=[.!?])\s+", plain)
+        short = " ".join(parts[:2]).strip() if parts else plain
+        w = short.split()
+        if len(w) > 90:
+            short = " ".join(w[:90]).rstrip(",;:") + "."
+        return short or plain
+
+    # Voice: ~45 words / 2 sentences
+    max_words = int(os.getenv("EA_VOICE_MAX_WORDS", "48") or 48)
+    max_words = max(20, min(max_words, 80))
+    parts = re.split(r"(?<=[.!?])\s+", plain)
+    out = []
+    count = 0
+    for p in parts:
+        p = (p or "").strip()
+        if not p:
+            continue
+        wc = len(p.split())
+        if out and count + wc > max_words:
+            break
+        out.append(p)
+        count += wc
+        if len(out) >= 2 and count >= 18:
+            break
+        if count >= max_words:
+            break
+    spoken = " ".join(out).strip() if out else plain
+    w = spoken.split()
+    if len(w) > max_words:
+        spoken = " ".join(w[:max_words]).rstrip(",;:") + "."
+    return spoken or plain
+
+
 def _agent_turn(
     db,
     tenant: Tenant,
@@ -5715,6 +5804,7 @@ def _agent_turn(
     user_text: str,
     context: dict | None,
     attachment_ids: list[str] | None = None,
+    source: str = "text",
 ) -> dict:
     budget = _check_budget(db, tenant.id)
     if not budget["ok"]:
@@ -5783,6 +5873,24 @@ def _agent_turn(
         "rates call get_billing_rates (or get_offtaker) first — do not call "
         "product_map for rate questions. Avoid multi-tool fishing."
     )
+    voice_turn = _is_voice_turn(source, context)
+    if voice_turn:
+        system += (
+            "\n\nCHANNEL=VOICE (Realtime mouth — keep it SHORT or it gets cut off):\n"
+            "- Reply in 1–2 short spoken sentences (about 25–50 words total).\n"
+            "- Lead with the answer. One optional detail. Then stop.\n"
+            "- No multi-paragraph setup guides, no tab inventory, no lecture.\n"
+            "- If they need a long walkthrough, give the first step only and ask "
+            "if they want the next.\n"
+            "- Lists: max 3 one-line bullets, or better: name the top item and "
+            "offer the rest.\n"
+            "- This is spoken aloud — write for the ear, not a manual."
+        )
+    else:
+        system += (
+            "\n\nBREVITY REMINDER: Prefer 1–3 short sentences or a tight list "
+            "(≤4 bullets). Don't monologue. Offer more if needed."
+        )
     if mind_plan:
         system += (
             "\n\nMind background (internal — do not dump task IDs to the user):\n"
@@ -5832,9 +5940,19 @@ def _agent_turn(
     total_cost = 0.0
     provider = None
     final_text = ""
+    # Voice gets a tighter completion budget so the model can't ramble.
+    try:
+        default_max = int(os.getenv("EA_MAX_TOKENS", "1200") or 1200)
+    except (TypeError, ValueError):
+        default_max = 1200
+    try:
+        voice_max = int(os.getenv("EA_VOICE_MAX_TOKENS", "700") or 700)
+    except (TypeError, ValueError):
+        voice_max = 700
+    llm_max_tokens = voice_max if voice_turn else default_max
 
     for _round in range(MAX_TOOL_ROUNDS):
-        result = _call_llm(messages)
+        result = _call_llm(messages, max_tokens=llm_max_tokens)
         provider = result.get("provider")
         total_cost += _usage_cost(result.get("usage") or {})
         msg = result["message"]
@@ -5985,10 +6103,12 @@ def _agent_turn(
             ),
         }
 
+    spoken = _mouth_line(final_text, voice=voice_turn)
     return {
         "reply": final_text,
         # Mouth speaks this (mind-steered). Client prefers speak over inventing a paraphrase.
-        "speak": final_text,
+        # Voice turns get a hard-capped spoken line so long dumps don't cut themselves off.
+        "speak": spoken,
         "ui_commands": ui_commands,
         "pending": pending,
         "tool_trace": tool_trace,
@@ -5996,6 +6116,7 @@ def _agent_turn(
         "provider": provider,
         "mind": mind_out,
         "cost_usd": round(total_cost, 6),
+        "voice_turn": voice_turn,
     }
 
 
@@ -6454,7 +6575,11 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
                 "provider": "confirm",
             }
 
-        out = _agent_turn(db, t, s, msg, body.context, attachment_ids=attach_ids)
+        out = _agent_turn(
+            db, t, s, msg, body.context,
+            attachment_ids=attach_ids,
+            source=body.source or "text",
+        )
         db.commit()
         return {"ok": True, "session_id": s.id, **out}
 
