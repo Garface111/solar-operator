@@ -1,16 +1,22 @@
 """scripts/migrate_nepool_tenant.py — the Phase-1 fold migration tool.
 
 Synthetic fixture mirroring the real prod shape (dual-capture "sibling"
-arrays): a NEPOOL tenant with 2 clients / 3 arrays migrated onto an AO tenant.
+arrays): a NEPOOL tenant with 3 clients / 3 arrays migrated onto an AO tenant.
 
   A1 "North Field"  -> exact-name sibling on target        (link-name)
   A2 "South Field"  -> account-number sibling "S Field Two" (link-account + rename)
   A3 "Hydro Dam"    -> no match                             (move wholesale)
+  C3 "Sample VEC"   -> zero-array client, moves as-is (flagged in the plan)
+
+capture_client=True adds the Bruce-pair shape: a target capture client (like
+prod 1557) holding TA1/TA2 + a plain capture array — exercising
+--claim-linked-from and --deactivate-client.
 
 Asserts: the mapping plan, NEPOOL fields carried, settings moved,
 ReportDelivery history re-pointed, verify-mode workbook byte-equality on the
-default writer dispatch, the rollback proof (verify leaves the DB untouched),
-and that ambiguities abort execute instead of guessing.
+default writer dispatch + the post-state reports-iteration assertions, the
+rollback proof (verify leaves the DB untouched), and that ambiguities /
+unclaimed linked targets abort execute instead of guessing.
 """
 from __future__ import annotations
 
@@ -49,8 +55,15 @@ def _bill_kwargs(kwh: int) -> dict:
                 kwh_generated=kwh)
 
 
-def _fixture() -> dict:
-    """The synthetic two-tenant world. Returns ids keyed by name."""
+def _fixture(capture_client: bool = False) -> dict:
+    """The synthetic two-tenant world. Returns ids keyed by name.
+
+    capture_client=True reproduces the Bruce-pair prod shape: the TARGET has
+    one capture-created client ("GMCS Capture", like prod client 1557) that
+    holds ALL its arrays — the report siblings TA1/TA2 plus a plain capture
+    array TA3 (no gis) — so LINK matches hit client-linked targets and need
+    --claim-linked-from.
+    """
     ids: dict = {}
     src = _tenant(product="nepool",
                   report_frequency="monthly", send_mode="to_both",
@@ -68,9 +81,11 @@ def _fixture() -> dict:
                     contact_email="alpha@client.test")
         c2 = Client(tenant_id=src, name="Beta Hydro", active=True,
                     contact_email="beta@client.test")
-        db.add_all([c1, c2])
+        # The "Sample VEC" shape: a zero-array client that moves as-is.
+        c3 = Client(tenant_id=src, name="Sample VEC", active=True)
+        db.add_all([c1, c2, c3])
         db.flush()
-        ids["c1"], ids["c2"] = c1.id, c2.id
+        ids["c1"], ids["c2"], ids["c3"] = c1.id, c2.id, c3.id
 
         # A1: exact-name sibling.
         a1 = Array(tenant_id=src, client_id=c1.id, name="North Field",
@@ -109,11 +124,25 @@ def _fixture() -> dict:
                                    day=date(2024, 1, d), kwh=100.0))
 
         # ── target siblings (dual capture: same numbers, its own rows) ──
-        ta1 = Array(tenant_id=tgt, client_id=None, name="North Field")
-        ta2 = Array(tenant_id=tgt, client_id=None, name="S Field Two")
+        cap_id = None
+        if capture_client:
+            cap = Client(tenant_id=tgt, name="GMCS Capture", active=True)
+            db.add(cap)
+            db.flush()
+            cap_id = cap.id
+            ids["cap"] = cap_id
+        ta1 = Array(tenant_id=tgt, client_id=cap_id, name="North Field")
+        ta2 = Array(tenant_id=tgt, client_id=cap_id, name="S Field Two")
         db.add_all([ta1, ta2])
+        if capture_client:
+            # plain capture array with NO gis — stays behind on the capture
+            # client; deactivation is allowed while it remains.
+            ta3 = Array(tenant_id=tgt, client_id=cap_id, name="Plain Capture")
+            db.add(ta3)
         db.flush()
         ids["ta1"], ids["ta2"] = ta1.id, ta2.id
+        if capture_client:
+            ids["ta3"] = ta3.id
         tua1 = UtilityAccount(tenant_id=tgt, array_id=ta1.id, provider="gmp",
                               account_number="TN1_" + secrets.token_hex(3))
         tua2 = UtilityAccount(tenant_id=tgt, array_id=ta2.id, provider="gmp",
@@ -160,7 +189,12 @@ def test_plan_maps_by_name_then_account_then_moves():
     assert a3.fields["fuel_type"] == "hydro"
     assert a3.fields["cert_registry"] == "LIHI"
 
-    assert {c["name"] for c in plan.clients} == {"Alpha Solar", "Beta Hydro"}
+    assert {c["name"] for c in plan.clients} == {"Alpha Solar", "Beta Hydro",
+                                                 "Sample VEC"}
+    # zero-array client flagged so the operator sees it's benign
+    by_name = {c["name"]: c for c in plan.clients}
+    assert by_name["Sample VEC"]["arrays"] == 0
+    assert by_name["Alpha Solar"]["arrays"] == 2
     assert plan.report_deliveries == 1
 
     settings = {s["field"]: s["action"] for s in plan.settings}
@@ -176,11 +210,16 @@ def test_verify_workbooks_identical_and_rolls_back():
     ids = _fixture()
     results = run_verify(ids["src"], ids["tgt"], reference_date=_REF)
 
-    for cid in (ids["c1"], ids["c2"]):
+    for cid in (ids["c1"], ids["c2"], ids["c3"]):
         r = results[cid]
         assert r["level"] in ("identical", "content_identical"), r
     # C1 exercises the gmcs (solar) writer, C2 the rec (hydro) writer — both
-    # through the real registry dispatch.
+    # through the real registry dispatch. C3 (zero arrays) renders the same
+    # "(no data)" stub pre/post.
+
+    # post-state: no capture client in this fixture -> active target clients
+    # == exactly the migrated set.
+    assert results["_post_state"]["ok"] is True, results["_post_state"]
 
     # ROLLBACK PROOF: verify must leave the world byte-for-byte as it found it.
     with SessionLocal() as db:
@@ -272,6 +311,133 @@ def test_execute_moves_everything_and_carries_nepool_fields():
         assert wb.sheetnames == ["North Field", "South Field"]
         assert wb["North Field"]["A1"].value == "North Field (111)"
         assert wb["South Field"]["A1"].value == "South Field (222)"
+
+
+# ── claiming capture-created client links (the Bruce-pair shape) ───────────────
+
+def test_linked_targets_require_explicit_claim():
+    ids = _fixture(capture_client=True)
+    with SessionLocal() as db:
+        # no claim -> the guard fires exactly as on the Bruce prod dry-run
+        plan = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]))
+    assert any("--claim-linked-from" in c for c in plan.conflicts)
+    with pytest.raises(MigrationBlocked):
+        run_execute(ids["src"], ids["tgt"])
+
+    with SessionLocal() as db:
+        # claiming some OTHER client id does not unlock these targets
+        plan2 = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]),
+                           claim_from={ids["cap"] + 99999})
+    assert any("already linked to client" in c for c in plan2.conflicts)
+
+
+def test_claim_path_repoints_renames_and_carries_gis():
+    ids = _fixture(capture_client=True)
+    with SessionLocal() as db:
+        plan = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]),
+                          claim_from={ids["cap"]})
+    assert plan.blockers == []
+    by_src = {a.source_id: a for a in plan.arrays}
+    assert by_src[ids["a1"]].claimed_from == ids["cap"]
+    assert by_src[ids["a2"]].claimed_from == ids["cap"]
+    assert by_src[ids["a2"]].rename_to == "South Field"
+
+    run_execute(ids["src"], ids["tgt"], claim_from={ids["cap"]})
+    with SessionLocal() as db:
+        ta1 = db.get(Array, ids["ta1"])
+        ta2 = db.get(Array, ids["ta2"])
+        assert ta1.client_id == ids["c1"] and ta1.nepool_gis_id == "111"
+        assert ta2.client_id == ids["c1"] and ta2.nepool_gis_id == "222"
+        assert ta2.name == "South Field"                       # renamed
+        assert db.get(Array, ids["a1"]).client_id is None      # source detached
+        assert db.get(Array, ids["a2"]).client_id is None
+        # the capture client keeps its plain array and (not deactivated) stays active
+        cap = db.get(Client, ids["cap"])
+        assert cap.active is True
+        assert db.get(Array, ids["ta3"]).client_id == ids["cap"]
+
+
+def test_deactivate_refused_while_report_arrays_remain():
+    ids = _fixture(capture_client=True)
+    with SessionLocal() as db:
+        # make the leftover capture array a REPORT array (gis set) — the
+        # capture client would still hold reports-world data after the claims
+        db.get(Array, ids["ta3"]).nepool_gis_id = "999"
+        db.commit()
+    with SessionLocal() as db:
+        plan = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]),
+                          claim_from={ids["cap"]},
+                          deactivate_clients={ids["cap"]})
+    assert any("REPORT array" in c for c in plan.conflicts)
+    with pytest.raises(MigrationBlocked):
+        run_execute(ids["src"], ids["tgt"], claim_from={ids["cap"]},
+                    deactivate_clients={ids["cap"]})
+    with SessionLocal() as db:                                 # nothing moved
+        assert db.get(Client, ids["c1"]).tenant_id == ids["src"]
+        assert db.get(Client, ids["cap"]).active is True
+
+
+def test_deactivate_wrong_tenant_client_is_a_conflict():
+    ids = _fixture(capture_client=True)
+    with SessionLocal() as db:
+        plan = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]),
+                          claim_from={ids["cap"]},
+                          deactivate_clients={ids["c1"]})      # a SOURCE client
+    assert any("not a live client on target" in c for c in plan.conflicts)
+
+
+def test_verify_post_state_flags_still_active_capture_client():
+    ids = _fixture(capture_client=True)
+
+    # claim WITHOUT deactivating: workbooks still byte-agree, but the reports
+    # iteration would still see the capture client -> post-state FAILS verify.
+    results = run_verify(ids["src"], ids["tgt"], reference_date=_REF,
+                         claim_from={ids["cap"]})
+    for cid in (ids["c1"], ids["c2"]):
+        assert results[cid]["level"] in ("identical", "content_identical")
+    post = results["_post_state"]
+    assert post["ok"] is False
+    assert str(ids["cap"]) in post["detail"]
+
+    # claim + deactivate: everything green.
+    results2 = run_verify(ids["src"], ids["tgt"], reference_date=_REF,
+                          claim_from={ids["cap"]},
+                          deactivate_clients={ids["cap"]})
+    for cid in (ids["c1"], ids["c2"], ids["c3"]):
+        assert results2[cid]["level"] in ("identical", "content_identical")
+    assert results2["_post_state"]["ok"] is True, results2["_post_state"]
+    plan = results2["_plan"]
+    assert plan.deactivate == [{"id": ids["cap"], "name": "GMCS Capture",
+                                "remaining_arrays": 1}]
+
+    # ROLLBACK PROOF for the claim+deactivate path too.
+    with SessionLocal() as db:
+        cap = db.get(Client, ids["cap"])
+        assert cap.active is True                              # not deactivated
+        assert db.get(Array, ids["ta1"]).client_id == ids["cap"]   # not claimed
+        assert db.get(Client, ids["c1"]).tenant_id == ids["src"]
+
+    # and EXECUTE actually retires it.
+    run_execute(ids["src"], ids["tgt"], claim_from={ids["cap"]},
+                deactivate_clients={ids["cap"]})
+    with SessionLocal() as db:
+        assert db.get(Client, ids["cap"]).active is False
+        assert db.get(Array, ids["ta3"]).client_id == ids["cap"]  # arrays untouched
+
+
+def test_plan_print_flags_claims_deactivation_and_zero_array_clients(capsys):
+    from scripts.migrate_nepool_tenant import _print_plan
+    ids = _fixture(capture_client=True)
+    with SessionLocal() as db:
+        plan = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]),
+                          claim_from={ids["cap"]},
+                          deactivate_clients={ids["cap"]})
+    _print_plan(plan)
+    out = capsys.readouterr().out
+    assert f"CLAIM (from client {ids['cap']})" in out
+    assert "(no arrays — moves as-is)" in out
+    assert "Clients to DEACTIVATE on target" in out
+    assert "1 plain capture array(s) remain" in out
 
 
 # ── never guess between two candidates ─────────────────────────────────────────

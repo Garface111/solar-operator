@@ -43,6 +43,30 @@ For every LIVE source array linked to a moved client, in order:
     linked (writers skip excluded arrays, so report parity holds either way;
     silently setting excluded on a live AO array would change AO billing).
     It is listed loudly for Ford's eyeball.
+  * A LINK match onto a target array that is ALREADY client-linked aborts —
+    UNLESS the operator explicitly claims it (below). Never inference.
+
+Claiming capture-created client links (the Bruce-pair shape)
+-------------------------------------------------------------
+AO capture auto-creates a Client per utility-login holder and links every
+captured array to it (e.g. Bruce's AO tenant: ONE "Green Mountain Community
+Solar" capture client holding all 28 arrays). The GMP-side siblings of the
+real report arrays are therefore client-LINKED, which the guard above
+refuses. Two EXPLICIT operator choices unlock that:
+
+  * --claim-linked-from <client_id>   (repeatable) A LINK/LINK-ACCOUNT match
+        whose target array currently belongs to one of these client ids is
+        ALLOWED: the array is re-pointed to the migrated client (same rename
+        + NEPOOL-field carry + source-sibling detach semantics). A linked
+        target belonging to any OTHER client still aborts. The plan prints
+        "CLAIM (from client N)" per array.
+  * --deactivate-client <client_id>   (repeatable, target-tenant client)
+        Sets active=False in the same transaction — retires the capture
+        client from the reports iteration. REFUSED if, after the claims, the
+        client would still hold live report arrays (any remaining array with
+        a nepool_gis_id); only a client whose remaining arrays are plain
+        capture arrays may be deactivated. The plan lists it with its
+        remaining-array count.
 
 Safety
 ------
@@ -57,6 +81,11 @@ Safety
                       when only that member differs the result is reported as
                       "content_identical" and, failing that, sheet content is
                       compared cell-by-cell via openpyxl.
+                      ALSO asserts the post-migration reports iteration: the
+                      target's ACTIVE clients must be exactly the migrated
+                      (source-active) client set — a still-active capture
+                      client fails verify — and every claimed array must sit
+                      on its migrated client.
   * --execute         apply + COMMIT. Refuses while any ambiguity/conflict is
                       open. Combine with --verify to require a green byte-diff
                       in the same run before committing.
@@ -69,6 +98,10 @@ Usage
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT --report
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT --verify
+  # the Bruce-pair shape: claim the GMP siblings off the capture client and
+  # retire it from the reports iteration, all verified in one transaction:
+  python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT \
+      --claim-linked-from 1557 --deactivate-client 1557 --verify
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT \
       --verify --execute --yes-prod        # Phase 4 only
 """
@@ -115,15 +148,22 @@ class ArrayAction:
     rename_to: Optional[str] = None
     fields: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # For link actions: the migrated client this array will belong to (the
+    # source array's client_id — stable through the move).
+    client_id: Optional[int] = None
+    # Set when the target array was client-linked and the operator explicitly
+    # claimed it via --claim-linked-from: the client id it is taken FROM.
+    claimed_from: Optional[int] = None
 
 
 @dataclass
 class Plan:
     source_id: str
     target_id: str
-    clients: list[dict] = field(default_factory=list)       # {id, name, active}
+    clients: list[dict] = field(default_factory=list)       # {id, name, active, arrays}
     arrays: list[ArrayAction] = field(default_factory=list)
     settings: list[dict] = field(default_factory=list)      # {field, source, target, action}
+    deactivate: list[dict] = field(default_factory=list)    # {id, name, remaining_arrays}
     report_deliveries: int = 0
     ambiguities: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
@@ -137,7 +177,11 @@ class Plan:
 # ───────────────────────────── plan building (read-only) ───────────────────────
 
 def build_plan(db, source: Tenant, target: Tenant,
-               allow_products: bool = False) -> Plan:
+               allow_products: bool = False,
+               claim_from: Optional[set[int]] = None,
+               deactivate_clients: Optional[set[int]] = None) -> Plan:
+    claim_from = set(claim_from or ())
+    deactivate_clients = set(deactivate_clients or ())
     plan = Plan(source_id=source.id, target_id=target.id)
 
     if source.id == target.id:
@@ -164,7 +208,16 @@ def build_plan(db, source: Tenant, target: Tenant,
     if not src_clients:
         plan.conflicts.append(f"source {source.id} has no live Client rows — nothing to migrate")
     moved_client_ids = {c.id for c in src_clients}
-    plan.clients = [{"id": c.id, "name": c.name, "active": bool(c.active)}
+    # Live-array count per client so the plan can flag zero-array clients
+    # (they move as-is — benign, but the operator should see it).
+    src_client_array_counts = dict(db.execute(
+        select(Array.client_id, func.count())
+        .where(Array.tenant_id == source.id, Array.deleted_at.is_(None),
+               Array.client_id.in_(moved_client_ids or {-1}))
+        .group_by(Array.client_id)
+    ).all()) if moved_client_ids else {}
+    plan.clients = [{"id": c.id, "name": c.name, "active": bool(c.active),
+                     "arrays": int(src_client_array_counts.get(c.id, 0))}
                     for c in src_clients]
 
     # uq_client_per_tenant spans soft-deleted rows too — any same-name client
@@ -266,14 +319,27 @@ def build_plan(db, source: Tenant, target: Tenant,
                     f"array {a.id} {a.name!r}: target {tgt.id} {tgt.name!r} already "
                     f"claimed by another source array — will not guess")
                 continue
+            claimed_from_client: Optional[int] = None
             if tgt.client_id is not None:
-                plan.conflicts.append(
-                    f"target array {tgt.id} {tgt.name!r} already linked to client "
-                    f"{tgt.client_id} — target has its own reports world")
-                continue
+                if tgt.client_id in claim_from:
+                    # EXPLICIT operator choice (--claim-linked-from): take this
+                    # array from the named capture client. Never inference.
+                    claimed_from_client = tgt.client_id
+                else:
+                    plan.conflicts.append(
+                        f"target array {tgt.id} {tgt.name!r} already linked to client "
+                        f"{tgt.client_id} — target has its own reports world "
+                        f"(--claim-linked-from {tgt.client_id} to claim it explicitly)")
+                    continue
             claimed_target_ids.add(tgt.id)
             act = ArrayAction(a.id, a.name, how, target_id=tgt.id,
-                              target_name=tgt.name, fields=fields)
+                              target_name=tgt.name, fields=fields,
+                              client_id=a.client_id,
+                              claimed_from=claimed_from_client)
+            if claimed_from_client is not None:
+                act.notes.append(
+                    f"CLAIMED from client {claimed_from_client} "
+                    f"(--claim-linked-from) — re-pointed to the migrated client")
             if tgt.name != a.name:
                 act.rename_to = a.name
                 act.notes.append(
@@ -302,6 +368,41 @@ def build_plan(db, source: Tenant, target: Tenant,
                     f"({ua.provider}, {ua.account_number}) utility account "
                     f"(uq_account_per_tenant) — resolve by hand")
         plan.arrays.append(act)
+
+    # Explicit capture-client retirement (--deactivate-client). Only a
+    # TARGET-tenant client, and only when — after the claims above — it would
+    # hold no live report arrays (nepool_gis_id set). Plain capture arrays may
+    # remain; deactivating never touches arrays, just the reports iteration.
+    claimed_by_client: dict[int, set[int]] = {}
+    for act in plan.arrays:
+        if act.claimed_from is not None and act.target_id is not None:
+            claimed_by_client.setdefault(act.claimed_from, set()).add(act.target_id)
+    unused_claims = claim_from - set(claimed_by_client)
+    for cid in sorted(unused_claims):
+        plan.notes.append(
+            f"--claim-linked-from {cid}: no linked match was claimed from it")
+    for cid in sorted(deactivate_clients):
+        c = db.get(Client, cid)
+        if c is None or c.tenant_id != target.id or c.deleted_at is not None:
+            plan.conflicts.append(
+                f"--deactivate-client {cid}: not a live client on target {target.id}")
+            continue
+        live_arrays = db.execute(
+            select(Array).where(Array.client_id == cid,
+                                Array.deleted_at.is_(None))
+        ).scalars().all()
+        claimed_ids = claimed_by_client.get(cid, set())
+        remaining = [a for a in live_arrays if a.id not in claimed_ids]
+        report_left = [a for a in remaining if getattr(a, "nepool_gis_id", None)]
+        if report_left:
+            plan.conflicts.append(
+                f"--deactivate-client {cid} {c.name!r}: would still hold "
+                f"{len(report_left)} live REPORT array(s) after the claims "
+                f"({', '.join(repr(a.name) for a in report_left[:5])}) — refused; "
+                f"only plain capture arrays may remain on a deactivated client")
+            continue
+        plan.deactivate.append({"id": cid, "name": c.name,
+                                "remaining_arrays": len(remaining)})
 
     # Tenant-level settings diff.
     for f in HARD_COPY_SETTINGS:
@@ -387,6 +488,11 @@ def apply_plan(db, plan: Plan) -> None:
     db.execute(update(ReportDelivery)
                .where(ReportDelivery.tenant_id == source.id)
                .values(tenant_id=target.id))
+
+    # 5. Explicit capture-client retirement (validated in build_plan).
+    for d in plan.deactivate:
+        c = db.get(Client, d["id"])
+        c.active = False
 
     db.flush()
 
@@ -510,11 +616,19 @@ def _semantic_diff(pre: bytes, post: bytes) -> list[str]:
 def run_verify(source_id: str, target_id: str, *,
                reference_date: Optional[date] = None,
                out_dir: Optional[pathlib.Path] = None,
-               allow_products: bool = False) -> dict:
+               allow_products: bool = False,
+               claim_from: Optional[set[int]] = None,
+               deactivate_clients: Optional[set[int]] = None) -> dict:
     """The byte-diff oracle: migrate INSIDE one transaction, build every moved
     client's workbook from the migrated target state, compare against the
     source-tenant workbooks built pre-migration, ROLL BACK. Returns
-    {client_id: {"level":…, "detail":…}, "_plan": Plan}. Never commits."""
+    {client_id: {"level":…, "detail":…}, "_plan": Plan, "_post_state": {…}}.
+    Never commits.
+
+    "_post_state" asserts the post-migration REPORTS ITERATION: the target's
+    active clients must be exactly the migrated (source-active) client set —
+    a capture client left active fails this — and every claimed array must
+    sit on its migrated client."""
     tmp_ctx = None
     if out_dir is None:
         tmp_ctx = tempfile.TemporaryDirectory(prefix="so-migrate-verify-")
@@ -529,7 +643,9 @@ def run_verify(source_id: str, target_id: str, *,
         target = session.get(Tenant, target_id)
         if source is None or target is None:
             raise MigrationBlocked("source or target tenant not found")
-        plan = build_plan(session, source, target, allow_products=allow_products)
+        plan = build_plan(session, source, target, allow_products=allow_products,
+                          claim_from=claim_from,
+                          deactivate_clients=deactivate_clients)
         results["_plan"] = plan
         if plan.blockers:
             raise MigrationBlocked("; ".join(plan.blockers))
@@ -547,6 +663,40 @@ def run_verify(source_id: str, target_id: str, *,
             level, detail = compare_workbooks(pre[c["id"]], post)
             results[c["id"]] = {"client": c["name"], "level": level,
                                 "detail": detail}
+
+        # Post-state assertions: what the reports iteration will actually see.
+        problems: list[str] = []
+        expected_active = {c["id"] for c in active_clients}
+        actual_active = {cid for (cid,) in session.execute(
+            select(Client.id).where(Client.tenant_id == target_id,
+                                    Client.active == True,   # noqa: E712
+                                    Client.deleted_at.is_(None))).all()}
+        if actual_active != expected_active:
+            extra = sorted(actual_active - expected_active)
+            missing = sorted(expected_active - actual_active)
+            if extra:
+                problems.append(
+                    f"target still iterates non-migrated active client(s) {extra} "
+                    f"— deactivate them (--deactivate-client) or explain why not")
+            if missing:
+                problems.append(f"migrated active client(s) {missing} missing "
+                                f"from the target's active set")
+        for act in plan.arrays:
+            if act.claimed_from is not None:
+                arr = session.get(Array, act.target_id)
+                if arr.client_id != act.client_id:
+                    problems.append(
+                        f"claimed array {act.target_id} {act.source_name!r} sits on "
+                        f"client {arr.client_id}, expected migrated client "
+                        f"{act.client_id}")
+        results["_post_state"] = {
+            "ok": not problems,
+            "detail": ("; ".join(problems) if problems else
+                       f"target active clients == migrated set "
+                       f"({sorted(expected_active)}); "
+                       f"{sum(1 for a in plan.arrays if a.claimed_from is not None)} "
+                       f"claimed array(s) on their migrated clients"),
+        }
         return results
     finally:
         session.rollback()     # the whole migration evaporates — flush proof
@@ -557,14 +707,18 @@ def run_verify(source_id: str, target_id: str, *,
 
 
 def run_execute(source_id: str, target_id: str, *,
-                allow_products: bool = False) -> Plan:
+                allow_products: bool = False,
+                claim_from: Optional[set[int]] = None,
+                deactivate_clients: Optional[set[int]] = None) -> Plan:
     """Apply + COMMIT. Raises MigrationBlocked instead of guessing."""
     with SessionLocal() as session:
         source = session.get(Tenant, source_id)
         target = session.get(Tenant, target_id)
         if source is None or target is None:
             raise MigrationBlocked("source or target tenant not found")
-        plan = build_plan(session, source, target, allow_products=allow_products)
+        plan = build_plan(session, source, target, allow_products=allow_products,
+                          claim_from=claim_from,
+                          deactivate_clients=deactivate_clients)
         apply_plan(session, plan)    # raises on blockers, flushes
         session.commit()
         return plan
@@ -576,10 +730,16 @@ def _print_plan(plan: Plan) -> None:
     print(f"\n=== MIGRATION PLAN  {plan.source_id}  ->  {plan.target_id} ===")
     print(f"\nClients to move ({len(plan.clients)}) — re-pointed, ids stable:")
     for c in plan.clients:
-        print(f"  - [{c['id']}] {c['name']}{'' if c['active'] else '  (inactive)'}")
+        flags = "" if c["active"] else "  (inactive)"
+        if c.get("arrays", None) == 0:
+            flags += "  (no arrays — moves as-is)"
+        print(f"  - [{c['id']}] {c['name']}{flags}")
     print(f"\nArrays ({len(plan.arrays)}):")
     for a in plan.arrays:
-        line = f"  - [{a.source_id}] {a.source_name!r}: {a.action.upper()}"
+        verb = a.action.upper()
+        if a.claimed_from is not None:
+            verb = f"CLAIM (from client {a.claimed_from})"
+        line = f"  - [{a.source_id}] {a.source_name!r}: {verb}"
         if a.target_id is not None:
             line += f" -> target [{a.target_id}] {a.target_name!r}"
         if a.rename_to:
@@ -595,6 +755,12 @@ def _print_plan(plan: Plan) -> None:
     for s in plan.settings:
         print(f"  - {s['field']}: {s['action']}"
               + (f"  ({s['source']!r} -> target)" if s["action"] == "copy" else ""))
+    if plan.deactivate:
+        print(f"\nClients to DEACTIVATE on target ({len(plan.deactivate)}) — "
+              f"retired from the reports iteration, arrays untouched:")
+        for d in plan.deactivate:
+            print(f"  - [{d['id']}] {d['name']}  "
+                  f"({d['remaining_arrays']} plain capture array(s) remain on it)")
     print(f"\nReportDelivery history rows to re-point: {plan.report_deliveries}")
     print("Target tenant gains generation_reports=True — this is what turns on "
           "scheduled sends,\ndigests and the operator directory for the migrated "
@@ -627,11 +793,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="required for --execute against a Postgres DATABASE_URL")
     ap.add_argument("--allow-products", action="store_true",
                     help="skip the source=nepool / target=array_operator sanity check")
+    ap.add_argument("--claim-linked-from", action="append", type=int, default=[],
+                    metavar="CLIENT_ID",
+                    help="repeatable: allow LINK matches onto target arrays currently "
+                         "belonging to this client id (re-pointed to the migrated "
+                         "client); any OTHER linked target still aborts")
+    ap.add_argument("--deactivate-client", action="append", type=int, default=[],
+                    metavar="CLIENT_ID",
+                    help="repeatable: set this TARGET-tenant client active=False in the "
+                         "same transaction; refused if it would still hold live report "
+                         "arrays (nepool_gis_id) after the claims")
     ap.add_argument("--quarter", default=None,
                     help="pin the report window, e.g. Q1-2026 (default: the writers' own default)")
     ap.add_argument("--keep-workbooks", default=None,
                     help="directory to keep the pre/post verify workbooks in")
     args = ap.parse_args(argv)
+    claim_from = set(args.claim_linked_from)
+    deactivate_clients = set(args.deactivate_client)
 
     reference_date = None
     if args.quarter:
@@ -660,7 +838,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"tenant not found: {'source ' + args.source if source is None else ''}"
                   f"{'target ' + args.target if target is None else ''}")
             return 2
-        plan = build_plan(db, source, target, allow_products=args.allow_products)
+        plan = build_plan(db, source, target, allow_products=args.allow_products,
+                          claim_from=claim_from,
+                          deactivate_clients=deactivate_clients)
     _print_plan(plan)
 
     if args.verify:
@@ -669,18 +849,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             results = run_verify(args.source, args.target,
                                  reference_date=reference_date, out_dir=out_dir,
-                                 allow_products=args.allow_products)
+                                 allow_products=args.allow_products,
+                                 claim_from=claim_from,
+                                 deactivate_clients=deactivate_clients)
         except MigrationBlocked as e:
             print(f"VERIFY BLOCKED: {e}")
             return 3
         ok = True
         for cid, r in results.items():
-            if cid == "_plan":
+            if cid in ("_plan", "_post_state"):
                 continue
             good = r["level"] in ("identical", "content_identical")
             ok = ok and good
             mark = "✓" if good else "✗"
             print(f"  {mark} client [{cid}] {r['client']}: {r['level']} — {r['detail']}")
+        post = results.get("_post_state") or {"ok": False, "detail": "missing"}
+        ok = ok and post["ok"]
+        print(f"  {'✓' if post['ok'] else '✗'} reports iteration post-state: {post['detail']}")
         print(f"VERIFY {'PASSED' if ok else 'FAILED'} (all changes rolled back)")
         if not ok and args.execute:
             print("REFUSED: --execute skipped because verify failed.")
@@ -694,7 +879,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 3
         try:
             run_execute(args.source, args.target,
-                        allow_products=args.allow_products)
+                        allow_products=args.allow_products,
+                        claim_from=claim_from,
+                        deactivate_clients=deactivate_clients)
         except MigrationBlocked as e:
             print(f"EXECUTE BLOCKED: {e}")
             return 3
