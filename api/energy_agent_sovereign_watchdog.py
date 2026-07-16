@@ -584,62 +584,101 @@ def soft_reboot(
                 pass
             return {"ok": False, "error": str(e)[:400], "actions": actions}
 
-    # Heavy work outside the prep transaction
-    if force_sub:
+    # Heavy work outside the prep transaction — gated so recovery cannot
+    # re-thrash a hot pool (same circuit breaker as scheduler runners).
+    def _guard_blocks(layer: str) -> str | None:
         try:
-            from .energy_agent_sovereign_subconscious import subconscious_tick
-            sub = subconscious_tick(reason=f"watchdog:{reason}"[:80], force=True)
-            note_primary("sub", ok=bool(sub.get("ok")), detail={"via": "recovery", "tick": sub.get("tick_id")})
+            from .sovereign_guard import should_skip_heavy
+            skip, why = should_skip_heavy(layer)
+            return why if skip else None
+        except Exception as ge:  # noqa: BLE001
+            log.warning("soft_reboot guard check failed: %s", ge)
+            return None
+
+    if force_sub:
+        blocked = _guard_blocks("watchdog_sub")
+        if blocked:
             actions.append({
                 "step": "force_subconscious",
-                "ok": sub.get("ok"),
-                "heat": sub.get("heat"),
-                "tick_id": sub.get("tick_id"),
+                "ok": True,
+                "skipped": True,
+                "reason": blocked,
             })
-        except Exception as e:  # noqa: BLE001
-            note_primary("sub", ok=False, detail={"error": str(e)[:200]})
-            actions.append({"step": "force_subconscious", "ok": False, "error": str(e)[:300]})
+        else:
+            try:
+                from .energy_agent_sovereign_subconscious import subconscious_tick
+                sub = subconscious_tick(reason=f"watchdog:{reason}"[:80], force=True)
+                note_primary("sub", ok=bool(sub.get("ok")), detail={"via": "recovery", "tick": sub.get("tick_id")})
+                actions.append({
+                    "step": "force_subconscious",
+                    "ok": sub.get("ok"),
+                    "heat": sub.get("heat"),
+                    "tick_id": sub.get("tick_id"),
+                })
+            except Exception as e:  # noqa: BLE001
+                note_primary("sub", ok=False, detail={"error": str(e)[:200]})
+                actions.append({"step": "force_subconscious", "ok": False, "error": str(e)[:300]})
 
     if force_cortex:
-        try:
-            mark_cortex_inflight(True)
-            from .energy_agent_sovereign import sovereign_tick
-            cortex = sovereign_tick(reason=f"watchdog:{reason}"[:120])
-            note_primary(
-                "cortex",
-                ok=bool(cortex.get("ok")),
-                detail={"via": "recovery", "tick": cortex.get("tick_id")},
-            )
+        blocked = _guard_blocks("watchdog_cortex")
+        if blocked:
             actions.append({
                 "step": "force_cortex",
-                "ok": cortex.get("ok"),
-                "tick_id": cortex.get("tick_id"),
-                "mode": cortex.get("mode"),
-                "n_decisions": len(cortex.get("decisions") or []),
+                "ok": True,
+                "skipped": True,
+                "reason": blocked,
             })
-        except Exception as e:  # noqa: BLE001
-            note_primary("cortex", ok=False, detail={"error": str(e)[:200]})
-            actions.append({"step": "force_cortex", "ok": False, "error": str(e)[:300]})
-        finally:
-            mark_cortex_inflight(False)
+        else:
+            try:
+                mark_cortex_inflight(True)
+                from .energy_agent_sovereign import sovereign_tick
+                cortex = sovereign_tick(reason=f"watchdog:{reason}"[:120])
+                note_primary(
+                    "cortex",
+                    ok=bool(cortex.get("ok")),
+                    detail={"via": "recovery", "tick": cortex.get("tick_id")},
+                )
+                actions.append({
+                    "step": "force_cortex",
+                    "ok": cortex.get("ok"),
+                    "tick_id": cortex.get("tick_id"),
+                    "mode": cortex.get("mode"),
+                    "n_decisions": len(cortex.get("decisions") or []),
+                })
+            except Exception as e:  # noqa: BLE001
+                note_primary("cortex", ok=False, detail={"error": str(e)[:200]})
+                actions.append({"step": "force_cortex", "ok": False, "error": str(e)[:300]})
+            finally:
+                mark_cortex_inflight(False)
 
     if requeue_jobs:
-        try:
-            mark_jobs_inflight(True)
-            from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
-            if code_live_enabled():
-                with SessionLocal() as db2:
-                    res = drain_jobs(db2, limit=1)
-                    db2.commit()
-                note_primary("jobs", ok=bool(res.get("ok")), detail={"via": "recovery", **{k: res.get(k) for k in ("processed",)}})
-                actions.append({"step": "drain_jobs", "ok": res.get("ok"), "processed": res.get("processed")})
-            else:
-                actions.append({"step": "drain_jobs", "ok": True, "skipped": True})
-        except Exception as e:  # noqa: BLE001
-            note_primary("jobs", ok=False, detail={"error": str(e)[:200]})
-            actions.append({"step": "drain_jobs", "ok": False, "error": str(e)[:300]})
-        finally:
-            mark_jobs_inflight(False)
+        # Always allow lightweight requeue of stuck rows (already done above).
+        # Only gate the optional single job *drain* (code agent — heavy).
+        blocked = _guard_blocks("watchdog_jobs")
+        if blocked:
+            actions.append({
+                "step": "drain_jobs",
+                "ok": True,
+                "skipped": True,
+                "reason": blocked,
+            })
+        else:
+            try:
+                mark_jobs_inflight(True)
+                from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
+                if code_live_enabled():
+                    with SessionLocal() as db2:
+                        res = drain_jobs(db2, limit=1)
+                        db2.commit()
+                    note_primary("jobs", ok=bool(res.get("ok")), detail={"via": "recovery", **{k: res.get(k) for k in ("processed",)}})
+                    actions.append({"step": "drain_jobs", "ok": res.get("ok"), "processed": res.get("processed")})
+                else:
+                    actions.append({"step": "drain_jobs", "ok": True, "skipped": True})
+            except Exception as e:  # noqa: BLE001
+                note_primary("jobs", ok=False, detail={"error": str(e)[:200]})
+                actions.append({"step": "drain_jobs", "ok": False, "error": str(e)[:300]})
+            finally:
+                mark_jobs_inflight(False)
 
     health = diagnose()
     return {

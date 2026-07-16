@@ -3220,12 +3220,19 @@ def sovereign_state(authorization: str | None = Header(default=None)):
 def sovereign_healthz(authorization: str | None = Header(default=None)):
     """Dual-channel mind health (interface sidecar /healthz analogue).
 
-    Surfaces ages, storm breaker, stuck jobs, primary vs recovery readiness.
+    Surfaces ages, storm breaker, stuck jobs, primary vs recovery readiness,
+    plus circuit-breaker / pool-pressure guard (sovereign_guard) so ops can
+    see pause state without a separate endpoint.
     """
     _require_sovereign_or_admin(authorization)
     from .energy_agent_sovereign_watchdog import diagnose, watchdog_enabled
     h = diagnose()
     h["watchdog_enabled"] = watchdog_enabled()
+    try:
+        from .sovereign_guard import guard_status
+        h["guard"] = guard_status()
+    except Exception as e:  # noqa: BLE001
+        h["guard"] = {"ok": False, "error": str(e)[:200]}
     return h
 
 

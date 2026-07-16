@@ -1853,8 +1853,43 @@ def _run_energy_agent_long_term_mind() -> None:
             pass
 
 
+def _sov_guard_skip(layer: str) -> bool:
+    """Central heavy-work gate (pool pressure / pause / enabled). See sovereign_guard."""
+    try:
+        from .sovereign_guard import should_skip_heavy
+        skip, reason = should_skip_heavy(layer)
+        if skip:
+            logger.warning("sovereign_%s skipped: %s", layer, reason)
+        return skip
+    except Exception as exc:  # noqa: BLE001
+        # Fail open only if guard itself is broken — prefer keeping API alive
+        # by treating unknown as skip when pool looks hot.
+        logger.exception("sovereign_guard failed (%s): %s", layer, exc)
+        try:
+            from .sovereign_guard import pool_too_hot
+            if pool_too_hot():
+                logger.warning("sovereign_%s skipped: guard_error+pool_hot", layer)
+                return True
+        except Exception:
+            pass
+        return False
+
+
+def _sov_pool_too_hot() -> bool:
+    """Back-compat wrapper — prefer _sov_guard_skip / sovereign_guard."""
+    try:
+        from .sovereign_guard import pool_too_hot
+        return pool_too_hot()
+    except Exception:
+        return False
+
+
 def _run_energy_agent_sovereign_watchdog() -> None:
-    """Independent durability supervisor for Sovereign (dual-channel recovery)."""
+    """Independent durability supervisor for Sovereign (dual-channel recovery).
+
+    Diagnose always runs (cheap). Heavy recovery (force sub/cortex/jobs) is
+    gated inside watchdog via sovereign_guard so pool thrash cannot re-enter.
+    """
     try:
         from .energy_agent_sovereign_watchdog import (
             persist_vitals_snapshot,
@@ -1872,6 +1907,11 @@ def _run_energy_agent_sovereign_watchdog() -> None:
             )
         elif res.get("mode") == "healthy":
             logger.debug("sovereign_watchdog healthy")
+        elif res.get("skipped") or res.get("mode") == "guard_skip":
+            logger.warning(
+                "sovereign_watchdog heavy recovery skipped: %s",
+                res.get("reason") or res.get("skip_reason"),
+            )
         try:
             persist_vitals_snapshot()
         except Exception:
@@ -1885,6 +1925,8 @@ def _run_energy_agent_sovereign_skills() -> None:
     try:
         from .energy_agent_sovereign_skills import evolution_cycle, skills_enabled
         if not skills_enabled():
+            return
+        if _sov_guard_skip("skills"):
             return
         res = evolution_cycle()
         if res.get("created") or res.get("patched"):
@@ -1912,8 +1954,7 @@ def _run_energy_agent_sovereign_subconscious() -> None:
         from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
         if not subconscious_enabled():
             return
-        if _sov_pool_too_hot():
-            logger.warning("sovereign_subconscious skipped: db pool hot")
+        if _sov_guard_skip("subconscious"):
             return
         res = subconscious_tick(reason="scheduler")
         note_primary(
@@ -1922,6 +1963,9 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             detail={"mode": res.get("mode"), "heat": res.get("heat"), "tick": res.get("tick_id")},
         )
         if res.get("needs_cortex"):
+            # Cortex wake is heavy — re-check guard before escalating
+            if _sov_guard_skip("cortex_wake"):
+                return
             mark_cortex_inflight(True)
             try:
                 cortex = _run_cortex_if_needed(res, reason="subconscious_hot")
@@ -1953,23 +1997,6 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             pass
 
 
-def _sov_pool_too_hot() -> bool:
-    """Skip heavy Sovereign work when DB pool is near saturation (keeps API up)."""
-    try:
-        from .db import pool_status
-        st = pool_status() or {}
-        if st.get("pressure"):
-            return True
-        # checked_out / capacity >= 70%
-        cap = float(st.get("capacity") or st.get("db_pool_max") or 0) or 0
-        out = float(st.get("checked_out") or st.get("db_pool_checked_out") or 0)
-        if cap > 0 and (out / cap) >= 0.70:
-            return True
-    except Exception:
-        return False
-    return False
-
-
 def _run_energy_agent_sovereign_mission_loop() -> None:
     """Long-running expand missions (HAR recon, cred refresh) every ~2m."""
     try:
@@ -1978,8 +2005,7 @@ def _run_energy_agent_sovereign_mission_loop() -> None:
         from .db import SessionLocal
         if not sovereign_enabled() or not expand_enabled():
             return
-        if _sov_pool_too_hot():
-            logger.warning("sovereign_mission_loop skipped: db pool hot")
+        if _sov_guard_skip("mission_loop"):
             return
         with SessionLocal() as db:
             res = mission_loop_tick(db)
@@ -1997,8 +2023,7 @@ def _run_energy_agent_sovereign_tick() -> None:
         from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
         if not sovereign_enabled():
             return
-        if _sov_pool_too_hot():
-            logger.warning("sovereign_cortex skipped: db pool hot")
+        if _sov_guard_skip("cortex"):
             return
         # Light subconscious first so cortex always has fresh tape
         try:
@@ -2060,8 +2085,7 @@ def _run_energy_agent_sovereign_jobs() -> None:
         from .energy_agent_sovereign_watchdog import mark_jobs_inflight, note_primary
         if not code_live_enabled():
             return
-        if _sov_pool_too_hot():
-            logger.warning("sovereign_jobs skipped: db pool hot")
+        if _sov_guard_skip("jobs"):
             return
         mark_jobs_inflight(True)
         try:
@@ -2099,6 +2123,8 @@ def _run_energy_agent_sovereign_weekly_digest() -> None:
     try:
         from .energy_agent_sovereign import sovereign_enabled, run_weekly_digest
         if not sovereign_enabled():
+            return
+        if _sov_guard_skip("weekly_digest"):
             return
         res = run_weekly_digest(force=False)
         if res.get("emailed"):
@@ -2143,6 +2169,16 @@ def _run_pool_watchdog() -> None:
             _pool_pressure_streak = 0
             return
         pressure = bool(st.get("pressure"))
+        # Feed Sovereign circuit breaker (auto-pause) so heavy work cools even
+        # when no sovereign runner is currently scheduled.
+        try:
+            from .sovereign_guard import note_pool_observation, pool_too_hot
+            note_pool_observation(
+                hot=pressure or pool_too_hot(),
+                detail=f"db_pool_watchdog pressure={pressure}",
+            )
+        except Exception:
+            pass
         if pressure:
             _pool_pressure_streak += 1
             logger.warning(
