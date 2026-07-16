@@ -82,12 +82,13 @@ def _check_admin(key_header: str | None, key_query: str | None) -> None:
     if not ADMIN_API_KEY:
         raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
     if not hmac.compare_digest(key or "", ADMIN_API_KEY):
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(401, "Invalid admin key")
 
 
 @router.post("/v1/utility-requests")
-def submit_requests(body: RequestsIn):
-    """Batch-submit utility-add requests (the picker's 'send all' button)."""
+def create_requests(body: RequestsIn, authorization: str | None = Header(default=None)):
+    """Batch-create utility-add requests. Public endpoint (no auth check yet)."""
+    # TODO: extract tenant_id from session if we want per-tenant tracking.
     with SessionLocal() as db:
         for req in body.requests:
             db.add(UtilityRequest(
@@ -97,25 +98,24 @@ def submit_requests(body: RequestsIn):
                 note=req.note.strip() if req.note else None,
             ))
         db.commit()
-    return {"queued": len(body.requests)}
+    return {"ok": True, "count": len(body.requests)}
 
 
 @router.get("/v1/utility-requests")
 def list_requests(
     status: str | None = Query(default=None),
-    limit: int = Query(default=100, le=500),
-    x_admin_key: str | None = Header(default=None),
     admin_key: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    """List utility-add requests (admin/agent endpoint)."""
-    _check_admin(x_admin_key, admin_key)
+    """List utility-add requests. Admin-only."""
+    _check_admin(authorization, admin_key)
     with SessionLocal() as db:
         q = db.query(UtilityRequest)
         if status:
             if status not in VALID_STATUSES:
-                raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
+                raise HTTPException(400, f"Invalid status. Must be one of {VALID_STATUSES}")
             q = q.filter(UtilityRequest.status == status)
-        rows = q.order_by(UtilityRequest.created_at.desc()).limit(limit).all()
+        rows = q.order_by(UtilityRequest.created_at.desc()).all()
         return {
             "requests": [
                 {
@@ -138,36 +138,36 @@ def list_requests(
 def update_result(
     request_id: int,
     body: ResultIn,
-    x_admin_key: str | None = Header(default=None),
     admin_key: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    """Agent writeback: record research outcome + status."""
-    _check_admin(x_admin_key, admin_key)
+    """Agent writeback: record research result + status. Admin-only."""
+    _check_admin(authorization, admin_key)
     if body.status and body.status not in VALID_STATUSES:
-        raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
+        raise HTTPException(400, f"Invalid status. Must be one of {VALID_STATUSES}")
     with SessionLocal() as db:
         row = db.query(UtilityRequest).filter(UtilityRequest.id == request_id).first()
         if not row:
             raise HTTPException(404, "Request not found")
-        row.result = body.result.strip()
+        row.result = body.result
         if body.status:
             row.status = body.status
         row.reviewed_at = _now()
         db.commit()
-        return {"id": row.id, "status": row.status, "result": row.result}
+    return {"ok": True}
 
 
 @router.patch("/v1/utility-requests/{request_id}/status")
 def update_status(
     request_id: int,
     body: StatusIn,
-    x_admin_key: str | None = Header(default=None),
     admin_key: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
 ):
-    """Agent status-only update (e.g., 'researching' → 'added')."""
-    _check_admin(x_admin_key, admin_key)
+    """Update request status (e.g., mark as 'added' after wiring). Admin-only."""
+    _check_admin(authorization, admin_key)
     if body.status not in VALID_STATUSES:
-        raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
+        raise HTTPException(400, f"Invalid status. Must be one of {VALID_STATUSES}")
     with SessionLocal() as db:
         row = db.query(UtilityRequest).filter(UtilityRequest.id == request_id).first()
         if not row:
@@ -176,4 +176,4 @@ def update_status(
         if body.status in ("added", "declined", "reviewed"):
             row.reviewed_at = _now()
         db.commit()
-        return {"id": row.id, "status": row.status}
+    return {"ok": True}

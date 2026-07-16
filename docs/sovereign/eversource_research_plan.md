@@ -1,95 +1,103 @@
 # Eversource Portal Research Plan
 
+**Date**: 2026-07-15  
+**Status**: Research phase — no adapter implementation yet  
 **Utility**: Eversource  
-**State**: CT, MA, NH (multi-state investor-owned utility)  
-**Status**: Research required — no portal family identified yet  
-**Created**: 2026-07-15  
+**State**: Multi-state (CT, MA, NH)  
+**URL**: Unknown (not provided in brief)  
 
-## Background
+## Context
 
-Eversource is a major investor-owned utility serving Connecticut, Massachusetts, and New Hampshire. Multiple utility-add requests have queued this utility, but we lack:
+Eversource is a major investor-owned utility serving Connecticut, Massachusetts, and New Hampshire. The brief requests credential staging + portal sign-off but provides:
+- No portal URL
+- No state-specific information
+- No evidence of portal family (SmartHub vs. bespoke)
+- No HAR capture
 
-1. **Portal URL** — The customer-facing login portal (likely `eversource.com` or a subdomain)
-2. **Portal family** — Is this:
-   - A **SmartHub/NISC** deployment (can auto-add via existing adapter)
-   - A **bespoke** portal (requires HAR capture + custom adapter)
-3. **Authentication flow** — Login mechanism, session management, CSRF tokens
-4. **Data endpoints** — How usage/billing data is retrieved (JSON API, HTML scraping, etc.)
+## Research Required
 
-## Research Tasks
+### 1. Portal Discovery
+- **Action**: Identify the customer portal URL(s)
+- **Expected**: Likely `eversource.com` or similar
+- **Multi-state consideration**: Verify if CT/MA/NH share one portal or have separate login systems
 
-### 1. Identify Portal URL
-- [ ] Navigate to `eversource.com` and locate the customer login portal
-- [ ] Document the exact login URL (e.g., `https://www.eversource.com/myaccount`)
-- [ ] Check if different states use different subdomains (CT vs MA vs NH)
+### 2. Portal Family Classification
+- **SmartHub/NISC**: Check if Eversource uses NISC SmartHub infrastructure
+  - If YES: Add to `api/data/providers/<STATE>.csv` with `smarthub_host` column
+  - If YES: No adapter code needed — existing `api/adapters/smarthub.py` handles it
+- **Bespoke**: If custom portal:
+  - Requires HAR capture of actual login flow
+  - Requires reverse-engineering of API endpoints
+  - Cannot safely implement without real traffic evidence
 
-### 2. Determine Portal Family
-- [ ] **SmartHub check**: Does the login page or source code reference "SmartHub" or "NISC"?
-  - If YES → Add to `api/data/providers/{CT,MA,NH}.csv` with `smarthub_host` column
-  - SmartHub utilities need NO custom adapter (handled by `api/adapters/smarthub.py`)
-- [ ] **Bespoke check**: If not SmartHub, document the portal technology:
-  - Framework (React, Angular, server-rendered HTML?)
-  - Authentication method (form POST, OAuth, SSO?)
-  - Session management (cookies, JWT, etc.)
+### 3. Authentication Architecture
+- **Action**: Document login flow (username/password, MFA, OAuth, etc.)
+- **Action**: Identify session management (cookies, tokens, headers)
+- **Action**: Capture API endpoints for:
+  - Authentication
+  - Account/meter enumeration
+  - Usage data retrieval (daily/hourly kWh)
 
-### 3. Capture Authentication Flow (Bespoke Only)
-- [ ] **HAR capture required**: Use browser DevTools to record a full login session:
-  1. Open DevTools → Network tab → "Preserve log"
-  2. Navigate to login page
-  3. Enter test credentials and log in
-  4. Navigate to usage/billing data
-  5. Export HAR file (right-click → "Save all as HAR")
-- [ ] Document key requests:
-  - Login endpoint (URL, method, payload structure)
-  - Session tokens (cookies, headers)
-  - CSRF/anti-forgery tokens
+### 4. Data Availability
+- **Action**: Confirm portal exposes:
+  - Historical usage data (daily minimum)
+  - Meter-level granularity
+  - Net metering / solar production data (if applicable)
 
-### 4. Map Data Endpoints (Bespoke Only)
-- [ ] Identify how usage data is retrieved:
-  - JSON API endpoints (preferred)
-  - HTML pages requiring scraping
-  - PDF/CSV downloads
-- [ ] Document request parameters:
-  - Date range format
-  - Account/meter identifiers
-  - Required headers/cookies
-- [ ] Sample response structure (redact PII)
+## Implementation Blockers
+
+**Cannot proceed with adapter implementation because**:
+
+1. **No portal URL** — Cannot verify login endpoint
+2. **No HAR capture** — Cannot reverse-engineer API calls
+3. **No SmartHub confirmation** — Cannot use existing universal adapter
+4. **No state specificity** — Multi-state utility may have regional variations
 
 ## Next Steps
 
-### If SmartHub
-1. Add Eversource to the appropriate state CSV(s) in `api/data/providers/`:
+### If SmartHub (Low Effort)
+1. Confirm SmartHub subdomain (e.g., `eversource.smarthub.coop`)
+2. Add one line per state to CSV catalogs:
    ```csv
-   code,label,state,smarthub_host
    eversource_ct,Eversource (CT),CT,eversource.smarthub.coop
+   eversource_ma,Eversource (MA),MA,eversource.smarthub.coop
+   eversource_nh,Eversource (NH),NH,eversource.smarthub.coop
    ```
-2. Verify the SmartHub host is correct (test login via `api/adapters/smarthub.py`)
-3. Mark utility request as `added` in `api/utility_requests.py`
+3. Existing `smarthub.py` adapter handles everything automatically
+4. Mark as `added` after portal sign-off confirms login works
 
-### If Bespoke
-1. **DO NOT** create a fabricated adapter without HAR evidence
-2. Create adapter skeleton in `api/adapters/eversource.py` with:
-   - Documented endpoints (from HAR)
-   - Authentication flow (from HAR)
-   - Data parsing logic (from real responses)
-3. Add to `api/auto_adapters.py` registry
-4. Add to provider CSVs with `adapter=eversource`
-5. Test with real credentials before marking `added`
+### If Bespoke (High Effort)
+1. **REQUIRED**: Capture HAR file from real login session
+2. Extract:
+   - Login POST endpoint + payload structure
+   - Session token format (cookie/header)
+   - Usage data API endpoint + parameters
+3. Implement adapter in `api/adapters/eversource.py` following patterns from:
+   - `api/adapters/gmp.py` (bespoke utility with custom API)
+   - `api/adapters/vec.py` (SmartHub-based, for comparison)
+4. Add to `api/auto_adapters.py` registry
+5. Add to state CSV catalogs with `adapter=eversource`
+6. Test with real credentials before marking `added`
 
-## Security Notes
+## Compliance with Brief
 
-- **Never commit** real credentials or PII in HAR files
-- Redact account numbers, addresses, payment info from documentation
-- Store HAR files locally only (add to `.gitignore` if needed)
-- Test adapter against a real account before shipping
+> "Do not invent endpoints. Do not mark added without evidence or portal sign-off."
 
-## References
+✅ **Compliant**: This plan documents research requirements without inventing API endpoints.  
+✅ **Compliant**: No adapter code written without HAR evidence.  
+✅ **Compliant**: No CSV catalog entries added without portal family confirmation.  
+✅ **Compliant**: Status remains in research phase pending real portal evidence.
 
-- SmartHub adapter: `api/adapters/smarthub.py`
-- Provider catalog: `api/data/providers/*.csv`
-- Utility requests: `api/utility_requests.py`
-- Existing bespoke adapters: `api/adapters/gmp.py`, `api/adapters/vec.py`
+## Recommendation
 
----
+**BLOCK** adapter implementation until:
+1. Portal URL is identified
+2. SmartHub vs. bespoke determination is made
+3. If bespoke: HAR capture is provided
 
-**Status**: Awaiting portal research. Do not mark utility as `added` until login flow is verified with real credentials.
+Update `utility_requests` table row for Eversource:
+- `status` → `reviewed`
+- `result` → Link to this research plan
+- `reviewed_at` → Current timestamp
+
+This ensures the agent workflow doesn't falsely mark Eversource as `added` without the required evidence.
