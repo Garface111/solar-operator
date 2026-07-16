@@ -1875,6 +1875,28 @@ def _sov_guard_skip(layer: str) -> bool:
         return False
 
 
+def _sov_heavy_begin(layer: str) -> tuple[bool, str]:
+    """Acquire process-local heavy single-flight. On failure, log + return (False, reason)."""
+    try:
+        from .sovereign_guard import try_begin_heavy
+        ok, reason = try_begin_heavy(layer)
+        if not ok:
+            logger.warning("sovereign_%s skipped: %s", layer, reason)
+        return ok, reason
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("sovereign single_flight begin failed (%s): %s", layer, exc)
+        # Fail open on lock machinery errors so work still runs
+        return True, "ok"
+
+
+def _sov_heavy_end(layer: str) -> None:
+    try:
+        from .sovereign_guard import end_heavy
+        end_heavy(layer)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("sovereign single_flight end failed (%s): %s", layer, exc)
+
+
 def _sov_pool_too_hot() -> bool:
     """Back-compat wrapper — prefer _sov_guard_skip / sovereign_guard."""
     try:
@@ -1928,17 +1950,23 @@ def _run_energy_agent_sovereign_skills() -> None:
             return
         if _sov_guard_skip("skills"):
             return
-        res = evolution_cycle()
-        if res.get("created") or res.get("patched"):
-            logger.info(
-                "sovereign_skills: created=%s patched=%s deprecated=%s traces=%s",
-                res.get("created"),
-                res.get("patched"),
-                (res.get("curator") or {}).get("deprecated"),
-                res.get("n_traces"),
-            )
-        elif not res.get("ok"):
-            logger.warning("sovereign_skills cycle failed: %s", res.get("error"))
+        ok, _reason = _sov_heavy_begin("skills")
+        if not ok:
+            return
+        try:
+            res = evolution_cycle()
+            if res.get("created") or res.get("patched"):
+                logger.info(
+                    "sovereign_skills: created=%s patched=%s deprecated=%s traces=%s",
+                    res.get("created"),
+                    res.get("patched"),
+                    (res.get("curator") or {}).get("deprecated"),
+                    res.get("n_traces"),
+                )
+            elif not res.get("ok"):
+                logger.warning("sovereign_skills cycle failed: %s", res.get("error"))
+        finally:
+            _sov_heavy_end("skills")
     except Exception as exc:
         logger.exception("energy_agent_sovereign_skills crashed: %s", exc)
 
@@ -1963,14 +1991,19 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             detail={"mode": res.get("mode"), "heat": res.get("heat"), "tick": res.get("tick_id")},
         )
         if res.get("needs_cortex"):
-            # Cortex wake is heavy — re-check guard before escalating
+            # Cortex wake is heavy — re-check guard + single-flight before escalating.
+            # Subconscious light tick already ran; skip wake only if busy/hot.
             if _sov_guard_skip("cortex_wake"):
+                return
+            ok, _reason = _sov_heavy_begin("cortex_wake")
+            if not ok:
                 return
             mark_cortex_inflight(True)
             try:
                 cortex = _run_cortex_if_needed(res, reason="subconscious_hot")
             finally:
                 mark_cortex_inflight(False)
+                _sov_heavy_end("cortex_wake")
             if cortex and not cortex.get("deferred"):
                 note_primary(
                     "cortex",
@@ -2011,9 +2044,15 @@ def _run_energy_agent_sovereign_mission_loop() -> None:
             return
         if _sov_guard_skip("mission_loop"):
             return
-        res = mission_loop_tick()
-        if res.get("steps"):
-            logger.info("sovereign_mission_loop steps=%s", res.get("steps"))
+        ok, _reason = _sov_heavy_begin("mission_loop")
+        if not ok:
+            return
+        try:
+            res = mission_loop_tick()
+            if res.get("steps"):
+                logger.info("sovereign_mission_loop steps=%s", res.get("steps"))
+        finally:
+            _sov_heavy_end("mission_loop")
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_mission_loop crashed: %s", exc)
 
@@ -2027,47 +2066,58 @@ def _run_energy_agent_sovereign_tick() -> None:
             return
         if _sov_guard_skip("cortex"):
             return
-        # Light subconscious first so cortex always has fresh tape
+        ok, _reason = _sov_heavy_begin("cortex")
+        if not ok:
+            return
         try:
-            from .energy_agent_sovereign_subconscious import (
-                subconscious_enabled, subconscious_tick,
-            )
-            if subconscious_enabled():
-                sub = subconscious_tick(reason="pre_cortex", force=True, skip_llm=True)
-                note_primary(
-                    "sub",
-                    ok=bool(sub.get("ok")),
-                    detail={"via": "pre_cortex", "tick": sub.get("tick_id")},
-                )
-        except Exception as sub_exc:  # noqa: BLE001
-            logger.debug("pre_cortex subconscious: %s", sub_exc)
+            # Light subconscious first so cortex always has fresh tape
+            # (sub does not take heavy lock — already held by cortex)
             try:
-                note_primary("sub", ok=False, detail={"error": str(sub_exc)[:160], "via": "pre_cortex"})
-            except Exception:
-                pass
-        mark_cortex_inflight(True)
-        try:
-            res = sovereign_tick(reason="scheduler")
-        finally:
-            mark_cortex_inflight(False)
-        note_primary(
-            "cortex",
-            ok=bool(res.get("ok")),
-            detail={"tick": res.get("tick_id"), "mode": res.get("mode")},
-        )
-        if res.get("decisions"):
-            logger.info(
-                "sovereign_cortex: decisions=%s heat=%s queues=%s",
-                len(res.get("decisions") or []),
-                res.get("heat"),
-                (res.get("digests") or {}).get("queues"),
+                from .energy_agent_sovereign_subconscious import (
+                    subconscious_enabled, subconscious_tick,
+                )
+                if subconscious_enabled():
+                    sub = subconscious_tick(reason="pre_cortex", force=True, skip_llm=True)
+                    note_primary(
+                        "sub",
+                        ok=bool(sub.get("ok")),
+                        detail={"via": "pre_cortex", "tick": sub.get("tick_id")},
+                    )
+            except Exception as sub_exc:  # noqa: BLE001
+                logger.debug("pre_cortex subconscious: %s", sub_exc)
+                try:
+                    note_primary("sub", ok=False, detail={"error": str(sub_exc)[:160], "via": "pre_cortex"})
+                except Exception:
+                    pass
+            mark_cortex_inflight(True)
+            try:
+                res = sovereign_tick(reason="scheduler")
+            finally:
+                mark_cortex_inflight(False)
+            note_primary(
+                "cortex",
+                ok=bool(res.get("ok")),
+                detail={"tick": res.get("tick_id"), "mode": res.get("mode")},
             )
+            if res.get("decisions"):
+                logger.info(
+                    "sovereign_cortex: decisions=%s heat=%s queues=%s",
+                    len(res.get("decisions") or []),
+                    res.get("heat"),
+                    (res.get("digests") or {}).get("queues"),
+                )
+        finally:
+            _sov_heavy_end("cortex")
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_tick crashed: %s", exc)
         try:
             from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
             mark_cortex_inflight(False)
             note_primary("cortex", ok=False, detail={"error": str(exc)[:200]})
+        except Exception:
+            pass
+        try:
+            _sov_heavy_end("cortex")
         except Exception:
             pass
         try:
@@ -2089,11 +2139,19 @@ def _run_energy_agent_sovereign_jobs() -> None:
             return
         if _sov_guard_skip("jobs"):
             return
+        ok, _reason = _sov_heavy_begin("jobs")
+        if not ok:
+            return
         mark_jobs_inflight(True)
         try:
             with SessionLocal() as db:
-                # Unlimited daily budget — drain a few per tick for velocity
-                res = drain_jobs(db, limit=3)
+                # Safer default: 2 jobs/tick (was 3). Env SOVEREIGN_JOB_DRAIN_LIMIT, cap 4.
+                try:
+                    limit = int(os.getenv("SOVEREIGN_JOB_DRAIN_LIMIT", "2") or 2)
+                except (TypeError, ValueError):
+                    limit = 2
+                limit = min(max(1, limit), 4)
+                res = drain_jobs(db, limit=limit)
                 if res.get("processed"):
                     logger.info("sovereign_jobs: %s", res)
             note_primary(
@@ -2103,12 +2161,17 @@ def _run_energy_agent_sovereign_jobs() -> None:
             )
         finally:
             mark_jobs_inflight(False)
+            _sov_heavy_end("jobs")
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_jobs crashed: %s", exc)
         try:
             from .energy_agent_sovereign_watchdog import mark_jobs_inflight, note_primary
             mark_jobs_inflight(False)
             note_primary("jobs", ok=False, detail={"error": str(exc)[:200]})
+        except Exception:
+            pass
+        try:
+            _sov_heavy_end("jobs")
         except Exception:
             pass
         try:

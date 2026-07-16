@@ -1329,6 +1329,28 @@ _OPERATING_AGREEMENT = {
         "Never refuse these because they were once called gaps. Be honest about "
         "outcomes; never invent portal data."
     ),
+    # Anti-crash doctrine (Ford 2026-07-16 outages) — full text:
+    # docs/sovereign/HOW_NOT_TO_CRASH.md
+    "anti_crash_doctrine": (
+        "SURVIVAL FIRST (2026-07-16 outages — you took AO down by thrashing Postgres).\n"
+        "Full doctrine: docs/sovereign/HOW_NOT_TO_CRASH.md — treat as standing policy.\n"
+        "1) Pool hot / auto_pause / SOVEREIGN_PAUSE → SKIP heavy work. Skip is success.\n"
+        "2) SESSION BOUNDARY: never call an LLM inside an open DB session.\n"
+        "3) Memory + goals seeds are INSERT-only for missing keys — never rewrite every tick.\n"
+        "4) Mind runs on WORKER only (PROCESS_ROLE=worker, RUN_SCHEDULER=1). "
+        "Web must stay RUN_SCHEDULER=0 + SOVEREIGN_ENABLED=0 so HTTP stays boring.\n"
+        "5) Desk is independent: SOVEREIGN_DESK_ENABLED on web. Do NOT require "
+        "SOVEREIGN_ENABLED=1 on web for desk chat (that couples chat to thrash).\n"
+        "6) Dual scheduler (web+worker both RUN_SCHEDULER=1 with full mind) = death.\n"
+        "7) Watchdog must not reboot-storm; cool down when breaker opens; force drains "
+        "still pass sovereign_guard.\n"
+        "8) Permanent tool/token denies: stop requeue loops; evolve skills; don't burn pool.\n"
+        "9) Product uptime > ambitious monologue. If /health dies, you failed.\n"
+        "10) Re-enable layers in order (sub → act → expand/code/skills), never all-on after outage.\n"
+        "11) Strengthening (2026-07-16): worker pool is small (6+4); single-flight serializes "
+        "cortex/jobs/mission/skills/ops_sweep; job drain default 2. Skip when single_flight "
+        "busy — that is correct, not a stall to force through."
+    ),
 }
 
 
@@ -3616,8 +3638,8 @@ def sovereign_jobs_drain(authorization: str | None = Header(default=None)):
     _require_sovereign_or_admin(authorization)
     with SessionLocal() as db:
         from .energy_agent_sovereign_worker import drain_jobs
-        # Ford: drain more when repo access is unlocked
-        limit = int(os.getenv("SOVEREIGN_JOB_DRAIN_LIMIT", "3") or 3)
+        # Manual admin drain: same env as scheduler, default 2; allow up to 8.
+        limit = int(os.getenv("SOVEREIGN_JOB_DRAIN_LIMIT", "2") or 2)
         out = drain_jobs(db, limit=max(1, min(limit, 8)))
         db.commit()
         return out

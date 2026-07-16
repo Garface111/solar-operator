@@ -629,27 +629,49 @@ def soft_reboot(
                 "reason": blocked,
             })
         else:
+            # Single-flight: do not force cortex while jobs/mission/skills hold heavy
+            flight_ok, flight_why = True, "ok"
             try:
-                mark_cortex_inflight(True)
-                from .energy_agent_sovereign import sovereign_tick
-                cortex = sovereign_tick(reason=f"watchdog:{reason}"[:120])
-                note_primary(
-                    "cortex",
-                    ok=bool(cortex.get("ok")),
-                    detail={"via": "recovery", "tick": cortex.get("tick_id")},
-                )
+                from .sovereign_guard import try_begin_heavy
+                flight_ok, flight_why = try_begin_heavy("watchdog_cortex")
+            except Exception as fe:  # noqa: BLE001
+                log.warning("soft_reboot single_flight check failed: %s", fe)
+                flight_ok, flight_why = True, "ok"
+            if not flight_ok:
+                log.warning("soft_reboot force_cortex skipped: %s", flight_why)
                 actions.append({
                     "step": "force_cortex",
-                    "ok": cortex.get("ok"),
-                    "tick_id": cortex.get("tick_id"),
-                    "mode": cortex.get("mode"),
-                    "n_decisions": len(cortex.get("decisions") or []),
+                    "ok": True,
+                    "skipped": True,
+                    "reason": flight_why,
                 })
-            except Exception as e:  # noqa: BLE001
-                note_primary("cortex", ok=False, detail={"error": str(e)[:200]})
-                actions.append({"step": "force_cortex", "ok": False, "error": str(e)[:300]})
-            finally:
-                mark_cortex_inflight(False)
+            else:
+                try:
+                    mark_cortex_inflight(True)
+                    from .energy_agent_sovereign import sovereign_tick
+                    cortex = sovereign_tick(reason=f"watchdog:{reason}"[:120])
+                    note_primary(
+                        "cortex",
+                        ok=bool(cortex.get("ok")),
+                        detail={"via": "recovery", "tick": cortex.get("tick_id")},
+                    )
+                    actions.append({
+                        "step": "force_cortex",
+                        "ok": cortex.get("ok"),
+                        "tick_id": cortex.get("tick_id"),
+                        "mode": cortex.get("mode"),
+                        "n_decisions": len(cortex.get("decisions") or []),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    note_primary("cortex", ok=False, detail={"error": str(e)[:200]})
+                    actions.append({"step": "force_cortex", "ok": False, "error": str(e)[:300]})
+                finally:
+                    mark_cortex_inflight(False)
+                    try:
+                        from .sovereign_guard import end_heavy
+                        end_heavy("watchdog_cortex")
+                    except Exception:
+                        pass
 
     if requeue_jobs:
         # Always allow lightweight requeue of stuck rows (already done above).
@@ -663,22 +685,43 @@ def soft_reboot(
                 "reason": blocked,
             })
         else:
+            flight_ok, flight_why = True, "ok"
             try:
-                mark_jobs_inflight(True)
-                from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
-                if code_live_enabled():
-                    with SessionLocal() as db2:
-                        res = drain_jobs(db2, limit=1)
-                        db2.commit()
-                    note_primary("jobs", ok=bool(res.get("ok")), detail={"via": "recovery", **{k: res.get(k) for k in ("processed",)}})
-                    actions.append({"step": "drain_jobs", "ok": res.get("ok"), "processed": res.get("processed")})
-                else:
-                    actions.append({"step": "drain_jobs", "ok": True, "skipped": True})
-            except Exception as e:  # noqa: BLE001
-                note_primary("jobs", ok=False, detail={"error": str(e)[:200]})
-                actions.append({"step": "drain_jobs", "ok": False, "error": str(e)[:300]})
-            finally:
-                mark_jobs_inflight(False)
+                from .sovereign_guard import try_begin_heavy
+                flight_ok, flight_why = try_begin_heavy("watchdog_jobs")
+            except Exception as fe:  # noqa: BLE001
+                log.warning("soft_reboot single_flight check failed: %s", fe)
+                flight_ok, flight_why = True, "ok"
+            if not flight_ok:
+                log.warning("soft_reboot drain_jobs skipped: %s", flight_why)
+                actions.append({
+                    "step": "drain_jobs",
+                    "ok": True,
+                    "skipped": True,
+                    "reason": flight_why,
+                })
+            else:
+                try:
+                    mark_jobs_inflight(True)
+                    from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
+                    if code_live_enabled():
+                        with SessionLocal() as db2:
+                            res = drain_jobs(db2, limit=1)
+                            db2.commit()
+                        note_primary("jobs", ok=bool(res.get("ok")), detail={"via": "recovery", **{k: res.get(k) for k in ("processed",)}})
+                        actions.append({"step": "drain_jobs", "ok": res.get("ok"), "processed": res.get("processed")})
+                    else:
+                        actions.append({"step": "drain_jobs", "ok": True, "skipped": True})
+                except Exception as e:  # noqa: BLE001
+                    note_primary("jobs", ok=False, detail={"error": str(e)[:200]})
+                    actions.append({"step": "drain_jobs", "ok": False, "error": str(e)[:300]})
+                finally:
+                    mark_jobs_inflight(False)
+                    try:
+                        from .sovereign_guard import end_heavy
+                        end_heavy("watchdog_jobs")
+                    except Exception:
+                        pass
 
     health = diagnose()
     return {

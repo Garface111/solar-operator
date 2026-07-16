@@ -2589,7 +2589,29 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
 
         out: dict[str, Any]
         if action in ("sweep", "ops_sweep", "run_all"):
-            out = autonomous_ops_sweep(db)
+            # Single-flight: do not run full ops sweep concurrent with worker
+            # heavy layers in the same process (or nested desk double-clicks).
+            try:
+                from .sovereign_guard import try_begin_heavy, end_heavy
+                flight_ok, flight_why = try_begin_heavy("ops_sweep")
+            except Exception:
+                flight_ok, flight_why = True, "ok"
+            if not flight_ok:
+                out = {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": flight_why,
+                    "action": action,
+                }
+            else:
+                try:
+                    out = autonomous_ops_sweep(db)
+                finally:
+                    try:
+                        from .sovereign_guard import end_heavy
+                        end_heavy("ops_sweep")
+                    except Exception:
+                        pass
         elif action in ("feature_status",):
             out = set_feature_status(
                 db, int(p["feature_id"]), p.get("status") or "building",

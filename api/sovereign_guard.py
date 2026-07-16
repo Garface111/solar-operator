@@ -14,6 +14,11 @@ Skip heavy work if ANY of:
   - pool checked_out/capacity >= SOVEREIGN_POOL_SKIP_RATIO (default 0.65)
     OR pool_status()['pressure'] is true
 
+Additionally, process-local single-flight (`heavy_flight`) ensures only ONE
+heavy layer (cortex / jobs / mission_loop / skills / ops_sweep / cortex_wake /
+watchdog cortex|jobs recovery) runs at a time. Light subconscious ticks do
+NOT take the heavy lock; cortex wake FROM subconscious does.
+
 Web process with RUN_SCHEDULER=0 never calls these runners (scheduler not
 driving heavy work) — process_role() still surfaces that fact on healthz.
 
@@ -24,6 +29,7 @@ Env (all optional):
   SOVEREIGN_AUTO_PAUSE=1|0         enable auto-pause after N hot ticks (default on)
   SOVEREIGN_AUTO_PAUSE_TICKS=3     consecutive hot observations to trip
   SOVEREIGN_AUTO_PAUSE_MINUTES=15  how long process-local pause lasts
+  SOVEREIGN_SINGLE_FLIGHT=1|0      cross-layer single-flight lock (default on)
   PROCESS_ROLE=web|worker          explicit role label
   RUN_SCHEDULER=0|1                role hint (0 → web-leaning / no scheduler)
   RAILWAY_SERVICE_NAME=...         role hint (contains "worker" → worker)
@@ -36,7 +42,8 @@ import logging
 import os
 import threading
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 log = logging.getLogger("energy_agent.sovereign.guard")
 
@@ -53,6 +60,27 @@ _state: dict[str, Any] = {
     "last_allow_at": None,
     "skips_total": 0,
     "allows_total": 0,
+}
+
+# ── Single-flight (cross-layer mutex for heavy Sovereign work) ───────────────
+# One process-local lock shared by all heavy layers so cortex/ops/jobs cannot
+# thrash Postgres together. Non-reentrant: same layer holding again fails.
+# Not durable across process recycle.
+HEAVY_LAYERS = frozenset({
+    "cortex",
+    "ops_sweep",
+    "jobs",
+    "mission_loop",
+    "skills",
+    "cortex_wake",
+    "watchdog_cortex",
+    "watchdog_jobs",
+})
+
+_flight_lock = threading.Lock()
+_flight: dict[str, Any] = {
+    "held_by": None,       # layer name or None
+    "held_since": None,    # wall-clock time.time() when acquired
 }
 
 
@@ -350,6 +378,78 @@ def _skip(layer: str, reason: str) -> tuple[bool, str]:
     return False, reason
 
 
+# ── Single-flight heavy lock ─────────────────────────────────────────────────
+def single_flight_enabled() -> bool:
+    """SOVEREIGN_SINGLE_FLIGHT default ON — set 0 to allow concurrent heavy layers."""
+    return _flag("SOVEREIGN_SINGLE_FLIGHT", "1")
+
+
+def flight_status() -> dict[str, Any]:
+    """Snapshot of process-local heavy single-flight lock (no side effects)."""
+    with _flight_lock:
+        held_by = _flight.get("held_by")
+        held_since = _flight.get("held_since")
+    return {
+        "enabled": single_flight_enabled(),
+        "held_by": held_by,
+        "held_since": held_since,
+        "busy": held_by is not None,
+        "heavy_layers": sorted(HEAVY_LAYERS),
+    }
+
+
+def try_begin_heavy(layer: str) -> tuple[bool, str]:
+    """Acquire process-local heavy single-flight lock for ``layer``.
+
+    Returns (ok, reason). If another heavy layer holds the lock, return
+    (False, 'single_flight held_by=...'). Non-reentrant: same layer held
+    again also fails. When SOVEREIGN_SINGLE_FLIGHT=0, always allows.
+    """
+    if not single_flight_enabled():
+        return True, "ok"
+    layer_s = (layer or "sovereign").strip() or "sovereign"
+    with _flight_lock:
+        holder = _flight.get("held_by")
+        if holder is not None:
+            return False, f"single_flight held_by={holder}"
+        _flight["held_by"] = layer_s
+        _flight["held_since"] = time.time()
+    return True, "ok"
+
+
+def end_heavy(layer: str) -> None:
+    """Release heavy single-flight if this layer holds it (no-op otherwise)."""
+    layer_s = (layer or "sovereign").strip() or "sovereign"
+    with _flight_lock:
+        if _flight.get("held_by") == layer_s:
+            _flight["held_by"] = None
+            _flight["held_since"] = None
+
+
+@contextmanager
+def heavy_flight(layer: str) -> Iterator[tuple[bool, str]]:
+    """Context manager for heavy single-flight.
+
+    Yields (True, "ok") when acquired; (False, reason) when busy (caller
+    should skip work). Always releases on exit if this layer acquired.
+    """
+    ok, reason = try_begin_heavy(layer)
+    if not ok:
+        yield False, reason
+        return
+    try:
+        yield True, "ok"
+    finally:
+        end_heavy(layer)
+
+
+def _reset_flight_for_tests() -> None:
+    """Test helper: clear single-flight state."""
+    with _flight_lock:
+        _flight["held_by"] = None
+        _flight["held_since"] = None
+
+
 # ── Status surface ───────────────────────────────────────────────────────────
 def guard_status() -> dict[str, Any]:
     """Worker-friendly snapshot for /admin/sovereign/healthz (no DB checkout)."""
@@ -399,6 +499,7 @@ def guard_status() -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         dry_reason = f"error:{str(e)[:80]}"
 
+    sf = flight_status()
     return {
         "heavy_work_allowed": dry_reason == "ok",
         "skip_reason": None if dry_reason == "ok" else dry_reason,
@@ -418,6 +519,12 @@ def guard_status() -> dict[str, Any]:
             "any_pause": pause_active,
         },
         "pool": pool,
+        "single_flight": {
+            "held_by": sf.get("held_by"),
+            "held_since": sf.get("held_since"),
+            "busy": sf.get("busy"),
+            "enabled": sf.get("enabled"),
+        },
         "stats": {
             "skips_total": st.get("skips_total"),
             "allows_total": st.get("allows_total"),
@@ -432,7 +539,9 @@ def guard_status() -> dict[str, Any]:
                 "SOVEREIGN_PAUSE=1 or pause file",
                 "process-local auto-pause active",
                 f"pool ratio >= {pool_skip_ratio()} or pressure flag",
+                "single_flight held by another heavy layer (when enabled)",
             ],
             "pool_skip_ratio": pool_skip_ratio(),
+            "single_flight_enabled": single_flight_enabled(),
         },
     }

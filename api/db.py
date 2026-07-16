@@ -15,6 +15,21 @@ Defenses:
   • Checkout counters + rate-limited internal alert at high utilization
   • pool_status() for /health (no checkout required)
   • dispose_pool() recovery path for the watchdog
+
+Role-aware pool budgets (web vs worker)
+---------------------------------------
+Web keeps headroom for request bursts; worker-like processes self-cap so a
+background/scheduler service cannot starve the API of Postgres connections.
+
+  • web (default):  pool_size=15, max_overflow=15  → capacity 30
+  • worker:         pool_size=6,  max_overflow=4   → capacity 10
+
+Worker detection (same spirit as api.sovereign_guard.process_role):
+PROCESS_ROLE / SO_PROCESS in {worker, background, scheduler}, or
+RAILWAY_SERVICE_NAME / RAILWAY_SERVICE containing "worker" or "background".
+
+DB_POOL_SIZE / DB_MAX_OVERFLOW env vars always win when set (no silent override).
+SQLite ignores pool sizing. Keep (size+overflow) * processes under PG max_connections.
 """
 from __future__ import annotations
 
@@ -23,7 +38,7 @@ import os
 import pathlib
 import threading
 import time
-from typing import Any, Generator, Optional
+from typing import Any, Generator, Mapping
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -32,6 +47,77 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 from .models import Base
 
 logger = logging.getLogger(__name__)
+
+# Role-aware defaults (Postgres only). Explicit DB_POOL_* env always wins.
+_WEB_POOL_SIZE = 15
+_WEB_MAX_OVERFLOW = 15
+_WORKER_POOL_SIZE = 6
+_WORKER_MAX_OVERFLOW = 4
+
+
+def process_is_worker(environ: Mapping[str, str] | None = None) -> bool:
+    """True when this process should use the smaller worker pool budget.
+
+    Mirrors api.sovereign_guard.process_role() worker-like detection without
+    importing that module (db is loaded early; keep this dependency-free).
+    """
+    env = os.environ if environ is None else environ
+    explicit = (env.get("PROCESS_ROLE") or env.get("SO_PROCESS") or "").strip().lower()
+    if explicit in ("worker", "background", "scheduler"):
+        return True
+    if explicit in ("web", "api"):
+        return False
+    svc = (env.get("RAILWAY_SERVICE_NAME") or env.get("RAILWAY_SERVICE") or "").strip().lower()
+    if "worker" in svc or "background" in svc:
+        return True
+    return False
+
+
+def resolve_pool_defaults(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Resolve pool_size / max_overflow for the process role.
+
+    Pure helper: reads env (or a mapping) and returns numbers without touching
+    the engine. Empty-string env values are treated as unset.
+    """
+    env = os.environ if environ is None else environ
+    worker = process_is_worker(env)
+    role = "worker" if worker else "web"
+    default_size = _WORKER_POOL_SIZE if worker else _WEB_POOL_SIZE
+    default_overflow = _WORKER_MAX_OVERFLOW if worker else _WEB_MAX_OVERFLOW
+
+    size_raw = env.get("DB_POOL_SIZE")
+    overflow_raw = env.get("DB_MAX_OVERFLOW")
+    size_explicit = size_raw is not None and str(size_raw).strip() != ""
+    overflow_explicit = overflow_raw is not None and str(overflow_raw).strip() != ""
+
+    pool_size = int(str(size_raw).strip()) if size_explicit else default_size
+    max_overflow = int(str(overflow_raw).strip()) if overflow_explicit else default_overflow
+
+    return {
+        "role": role,
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
+        "capacity": pool_size + max_overflow,
+        "pool_size_explicit": size_explicit,
+        "max_overflow_explicit": overflow_explicit,
+        "defaults": {
+            "web": {"pool_size": _WEB_POOL_SIZE, "max_overflow": _WEB_MAX_OVERFLOW},
+            "worker": {"pool_size": _WORKER_POOL_SIZE, "max_overflow": _WORKER_MAX_OVERFLOW},
+        },
+    }
+
+
+def pool_config_summary() -> dict[str, Any]:
+    """Live pool config snapshot (role, sizes, capacity) for health/tests."""
+    return {
+        "role": "worker" if process_is_worker() else "web",
+        "pool_size": _POOL_SIZE,
+        "max_overflow": _MAX_OVERFLOW,
+        "capacity": _POOL_SIZE + _MAX_OVERFLOW,
+        "pool_timeout_s": _POOL_TIMEOUT,
+        "is_sqlite": _is_sqlite,
+    }
+
 
 DATA_DIR = pathlib.Path(os.environ.get("SOLAR_DATA_DIR", pathlib.Path(__file__).parent.parent / "storage"))
 DATA_DIR.mkdir(exist_ok=True, parents=True)
@@ -45,16 +131,24 @@ if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
 # Connection pool. SQLite ignores pool sizing (single-writer), so only tune it
-# for Postgres. Defaults: 15+15=30 concurrent connections per web process.
-# Keep total (size+overflow) * WEB_CONCURRENCY under Postgres max_connections
+# for Postgres. Role-aware defaults: web 15+15=30, worker 6+4=10 (see module doc).
+# Keep total (size+overflow) * process count under Postgres max_connections
 # (and leave headroom for the cloud-capture-harvester service).
 _is_sqlite = DB_URL.startswith("sqlite")
 # Fail-fast under saturation: 8s (was 30s). Waiting longer just fills the
 # request threadpool and cascades into a full outage (2026-07-14).
-_POOL_SIZE = int(os.environ.get("DB_POOL_SIZE", "15"))
-_MAX_OVERFLOW = int(os.environ.get("DB_MAX_OVERFLOW", "15"))
+_pool_resolved = resolve_pool_defaults()
+_POOL_SIZE = int(_pool_resolved["pool_size"])
+_MAX_OVERFLOW = int(_pool_resolved["max_overflow"])
 _POOL_TIMEOUT = float(os.environ.get("DB_POOL_TIMEOUT", "8"))
 _POOL_RECYCLE = int(os.environ.get("DB_POOL_RECYCLE", "1800"))
+logger.info(
+    "db pool role=%s size=%s overflow=%s capacity=%s",
+    _pool_resolved["role"],
+    _POOL_SIZE,
+    _MAX_OVERFLOW,
+    _POOL_SIZE + _MAX_OVERFLOW,
+)
 
 _pool_kwargs: dict[str, Any] = {} if _is_sqlite else {
     "pool_size": _POOL_SIZE,

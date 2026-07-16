@@ -1194,6 +1194,8 @@ def requeue_failed_jobs(
 def drain_jobs(db, *, limit: int = 2) -> dict[str, Any]:
     """Process queued sovereign jobs (oldest first).
 
+    Default limit=2 (safer for pool). Scheduler uses SOVEREIGN_JOB_DRAIN_LIMIT
+    (default 2, hard cap 4). Manual admin drain may pass a higher limit.
     Each job is isolated: failure/rollback of one never aborts the batch.
     """
     from .energy_agent_sovereign import EaSovereignJob
