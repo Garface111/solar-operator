@@ -34,9 +34,25 @@ def test_detect_approval_and_reject():
     assert detect_ford_approval("yes")
     assert detect_ford_approval("Approved — do it")
     assert detect_ford_approval("go ahead")
+    assert detect_ford_approval("I approve the patch")
     assert not detect_ford_approval("what do you recommend?")
-    assert detect_ford_rejection("reject that")
+    # Real Ford message that FALSE-TRIGGERED apply (must never count as approval)
+    ford_msg = (
+        "I've just giving you the ability to alter your own mind can you propose "
+        "some improvements I'd like to propose some one I'd like you to be able to "
+        "do things automatically without asking me for example this build-out agenda "
+        "like you should just start doing these things and start proposing things to "
+        "me and I'll approve them just go for it we have an insane amount of rock "
+        "credits available so you really have infinite flexibility here"
+    )
+    assert not detect_ford_approval(ford_msg)
+    assert not detect_ford_approval(
+        "I'll approve them just go for it — keep shipping the build-out"
+    )
+    assert detect_ford_rejection("reject the patch")
     assert detect_ford_rejection("veto")
+    # Bare "veto" / "reject" short
+    assert detect_ford_rejection("reject")
 
 
 def test_propose_then_apply(db_session):

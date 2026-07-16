@@ -1651,46 +1651,78 @@ _MIND_DENY_KEYS = frozenset({
 
 
 def detect_ford_approval(text: str) -> bool:
-    """True if Ford's chat message is approving a pending mind change."""
+    """True only when Ford is clearly approving a *pending mind patch*.
+
+    Must be strict: long instructions that mention 'approve' / 'go for it' in
+    the future tense (e.g. "I'll approve them, just go for it") are NOT
+    approvals of a staged reprogram — they are new work for Sovereign.
+    """
+    import re
     t = (text or "").strip().lower()
     if not t:
         return False
-    # Explicit veto wins
-    for no in (
-        "reject", "rejected", "veto", "don't", "do not", "not yet", "cancel",
-        "no don't", "nope", "hold off", "wait",
-    ):
-        if no in t and "approve" not in t:
-            # "don't wait" is not a veto — skip bare wait if approve also present
-            if no == "wait" and any(y in t for y in ("yes", "approve", "go ahead", "do it")):
-                continue
-            if t in ("wait", "not yet", "hold off", "cancel", "reject", "rejected", "veto", "nope", "no"):
-                return False
-            if no in ("reject", "rejected", "veto", "cancel", "not yet", "hold off", "nope"):
-                return False
-    yes_phrases = (
-        "approved", "approve", "i approve", "yes", "yep", "yeah", "do it",
-        "ship it", "apply", "apply it", "go ahead", "make it so", "lgtm",
-        "proceed", "sounds good", "do that", "yes do", "go for it",
-        "change your mind", "update your mind", "reprogram", "as proposed",
-        "implement that", "execute that", "ok do it", "okay do it",
-    )
-    # Short pure affirmatives
-    if t in ("y", "yes", "yep", "yeah", "ok", "okay", "k", "approved", "approve", "lgtm", "do it", "ship it", "go", "proceed"):
+
+    # Pure short affirmatives (whole message is the approval)
+    compact = re.sub(r"[.!?,;:\s]+", " ", t).strip()
+    short_yes = {
+        "y", "yes", "yep", "yeah", "ok", "okay", "k", "kk",
+        "approved", "approve", "i approve", "lgtm", "do it", "ship it",
+        "go", "proceed", "go ahead", "apply", "apply it", "make it so",
+        "yes do it", "ok do it", "okay do it", "sounds good", "go for it",
+    }
+    if compact in short_yes:
         return True
-    return any(p in t for p in yes_phrases)
+    # Short message (<= 12 words) with explicit approval of the patch/proposal
+    words = compact.split()
+    if len(words) <= 12:
+        explicit_short = (
+            "approve", "approved", "apply", "do it", "ship it", "go ahead",
+            "lgtm", "proceed", "make it so", "as proposed",
+        )
+        if any(p in compact for p in explicit_short):
+            # Future tense still doesn't count even when short
+            if re.search(r"\bi(?:'ll| will) approve\b", compact):
+                return False
+            return True
+
+    # Longer messages: only if they explicitly approve THIS mind/patch/proposal
+    explicit_long = (
+        "approve the patch", "approve this patch", "approve the mind",
+        "approve this mind", "approve the change", "approve this change",
+        "approve the proposal", "approve this proposal",
+        "apply the patch", "apply this patch", "apply the mind change",
+        "apply the mind", "apply this change", "apply the proposal",
+        "mind update approved", "patch approved", "proposal approved",
+        "yes apply the", "yes approve the", "i approve the patch",
+        "i approve this patch", "i approve the mind", "i approve the proposal",
+        "reprogram approved", "approved as proposed",
+    )
+    if any(p in t for p in explicit_long):
+        return True
+
+    # "I'll approve them just go for it" = future workflow, NOT approval now
+    return False
 
 
 def detect_ford_rejection(text: str) -> bool:
+    import re
     t = (text or "").strip().lower()
     if not t:
         return False
     if detect_ford_approval(t):
         return False
-    for no in ("reject", "rejected", "veto", "don't do that", "do not apply", "cancel the", "no don't", "scrap that"):
+    compact = re.sub(r"[.!?,;:\s]+", " ", t).strip()
+    if compact in ("no", "nope", "cancel", "reject", "veto", "rejected"):
+        return True
+    # Long messages: only explicit reject of the pending patch
+    for no in (
+        "reject the patch", "reject this patch", "reject the proposal",
+        "reject the mind", "veto the", "don't apply", "do not apply",
+        "cancel the patch", "scrap the patch", "discard the proposal",
+    ):
         if no in t:
             return True
-    return t in ("no", "nope", "cancel", "reject", "veto")
+    return False
 
 
 def get_pending_mind_patch(db) -> dict | None:
