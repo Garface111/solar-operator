@@ -59,11 +59,12 @@ logger = logging.getLogger(__name__)
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_SETUP_PRICE_ID = os.getenv("STRIPE_SETUP_PRICE_ID", "")  # $250 one-time
 STRIPE_ARRAY_PRICE_ID = os.getenv("STRIPE_ARRAY_PRICE_ID", "")  # $15/array/mo
-APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
+APP_URL = os.getenv("APP_URL", "https://arrayoperator.com").rstrip("/")
 API_URL = os.getenv("API_URL", "https://web-production-49c83.up.railway.app").rstrip("/")
-# Public, buyer-facing onboarding URL. Netlify 200-proxies nepooloperator.com/onboarding
-# to the FastAPI /onboarding/* mount on Railway, so Stripe return URLs keep the
-# operator on the marketing domain instead of the raw Railway host.
+# Public, buyer-facing onboarding URL. Post-fold (2026-07-16) the default rides
+# APP_URL = arrayoperator.com — its /onboarding serves the folded product's
+# wizard, so Stripe return URLs keep the operator on the marketing domain
+# instead of the raw Railway host. PUBLIC_ONBOARDING_URL still overrides.
 PUBLIC_ONBOARDING_URL = os.getenv("PUBLIC_ONBOARDING_URL", f"{APP_URL}/onboarding").rstrip("/")
 SETUP_FEE_CENTS = int(os.getenv("ONBOARDING_SETUP_CENTS", "25000"))   # $250 one-time
 ARRAY_PRICE_CENTS = int(os.getenv("ONBOARDING_ARRAY_CENTS", "1500"))  # $15/array/mo

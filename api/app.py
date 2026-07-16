@@ -20,7 +20,7 @@ import io, os, pathlib, secrets, shutil, json, logging, tarfile, hmac
 from datetime import datetime
 from typing import Any
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
@@ -2175,30 +2175,14 @@ def admin_run_new_bill_reviews(
 
 # ---- root --------------------------------------------------------------
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", include_in_schema=False)
 def root():
-    return """
-<!DOCTYPE html><html><head><title>NEPOOL Operator API</title>
-<style>body{font-family:Georgia,serif;max-width:680px;margin:40px auto;padding:0 20px;color:#222}
-h1{color:#2e6b3a;border-bottom:2px solid #2e6b3a;padding-bottom:8px}
-code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:13px}
-.endpoint{background:#eef3ec;border-left:3px solid #2e6b3a;padding:8px 12px;margin:6px 0;font-family:ui-monospace,monospace;font-size:13px}
-</style></head><body>
-<h1>NEPOOL Operator API</h1>
-<p>Backend for the Chrome extension. Receives captured utility sessions, pulls bills, drafts reports.</p>
-<h3>Ingest</h3>
-<div class="endpoint">POST /v1/sync — Chrome extension target</div>
-<h3>Tenant</h3>
-<div class="endpoint">GET  /v1/tenants/{id}/status</div>
-<div class="endpoint">GET  /v1/tenants/{id}/bills</div>
-<div class="endpoint">POST /v1/tenants/{id}/pull — force a pull-bills run</div>
-<h3>Admin</h3>
-<div class="endpoint">POST /admin/tenants    {"name":"...", "contact_email":"..."}</div>
-<div class="endpoint">GET  /admin/tenants</div>
-<div class="endpoint">POST /admin/jobs/run</div>
-<p style="margin-top:30px;color:#888;font-size:13px">NEPOOL Operator · hundreds of utilities supported nationwide · multi-tenant</p>
-</body></html>
-"""
+    """Post-fold (2026-07-16): the old "NEPOOL Operator API" HTML landing is
+    gone — anyone hitting the API root (nepooloperator.com's proxy or the
+    Railway origin directly) lands on the folded product home. Permanent
+    redirect only on this exact path; /health, /v1/*, /app, /admin/* are
+    untouched."""
+    return RedirectResponse("https://arrayoperator.com", status_code=301)
 
 
 # ─── Delivery endpoints (default workbook → email) ────────────────────

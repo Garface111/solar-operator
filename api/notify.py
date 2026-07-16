@@ -228,6 +228,9 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
     first = _html.escape(name.split()[0] if name else "there")
     install_url = EXTENSION_INSTALL_URL
     next_q = _next_quarterly_date()
+    # NEPOOL-only email — post-fold its dashboard is the /accounts SPA on the
+    # folded home (branding derives it; never hardcode the sunset domain).
+    _dash = branding.dashboard_url("nepool")
 
     body_html = (
         f"<p>Your NEPOOL Operator account is live on the <strong>{_html.escape(plan_label)}</strong> plan. "
@@ -237,7 +240,7 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
         f'<li style="margin:10px 0;"><strong>Install the Chrome extension</strong> — '
         f'<a href="{install_url}" style="color:#047857;">Add NEPOOL Operator Sync to Chrome</a></li>'
         f'<li style="margin:10px 0;"><strong>The extension auto-pairs with your account</strong> — '
-        f'open your <a href="https://nepooloperator.com/accounts" style="color:#047857;">NEPOOL Operator dashboard</a> '
+        f'open your <a href="{_dash}" style="color:#047857;">NEPOOL Operator dashboard</a> '
         f"once after installing and the extension links itself automatically. No codes to copy.</li>"
         f'<li style="margin:10px 0;"><strong>Sign into your utility portal once</strong> — visit '
         f'<a href="https://greenmountainpower.com" style="color:#047857;">greenmountainpower.com</a> '
@@ -264,7 +267,7 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
         f"Your account is live on the {plan_label} plan.\n\n"
         f"Setup (3 steps):\n\n"
         f"  1. Install the Chrome extension: {install_url}\n"
-        f"  2. Open your NEPOOL Operator dashboard (nepooloperator.com/accounts) — the\n"
+        f"  2. Open your NEPOOL Operator dashboard ({_dash}) — the\n"
         f"     extension auto-pairs with your account. No codes to copy.\n"
         f"  3. Sign into your utility portal once (greenmountainpower.com or Vermont\n"
         f"     Electric Co-op). The extension captures the rest.\n\n"
@@ -300,12 +303,16 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
 
 
 def send_sample_workbook_email(to: str, name: str,
-                               dashboard_url: str = "https://nepooloperator.com/accounts") -> bool:
+                               dashboard_url: str | None = None) -> bool:
     """Email the generic demo workbook so a new operator sees what their
     quarterly reports will look like. Generates a fresh sample to a temp file
-    and attaches it. Best-effort: returns False (and logs) on any failure."""
+    and attaches it. Best-effort: returns False (and logs) on any failure.
+
+    NEPOOL-only email; dashboard_url defaults to the product's branding URL
+    (post-fold: arrayoperator.com/accounts) instead of a hardcoded domain."""
     import tempfile, pathlib as _p
     import html as _html
+    dashboard_url = dashboard_url or branding.dashboard_url("nepool")
     # Deferred import keeps notify.py import-light and avoids any writer/db
     # import cost for the (common) code paths that never send this email.
     from .writers.demo_writer import build_demo_workbook
@@ -423,7 +430,7 @@ def send_payment_failed_email(to: str, name: str, amount_dollars: float,
 def send_trial_charge_failed_email(
     to: str,
     name: str,
-    dashboard_url: str = "https://nepooloperator.com/accounts",
+    dashboard_url: str | None = None,
     product: str = "nepool",
 ) -> bool:
     """Notify operator their card was declined when we tried to activate their
@@ -431,6 +438,7 @@ def send_trial_charge_failed_email(
     no retry timeline, and the context is the trial-end charge specifically."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    dashboard_url = dashboard_url or branding.dashboard_url(product)
     _brand = branding.brand_name(product)
     _link = link_color(product)
     _what = "watching your arrays stays paused" if product == "array_operator" else "reports stay paused"
@@ -482,7 +490,7 @@ def send_trial_welcome_email(
     to: str,
     name: str,
     trial_end_iso_date: str,
-    dashboard_url: str = "https://nepooloperator.com/accounts",
+    dashboard_url: str | None = None,
     product: str = "nepool",
 ) -> bool:
     """Welcome email sent immediately after onboarding completes. No-card reality:
@@ -495,6 +503,7 @@ def send_trial_welcome_email(
     _brand = branding.brand_name(product)
     _link = link_color(product)
     _pricing = branding.pricing_blurb(product)
+    dashboard_url = dashboard_url or branding.dashboard_url(product)
 
     if product == "array_operator":
         # ── Array Operator (owner-side) ──────────────────────────────────────
@@ -592,13 +601,14 @@ def send_trial_welcome_email(
 def send_trial_paused_no_card_email(
     to: str,
     name: str,
-    dashboard_url: str = "https://nepooloperator.com/accounts",
+    dashboard_url: str | None = None,
     product: str = "nepool",
 ) -> bool:
     """Trial ended with no card on file — the account is paused (read-only).
     Tell the operator nothing was deleted and how to resume."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    dashboard_url = dashboard_url or branding.dashboard_url(product)
     _brand = branding.brand_name(product)
     _link = link_color(product)
     _pricing = branding.pricing_blurb(product)
@@ -656,13 +666,14 @@ def send_trial_ending_no_card_reminder_email(
     to: str,
     name: str,
     trial_end_date: str,
-    dashboard_url: str = "https://nepooloperator.com/accounts",
+    dashboard_url: str | None = None,
     product: str = "nepool",
 ) -> bool:
     """Sent ~3 days before a no-card trial ends. Nudge the operator to add a card
     so they don't get paused when the trial expires."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    dashboard_url = dashboard_url or branding.dashboard_url(product)
     end_escaped = _html.escape(trial_end_date)
     _brand = branding.brand_name(product)
     _link = link_color(product)
@@ -776,29 +787,44 @@ def send_cancellation_email(to: str, name: str,
     )
 
 
-def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https://nepooloperator.com/accounts") -> bool:
-    """Trial extended 3 more days — operator has no arrays yet."""
+def send_add_first_array_email(to: str, name: str,
+                               dashboard_url: str | None = None,
+                               product: str = "nepool") -> bool:
+    """Trial extended 3 more days — operator has no arrays yet. Product-aware:
+    brand, dashboard link, skin and the billing line follow the TENANT's product
+    (an Array Operator owner was previously getting NEPOOL-branded copy)."""
     import html as _html
     first = _html.escape((name or "there").split()[0])
+    _brand = branding.brand_name(product)
+    _link = link_color(product)
+    dashboard_url = dashboard_url or branding.dashboard_url(product)
+    if product == "array_operator":
+        _billing_html = (
+            "<p>Once your trial ends, billing simply follows what your arrays "
+            "generate — nothing connected, nothing charged, but nothing watched "
+            "either.</p>")
+    else:
+        _billing_html = (
+            "<p>Once your trial ends, we'll bill you based on the arrays that are "
+            "there. If you still have zero, we'll charge the 1-array minimum.</p>")
 
     body_html = (
         f"<p>Hi {first},</p>"
-        f"<p>You signed up for NEPOOL Operator but haven't added any arrays yet. "
+        f"<p>You signed up for {_brand} but haven't added any arrays yet. "
         f"We've extended your trial by 3 more days so you have time to finish setup.</p>"
-        f'<p>Head to your <a href="{dashboard_url}" style="color:#047857;">dashboard</a>, '
+        f'<p>Head to your <a href="{dashboard_url}" style="color:{_link};">dashboard</a>, '
         f"install the Chrome extension, and log into your utility portal to pull your "
         f"arrays automatically.</p>"
-        f"<p>Once your trial ends, we'll bill you based on the arrays that are there. "
-        f"If you still have zero, we'll charge the 1-array minimum.</p>"
+        f"{_billing_html}"
         f"<p>Questions? Just reply — we read every email.</p>"
-        f"<p style=\"margin-top:24px;\">— NEPOOL Operator</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand}</p>"
     )
     body_text = (
         f"Hi {(name or 'there').split()[0]},\n\n"
-        f"You signed up for NEPOOL Operator but haven't added any arrays yet. "
+        f"You signed up for {_brand} but haven't added any arrays yet. "
         f"We've extended your trial by 3 more days.\n\n"
         f"Head to {dashboard_url} to finish setup.\n\n"
-        f"Questions? Just reply.\n\n— NEPOOL Operator"
+        f"Questions? Just reply.\n\n— {_brand}"
     )
     html = render_email_skin(
         preheader="Trial extended 3 days — add your first array before it ends.",
@@ -806,18 +832,21 @@ def send_add_first_array_email(to: str, name: str, dashboard_url: str = "https:/
         intro_line="Your trial has been extended by 3 days.",
         body_html=body_html,
         cta={"label": "Open dashboard", "url": dashboard_url},
+        product=product,
     )
     text = render_email_skin_text(
         headline="Add your first array",
         intro_line="Your trial has been extended by 3 days.",
         body_text=body_text,
         cta={"label": "Open dashboard", "url": dashboard_url},
+        product=product,
     )
     return _send_via_resend(
         to=to,
         subject="Add your first array — trial extended 3 days",
         html=html,
         text=text,
+        product=product,
     )
 
 

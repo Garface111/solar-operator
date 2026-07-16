@@ -27,7 +27,7 @@ def api_base() -> str:
     """Base URL of the Array Operator API the captures POST to. Defaults to the
     same PROD endpoint the extension ships with; override with AO_API_BASE (e.g.
     the Railway internal service URL to avoid a public round-trip)."""
-    return (os.environ.get("AO_API_BASE") or "https://nepooloperator.com").rstrip("/")
+    return (os.environ.get("AO_API_BASE") or "https://arrayoperator.com").rstrip("/")
 
 
 def _tenant_key(tenant_id: str) -> str | None:

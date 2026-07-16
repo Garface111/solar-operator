@@ -301,9 +301,13 @@ class TestMagicLinkTarget:
         assert "nepooloperator.com" not in cap["html"]
 
     def test_nepool_magic_link_targets_nepool_accounts(self, monkeypatch):
+        """Post-fold, the nepool product's SPA lives at the folded home's
+        /accounts proxy — the link must land there (NOT on AO's /login, and
+        never on the sunsetting nepooloperator.com)."""
         cap = self._capture_link(monkeypatch, "nepool")
-        assert "nepooloperator.com/accounts/?token=" in cap["html"]
-        assert "arrayoperator.com" not in cap["html"]
+        assert "arrayoperator.com/accounts/?token=" in cap["html"]
+        assert "/login?token=" not in cap["html"]
+        assert "nepooloperator.com" not in cap["html"]
 
 
 # ─── multi-tenant-per-email disambiguation (the login whack-a-mole fix) ─────────
@@ -405,15 +409,17 @@ class TestMagicLinkProductScoping:
         return account, captured
 
     def test_nepool_request_with_dual_email_targets_nepool(self, monkeypatch):
-        """A NEPOOL login on a shared email lands on nepooloperator.com even
-        though an Array Operator tenant exists (and sorts first)."""
+        """A NEPOOL login on a shared email lands on the NEPOOL surface even
+        though an Array Operator tenant exists (and sorts first). Post-fold both
+        products live on arrayoperator.com — product scoping now shows in the
+        PATH: nepool → the /accounts SPA, AO → /login."""
         account, cap = self._capture(monkeypatch)
         email = f"dual_{secrets.token_hex(4)}@example.com"
         self._two_accounts(email)
         sent = account.issue_magic_link(email, product="nepool")
         assert sent is True
-        assert "nepooloperator.com/accounts/?token=" in cap["html"]
-        assert "arrayoperator.com" not in cap["html"]
+        assert "arrayoperator.com/accounts/?token=" in cap["html"]
+        assert "/login?token=" not in cap["html"]
 
     def test_array_operator_request_with_dual_email_targets_ao(self, monkeypatch):
         account, cap = self._capture(monkeypatch)
@@ -460,5 +466,5 @@ class TestMagicLinkProductScoping:
             db.commit()
         sent = account.issue_magic_link(email)  # no product
         assert sent is True
-        assert "nepooloperator.com/accounts/?token=" in cap["html"]
+        assert "arrayoperator.com/accounts/?token=" in cap["html"]
 

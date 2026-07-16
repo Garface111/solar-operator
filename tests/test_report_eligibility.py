@@ -210,7 +210,10 @@ def test_presend_review_is_data_keyed_and_product_skinned(monkeypatch):
     assert "arrayoperator.com" in sends[ao_email]["html"]
     assert "nepooloperator.com" not in sends[ao_email]["html"]
     assert sends[nep_email]["product"] == "nepool"
-    assert "nepooloperator.com" in sends[nep_email]["html"]
+    # Post-fold (sunset lane) the nepool dashboard_url ALSO defaults to the
+    # folded home — the dying domain must not be emitted for anyone.
+    assert "arrayoperator.com" in sends[nep_email]["html"]
+    assert "nepooloperator.com" not in sends[nep_email]["html"]
 
 
 # ── delivery receipt (run_delivery_receipts) ──────────────────────────────────
