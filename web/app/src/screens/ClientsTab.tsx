@@ -72,11 +72,11 @@ export default function ClientsTab() {
     return () => window.removeEventListener("keydown", handler);
   }, [isFullscreen]);
 
-  // Sandbox fills under top nav + Table/Sandbox toggle. Table keeps the classic
-  // max-w-4xl gutters (dead space L/R) — only sandbox is full-bleed.
-  // ~3.5rem TabBar + ~0.75rem main pad + ~3rem subtab + gaps ≈ 7.5rem.
+  // Sandbox fills under top nav + compact Table/Sandbox pill. Table keeps the
+  // classic max-w-4xl gutters (dead space L/R) — only sandbox is full-bleed.
+  // ~3.5rem TabBar + ~0.75rem main pad + ~1.75rem pill + gaps ≈ 6.25rem.
   const sandboxFillClass =
-    "relative rounded-2xl h-[calc(100dvh-7.5rem)] min-h-[28rem] w-full";
+    "relative rounded-2xl h-[calc(100dvh-6.25rem)] min-h-[28rem] w-full";
   const isSandbox = subtab === "sandbox";
 
   // Let DashboardLayout hide the site footer only while the large sandbox is up.
@@ -92,18 +92,13 @@ export default function ClientsTab() {
         isSandbox && !isFullscreen ? "flex flex-col gap-3" : "space-y-4"
       }
     >
-      {/* Sub-tab toggle — Table keeps the centered max-w-4xl column; Sandbox
-          spans full width. Hidden in true fullscreen. */}
+      {/* Compact pill toggle — sits under the top tabs, not a full-width bar. */}
       {!isFullscreen && (
-        <div
-          className={
-            isSandbox ? "w-full shrink-0" : "mx-auto w-full max-w-4xl shrink-0"
-          }
-        >
+        <div className="flex w-full shrink-0 justify-center">
           <div
             role="tablist"
             aria-label="Clients view"
-            className="flex w-full items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
+            className="inline-flex items-center gap-0.5 rounded-full border border-zinc-200/90 bg-white/95 p-0.5 shadow-sm backdrop-blur-sm"
           >
             {(["spreadsheet", "sandbox"] as const).map((v) => (
               <button
@@ -113,10 +108,10 @@ export default function ClientsTab() {
                 aria-selected={subtab === v}
                 onClick={() => selectSubtab(v)}
                 className={[
-                  "flex-1 rounded-full px-4 py-2 text-sm font-semibold transition-colors",
+                  "rounded-full px-3 py-1 text-[11px] font-semibold leading-none tracking-tight transition-colors",
                   subtab === v
                     ? "bg-primary-500 text-white shadow-sm"
-                    : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900",
+                    : "text-zinc-500 hover:bg-zinc-50 hover:text-zinc-800",
                 ].join(" ")}
               >
                 {v === "spreadsheet" ? "Table" : "Sandbox"}
