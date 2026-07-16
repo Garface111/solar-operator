@@ -18,6 +18,7 @@ Models live on shared Base so create_all picks them up (no migration).
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 import os
@@ -840,7 +841,7 @@ def _mem_set(db, scope: str, key: str, value: str):
     key = (key or "")[:120]
     value = (value or "")[:8000]
     # scrub secrets-ish patterns from global
-    if scope == "global":
+    if scope in ("global", "global_pending"):
         if re.search(r"(password|api[_-]?key|secret|sk-|Bearer\s)", value, re.I):
             raise HTTPException(400, "Global memory cannot store secrets")
     existing = db.execute(
@@ -851,6 +852,34 @@ def _mem_set(db, scope: str, key: str, value: str):
         existing.updated_at = _now()
     else:
         db.add(EaMemory(scope=scope, key=key, value=value))
+
+
+def _queue_global_memory(db, tenant_id: str, key: str, value: str) -> dict:
+    """Tenant-originated global-behavior tips are QUEUED, never applied directly.
+
+    Only `scope == "global"` rows are injected into system prompts; anything a
+    tenant (or the agent acting for one) writes lands in `global_pending` and
+    requires an explicit admin promotion (ENERGY_AGENT_VOICE.md §5B). This is
+    the cross-tenant prompt-injection gate — a demo tenant must never be able
+    to steer every other tenant's agent.
+    """
+    pend_key = f"{tenant_id}/{(key or 'tip')[:100]}"
+    _mem_set(db, "global_pending", pend_key, value)
+    try:
+        from .notify import send_internal_alert
+        send_internal_alert(
+            "[EnergyAgent] global behavior tip queued for review",
+            f"tenant: {tenant_id}\nkey: {pend_key}\nvalue:\n{(value or '')[:2000]}\n\n"
+            "Promote: POST /v1/energy-agent/admin/memory/promote {\"key\": \"" + pend_key + "\"} "
+            "(x-admin-key). Reject: .../reject with the same body.",
+        )
+    except Exception as e:
+        log.warning("global-pending alert email failed: %s", e)
+    return {
+        "ok": True,
+        "scope": "global_pending",
+        "note": "Queued for review — global behavior changes apply only after Ford approves.",
+    }
 
 
 # ── tools ───────────────────────────────────────────────────────────────────
@@ -4833,8 +4862,7 @@ def _run_tool(
         return {"ok": True, "scope": "tenant"}
 
     if name == "remember_global_behavior":
-        _mem_set(db, "global", args.get("key") or "tip", args.get("value") or "")
-        return {"ok": True, "scope": "global"}
+        return _queue_global_memory(db, tid, args.get("key") or "tip", args.get("value") or "")
 
     if name == "escalate_to_ford":
         summary = args.get("summary") or "(no summary)"
@@ -5639,6 +5667,33 @@ def _call_anthropic(messages: list[dict], tools: list, *, max_tokens: int | None
     return {"message": msg, "usage": usage, "provider": "anthropic"}
 
 
+_PRIMARY_DOWN_ALERT_EVERY_S = int(os.getenv("EA_PRIMARY_DOWN_ALERT_EVERY_S", "21600") or 21600)
+_primary_down_alert_at: dict[str, float] = {}
+
+
+def _alert_primary_llm_down(provider: str, err: str) -> None:
+    """Loud, throttled (per-provider, default 6h) alert when the primary EA brain
+    is failing and turns are silently riding the fallback. Never trade
+    reliability for quiet — a degraded brain must be visible."""
+    now = time.time()
+    if now - _primary_down_alert_at.get(provider, 0.0) < _PRIMARY_DOWN_ALERT_EVERY_S:
+        return
+    _primary_down_alert_at[provider] = now
+    log.error("EA primary LLM %s DOWN — running on fallback: %s", provider, err)
+    try:
+        from .notify import send_internal_alert
+        send_internal_alert(
+            f"[EnergyAgent] primary LLM '{provider}' DOWN — turns running on fallback",
+            "Every Energy Agent turn is currently falling back to the secondary model.\n\n"
+            f"provider: {provider}\nerror: {err}\n\n"
+            "Fix the credential (Grok Build OIDC / API key) or flip "
+            "ENERGY_AGENT_LLM_PRIMARY deliberately. This alert repeats every "
+            f"{_PRIMARY_DOWN_ALERT_EVERY_S // 3600}h while the primary stays down.",
+        )
+    except Exception as e:
+        log.error("primary-LLM-down alert email failed: %s", e)
+
+
 def _call_llm(messages: list[dict], *, max_tokens: int | None = None) -> dict:
     """Grok (Build OIDC / API key) first when ready; Claude cloth fallback."""
     primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
@@ -5650,13 +5705,18 @@ def _call_llm(messages: list[dict], *, max_tokens: int | None = None) -> dict:
         order = ["grok", "claude"]
     last_err = None
     for who in order:
+        is_primary = who == order[0]
         try:
             if who == "grok" and _xai_ready():
                 return _call_grok(messages, TOOL_DEFS, max_tokens=max_tokens)
             if who == "claude" and ANTHROPIC_API_KEY:
                 return _call_anthropic(messages, TOOL_DEFS, max_tokens=max_tokens)
+            if is_primary:
+                _alert_primary_llm_down(who, "not configured (missing key/credential)")
         except Exception as e:
             last_err = e
+            if is_primary:
+                _alert_primary_llm_down(who, repr(e))
             log.warning("%s failed, trying next LLM: %s", who, e)
             continue
     if last_err:
@@ -6164,6 +6224,13 @@ def _agent_turn(
     llm_max_tokens = voice_max if voice_turn else default_max
 
     for _round in range(MAX_TOOL_ROUNDS):
+        # Release the pooled DB connection before the (long, blocking) LLM HTTP
+        # call — holding a txn across vendor HTTP is the documented whole-API
+        # meltdown class. Tools re-acquire a connection lazily afterwards.
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         result = _call_llm(messages, max_tokens=llm_max_tokens)
         provider = result.get("provider")
         total_cost += _usage_cost(result.get("usage") or {})
@@ -6948,8 +7015,63 @@ def get_memory(authorization: str | None = Header(default=None)):
 def set_memory(body: MemoryIn, authorization: str | None = Header(default=None)):
     t = _auth(authorization)
     require_not_demo(t)
-    scope = "global" if body.scope == "global" else f"tenant:{t.id}"
     with SessionLocal() as db:
+        if body.scope == "global":
+            out = _queue_global_memory(db, t.id, body.key, body.value)
+            db.commit()
+            return out
+        scope = f"tenant:{t.id}"
         _mem_set(db, scope, body.key, body.value)
         db.commit()
         return {"ok": True, "scope": scope}
+
+
+def _check_ea_admin(key_header: str | None, key_query: str | None = None) -> None:
+    admin_key = (os.getenv("ADMIN_API_KEY") or "").strip()
+    key = key_header or key_query
+    if not admin_key:
+        raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
+    if not hmac.compare_digest(key or "", admin_key):
+        raise HTTPException(403, "Invalid or missing admin key")
+
+
+@router.get("/v1/energy-agent/admin/memory/pending")
+def list_pending_global_memory(x_admin_key: str | None = Header(default=None)):
+    _check_ea_admin(x_admin_key)
+    with SessionLocal() as db:
+        return {"pending": _mem_get(db, "global_pending", 100)}
+
+
+class MemoryPromoteIn(BaseModel):
+    key: str
+    new_key: str | None = None  # optional rename on promotion (drops tenant prefix by default)
+
+
+@router.post("/v1/energy-agent/admin/memory/promote")
+def promote_global_memory(body: MemoryPromoteIn, x_admin_key: str | None = Header(default=None)):
+    _check_ea_admin(x_admin_key)
+    with SessionLocal() as db:
+        row = db.execute(
+            select(EaMemory).where(EaMemory.scope == "global_pending", EaMemory.key == body.key)
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(404, "No pending global memory with that key")
+        final_key = body.new_key or (body.key.split("/", 1)[1] if "/" in body.key else body.key)
+        _mem_set(db, "global", final_key, row.value)
+        db.delete(row)
+        db.commit()
+        return {"ok": True, "promoted": final_key}
+
+
+@router.post("/v1/energy-agent/admin/memory/reject")
+def reject_global_memory(body: MemoryPromoteIn, x_admin_key: str | None = Header(default=None)):
+    _check_ea_admin(x_admin_key)
+    with SessionLocal() as db:
+        row = db.execute(
+            select(EaMemory).where(EaMemory.scope == "global_pending", EaMemory.key == body.key)
+        ).scalar_one_or_none()
+        if not row:
+            raise HTTPException(404, "No pending global memory with that key")
+        db.delete(row)
+        db.commit()
+        return {"ok": True, "rejected": body.key}

@@ -1476,28 +1476,23 @@ def _repair_llm_complete(messages: list[dict], *, temperature: float = 0.35) -> 
             err = e.read().decode("utf-8", "replace")[:600]
             raise RuntimeError(f"LLM HTTP {e.code}: {err}") from e
 
-    if xai_key:
-        try:
-            out = _http(
-                f"{xai_base}/chat/completions",
-                {
-                    "Authorization": f"Bearer {xai_key}",
-                    "Content-Type": "application/json",
-                },
-                {
-                    "model": xai_model,
-                    "messages": messages,
-                    "temperature": temperature,
-                },
-            )
-            msg = ((out.get("choices") or [{}])[0].get("message") or {})
-            text = (msg.get("content") or "").strip()
-            if text:
-                return text
-        except Exception as exc:
-            log.warning("repair convo xAI failed: %s", exc)
+    def _grok() -> str:
+        out = _http(
+            f"{xai_base}/chat/completions",
+            {
+                "Authorization": f"Bearer {xai_key}",
+                "Content-Type": "application/json",
+            },
+            {
+                "model": xai_model,
+                "messages": messages,
+                "temperature": temperature,
+            },
+        )
+        msg = ((out.get("choices") or [{}])[0].get("message") or {})
+        return (msg.get("content") or "").strip()
 
-    if anth_key:
+    def _claude() -> str:
         sys = ""
         a_msgs = []
         for m in messages:
@@ -1525,7 +1520,32 @@ def _repair_llm_complete(messages: list[dict], *, temperature: float = 0.35) -> 
                 parts.append(block.get("text") or "")
         return "\n".join(parts).strip()
 
-    raise RuntimeError("no LLM keys for repair conversation")
+    primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
+    if primary in ("claude", "anthropic", "cloth"):
+        order = [("claude", anth_key, _claude), ("grok", xai_key, _grok)]
+    else:
+        order = [("grok", xai_key, _grok), ("claude", anth_key, _claude)]
+
+    last_err: Exception | None = None
+    for i, (who, key, call) in enumerate(order):
+        if not key:
+            continue
+        try:
+            text = call()
+            if text:
+                return text
+            raise RuntimeError(f"{who} returned empty completion")
+        except Exception as exc:
+            last_err = exc
+            log.warning("repair convo %s failed: %s", who, exc)
+            if i == 0:
+                try:
+                    from .energy_agent import _alert_primary_llm_down
+                    _alert_primary_llm_down(who, repr(exc))
+                except Exception:
+                    pass
+
+    raise RuntimeError(f"no working LLM for repair conversation (last={last_err!r})")
 
 
 def _parse_llm_json(raw: str) -> dict:
@@ -1704,6 +1724,12 @@ def plan_repair_email_reply(
     )
     system = _REPAIR_CONVO_SYSTEM.replace("{ticket_id}", str(ticket.id))
     try:
+        # Release the pooled DB connection before the blocking LLM HTTP call
+        # (session-held-across-vendor-HTTP is the documented meltdown class).
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         raw = _repair_llm_complete([
             {"role": "system", "content": system},
             {"role": "user", "content": ctx},

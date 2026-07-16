@@ -1781,14 +1781,18 @@ def _run_energy_agent_mind_tick() -> None:
                     EaSession.created_at >= cutoff,
                 )
             ).scalars().all()
-            for tid in tenant_ids[:40]:
-                try:
+        # One SHORT session per tenant — mind workers can hit LLM/Resend HTTP,
+        # and a single session held across the whole fleet loop is the
+        # documented pool-exhaustion meltdown class.
+        for tid in tenant_ids[:40]:
+            try:
+                with SessionLocal() as db:
                     mind_tick(db, tid)
                     # Phase D: fold shipped feature suggestions into win events
                     sync_improvement_wins(db, tid)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("mind tick tenant %s: %s", tid, exc)
-            db.commit()
+                    db.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("mind tick tenant %s: %s", tid, exc)
     except Exception as exc:  # noqa: BLE001
         try:
             send_internal_alert(
@@ -1844,15 +1848,17 @@ def _run_energy_agent_long_term_mind() -> None:
                 candidates = list(known & ao_ids)
             else:
                 candidates = list(known)
-            # Cap per tick
-            for tid in candidates[:25]:
-                try:
+        # One SHORT session per tenant (LLM/Resend HTTP runs inside mind work —
+        # never hold a session across the whole fleet loop).
+        for tid in candidates[:25]:
+            try:
+                with SessionLocal() as db:
                     wake_mind(db, tid, "scheduled_proactive", enqueue_insight=True)
                     mind_tick(db, tid)
                     sync_improvement_wins(db, tid)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("long-term mind tenant %s: %s", tid, exc)
-            db.commit()
+                    db.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("long-term mind tenant %s: %s", tid, exc)
     except Exception as exc:  # noqa: BLE001
         try:
             send_internal_alert(
