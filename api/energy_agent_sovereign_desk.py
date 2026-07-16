@@ -20,7 +20,7 @@ import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,11 @@ _inflight_crids: set[str] = set()
 # Ford interrupt — brain may finish the HTTP call, but we drop the long reply.
 _cancelled_crids: set[str] = set()
 _STOP_REPLY = "*(Stopped.)*"
+
+# Orphan desk turns (deploy kill mid-brain) — recovered by watchdog / boot
+_ORPHAN_MIN_AGE_SEC = float(os.getenv("SOVEREIGN_DESK_ORPHAN_MIN_AGE_SEC", "50") or 50)
+_ORPHAN_MAX_AGE_SEC = float(os.getenv("SOVEREIGN_DESK_ORPHAN_MAX_AGE_SEC", "2400") or 2400)
+_ORPHAN_CLAIM_TTL_SEC = float(os.getenv("SOVEREIGN_DESK_ORPHAN_CLAIM_TTL_SEC", "200") or 200)
 
 _DESK_EMAILS = frozenset({
     "ford.genereaux@gmail.com",
@@ -647,6 +652,250 @@ def _clear_crid_cancelled(client_request_id: str | None) -> None:
         _cancelled_crids.discard(crid)
 
 
+def _patch_ford_meta(db, ford_id: str, **fields: Any) -> None:
+    """Merge fields into ford message meta (durable turn status)."""
+    row = db.get(EaSovereignDeskMessage, ford_id)
+    if not row:
+        return
+    meta = _safe_json_meta(row.meta_json)
+    meta.update({k: v for k, v in fields.items() if v is not None})
+    meta["turn_updated_at"] = _now().isoformat() + "Z"
+    row.meta_json = json.dumps(meta, default=str)[:4000]
+    try:
+        db.flush()
+    except Exception:
+        pass
+
+
+def _ford_has_reply(db, ford: EaSovereignDeskMessage) -> bool:
+    crid = _safe_json_meta(ford.meta_json).get("client_request_id")
+    if crid:
+        hit = lookup_turn_by_client_request_id(db, str(crid))
+        if hit and hit.get("complete"):
+            return True
+    cand = db.execute(
+        select(EaSovereignDeskMessage)
+        .where(
+            EaSovereignDeskMessage.role == "sovereign",
+            EaSovereignDeskMessage.created_at >= ford.created_at,
+        )
+        .order_by(EaSovereignDeskMessage.created_at.asc())
+        .limit(8)
+    ).scalars().all()
+    dump = {"worker", "rules", "admin", "error"}
+    for s in cand:
+        if (s.provider or "") in dump:
+            continue
+        meta = _safe_json_meta(s.meta_json)
+        if meta.get("reply_to_ford") == ford.id or (s.content or "").strip():
+            # Prefer linked reply; otherwise any chat-worthy sov after this ford
+            if meta.get("reply_to_ford") == ford.id:
+                return True
+            if meta.get("client_request_id") and meta.get("client_request_id") == _safe_json_meta(
+                ford.meta_json
+            ).get("client_request_id"):
+                return True
+    # Linked or first non-dump after ford within 2 minutes counts
+    if cand:
+        for s in cand:
+            if (s.provider or "") in dump:
+                continue
+            if (s.content or "").strip() and (s.created_at - ford.created_at).total_seconds() < 600:
+                return True
+    return False
+
+
+def find_orphan_desk_turns(
+    db,
+    *,
+    min_age_sec: float | None = None,
+    max_age_sec: float | None = None,
+    limit: int = 8,
+) -> list[EaSovereignDeskMessage]:
+    """Ford desk messages that never got a reply (process death mid-brain)."""
+    min_age = float(min_age_sec if min_age_sec is not None else _ORPHAN_MIN_AGE_SEC)
+    max_age = float(max_age_sec if max_age_sec is not None else _ORPHAN_MAX_AGE_SEC)
+    now = _now()
+    newest = now - timedelta(seconds=min_age)
+    oldest = now - timedelta(seconds=max_age)
+    rows = db.execute(
+        select(EaSovereignDeskMessage)
+        .where(
+            EaSovereignDeskMessage.role == "ford",
+            EaSovereignDeskMessage.created_at >= oldest,
+            EaSovereignDeskMessage.created_at <= newest,
+        )
+        .order_by(EaSovereignDeskMessage.created_at.asc())
+        .limit(60)
+    ).scalars().all()
+    orphans: list[EaSovereignDeskMessage] = []
+    for ford in rows:
+        meta = _safe_json_meta(ford.meta_json)
+        # Desk channel only (email inbound also uses desk table)
+        ch = (meta.get("channel") or "desk").lower()
+        if ch not in ("desk", ""):
+            continue
+        if meta.get("turn_status") == "cancelled" or meta.get("cancelled"):
+            continue
+        # Active claim by another recoverer
+        if meta.get("turn_status") == "running":
+            claimed_raw = meta.get("claimed_at") or ""
+            try:
+                claimed_at = datetime.fromisoformat(str(claimed_raw).replace("Z", ""))
+                if (_now() - claimed_at).total_seconds() < _ORPHAN_CLAIM_TTL_SEC:
+                    continue
+            except Exception:
+                pass
+        if _ford_has_reply(db, ford):
+            # heal meta
+            if meta.get("turn_status") not in ("done", "cancelled"):
+                try:
+                    _patch_ford_meta(db, ford.id, turn_status="done")
+                except Exception:
+                    pass
+            continue
+        orphans.append(ford)
+        if len(orphans) >= limit:
+            break
+    return orphans
+
+
+def recover_orphan_desk_turns(*, limit: int = 3) -> dict[str, Any]:
+    """Resume desk turns killed by deploy/restart. Safe to call from watchdog/boot."""
+    from .models import Tenant
+
+    ensure_tables()
+    results: list[dict] = []
+    with SessionLocal() as db:
+        orphans = find_orphan_desk_turns(db, limit=limit)
+        for ford in orphans:
+            meta = _safe_json_meta(ford.meta_json)
+            crid = (meta.get("client_request_id") or "").strip()[:80] or None
+            # Claim
+            claimer = f"recover-{uuid.uuid4().hex[:10]}"
+            try:
+                _patch_ford_meta(
+                    db,
+                    ford.id,
+                    turn_status="running",
+                    claimed_at=_now().isoformat() + "Z",
+                    claimer=claimer,
+                    resume_reason="orphan_recover",
+                )
+                db.commit()
+            except Exception as e:  # noqa: BLE001
+                log.warning("orphan claim failed %s: %s", ford.id, e)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                continue
+
+            # Re-check after claim
+            ford = db.get(EaSovereignDeskMessage, ford.id)
+            if not ford:
+                continue
+            if _ford_has_reply(db, ford):
+                _patch_ford_meta(db, ford.id, turn_status="done")
+                try:
+                    db.commit()
+                except Exception:
+                    pass
+                results.append({"ford_id": ford.id, "skipped": "already_done"})
+                continue
+
+            t = db.get(Tenant, ford.tenant_id) if ford.tenant_id else None
+            if not t:
+                # Fall back: any array_operator tenant for desk emails
+                try:
+                    t = db.execute(
+                        select(Tenant)
+                        .where(Tenant.product == "array_operator")
+                        .order_by(Tenant.id.desc())
+                        .limit(1)
+                    ).scalars().first()
+                except Exception:
+                    t = None
+            if not t:
+                results.append({"ford_id": ford.id, "ok": False, "error": "no_tenant"})
+                continue
+
+            attach_ids = meta.get("attachment_ids") or []
+            if not isinstance(attach_ids, list):
+                attach_ids = []
+            try:
+                out = desk_turn(
+                    db,
+                    t,
+                    ford.content or "",
+                    attachment_ids=[str(a) for a in attach_ids][:12],
+                    client_request_id=crid,
+                    existing_ford_id=ford.id,
+                )
+                db.commit()
+                results.append({
+                    "ford_id": ford.id,
+                    "ok": True,
+                    "reply_id": (out.get("message") or {}).get("id"),
+                    "provider": out.get("provider"),
+                    "cancelled": out.get("cancelled"),
+                })
+                log.info(
+                    "orphan desk turn recovered ford=%s crid=%s reply=%s",
+                    ford.id, crid, (out.get("message") or {}).get("id"),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.exception("orphan desk recover failed ford=%s", ford.id)
+                try:
+                    db.rollback()
+                    _patch_ford_meta(
+                        db, ford.id,
+                        turn_status="thinking",
+                        last_recover_error=str(e)[:200],
+                    )
+                    db.commit()
+                except Exception:
+                    pass
+                results.append({"ford_id": ford.id, "ok": False, "error": str(e)[:240]})
+    return {
+        "ok": True,
+        "scanned": len(results),
+        "recovered": sum(1 for r in results if r.get("ok")),
+        "results": results,
+    }
+
+
+def note_sovereign_boot() -> None:
+    """Durable boot marker so the mind knows it recycled (not amnesia)."""
+    try:
+        from .energy_agent_sovereign import memory_set, write_note
+        ensure_tables()
+        with SessionLocal() as db:
+            boot = {
+                "at": _now().isoformat() + "Z",
+                "pid": os.getpid(),
+                "reason": "process_start",
+            }
+            memory_set(db, "last_process_boot", json.dumps(boot), source="system")
+            try:
+                write_note(
+                    db,
+                    kind="system",
+                    title="Sovereign process boot",
+                    body=(
+                        "Process recycled (deploy/restart). Durable memory/world/jobs "
+                        "persist. Orphan desk turns will be resumed by recover_orphan_desk_turns."
+                    ),
+                    provider="system",
+                    meta=boot,
+                )
+            except Exception:
+                pass
+            db.commit()
+    except Exception as e:  # noqa: BLE001
+        log.warning("note_sovereign_boot failed: %s", e)
+
+
 def _write_stopped_reply(
     db,
     *,
@@ -838,6 +1087,7 @@ def desk_turn(
     *,
     attachment_ids: list[str] | None = None,
     client_request_id: str | None = None,
+    existing_ford_id: str | None = None,
 ) -> dict:
     from .energy_agent_sovereign import (
         apply_agenda,
@@ -868,13 +1118,42 @@ def desk_turn(
             db.rollback()
         except Exception:
             pass
-    msg = (ford_message or "").strip()
-    assets = load_assets(db, attachment_ids)
-    if not msg and not assets:
-        raise HTTPException(400, "Empty message")
-    if not msg and assets:
-        names = ", ".join(a.filename for a in assets[:6])
-        msg = f"[Attached: {names}] Please review these files/data."
+
+    # Resume path: complete a ford bubble that survived a process kill
+    resuming = bool(existing_ford_id)
+    ford_row: EaSovereignDeskMessage | None = None
+    if resuming:
+        ford_row = db.get(EaSovereignDeskMessage, existing_ford_id)
+        if not ford_row or ford_row.role != "ford":
+            raise HTTPException(404, f"existing ford not found: {existing_ford_id}")
+        fmeta = _safe_json_meta(ford_row.meta_json)
+        crid = (client_request_id or fmeta.get("client_request_id") or "").strip()[:80] or None
+        msg = (ford_row.content or ford_message or "").strip()
+        attachment_ids = attachment_ids or fmeta.get("attachment_ids") or []
+        if not isinstance(attachment_ids, list):
+            attachment_ids = []
+        assets = load_assets(db, attachment_ids)
+        if not msg and not assets:
+            raise HTTPException(400, "Empty message")
+        ford_id_early = ford_row.id
+        ford_created_early = ford_row.created_at or _now()
+        # Durable claim already set by recover; keep status running
+        try:
+            _patch_ford_meta(db, ford_row.id, turn_status="running", resume=True)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    else:
+        msg = (ford_message or "").strip()
+        assets = load_assets(db, attachment_ids)
+        if not msg and not assets:
+            raise HTTPException(400, "Empty message")
+        if not msg and assets:
+            names = ", ".join(a.filename for a in assets[:6])
+            msg = f"[Attached: {names}] Please review these files/data."
 
     # Mind self-modify: apply/reject pending patch when Ford approves in chat
     # (strict detector — long messages with "I'll approve" do NOT count)
@@ -903,53 +1182,56 @@ def desk_turn(
     except Exception as e:  # noqa: BLE001
         log.debug("persona scrub skipped: %s", e)
 
-    # Save Ford message first
-    crid = (client_request_id or "").strip()[:80] or None
-    ford_row = EaSovereignDeskMessage(
-        id=_id("sdm"),
-        role="ford",
-        content=msg[:12000],
-        tenant_id=t.id,
-        meta_json=json.dumps({
-            "channel": "desk",
-            "client_request_id": crid,
-            "attachment_ids": [a.id for a in assets],
-            "attachments": [
-                {"id": a.id, "filename": a.filename, "mime": a.mime, "size": a.size}
-                for a in assets
-            ],
-        }, default=str)[:4000],
-    )
-    db.add(ford_row)
-    if not ford_row.created_at:
-        ford_row.created_at = _now()
-    db.flush()
-
-    # Event bus: desk is the highest-heat human touch (cortex is this turn)
-    try:
-        from .energy_agent_sovereign_subconscious import append_event
-        append_event(
-            db, "desk_message",
-            {"tenant_id": t.id, "message_id": ford_row.id, "excerpt": msg[:160]},
-            source="desk",
-            heat=95,
+    if not resuming:
+        # Save Ford message first (durable turn_status so restarts can resume)
+        crid = (client_request_id or "").strip()[:80] or None
+        ford_row = EaSovereignDeskMessage(
+            id=_id("sdm"),
+            role="ford",
+            content=msg[:12000],
+            tenant_id=t.id,
+            meta_json=json.dumps({
+                "channel": "desk",
+                "client_request_id": crid,
+                "turn_status": "thinking",
+                "turn_started_at": _now().isoformat() + "Z",
+                "attachment_ids": [a.id for a in assets],
+                "attachments": [
+                    {"id": a.id, "filename": a.filename, "mime": a.mime, "size": a.size}
+                    for a in assets
+                ],
+            }, default=str)[:4000],
         )
-    except Exception:
-        pass
+        db.add(ford_row)
+        if not ford_row.created_at:
+            ford_row.created_at = _now()
+        db.flush()
 
-    # Commit Ford's bubble IMMEDIATELY so a slow context/brain path can never
-    # lose the human message (idempotent poll finds it by client_request_id).
-    ford_id_early = ford_row.id
-    ford_created_early = ford_row.created_at or _now()
-    try:
-        db.commit()
-    except Exception as e:  # noqa: BLE001
-        log.exception("desk early ford commit failed")
+        # Event bus: desk is the highest-heat human touch (cortex is this turn)
         try:
-            db.rollback()
+            from .energy_agent_sovereign_subconscious import append_event
+            append_event(
+                db, "desk_message",
+                {"tenant_id": t.id, "message_id": ford_row.id, "excerpt": msg[:160]},
+                source="desk",
+                heat=95,
+            )
         except Exception:
             pass
-        raise HTTPException(500, f"Could not save your message: {str(e)[:160]}") from e
+
+        # Commit Ford's bubble IMMEDIATELY so a slow context/brain path can never
+        # lose the human message (idempotent poll finds it by client_request_id).
+        ford_id_early = ford_row.id
+        ford_created_early = ford_row.created_at or _now()
+        try:
+            db.commit()
+        except Exception as e:  # noqa: BLE001
+            log.exception("desk early ford commit failed")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise HTTPException(500, f"Could not save your message: {str(e)[:160]}") from e
 
     # Context gathers are best-effort — never block chat on a stuck digest/lock
     def _ctx_recover() -> None:
@@ -1211,6 +1493,7 @@ def desk_turn(
     if cancelled:
         try:
             db.flush()
+            _patch_ford_meta(db, ford_id, turn_status="cancelled", cancelled=True)
         except Exception:
             pass
         _clear_crid_cancelled(crid)
@@ -1343,6 +1626,10 @@ def desk_turn(
         except Exception as e2:  # noqa: BLE001
             log.exception("desk reply re-add after side-effect failure: %s", e2)
 
+    try:
+        _patch_ford_meta(db, ford_id, turn_status="done")
+    except Exception:
+        pass
     _clear_crid_cancelled(crid)
     return {
         "ok": True,
@@ -1778,6 +2065,13 @@ def desk_cancel(body: CancelIn, authorization: str | None = Header(default=None)
 
         if hit and hit.get("ford") and not hit.get("complete"):
             try:
+                try:
+                    _patch_ford_meta(
+                        db, hit["ford"].id,
+                        turn_status="cancelled", cancelled=True,
+                    )
+                except Exception:
+                    pass
                 sov = _write_stopped_reply(
                     db,
                     ford=hit["ford"],

@@ -107,6 +107,61 @@ def test_history_chat_only_survives_worker_flood(monkeypatch):
         assert not any("Sovereign shipped job" in (h["content"] or "") for h in hist)
 
 
+def test_find_orphan_desk_turns_and_meta(monkeypatch):
+    """Orphan ford messages (no reply) are discoverable for post-restart resume."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    from datetime import datetime, timedelta
+    from api.models import Base
+    import api.energy_agent_sovereign_desk as desk
+    import api.energy_agent_sovereign as sov  # noqa: F401
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as db:
+        old = datetime.utcnow() - timedelta(seconds=120)
+        ford = desk.EaSovereignDeskMessage(
+            id="sdm_orphan_1",
+            role="ford",
+            content="still there?",
+            created_at=old,
+            meta_json=json.dumps({
+                "channel": "desk",
+                "client_request_id": "cr_orphan_1",
+                "turn_status": "thinking",
+            }),
+        )
+        db.add(ford)
+        db.commit()
+        found = desk.find_orphan_desk_turns(
+            db, min_age_sec=30, max_age_sec=3600, limit=5
+        )
+        assert any(f.id == "sdm_orphan_1" for f in found)
+
+        # After a reply exists, no longer orphan
+        db.add(desk.EaSovereignDeskMessage(
+            id="sdm_orphan_reply",
+            role="sovereign",
+            content="yes",
+            created_at=datetime.utcnow(),
+            provider="grok",
+            meta_json=json.dumps({
+                "client_request_id": "cr_orphan_1",
+                "reply_to_ford": "sdm_orphan_1",
+            }),
+        ))
+        db.commit()
+        found2 = desk.find_orphan_desk_turns(
+            db, min_age_sec=30, max_age_sec=3600, limit=5
+        )
+        assert not any(f.id == "sdm_orphan_1" for f in found2)
+
+
 def test_cancel_marks_crid_and_writes_stopped(monkeypatch):
     """Stop button: mark cancelled + persist *(Stopped.)* when ford exists."""
     monkeypatch.setenv("SOVEREIGN_ENABLED", "1")

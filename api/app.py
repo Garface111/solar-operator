@@ -480,6 +480,41 @@ def _startup():
     except Exception:
         pass  # non-fatal — fall back to the default limiter
 
+    # Sovereign durability: after deploy/restart, resume orphan desk turns so
+    # Ford never loses a mid-flight "thinking" reply. Runs off the main thread.
+    def _sovereign_boot_recover() -> None:
+        import logging
+        import time
+        log = logging.getLogger("energy_agent.sovereign.boot")
+        try:
+            time.sleep(4)  # let pool + tables settle
+            from .energy_agent_sovereign_desk import (
+                note_sovereign_boot,
+                recover_orphan_desk_turns,
+            )
+            note_sovereign_boot()
+            res = recover_orphan_desk_turns(limit=5)
+            if res.get("recovered"):
+                log.warning(
+                    "sovereign boot recovered %s orphan desk turn(s): %s",
+                    res.get("recovered"),
+                    res.get("results"),
+                )
+            else:
+                log.info("sovereign boot: no orphan desk turns (%s)", res)
+        except Exception:
+            log.exception("sovereign boot recover failed")
+
+    try:
+        import threading
+        threading.Thread(
+            target=_sovereign_boot_recover,
+            name="sov-boot-recover",
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
+
 
 @app.get("/health")
 async def health():

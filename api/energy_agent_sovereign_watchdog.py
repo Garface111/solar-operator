@@ -311,6 +311,14 @@ def diagnose(db=None) -> dict[str, Any]:
         problems.append(f"jobs_inflight_stuck sec={int(now - float(jobs_inf))}")
     if stuck_jobs:
         problems.append(f"jobs_running_stuck n={stuck_jobs}")
+    orphan_desk = 0
+    try:
+        from .energy_agent_sovereign_desk import find_orphan_desk_turns
+        orphan_desk = len(find_orphan_desk_turns(db, limit=8))
+    except Exception:
+        orphan_desk = 0
+    if orphan_desk:
+        problems.append(f"desk_orphan_turns n={orphan_desk}")
     if int(v.get("consecutive_sub_fail") or 0) >= fail_threshold():
         problems.append(f"sub_fail_burst n={v.get('consecutive_sub_fail')}")
     if int(v.get("consecutive_cortex_fail") or 0) >= fail_threshold():
@@ -348,6 +356,9 @@ def diagnose(db=None) -> dict[str, Any]:
         "jobs": {
             "running_stuck": stuck_jobs,
             "failed_recent_6h": failed_recent,
+        },
+        "desk": {
+            "orphan_turns": orphan_desk,
         },
         "fails": {
             "sub": v.get("consecutive_sub_fail"),
@@ -656,22 +667,55 @@ def watchdog_tick(*, force: bool = False) -> dict[str, Any]:
 
     health = diagnose()
     problems = [p for p in (health.get("problems") or []) if p != "storm_breaker_open"]
+
+    # Always try to finish desk turns orphaned by deploys (even when otherwise healthy)
+    desk_recover: dict[str, Any] | None = None
+    try:
+        from .energy_agent_sovereign_desk import recover_orphan_desk_turns
+        desk_recover = recover_orphan_desk_turns(limit=3)
+        if desk_recover.get("recovered"):
+            log.warning(
+                "watchdog resumed %s orphan desk turn(s)",
+                desk_recover.get("recovered"),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("watchdog desk orphan recover failed: %s", e)
+        desk_recover = {"ok": False, "error": str(e)[:200]}
+
+    # Re-diagnose after desk recover so we don't soft-reboot solely for orphans we fixed
+    if desk_recover and desk_recover.get("recovered"):
+        health = diagnose()
+        problems = [p for p in (health.get("problems") or []) if p != "storm_breaker_open"]
+
     if not problems and not force:
         return {
             "ok": True,
             "mode": "healthy",
-            "recovered": False,
+            "recovered": bool(desk_recover and desk_recover.get("recovered")),
+            "desk_recover": desk_recover,
             "health": health,
         }
 
     # Prefer surgical recoveries before full soft-reboot
     surgical: list[dict] = []
+    if desk_recover:
+        surgical.append({"step": "desk_orphan_recover", **desk_recover})
     only_jobs = problems and all(
-        p.startswith("jobs_") or p.startswith("jobs_inflight") for p in problems
+        p.startswith("jobs_") or p.startswith("jobs_inflight") or p.startswith("desk_orphan")
+        for p in problems
     )
+    only_desk = problems and all(p.startswith("desk_orphan") for p in problems)
+    if only_desk and not force:
+        return {
+            "ok": True,
+            "mode": "surgical",
+            "recovered": bool(desk_recover and desk_recover.get("recovered")),
+            "surgical": surgical,
+            "health": health,
+        }
     if only_jobs and not force:
         if not _record_recovery("surgical_jobs:" + ",".join(problems)[:120]):
-            return {"ok": False, "storm_breaker": True, "health": health}
+            return {"ok": False, "storm_breaker": True, "health": health, "desk_recover": desk_recover}
         with SessionLocal() as db:
             try:
                 surgical.append(recover_stuck_jobs(db))
@@ -685,6 +729,7 @@ def watchdog_tick(*, force: bool = False) -> dict[str, Any]:
             "mode": "surgical",
             "recovered": True,
             "surgical": surgical,
+            "desk_recover": desk_recover,
             "health": diagnose(),
         }
 
