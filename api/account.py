@@ -863,6 +863,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             )
         ).scalar() or 0
         all_set = _compute_all_set(db, t.id)
+        from .report_eligibility import tenant_in_reports_world
         from .stripe_helpers import ao_plan_features
         _plan_features = ao_plan_features(t.product, getattr(t, "billing_plan", None))
         return {
@@ -881,6 +882,11 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             # vendor_data, invoicing}. See stripe_helpers.ao_plan_features.
             "billing_plan": getattr(t, "billing_plan", None),
             "plan_features": _plan_features,
+            # THE FOLD: is this tenant's generation-reports surface live?
+            # nepool product → always; array_operator → iff the migration set
+            # the Tenant.generation_reports marker. AO's Invoices tab shows the
+            # "Generation reports" pill off this (report_eligibility module).
+            "generation_reports": tenant_in_reports_world(t),
             # Energy Agent Pro ($50/mo unlimited AI). Free tier keeps a weekly sample.
             "ai_pro": bool(getattr(t, "ai_pro", False)),
             "plan": t.plan,
