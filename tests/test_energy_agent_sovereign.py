@@ -133,6 +133,39 @@ def test_sovereign_inbound_address_match():
     assert is_sovereign_inbound_address(["repairs@agent.arrayoperator.com"]) is False
 
 
+def test_email_ford_blocks_ops_telemetry(monkeypatch):
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_EMAIL_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_SPEAK_ENABLED", "0")
+    from api.energy_agent_sovereign import email_ford, _looks_like_ops_telemetry
+
+    assert _looks_like_ops_telemetry(
+        "[Sovereign] Code-hire job queued: Utility adapter",
+        "Job id: job_abc\nKind: utility_adapter\n",
+    )
+    sent = []
+    monkeypatch.setattr(
+        "api.notify._send_via_resend",
+        lambda **k: sent.append(k) or True,
+    )
+    ok = email_ford(
+        "[Sovereign] Code-hire job queued: Utility adapter: healthcheck",
+        "Job id: job_11bd1d3d0aa4476d\nKind: utility_adapter\nExpand: grok\n",
+        note_desk=False,
+    )
+    assert ok is False
+    assert sent == []
+    # High-level still ok
+    ok2 = email_ford(
+        "Quick partnership note",
+        "Utility coverage is moving — three co-ops in research. "
+        "I'll only pull you in if we hit a HAR wall. No action needed tonight.",
+        note_desk=False,
+    )
+    assert ok2 is True
+    assert len(sent) == 1
+
+
 def test_observe_and_tick_with_db(monkeypatch):
     """In-memory tables: observe digests + world save + audit observe row."""
     monkeypatch.setenv("SOVEREIGN_ENABLED", "1")

@@ -100,7 +100,10 @@ Therefore independence is a *project*, not a pose:
    brand_set|brand_announce|tenant_soft_delete|tenant_hard_purge|purge_soft_deleted|
    har_stage|har_received. Hard purge requires confirm equal to tenant_id.
 10. Desk/email Ford for partnership and judgment — not as a gate for work you already own.
-    Email: email_ford with subject + body. Never mass-spam owners.
+    Email is HIGH-LEVEL only (strategy, crisp asks, business status). email_ford subject+prose.
+    NEVER email job ids, code-hire queues, utility triage lists, ship/deploy JSON, or feature
+    dumps — those stay on the desk. Prefer silence over a noisy "notification."
+    Never mass-spam owners.
 
 Output ONLY valid JSON matching the schema in the user message. No markdown fences."""
 
@@ -347,8 +350,8 @@ def build_think_prompt(
                 "limit": 5,
                 "tenant_ids": [],
                 "importance": 70,
-                "subject": "for email_ford — short human subject",
-                "body": "for email_ford — clear prose to Ford's inbox from Sovereign@",
+                "subject": "for email_ford — short HUMAN subject (no job ids)",
+                "body": "for email_ford — high-level prose only; never queue/job dumps",
                 "to": "optional ford email (must be allowlisted); default both Ford addresses",
                 "tenant_id": "for stripe/billing/purge",
                 "confirm": "must equal tenant_id for hard purge",

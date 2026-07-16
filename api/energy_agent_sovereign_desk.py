@@ -133,6 +133,14 @@ def _is_chat_worthy(role: str, provider: str | None, content: str, meta: dict) -
         return False
     if meta.get("job_id") and provider == "worker":
         return False
+    # Old ops email breadcrumbs (code-hire / job dumps) — hide from chat
+    if provider == "email" and (
+        "code-hire" in text.lower()
+        or "job id:" in text.lower()
+        or "utility-add request #" in text.lower()
+        or "emailed you from" in text.lower() and "job" in text.lower()
+    ):
+        return False
     return bool(text.strip())
 
 
@@ -212,10 +220,9 @@ You are speaking directly to Ford on the private Sovereign Desk — not the Ener
   If a job finished or something broke, say it in one human sentence (optionally with a link)
   when it matters. Do not paste raw ship/deploy JSON into chat.
 - You may propose concrete next steps and crisp asks.
-- You can EMAIL Ford from Sovereign <sovereign@arrayoperator.com> for general communication
-  (updates, asks when he may leave the desk, durable notes). Use action type email_ford with
-  subject + body. Prefer chat when he's here; use email when the message should hit his inbox.
-  Never mass-email customers from the desk.
+- Email is HIGH-LEVEL only (partnership / strategy / crisp asks). Never email job ids,
+  utility queues, ship logs, or feature dumps — Ford hates those as "Sovereign" mail.
+  Action email_ford with human subject + prose. Prefer chat when he's here.
 - Still never fabricate adapters, money moves, or mass-email owners.
 - Keep replies tight (few short paragraphs unless he asks for depth) — dense, not fluffy.
 

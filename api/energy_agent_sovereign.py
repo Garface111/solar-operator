@@ -817,6 +817,38 @@ def _email_rate_ok(db=None) -> tuple[bool, str]:
         return True, "ok"  # fail open so critical alerts still try
 
 
+def _looks_like_ops_telemetry(subject: str, body: str) -> bool:
+    """True for job/queue/adapter dumps — must not hit Ford's inbox as 'Sovereign'."""
+    s = f"{subject or ''}\n{body or ''}".lower()
+    needles = (
+        "job id:",
+        "code-hire job",
+        "code job failed",
+        "utility queue triage",
+        "staged feature suggestion",
+        "ship: {",
+        "deploy: {",
+        "expand: grok",
+        "expand: claude",
+        "status=queued",
+        "utility-add request #",
+        "adapter work landed",
+        "credential staging",
+        "portal research for",
+        "sov/job_",
+        "job_id",
+        "brief_json",
+        "tick failed",
+    )
+    hits = sum(1 for n in needles if n in s)
+    # Structural dump: many bracket timestamps / id lines
+    if hits >= 1:
+        return True
+    if s.count("job_") >= 2 or s.count("[sovereign 20") >= 2:
+        return True
+    return False
+
+
 def email_ford(
     subject: str,
     body: str,
@@ -825,12 +857,13 @@ def email_ford(
     html: str | None = None,
     db=None,
     note_desk: bool = True,
+    high_level: bool = True,
 ) -> bool:
-    """Send Ford (or allowlisted recipients) mail as Sovereign@arrayoperator.com.
+    """High-level mail to Ford from Sovereign (sky theme).
 
-    General communication channel — desk is for live chat; email is for when
-    Ford is offline or for a durable written update. Never mass-mail owners
-    through this helper (use speak.email_owner separately, still gated).
+    For partnership-level communication — status of the business, crisp asks,
+    decisions — NOT queue telemetry, job ids, or ship dumps. Ops noise stays
+    on the desk / internal logs.
     """
     if not capability_allowed("speak.email_ford"):
         return False
@@ -840,10 +873,20 @@ def email_ford(
         return False
 
     subj = (subject or "Sovereign").strip()[:200]
+    # Avoid robotic [Sovereign] prefixes for human mail
+    if subj.startswith("[Sovereign]"):
+        subj = subj.replace("[Sovereign]", "Sovereign —", 1).strip()
     if not subj.lower().startswith("sovereign") and not subj.startswith("["):
         subj = f"Sovereign — {subj}"
     text = (body or "").strip()[:12000]
     if not text:
+        return False
+
+    if high_level and _looks_like_ops_telemetry(subj, text):
+        log.info(
+            "sovereign email blocked as ops telemetry: %s",
+            subj[:120],
+        )
         return False
 
     # Resolve recipients — only Ford list (or explicit subset of it)
@@ -964,16 +1007,17 @@ def email_ford(
             if sent and note_desk:
                 try:
                     from .energy_agent_sovereign_desk import push_sovereign_message
+                    # Short breadcrumb only — never paste the full ops body into chat
                     push_sovereign_message(
                         db,
-                        f"Emailed you from {sovereign_mail_address()} — **{subj}**\n\n"
-                        f"{text[:1500]}",
+                        f"I emailed you: **{subj}**",
                         provider="email",
                         meta={
                             "channel": "email",
                             "subject": subj,
                             "to": recipients,
                             "from": from_addr,
+                            "high_level": True,
                         },
                     )
                 except Exception:
@@ -1022,11 +1066,7 @@ def act_stage_feature(
         rationale=text[:400], targets={"feature_id": fs.id},
         result="ok", correlation_id=str(fs.id),
     )
-    email_ford(
-        f"[Sovereign] Staged feature suggestion #{fs.id}",
-        f"The product mind staged a feature suggestion:\n\n{text}\n\n"
-        f"tenant={tenant_id or '-'} id={fs.id}",
-    )
+    # No email — ops stay on the desk / queues (Ford: email is high-level only)
     return {"ok": True, "feature_id": fs.id}
 
 
@@ -1062,13 +1102,7 @@ def act_triage_utility_queue(db) -> dict:
             targets={"utility_request_id": r.id},
             result="ok",
         )
-    if done:
-        email_ford(
-            f"[Sovereign] Utility queue triage ({len(done)})",
-            "Moved to researching:\n" + "\n".join(
-                f"#{x['id']} {x['name']}" for x in done
-            ),
-        )
+    # No email on triage — high-level mail only (not queue telemetry)
     return {"ok": True, "triaged": len(done), "items": done}
 
 
@@ -1147,25 +1181,13 @@ def act_code_hire(
         rationale=title[:400], targets={"job_id": job.id, "expand": expand_meta.get("provider")},
         result="ok", correlation_id=job.id,
     )
-    body = (
-        f"Job id: {job.id}\nKind: {kind}\nExpand: {expand_meta.get('provider') or 'none'}\n\n"
-        f"{brief[:2500]}\n\n"
-    )
-    if expanded:
-        body += f"--- Expanded plan ---\n{expanded[:3500]}\n\n"
     live = False
     try:
         from .energy_agent_sovereign_worker import code_live_enabled
         live = code_live_enabled()
     except Exception:
         live = False
-    body += (
-        "Status=queued — worker will run Claude Code (cloth) or Grok (rock), "
-        "then push/deploy if SOVEREIGN_CODE_LIVE=1 (Ford authorized 2026-07-15)."
-        if live
-        else "Status=queued — code live shipping is off."
-    )
-    email_ford(f"[Sovereign] Code-hire job queued: {title[:80]}", body)
+    # No email on code-hire queue — Ford wants high-level mail only, not job dumps
 
     # Jobs are drained by scheduler (energy_agent_sovereign_jobs) so HTTP ticks
     # never block on Claude Code. Admin can force: POST /admin/sovereign/jobs/drain
@@ -1488,14 +1510,22 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 except Exception as e:  # noqa: BLE001
                     res = {"ok": False, "error": str(e)[:300]}
         elif atype in ("email_ford", "email", "mail_ford"):
+            # High-level only — ops dumps are rejected inside email_ford
             ok = email_ford(
-                raw.get("subject") or "[Sovereign]",
-                raw.get("body") or raw.get("text") or raw.get("rationale") or "",
+                raw.get("subject") or "Sovereign",
+                raw.get("body") or raw.get("text") or "",
                 to=raw.get("to") or raw.get("email"),
                 db=db,
+                high_level=True,
             )
-            res = {"ok": ok}
-            # email_ford already audits + optional desk breadcrumb
+            res = {
+                "ok": ok,
+                "denied": (not ok),
+                "denied_reason": (
+                    None if ok else "blocked_ops_telemetry_or_rate_or_send_fail"
+                ),
+            }
+            # email_ford already audits + short desk breadcrumb
         # ── Succession full grant (money / brand / hard-delete / HAR) ────────
         elif atype in ("stripe_inspect", "money_inspect"):
             from .energy_agent_sovereign_succession import stripe_inspect
@@ -1631,21 +1661,8 @@ def decide_and_act(db, digests: dict) -> list[dict]:
                 except Exception as e:  # noqa: BLE001
                     take({"kind": "desk_utility_progress", "result": {"ok": False, "error": str(e)[:120]}})
 
-    # 2) Escalations needing Ford → email digest once per tick if any
-    if budget > 0 and (q.get("escalation_needs_ford") or 0) > 0:
-        if capability_allowed("speak.email_ford"):
-            ok = email_ford(
-                f"[Sovereign] {q.get('escalation_needs_ford')} EA escalations need Ford",
-                "Open admin escalations board and clear needs_ford items.\n"
-                f"Counts: {json.dumps({k: v for k, v in q.items() if k.startswith('escalation_')})}",
-            )
-            audit(
-                db, capability="speak.email_ford", decision="speak",
-                rationale="escalation_needs_ford digest",
-                targets={"count": q.get("escalation_needs_ford")},
-                result="ok" if ok else "failed",
-            )
-            take({"kind": "email_escalations", "ok": ok})
+    # Escalations / queue digests: no auto-email (Ford: high-level mail only).
+    # Cortex may email intentionally via email_ford action when it has a real ask.
 
     # 3) UX friction cluster → stage feature if volume high
     if budget > 0 and (ux.get("tasks_propose_ui_14d") or 0) >= 3:
@@ -2041,7 +2058,8 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             except Exception:
                 pass
             try:
-                email_ford("[Sovereign] tick failed", str(e)[:2000])
+                from .notify import send_internal_alert
+                send_internal_alert("Sovereign tick failed", str(e)[:2000])
             except Exception:
                 pass
             return {

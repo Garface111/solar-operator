@@ -879,7 +879,7 @@ def deploy_repo(repo_name: str) -> dict[str, Any]:
 
 def process_job(db, job) -> dict[str, Any]:
     """Execute one EaSovereignJob end-to-end."""
-    from .energy_agent_sovereign import audit, write_note, email_ford
+    from .energy_agent_sovereign import audit, write_note
 
     if not code_live_enabled():
         return {"ok": False, "denied": True, "denied_reason": "SOVEREIGN_CODE_LIVE off"}
@@ -1062,24 +1062,8 @@ def process_job(db, job) -> dict[str, Any]:
         cost_usd=float(agent_result.get("cost_usd") or 0) if isinstance(agent_result.get("cost_usd"), (int, float)) else 0.0,
     )
 
-    # Desk is chat-only (Ford 2026-07-15): do NOT dump worker ship JSON into
-    # the Sovereign transcript. Notes + audit already capture the record.
-    # On failure only: short email so Ford knows without polluting chat.
-    summary = (
-        f"job {job.id} · {title}\n"
-        f"repo={repo_name} status={job.status}\n"
-        f"ship={json.dumps(ship, default=str)[:600]}\n"
-        f"deploy={json.dumps(deploy, default=str)[:300]}\n"
-    )
-    if job.status != "done":
-        try:
-            email_ford(
-                f"[Sovereign] Code job FAILED: {title[:80]}",
-                summary + "\n" + (agent_result.get("result_text") or "")[:2000],
-            )
-        except Exception:
-            pass
-    # success: silent to desk/email — cortex can mention it in conversation if relevant
+    # No Sovereign-branded email on job done/fail (Ford: high-level mail only).
+    # Failures stay in notes/audit + wake bus; cortex can surface if it matters.
     # Reflex: job terminal state → subconscious tape (+ cortex if failed/hot)
     try:
         from .energy_agent_sovereign_subconscious import fire_and_forget_wake
