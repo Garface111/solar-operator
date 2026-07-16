@@ -360,6 +360,11 @@ export interface ClientRow {
    *  login and is still awaiting its first harvested bill. Drives the
    *  "Pulling bills…" state; cleared on the first capture. */
   capture_pending?: boolean;
+  /** Most recent time we SUCCESSFULLY signed in and checked this client's
+   *  utility (a cloud-capture harvest that authenticated OK) — even if no new
+   *  bill landed. Drives the "Last checked" column so a monthly-billing meter
+   *  doesn't look stale between bills. */
+  last_checked_at?: string | null;
 }
 
 // ─── account ───────────────────────────────────────────────────────────────

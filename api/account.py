@@ -43,7 +43,7 @@ from . import branding
 from .bill_attribution import distribute_kwh_by_calendar_day
 from .db import SessionLocal
 from .fuels import normalize_fuel
-from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, now
+from .models import Tenant, Client, Array, Bill, LoginToken, UtilityAccount, DeleteHistory, ClientMergeDismissal, ArrayMergeDismissal, PortalCredential, now
 from .notify import _send_via_resend, send_internal_alert, FROM_ADDRESS
 from .email_skin import render_email_skin, render_email_skin_text
 from . import ratelimit
@@ -379,7 +379,7 @@ class ClientUpdate(BaseModel):
     vec_autopopulate: Optional[bool] = None
 
 
-def _client_to_dict(c: Client, array_count: int = 0) -> dict:
+def _client_to_dict(c: Client, array_count: int = 0, last_checked_at=None) -> dict:
     return {
         "id": c.id,
         "name": c.name,
@@ -403,6 +403,12 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "last_bounce_reason": c.last_bounce_reason,
         "is_placeholder": c.is_placeholder,
         "capture_pending": bool(getattr(c, "capture_pending", False)),
+        # Last time we SUCCESSFULLY checked this client's utility (a cloud-capture
+        # harvest that signed in OK), independent of whether new data landed. The
+        # harvester signs in on a cadence even when a monthly-billing meter has no
+        # new bill, so last_*_sync_at (last NEW data) made healthy accounts look
+        # stale. The UI's "Last checked" prefers this.
+        "last_checked_at": _iso_utc(last_checked_at) if last_checked_at else None,
     }
 
 
@@ -2548,7 +2554,34 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
             .group_by(Array.client_id)
         ).all()
         counts = {row.client_id: row.n for row in array_counts_rows}
-        out = [_client_to_dict(c, array_count=counts.get(c.id, 0)) for c in clients]
+
+        # "Last checked" — the most recent SUCCESSFUL cloud-capture harvest per
+        # login (last_harvest_ok), so a client whose meter simply hasn't issued a
+        # new bill still shows the harvester is alive and signing in. Matched to
+        # clients by their stored login usernames/emails.
+        checked_rows = db.execute(
+            select(PortalCredential.username_lc,
+                   func.max(PortalCredential.last_harvest_at))
+            .where(PortalCredential.tenant_id == t.id,
+                   PortalCredential.last_harvest_ok.is_(True),
+                   PortalCredential.last_harvest_at.is_not(None))
+            .group_by(PortalCredential.username_lc)
+        ).all()
+        checked_by_user = {u: ts for u, ts in checked_rows if u}
+
+        def _client_checked(c: Client):
+            best = None
+            for v in (c.gmp_email, c.gmp_username, c.vec_email, c.vec_username):
+                if not v:
+                    continue
+                ts = checked_by_user.get(v.strip().lower())
+                if ts and (best is None or ts > best):
+                    best = ts
+            return best
+
+        out = [_client_to_dict(c, array_count=counts.get(c.id, 0),
+                               last_checked_at=_client_checked(c))
+               for c in clients]
     return {"ok": True, "clients": out}
 
 

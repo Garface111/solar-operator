@@ -79,8 +79,18 @@ function getInitials(name: string): string {
     .join("");
 }
 
-function lastCaptureIso(c: ClientRow): string | null {
-  const dates = [c.gmp_last_sync_at, c.vec_last_sync_at].filter(Boolean) as string[];
+// "Last checked" — the most recent time we successfully signed in to this
+// client's utility. Prefer the cloud-capture harvest check (last_checked_at):
+// the harvester signs in on a cadence even when a monthly-billing meter has no
+// new bill, so keying off last_*_sync_at (last NEW data) made healthy accounts
+// read as "days ago". Fall back to the last-capture timestamps for
+// extension-only clients (where a sign-in IS a capture).
+function lastCheckedIso(c: ClientRow): string | null {
+  const dates = [
+    c.last_checked_at,
+    c.gmp_last_sync_at,
+    c.vec_last_sync_at,
+  ].filter(Boolean) as string[];
   if (!dates.length) return null;
   return dates.sort().pop() ?? null;
 }
@@ -586,7 +596,7 @@ export function ClientsTable({
             <th scope="col" className="w-28 py-2.5 pr-3 text-left">Logins</th>
             <th scope="col" className="w-16 py-2.5 pr-3 text-right">Arrays</th>
             <th scope="col" className="w-16 py-2.5 pr-3 text-right">Accts</th>
-            <th scope="col" className="w-28 py-2.5 pr-3 text-left">Last capture</th>
+            <th scope="col" className="w-28 py-2.5 pr-3 text-left">Last checked</th>
             <th scope="col" className="w-20 py-2.5 pr-3 text-left">Delivery</th>
             <th scope="col" className="w-24 py-2.5 pr-3 text-right">Actions</th>
           </tr>
@@ -677,7 +687,7 @@ function ClientTableRow({
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
 
   const delivery = deliveryStatus(client);
-  const captureIso = lastCaptureIso(client);
+  const captureIso = lastCheckedIso(client);
   const acctCount = arrays != null ? uniqueAccountCount(arrays) : null;
 
   async function handleRefresh(e: React.MouseEvent) {
@@ -877,7 +887,7 @@ function ClientTableRow({
           {acctCount != null ? acctCount : "—"}
         </td>
 
-        {/* Last capture */}
+        {/* Last checked — last successful sign-in, not just last new bill */}
         <td className="w-28 py-2.5 pr-3 text-[11px] text-zinc-500">
           {client.capture_pending && client.array_count === 0 ? (
             <span
@@ -888,7 +898,7 @@ function ClientTableRow({
               Pulling bills…
             </span>
           ) : (
-            <span title={captureIso ? new Date(captureIso).toLocaleString() : undefined}>
+            <span title={captureIso ? `Last successful sign-in: ${new Date(captureIso).toLocaleString()}` : undefined}>
               {relativeTime(captureIso)}
             </span>
           )}
