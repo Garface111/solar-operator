@@ -162,24 +162,38 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "expand.docs": {"tier": "expand"},
 }
 
-# Empty when SOVEREIGN_SUCCESSION_FULL=1 (default after Ford grant 2026-07-16).
-# Kill switch: SOVEREIGN_SUCCESSION_FULL=0 restores dual-control on money+deploy.
+# Ford 2026-07-16 (re-invert to safe): these capabilities are NEVER granted to an
+# autonomous tick — money/identity, live deploy, brand blast, irreversible delete,
+# owner-browser capture. No SOVEREIGN_* flag un-gates them. The brain may only
+# PROPOSE them (see DRAFT_ONLY_ATYPES / _draft_ford_approval); Ford fires a proposal
+# via POST /admin/sovereign/approvals/{id}/fire. "Fired by you", not by the mind.
 NEVER_AUTONOMOUS = frozenset({"act.money_identity", "act.deploy", "act.brand", "act.hard_delete", "act.har_capture"})
+
+# Brain action types that are never executed inline — drafted for Ford approval
+# instead (money / hard-delete / brand / soft-delete). Deploy is forced to
+# stage-only in its own branch. Independent of every SOVEREIGN_* flag.
+DRAFT_ONLY_ATYPES: dict[str, str] = {
+    "stripe_refund": "act.money_identity", "refund": "act.money_identity",
+    "stripe_cancel": "act.money_identity", "cancel_subscription": "act.money_identity",
+    "billing_status": "act.money_identity", "stripe_set_status": "act.money_identity",
+    "brand_announce": "act.brand", "brand_email": "act.brand",
+    "tenant_hard_purge": "act.hard_delete", "hard_delete_tenant": "act.hard_delete",
+    "purge_soft_deleted": "act.hard_delete", "tenant_soft_delete": "act.hard_delete",
+}
 
 
 def succession_full_enabled() -> bool:
-    return sovereign_enabled() and _flag("SOVEREIGN_SUCCESSION_FULL", "1")
+    # Default OFF (Ford 2026-07-16 re-invert). Autonomous succession authority is
+    # off unless explicitly armed; even armed, NEVER_AUTONOMOUS stays draft-only.
+    return sovereign_enabled() and _flag("SOVEREIGN_SUCCESSION_FULL", "0")
 
 
 def capability_allowed(cap_id: str) -> bool:
     if not sovereign_enabled() or cap_id not in CAPABILITIES:
         return False
-    # Ford full succession grant: T4/T5 domains are autonomous
+    # Money / deploy / brand / hard-delete / HAR are never autonomous — draft-only.
     if cap_id in NEVER_AUTONOMOUS:
-        if succession_full_enabled() or _flag("SOVEREIGN_ARM_T4_T5", "1"):
-            pass  # allowed
-        else:
-            return False
+        return False
     # Email is its own channel (Sovereign@…) — not gated by EA-session speak flag
     if cap_id in ("speak.email_ford", "speak.email_owner"):
         if not sovereign_email_enabled():
@@ -2072,6 +2086,118 @@ def apply_agenda(db, agenda: list[dict]) -> int:
     return n
 
 
+def _approval_summary(atype: str, raw: dict) -> str:
+    """Human one-liner for a drafted dangerous action (shown to Ford)."""
+    if atype in ("stripe_refund", "refund"):
+        amt = raw.get("amount_cents")
+        who = raw.get("payment_intent_id") or raw.get("charge_id") or "?"
+        return f"Refund {('$%.2f' % (int(amt) / 100)) if amt else 'FULL amount'} ({who})"
+    if atype in ("stripe_cancel", "cancel_subscription"):
+        return f"Cancel subscription for tenant {raw.get('tenant_id')}"
+    if atype in ("billing_status", "stripe_set_status"):
+        return f"Set billing status={raw.get('status') or raw.get('subscription_status')} for {raw.get('tenant_id')}"
+    if atype in ("brand_announce", "brand_email"):
+        return f"Brand announce (channel={raw.get('channel') or 'ford'}): {(raw.get('subject') or '')[:80]}"
+    if atype in ("tenant_hard_purge", "hard_delete_tenant"):
+        return f"HARD-DELETE tenant {raw.get('tenant_id')} (irreversible)"
+    if atype == "purge_soft_deleted":
+        return f"Purge soft-deleted tenants older_than_days={raw.get('older_than_days') or 0}"
+    if atype == "tenant_soft_delete":
+        return f"Soft-delete tenant {raw.get('tenant_id')}"
+    return f"{atype}: {json.dumps(raw, default=str)[:120]}"
+
+
+def _draft_ford_approval(db, raw: dict, *, cap: str, tick_id: str) -> dict:
+    """Record a money/delete/brand action as a PENDING Ford approval instead of
+    executing it. Never autonomous — Ford fires it via
+    POST /admin/sovereign/approvals/{id}/fire. Loud, never silent."""
+    atype = (raw.get("type") or "").strip().lower()
+    summary = _approval_summary(atype, raw)
+    job = EaSovereignJob(
+        id=_id("appr"),
+        kind="ford_approval",
+        status="queued",
+        title=summary[:240],
+        brief_json=json.dumps(
+            {"action": raw, "capability": cap, "summary": summary}, default=str
+        )[:8000],
+    )
+    db.add(job)
+    db.flush()
+    audit(
+        db, capability=cap, decision="escalate",
+        rationale="drafted for Ford approval: " + summary[:280],
+        targets={"approval_id": job.id, "atype": atype},
+        result="deferred",
+        denied_reason="never-autonomous: requires Ford approval",
+        correlation_id=tick_id,
+    )
+    try:
+        email_ford(
+            f"[approval needed] {summary[:110]}",
+            "I want to do a money/delete/brand action, so I'm not doing it without you.\n\n"
+            f"  {summary}\n\n"
+            f"Fire it:   POST /admin/sovereign/approvals/{job.id}/fire  (admin key)\n"
+            f"Reject it: POST /admin/sovereign/approvals/{job.id}/reject\n\n"
+            "Proposed action:\n" + json.dumps(raw, indent=2, default=str)[:1400],
+            db=db, high_level=True,
+        )
+    except Exception:  # noqa: BLE001 — never let notify failure execute the action
+        pass
+    return {
+        "ok": False, "deferred": True, "approval_id": job.id,
+        "reason": "queued for Ford approval (never-autonomous)", "summary": summary,
+    }
+
+
+def _execute_approved_action(db, atype: str, raw: dict) -> dict:
+    """Run a Ford-approved dangerous action. Caller must be inside
+    `with ford_execution():` (the admin fire endpoint provides it)."""
+    from .energy_agent_sovereign_succession import (
+        brand_announce, purge_soft_deleted_now, stripe_cancel_subscription,
+        stripe_refund, stripe_set_status, tenant_hard_purge, tenant_soft_delete,
+    )
+    if atype in ("stripe_refund", "refund"):
+        return stripe_refund(
+            db, payment_intent_id=raw.get("payment_intent_id"),
+            charge_id=raw.get("charge_id"),
+            amount_cents=int(raw["amount_cents"]) if raw.get("amount_cents") is not None else None,
+            note=raw.get("text") or raw.get("rationale") or "Ford-approved",
+        )
+    if atype in ("stripe_cancel", "cancel_subscription"):
+        return stripe_cancel_subscription(
+            db, tenant_id=str(raw["tenant_id"]),
+            at_period_end=raw.get("at_period_end", True) is not False,
+            reason=raw.get("text") or "Ford-approved",
+        )
+    if atype in ("billing_status", "stripe_set_status"):
+        return stripe_set_status(
+            db, tenant_id=str(raw["tenant_id"]),
+            subscription_status=str(raw.get("status") or raw.get("subscription_status") or "active"),
+            active=raw.get("active"), note=raw.get("text") or "Ford-approved",
+        )
+    if atype in ("brand_announce", "brand_email"):
+        return brand_announce(
+            db, subject=raw.get("subject") or "[Sovereign brand]",
+            body=raw.get("body") or raw.get("text") or "",
+            channel=raw.get("channel") or "ford",
+            tenant_email=raw.get("tenant_email") or raw.get("email"),
+        )
+    if atype in ("tenant_hard_purge", "hard_delete_tenant"):
+        return tenant_hard_purge(
+            db, tenant_id=str(raw["tenant_id"]),
+            confirm=str(raw.get("tenant_id")),  # Ford explicitly fired this
+            reason=raw.get("text") or "Ford-approved hard purge",
+        )
+    if atype == "tenant_soft_delete":
+        return tenant_soft_delete(
+            db, tenant_id=str(raw["tenant_id"]), reason=raw.get("text") or "Ford-approved",
+        )
+    if atype == "purge_soft_deleted":
+        return purge_soft_deleted_now(db, older_than_days=int(raw.get("older_than_days") or 30))
+    return {"ok": False, "error": f"unknown approved action {atype}"}
+
+
 def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict]:
     """Run structured actions from the brain (capped)."""
     out: list[dict] = []
@@ -2082,6 +2208,12 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
         if not isinstance(raw, dict):
             continue
         atype = (raw.get("type") or "wait").strip().lower()
+        # Never-autonomous: money / hard-delete / brand / soft-delete → draft for Ford.
+        if atype in DRAFT_ONLY_ATYPES:
+            res = _draft_ford_approval(db, raw, cap=DRAFT_ONLY_ATYPES[atype], tick_id=tick_id)
+            out.append({"kind": atype, "result": res})
+            budget -= 1
+            continue
         if atype in ("wait", "noop", "none", ""):
             write_note(
                 db, kind="decision", title="wait",
@@ -2193,11 +2325,13 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             )
         elif atype in ("deploy_stage", "stage_deploy"):
             from .energy_agent_sovereign_ops import stage_deploy
+            # Live deploy is never-autonomous — the brain may only STAGE (execute_now
+            # forced False). Ford promotes a staged deploy himself.
             res = stage_deploy(
                 db,
                 repo=raw.get("repo") or "both",
                 reason=raw.get("text") or raw.get("rationale") or "brain deploy_stage",
-                execute_now=bool(raw.get("execute_now")),
+                execute_now=False,
             )
         elif atype in ("credentials_list", "credential_inventory"):
             from .energy_agent_sovereign_ops import list_credential_inventory
@@ -2324,10 +2458,13 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             )
         elif atype in ("tenant_hard_purge", "hard_delete_tenant") and raw.get("tenant_id"):
             from .energy_agent_sovereign_succession import tenant_hard_purge
+            # Defense-in-depth: this branch is unreachable (gated to draft above).
+            # Never derive confirm from the target id — a real confirm must be
+            # supplied by the Ford-approval fire path.
             res = tenant_hard_purge(
                 db,
                 tenant_id=str(raw["tenant_id"]),
-                confirm=str(raw.get("confirm") or raw.get("tenant_id") or ""),
+                confirm=str(raw.get("confirm") or ""),
                 reason=raw.get("text") or raw.get("rationale") or "brain hard purge",
             )
         elif atype in ("purge_soft_deleted",):
@@ -3008,13 +3145,14 @@ def plan_inject(
 
 def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
     payload = payload or {}
-    if capability in NEVER_AUTONOMOUS and not (
-        succession_full_enabled() or _flag("SOVEREIGN_ARM_T4_T5", "1")
-    ):
+    if capability in NEVER_AUTONOMOUS:
         return {
             "ok": False,
             "denied": True,
-            "denied_reason": f"{capability} requires SOVEREIGN_SUCCESSION_FULL=1 (Ford dual-control)",
+            "denied_reason": (
+                f"{capability} is never autonomous — draft it for Ford and fire via "
+                "POST /admin/sovereign/approvals/{id}/fire"
+            ),
             "tier": CAPABILITIES.get(capability, {}).get("tier"),
         }
     if not capability_allowed(capability):
@@ -3485,6 +3623,85 @@ def sovereign_actions(
                 for a in rows
             ]
         }
+
+
+@router.get("/admin/sovereign/approvals")
+def sovereign_approvals(
+    authorization: str | None = Header(default=None),
+    status: str = Query(default="queued"),
+):
+    """Dangerous actions the mind drafted and is waiting for Ford to fire/reject."""
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        q = select(EaSovereignJob).where(EaSovereignJob.kind == "ford_approval")
+        if status and status != "all":
+            q = q.where(EaSovereignJob.status == status)
+        rows = db.execute(
+            q.order_by(EaSovereignJob.created_at.desc()).limit(50)
+        ).scalars().all()
+        return {
+            "approvals": [
+                {
+                    "id": j.id,
+                    "status": j.status,
+                    "title": j.title,
+                    "created_at": j.created_at.isoformat() + "Z" if j.created_at else None,
+                    "action": json.loads(j.brief_json or "{}").get("action"),
+                    "result": json.loads(j.result_json) if j.result_json else None,
+                }
+                for j in rows
+            ]
+        }
+
+
+@router.post("/admin/sovereign/approvals/{approval_id}/fire")
+def sovereign_fire_approval(
+    approval_id: str, authorization: str | None = Header(default=None),
+):
+    """Ford fires a drafted money/delete/brand action. This is the ONLY path that
+    executes a NEVER_AUTONOMOUS action — the mind can never reach it."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_succession import ford_execution
+    with SessionLocal() as db:
+        job = db.get(EaSovereignJob, approval_id)
+        if not job or job.kind != "ford_approval":
+            raise HTTPException(404, "approval not found")
+        if job.status != "queued":
+            return {"ok": False, "error": f"approval is {job.status}, not queued"}
+        brief = json.loads(job.brief_json or "{}")
+        raw = brief.get("action") or {}
+        atype = (raw.get("type") or "").strip().lower()
+        try:
+            with ford_execution():
+                res = _execute_approved_action(db, atype, raw)
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": False, "error": str(e)[:400]}
+        job.status = "done" if res.get("ok") else "failed"
+        job.result_json = json.dumps(res, default=str)[:8000]
+        job.finished_at = _now()
+        audit(
+            db, capability=brief.get("capability") or "act.money_identity",
+            decision="act", rationale=f"Ford fired approval {approval_id}: {job.title}"[:280],
+            targets={"approval_id": approval_id, "atype": atype},
+            result="ok" if res.get("ok") else "failed",
+        )
+        db.commit()
+        return {"ok": bool(res.get("ok")), "approval_id": approval_id, "result": res}
+
+
+@router.post("/admin/sovereign/approvals/{approval_id}/reject")
+def sovereign_reject_approval(
+    approval_id: str, authorization: str | None = Header(default=None),
+):
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        job = db.get(EaSovereignJob, approval_id)
+        if not job or job.kind != "ford_approval":
+            raise HTTPException(404, "approval not found")
+        job.status = "cancelled"
+        job.finished_at = _now()
+        db.commit()
+        return {"ok": True, "approval_id": approval_id, "status": "cancelled"}
 
 
 @router.get("/admin/sovereign/jobs")

@@ -52,6 +52,115 @@ def test_money_never_autonomous(monkeypatch):
     assert out["denied"] is True
 
 
+def test_never_autonomous_denied_even_when_armed(monkeypatch):
+    """No SOVEREIGN_* flag un-gates money/deploy/brand/hard-delete/HAR."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_ACT_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_ARM_T4_T5", "1")
+    monkeypatch.setenv("SOVEREIGN_SUCCESSION_FULL", "1")
+    monkeypatch.setenv("SOVEREIGN_CAPABILITIES", "*")
+    from api.energy_agent_sovereign import capability_allowed, plan_action
+
+    for cap in (
+        "act.money_identity", "act.deploy", "act.brand",
+        "act.hard_delete", "act.har_capture",
+    ):
+        assert capability_allowed(cap) is False, cap
+        assert plan_action(cap, {}).get("denied") is True, cap
+
+
+def test_succession_gate_default_off_and_ford_context(monkeypatch):
+    """succession_full() is off by default and only true inside ford_execution()."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.delenv("SOVEREIGN_SUCCESSION_FULL", raising=False)
+    from api.energy_agent_sovereign_succession import ford_execution, succession_full
+
+    assert succession_full() is False
+    with ford_execution():
+        assert succession_full() is True
+    assert succession_full() is False
+
+
+def test_brain_drafts_dangerous_action_instead_of_executing(monkeypatch):
+    """A stripe_refund from the brain becomes a queued Ford approval; the real
+    refund is never called by the autonomous path."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_ACT_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_SUCCESSION_FULL", "1")  # even armed → still drafts
+
+    from api.models import Base
+    import api.energy_agent_sovereign as sov
+    import api.energy_agent_sovereign_succession as succ
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(sov, "SessionLocal", Session)
+    monkeypatch.setattr(sov, "email_ford", lambda *a, **k: True)
+
+    called = {"refund": False}
+    monkeypatch.setattr(
+        succ, "stripe_refund",
+        lambda *a, **k: called.__setitem__("refund", True) or {"ok": True},
+    )
+
+    with Session() as db:
+        out = sov.execute_brain_actions(
+            db,
+            [{"type": "stripe_refund", "amount_cents": 500, "payment_intent_id": "pi_x"}],
+            tick_id="t_test",
+        )
+        db.commit()
+        res = out[0]["result"]
+        assert res.get("deferred") is True
+        assert res.get("approval_id")
+        assert called["refund"] is False
+        job = db.get(sov.EaSovereignJob, res["approval_id"])
+        assert job is not None and job.kind == "ford_approval" and job.status == "queued"
+
+
+def test_ford_fire_approval_executes(monkeypatch):
+    """The admin fire endpoint runs the drafted action inside ford_execution()."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    monkeypatch.setenv("SOVEREIGN_ACT_ENABLED", "1")
+
+    from api.models import Base
+    import api.energy_agent_sovereign as sov
+    import api.energy_agent_sovereign_succession as succ
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(sov, "SessionLocal", Session)
+    monkeypatch.setattr(sov, "email_ford", lambda *a, **k: True)
+
+    seen = {"ctx": None}
+    monkeypatch.setattr(
+        succ, "stripe_refund",
+        lambda *a, **k: {"ok": True, "ctx": succ.ford_execution_active()},
+    )
+
+    with Session() as db:
+        drafted = sov._draft_ford_approval(
+            db, {"type": "stripe_refund", "amount_cents": 500, "charge_id": "ch_x"},
+            cap="act.money_identity", tick_id="t",
+        )
+        db.commit()
+        aid = drafted["approval_id"]
+        with sov.ford_execution() if hasattr(sov, "ford_execution") else succ.ford_execution():
+            res = sov._execute_approved_action(
+                db, "stripe_refund",
+                {"type": "stripe_refund", "amount_cents": 500, "charge_id": "ch_x"},
+            )
+        assert res["ok"] is True
+        assert res["ctx"] is True  # ran inside ford_execution context
+        assert aid
+
+
 def test_email_ford_enabled_without_ea_speak(monkeypatch):
     """Email channel is ON even when SOVEREIGN_SPEAK_ENABLED (EA inject) is off."""
     monkeypatch.setenv("SOVEREIGN_ENABLED", "1")

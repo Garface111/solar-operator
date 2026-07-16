@@ -12,6 +12,7 @@ Every action writes audit + self-note. Kill switches:
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -33,9 +34,39 @@ def _flag(name: str, default: str = "0") -> bool:
     )
 
 
+# Ford-approval execution context. The autonomous mind NEVER sets this. The admin
+# fire endpoint (POST /admin/sovereign/approvals/{id}/fire) wraps the succession
+# call in `with ford_execution():` so a Ford-approved action can run while the
+# same function stays denied for any autonomous tick.
+_FORD_EXEC: contextvars.ContextVar[bool] = contextvars.ContextVar("ford_exec", default=False)
+
+
+def ford_execution_active() -> bool:
+    return bool(_FORD_EXEC.get())
+
+
+class ford_execution:
+    """Context manager marking the current call as Ford-authorized."""
+
+    def __enter__(self) -> "ford_execution":
+        self._token = _FORD_EXEC.set(True)
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        _FORD_EXEC.reset(self._token)
+        return False
+
+
 def succession_full() -> bool:
-    """Ford authorized full succession (default ON after 2026-07-16 grant)."""
-    return _flag("SOVEREIGN_ENABLED", "1") and _flag("SOVEREIGN_SUCCESSION_FULL", "1")
+    """Money / brand / hard-delete authority.
+
+    Ford 2026-07-16 re-invert to safe: default OFF. An autonomous tick can never
+    run these (SOVEREIGN_SUCCESSION_FULL default 0). They execute only when Ford
+    fires an approval (ford_execution context) or explicitly arms the flag.
+    """
+    if not _flag("SOVEREIGN_ENABLED", "1"):
+        return False
+    return ford_execution_active() or _flag("SOVEREIGN_SUCCESSION_FULL", "0")
 
 
 def _deny(reason: str) -> dict:

@@ -54,15 +54,18 @@ def test_succession_status_on(db_session):
     assert st["domains"]["har_capture"] is True
 
 
-def test_capability_money_allowed(db_session, monkeypatch):
-    db, succ, sov = db_session
-    assert sov.capability_allowed("act.money_identity") is True
-    assert sov.capability_allowed("act.brand") is True
-    assert sov.capability_allowed("act.hard_delete") is True
-    assert sov.capability_allowed("act.har_capture") is True
+def test_capability_money_never_autonomous(db_session, monkeypatch):
+    """Ford 2026-07-16 re-invert: money/brand/hard-delete/HAR are NEVER granted to
+    an autonomous tick, even with every arm flag on. They are draft-only."""
+    db, succ, sov = db_session  # fixture sets SUCCESSION_FULL=1 + ARM_T4_T5=1
+    assert sov.capability_allowed("act.money_identity") is False
+    assert sov.capability_allowed("act.brand") is False
+    assert sov.capability_allowed("act.hard_delete") is False
+    assert sov.capability_allowed("act.har_capture") is False
+    # The armed flag still lets a Ford-authorized direct call run the function,
+    # but capability_allowed (the autonomous grant) stays denied.
+    assert sov.succession_full_enabled() is True
     monkeypatch.setenv("SOVEREIGN_SUCCESSION_FULL", "0")
-    monkeypatch.setenv("SOVEREIGN_ARM_T4_T5", "0")
-    # re-import flag path
     assert sov.succession_full_enabled() is False
 
 
@@ -106,6 +109,8 @@ def test_har_stage(db_session):
 
 
 def test_brain_actions_succession(db_session):
+    """Benign succession acts (brand memory, HAR stage) still run; a money act
+    (billing_status) is drafted for Ford instead of executing."""
     db, succ, sov = db_session
     out = sov.execute_brain_actions(
         db,
@@ -116,7 +121,9 @@ def test_brain_actions_succession(db_session):
         ],
         tick_id="tick_succ",
     )
-    kinds = [o["kind"] for o in out]
-    assert "brand_set" in kinds
-    assert "har_stage" in kinds
-    assert all((o.get("result") or {}).get("ok") is not False for o in out)
+    by_kind = {o["kind"]: (o.get("result") or {}) for o in out}
+    assert by_kind.get("brand_set", {}).get("ok") is True
+    assert by_kind.get("har_stage", {}).get("ok") is True
+    # money act deferred, not executed
+    assert by_kind.get("billing_status", {}).get("deferred") is True
+    assert by_kind.get("billing_status", {}).get("approval_id")
