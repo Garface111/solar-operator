@@ -1194,15 +1194,20 @@ def act_code_hire(
         if n >= MAX_JOBS_PER_DAY:
             return {"ok": False, "denied": True, "denied_reason": "daily job budget"}
 
+    # Never call an LLM on the hot path unless expand is explicitly on.
+    # Owner Improve submit + batch claim must stay sub-second (web SOVEREIGN_ENABLED=0).
     expanded = None
     expand_meta: dict[str, Any] = {}
-    try:
-        from .energy_agent_sovereign_brain import try_expand_code_brief
-        expand_meta = try_expand_code_brief(title=title, brief=brief) or {}
-        if expand_meta.get("ok") and expand_meta.get("expanded_brief"):
-            expanded = expand_meta["expanded_brief"]
-    except Exception as e:  # noqa: BLE001
-        expand_meta = {"ok": False, "error": str(e)[:300]}
+    if _flag("SOVEREIGN_EXPAND", "0"):
+        try:
+            from .energy_agent_sovereign_brain import try_expand_code_brief
+            expand_meta = try_expand_code_brief(title=title, brief=brief) or {}
+            if expand_meta.get("ok") and expand_meta.get("expanded_brief"):
+                expanded = expand_meta["expanded_brief"]
+        except Exception as e:  # noqa: BLE001
+            expand_meta = {"ok": False, "error": str(e)[:300]}
+    else:
+        expand_meta = {"ok": False, "skipped": "SOVEREIGN_EXPAND=0"}
 
     job = EaSovereignJob(
         id=_id("job"),

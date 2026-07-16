@@ -223,142 +223,198 @@ def claim_improvement_for_sovereign(
 
     Ford 2026-07-16: proposals go straight into Sovereign's working memory and
     ship queue so work starts now (not only the external fs_watch judge path).
+
+    IMPORTANT: this must succeed on the **web** dyno where SOVEREIGN_ENABLED=0
+    (HTTP stays boring). Mind ingest + status→building + job row are pure DB
+    writes — never gated by sovereign_enabled / ops_enabled, never call an LLM
+    on the request path (worker expands briefs later).
     """
     import json as _json
-    from .energy_agent_sovereign import memory_set, memory_get_all, write_note, act_code_hire, audit
+    from .energy_agent_sovereign import (
+        memory_set, memory_get_all, write_note, audit, EaSovereignJob, _id,
+    )
+    from .feature_suggestions import FeatureSuggestion
+
+    from sqlalchemy import text as _sql_text
 
     text = (text or "").strip()
+    fid = int(feature_id)
     # Idempotent: already claimed / shipping
     try:
-        from .feature_suggestions import FeatureSuggestion
-        existing = db.get(FeatureSuggestion, int(feature_id))
+        existing = db.get(FeatureSuggestion, fid)
         if existing and existing.status in ("building", "shipped"):
             return {
                 "ok": True,
-                "feature_id": feature_id,
+                "feature_id": fid,
                 "status": existing.status,
                 "already": True,
             }
     except Exception:
         pass
+
     item = {
-        "id": int(feature_id),
+        "id": fid,
         "text": text[:2000],
         "tenant_id": tenant_id,
         "email": email,
         "product": product,
         "has_screenshot": bool(has_screenshot),
         "at": _now().isoformat() + "Z",
-        "status": "new",
+        "status": "building",
     }
-    # Durable queue (last 40)
-    queue: list = []
+
+    # 1) Status first (journey UI). Use SQL with longer lock wait — memory_set
+    # sets LOCAL lock_timeout=800ms which would starve this update.
+    prev = None
+    status_ok = False
     try:
-        for m in memory_get_all(db, limit=80):
-            if m.get("key") == "improvement_queue":
-                queue = list(_json.loads(m.get("value") or "[]"))
-                break
-    except Exception:
-        queue = []
-    queue = [q for q in queue if q.get("id") != feature_id]
-    queue.append(item)
-    queue = queue[-40:]
-    memory_set(db, "improvement_queue", _json.dumps(queue), source="improve")
-    memory_set(
-        db, "latest_improvement",
-        _json.dumps(item, default=str)[:8000],
-        source="improve",
-    )
-    memory_set(
-        db, f"improvement:{feature_id}",
-        _json.dumps(item, default=str)[:8000],
-        source="improve",
-    )
-    write_note(
-        db,
-        kind="observation",
-        title=f"Owner improve proposal #{feature_id}",
-        body=(
-            f"LIVE owner proposal — act on this.\n"
-            f"Tenant: {tenant_id or '-'}  Email: {email or '-'}\n"
-            f"Screenshot: {'yes' if has_screenshot else 'no'}\n\n"
-            f"{text[:4000]}"
-        ),
-        provider="improve",
-        meta={"feature_id": feature_id, "tenant_id": tenant_id},
-    )
+        db.execute(_sql_text("SET LOCAL lock_timeout = '5s'"))
+        fs = db.get(FeatureSuggestion, fid)
+        if fs:
+            prev = fs.status
+            if fs.status not in ("building", "shipped"):
+                note = (
+                    "Sovereign claimed live: owner Improve proposal ingested into mind + "
+                    "code job queued (not waiting on external judge alone)."
+                )
+                fs.status = "building"
+                fs.review = ((fs.review or "") + f"\n[sovereign {_now().isoformat()}Z] {note}").strip()[:20000]
+                if not fs.reviewed_at:
+                    fs.reviewed_at = _now()
+                db.flush()
+            status_ok = True
+            item["status"] = fs.status
+    except Exception as e:  # noqa: BLE001
+        log.warning("claim improve status fail #%s: %s", fid, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
-    if not ops_enabled():
-        audit(
-            db, capability="act.feature_queue", decision="observe",
-            rationale=f"improve #{feature_id} noted (ops off)",
-            targets={"feature_id": feature_id},
-            result="ok",
+    # 2) Mind ingest (best-effort; never undo status if it already landed)
+    try:
+        queue: list = []
+        try:
+            for m in memory_get_all(db, limit=80):
+                if m.get("key") == "improvement_queue":
+                    queue = list(_json.loads(m.get("value") or "[]"))
+                    break
+        except Exception:
+            queue = []
+        queue = [q for q in queue if q.get("id") != fid]
+        queue.append(item)
+        queue = queue[-40:]
+        memory_set(db, "improvement_queue", _json.dumps(queue), source="improve")
+        memory_set(
+            db, "latest_improvement",
+            _json.dumps(item, default=str)[:8000],
+            source="improve",
         )
-        return {"ok": True, "status": "new", "queued_only": True, "feature_id": feature_id}
+        memory_set(
+            db, f"improvement:{fid}",
+            _json.dumps(item, default=str)[:8000],
+            source="improve",
+        )
+        # Wake flag for worker (web has SOVEREIGN_ENABLED=0 so fire_and_forget_wake no-ops)
+        memory_set(
+            db, "improve_wake",
+            _json.dumps({"feature_id": fid, "at": item["at"], "text": text[:400]}, default=str),
+            source="improve",
+        )
+        write_note(
+            db,
+            kind="observation",
+            title=f"Owner improve proposal #{fid}",
+            body=(
+                f"LIVE owner proposal — act on this now.\n"
+                f"Tenant: {tenant_id or '-'}  Email: {email or '-'}\n"
+                f"Screenshot: {'yes' if has_screenshot else 'no'}\n\n"
+                f"{text[:4000]}"
+            ),
+            provider="improve",
+            meta={"feature_id": fid, "tenant_id": tenant_id},
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("claim improve mind fail #%s: %s", fid, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
-    # Claim: new → building + code-hire so the worker starts now
-    st = set_feature_status(
-        db, int(feature_id), "building",
-        review_note=(
-            "Sovereign claimed live: owner Improve proposal ingested into mind + "
-            "code job queued (not waiting on external judge alone)."
-        ),
-        actor="sovereign",
-    )
-    job = act_code_hire(
-        db,
-        title=f"Owner improve #{feature_id}: {text[:80]}"[:200],
-        brief=(
-            f"OWNER IMPROVE PROPOSAL #{feature_id} (live ingest → Sovereign).\n"
-            f"Tenant: {tenant_id or '-'}  Product: {product}\n"
-            f"Email: {email or '-'}\n"
-            f"Has marked screenshot: {bool(has_screenshot)}\n\n"
-            f"Owner ask:\n{text[:3500]}\n\n"
-            "Implement a minimal correct UI/product fix on array-operator public/ "
-            "(or solar-operator api/ if backend). Prefer pure CSS/layout/copy when "
-            "that's the ask. Do NOT invent billing math. After ship, mark feature "
-            f"#{feature_id} shipped via admin status if live."
-        ),
-        kind="owner_improve",
-    )
-    item["status"] = "building"
-    item["job_id"] = (job or {}).get("job_id")
-    memory_set(db, "latest_improvement", _json.dumps(item, default=str)[:8000], source="improve")
-    memory_set(
-        db, "improvement_queue",
-        _json.dumps(
-            [{**q, "status": ("building" if q.get("id") == feature_id else q.get("status"))}
-             for q in queue],
-            default=str,
-        )[:8000],
-        source="improve",
-    )
-    audit(
-        db, capability="act.feature_queue", decision="act",
-        rationale=f"claimed improve #{feature_id} → building + code job",
-        targets={
-            "feature_id": feature_id,
-            "job_id": (job or {}).get("job_id"),
-            "status": st.get("status"),
-        },
-        result="ok" if st.get("ok") else "partial",
-    )
+    # 3) Lightweight job row — no LLM expand on submit path
+    job_id = None
+    try:
+        db.execute(_sql_text("SET LOCAL lock_timeout = '5s'"))
+        job = EaSovereignJob(
+            id=_id("job"),
+            kind="owner_improve",
+            status="queued",
+            title=f"Owner improve #{fid}: {text[:80]}"[:200],
+            brief_json=_json.dumps({
+                "title": f"Owner improve #{fid}",
+                "brief": (
+                    f"OWNER IMPROVE PROPOSAL #{fid} (live ingest → Sovereign).\n"
+                    f"Tenant: {tenant_id or '-'}  Product: {product}\n"
+                    f"Email: {email or '-'}\n"
+                    f"Has marked screenshot: {bool(has_screenshot)}\n\n"
+                    f"Owner ask:\n{text[:3500]}\n\n"
+                    "Implement a minimal correct UI/product fix on array-operator public/ "
+                    "(or solar-operator api/ if backend). Prefer pure CSS/layout/copy when "
+                    "that's the ask. Do NOT invent billing math. After ship, mark feature "
+                    f"#{fid} shipped via admin status if live."
+                ),
+                "feature_id": fid,
+                "created_by": "sovereign",
+                "source": "owner_improve_live",
+                "instructions": (
+                    "Human or Hermes/Claude Code: implement this scoped change in "
+                    "array-operator and/or solar-operator. Do not invent billing math."
+                ),
+            }, default=str)[:50_000],
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        item["job_id"] = job_id
+        try:
+            memory_set(db, "latest_improvement", _json.dumps(item, default=str)[:8000], source="improve")
+        except Exception:
+            pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("claim improve job fail #%s: %s", fid, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    try:
+        audit(
+            db, capability="act.feature_queue", decision="act",
+            rationale=f"claimed improve #{fid} → building + code job (web-safe path)",
+            targets={"feature_id": fid, "job_id": job_id, "from": prev, "status": item["status"]},
+            result="ok" if status_ok else "partial",
+            correlation_id=job_id,
+        )
+    except Exception:
+        pass
+
     return {
         "ok": True,
-        "feature_id": feature_id,
-        "status": "building" if st.get("ok") else "new",
-        "set_status": st,
-        "job_id": (job or {}).get("job_id"),
-        "code_job": job,
+        "feature_id": fid,
+        "status": item.get("status") or ("building" if status_ok else "new"),
+        "job_id": job_id,
+        "from": prev,
+        "status_ok": status_ok,
     }
 
 
 def claim_new_improvements_batch(db, *, limit: int = 8) -> dict:
-    """Drain backlog of status=new proposals into Sovereign building jobs."""
+    """Drain backlog of status=new proposals into Sovereign building jobs.
+
+    Safe on worker (ops on) and for ops scripts. Does not require ops_enabled —
+    owner proposals always claim into mind.
+    """
     from .feature_suggestions import FeatureSuggestion
-    if not ops_enabled():
-        return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
     rows = db.execute(
         select(FeatureSuggestion)
         .where(FeatureSuggestion.status == "new")

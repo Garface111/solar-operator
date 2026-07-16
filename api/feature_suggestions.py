@@ -103,7 +103,7 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
     if status == "new":
         return {
             "status": "new",
-            "detail": "Queued — Sovereign and the judge are on it.",
+            "detail": "Received — Sovereign is taking this into mind now.",
         }
     # reviewed / held
     reason = ""
