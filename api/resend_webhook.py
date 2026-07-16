@@ -200,6 +200,34 @@ async def resend_webhook(
             to_list = [str(x).strip().lower() for x in rf if x]
         elif isinstance(rf, str) and rf.strip():
             to_list = [rf.strip().lower()]
+        # Sovereign mailbox (Ford ↔ product mind) — check before repair tickets
+        try:
+            from .energy_agent_sovereign_desk import (
+                is_sovereign_inbound_address,
+                ingest_sovereign_inbound_async,
+            )
+            if is_sovereign_inbound_address(to_list):
+                # Async: desk LLM can exceed Resend webhook timeout
+                ingest_sovereign_inbound_async(
+                    from_email=from_email,
+                    to_emails=to_list,
+                    subject=subject,
+                    body=body,
+                    resend_email_id=str(email_id) if email_id else None,
+                )
+                logger.info(
+                    "resend inbound sovereign queued: email_id=%s from=%s to=%s",
+                    email_id, from_email, to_list,
+                )
+                return {
+                    "ok": True,
+                    "event": event_type,
+                    "sovereign_inbound": {"queued": True},
+                    "email_id": email_id,
+                }
+        except Exception:
+            logger.exception("resend webhook: sovereign inbound route failed")
+
         try:
             from . import repair_ops
             with SessionLocal() as db:

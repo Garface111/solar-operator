@@ -447,6 +447,201 @@ def desk_turn(db, t, ford_message: str) -> dict:
     }
 
 
+def _strip_email_reply(text: str) -> str:
+    """Drop quoted history / signatures so the model sees Ford's new words."""
+    import re
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    patterns = [
+        r"\nOn .+wrote:\s*\n",
+        r"\nOn \w{3},.+?wrote:\s*\n",
+        r"\n-{2,}\s*Original Message\s*",
+        r"\nFrom:\s+.+\nSent:\s+",
+        r"\n_{2,}\s*\n",
+        r"\n>+ ",  # quoted lines start — cut from first quoted block if dense
+    ]
+    for pat in patterns[:5]:
+        cleaned = re.split(pat, cleaned, maxsplit=1, flags=re.I | re.S)[0].strip()
+    # Trim common mobile sigs
+    cleaned = re.split(r"\n--\s*\n", cleaned, maxsplit=1)[0].strip()
+    cleaned = re.split(r"\nSent from my (iPhone|iPad|Android)", cleaned, maxsplit=1, flags=re.I)[0].strip()
+    return cleaned[:8000]
+
+
+def _ford_tenant_for_email(db, from_email: str | None):
+    """Resolve Ford's tenant from the From address (desk allowlist)."""
+    from sqlalchemy import func, select
+    from .models import Tenant
+    from .energy_agent_sovereign import sovereign_mail_recipients
+
+    email = (from_email or "").strip().lower()
+    allowed = set(sovereign_mail_recipients()) | set(desk_emails())
+    if email not in allowed:
+        return None, email
+    # Prefer array_operator product tenant for this email
+    rows = db.execute(
+        select(Tenant).where(func.lower(Tenant.contact_email) == email)
+        .order_by(Tenant.id.desc())
+    ).scalars().all()
+    if not rows:
+        return None, email
+    for t in rows:
+        if (getattr(t, "product", None) or "") == "array_operator":
+            return t, email
+    return rows[0], email
+
+
+def is_sovereign_inbound_address(to_emails: list[str] | None) -> bool:
+    from .energy_agent_sovereign import sovereign_inbound_addresses
+    targets = sovereign_inbound_addresses()
+    for raw in to_emails or []:
+        e = (raw or "").strip().lower()
+        if "<" in e and ">" in e:
+            try:
+                e = e.split("<", 1)[1].split(">", 1)[0].strip().lower()
+            except Exception:
+                pass
+        if e in targets:
+            return True
+        # Any sovereign@ on arrayoperator domains
+        if e.startswith("sovereign@") and (
+            e.endswith("@arrayoperator.com") or e.endswith("@agent.arrayoperator.com")
+        ):
+            return True
+    return False
+
+
+def ingest_sovereign_inbound(
+    db,
+    *,
+    from_email: str | None,
+    to_emails: list[str] | None = None,
+    subject: str | None = None,
+    body: str | None = None,
+    resend_email_id: str | None = None,
+) -> dict:
+    """Ford replied to Sovereign@… → desk turn → email reply (two-way loop)."""
+    from .energy_agent_sovereign import (
+        email_ford,
+        sovereign_email_enabled,
+        sovereign_mail_address,
+    )
+
+    if not sovereign_email_enabled():
+        return {"ok": False, "reason": "email_disabled"}
+    if not is_sovereign_inbound_address(to_emails):
+        return {"ok": False, "matched": False, "reason": "not_sovereign_address"}
+
+    ensure_tables(db)
+    t, email = _ford_tenant_for_email(db, from_email)
+    if t is None:
+        return {
+            "ok": False,
+            "matched": False,
+            "reason": "from_not_allowlisted",
+            "from": email,
+        }
+
+    # Dedupe by Resend id in desk meta
+    if resend_email_id:
+        marker = f'"resend_email_id": "{resend_email_id}"'
+        marker2 = f'"resend_email_id":"{resend_email_id}"'
+        recent = history(db, limit=40, chat_only=False)
+        for m in recent:
+            meta = m.get("meta") or {}
+            if meta.get("resend_email_id") == resend_email_id:
+                return {
+                    "ok": True,
+                    "matched": True,
+                    "deduped": True,
+                    "message_id": m.get("id"),
+                }
+            raw = json.dumps(meta)
+            if marker in raw or marker2 in raw:
+                return {"ok": True, "matched": True, "deduped": True, "message_id": m.get("id")}
+
+    text = _strip_email_reply(body or "") or (subject or "").strip()
+    if not text:
+        return {"ok": False, "matched": True, "reason": "empty_body"}
+
+    # Prefix so desk history shows channel; model still gets the text
+    turn_text = text
+    try:
+        out = desk_turn(db, t, turn_text)
+    except Exception as e:  # noqa: BLE001
+        log.exception("sovereign inbound desk_turn failed")
+        return {"ok": False, "matched": True, "reason": f"desk_turn:{e}"[:200]}
+
+    # Tag the ford message we just wrote with resend id (best-effort)
+    try:
+        fid = out.get("ford_message_id")
+        if fid and resend_email_id:
+            row = db.get(EaSovereignDeskMessage, fid)
+            if row:
+                try:
+                    meta = json.loads(row.meta_json or "{}")
+                except Exception:
+                    meta = {}
+                meta["channel"] = "email_inbound"
+                meta["resend_email_id"] = resend_email_id
+                meta["email_subject"] = (subject or "")[:200]
+                row.meta_json = json.dumps(meta, default=str)[:4000]
+                db.flush()
+    except Exception:
+        pass
+
+    reply = (out.get("reply") or out.get("message", {}).get("content") or "").strip()
+    emailed = False
+    if reply:
+        # Re: subject for thread continuity
+        subj = (subject or "").strip()
+        if subj and not subj.lower().startswith("re:"):
+            subj = f"Re: {subj}"
+        elif not subj:
+            subj = "Re: Sovereign"
+        emailed = bool(
+            email_ford(
+                subj[:200],
+                reply,
+                to=email,
+                db=db,
+                note_desk=False,  # reply already on desk via desk_turn
+            )
+        )
+
+    return {
+        "ok": True,
+        "matched": True,
+        "from": email,
+        "tenant_id": t.id,
+        "reply_emailed": emailed,
+        "mailbox": sovereign_mail_address(),
+        "ford_message_id": out.get("ford_message_id"),
+        "sovereign_message_id": (out.get("message") or {}).get("id"),
+    }
+
+
+def ingest_sovereign_inbound_async(**kwargs) -> None:
+    """Background wrapper so Resend webhook returns quickly (desk LLM can be slow)."""
+    import threading
+
+    def _run() -> None:
+        try:
+            with SessionLocal() as db:
+                try:
+                    res = ingest_sovereign_inbound(db, **kwargs)
+                    db.commit()
+                    log.info("sovereign inbound async: %s", res)
+                except Exception:
+                    db.rollback()
+                    log.exception("sovereign inbound async failed")
+        except Exception:
+            log.exception("sovereign inbound async session failed")
+
+    threading.Thread(target=_run, name="sov-inbound-email", daemon=True).start()
+
+
 # ── HTTP ────────────────────────────────────────────────────────────────────
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=12000)

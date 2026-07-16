@@ -64,7 +64,9 @@ def test_email_ford_enabled_without_ea_speak(monkeypatch):
 
     assert capability_allowed("speak.email_ford") is True
     assert capability_allowed("speak.session_inject") is False
-    assert "sovereign@arrayoperator.com" in sovereign_mail_from().lower()
+    # Prefer agent subdomain so Reply hits Resend inbound (send+receive verified)
+    assert "sovereign@" in sovereign_mail_from().lower()
+    assert "arrayoperator.com" in sovereign_mail_from().lower()
     assert "ford.genereaux@gmail.com" in sovereign_mail_recipients()
 
 
@@ -104,7 +106,14 @@ def test_email_ford_sends_from_sovereign_domain(monkeypatch):
         )
         db.commit()
         assert ok is True
-        assert "sovereign@arrayoperator.com" in (captured.get("from_addr") or "").lower()
+        from_a = (captured.get("from_addr") or "").lower()
+        reply_a = (captured.get("reply_to") or "").lower()
+        assert "sovereign@" in from_a
+        # From == Reply-To so Gmail Reply hits inbound
+        assert from_a == reply_a or "sovereign@" in reply_a
+        # Sky skin should be HTML with AO tokens
+        html = captured.get("html") or ""
+        assert "2196F3" in html or "Array Operator" in html or "sky" in html.lower() or "Sovereign" in html
         assert "Utility queue" in (captured.get("subject") or "") or "Sovereign" in (
             captured.get("subject") or ""
         )
@@ -115,6 +124,13 @@ def test_email_ford_sends_from_sovereign_domain(monkeypatch):
             assert "ford" in str(to).lower()
         n = db.query(sov.EaSovereignAction).filter_by(capability="speak.email_ford").count()
         assert n >= 1
+
+
+def test_sovereign_inbound_address_match():
+    from api.energy_agent_sovereign_desk import is_sovereign_inbound_address
+    assert is_sovereign_inbound_address(["sovereign@agent.arrayoperator.com"]) is True
+    assert is_sovereign_inbound_address(["Sovereign <sovereign@arrayoperator.com>"]) is True
+    assert is_sovereign_inbound_address(["repairs@agent.arrayoperator.com"]) is False
 
 
 def test_observe_and_tick_with_db(monkeypatch):
