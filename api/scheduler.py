@@ -1881,6 +1881,13 @@ def _run_energy_agent_long_term_mind() -> None:
                     wake_mind(db, tid, "scheduled_proactive", enqueue_insight=True)
                     mind_tick(db, tid)
                     sync_improvement_wins(db, tid)
+                    # Standing objective: nudge the single highest-value setup/
+                    # operational gap (silent when fully operational).
+                    try:
+                        from .energy_agent_mind import evaluate_and_nudge_gap
+                        evaluate_and_nudge_gap(db, tid)
+                    except Exception as gexc:  # noqa: BLE001
+                        logger.info("gap nudge %s: %s", tid, gexc)
                     db.commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("long-term mind tenant %s: %s", tid, exc)

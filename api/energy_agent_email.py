@@ -168,6 +168,7 @@ Rules:
 - NEVER invent numbers — only use what the JSON gives you. If a section has no data, skip it entirely.
 - If everything is healthy, say so in two sentences — short all-clears build trust.
 - If there is no O&M contact and sites need attention, say you have nobody to email and ask for a contact.
+- SETUP OBJECTIVE: if setup_objective.top_gap is present, name that ONE specific gap and offer to close it (e.g. stale data → offer to refresh; no utility login → offer to help add it). If setup_objective.fully_operational is true, don't invent setup work.
 - End by inviting a reply: they can answer this email and you will act.
 - Sign off exactly:  — Energy Agent
 Return STRICT JSON only: {"subject": "...", "body": "..."} .
@@ -258,9 +259,21 @@ def compose_checkin(db, tenant: Tenant) -> dict | None:
     except Exception as e:
         log.warning("checkin invoices failed %s: %s", tenant.id, e)
     repairs = _week_repairs_digest(db, tenant.id)
+    setup = {}
+    try:
+        from .energy_agent import _compute_setup_status
+        s = _compute_setup_status(db, tenant)
+        setup = {
+            "fully_operational": s.get("fully_operational"),
+            "data_fresh": s.get("data_fresh"),
+            "top_gap": s.get("top_gap"),
+        }
+    except Exception as e:
+        log.warning("checkin setup_status failed %s: %s", tenant.id, e)
 
     facts = {
         "operator_name": getattr(tenant, "name", None) or getattr(tenant, "company", None),
+        "setup_objective": setup,
         "fleet_attention": {
             "arrays_needing_attention": attention.get("count"),
             "attention_units": attention.get("attention_unit_count"),
@@ -359,6 +372,87 @@ def send_checkin_email(tenant: Tenant, subject: str, body: str) -> bool:
             from_addr=OWNER_AGENT_FROM,
             reply_to=OWNER_AGENT_FROM,
             product="array_operator",
+        )
+    )
+
+
+_MORNING_NOTE_SYSTEM = (
+    "You are Energy Agent, this solar owner's operator. Write a SHORT personal note (2-3 "
+    "sentences, ~45 words) that sits at the top of their morning fleet digest, in your voice "
+    "— warm, direct, like a good employee's one-line morning heads-up. You're given ground-"
+    "truth JSON. Lead with the single thing that matters most today (a flagged site + $ if "
+    "any, else a genuine all-clear). If there's a setup gap, mention it in one clause. NEVER "
+    "invent numbers — only use the JSON. Plain text, no markdown, no greeting like 'Hi', no "
+    "sign-off (the email already brands you). Do NOT restate the whole digest — the visuals "
+    "below cover the detail; you're the human line on top. Return ONLY the note text."
+)
+
+
+def compose_morning_note(db, tenant: Tenant, facts: dict) -> str | None:
+    """A 2-3 sentence personal note for the top of the morning digest. Returns
+    None on any failure so the digest ships template-only."""
+    from .energy_agent import _call_llm, _usage_cost, _charge
+    try:
+        out = _call_llm(
+            [
+                {"role": "system", "content": _MORNING_NOTE_SYSTEM},
+                {"role": "user", "content": json.dumps(facts, default=str)[:3000]},
+            ],
+            max_tokens=180,
+        )
+    except Exception as e:
+        log.info("morning note compose failed %s: %s", getattr(tenant, "id", "?"), e)
+        return None
+    try:
+        _charge(db, tenant.id, _usage_cost(out.get("usage") or {}), "morning_note")
+    except Exception:
+        pass
+    note = ((out.get("message") or {}).get("content") or "").strip()
+    note = re.sub(r"^\s*(hi|hey|good morning)[!,. ]+", "", note, flags=re.I).strip()
+    note = note.strip().strip('"').strip()
+    if not note or len(note) < 15:
+        return None
+    return note[:600]
+
+
+def send_gap_alert_email(tenant: Tenant, setup_status: dict, top_gap: dict) -> bool:
+    """Direct, restrained alert when a gap is actively costing money (stale data
+    past the urgent window). Same AO skin + opt-out as the weekly check-in."""
+    from .email_skin import render_email_skin
+    from .notify import _send_via_resend
+
+    to = (getattr(tenant, "contact_email", None) or "").strip()
+    if not to or "@" not in to:
+        return False
+    why = (top_gap.get("why") or "").strip()
+    hrs = setup_status.get("hours_since_capture")
+    subject = "Your fleet data has gone stale — worth a quick look"
+    off_url = _optout_url(tenant.id, on=True)
+    body_lines = [
+        why,
+        "",
+        "I can re-arm your cloud logins and re-pull bills to try to refresh it — "
+        "just reply and say \"refresh\", or ask me in the app. If it's a device/"
+        "extension login, opening Array Operator in your browser will pull it.",
+    ]
+    body = "\n".join(body_lines)
+    esc = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+    footer = "Reply and I'll act on it."
+    if off_url:
+        footer += f' · <a href="{off_url}">Stop these emails</a>'
+    html = render_email_skin(
+        preheader=(f"Last fresh data ~{round(hrs)}h ago" if hrs else "Fleet data looks stale"),
+        headline="Data went stale",
+        intro_line="From Energy Agent, your fleet's operator",
+        body_html=f"<p style='white-space:pre-line'>{esc}</p>",
+        footer_line=footer,
+        product="array_operator",
+    )
+    text = body + ("\n\nStop these emails: " + off_url if off_url else "")
+    return bool(
+        _send_via_resend(
+            to=to, subject=subject, html=html, text=text,
+            from_addr=OWNER_AGENT_FROM, reply_to=OWNER_AGENT_FROM, product="array_operator",
         )
     )
 

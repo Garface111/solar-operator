@@ -426,14 +426,18 @@ def _all_flagged(cols: list[dict]) -> list[dict]:
 
 # ─────────────────────────────── rendering ───────────────────────────────────
 
-def build_digest_html(tenant, tree: dict) -> str:
+def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> str:
     """Render the morning fleet-health digest as a self-contained HTML email.
 
     Array Operator DAY skin: a light, control-room "utility blue on cool slate"
     look matching the product's default theme (theme-day.css). Forces light mode
     (color-scheme: light only + explicit bgcolors) so dark-mode mail clients
     don't auto-invert it. Mobile-friendly, inline-CSS only, no external assets.
-    Pure function of (tenant, tree): no DB, no I/O -- trivially testable.
+    Pure function of (tenant, tree, personal_note): no DB, no I/O -- testable.
+
+    HYBRID (Ford 2026-07-16): a personal note the Energy Agent brain writes for
+    THIS fleet sits on top (in her voice); the structured visual digest follows.
+    personal_note falsy → the exact template-only digest ships unchanged.
     """
     # ---- Array Operator day palette (mirrors theme-day.css) -----------------
     PAGE, CARD, TILE = "#f6f8fb", "#ffffff", "#f8fafc"
@@ -445,6 +449,26 @@ def build_digest_html(tenant, tree: dict) -> str:
     # VENDOR (inverter) arrays only — drop GMP-only utility-bill arrays so the
     # counts + list match what the owner sees in their inverter sandbox.
     cols = _vendor_columns(tree)
+
+    # HYBRID personal note (Energy Agent's voice), above the structured visuals.
+    note_html = ""
+    _note = (personal_note or "").strip()
+    if _note:
+        _note_esc = (
+            _note.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\n", "<br>")
+        )
+        note_html = (
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:2px 0 16px;"><tr>'
+            f'<td style="background:{BLUE_BG};border:1px solid {BLUE_BORDER};'
+            f'border-radius:12px;padding:14px 16px;">'
+            f'<div style="font-size:11px;color:{BLUE_TEXT};font-weight:700;'
+            'letter-spacing:.5px;text-transform:uppercase;margin-bottom:5px;">'
+            'From your Energy Agent</div>'
+            f'<div style="font-size:14.5px;line-height:1.5;color:{BODY};">{_note_esc}</div>'
+            '</td></tr></table>'
+        )
     arrays_total = len(cols)
     inverters_total = sum(int(c.get("inverter_count") or 0) for c in cols)
     # SINGLE source of the attention count: the 14-day peer/comm verdicts UNION the
@@ -693,7 +717,7 @@ def build_digest_html(tenant, tree: dict) -> str:
         + stale_html +
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
-        + kpis + banner + highlights + per_array +
+        + note_html + kpis + banner + highlights + per_array +
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:4px 28px 26px;">'
         f'<a href="{dash}" style="display:inline-block;background:{BLUE};color:#ffffff;'
@@ -710,7 +734,7 @@ def build_digest_html(tenant, tree: dict) -> str:
     )
 
 
-def build_digest_text(tenant, tree: dict) -> str:
+def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> str:
     """A short plain-text fallback for the digest (mirrors the HTML's substance).
     Honest about missing data; never invents kWh."""
     fleet = _fleet_name(tenant)
@@ -722,6 +746,9 @@ def build_digest_text(tenant, tree: dict) -> str:
 
     date_line = f"Full-day summary · {data_label}" if data_label else "Full-day summary"
     lines = [f"Daily fleet health — {fleet}", date_line]
+    _pn = (personal_note or "").strip()
+    if _pn:
+        lines += ["", "From your Energy Agent:", _pn]
     if stale:
         lines.append("(Some arrays haven't reported a full day recently — see their "
                      "dates below; open Array Operator to refresh.)")
@@ -819,8 +846,48 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
         tenant.digest_hold_notified_at = None
         db.commit()
 
-    html = build_digest_html(tenant, tree)
-    text = build_digest_text(tenant, tree)
+    # HYBRID: a personal note from the Energy Agent brain on top of the visual
+    # digest. All LLM/I-O stays HERE; build_digest_html stays a pure function so
+    # any failure collapses the note to "" and the template-only digest ships.
+    personal_note = None
+    try:
+        _cols = _vendor_columns(tree)
+        _flagged = _all_flagged(_cols)
+        _ranked = _ranked_arrays(_cols)
+        _, _date_label, _stale = _fleet_reference_day(_cols)
+        _facts = {
+            "fleet_name": _fleet_name(tenant),
+            "date": _date_label,
+            "arrays_total": len(_cols),
+            "inverters_total": sum(int(c.get("inverter_count") or 0) for c in _cols),
+            "attention_count": len(_flagged),
+            "flagged": [
+                {"array": f.get("array_name"), "inverter": f.get("name"),
+                 "status": f.get("status"), "note": f.get("phrase")}
+                for f in _flagged[:5]
+            ],
+            "best_array": ({"name": _ranked[0]["col"].get("array_name"),
+                            "kwh": round(_ranked[0].get("kwh") or 0, 1)} if _ranked else None),
+            "worst_array": ({"name": _ranked[-1]["col"].get("array_name"),
+                             "kwh": round(_ranked[-1].get("kwh") or 0, 1)}
+                            if len(_ranked) > 1 else None),
+            "data_stale": bool(_stale),
+        }
+        try:
+            from ..energy_agent import _compute_setup_status
+            _st = _compute_setup_status(db, tenant)
+            _facts["setup_gap"] = _st.get("top_gap")
+            _facts["fully_operational"] = _st.get("fully_operational")
+        except Exception:
+            pass
+        from ..energy_agent_email import compose_morning_note
+        personal_note = compose_morning_note(db, tenant, _facts)
+    except Exception as e:
+        log.info("morning_digest personal note skipped %s: %s", tenant.id, e)
+        personal_note = None
+
+    html = build_digest_html(tenant, tree, personal_note=personal_note)
+    text = build_digest_text(tenant, tree, personal_note=personal_note)
     subject = _subject(tenant, tree)
 
     return notify._send_via_resend(

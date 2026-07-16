@@ -1539,6 +1539,44 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "setup_status",
+            "description": (
+                "YOUR STANDING OBJECTIVE: is this operator fully set up and operational, "
+                "and if not, what is the single highest-value gap? Returns the completeness "
+                "pillars (arrays, auto-refresh, DATA FRESHNESS, utility bills, offtakers, "
+                "repair contact, online pay), whether data is flowing (stale capture = a "
+                "money leak), and top_gap. Call this when the user asks 'am I all set / "
+                "what's left / is everything working', at the start of a setup/onboarding "
+                "conversation, or before nudging. Lead with the specific gap and act — never "
+                "ask 'is everything set up?'."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "refresh_capture",
+            "description": (
+                "Force fresh data NOW when capture has gone stale — re-arms cloud vault logins "
+                "(harvester re-captures in ~a minute) and re-pulls utility bills. Use when data "
+                "is stale (setup_status data_fresh=false) or the user asks 'refresh / why is my "
+                "data old / pull the latest'. Be honest about limits: device/extension vendors "
+                "and SmartHub/VEC co-ops only refresh from an open browser; SolarEdge auto-polls. "
+                "Confirm before running (it reaches out to the portals)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "billing_portal_link",
             "description": "Get Stripe customer portal URL for this tenant (open link; never charges).",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -4050,6 +4088,278 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
     return out
 
 
+# ── setup / operational objective ───────────────────────────────────────────
+# The agent's STANDING JOB: get this operator fully operational, then keep them
+# there. It reasons over a per-tenant completeness model (mirrors the frontend
+# hands-off pillars) anchored on DATA FRESHNESS — the failure mode that silently
+# breaks "operational" in this product (a login lapses, capture goes stale, an
+# array goes dark and nobody notices). She names the ONE highest-value gap and
+# acts on it; when everything's green she goes quiet.
+
+_CAPTURE_STALE_HOURS = float(os.getenv("EA_CAPTURE_STALE_HOURS", "30") or 30)
+
+
+def _hours_since(dt) -> float | None:
+    if not dt:
+        return None
+    try:
+        d = dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+        return max(0.0, (_now() - d).total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
+def _compute_setup_status(db, tenant: Tenant) -> dict:
+    """Per-tenant operational-completeness model. Cheap counts + the freshest
+    capture timestamp. Returns pillars, the single top gap, and a one-line
+    summary for prompt injection. Every sub-query is defensive."""
+    from sqlalchemy import func
+    from .models import (
+        Array, Inverter, UtilityAccount, UtilitySession, Bill,
+        BillingReportSubscription, PortalCredential,
+    )
+    t = db.get(Tenant, tenant.id) or tenant
+
+    def _count(model, *where):
+        try:
+            return int(db.execute(select(func.count()).select_from(model).where(*where)).scalar() or 0)
+        except Exception:
+            return 0
+
+    arrays_n = _count(Array, Array.tenant_id == t.id, Array.deleted_at.is_(None))
+    inverter_backed = 0
+    try:
+        inverter_backed = int(db.execute(
+            select(func.count(func.distinct(Inverter.array_id))).where(
+                Inverter.array_id.in_(
+                    select(Array.id).where(Array.tenant_id == t.id, Array.deleted_at.is_(None))
+                )
+            )
+        ).scalar() or 0)
+    except Exception:
+        pass
+    util_n = _count(UtilityAccount, UtilityAccount.tenant_id == t.id)
+    bills_n = _count(Bill, Bill.tenant_id == t.id)
+    offtakers_n = _count(BillingReportSubscription, BillingReportSubscription.tenant_id == t.id)
+    cloud_creds_n = _count(
+        PortalCredential,
+        PortalCredential.tenant_id == t.id,
+        PortalCredential.cloud_capture_enabled.is_(True),
+    )
+    contacts_n = 0
+    try:
+        from .repair_ops import list_contacts
+        contacts_n = len(list_contacts(db, t.id))
+    except Exception:
+        pass
+
+    # Freshest "capture pipeline actually ran" signal across all paths.
+    fresh_dt = None
+    try:
+        cand = []
+        cand.append(getattr(t, "last_pull_at", None))
+        cand.append(getattr(t, "extension_heartbeat_at", None))
+        lh = db.execute(
+            select(func.max(PortalCredential.last_harvest_at)).where(
+                PortalCredential.tenant_id == t.id
+            )
+        ).scalar()
+        cand.append(lh)
+        ls = db.execute(
+            select(func.max(UtilitySession.captured_at)).where(
+                UtilitySession.tenant_id == t.id
+            )
+        ).scalar()
+        cand.append(ls)
+        cand = [c for c in cand if c]
+        fresh_dt = max(cand) if cand else None
+    except Exception:
+        pass
+    hours_since = _hours_since(fresh_dt)
+    capture_mode = getattr(t, "capture_mode", None)
+    # "Configured" = a scheduled refresh path exists (cloud creds, or device
+    # extension paired, or API-key vendors implied by arrays existing).
+    capture_configured = bool(cloud_creds_n > 0 or capture_mode in ("cloud", "device"))
+    data_fresh = hours_since is not None and hours_since <= _CAPTURE_STALE_HOURS
+    data_stale = arrays_n > 0 and (hours_since is None or hours_since > _CAPTURE_STALE_HOURS)
+
+    pay_ready = bool(getattr(t, "stripe_connect_charges_enabled", False))
+
+    pillars = [
+        {"key": "arrays", "label": "Arrays connected", "done": arrays_n > 0,
+         "optional": False, "detail": f"{arrays_n} array(s), {inverter_backed} inverter-backed"},
+        {"key": "auto_refresh", "label": "Auto-refresh configured", "done": capture_configured,
+         "optional": False,
+         "detail": (f"mode={capture_mode or 'unset'}, {cloud_creds_n} cloud login(s)")},
+        {"key": "data_fresh", "label": "Data flowing (fresh)", "done": (arrays_n == 0 or data_fresh),
+         "optional": False,
+         "detail": (f"last capture ~{round(hours_since,1)}h ago" if hours_since is not None
+                    else "no capture on record")},
+        {"key": "utility_bills", "label": "Utility bills landing", "done": bills_n > 0,
+         "optional": False, "detail": f"{util_n} utility account(s), {bills_n} bill(s)"},
+        {"key": "offtakers", "label": "Offtakers added", "done": offtakers_n > 0,
+         "optional": True, "detail": f"{offtakers_n} offtaker(s)"},
+        {"key": "repair_contact", "label": "Repair contact on file", "done": contacts_n > 0,
+         "optional": True, "detail": f"{contacts_n} O&M contact(s)"},
+        {"key": "online_pay", "label": "Online pay (Stripe Connect)", "done": pay_ready,
+         "optional": True, "detail": ("ready" if pay_ready else "not connected")},
+    ]
+
+    core_open = [p for p in pillars if not p["done"] and not p["optional"]]
+    optional_open = [p for p in pillars if not p["done"] and p["optional"]]
+    fully_operational = not core_open
+
+    # Rank the single highest-value gap. Data-freshness on an existing fleet is
+    # the money-leak gap and outranks incomplete first-time setup.
+    top_gap = None
+    if data_stale:
+        top_gap = {
+            "key": "data_fresh",
+            "why": (f"Your fleet data has been stale for ~{round(hours_since,1) if hours_since else '??'}h "
+                    "— arrays could be dark and invoices could be running on old numbers."),
+            "action": "refresh_capture (or re-add the lapsed portal login on Account → Auto-refresh)",
+            "costing_money": True,
+        }
+    elif arrays_n == 0:
+        top_gap = {"key": "arrays", "why": "No arrays are connected yet — nothing can be monitored or billed.",
+                   "action": "walk them through connecting a vendor portal (onboarding fork)",
+                   "costing_money": False}
+    elif not capture_configured:
+        top_gap = {"key": "auto_refresh", "why": "No 24/7 auto-refresh — data only updates when a browser is open.",
+                   "action": "help save a portal login to cloud (Account → Auto-refresh)", "costing_money": False}
+    elif bills_n == 0:
+        top_gap = {"key": "utility_bills", "why": "No utility bills on file — offtaker invoices can't compute.",
+                   "action": "save a utility login so bills land", "costing_money": False}
+    elif optional_open:
+        p = optional_open[0]
+        top_gap = {"key": p["key"], "why": f"{p['label']} is not set up yet (optional).",
+                   "action": f"offer to set up {p['label'].lower()}", "costing_money": False}
+
+    if fully_operational and not optional_open:
+        summary = "Fully operational — everything's connected and data is fresh. Nothing to nudge."
+    elif top_gap:
+        summary = f"Top gap: {top_gap['why']} Action: {top_gap['action']}."
+    else:
+        summary = "Operational; some optional setup remains."
+
+    return {
+        "fully_operational": fully_operational,
+        "data_fresh": bool(arrays_n == 0 or data_fresh),
+        "hours_since_capture": round(hours_since, 1) if hours_since is not None else None,
+        "capture_mode": capture_mode,
+        "pillars": pillars,
+        "core_gaps": [p["key"] for p in core_open],
+        "optional_gaps": [p["key"] for p in optional_open],
+        "top_gap": top_gap,
+        "summary_line": summary,
+    }
+
+
+def _setup_status_tool(db, tenant: Tenant, args: dict) -> dict:
+    st = _compute_setup_status(db, tenant)
+    st["instruction_for_agent"] = (
+        "This is your standing objective: get them fully operational, then keep them there. "
+        "Lead with top_gap when it exists and it's relevant — name the SPECIFIC gap and offer "
+        "to act (don't ask 'is everything set up?'). If data_fresh is false, that's a money "
+        "leak — offer refresh_capture. If fully_operational and no optional gaps, say things "
+        "look good in one line and don't invent work."
+    )
+    return st
+
+
+def _refresh_capture_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Force fresh data now, across every path the SERVER can actually push:
+      • Cloud vault logins → re-arm (harvester re-captures in ~a minute).
+      • Utility bills (GMP-pullable) → background re-pull.
+    Honest about what it CANNOT force: device/extension capture and SmartHub/VEC
+    utilities only refresh when a signed-in browser is open; SolarEdge rides its
+    own 5-minute server poll. Never claims 'refreshed' for those — 'flagged' at most.
+    """
+    from .models import PortalCredential
+    triggered: list[str] = []
+    limits: list[str] = []
+
+    # 1) Cloud vault — re-arm enabled creds (same as POST /v1/cloud-capture/refresh).
+    cloud_n = 0
+    try:
+        rows = db.execute(
+            select(PortalCredential).where(
+                PortalCredential.tenant_id == tenant.id,
+                PortalCredential.cloud_capture_enabled.is_(True),
+                PortalCredential.secret_enc.isnot(None),
+            )
+        ).scalars().all()
+        for r in rows:
+            r.last_harvest_at = None
+            r.harvest_fails = 0
+            r.updated_at = _now()
+        db.commit()
+        cloud_n = len(rows)
+        if cloud_n:
+            triggered.append(
+                f"Re-armed {cloud_n} cloud login(s) — the harvester re-captures within ~a minute."
+            )
+    except Exception as e:
+        db.rollback()
+        log.warning("refresh_capture cloud re-arm failed: %s", e)
+
+    # 2) Utility bills — background GMP re-pull (never block the turn; demo no-ops).
+    if not bool(getattr(tenant, "is_demo", False)):
+        try:
+            import threading
+            from .worker import pull_bills_for_tenant
+            tid = tenant.id
+
+            def _pull():
+                try:
+                    pull_bills_for_tenant(tid)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("refresh_capture bg bill pull failed %s: %s", tid, e)
+
+            threading.Thread(target=_pull, daemon=True).start()
+            triggered.append("Re-pulling your utility bills now (GMP-pullable accounts).")
+            limits.append("SmartHub / VEC co-op bills can't be pulled from our servers — those refresh from your browser.")
+        except Exception as e:
+            log.warning("refresh_capture bill pull dispatch failed: %s", e)
+
+    # 3) Honest limits for the paths the server cannot force.
+    hb = getattr(tenant, "extension_heartbeat_at", None)
+    hb_hours = _hours_since(hb)
+    if getattr(tenant, "capture_mode", None) == "device" or (hb_hours is not None and hb_hours < 24):
+        if hb_hours is not None and hb_hours < 24:
+            limits.append("Device/extension vendors (Fronius/SMA/Chint) refresh on your next browser sync — a browser is paired, so it should catch up soon.")
+        else:
+            limits.append("Device/extension vendors only refresh when a signed-in browser is open — open Array Operator to pull them.")
+    limits.append("SolarEdge rides its own 5-minute server poll — no manual poke needed.")
+
+    if not triggered:
+        return {
+            "ok": True,
+            "triggered_nothing": True,
+            "message": (
+                "Nothing to force from our side right now — you're either on device/extension "
+                "capture or SolarEdge's automatic poll. "
+            ),
+            "limits": limits,
+            "instruction_for_agent": (
+                "Be honest: there was no server-forceable refresh. If data is stale and it's a "
+                "device/co-op login, tell them to open Array Operator (or re-add the login on "
+                "Account → Auto-refresh); don't claim you refreshed it."
+            ),
+        }
+    return {
+        "ok": True,
+        "cloud_logins_rearmed": cloud_n,
+        "triggered": triggered,
+        "limits": limits,
+        "instruction_for_agent": (
+            "Tell them plainly what you kicked off (cloud re-arm ~1 min; bills re-pulling) and "
+            "be honest about what can't be forced. Offer to check back after it lands. Do NOT "
+            "over-promise instant results."
+        ),
+    }
+
+
 def _ea_judge_write(name: str, args: dict) -> dict | None:
     """Internal judge for Energy Agent writes (not the site auto-ship judge).
 
@@ -5134,6 +5444,23 @@ def _run_tool(
 
     if name == "account_summary":
         return _account_summary_tool(db, tenant, args)
+
+    if name == "setup_status":
+        return _setup_status_tool(db, tenant, args)
+
+    if name == "refresh_capture":
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"refresh": True}):
+            needs = False
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": {"needs_confirm": False}},
+                "message": (args.get("reason") or "Refresh your data now")
+                + " — I'll re-arm cloud logins and re-pull bills. Confirm?",
+                "needs_confirm": True,
+            }
+        return _refresh_capture_tool(db, tenant, args)
 
     if name == "billing_portal_link":
         # Do not invent Stripe; return instruction for UI to call existing endpoint
@@ -6719,6 +7046,25 @@ def _agent_turn(
             "do not claim silence if inbound exists):\n"
             + email_digest[:3500]
         )
+    # Standing objective: where this operator stands on being fully operational.
+    # She always knows the gap and can lead with it (never asks "are you set up?").
+    try:
+        _setup = _compute_setup_status(db, tenant)
+        if _setup.get("fully_operational") and not _setup.get("optional_gaps"):
+            system += (
+                "\n\nOBJECTIVE STATE: this operator is FULLY OPERATIONAL and data is fresh. "
+                "Do not invent setup work or nag — just help with what they ask."
+            )
+        else:
+            system += (
+                "\n\nOBJECTIVE STATE (your standing job — get them fully operational, then keep "
+                "them there): " + _setup.get("summary_line", "")
+                + " Lead with this gap ONLY when it's relevant to the turn; name the specific "
+                "gap and offer to act (call setup_status for detail, refresh_capture if data is "
+                "stale). Never ask 'is everything set up?'."
+            )
+    except Exception as _e:
+        log.info("objective-state inject skipped: %s", _e)
     system += (
         "\n\nSPEED: Prefer ONE tool call then answer. For solar credit / offtaker "
         "rates call get_billing_rates (or get_offtaker) first — do not call "

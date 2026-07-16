@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -55,6 +56,8 @@ KIND_IMPORTANCE: dict[str, int] = {
     "proactive_insight": 48,  # quiet by default; only speak on spike / first notice
     "prepare_ux_approval": 78,
     "profile_sync": 12,
+    # Standing objective — nudge the single highest-value setup/operational gap.
+    "setup_gap": 62,  # clears MIN_IMPORTANCE_TO_SPEAK; money-losing gaps boost higher
 }
 
 # Cheap cost attribution for workers (ledger reason worker:<kind>)
@@ -365,6 +368,11 @@ def score_importance(kind: str, result: dict | None, speak: str | None) -> int:
     elif kind == "prepare_ux_approval":
         if result.get("suggestion_id"):
             boost += 10
+    elif kind == "setup_gap":
+        if result.get("costing_money"):
+            boost += 22  # stale data / dark array — surface it
+        elif result.get("optional_only"):
+            boost -= 18  # optional setup — gentle, easy to suppress
 
     if speak and len(speak) > 20:
         boost += 5
@@ -1578,6 +1586,108 @@ def _prepare_ux_approval_worker(db, tenant_id: str, payload: dict) -> dict:
     result["prepared"] = True
     result["awaiting_human"] = not auto
     return result
+
+
+# ── standing objective: nudge the single highest-value gap, with restraint ────
+GAP_NUDGE_COOLDOWN_HOURS = float(os.getenv("EA_GAP_NUDGE_COOLDOWN_HOURS", "20") or 20)
+GAP_URGENT_HOURS = float(os.getenv("EA_CAPTURE_URGENT_HOURS", "48") or 48)
+GAP_URGENT_EMAIL_COOLDOWN_HOURS = float(os.getenv("EA_GAP_URGENT_EMAIL_COOLDOWN_HOURS", "72") or 72)
+
+
+def _gap_speak(top_gap: dict) -> str:
+    why = (top_gap.get("why") or "").strip()
+    action = (top_gap.get("action") or "").strip()
+    if top_gap.get("costing_money"):
+        return f"Quick heads up — {why} Want me to refresh it now?"
+    return f"When you have a sec — {why} Want me to help {action}?" if action else f"When you have a sec — {why}"
+
+
+def evaluate_and_nudge_gap(db, tenant_id: str) -> dict:
+    """The standing objective, evaluated once per long-term tick:
+      • Fully operational + fresh → SILENT (clear gap state).
+      • Otherwise pick the ONE top gap and surface an in-app nudge (policy-
+        throttled, deduped per gap key).
+      • If it's actively costing money (stale capture past the urgent window) →
+        escalate to a direct email, opt-out-aware, on a long cooldown.
+    Never nags: gap-specific, one channel at a time, quiet when green."""
+    out = {"silent": True}
+    from .models import Tenant
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None:
+        return out
+    try:
+        from .energy_agent import _compute_setup_status
+        st = _compute_setup_status(db, tenant)
+    except Exception as e:
+        log.info("gap eval setup_status failed %s: %s", tenant_id, e)
+        return out
+
+    world = _world_get(db, tenant_id) or {}
+    if st.get("fully_operational") and not st.get("optional_gaps"):
+        if world.get("last_gap_key"):
+            _world_patch(db, tenant_id, {"last_gap_key": None})
+        return {"silent": True, "reason": "fully_operational"}
+
+    top = st.get("top_gap") or None
+    if not top:
+        return {"silent": True, "reason": "no_top_gap"}
+
+    gap_key = top.get("key")
+    costing = bool(top.get("costing_money"))
+    optional_only = not costing and not st.get("core_gaps")
+
+    # In-app nudge — deduped per gap key on a cooldown.
+    last_key = world.get("last_gap_key")
+    last_at = world.get("last_gap_nudge_at")
+    dup = False
+    if last_key == gap_key and last_at:
+        try:
+            from datetime import datetime
+            since_h = (_now() - datetime.fromisoformat(str(last_at).rstrip("Z"))).total_seconds() / 3600.0
+            dup = since_h < GAP_NUDGE_COOLDOWN_HOURS
+        except Exception:
+            dup = False
+
+    emitted = None
+    if not dup:
+        emitted = maybe_queue_interrupt(
+            db, tenant_id,
+            session_id=None,
+            ref_id=f"gap:{gap_key}",
+            title=f"Setup gap: {gap_key}",
+            speak=_gap_speak(top),
+            kind="setup_gap",
+            result={"costing_money": costing, "optional_only": optional_only, "gap": top},
+        )
+        _world_patch(db, tenant_id, {
+            "last_gap_key": gap_key,
+            "last_gap_nudge_at": _now().isoformat() + "Z",
+        })
+        out = {"silent": False, "gap": gap_key, "emitted": emitted, "costing_money": costing}
+    else:
+        out = {"silent": True, "reason": "deduped", "gap": gap_key}
+
+    # Urgent escalation — direct email ONLY when a gap is actively costing money
+    # (stale data past the urgent window). Opt-out-aware, long cooldown.
+    if costing and (st.get("hours_since_capture") or 0) >= GAP_URGENT_HOURS:
+        try:
+            from .energy_agent_email import checkin_opted_out, send_gap_alert_email
+            if not checkin_opted_out(db, tenant_id):
+                last_urgent = world.get("last_gap_urgent_email_at")
+                cool_ok = True
+                if last_urgent:
+                    try:
+                        from datetime import datetime
+                        since_h = (_now() - datetime.fromisoformat(str(last_urgent).rstrip("Z"))).total_seconds() / 3600.0
+                        cool_ok = since_h >= GAP_URGENT_EMAIL_COOLDOWN_HOURS
+                    except Exception:
+                        cool_ok = True
+                if cool_ok and send_gap_alert_email(tenant, st, top):
+                    _world_patch(db, tenant_id, {"last_gap_urgent_email_at": _now().isoformat() + "Z"})
+                    out["urgent_email"] = True
+        except Exception as e:
+            log.info("gap urgent email skipped %s: %s", tenant_id, e)
+    return out
 
 
 def wake_mind(
