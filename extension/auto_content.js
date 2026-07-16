@@ -25,7 +25,7 @@
   }
 
   function base(s) {
-    var ep = s.api_endpoint || "https://nepooloperator.com/v1/sync";
+    var ep = s.api_endpoint || "https://arrayoperator.com/v1/sync";
     return ep.replace(/\/v1\/sync\/?$/, "");
   }
   function headers(s) {
