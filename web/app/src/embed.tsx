@@ -199,7 +199,13 @@ function mount(host: HTMLElement): () => void {
 declare global {
   interface Window {
     NepoolGenReports?: { mount: typeof mount };
+    __soEventsBase?: string;
   }
 }
+
+// SSE must skip the Netlify /v1 proxy (it buffers event-streams ~21s to first
+// byte — measured live 2026-07-16). Point SSE, and only SSE, at the Railway
+// origin; AO's CSP connect-src and the backend's CORS already allow it.
+window.__soEventsBase = "https://web-production-49c83.up.railway.app";
 
 window.NepoolGenReports = { mount };

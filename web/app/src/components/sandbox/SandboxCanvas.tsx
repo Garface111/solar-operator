@@ -33,6 +33,7 @@ import {
   getSession,
   clearSession,
   UNAUTHORIZED_EVENT,
+  eventsUrl,
   type CanvasResponse,
   type CanvasClientData,
 } from '../../lib/api';
@@ -723,7 +724,7 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
       setSseStatus('reconnecting');
 
       try {
-        const resp = await fetch('/v1/events', {
+        const resp = await fetch(eventsUrl(), {
           headers: { Authorization: `Bearer ${token}` },
           signal: ac.signal,
         });

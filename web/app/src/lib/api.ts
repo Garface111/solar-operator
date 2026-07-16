@@ -369,6 +369,16 @@ export interface ClientRow {
 
 // ─── account ───────────────────────────────────────────────────────────────
 
+/** THE FOLD: SSE endpoint resolver. On arrayoperator.com the Netlify /v1
+ *  proxy BUFFERS event-streams (~21s to first byte, measured 2026-07-16), so
+ *  the embed entry points SSE — and only SSE — straight at the Railway
+ *  origin (window.__soEventsBase; CORS + AO's CSP connect-src both already
+ *  allow it). The standalone SPA leaves the global unset → same-origin. */
+export function eventsUrl(): string {
+  const base = (window as unknown as { __soEventsBase?: string }).__soEventsBase;
+  return (typeof base === "string" && base ? base.replace(/\/+$/, "") : "") + "/v1/events";
+}
+
 export function getAccount(): Promise<Account> {
   return request<Account>("/v1/account");
 }
