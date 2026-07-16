@@ -1,12 +1,13 @@
-"""Locus Energy (SolarNOC) inverter source — WRAPS api/adapters/locus.py.
+"""Locus Energy (SolarNOC / AlsoEnergy) inverter source — WRAPS api/adapters/locus.py.
 
 The working Locus HTTP logic lives in api/adapters/locus.py and is the single
 source of truth for Locus calls. This module only adapts that logic to the
 vendor interface (validate / fetch_live / fetch_daily + discover_sites) and
 translates Locus exceptions into the framework's InverterError family.
 
-Config: {"client_id", "client_secret", "username", "password", "site_id"};
-discovery additionally takes {"partner_id"}.
+Config: {"username", "password", "site_id"}. One SolarNOC login enumerates every
+site under the partner — the "paste one credential, attach all arrays" flow. The
+partner id is read from the login itself (no client_id/secret, no API key).
 """
 from __future__ import annotations
 
@@ -18,28 +19,33 @@ from .base import InverterAuthError, InverterError, InverterScopeError, require_
 CODE = "locus"
 LABEL = "Locus Energy (SolarNOC)"
 AVAILABLE = True
-NOTE = "Requires Locus API credentials (client_id/secret + SolarNOC username/password) from your Locus account manager."
+NOTE = (
+    "Requires your Locus SolarNOC portal username + password — the same login "
+    "you use at the SolarNOC / AlsoEnergy portal. No API key or client secret needed."
+)
 SUPPORTS_LIVE = True
 SUPPORTS_DAILY = True
 FIELDS = [
-    {"name": "client_id", "label": "Client ID", "secret": False},
-    {"name": "client_secret", "label": "Client Secret", "secret": True},
     {"name": "username", "label": "SolarNOC username", "secret": False},
     {"name": "password", "label": "SolarNOC password", "secret": True},
-    {"name": "site_id", "label": "Site ID", "secret": False},
-    {"name": "partner_id", "label": "Partner ID (for discovery)", "secret": False},
+    # Optional when using connect-account / discover — one login attaches every site.
+    {"name": "site_id", "label": "Site ID (optional — leave blank to attach every site)",
+     "secret": False, "optional": True},
 ]
 
 
 def _creds(config: dict) -> dict:
-    """Pull the four credential fields out of config (raises if any is blank)."""
-    require_fields(config, "client_id", "client_secret", "username", "password")
-    return {
-        "client_id": str(config["client_id"]).strip(),
-        "client_secret": str(config["client_secret"]).strip(),
+    """Pull the credential fields out of config (raises if username/password blank)."""
+    require_fields(config, "username", "password")
+    creds = {
         "username": str(config["username"]).strip(),
         "password": str(config["password"]),
     }
+    # Optional override of the portal's Cognito app client id (defaults to the
+    # shared portal client baked into the adapter).
+    if config.get("cognito_client_id"):
+        creds["cognito_client_id"] = str(config["cognito_client_id"]).strip()
+    return creds
 
 
 def _site_id(config: dict) -> int:
@@ -66,23 +72,21 @@ def validate(config: dict) -> dict:
 
 
 def discover_sites(config: dict) -> list[dict]:
-    """Every site under a partner an account credential can read, for the "paste
-    one credential, attach all arrays" flow.
+    """Every site the login can read, for the "paste one credential, attach all
+    arrays" flow. The partner id is derived from the login (an explicit
+    `partner_id` in config still overrides it).
 
-    Returns [{site_id, name, peak_power_kw, status}, ...] — Locus's site list has
-    no peak power, so peak_power_kw is always None (the key is kept so the UI
-    shape matches SolarEdge).
+    Returns [{site_id, name, peak_power_kw, status}, ...].
 
     Raises:
       InverterScopeError — credentials valid but no access to the partner (403).
-      InverterAuthError  — bad/inactive credentials (401).
+      InverterAuthError  — bad/inactive login (401).
       InverterError      — any other Locus failure (5xx, network, bad JSON).
     """
     creds = _creds(config)
-    require_fields(config, "partner_id")
-    partner_id = config["partner_id"]
+    partner = config.get("partner_id") or None
     try:
-        sites = _locus.list_partner_sites(creds, partner_id)
+        sites = _locus.list_partner_sites(creds, partner)
     except _locus.LocusScopeError as exc:
         raise InverterScopeError(str(exc)) from exc
     except _locus.LocusAuthError as exc:
@@ -94,7 +98,7 @@ def discover_sites(config: dict) -> list[dict]:
         {
             "site_id": s["site_id"],
             "name": s.get("name") or "",
-            "peak_power_kw": None,
+            "peak_power_kw": s.get("peak_power_kw"),
             "status": "",
         }
         for s in sites

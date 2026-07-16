@@ -2414,8 +2414,6 @@ def connect_solaredge(
 
 
 class LocusConnectBody(BaseModel):
-    client_id: str
-    client_secret: str
     username: str
     password: str
     site_id: int
@@ -2431,27 +2429,21 @@ def connect_locus(
 ) -> dict:
     """Connect a Locus Energy (SolarNOC) site to an array — thin shim over the
     vendor-agnostic inverter framework (same path SolarEdge uses). Validates the
-    credentials + site by pulling site details (Locus v3 OAuth2 password grant)
-    before persisting; a rejected credential (401/403) or unreachable site returns
-    400 and saves nothing.
+    credentials + site by pulling site details before persisting; a rejected
+    login (401/403) or unreachable site returns 400 and saves nothing.
 
-    NOTE: Locus needs API app credentials (client_id/secret) from the operator's
-    Locus/AlsoEnergy account manager — the SolarNOC *portal* login alone won't
-    authenticate the API.
+    Auth is the SolarNOC portal username + password (the API is fronted by AWS
+    Cognito) — no API app client_id/secret needed.
     """
     tenant = _tenant_from_bearer(authorization)
 
     config = {
-        "client_id": (body.client_id or "").strip(),
-        "client_secret": (body.client_secret or "").strip(),
         "username": (body.username or "").strip(),
         "password": body.password or "",
         "site_id": int(body.site_id),
     }
-    if not all((config["client_id"], config["client_secret"],
-                config["username"], config["password"])):
-        raise HTTPException(
-            400, "client_id, client_secret, username and password are all required")
+    if not all((config["username"], config["password"])):
+        raise HTTPException(400, "username and password are both required")
     if body.partner_id:
         config["partner_id"] = body.partner_id.strip()
     if body.timezone:
@@ -2610,7 +2602,8 @@ class PublicPreviewBody(BaseModel):
 # Per-vendor friendly copy for the two recoverable failures (bad creds / scope).
 _PREVIEW_AUTH_MSG = {
     "solaredge": "That key didn't work — make sure it's an active account-level API key.",
-    "locus": "Those Locus credentials didn't work — double-check the client ID/secret and your SolarNOC login.",
+    "locus": "That SolarNOC login didn't work — double-check the username and password "
+             "you use at the Locus SolarNOC / AlsoEnergy portal.",
     "fronius": "Those Solar.web keys didn't work — check the Access Key ID and "
                "Access Key Value (Solar.web → Settings → REST API → CREATE NEW KEY).",
     "sma": "Those SMA credentials didn't work — check the client ID/secret and Plant/System ID.",
@@ -2619,8 +2612,8 @@ _PREVIEW_SCOPE_MSG = {
     "solaredge": "That's a site-level key — it can't list your whole account. Paste an "
                  "account-level key (SolarEdge Admin → Site Access → API Access) to see "
                  "every array at once.",
-    "locus": "Those credentials can't list the partner's sites. Add your Partner ID, or "
-             "enter a single Site ID to preview just that array.",
+    "locus": "That login is valid but can't list the partner's sites. Enter a single "
+             "Site ID to preview just that array.",
 }
 
 
@@ -2668,12 +2661,13 @@ def _preview_sites_for_vendor(vendor: str, config: dict) -> list[dict]:
         return [_normalize_preview_site(vendor, s) for s in raw]
 
     if vendor == "locus":
-        # Account-wide discovery needs a partner_id; otherwise preview the one
-        # named site via validate().
-        if (config.get("partner_id") or "").strip():
-            raw = mod.discover_sites(config)
-            return [_normalize_preview_site(vendor, s) for s in raw]
-        return [_normalize_preview_site(vendor, mod.validate(config))]
+        # One SolarNOC login lists every site under the partner (the partner id
+        # is read from the login itself — no partner_id input). A named site_id
+        # still previews just that array.
+        if str(config.get("site_id") or "").strip():
+            return [_normalize_preview_site(vendor, mod.validate(config))]
+        raw = mod.discover_sites(config)
+        return [_normalize_preview_site(vendor, s) for s in raw]
 
     if vendor == "fronius":
         # Full-account cascade: the Solar.web AccessKey lists EVERY system on
@@ -2727,7 +2721,8 @@ def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
     # Required fields present? (cheap pre-check so we return friendly copy, not 500)
     needs = {
         "solaredge": ["api_key"],
-        "locus": ["client_id", "client_secret", "username", "password"],
+        # site_id optional: without it we list every site under the login.
+        "locus": ["username", "password"],
         # pv_system_id optional: without it we list the whole account.
         "fronius": ["access_key_id", "access_key_value"],
         "sma": ["client_id", "client_secret", "system_id"],
@@ -3004,8 +2999,6 @@ def _attach_locus(db, arr: Array, creds: dict, site_id: int) -> InverterConnecti
     locus (the solaredge_* columns are SolarEdge-only).
     """
     config = {
-        "client_id": creds["client_id"],
-        "client_secret": creds["client_secret"],
         "username": creds["username"],
         "password": creds["password"],
         "site_id": int(site_id),
@@ -3027,11 +3020,10 @@ def _attach_locus(db, arr: Array, creds: dict, site_id: int) -> InverterConnecti
 
 
 class LocusDiscoverBody(BaseModel):
-    client_id: str
-    client_secret: str
     username: str
     password: str
-    partner_id: int
+    # Optional: normally derived from the login; override only for a sub-partner.
+    partner_id: Optional[int] = None
 
 
 @router.post("/v1/array-owners/locus/discover")
@@ -3048,13 +3040,9 @@ def locus_discover(
     _tenant = _tenant_from_bearer(authorization)
     _guard_vendor_discover(_tenant.id, "locus")
 
-    creds = {
-        "client_id": body.client_id,
-        "client_secret": body.client_secret,
-        "username": body.username,
-        "password": body.password,
-        "partner_id": body.partner_id,
-    }
+    creds = {"username": body.username, "password": body.password}
+    if body.partner_id is not None:
+        creds["partner_id"] = body.partner_id
 
     try:
         sites = inverters.locus.discover_sites(creds)
@@ -3073,11 +3061,10 @@ def locus_discover(
 
 
 class LocusConnectAccountBody(BaseModel):
-    client_id: str
-    client_secret: str
     username: str
     password: str
-    partner_id: int
+    # Optional: normally derived from the login; override only for a sub-partner.
+    partner_id: Optional[int] = None
     # When omitted, every discovered site is connected.
     site_ids: Optional[list[int]] = None
 
@@ -3099,13 +3086,13 @@ def locus_connect_account(
     """
     tenant = _tenant_from_bearer(authorization)
 
-    creds = {
-        "client_id": body.client_id,
-        "client_secret": body.client_secret,
-        "username": body.username,
-        "password": body.password,
-        "partner_id": body.partner_id,
-    }
+    username = (body.username or "").strip()
+    password = body.password or ""
+    if not username or not password:
+        raise HTTPException(400, "username and password are required")
+    creds = {"username": username, "password": password}
+    if body.partner_id is not None:
+        creds["partner_id"] = body.partner_id
 
     requested: set[int] | None = None
     if body.site_ids is not None:
