@@ -5790,7 +5790,8 @@ def _agent_turn(
         )
         system += (
             "\nIf mind_plan is set, prefer refining understanding in conversation "
-            "while work continues; you may briefly say you're looking into it."
+            "while work continues. Do NOT say theater lines like 'looking into it' — "
+            "only speak concrete progress or wait silently."
         )
     try:
         from .energy_agent_mind import _world_get as _wg
