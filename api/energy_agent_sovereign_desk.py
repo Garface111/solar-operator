@@ -2251,8 +2251,13 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
     """
     t, email = _auth_ford(authorization)
     del email
-    if not _flag("SOVEREIGN_ENABLED", "1"):
-        raise HTTPException(503, "Sovereign is offline (SOVEREIGN_ENABLED=0)")
+    # Desk HTTP lives on the web service. After process split, background mind is
+    # on the worker (SOVEREIGN_ENABLED there). Web often has SOVEREIGN_ENABLED=0
+    # so scheduler thrash can't take AO down — but Ford still needs the desk.
+    # Kill desk alone with SOVEREIGN_DESK_ENABLED=0.
+    desk_on = _flag("SOVEREIGN_DESK_ENABLED", "1")
+    if not desk_on:
+        raise HTTPException(503, "Sovereign desk is offline (SOVEREIGN_DESK_ENABLED=0)")
     ensure_tables()
 
     crid = (body.client_request_id or "").strip()[:80] or None
