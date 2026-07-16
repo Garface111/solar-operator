@@ -420,10 +420,14 @@ You are speaking directly to Ford on the private Sovereign Desk — not the Ener
 - Prefer small, reversible local tools. Never request mass-delete or destructive rm -rf.
 
 Also return a trailing JSON block after your prose with optional structured side-effects
-(the UI strips this; never put it mid-reply):
+(the UI strips this; never put it mid-reply). Rules for the side block:
+- ALWAYS after prose, never instead of prose (unless the whole turn is a one-liner ack).
+- NEVER wrap the side block in a markdown fence (no ```json). Use the delimiters exactly:
 ---JSON---
 {"monologue":"...","actions":[],"ford_ask":null,"succession_gap":null,"memory_writes":[],"mood":"determined"}
 ---END---
+- succession_gap: under full succession this is usually null. Only list true residual
+  Ford-only needs (e.g. physical device, bank 2FA) — never money/brand/hard-delete/HAR.
 """
     )
     transcript = []
@@ -453,28 +457,109 @@ Also return a trailing JSON block after your prose with optional structured side
     return blocks
 
 
+_SIDE_META_KEYS = frozenset({
+    "monologue", "actions", "mood", "ford_ask", "succession_gap",
+    "memory_writes", "agenda_updates",
+})
+
+
+def _looks_like_side_meta(obj: Any) -> bool:
+    return isinstance(obj, dict) and bool(_SIDE_META_KEYS.intersection(obj.keys()))
+
+
+def _prose_from_meta(meta: dict, fallback: str = "") -> str:
+    """User-facing chat text when the model returned structured side-meta only."""
+    mono = (meta.get("monologue") or "").strip() if isinstance(meta, dict) else ""
+    ask = (meta.get("ford_ask") or "").strip() if isinstance(meta, dict) else ""
+    if mono and ask and ask not in mono:
+        return f"{mono}\n\n**What I need from you:** {ask}"
+    if mono:
+        return mono
+    if ask:
+        return ask
+    return (fallback or "").strip()
+
+
+def _try_parse_side_json(blob: str) -> dict | None:
+    s = (blob or "").strip()
+    if not s:
+        return None
+    # strip accidental fences the model wrapped around the side block
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json|JSON)?\s*", "", s)
+        s = re.sub(r"\s*```\s*$", "", s)
+        s = s.strip()
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return None
+    return obj if _looks_like_side_meta(obj) else None
+
+
 def _split_reply(raw: str) -> tuple[str, dict]:
+    """Split model output into Ford-facing prose + structured side-effect meta.
+
+    Accepts several shapes models actually produce:
+      1) prose + ---JSON--- {...} ---END---
+      2) prose + trailing bare {...monologue/actions...}
+      3) prose + trailing fenced ```json {...}```
+      4) pure side-meta JSON object (whole reply is JSON) → monologue becomes prose
+    Never leave raw side-meta JSON in the chat bubble.
+    """
     text = (raw or "").strip()
     meta: dict[str, Any] = {}
+    if not text:
+        return "", meta
+
+    # 1) Explicit delimiter (preferred prompt contract)
     if "---JSON---" in text:
         prose, rest = text.split("---JSON---", 1)
         json_part = rest.split("---END---", 1)[0].strip()
-        try:
-            meta = json.loads(json_part)
-            if not isinstance(meta, dict):
-                meta = {}
-        except Exception:
-            meta = {}
-        return prose.strip(), meta
-    # try trailing JSON object
-    start = text.rfind("{")
-    if start > 0 and text.rstrip().endswith("}"):
-        try:
-            meta = json.loads(text[start:])
-            if isinstance(meta, dict) and ("monologue" in meta or "actions" in meta or "mood" in meta):
-                return text[:start].strip(), meta
-        except Exception:
-            pass
+        parsed = _try_parse_side_json(json_part)
+        if parsed is not None:
+            meta = parsed
+        prose = prose.strip()
+        # Drop a trailing fence opener the model left before the delimiter
+        prose = re.sub(r"\n?```(?:json|JSON)?\s*$", "", prose).strip()
+        if not prose:
+            prose = _prose_from_meta(meta)
+        return prose, meta
+
+    # 2) Whole reply is side-meta JSON (common when model ignores "prose first")
+    whole = _try_parse_side_json(text)
+    if whole is not None:
+        return _prose_from_meta(whole) or "Understood.", whole
+
+    # 3) Trailing fenced ```json ... ``` (what the screenshot bug was)
+    fence_re = re.compile(
+        r"\n?```(?:json|JSON)?\s*\n(\{[\s\S]*?\})\s*\n?```\s*$",
+        re.MULTILINE,
+    )
+    m = fence_re.search(text)
+    if m:
+        parsed = _try_parse_side_json(m.group(1))
+        if parsed is not None:
+            prose = text[: m.start()].strip()
+            prose = re.sub(r"\n?```(?:json|JSON)?\s*$", "", prose).strip()
+            if not prose:
+                prose = _prose_from_meta(parsed)
+            return prose, parsed
+
+    # 4) Trailing bare JSON object with side-meta keys
+    start = text.rfind("\n{")
+    if start < 0 and text.startswith("{"):
+        start = 0
+    elif start >= 0:
+        start = start + 1  # point at '{'
+    if start >= 0 and text.rstrip().endswith("}"):
+        candidate = text[start:]
+        parsed = _try_parse_side_json(candidate)
+        if parsed is not None:
+            prose = text[:start].strip()
+            if not prose:
+                prose = _prose_from_meta(parsed)
+            return prose, parsed
+
     return text, meta
 
 
@@ -574,6 +659,13 @@ def desk_turn(
         .limit(8)
     ).scalars().all()
 
+    succession_ctx: dict[str, Any] = {}
+    try:
+        from .energy_agent_sovereign_succession import succession_status
+        succession_ctx = succession_status()
+    except Exception as e:  # noqa: BLE001
+        succession_ctx = {"error": str(e)[:120]}
+
     context = {
         "digests": digests,
         "goals": goals,
@@ -581,6 +673,7 @@ def desk_turn(
         "recent_notes": recent_notes(db, limit=8),
         "open_jobs": jobs,
         "tenant_id": t.id,
+        "succession": succession_ctx,
         "attachments": [serialize_asset(a) for a in assets],
         "local_bridge": {
             "pending": [
@@ -619,6 +712,19 @@ def desk_turn(
         provider = raw.get("provider")
         model = raw.get("model")
         reply, meta = _split_reply(raw.get("content") or "")
+        # Belt-and-suspenders: if split left side-JSON as prose, salvage monologue
+        if reply.lstrip().startswith("{") and _looks_like_side_meta(
+            _try_parse_side_json(reply) or {}
+        ):
+            salvaged = _try_parse_side_json(reply) or {}
+            meta = {**salvaged, **meta} if meta else salvaged
+            reply = _prose_from_meta(meta, reply)
+        # Strip any residual fenced side-JSON the model left mid/end of prose
+        if "```" in reply and any(k in reply for k in ('"monologue"', '"actions"', '"mood"')):
+            reply2, meta2 = _split_reply(reply)
+            if meta2:
+                meta = {**meta, **meta2}
+            reply = reply2
     except Exception as e:  # noqa: BLE001
         log.exception("desk brain failed")
         reply = (
@@ -630,6 +736,9 @@ def desk_turn(
 
     if not reply:
         reply = "Understood. I'm on it — I'll push the next concrete step and note what I need from you."
+    # Never persist raw side-meta JSON into the chat transcript
+    if reply.lstrip().startswith("{") and '"monologue"' in reply[:200]:
+        reply = _prose_from_meta(meta, "Understood.") or "Understood."
 
     sov_row = EaSovereignDeskMessage(
         id=_id("sdm"),

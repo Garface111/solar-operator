@@ -107,6 +107,46 @@ def test_history_chat_only_survives_worker_flood(monkeypatch):
         assert not any("Sovereign shipped job" in (h["content"] or "") for h in hist)
 
 
+def test_split_reply_strips_fenced_and_pure_json():
+    """Desk must never store raw side-meta JSON as the chat bubble (screenshot bug)."""
+    from api.energy_agent_sovereign_desk import _split_reply
+
+    pure = json.dumps({
+        "monologue": "Yes, I'm live and listening.",
+        "actions": [],
+        "ford_ask": None,
+        "succession_gap": None,
+        "mood": "determined",
+    })
+    prose, meta = _split_reply(pure)
+    assert prose == "Yes, I'm live and listening."
+    assert meta.get("mood") == "determined"
+    assert not prose.lstrip().startswith("{")
+
+    fenced = (
+        "Yes — still here.\n\n"
+        "## Status\n- Queues quiet\n\n"
+        "```json\n"
+        + pure
+        + "\n```"
+    )
+    prose2, meta2 = _split_reply(fenced)
+    assert "Yes — still here" in prose2
+    assert "```" not in prose2
+    assert '"monologue"' not in prose2
+    assert meta2.get("mood") == "determined"
+
+    delim = "Hello Ford.\n---JSON---\n" + pure + "\n---END---\n"
+    prose3, meta3 = _split_reply(delim)
+    assert prose3 == "Hello Ford."
+    assert meta3.get("actions") == []
+
+    bare = "Hello Ford.\n\n" + pure
+    prose4, meta4 = _split_reply(bare)
+    assert prose4 == "Hello Ford."
+    assert meta4.get("monologue")
+
+
 def test_speak_defaults_off():
     import os
     os.environ.pop("SOVEREIGN_SPEAK_ENABLED", None)
