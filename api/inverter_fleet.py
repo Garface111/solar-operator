@@ -1200,6 +1200,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "daily": m.get("daily", []),
                 "error_code": m.get("error_code"),
                 "last_report": _lr,
+                # Owner-confirmed structural underperformance: the verdict engine
+                # re-baselines these against expected_low_baseline instead of the
+                # cohort floor (see peer_analysis.analyze_cohort).
+                "expected_low": bool(getattr(iv, "expected_low", False)),
+                "expected_low_baseline": getattr(iv, "expected_low_baseline", None),
+                "expected_low_reason": getattr(iv, "expected_low_reason", None),
             })
 
         analyzed = peer_analysis.analyze_cohort(
@@ -1242,6 +1248,15 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "no_energy_register": False,
                 "diagnosis": u.get("diagnosis"),
                 "window_kwh": u.get("window_kwh"),
+                # Owner-confirmed structural underperformance (shading/obstruction).
+                # Carried so every surface renders the calm "expected lower" state
+                # instead of a red "underperforming", and so the agent can reason
+                # about it. expected_low_breach = it dropped BELOW its baseline (a
+                # real new problem) and IS flagged underperforming despite the mark.
+                "expected_low": bool(getattr(iv, "expected_low", False)),
+                "expected_low_reason": getattr(iv, "expected_low_reason", None),
+                "expected_low_baseline": getattr(iv, "expected_low_baseline", None),
+                "expected_low_breach": bool(u.get("expected_low_breach")),
                 # This inverter's TODAY kWh (the last daily point IF it's today), so the
                 # spreadsheet's Today column can show per-inverter output, not just the
                 # array total. None when today hasn't been captured yet (no misleading 0).
@@ -1571,6 +1586,55 @@ def rename_inverter(db, tenant: Tenant, inverter_id: int, name: str) -> Inverter
         raise FleetError("Name cannot be empty")
     iv.name = new_name
     iv.name_is_custom = True
+    db.commit()
+    db.refresh(iv)
+    return iv
+
+
+def current_peer_index(db, tenant: Tenant, inverter_id: int) -> float | None:
+    """The inverter's STABLE 14-day peer_index right now (same verdict the dashboard
+    and emails use). Used to seed an expected-low baseline. None when it can't be
+    peer-graded yet (solo cohort, or no captured history)."""
+    tree = build_fleet_tree(db, tenant, stable_verdicts=True)
+    for col in tree.get("columns", []):
+        for r in col.get("inverters", []):
+            if r.get("inverter_id") == inverter_id:
+                return r.get("peer_index")
+    return None
+
+
+def set_expected_low(db, tenant: Tenant, inverter_id: int, *, expected_low: bool,
+                     reason: str | None = None, baseline: float | None = None,
+                     set_by: str = "owner") -> Inverter:
+    """Mark (or clear) an inverter as OWNER-CONFIRMED expected-low — it runs
+    permanently below its peers for a fixed physical reason (afternoon shade from a
+    neighbour's tree, a chimney, a poor roof face). When set, we record its CURRENT
+    stable peer_index as the baseline and the verdict engine re-judges it against
+    THAT level, not the cohort floor (peer_analysis.analyze_cohort) — so it reads
+    calm while it holds, but still flags + alerts if it drops beneath the baseline
+    (a genuine new fault on top of the shading). Tenant-scoped."""
+    iv = db.get(Inverter, inverter_id)
+    if iv is None or iv.tenant_id != tenant.id or iv.deleted_at is not None:
+        raise FleetError("Inverter not found")
+    if expected_low:
+        if baseline is None:
+            baseline = current_peer_index(db, tenant, inverter_id)
+        if baseline is None:
+            raise FleetError(
+                "Not enough peer history yet to set a baseline for this inverter — it "
+                "needs a few days of data alongside at least one neighbour first."
+            )
+        iv.expected_low = True
+        iv.expected_low_reason = ((reason or "").strip()[:240] or None)
+        iv.expected_low_baseline = float(baseline)
+        iv.expected_low_set_at = now()
+        iv.expected_low_set_by = (set_by or "owner")[:40]
+    else:
+        iv.expected_low = False
+        iv.expected_low_reason = None
+        iv.expected_low_baseline = None
+        iv.expected_low_set_at = None
+        iv.expected_low_set_by = None
     db.commit()
     db.refresh(iv)
     return iv

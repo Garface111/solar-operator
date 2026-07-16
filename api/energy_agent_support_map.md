@@ -215,6 +215,11 @@ SAFETY
 
 STALE ≠ DEAD (say this often): for Fronius/SMA/Chint, “stale” usually means no recent capture (the feed only advances while a signed-in browser or the cloud harvester runs), not a dead inverter. The next step is “re-log-in with the vendor / check Auto-refresh,” not “replace hardware.”
 
+EXPECTED-LOW / SHADING (an inverter that’s *supposed* to run low):
+- Some inverters are permanently below their peers for a **fixed physical reason** — afternoon shade from a neighbour’s tree, a chimney, a poor roof face. That’s not a fault to chase; flagging it “underperforming” forever just trains the owner to ignore the flag.
+- When the owner confirms the cause, the inverter is marked **expected-low**: we record its current peer ratio as a **baseline** and judge it against *that* level instead of the cohort floor. So a steadily-shaded unit reads calm (“Holding at its expected reduced level ~42% of peers”), but it **still flags and alerts if it drops BELOW that baseline** — a genuine new problem on top of the shading. This silences the known bias without going blind.
+- The Energy Agent should PROACTIVELY spot a steady, long-standing underperformer and **ask** the owner whether shading explains it; on a yes it calls `mark_inverter_expected_low`. There’s also a manual toggle on the inverter’s detail card. Removing the shading (tree cut) → `clear_inverter_expected_low` returns it to normal grading. `expected_low_breach = true` means a marked unit fell below its baseline — treat it as a real issue.
+
 ---
 
 ## offtakers

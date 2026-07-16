@@ -234,6 +234,12 @@ def _live_low_inverters(tree: dict) -> list[dict]:
         for inv in invs:
             if inv.get("status") != "ok" or not _is_producing(inv):
                 continue
+            # Owner-confirmed expected-low (shading): running below its peers is the
+            # WHOLE POINT — never page "live low" on it. The 14-day re-baseline still
+            # catches a drop below its baseline, and live_dark still fires if it goes
+            # fully dark (0W is not expected even for a shaded unit).
+            if inv.get("expected_low"):
+                continue
             my = _pct_of_max(inv)
             if my is None:
                 continue

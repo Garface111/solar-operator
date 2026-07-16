@@ -242,3 +242,39 @@ def test_overview_endpoint_attaches_peer_block():
     assert ps["arrays_attention"] == 1
     assert ps["cohorts_with_peer_signal"] == 1
     assert ps["estimated_loss_kwh_window"] > 0
+
+
+def test_expected_low_holds_at_baseline_and_flags_on_breach():
+    """Owner-confirmed expected-low (shading) RE-BASELINES a chronically-shaded unit:
+    it reads OK while it holds its recorded level, but flags 'underperforming' again
+    if it drops BELOW that baseline (a genuine new fault on top of the shading)."""
+    # Baseline: U6 (shaded ~62%) is normally flagged underperforming.
+    base = _by_id(pa.analyze_cohort(_demo_cohort()))["U6"]
+    assert base["status"] == "underperforming"
+    pi = base["peer_index"]
+    assert pi is not None and pi < pa.UNDERPERFORM_THRESHOLD
+
+    # Marked expected-low at its own baseline -> OK (holding), not a fault.
+    coh = _demo_cohort()
+    for u in coh:
+        if u["id"] == "U6":
+            u["expected_low"] = True
+            u["expected_low_baseline"] = pi
+            u["expected_low_reason"] = "Afternoon shade from neighbour's maple"
+    held = _by_id(pa.analyze_cohort(coh))["U6"]
+    assert held["status"] == "ok"
+    assert not held.get("expected_low_breach")
+    assert "expected reduced level" in held["diagnosis"].lower()
+
+    # Drop it well below its baseline -> breach -> flagged underperforming again.
+    weather = [0.6 + 0.4 * ((i * 7) % 5) / 5 for i in range(WINDOW + 1)]
+    coh2 = _demo_cohort()
+    for u in coh2:
+        if u["id"] == "U6":
+            u["daily"] = _daily(6.0, factor=0.28, weather=weather)  # ~half its shaded level
+            u["expected_low"] = True
+            u["expected_low_baseline"] = pi
+            u["expected_low_reason"] = "Afternoon shade from neighbour's maple"
+    breached = _by_id(pa.analyze_cohort(coh2))["U6"]
+    assert breached["status"] == "underperforming"
+    assert breached.get("expected_low_breach") is True

@@ -1748,6 +1748,42 @@ def rename_inverter_ep(inverter_id: int, body: RenameBody,
         return {"ok": True, "inverter_id": iv.id, "name": iv.name}
 
 
+class ExpectedLowBody(BaseModel):
+    # True = mark this inverter as expected-low (structural shading/obstruction);
+    # False = clear the mark and return it to normal peer grading.
+    expected_low: bool
+    reason: str | None = None       # e.g. "Afternoon shade from neighbour's maple"
+    baseline: float | None = None   # optional peer_index to hold to; else computed
+
+
+@router.post("/v1/array-owners/inverters/{inverter_id}/expected-low")
+def set_expected_low_ep(inverter_id: int, body: ExpectedLowBody,
+                        authorization: str | None = Header(default=None)) -> dict:
+    """Mark/clear an inverter as OWNER-CONFIRMED expected-low. When marked, the
+    verdict engine re-baselines it (holds it to its recorded level instead of the
+    cohort floor) so a permanently-shaded unit stops reading "underperforming" —
+    but still flags + alerts if it drops BELOW that baseline. The Energy Agent sets
+    this after confirming the cause with the owner; the dashboard exposes it as a
+    manual toggle too."""
+    tenant = _tenant_from_bearer(authorization)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            iv = inverter_fleet.set_expected_low(
+                db, tenant, inverter_id,
+                expected_low=body.expected_low, reason=body.reason,
+                baseline=body.baseline, set_by="owner",
+            )
+        except inverter_fleet.FleetError as exc:
+            raise HTTPException(400, str(exc))
+        return {
+            "ok": True, "inverter_id": iv.id,
+            "expected_low": iv.expected_low,
+            "expected_low_reason": iv.expected_low_reason,
+            "expected_low_baseline": iv.expected_low_baseline,
+        }
+
+
 @router.get("/v1/array-owners/utility-accounts")
 def list_utility_accounts_ep(authorization: str | None = Header(default=None)) -> dict:
     """The tenant's captured GMP/utility accounts and which array each is linked

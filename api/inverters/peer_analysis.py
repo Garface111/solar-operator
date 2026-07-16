@@ -277,6 +277,34 @@ def analyze_cohort(
                     "gateway/Wi-Fi dropout, not necessarily a power fault."
                 )
             u["status"] = "comm_gap"
+        elif (u.get("expected_low") and u.get("expected_low_baseline")
+              and u["peer_index"] is not None and u.get("daily")):
+            # OWNER-CONFIRMED EXPECTED-LOW (structural shading / obstruction). We do
+            # NOT flag it against the cohort floor — the owner told us this unit runs
+            # permanently below its peers for a fixed physical reason. Instead we judge
+            # it against the baseline peer_index recorded when it was marked: it's fine
+            # while it HOLDS that level, and only flags if it drops meaningfully BELOW
+            # it — a genuine NEW problem stacked on top of the known shading. This is
+            # the whole point: silence the known bias without going blind to a fault.
+            base = u["expected_low_baseline"]
+            rel = (u["peer_index"] / base) if base > 0 else 1.0
+            if rel < UNDERPERFORM_THRESHOLD:
+                drop = round((1 - rel) * 100)
+                u["status"] = "underperforming"
+                u["expected_low_breach"] = True
+                u["diagnosis"] = (
+                    f"Running {drop}% below its OWN expected level. This unit is marked "
+                    f"expected-low ({u.get('expected_low_reason') or 'known shading/obstruction'}), "
+                    f"so we hold it to ~{round(base * 100)}% of peers — dropping beneath that "
+                    "baseline points to a NEW issue on top of the shading. Worth a look."
+                )
+            else:
+                u["status"] = "ok"
+                u["diagnosis"] = (
+                    f"Holding at its expected reduced level (~{round(base * 100)}% of peers — "
+                    f"{u.get('expected_low_reason') or 'known shading/obstruction'}). "
+                    "Marked expected-low, so this is normal for this unit, not a fault."
+                )
         elif (u["peer_index"] is not None and u["peer_index"] < UNDERPERFORM_THRESHOLD
               and u.get("daily")):
             # Real underperformance requires real history to compare against. An
@@ -322,6 +350,10 @@ def analyze_cohort(
             )
             for u in out_units
             if u["status"] in ("dead", "underperforming", "fault")
+            # An expected-low unit's shortfall is STRUCTURAL (shading) — not money we
+            # can recover by a repair — so it never inflates the recoverable-$ figure,
+            # even when it briefly breaches its baseline.
+            and not u.get("expected_low")
         ),
         1,
     )

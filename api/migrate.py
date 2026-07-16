@@ -1100,6 +1100,13 @@ def main():
             # The live-anomaly detectors ignore estimated values so a partial Fronius
             # capture can't fabricate a "dark right now" alert on a healthy inverter.
             ("last_power_estimated", "ALTER TABLE inverters ADD COLUMN last_power_estimated BOOLEAN DEFAULT FALSE NOT NULL"),
+            # Owner-confirmed structural underperformance (shading / obstruction): the
+            # verdict engine re-baselines these instead of flagging them forever.
+            ("expected_low", "ALTER TABLE inverters ADD COLUMN expected_low BOOLEAN DEFAULT FALSE NOT NULL"),
+            ("expected_low_reason", "ALTER TABLE inverters ADD COLUMN expected_low_reason VARCHAR(240)"),
+            ("expected_low_baseline", "ALTER TABLE inverters ADD COLUMN expected_low_baseline DOUBLE PRECISION"),
+            ("expected_low_set_at", "ALTER TABLE inverters ADD COLUMN expected_low_set_at TIMESTAMP"),
+            ("expected_low_set_by", "ALTER TABLE inverters ADD COLUMN expected_low_set_by VARCHAR(40)"),
         ]:
             if not column_exists(conn, "inverters", col):
                 conn.execute(text(sql))

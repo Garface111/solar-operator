@@ -1163,6 +1163,29 @@ class Inverter(Base):
     # WE captured): a stale source_last_data_at means the data is frozen even if we keep
     # re-scraping it, so freshness + live-power gating keys off this when present.
     source_last_data_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # ── EXPECTED-LOW (structural underperformance the owner has confirmed) ──────
+    # Some inverters run permanently below their peers for a FIXED physical reason —
+    # a neighbour's tree shading the array in the afternoon, a chimney, a sub-optimal
+    # roof face. That is NOT a fault to chase; flagging it "underperforming" forever
+    # is a false positive that trains the owner to ignore the flag. When the owner
+    # (usually via the Energy Agent, after it asks) confirms the cause, we mark the
+    # inverter expected-low and record its CURRENT peer ratio as a baseline. The
+    # verdict engine then judges it against THAT baseline, not the cohort floor — so
+    # it reads calm while it holds its established level, but still flags (and alerts)
+    # if it drops BELOW that baseline, which is a genuine NEW problem on top of the
+    # shading. This is the deliberate, honest way to silence a known bias without
+    # going blind to a real fault. See peer_analysis.analyze_cohort.
+    expected_low: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    # Human reason ("Afternoon shading from neighbour's maple"), shown on the card.
+    expected_low_reason: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    # The peer_index captured at marking time — the level we now hold it to. A later
+    # verdict compares peer_index / baseline against the underperform threshold.
+    expected_low_baseline: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expected_low_set_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "owner" (manual toggle) | "agent" (Energy Agent, owner-confirmed) — provenance.
+    expected_low_set_by: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 

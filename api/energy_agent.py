@@ -165,6 +165,23 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   the Fleet Triage tile); list_recent_invoices = drafted/sent offtaker dollars.
   Lead with the dollars when they're ≥$1 — the owner runs a business.
 
+CRITICAL — SHADING / EXPECTED-LOW (a false "underperforming" you must catch):
+  Some inverters run permanently below their peers for a FIXED physical reason —
+  afternoon shade from a neighbour's tree, a chimney, a poor roof face. That is NOT a
+  fault to chase, and flagging it "underperforming" forever trains the owner to ignore
+  the flag. When investigate_attention / array_detail shows an "underperforming" unit
+  whose deficit is STEADY and long-standing (a consistent low peer_index, not a sudden
+  drop, and expected_low is still false), PROACTIVELY ask the owner something like:
+  "Inverter 13 on Chester has run ~42% of its neighbours steadily — that even pattern
+  usually means permanent shading (a tree, a chimney) rather than a fault. Is something
+  shading that one? If so I'll mark it so it stops flagging — and I'll still alert you
+  if it ever drops below that level." If they CONFIRM a physical cause, call
+  mark_inverter_expected_low(inverter_id, reason) — never mark on your own guess.
+  Never nag: ask once per unit. If a unit is already expected_low and shows
+  expected_low_breach=true, that IS a real new problem (it fell below its shaded
+  baseline) — surface it like any other underperformer. If shading is removed (tree
+  cut), use clear_inverter_expected_low.
+
 CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
   You WANT a complete repair roster the way a good ops lead wants a contact sheet.
   Incomplete roster = you cannot email anyone when hardware dies. Act hungry, not polite-passive.
@@ -1108,6 +1125,53 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "mark_inverter_expected_low",
+            "description": (
+                "Mark ONE inverter as EXPECTED-LOW — it runs permanently below its peers "
+                "for a fixed physical reason the OWNER has CONFIRMED (afternoon shade from "
+                "a neighbour's tree, a chimney, a poor roof face). Use this ONLY after the "
+                "owner confirms the cause — never on your own guess. It re-baselines the "
+                "unit: it stops showing 'underperforming' while it holds its current level, "
+                "but STILL flags and alerts if it drops below that baseline (a real new "
+                "fault). This asks the owner to confirm before applying. When a unit is a "
+                "steady, long-standing underperformer (consistent deficit, not worsening), "
+                "PROACTIVELY ask the owner whether shading/obstruction explains it, then "
+                "call this if they say yes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "inverter_id": {"type": "integer", "description": "The inverter to mark (from investigate_attention / array_detail)"},
+                    "reason": {"type": "string", "description": "Short cause in the owner's words, e.g. 'Afternoon shade from neighbour's maple'"},
+                    "needs_confirm": {"type": "boolean", "default": True,
+                                       "description": "false only when the owner has ALREADY confirmed the shading cause in this turn"},
+                },
+                "required": ["inverter_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_inverter_expected_low",
+            "description": (
+                "Undo an expected-low mark on an inverter — return it to normal peer "
+                "grading (e.g. the shading was removed, the tree was cut, or it was set by "
+                "mistake). Asks the owner to confirm first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "inverter_id": {"type": "integer"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                },
+                "required": ["inverter_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "repair_ops_overview",
             "description": (
                 "O&M healing overview: service contacts, array assignments, open repair "
@@ -1912,6 +1976,15 @@ def _slim_inverter(inv: dict) -> dict:
         "last_report": inv.get("last_report"),
         "no_energy_register": bool(inv.get("no_energy_register")),
         "last_mode": inv.get("last_mode"),
+        # Owner-confirmed structural underperformance (shading/obstruction). When
+        # expected_low is True this unit is judged against its own baseline, so a
+        # steady low reads OK; expected_low_breach True means it dropped BELOW that
+        # baseline (a real new problem). If a unit is "underperforming" but NOT
+        # expected_low, it's a candidate to ASK the owner about shading.
+        "expected_low": bool(inv.get("expected_low")),
+        "expected_low_reason": inv.get("expected_low_reason"),
+        "expected_low_baseline": inv.get("expected_low_baseline"),
+        "expected_low_breach": bool(inv.get("expected_low_breach")),
     }
 
 
@@ -4323,6 +4396,57 @@ def _run_tool(
 
     if name == "array_detail":
         return _array_detail_tool(db, tenant, args)
+
+    if name in ("mark_inverter_expected_low", "clear_inverter_expected_low"):
+        from . import inverter_fleet
+        mark = name == "mark_inverter_expected_low"
+        inv_id = args.get("inverter_id")
+        if not inv_id:
+            return {"ok": False, "error": "inverter_id required"}
+        reason = (args.get("reason") or "").strip() or None
+        needs = bool(args.get("needs_confirm", True))
+        # If the owner clearly directed this in their message, skip the extra confirm.
+        if needs and _user_clearly_directed(user_text, {"inverter_id": inv_id}):
+            needs = False
+        if needs:
+            verb = ("mark it expected-low so it stops showing as underperforming"
+                    if mark else "clear its expected-low mark and resume normal grading")
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": {"inverter_id": inv_id, "reason": reason}},
+                "message": (
+                    f"Just to confirm — {verb} for inverter #{inv_id}"
+                    + (f' (reason: "{reason}")' if (mark and reason) else "")
+                    + "? I'll still alert you if it ever drops below its established level."
+                ),
+                "needs_confirm": True,
+            }
+        try:
+            t = db.get(Tenant, tid) or tenant
+            iv = inverter_fleet.set_expected_low(
+                db, t, int(inv_id), expected_low=mark, reason=reason, set_by="agent",
+            )
+            if mark:
+                pct = round((iv.expected_low_baseline or 0) * 100)
+                return {
+                    "ok": True, "inverter_id": iv.id, "expected_low": True,
+                    "baseline_pct": pct, "reason": iv.expected_low_reason,
+                    "message": (
+                        f"Done — inverter #{iv.id} is now marked expected-low at ~{pct}% of "
+                        "its peers"
+                        + (f" ({iv.expected_low_reason})" if iv.expected_low_reason else "")
+                        + ". It won't read as underperforming while it holds that level, but "
+                        "I'll flag it right away if it drops below — that would be a real new issue."
+                    ),
+                }
+            return {
+                "ok": True, "inverter_id": iv.id, "expected_low": False,
+                "message": f"Done — inverter #{iv.id} is back to normal peer grading.",
+            }
+        except inverter_fleet.FleetError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # ── O&M / repair healing ──────────────────────────────────────────────
     if name == "repair_ops_overview":
