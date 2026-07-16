@@ -41,8 +41,23 @@ def test_chint_unchanged():
     assert npm("chint", "random") is None
 
 
+def test_fronius_model_kw():
+    # The model names the AC kW between the family and the phase digit. Bruce's
+    # Chester (Primo 7.6) + Waterford (Primo 12.5) inverters showed a blank size
+    # until this parsed. The "208-240" voltage must NOT be read as the rating.
+    assert npm("fronius", "Primo 7.6-1 208-240") == 7.6
+    assert npm("fronius", "Primo 12.5-1 208-240") == 12.5
+    assert npm("fronius", "Primo 15.0-1 208/240") == 15.0
+    assert npm("fronius", "Symo 24.0-3 480") == 24.0
+    assert npm("fronius", "Symo GEN24 8.0-3 400") == 8.0
+    # Unknown / no rating → blank (not a guess).
+    assert npm("fronius", "Primo 208-240") is None
+    assert npm("fronius", "SE10000") is None          # not a Fronius model string
+    assert npm("fronius", "0001013791738041") is None
+
+
 def test_other_vendors_not_parsed():
-    # Fronius/SMA models aren't parsed here — they report nameplate or stay blank.
-    assert npm("fronius", "SE10000") is None
+    # SMA reports its own nameplate; a non-Fronius model on 'sma'/None stays blank.
     assert npm("sma", "SE5000") is None
     assert npm(None, "SE10000") is None
+    assert npm(None, "Primo 7.6-1 208-240") is None   # needs vendor=='fronius'

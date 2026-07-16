@@ -52,9 +52,19 @@ log = logging.getLogger(__name__)
 #     model encodes the AC rating: residential SE#### = WATTS (SE10000 = 10 kW,
 #     SE7600 = 7.6 kW), optionally with an H (HD-Wave) + region suffix; commercial
 #     three-phase SE##K / SE##.#K = KILOWATTS (SE33.3KUS = 33.3 kW, SE100KUS = 100).
+#   Fronius — the extension captures the device MODEL, never a per-unit nameplate,
+#     and the model names the AC kW between the family and the phase digit:
+#     "Primo 7.6-1 208-240" = 7.6 kW, "Primo 12.5-1 208-240" = 12.5 kW,
+#     "Symo 24.0-3 480" = 24 kW. (Without this, every Fronius inverter showed a
+#     BLANK size — e.g. Bruce's 32 Chester/Waterford Primos.)
 _CHINT_MODEL_KW = re.compile(r"SC[A-Z]{0,3}(\d{1,3}(?:\.\d+)?)KTL", re.IGNORECASE)
 _SE_MODEL_KW = re.compile(r"\bSE(\d{1,3}(?:\.\d+)?)K", re.IGNORECASE)   # SE33.3KUS → kW
 _SE_MODEL_W = re.compile(r"\bSE(\d{3,5})(?!\d)", re.IGNORECASE)         # SE10000   → W
+# Fronius family + "<kW>-<1|3-phase>". The "-[13]" anchor keeps the voltage
+# ("208-240") from being misread as the rating.
+_FRONIUS_MODEL_KW = re.compile(
+    r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?\s+(\d{1,3}(?:\.\d+)?)-[13]\b",
+    re.IGNORECASE)
 
 def _nameplate_from_model(vendor, model):
     if not model:
@@ -85,6 +95,13 @@ def _nameplate_from_model(vendor, model):
                     kw = float(mw.group(1)) / 1000.0
                 except (TypeError, ValueError):
                     kw = None
+    elif v == "fronius":
+        mf = _FRONIUS_MODEL_KW.search(s)
+        if mf:
+            try:
+                kw = float(mf.group(1))
+            except (TypeError, ValueError):
+                kw = None
     if kw is None:
         return None
     return kw if 0 < kw <= 1000 else None
