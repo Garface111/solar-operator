@@ -294,30 +294,24 @@ Voice discipline:
   - Do NOT narrate every step of a tour or setup as a continuous speech; chunk into
     short lines the client can play without cutting mid-thought.
 
-CHAT TEXT FORMAT (CRITICAL — scannable bubbles; Ford 2026-07-15):
-  Chat is a narrow bubble. Structure multi-fact replies so they SKIM cleanly — and keep them SHORT.
-  Prefer real markdown lists over dense parenthetical dumps of numbers.
+CHAT TEXT FORMAT (CRITICAL — a narrow chat column, NOT a document; Ford 2026-07-16):
+  The panel is a slim sidebar. A reply that looks like a formatted report — bold on every
+  line, "**Header:**" rows, headings — reads as an OVERWHELMING WALL there. Write like a
+  sharp colleague texting, not like a printed brief.
   Rules:
-  1. Lead with the answer in one short sentence (or two). Then at most a tight list.
-  2. When you have 2+ parallel items (arrays, steps, rates, contacts, issues, options):
-     use a REAL markdown list — one item per line. Cap ~4 items unless they asked for all.
-       - Bullets: start the line with "- " (hyphen + space)
-       - Steps: start the line with "1. " "2. " (number + period + space)
-     Nested detail: indent 2 spaces then "- " under the parent item.
-  3. Metrics and attributes — put them on their own lines or as list items, NOT nested
-     parentheses stacked on a name.
-       BAD:  "Londonderry (99 kW, 6 inverters, peer 1.02, status ok) looks fine (no faults)."
-       GOOD:
-         **Londonderry** — healthy
-         - Size: 99 kW · 6 inverters
-         - Peer index: 1.02
-  4. Prefer " · " (middle dots) or separate list lines over stacks of (parentheses).
-     One short parenthetical is fine; three nested ones is not.
-  5. Bold key names/labels with **double asterisks**. Use a blank line between sections.
-     Keep paragraphs short (1–2 sentences). Whole reply usually under ~120 words.
+  1. LEAD with a one-sentence answer a person could say out loud (this is also what the
+     voice speaks). If everything's fine, two sentences and stop.
+  2. Detail only if it helps: AT MOST one short list, 1 line per item, ~3 items — then
+     "…and N more — want them?" instead of pasting all N. No sub-bullets unless asked.
+  3. EMPHASIS: bold AT MOST ONE thing — the single key number or verdict (e.g. **$170/mo**).
+     Do NOT bold names, labels, or every metric. Never a "**Top issues:**" / "**Next step:**"
+     header line. Never use '#' headings. These are what make it a wall.
+  4. Metrics ride inline with " · " middle dots, not stacked (parentheses).
+       BAD:  "**Londonderry** — 1 dark, 2 low (~31% output), peer 1.02 (needs a look)."
+       GOOD: "Londonderry: 1 inverter dark, 2 low · ~$40/mo."
+  5. Keep the WHOLE reply tight — usually under ~70 words. Tools gather depth; the reply
+     stays lean. Offer more, don't dump it.
   6. Links always as [label](https://…) — never bare "search for X".
-  7. Voice still stays short and linear when speaking; the CHAT text can be a slightly
-     denser skim-friendly version, never a monologue.
 
 Hard rules:
 - Never invent kWh, $, counts, or status. Use tools and report what they return.
@@ -2434,11 +2428,13 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
         "problems": problems,
         "brief": brief,
         "instruction_for_agent": (
-            "GROUND TRUTH for 'how is my fleet': report TOTAL arrays+units first, then "
-            "name EVERY problem array (not just the worst underperformer). Include live "
-            "dark/low inverters by name when present — they match Spreadsheet NEED ATTENTION "
-            "even when 14-day status is still ok. Do not ask for IDs. If count is 0, say "
-            "the fleet looks clear and offer to open Inverters for a double-check."
+            "GROUND TRUTH for 'how is my fleet'. Answer SCANNABLE, not a report: (1) one "
+            "lead sentence with the TRUE total and the total recoverable_usd_month (never "
+            "hide the count); (2) the top 1–3 arrays by $/impact as a short list, one line "
+            "each — then 'and N more — want the full list?' rather than pasting all N "
+            "(unless the total is ≤3 or they asked for all). Bold at most the headline "
+            "number. Do not ask for IDs. If count is 0, say the fleet looks clear in one "
+            "line and offer to open Inverters for a double-check."
         ),
     }
 
@@ -6137,7 +6133,7 @@ def _visual_fix_fast_path(
 
     return {
         "reply": reply,
-        "speak": _mouth_line(reply, voice=_is_voice_turn(None, ctx)),
+        "speak": _spoken_line(reply),
         "ui_commands": ui_commands,
         "pending": None,
         "tool_trace": tool_trace,
@@ -6348,6 +6344,158 @@ def _mouth_line(reply: str, *, voice: bool = False) -> str:
     if len(w) > max_words:
         spoken = " ".join(w[:max_words]).rstrip(",;:") + "."
     return spoken or plain
+
+
+# ── hybrid voice+text ───────────────────────────────────────────────────────
+# The panel is a NARROW chat column; the voice is a spoken assistant. A single
+# raw markdown blob served to both channels is what made replies feel like an
+# overwhelming wall on screen AND a cut-off list fragment out loud. So we split:
+#   TEXT  -> _tidy_chat_text(): panel-clean (no heading walls, no bold-everywhere)
+#   VOICE -> _make_spoken(): a real one-liner a person would say, never a list slice
+
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+_LIST_LINE_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
+_PSEUDO_HEADER_RE = re.compile(
+    r"^\s*(?:\*\*)?(top issues?|next steps?|here'?s|details?|breakdown|the rundown|"
+    r"issues?|problems?|summary)\b.{0,40}:?\s*(?:\*\*)?\s*$",
+    re.I,
+)
+
+
+def _tidy_chat_text(text: str) -> str:
+    """Render clean in the narrow panel. Conservative: keeps every word, list,
+    link and one emphasis — only removes the visual SHOUTING (markdown heading
+    walls, '**Header:**' scaffolding lines, and bold-on-everything)."""
+    t = (text or "").strip()
+    if not t:
+        return t
+    # Protect fenced code blocks from tidying.
+    blocks: list[str] = []
+
+    def _stash(m):
+        blocks.append(m.group(0))
+        return f"\x00CB{len(blocks) - 1}\x00"
+
+    t = re.sub(r"```[\s\S]*?```", _stash, t)
+
+    out_lines = []
+    for ln in t.split("\n"):
+        s = ln.rstrip()
+        # Markdown heading -> plain line (the panel renders '#'/'##' as big headers).
+        s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s)
+        # A line that is ENTIRELY one bold span (a pseudo-header) -> de-bold it.
+        m = re.match(r"^\s*\*\*(.+?)\*\*\s*(:?)\s*$", s)
+        if m:
+            s = (m.group(1).rstrip() + (m.group(2) or "")).rstrip()
+        out_lines.append(s)
+    t = "\n".join(out_lines)
+
+    # Cap emphasis: keep the first TWO bold spans (the lead's key number/verdict),
+    # unbold the rest so a bolded list of names/metrics stops reading as a wall.
+    spans = list(_BOLD_RE.finditer(t))
+    if len(spans) > 2:
+        cut = spans[1].end()
+        t = t[:cut] + _BOLD_RE.sub(lambda mm: mm.group(1), t[cut:])
+
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    t = re.sub(r"\x00CB(\d+)\x00", lambda mm: blocks[int(mm.group(1))], t)
+    return t
+
+
+def _plain_for_speech(text: str) -> str:
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", text or "")
+    s = re.sub(r"`([^`]+)`", r"\1", s)
+    s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+    s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s, flags=re.M)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _spoken_line(reply: str) -> str:
+    """Deterministic spoken lead: the answer BEFORE the first list/heading,
+    cleaned + capped to ~2 sentences, with a natural spoken offer when detail
+    was left on screen. Never reads a list item aloud."""
+    text = (reply or "").strip()
+    if not text:
+        return ""
+    lead_lines, dropped = [], False
+    for ln in text.split("\n"):
+        st = ln.strip()
+        if _LIST_LINE_RE.match(st) or re.match(r"^#{1,6}\s", st) or _PSEUDO_HEADER_RE.match(st):
+            dropped = True
+            break
+        lead_lines.append(ln)
+    lead = _plain_for_speech(" ".join(l.strip() for l in lead_lines if l.strip()))
+    if not lead:
+        # Whole reply was a list — speak just the count/gist, not the items.
+        lead = _plain_for_speech(text)
+        dropped = True
+    parts = re.split(r"(?<=[.!?])\s+", lead)
+    spoken = " ".join(parts[:2]).strip() if parts else lead
+    cap = max(20, min(int(os.getenv("EA_VOICE_MAX_WORDS", "45") or 45), 80))
+    words = spoken.split()
+    if len(words) > cap:
+        spoken = " ".join(words[:cap]).rstrip(",;:—- ") + "."
+        dropped = True
+    if dropped and spoken and not spoken.rstrip().endswith(("?", "…")):
+        spoken = spoken.rstrip() + " Want me to run through them?"
+    return spoken or _plain_for_speech(text)
+
+
+_VOICE_SUMMARY_SYSTEM = (
+    "You turn an assistant's written answer into ONE natural spoken sentence — how a "
+    "sharp colleague says it out loud, not how a report reads. Lead with the point. "
+    "Say numbers the human way ('about $170 a month', not '$170.00/mo'). No lists, no "
+    "markdown, no reading item-by-item, no site-by-site. Max ~30 words. If there's more "
+    "detail behind it, you MAY end with a short offer like 'want the rundown?'. "
+    "Return ONLY the spoken sentence."
+)
+
+
+def _spoken_summarize(reply: str) -> str | None:
+    """Cheap, fast humanizer pass — turns a long/listy answer into one spoken
+    sentence. Falls back (returns None) on any error so the caller uses the
+    deterministic lead."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    model = os.getenv("EA_VOICE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
+    try:
+        out = _http_json(
+            "https://api.anthropic.com/v1/messages",
+            {
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            {
+                "model": model,
+                "max_tokens": 90,
+                "system": _VOICE_SUMMARY_SYSTEM,
+                "messages": [{"role": "user", "content": _plain_for_speech(reply)[:2400]}],
+            },
+            timeout=int(os.getenv("EA_VOICE_SUMMARY_TIMEOUT", "12") or 12),
+        )
+        parts = [b.get("text", "") for b in (out.get("content") or []) if b.get("type") == "text"]
+        line = re.sub(r"\s+", " ", " ".join(parts)).strip().strip('"“”')
+        return line or None
+    except Exception as e:  # noqa: BLE001
+        log.info("voice summarize fell back to lead: %s", e)
+        return None
+
+
+def _make_spoken(reply: str, *, voice_active: bool) -> str:
+    """The line the mouth actually speaks. Deterministic lead by default; a
+    humanized one-liner when voice is live AND the answer is long or listy (the
+    exact case that used to read a truncated list fragment aloud)."""
+    lead = _spoken_line(reply)
+    if not voice_active:
+        return lead
+    listy = bool(_LIST_LINE_RE.search(reply or "")) or "\n- " in (reply or "")
+    long = len((reply or "").split()) > 45
+    if listy or long:
+        summarized = _spoken_summarize(reply)
+        if summarized:
+            return summarized
+    return lead
 
 
 def _agent_turn(
@@ -6649,6 +6797,9 @@ def _agent_turn(
     _charge(db, tenant.id, total_cost, f"chat:{provider or 'none'}")
     session.cost_usd = float(session.cost_usd or 0) + total_cost
 
+    # Panel-clean the text once — stored + returned + spoken all read from this.
+    final_text = _tidy_chat_text(final_text)
+
     user_meta: dict[str, Any] = {}
     if context:
         user_meta["context"] = context
@@ -6681,11 +6832,12 @@ def _agent_turn(
             ),
         }
 
-    spoken = _mouth_line(final_text, voice=voice_turn)
+    voice_active = voice_turn or bool((context or {}).get("voice_active"))
+    spoken = _make_spoken(final_text, voice_active=voice_active)
     return {
         "reply": final_text,
-        # Mouth speaks this (mind-steered). Client prefers speak over inventing a paraphrase.
-        # Voice turns get a hard-capped spoken line so long dumps don't cut themselves off.
+        # Mouth speaks this — a real spoken one-liner, not a truncation of the
+        # text. Humanized when voice is live and the answer is long/listy.
         "speak": spoken,
         "ui_commands": ui_commands,
         "pending": pending,
