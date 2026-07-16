@@ -3068,6 +3068,41 @@ def sovereign_state(authorization: str | None = Header(default=None)):
     }
 
 
+@router.get("/admin/sovereign/healthz")
+def sovereign_healthz(authorization: str | None = Header(default=None)):
+    """Dual-channel mind health (interface sidecar /healthz analogue).
+
+    Surfaces ages, storm breaker, stuck jobs, primary vs recovery readiness.
+    """
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_watchdog import diagnose, watchdog_enabled
+    h = diagnose()
+    h["watchdog_enabled"] = watchdog_enabled()
+    return h
+
+
+@router.post("/admin/sovereign/reboot")
+def sovereign_reboot(
+    authorization: str | None = Header(default=None),
+    force: bool = Query(default=True),
+):
+    """Soft-reboot recovery channel (does not kill the web process).
+
+    Force=true overrides storm breaker (manual captain restart).
+    """
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_watchdog import soft_reboot, watchdog_tick
+    if force:
+        return soft_reboot(
+            reason="admin_force",
+            force_cortex=True,
+            force_sub=True,
+            requeue_jobs=True,
+            respect_storm=False,
+        )
+    return watchdog_tick(force=True)
+
+
 @router.post("/admin/sovereign/wake")
 def sovereign_wake(body: WakeIn, authorization: str | None = Header(default=None)):
     """Event-driven wake: append event → subconscious → cortex if hot."""

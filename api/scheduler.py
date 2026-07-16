@@ -1671,6 +1671,16 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=4),
     )
+    # Sovereign durability: independent watchdog (interface dual-sidecar pattern).
+    # Diagnoses stale sub/cortex/jobs; soft-reboots recovery channel; storm breaker.
+    # Kill: SOVEREIGN_WATCHDOG=0
+    scheduler.add_job(
+        _run_energy_agent_sovereign_watchdog,
+        "interval", seconds=75, id="energy_agent_sovereign_watchdog",
+        replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=95),
+    )
     # Weekly async check-in digest to Ford (high-level, no job spam).
     # Monday 14:00 UTC ≈ morning US East — review when convenient.
     scheduler.add_job(
@@ -1804,6 +1814,33 @@ def _run_energy_agent_long_term_mind() -> None:
             pass
 
 
+def _run_energy_agent_sovereign_watchdog() -> None:
+    """Independent durability supervisor for Sovereign (dual-channel recovery)."""
+    try:
+        from .energy_agent_sovereign_watchdog import (
+            persist_vitals_snapshot,
+            watchdog_enabled,
+            watchdog_tick,
+        )
+        if not watchdog_enabled():
+            return
+        res = watchdog_tick()
+        if res.get("recovered") or res.get("mode") == "recovery":
+            logger.warning(
+                "sovereign_watchdog recovered mode=%s problems=%s",
+                res.get("mode"),
+                res.get("problems_seen") or (res.get("health") or {}).get("problems"),
+            )
+        elif res.get("mode") == "healthy":
+            logger.debug("sovereign_watchdog healthy")
+        try:
+            persist_vitals_snapshot()
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.exception("energy_agent_sovereign_watchdog crashed: %s", exc)
+
+
 def _run_energy_agent_sovereign_subconscious() -> None:
     """Cheap continuous mind: monologue + heat + needs_cortex (notes only)."""
     try:
@@ -1812,12 +1849,27 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             subconscious_tick,
             _run_cortex_if_needed,
         )
+        from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
         if not subconscious_enabled():
             return
         res = subconscious_tick(reason="scheduler")
+        note_primary(
+            "sub",
+            ok=bool(res.get("ok")) and res.get("mode") not in ("error",),
+            detail={"mode": res.get("mode"), "heat": res.get("heat"), "tick": res.get("tick_id")},
+        )
         if res.get("needs_cortex"):
-            cortex = _run_cortex_if_needed(res, reason="subconscious_hot")
+            mark_cortex_inflight(True)
+            try:
+                cortex = _run_cortex_if_needed(res, reason="subconscious_hot")
+            finally:
+                mark_cortex_inflight(False)
             if cortex and not cortex.get("deferred"):
+                note_primary(
+                    "cortex",
+                    ok=bool(cortex.get("ok")),
+                    detail={"via": "sub_wake", "tick": cortex.get("tick_id")},
+                )
                 logger.info(
                     "sovereign_subconscious→cortex heat=%s why=%s decisions=%s",
                     res.get("heat"),
@@ -1831,12 +1883,18 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             )
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_subconscious crashed: %s", exc)
+        try:
+            from .energy_agent_sovereign_watchdog import note_primary
+            note_primary("sub", ok=False, detail={"error": str(exc)[:200]})
+        except Exception:
+            pass
 
 
 def _run_energy_agent_sovereign_tick() -> None:
     """Cortex backstop (5m): full digests + Grok/Claude + hard acts."""
     try:
         from .energy_agent_sovereign import sovereign_enabled, sovereign_tick
+        from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
         if not sovereign_enabled():
             return
         # Light subconscious first so cortex always has fresh tape
@@ -1845,10 +1903,28 @@ def _run_energy_agent_sovereign_tick() -> None:
                 subconscious_enabled, subconscious_tick,
             )
             if subconscious_enabled():
-                subconscious_tick(reason="pre_cortex", force=True, skip_llm=True)
+                sub = subconscious_tick(reason="pre_cortex", force=True, skip_llm=True)
+                note_primary(
+                    "sub",
+                    ok=bool(sub.get("ok")),
+                    detail={"via": "pre_cortex", "tick": sub.get("tick_id")},
+                )
         except Exception as sub_exc:  # noqa: BLE001
             logger.debug("pre_cortex subconscious: %s", sub_exc)
-        res = sovereign_tick(reason="scheduler")
+            try:
+                note_primary("sub", ok=False, detail={"error": str(sub_exc)[:160], "via": "pre_cortex"})
+            except Exception:
+                pass
+        mark_cortex_inflight(True)
+        try:
+            res = sovereign_tick(reason="scheduler")
+        finally:
+            mark_cortex_inflight(False)
+        note_primary(
+            "cortex",
+            ok=bool(res.get("ok")),
+            detail={"tick": res.get("tick_id"), "mode": res.get("mode")},
+        )
         if res.get("decisions"):
             logger.info(
                 "sovereign_cortex: decisions=%s heat=%s queues=%s",
@@ -1858,6 +1934,12 @@ def _run_energy_agent_sovereign_tick() -> None:
             )
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_tick crashed: %s", exc)
+        try:
+            from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
+            mark_cortex_inflight(False)
+            note_primary("cortex", ok=False, detail={"error": str(exc)[:200]})
+        except Exception:
+            pass
         try:
             send_internal_alert(
                 "Energy Agent sovereign tick failed",
@@ -1872,15 +1954,31 @@ def _run_energy_agent_sovereign_jobs() -> None:
     try:
         from .db import SessionLocal
         from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
+        from .energy_agent_sovereign_watchdog import mark_jobs_inflight, note_primary
         if not code_live_enabled():
             return
-        with SessionLocal() as db:
-            # Unlimited daily budget — drain a few per tick for velocity
-            res = drain_jobs(db, limit=3)
-            if res.get("processed"):
-                logger.info("sovereign_jobs: %s", res)
+        mark_jobs_inflight(True)
+        try:
+            with SessionLocal() as db:
+                # Unlimited daily budget — drain a few per tick for velocity
+                res = drain_jobs(db, limit=3)
+                if res.get("processed"):
+                    logger.info("sovereign_jobs: %s", res)
+            note_primary(
+                "jobs",
+                ok=bool(res.get("ok", True)),
+                detail={"processed": res.get("processed")},
+            )
+        finally:
+            mark_jobs_inflight(False)
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_jobs crashed: %s", exc)
+        try:
+            from .energy_agent_sovereign_watchdog import mark_jobs_inflight, note_primary
+            mark_jobs_inflight(False)
+            note_primary("jobs", ok=False, detail={"error": str(exc)[:200]})
+        except Exception:
+            pass
         try:
             send_internal_alert(
                 "Sovereign code worker failed",
