@@ -28,4 +28,16 @@ if [ "$PROCESS_ROLE" = "worker" ] || [ "$SO_PROCESS" = "worker" ]; then
   exec python -m api.background_main
 fi
 
-python -m api.migrate && exec uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}"
+# Multi-worker web: a single blocked event loop was taking the whole public
+# site dark (TLS accepted, /health hung with 0 bytes) while Railway still
+# showed "Online". Default 2 workers so one stuck request path can't freeze
+# the product. Override with WEB_CONCURRENCY.
+WORKERS="${WEB_CONCURRENCY:-2}"
+# Cap at 4 on small containers — more workers thrash RAM without more CPU.
+case "$WORKERS" in
+  ''|*[!0-9]*) WORKERS=2 ;;
+esac
+if [ "$WORKERS" -lt 1 ]; then WORKERS=1; fi
+if [ "$WORKERS" -gt 4 ]; then WORKERS=4; fi
+echo "start.sh: launching web API (uvicorn workers=$WORKERS)"
+python -m api.migrate && exec uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}" --workers "$WORKERS"
