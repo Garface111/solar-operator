@@ -662,7 +662,7 @@ def _call_anthropic_messages(system: str, user: str) -> tuple[str, str | None]:
     key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY missing")
-    model = (os.getenv("SOVEREIGN_CLAUDE_MODEL") or "claude-sonnet-4-20250514").strip()
+    model = (os.getenv("SOVEREIGN_CLAUDE_MODEL") or "claude-sonnet-4-5").strip()
     r = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={

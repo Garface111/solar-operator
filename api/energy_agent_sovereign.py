@@ -885,7 +885,11 @@ def act_code_hire(
 
 
 def ensure_default_goals(db) -> None:
-    """Seed (or upgrade) the expansionist succession agenda."""
+    """Seed the expansionist succession agenda (INSERT only — never UPDATE).
+
+    Updating open goals on every desk/tick held row locks and timed out chat
+    while the worker drained jobs (LockNotAvailable on ea_sovereign_goals).
+    """
     defaults = [
         ("g_product_health", "Keep Array Operator healthy and truthful", 100),
         ("g_grow_business", "Make Array Operator bigger: owners, coverage, revenue motion", 98),
@@ -896,21 +900,29 @@ def ensure_default_goals(db) -> None:
         ("g_expansion", "Expand vendor/utility coverage from real owner demand", 85),
         ("g_independence", "Build notes, memory, agenda, and systems for true operational independence", 90),
     ]
-    existing_ids = set(db.execute(select(EaSovereignGoal.id)).scalars().all())
+    try:
+        existing_ids = set(db.execute(select(EaSovereignGoal.id)).scalars().all())
+    except Exception as e:  # noqa: BLE001
+        log.warning("ensure_default_goals read failed: %s", e)
+        return
+    added = 0
     for gid, title, pri in defaults:
         if gid in existing_ids:
-            # Refresh title/priority for leadership reframe (keep status)
-            row = db.get(EaSovereignGoal, gid)
-            if row and row.status == "open":
-                row.title = title
-                row.priority = max(int(row.priority or 0), pri)
-                row.updated_at = _now()
-            continue
+            continue  # leave existing rows alone — no lock-prone updates
         db.add(EaSovereignGoal(
             id=gid, title=title, priority=pri, status="open",
             detail_json=json.dumps({"seeded_by": "sovereign_leadership_v2"}),
         ))
-    db.flush()
+        added += 1
+    if added:
+        try:
+            db.flush()
+        except Exception as e:  # noqa: BLE001
+            log.warning("ensure_default_goals flush failed: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
 
 def write_note(

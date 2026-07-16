@@ -5225,6 +5225,7 @@ def _call_grok(messages: list[dict], tools: list) -> dict:
             "Content-Type": "application/json",
         },
         body,
+        timeout=int(os.getenv("EA_GROK_TIMEOUT", "20") or 20),
     )
     choice = (out.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
@@ -5315,13 +5316,27 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
 
 
 def _call_llm(messages: list[dict]) -> dict:
-    if XAI_API_KEY:
+    """Prefer Claude when Grok is credit-capped; still try Grok first only if forced."""
+    primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "claude").strip().lower()
+    order = []
+    if primary in ("grok", "xai", "rock"):
+        order = ["grok", "claude"]
+    else:
+        # Default Claude-first (xAI team hit monthly spend limit 2026-07-16)
+        order = ["claude", "grok"]
+    last_err = None
+    for who in order:
         try:
-            return _call_grok(messages, TOOL_DEFS)
+            if who == "grok" and XAI_API_KEY:
+                return _call_grok(messages, TOOL_DEFS)
+            if who == "claude" and ANTHROPIC_API_KEY:
+                return _call_anthropic(messages, TOOL_DEFS)
         except Exception as e:
-            log.warning("Grok failed, falling back: %s", e)
-    if ANTHROPIC_API_KEY:
-        return _call_anthropic(messages, TOOL_DEFS)
+            last_err = e
+            log.warning("%s failed, trying next LLM: %s", who, e)
+            continue
+    if last_err:
+        log.warning("all LLMs failed, last=%s", last_err)
     # Offline stub — no LLM keys
     return {
         "message": {

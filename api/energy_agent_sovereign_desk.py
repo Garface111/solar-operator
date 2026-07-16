@@ -213,7 +213,15 @@ def desk_turn(db, t, ford_message: str) -> dict:
     from .energy_agent_sovereign import EaSovereignGoal, EaSovereignJob
 
     ensure_tables()
-    ensure_default_goals(db)
+    try:
+        ensure_default_goals(db)
+    except Exception as e:  # noqa: BLE001
+        # Never block chat on agenda seed / lock contention
+        log.warning("desk ensure_default_goals skipped: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     msg = (ford_message or "").strip()
     if not msg:
         raise HTTPException(400, "Empty message")
