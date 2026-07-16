@@ -23,6 +23,7 @@ import {
   getReports,
   sendSampleReport,
   downloadDirectoryReport,
+  downloadGenerationDirectory,
   sendDirectoryReport,
   recentReportQuarters,
 } from "../lib/api";
@@ -129,7 +130,7 @@ export default function NepoolReportsTab() {
   // NEPOOL-GIS directory (all clients × arrays) for operator bulk upload.
   const dirQuarters = recentReportQuarters(8);
   const [dirQuarter, setDirQuarter] = useState(dirQuarters[0]?.value ?? "");
-  const [dirBusy, setDirBusy] = useState<"dl" | "mail" | null>(null);
+  const [dirBusy, setDirBusy] = useState<"dl" | "mail" | "gen" | null>(null);
   const [dirMsg, setDirMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const handleSendSample = useCallback(() => {
     setSampleSending(true);
@@ -356,6 +357,31 @@ export default function NepoolReportsTab() {
                 }}
               >
                 {dirBusy === "mail" ? "Sending…" : "Email me directory"}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={dirBusy !== null}
+                title="Every client's raw utility generation in one workbook — a Generation Summary (client × project × month, across GMP + co-ops) plus daily meter detail. Per-client version is on the Clients tab."
+                onClick={() => {
+                  setDirBusy("gen");
+                  setDirMsg(null);
+                  downloadGenerationDirectory(dirQuarter || undefined)
+                    .then(() =>
+                      setDirMsg({ ok: true, text: "All-clients generation downloaded." }),
+                    )
+                    .catch((err) =>
+                      setDirMsg({
+                        ok: false,
+                        text:
+                          err instanceof Error
+                            ? err.message
+                            : "Couldn't download generation.",
+                      }),
+                    )
+                    .finally(() => setDirBusy(null));
+                }}
+              >
+                {dirBusy === "gen" ? "Building…" : "Download all generation"}
               </Button>
             </div>
           </div>

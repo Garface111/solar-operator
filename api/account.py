@@ -1106,6 +1106,44 @@ def download_directory_report(
     )
 
 
+@router.get("/v1/account/generation-directory.xlsx")
+def download_generation_directory(
+    quarter: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """All-clients utility generation workbook for a quarter (Ford 2026-07-16) —
+    one Generation Summary (client × project × the quarter's months, across GMP +
+    co-ops) plus a per-project daily meter detail sheet. The all-clients
+    counterpart of the per-client /clients/{id}/generation.xlsx download."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if quarter:
+        try:
+            qy, qq = _parse_quarter_str(quarter)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    else:
+        from .writers.gmcs_writer import default_reporting_reference_date, _rolling_quarters
+        qy, qq = _rolling_quarters(default_reporting_reference_date(datetime.utcnow().date()))[-1]
+
+    from .writers.gmp_raw_writer import build_all_clients_generation_workbook
+    tmpdir = tempfile.mkdtemp(prefix=f"so-gendir-{t.id}-")
+    fname = f"generation-directory-Q{qq}-{qy}.xlsx"
+    out_path = Path(tmpdir) / fname
+    try:
+        build_all_clients_generation_workbook(t.id, out_path, year=qy, quarter=qq)
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.exception("download_generation_directory failed for tenant=%s", t.id)
+        raise HTTPException(500, f"Couldn't build the generation directory: {e}")
+    return FileResponse(
+        str(out_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=fname,
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
+
+
 @router.post("/v1/account/directory-report/send")
 def send_directory_report(
     quarter: Optional[str] = Query(default=None),

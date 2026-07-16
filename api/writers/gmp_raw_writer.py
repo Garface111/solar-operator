@@ -30,7 +30,7 @@ from sqlalchemy import func, select
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal
 from ..generation_sources import EXTENSION_SOURCES, VENDOR_TELEMETRY_SOURCES
-from ..models import Array, Bill, Client, DailyGeneration, UtilityAccount
+from ..models import Array, Bill, Client, DailyGeneration, Tenant, UtilityAccount
 from ..reports import gmp_daily_read
 from .gmcs_writer import _daily_generation_by_month, _quarter_months, _sheet_name_for_array
 
@@ -220,6 +220,108 @@ def build_generation_workbook(client_id: int, out_path, *, year: int, quarter: i
         used = {"Monthly Summary"}
         for arr, series in detail:
             sh = wb.create_sheet(title=_sheet_name_for_array(arr.name, used))
+            _write_daily(sh, arr, series, year, quarter)
+
+    wb.save(str(out_path))
+    return out_path
+
+
+def _write_all_summary(sh, tenant_name, rows, months, year, quarter):
+    """rows: [(client_name, project_name, monthly, providers)] across all clients."""
+    ncols = len(months) + 4
+    end_col = chr(ord("A") + ncols - 1)
+    sh["A1"] = f"{tenant_name} — utility generation (all clients), Q{quarter} {year}"
+    sh["A1"].font = _TITLE
+    sh.merge_cells(f"A1:{end_col}1")
+    sh["A2"] = "Generation (kWh) by month · utility meter (GMP interval / co-op daily) or GMP bill"
+    sh["A2"].font = _SUB
+    sh.merge_cells(f"A2:{end_col}2")
+
+    hdr = (["Client", "Project"]
+           + [f"{calendar.month_name[m]} {y}" for (y, m) in months]
+           + ["Quarter total", "Utility · source"])
+    for col, label in enumerate(hdr, start=1):
+        c = sh.cell(4, col, label)
+        c.font, c.fill, c.alignment = _HDR, _HDR_FILL, _CENTER
+    r = 5
+    grand = defaultdict(float)
+    last_client = None
+    for cname, pname, monthly, providers in rows:
+        sh.cell(r, 1, cname if cname != last_client else "")  # show client once per group
+        last_client = cname
+        sh.cell(r, 2, pname)
+        qtot = 0.0
+        srcs = set()
+        for i, key in enumerate(months):
+            kwh, src = monthly[key]
+            sh.cell(r, 3 + i, round(kwh, 1))
+            qtot += kwh
+            grand[i] += kwh
+            if src:
+                srcs.add(src)
+        sh.cell(r, 3 + len(months), round(qtot, 1)).font = _BOLD
+        grand["q"] += qtot
+        util = "/".join(providers) if providers else "—"
+        sh.cell(r, 4 + len(months), f"{util} · {' + '.join(sorted(srcs)) or 'no data'}")
+        r += 1
+    sh.cell(r, 1, "All clients").font = _BOLD
+    for i in range(len(months)):
+        sh.cell(r, 3 + i, round(grand[i], 1)).font = _BOLD
+    sh.cell(r, 3 + len(months), round(grand["q"], 1)).font = _BOLD
+    sh.column_dimensions["A"].width = 24
+    sh.column_dimensions["B"].width = 24
+    for i in range(len(months) + 2):
+        sh.column_dimensions[chr(ord("C") + i)].width = 16
+
+
+def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int, quarter: int) -> Path:
+    """One workbook covering EVERY client's utility generation for the quarter —
+    a combined Generation Summary (client × project × months) plus a daily meter
+    detail sheet per project that has one. All-clients counterpart of the
+    per-client export."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    months = _quarter_months(year, quarter)
+    start = date(months[0][0], months[0][1], 1)
+    ly, lm = months[-1]
+    end = date(ly, lm, calendar.monthrange(ly, lm)[1])
+
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, tenant_id)
+        tenant_name = (tenant.company_name or tenant.name) if tenant else "Your fleet"
+        clients = db.execute(
+            select(Client).where(Client.tenant_id == tenant_id,
+                                 Client.deleted_at.is_(None)).order_by(Client.name)
+        ).scalars().all()
+
+        all_rows = []   # (client_name, project_name, monthly, providers)
+        detail = []     # (client_name, array, series)
+        for c in clients:
+            arrays = db.execute(
+                select(Array).where(Array.client_id == c.id,
+                                    Array.deleted_at.is_(None),
+                                    Array.excluded.is_(False)).order_by(Array.name)
+            ).scalars().all()
+            for arr in arrays:
+                monthly = _array_monthly(db, arr.id, months, start, end)
+                if any(v[0] for v in monthly.values()):
+                    all_rows.append((c.name, arr.name, monthly, _providers_for_array(db, arr.id)))
+                series = _daily_utility_series(db, arr.id, start, end)
+                if series:
+                    detail.append((c.name, arr, series))
+
+        wb = Workbook()
+        summary = wb.active
+        summary.title = "Generation Summary"
+        if all_rows:
+            _write_all_summary(summary, tenant_name, all_rows, months, year, quarter)
+        else:
+            summary["A1"] = f"No utility generation across your clients in Q{quarter} {year}."
+            summary["A1"].font = _TITLE
+
+        used = {"Generation Summary"}
+        for cname, arr, series in detail:
+            sh = wb.create_sheet(title=_sheet_name_for_array(f"{cname[:9]}·{arr.name}", used))
             _write_daily(sh, arr, series, year, quarter)
 
     wb.save(str(out_path))

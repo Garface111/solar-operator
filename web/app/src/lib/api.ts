@@ -740,6 +740,40 @@ export async function downloadDirectoryReport(quarter?: string): Promise<void> {
   URL.revokeObjectURL(link.href);
 }
 
+/** Download ALL clients' utility generation in one workbook (a Generation
+ *  Summary across GMP + co-ops, plus per-project daily meter detail). The
+ *  all-clients counterpart of downloadGeneration(). */
+export async function downloadGenerationDirectory(quarter?: string): Promise<void> {
+  const token = getSession();
+  const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
+  const res = await fetchWithTimeout(
+    `/v1/account/generation-directory.xlsx${qs}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (res.status === 401) {
+    notifyUnauthorizedOnce();
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the generation directory (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof msg === "string" ? msg : "Couldn't build the generation directory");
+  }
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  const label = quarter ? quarter.replace(/[^A-Za-z0-9]+/g, "-") : "latest";
+  link.download = `generation-directory-${label}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
 /** Email the operator their NEPOOL-GIS directory workbook. */
 export async function sendDirectoryReport(
   quarter?: string,

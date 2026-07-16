@@ -68,6 +68,33 @@ def test_generation_export_covers_all_utilities(client):
     wb.close()
 
 
+def test_generation_directory_covers_all_clients(client):
+    tid, _cid = _seed_client(gmp_kwh=30000)
+    # a second client on the same tenant, with its own GMP project
+    with SessionLocal() as db:
+        c2 = Client(tenant_id=tid, name="Second Client", active=True)
+        db.add(c2); db.flush()
+        a2 = Array(tenant_id=tid, client_id=c2.id, name="Rooftop B")
+        db.add(a2); db.flush()
+        ua2 = UtilityAccount(tenant_id=tid, array_id=a2.id, provider="gmp",
+                             account_number="G2" + secrets.token_hex(3))
+        db.add(ua2); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=ua2.id, bill_date=datetime(2026, 2, 15),
+                    period_start=datetime(2026, 2, 1), kwh_generated=5000,
+                    document_number="g2-" + secrets.token_hex(4), parse_status="parsed"))
+        db.commit()
+    auth = {"Authorization": f"Bearer {mint_session_for_tenant(tid)}"}
+    r = client.get("/v1/account/generation-directory.xlsx?quarter=Q1-2026", headers=auth)
+    assert r.status_code == 200, r.text
+    wb = load_workbook(io.BytesIO(r.content), read_only=True)
+    sh = wb["Generation Summary"]
+    text = "\n".join(" ".join(str(sh.cell(row, col).value) for col in range(1, 8))
+                     for row in range(1, 20))
+    assert "Mixed Client" in text and "Second Client" in text  # both clients present
+    assert "Rooftop B" in text and "Londonderry" in text
+    wb.close()
+
+
 def test_generation_export_wrong_tenant_404(client):
     tid, cid = _seed_client()
     other = "ten_" + secrets.token_hex(6)
