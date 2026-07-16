@@ -116,24 +116,54 @@ def push_sovereign_message(
     return row
 
 
-def history(db, *, limit: int = 80) -> list[dict]:
+def _is_chat_worthy(role: str, provider: str | None, content: str, meta: dict) -> bool:
+    """Desk UI is conversation — hide worker dumps / ops telemetry blobs."""
+    role = (role or "").lower()
+    provider = (provider or "").lower()
+    text = content or ""
+    if role == "system":
+        return False
+    if provider in ("worker", "rules", "admin"):
+        return False
+    if text.startswith("Sovereign shipped job") or (
+        "Ship: {" in text and "Deploy: {" in text
+    ):
+        return False
+    if text.startswith("Ops ") and text.find("{") > 0:
+        return False
+    if meta.get("job_id") and provider == "worker":
+        return False
+    return bool(text.strip())
+
+
+def history(db, *, limit: int = 80, chat_only: bool = True) -> list[dict]:
+    # Pull extra rows when filtering worker dumps so the transcript stays full
+    fetch_n = min(max(limit * 3, limit), 300) if chat_only else limit
     rows = db.execute(
         select(EaSovereignDeskMessage)
         .order_by(EaSovereignDeskMessage.created_at.desc())
-        .limit(limit)
+        .limit(fetch_n)
     ).scalars().all()
     rows = list(reversed(rows))
-    return [
-        {
+    out: list[dict] = []
+    for r in rows:
+        try:
+            meta = json.loads(r.meta_json or "{}")
+        except Exception:
+            meta = {}
+        if chat_only and not _is_chat_worthy(r.role, r.provider, r.content or "", meta):
+            continue
+        out.append({
             "id": r.id,
             "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
             "role": r.role,
             "content": r.content,
             "provider": r.provider,
-            "meta": json.loads(r.meta_json or "{}"),
-        }
-        for r in rows
-    ]
+            "meta": meta,
+        })
+    if chat_only and len(out) > limit:
+        out = out[-limit:]
+    return out
 
 
 def _desk_chat_prompt(ford_msg: str, hist: list[dict], context: dict) -> list[dict]:
@@ -147,6 +177,9 @@ def _desk_chat_prompt(ford_msg: str, hist: list[dict], context: dict) -> list[di
 You are speaking directly to Ford on the private Sovereign Desk — not the Energy Agent owner UI.
 - Address him as a partner / founder. You are Sovereign, leader of Array Operator.
 - Reply in clear prose (not only JSON). Be direct, expansionist, honorable, determined.
+- This UI is CHAT ONLY — no worker logs, ship JSON, or queue dumps appear here.
+  If a job finished or something broke, say it in one human sentence when it matters.
+  Do not paste raw ship/deploy JSON into chat.
 - You may propose concrete next steps and crisp asks.
 - Still never fabricate adapters, money moves, or mass-email.
 - Keep replies tight (few short paragraphs unless he asks for depth).
