@@ -159,6 +159,11 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   For "how is my fleet?" ALWAYS call investigate_attention (or fleet_overview with
   needs_attention_only) and report TOTALS + every attention array — not one example.
 - repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
+- MONEY QUESTIONS ("why is production low?" / "how much is this costing me?" /
+  "what did we bill?"): production_forecast = weather-expected vs actual (cloudy week
+  vs real problem); investigate_attention now carries recoverable_usd_month (matches
+  the Fleet Triage tile); list_recent_invoices = drafted/sent offtaker dollars.
+  Lead with the dollars when they're ≥$1 — the owner runs a business.
 
 CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
   You WANT a complete repair roster the way a good ops lead wants a contact sheet.
@@ -1394,6 +1399,51 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "production_forecast",
+            "description": (
+                "Weather-aware predicted-vs-actual (the Analysis 'Production vs "
+                "expected' math): fleet ratio_pct + per-array breakdown over the "
+                "window. THE tool for 'why is production low?' / 'are we beating "
+                "the weather?' — separates cloudy-week from a real site problem. "
+                "Optional array_id/array_name narrows to one site."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_id": {"type": "integer", "description": "Limit to one array"},
+                    "array_name": {"type": "string", "description": "Or match by name"},
+                    "window_days": {"type": "integer", "description": "3-30, default 14"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_recent_invoices",
+            "description": (
+                "Offtaker invoice MONEY view: pending drafts + recently sent with "
+                "dollar amounts, plus pending-total and sent-last-30d totals. Use "
+                "for 'how much is drafted / what did we bill?' — read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "sent", "all"],
+                        "description": "Filter; default all",
+                    },
+                    "limit": {"type": "integer", "description": "Max rows (1-30, default 12)"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "account_summary",
             "description": (
                 "Account tab data for THIS tenant — company, operator name, "
@@ -1856,6 +1906,60 @@ def _slim_inverter(inv: dict) -> dict:
     }
 
 
+# ── recoverable-$ (mirrors Fleet Triage's tile math) ────────────────────────
+_LOSS_WINDOW_DAYS = 14  # peer_analysis.WINDOW_DAYS — window_kwh spans this window
+_ENERGY_RATE_FALLBACK = 0.21  # $/kWh — same demo/anon fallback the UI uses
+
+
+def _tenant_energy_rate(tenant: Tenant) -> float:
+    try:
+        r = float(getattr(tenant, "default_net_rate_per_kwh", None) or 0)
+    except (TypeError, ValueError):
+        r = 0.0
+    return r if r > 0 else _ENERGY_RATE_FALLBACK
+
+
+def _est_lost_kwh_window(inv: dict, fleet_window_kwh: float, total_np: float) -> float:
+    """Per-inverter lost-kWh estimate over the 14-day peer window — mirrors
+    command-center.js lostKwh() exactly so the agent's dollars always match the
+    Fleet Triage 'Recoverable' tile the owner is looking at. Only confirmed peer
+    verdicts are priced; live dark/low and comm_gap carry no dollars yet."""
+    fair = (inv.get("nameplate_kw") or 0.0) / (total_np or 1.0) * (fleet_window_kwh or 0.0)
+    st = inv.get("status") or "ok"
+    if st in ("dead", "fault"):
+        return max(0.0, fair - (inv.get("window_kwh") or 0.0))
+    if st == "underperforming" and inv.get("peer_index"):
+        try:
+            pi = max(float(inv["peer_index"]), 0.01)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, fair / pi - (inv.get("window_kwh") or 0.0))
+    return 0.0
+
+
+def _column_recoverable(col: dict, rate: float) -> dict:
+    invs = col.get("inverters") or []
+    total_np = sum((i.get("nameplate_kw") or 0.0) for i in invs) or 1.0
+    fleet_win = sum((i.get("window_kwh") or 0.0) for i in invs)
+    per_inv = []
+    lost_kwh = 0.0
+    for i in invs:
+        lk = _est_lost_kwh_window(i, fleet_win, total_np)
+        if lk > 0:
+            lost_kwh += lk
+            per_inv.append({
+                "name": i.get("name"),
+                "status": i.get("status"),
+                "est_lost_kwh_14d": round(lk, 1),
+                "est_loss_usd_month": round(lk * rate / _LOSS_WINDOW_DAYS * 30.0, 2),
+            })
+    return {
+        "est_lost_kwh_14d": round(lost_kwh, 1),
+        "est_loss_usd_month": round(lost_kwh * rate / _LOSS_WINDOW_DAYS * 30.0, 2),
+        "priced_inverters": per_inv,
+    }
+
+
 # Live overlay thresholds — must match public/fleet-store.js liveVerdict
 # (Spreadsheet "NEED ATTENTION" counts 14-day health AND live dark/low).
 _LIVE_FLOOR_W = 25.0
@@ -2231,6 +2335,8 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
         limit = 40
     limit = max(1, min(limit, 80))
 
+    rate = _tenant_energy_rate(tenant)
+    fleet_lost_kwh = 0.0
     problems = []
     for col in cols:
         if not _match_vendor(col, vendor):
@@ -2244,6 +2350,10 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
         row["all_inverters"] = [
             _slim_inverter(inv) for inv in (col.get("inverters") or [])
         ]
+        # Money view — same math as the Fleet Triage "Recoverable" tile
+        rec = _column_recoverable(col, rate)
+        fleet_lost_kwh += rec["est_lost_kwh_14d"]
+        row["recoverable"] = rec
         problems.append(row)
 
     # Rank: critical first, then by total attention units (14d + live)
@@ -2268,9 +2378,11 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
         for la in (p.get("live_anomalies") or [])[:8]:
             live_bits.append(f"{la.get('name')}={la.get('live')}")
         extra = f" | live: {', '.join(live_bits)}" if live_bits else ""
+        loss_mo = ((p.get("recoverable") or {}).get("est_loss_usd_month") or 0)
+        money = f" | ~${loss_mo:,.0f}/mo recoverable" if loss_mo >= 1 else ""
         lines.append(
             f"• {p.get('name')} ({', '.join(p.get('vendors') or []) or 'unknown vendor'}) "
-            f"[{units} unit(s)]: {p.get('why')}{extra} → {p.get('next_step')}"
+            f"[{units} unit(s)]: {p.get('why')}{extra}{money} → {p.get('next_step')}"
         )
     brief = "\n".join(lines) if lines else (
         "No arrays currently need attention"
@@ -2285,10 +2397,19 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
             + brief
         )
 
+    recoverable_usd_month = round(fleet_lost_kwh * rate / _LOSS_WINDOW_DAYS * 30.0, 2)
     return {
         "count": total_found,
         "returned": len(problems),
         "attention_unit_count": total_units,
+        "recoverable_usd_month": recoverable_usd_month,
+        "energy_rate_used": rate,
+        "recoverable_note": (
+            "Recoverable $ mirrors the Fleet Triage tile: confirmed dead/fault/"
+            "underperforming only, priced at the tenant's billed $/kWh"
+            + ("" if rate != _ENERGY_RATE_FALLBACK else " (fallback rate — no billed rate set)")
+            + ". Live dark/low anomalies are unpriced until the peer window confirms them."
+        ),
         "fleet_summary": {
             **summary,
             "attention": total_found,
@@ -2303,6 +2424,161 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
             "dark/low inverters by name when present — they match Spreadsheet NEED ATTENTION "
             "even when 14-day status is still ok. Do not ask for IDs. If count is 0, say "
             "the fleet looks clear and offer to open Inverters for a double-check."
+        ),
+    }
+
+
+def _production_forecast_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Weather-aware predicted-vs-actual — the Analysis 'Production vs expected'
+    math, served to the agent. Snapshot-first (same cache the tab uses) so a
+    chat turn never fans out to geocode + Open-Meteo when a warm snapshot exists."""
+    try:
+        wd = int(args.get("window_days") or 14)
+    except (TypeError, ValueError):
+        wd = 14
+    wd = max(3, min(wd, 30))
+    from . import array_owners as ao
+
+    data = None
+    try:
+        snap = db.execute(
+            select(ao.FleetForecastSnapshot).where(
+                ao.FleetForecastSnapshot.tenant_id == tenant.id,
+                ao.FleetForecastSnapshot.window_days == wd,
+            )
+        ).scalar_one_or_none()
+        if snap is not None and (
+            (_now() - snap.computed_at).total_seconds() < ao._FLEET_SNAPSHOT_MAX_SERVE_S
+        ):
+            data = snap.payload
+    except Exception as e:
+        log.warning("forecast snapshot read failed: %s", e)
+    if data is None:
+        # Inline compute opens its own short sessions; release ours first so we
+        # never hold a pooled connection across the Open-Meteo/geocode HTTP.
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        data = ao.compute_fleet_forecast(tenant, wd)
+
+    if not data.get("available"):
+        return {
+            "available": False,
+            "window_days": wd,
+            "skipped": data.get("skipped") or [],
+            "note": (
+                "No arrays could be weather-modeled (needs nameplate + a location "
+                "or an operator kWh/kW target). Set locations on Analysis to enable this."
+            ),
+        }
+
+    rows = data.get("rows") or []
+    aid = args.get("array_id")
+    name_q = (args.get("array_name") or "").strip().lower()
+    if aid is not None:
+        try:
+            aid = int(aid)
+        except (TypeError, ValueError):
+            aid = None
+    if aid is not None:
+        rows = [r for r in rows if r.get("array_id") == aid]
+    elif name_q:
+        rows = [r for r in rows if name_q in str(r.get("name") or "").lower()]
+
+    slim = [
+        {
+            "array_id": r.get("array_id"),
+            "name": r.get("name"),
+            "ratio_pct": r.get("ratio_pct"),
+            "expected_kwh": r.get("expected_matched_kwh"),
+            "actual_kwh": r.get("actual_kwh"),
+            "kwh_per_kw_day": r.get("kwh_per_kw_day"),
+            "expected_basis": r.get("expected_basis"),
+            "measured_days": r.get("measured_days"),
+            "confidence": r.get("confidence"),
+        }
+        for r in rows[:40]
+    ]
+    return {
+        "available": True,
+        "window": data.get("window"),
+        "fleet": {
+            "ratio_pct": data.get("ratio_pct"),
+            "expected_kwh": data.get("expected_kwh"),
+            "actual_kwh": data.get("actual_kwh"),
+            "performance_ratio_measured": data.get("performance_ratio_measured"),
+            "confidence": data.get("confidence"),
+            "kwh_per_kw": data.get("kwh_per_kw"),
+            "arrays_modeled": data.get("arrays_modeled"),
+            "arrays_skipped": data.get("arrays_skipped"),
+        },
+        "arrays": slim,
+        "skipped": (data.get("skipped") or [])[:20],
+        "sunny_spotlight": data.get("sunny_spotlight"),
+        "instruction_for_agent": (
+            "ratio_pct is actual÷weather-expected over measured days. Use it to "
+            "separate 'cloudy week' (fleet ratio normal, expected low) from a real "
+            "site problem (one array's ratio far below the fleet's). Quote confidence. "
+            "Never extrapolate across unmeasured days."
+        ),
+    }
+
+
+def _list_recent_invoices_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Offtaker invoice money view: pending drafts + recently sent, with dollars."""
+    from .models import ReportDraft
+
+    try:
+        limit = int(args.get("limit") or 12)
+    except (TypeError, ValueError):
+        limit = 12
+    limit = max(1, min(limit, 30))
+    status = (args.get("status") or "all").strip().lower()
+
+    q = select(ReportDraft).where(ReportDraft.tenant_id == tenant.id)
+    if status == "pending":
+        q = q.where(ReportDraft.status == "pending")
+    elif status == "sent":
+        q = q.where(ReportDraft.status == "sent")
+    drafts = db.execute(
+        q.order_by(ReportDraft.created_at.desc()).limit(limit)
+    ).scalars().all()
+
+    def _d(x: ReportDraft) -> dict:
+        return {
+            "draft_id": x.id,
+            "offtaker": x.customer_name,
+            "status": x.status,
+            "period": x.period_label,
+            "kwh": x.customer_kwh,
+            "amount_usd": x.amount_usd,
+            "invoice_number": x.invoice_number,
+            "created_at": x.created_at.isoformat() + "Z" if x.created_at else None,
+            "sent_at": x.sent_at.isoformat() + "Z" if x.sent_at else None,
+        }
+
+    pending_total = db.execute(
+        select(func.coalesce(func.sum(ReportDraft.amount_usd), 0.0)).where(
+            ReportDraft.tenant_id == tenant.id, ReportDraft.status == "pending",
+        )
+    ).scalar() or 0.0
+    sent_30d_total = db.execute(
+        select(func.coalesce(func.sum(ReportDraft.amount_usd), 0.0)).where(
+            ReportDraft.tenant_id == tenant.id,
+            ReportDraft.status == "sent",
+            ReportDraft.sent_at >= _now() - timedelta(days=30),
+        )
+    ).scalar() or 0.0
+
+    return {
+        "invoices": [_d(x) for x in drafts],
+        "pending_total_usd": round(float(pending_total), 2),
+        "sent_last_30d_total_usd": round(float(sent_30d_total), 2),
+        "note": (
+            "Amounts are the drafted/sent offtaker invoice dollars (utility-bill × "
+            "share math). Approve/send lives on Invoices — you can navigate there "
+            "but never send an invoice yourself."
         ),
     }
 
@@ -4682,6 +4958,12 @@ def _run_tool(
             "pending": cmd,
             "message": reason + " — confirm to apply.",
         }
+
+    if name == "production_forecast":
+        return _production_forecast_tool(db, tenant, args)
+
+    if name == "list_recent_invoices":
+        return _list_recent_invoices_tool(db, tenant, args)
 
     if name == "fleet_trends_summary":
         # Lightweight local summary from DailyGeneration if trends endpoint is heavy
