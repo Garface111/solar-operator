@@ -1892,6 +1892,9 @@ def _run_energy_agent_sovereign_subconscious() -> None:
         from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
         if not subconscious_enabled():
             return
+        if _sov_pool_too_hot():
+            logger.warning("sovereign_subconscious skipped: db pool hot")
+            return
         res = subconscious_tick(reason="scheduler")
         note_primary(
             "sub",
@@ -1930,12 +1933,33 @@ def _run_energy_agent_sovereign_subconscious() -> None:
             pass
 
 
+def _sov_pool_too_hot() -> bool:
+    """Skip heavy Sovereign work when DB pool is near saturation (keeps API up)."""
+    try:
+        from .db import pool_status
+        st = pool_status() or {}
+        if st.get("pressure"):
+            return True
+        # checked_out / capacity >= 70%
+        cap = float(st.get("capacity") or st.get("db_pool_max") or 0) or 0
+        out = float(st.get("checked_out") or st.get("db_pool_checked_out") or 0)
+        if cap > 0 and (out / cap) >= 0.70:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _run_energy_agent_sovereign_mission_loop() -> None:
     """Long-running expand missions (HAR recon, cred refresh) every ~2m."""
     try:
+        from .energy_agent_sovereign import sovereign_enabled
         from .energy_agent_sovereign_expand import expand_enabled, mission_loop_tick
         from .db import SessionLocal
-        if not expand_enabled():
+        if not sovereign_enabled() or not expand_enabled():
+            return
+        if _sov_pool_too_hot():
+            logger.warning("sovereign_mission_loop skipped: db pool hot")
             return
         with SessionLocal() as db:
             res = mission_loop_tick(db)
@@ -1952,6 +1976,9 @@ def _run_energy_agent_sovereign_tick() -> None:
         from .energy_agent_sovereign import sovereign_enabled, sovereign_tick
         from .energy_agent_sovereign_watchdog import mark_cortex_inflight, note_primary
         if not sovereign_enabled():
+            return
+        if _sov_pool_too_hot():
+            logger.warning("sovereign_cortex skipped: db pool hot")
             return
         # Light subconscious first so cortex always has fresh tape
         try:
@@ -2012,6 +2039,9 @@ def _run_energy_agent_sovereign_jobs() -> None:
         from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
         from .energy_agent_sovereign_watchdog import mark_jobs_inflight, note_primary
         if not code_live_enabled():
+            return
+        if _sov_pool_too_hot():
+            logger.warning("sovereign_jobs skipped: db pool hot")
             return
         mark_jobs_inflight(True)
         try:
